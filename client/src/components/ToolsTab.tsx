@@ -260,7 +260,7 @@ const ToolsTab = ({
                       No meta pairs.
                     </p>
                   ) : (
-                    <div className="space-y-20">
+                    <div className="space-y-2">
                       {metaEntries.map((entry, index) => (
                         <div
                           key={entry.id}
