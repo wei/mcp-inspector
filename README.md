@@ -142,6 +142,7 @@ The MCP Inspector provides convenient buttons to export server launch configurat
   ```
 
   **Streamable HTTP transport example:**
+
   ```json
   {
     "mcpServers": {
