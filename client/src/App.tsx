@@ -74,6 +74,10 @@ import ElicitationTab, {
   PendingElicitationRequest,
   ElicitationResponse,
 } from "./components/ElicitationTab";
+import {
+  CustomHeaders,
+  migrateFromLegacyAuth,
+} from "./lib/types/customHeaders";
 
 const CONFIG_LOCAL_STORAGE_KEY = "inspectorConfig_v1";
 
@@ -125,6 +129,39 @@ const App = () => {
 
   const [oauthScope, setOauthScope] = useState<string>(() => {
     return localStorage.getItem("lastOauthScope") || "";
+  });
+
+  // Custom headers state with migration from legacy auth
+  const [customHeaders, setCustomHeaders] = useState<CustomHeaders>(() => {
+    const savedHeaders = localStorage.getItem("lastCustomHeaders");
+    if (savedHeaders) {
+      try {
+        return JSON.parse(savedHeaders);
+      } catch (error) {
+        console.warn(
+          `Failed to parse custom headers: "${savedHeaders}", will try legacy migration`,
+          error,
+        );
+        // Fall back to migration if JSON parsing fails
+      }
+    }
+
+    // Migrate from legacy auth if available
+    const legacyToken = localStorage.getItem("lastBearerToken") || "";
+    const legacyHeaderName = localStorage.getItem("lastHeaderName") || "";
+
+    if (legacyToken) {
+      return migrateFromLegacyAuth(legacyToken, legacyHeaderName);
+    }
+
+    // Default to Authorization: Bearer as the most common case
+    return [
+      {
+        name: "Authorization",
+        value: "Bearer ",
+        enabled: true,
+      },
+    ];
   });
 
   const [pendingSampleRequests, setPendingSampleRequests] = useState<
@@ -213,8 +250,7 @@ const App = () => {
     args,
     sseUrl,
     env,
-    bearerToken,
-    headerName,
+    customHeaders,
     oauthClientId,
     oauthScope,
     config,
@@ -303,12 +339,37 @@ const App = () => {
   }, [transportType]);
 
   useEffect(() => {
-    localStorage.setItem("lastBearerToken", bearerToken);
+    if (bearerToken) {
+      localStorage.setItem("lastBearerToken", bearerToken);
+    } else {
+      localStorage.removeItem("lastBearerToken");
+    }
   }, [bearerToken]);
 
   useEffect(() => {
-    localStorage.setItem("lastHeaderName", headerName);
+    if (headerName) {
+      localStorage.setItem("lastHeaderName", headerName);
+    } else {
+      localStorage.removeItem("lastHeaderName");
+    }
   }, [headerName]);
+
+  useEffect(() => {
+    localStorage.setItem("lastCustomHeaders", JSON.stringify(customHeaders));
+  }, [customHeaders]);
+
+  // Auto-migrate from legacy auth when custom headers are empty but legacy auth exists
+  useEffect(() => {
+    if (customHeaders.length === 0 && (bearerToken || headerName)) {
+      const migratedHeaders = migrateFromLegacyAuth(bearerToken, headerName);
+      if (migratedHeaders.length > 0) {
+        setCustomHeaders(migratedHeaders);
+        // Clear legacy auth after migration
+        setBearerToken("");
+        setHeaderName("");
+      }
+    }
+  }, [bearerToken, headerName, customHeaders, setCustomHeaders]);
 
   useEffect(() => {
     localStorage.setItem("lastOauthClientId", oauthClientId);
@@ -810,10 +871,8 @@ const App = () => {
           setEnv={setEnv}
           config={config}
           setConfig={setConfig}
-          bearerToken={bearerToken}
-          setBearerToken={setBearerToken}
-          headerName={headerName}
-          setHeaderName={setHeaderName}
+          customHeaders={customHeaders}
+          setCustomHeaders={setCustomHeaders}
           oauthClientId={oauthClientId}
           setOauthClientId={setOauthClientId}
           oauthScope={oauthScope}
