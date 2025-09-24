@@ -23,6 +23,7 @@ import { AuthDebuggerState, EMPTY_DEBUGGER_STATE } from "./lib/auth-types";
 import { OAuthStateMachine } from "./lib/oauth-state-machine";
 import { cacheToolOutputSchemas } from "./utils/schemaUtils";
 import { cleanParams } from "./utils/paramUtils";
+import type { JsonSchemaType } from "./utils/jsonUtils";
 import React, {
   Suspense,
   useCallback,
@@ -781,7 +782,7 @@ const App = () => {
       // Find the tool schema to clean parameters properly
       const tool = tools.find((t) => t.name === name);
       const cleanedParams = tool?.inputSchema
-        ? cleanParams(params, tool.inputSchema as any)
+        ? cleanParams(params, tool.inputSchema as JsonSchemaType)
         : params;
 
       const response = await sendMCPRequest(
