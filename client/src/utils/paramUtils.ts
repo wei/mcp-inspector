@@ -3,14 +3,14 @@ import type { JsonSchemaType } from "./jsonUtils";
 /**
  * Cleans parameters by removing undefined, null, and empty string values for optional fields
  * while preserving all values for required fields.
- * 
+ *
  * @param params - The parameters object to clean
  * @param schema - The JSON schema defining which fields are required
  * @returns Cleaned parameters object with optional empty fields omitted
  */
 export function cleanParams(
   params: Record<string, unknown>,
-  schema: JsonSchemaType
+  schema: JsonSchemaType,
 ): Record<string, unknown> {
   const cleaned: Record<string, unknown> = {};
   const required = schema.required || [];
@@ -39,6 +39,9 @@ export function cleanParams(
  * @param value - The current value
  * @returns Whether to set the field to undefined
  */
-export function shouldSetToUndefined(isRequired: boolean, value: string): boolean {
+export function shouldSetToUndefined(
+  isRequired: boolean,
+  value: string,
+): boolean {
   return !isRequired && value === "";
 }

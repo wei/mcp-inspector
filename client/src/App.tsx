@@ -779,8 +779,8 @@ const App = () => {
 
     try {
       // Find the tool schema to clean parameters properly
-      const tool = tools.find(t => t.name === name);
-      const cleanedParams = tool?.inputSchema 
+      const tool = tools.find((t) => t.name === name);
+      const cleanedParams = tool?.inputSchema
         ? cleanParams(params, tool.inputSchema as any)
         : params;
 
