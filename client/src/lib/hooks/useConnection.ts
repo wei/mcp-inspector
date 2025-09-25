@@ -400,11 +400,25 @@ export function useConnection({
       // Use custom headers (migration is handled in App.tsx)
       let finalHeaders: CustomHeaders = customHeaders || [];
 
-      // Add OAuth token if available and no custom headers are set
-      if (finalHeaders.length === 0) {
+      // Check if we need to inject OAuth token
+      // This handles both empty headers and default "Bearer " placeholder headers
+      const isEmptyAuthHeader = (header: CustomHeaders[number]) =>
+        header.name.trim().toLowerCase() === "authorization" &&
+        header.value.trim() === "Bearer";
+
+      const needsOAuthToken =
+        finalHeaders.length === 0 ||
+        finalHeaders.some(
+          (header) => header.enabled && isEmptyAuthHeader(header),
+        );
+
+      if (needsOAuthToken) {
         const oauthToken = (await serverAuthProvider.tokens())?.access_token;
         if (oauthToken) {
+          // Add the OAuth token
           finalHeaders = [
+            // Remove any existing Authorization headers with empty tokens
+            ...finalHeaders.filter((header) => !isEmptyAuthHeader(header)),
             {
               name: "Authorization",
               value: `Bearer ${oauthToken}`,
