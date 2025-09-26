@@ -400,6 +400,23 @@ export function useConnection({
       // Use custom headers (migration is handled in App.tsx)
       let finalHeaders: CustomHeaders = customHeaders || [];
 
+      // Check for empty Authorization headers and show validation error
+      const hasEmptyAuthHeader = finalHeaders.some(
+        (header) =>
+          header.enabled &&
+          header.name.trim().toLowerCase() === "authorization" &&
+          (!header.value.trim() || header.value.trim() === "Bearer"),
+      );
+
+      if (hasEmptyAuthHeader) {
+        toast({
+          title: "Invalid Authorization Header",
+          description:
+            "Authorization header is enabled but empty. Please add a token or disable the header. It will be added automatically.",
+          variant: "destructive",
+        });
+      }
+
       // Check if we need to inject OAuth token
       // This handles both empty headers and default "Bearer " placeholder headers
       const isEmptyAuthHeader = (header: CustomHeaders[number]) =>
