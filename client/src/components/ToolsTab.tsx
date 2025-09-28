@@ -252,12 +252,18 @@ const ToolsTab = ({
                                   [key]: undefined,
                                 });
                               } else {
-                                // Field has value - convert to number (never store strings)
+                                // Field has value - try to convert to number, but store input either way
                                 const num = Number(value);
                                 if (!isNaN(num)) {
                                   setParams({
                                     ...params,
                                     [key]: num,
+                                  });
+                                } else {
+                                  // Store invalid input as string - let server validate
+                                  setParams({
+                                    ...params,
+                                    [key]: value,
                                   });
                                 }
                               }
