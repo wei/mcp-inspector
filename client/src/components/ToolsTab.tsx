@@ -159,17 +159,21 @@ const ToolsTab = ({
                             id={key}
                             name={key}
                             placeholder={prop.description}
-                            value={(params[key] as string) ?? ""}
+                            value={
+                              params[key] === undefined
+                                ? ""
+                                : String(params[key])
+                            }
                             onChange={(e) => {
                               const value = e.target.value;
-                              if (value === "" && !required) {
-                                // Optional field cleared - set to undefined to omit from request
+                              if (value === "") {
+                                // Field cleared - set to undefined
                                 setParams({
                                   ...params,
                                   [key]: undefined,
                                 });
                               } else {
-                                // Field has value or is required - keep as string
+                                // Field has value - keep as string
                                 setParams({
                                   ...params,
                                   [key]: value,
@@ -206,22 +210,26 @@ const ToolsTab = ({
                             id={key}
                             name={key}
                             placeholder={prop.description}
-                            value={(params[key] as string) ?? ""}
+                            value={
+                              params[key] === undefined
+                                ? ""
+                                : String(params[key])
+                            }
                             onChange={(e) => {
                               const value = e.target.value;
-                              if (value === "" && !required) {
-                                // Optional field cleared - set to undefined to omit from request
+                              if (value === "") {
+                                // Field cleared - set to undefined
                                 setParams({
                                   ...params,
                                   [key]: undefined,
                                 });
                               } else {
-                                // Field has value or is required - convert to number
+                                // Field has value - convert to number (never store strings)
                                 const num = Number(value);
-                                if (!isNaN(num) || value === "") {
+                                if (!isNaN(num)) {
                                   setParams({
                                     ...params,
-                                    [key]: value === "" ? "" : num,
+                                    [key]: num,
                                   });
                                 }
                               }

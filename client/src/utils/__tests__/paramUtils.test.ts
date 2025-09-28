@@ -2,7 +2,7 @@ import { cleanParams } from "../paramUtils";
 import type { JsonSchemaType } from "../jsonUtils";
 
 describe("cleanParams", () => {
-  it("should preserve required fields even when empty", () => {
+  it("should preserve required fields even when undefined", () => {
     const schema: JsonSchemaType = {
       type: "object",
       required: ["requiredString", "requiredNumber"],
@@ -15,17 +15,17 @@ describe("cleanParams", () => {
     };
 
     const params = {
-      requiredString: "",
-      requiredNumber: 0,
-      optionalString: "",
+      requiredString: undefined,
+      requiredNumber: undefined,
+      optionalString: undefined,
       optionalNumber: undefined,
     };
 
     const cleaned = cleanParams(params, schema);
 
     expect(cleaned).toEqual({
-      requiredString: "",
-      requiredNumber: 0,
+      requiredString: undefined,
+      requiredNumber: undefined,
       // optionalString and optionalNumber should be omitted
     });
   });
@@ -179,6 +179,30 @@ describe("cleanParams", () => {
 
     expect(cleaned).toEqual({
       optionalNumber: 0,
+    });
+  });
+
+  it("should handle the new undefined-first approach (no empty strings)", () => {
+    const schema: JsonSchemaType = {
+      type: "object",
+      required: ["requiredField"],
+      properties: {
+        requiredField: { type: "string" },
+        optionalField: { type: "string" },
+      },
+    };
+
+    // New behavior: cleared fields are undefined, never empty strings
+    const params = {
+      requiredField: undefined, // cleared required field
+      optionalField: undefined, // cleared optional field
+    };
+
+    const cleaned = cleanParams(params, schema);
+
+    expect(cleaned).toEqual({
+      requiredField: undefined, // required field preserved as undefined
+      // optionalField omitted entirely
     });
   });
 });
