@@ -32,16 +32,3 @@ export function cleanParams(
 
   return cleaned;
 }
-
-/**
- * Checks if a field should be set to undefined when cleared
- * @param isRequired - Whether the field is required
- * @param value - The current value
- * @returns Whether to set the field to undefined
- */
-export function shouldSetToUndefined(
-  isRequired: boolean,
-  value: string,
-): boolean {
-  return !isRequired && value === "";
-}
