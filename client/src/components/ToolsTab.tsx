@@ -131,14 +131,15 @@ const ToolsTab = ({
             </h3>
           </div>
           <div className="p-4">
-            {error ? (
-              <Alert variant="destructive">
-                <AlertCircle className="h-4 w-4" />
-                <AlertTitle>Error</AlertTitle>
-                <AlertDescription>{error}</AlertDescription>
-              </Alert>
-            ) : selectedTool ? (
+            {selectedTool ? (
               <div className="space-y-4">
+                {error && (
+                  <Alert variant="destructive">
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertTitle>Error</AlertTitle>
+                    <AlertDescription>{error}</AlertDescription>
+                  </Alert>
+                )}
                 <p className="text-sm text-gray-600 dark:text-gray-400">
                   {selectedTool.description}
                 </p>

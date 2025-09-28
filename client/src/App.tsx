@@ -801,6 +801,8 @@ const App = () => {
       );
 
       setToolResult(response);
+      // Clear any validation errors since tool execution completed
+      setErrors((prev) => ({ ...prev, tools: null }));
     } catch (e) {
       const toolResult: CompatibilityCallToolResult = {
         content: [
@@ -812,6 +814,8 @@ const App = () => {
         isError: true,
       };
       setToolResult(toolResult);
+      // Clear validation errors - tool execution errors are shown in ToolResults
+      setErrors((prev) => ({ ...prev, tools: null }));
     }
   };
 
