@@ -165,7 +165,13 @@ const App = () => {
     }
 
     // Default to empty array
-    return [];
+    return [
+      {
+        name: "Authorization",
+        value: "Bearer ",
+        enabled: false,
+      },
+    ];
   });
 
   const [pendingSampleRequests, setPendingSampleRequests] = useState<

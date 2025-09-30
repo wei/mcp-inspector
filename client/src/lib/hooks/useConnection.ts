@@ -402,7 +402,7 @@ export function useConnection({
 
       const isEmptyAuthHeader = (header: CustomHeaders[number]) =>
         header.name.trim().toLowerCase() === "authorization" &&
-        header.value.trim() === "Bearer";
+        header.value.trim().toLowerCase() === "bearer";
 
       // Check for empty Authorization headers and show validation error
       const hasEmptyAuthHeader = finalHeaders.some(
@@ -418,7 +418,11 @@ export function useConnection({
         });
       }
 
-      const needsOAuthToken = finalHeaders.length === 0 || hasEmptyAuthHeader;
+      const needsOAuthToken = !finalHeaders.some(
+        (header) =>
+          header.enabled &&
+          header.name.trim().toLowerCase() === "authorization",
+      );
 
       if (needsOAuthToken) {
         const oauthToken = (await serverAuthProvider.tokens())?.access_token;
