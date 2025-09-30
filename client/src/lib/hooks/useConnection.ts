@@ -413,7 +413,7 @@ export function useConnection({
         toast({
           title: "Invalid Authorization Header",
           description:
-            "Authorization header is enabled but empty. Please add a token or disable the header. It will be added automatically.",
+            "Authorization header is enabled but empty. Please add a token or disable the header.",
           variant: "destructive",
         });
       }
