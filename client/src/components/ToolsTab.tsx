@@ -131,14 +131,15 @@ const ToolsTab = ({
             </h3>
           </div>
           <div className="p-4">
-            {error ? (
-              <Alert variant="destructive">
-                <AlertCircle className="h-4 w-4" />
-                <AlertTitle>Error</AlertTitle>
-                <AlertDescription>{error}</AlertDescription>
-              </Alert>
-            ) : selectedTool ? (
+            {selectedTool ? (
               <div className="space-y-4">
+                {error && (
+                  <Alert variant="destructive">
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertTitle>Error</AlertTitle>
+                    <AlertDescription>{error}</AlertDescription>
+                  </Alert>
+                )}
                 <p className="text-sm text-gray-600 dark:text-gray-400">
                   {selectedTool.description}
                 </p>
@@ -184,16 +185,27 @@ const ToolsTab = ({
                             id={key}
                             name={key}
                             placeholder={prop.description}
-                            value={(params[key] as string) ?? ""}
-                            onChange={(e) =>
-                              setParams({
-                                ...params,
-                                [key]:
-                                  e.target.value === ""
-                                    ? undefined
-                                    : e.target.value,
-                              })
+                            value={
+                              params[key] === undefined
+                                ? ""
+                                : String(params[key])
                             }
+                            onChange={(e) => {
+                              const value = e.target.value;
+                              if (value === "") {
+                                // Field cleared - set to undefined
+                                setParams({
+                                  ...params,
+                                  [key]: undefined,
+                                });
+                              } else {
+                                // Field has value - keep as string
+                                setParams({
+                                  ...params,
+                                  [key]: value,
+                                });
+                              }
+                            }}
                             className="mt-1"
                           />
                         ) : prop.type === "object" || prop.type === "array" ? (
@@ -227,13 +239,35 @@ const ToolsTab = ({
                             id={key}
                             name={key}
                             placeholder={prop.description}
-                            value={(params[key] as string) ?? ""}
+                            value={
+                              params[key] === undefined
+                                ? ""
+                                : String(params[key])
+                            }
                             onChange={(e) => {
                               const value = e.target.value;
-                              setParams({
-                                ...params,
-                                [key]: value === "" ? "" : Number(value),
-                              });
+                              if (value === "") {
+                                // Field cleared - set to undefined
+                                setParams({
+                                  ...params,
+                                  [key]: undefined,
+                                });
+                              } else {
+                                // Field has value - try to convert to number, but store input either way
+                                const num = Number(value);
+                                if (!isNaN(num)) {
+                                  setParams({
+                                    ...params,
+                                    [key]: num,
+                                  });
+                                } else {
+                                  // Store invalid input as string - let server validate
+                                  setParams({
+                                    ...params,
+                                    [key]: value,
+                                  });
+                                }
+                              }
                             }}
                             className="mt-1"
                           />

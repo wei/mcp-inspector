@@ -644,6 +644,7 @@ describe("ToolsTab", () => {
       description: "Tool with JSON parameters",
       inputSchema: {
         type: "object" as const,
+        required: ["config", "data"], // Make them required so they render as form fields
         properties: {
           config: {
             type: "object" as const,
@@ -693,15 +694,16 @@ describe("ToolsTab", () => {
         callTool: mockCallTool,
       });
 
-      // Find JSON editor textareas
+      // Find JSON editor textareas (should have one for each required field: config and data)
       const textareas = screen.getAllByRole("textbox");
+      expect(textareas.length).toBe(2);
 
-      // Enter valid JSON in the first textarea
+      // Enter valid JSON in each textarea
       fireEvent.change(textareas[0], {
-        target: {
-          value:
-            '{ "config": { "setting": "value" }, "data": ["item1", "item2"] }',
-        },
+        target: { value: '{ "setting": "value" }' },
+      });
+      fireEvent.change(textareas[1], {
+        target: { value: '["item1", "item2"]' },
       });
 
       // Wait for debounced updates
@@ -799,9 +801,16 @@ describe("ToolsTab", () => {
       });
 
       const textareas = screen.getAllByRole("textbox");
+      expect(textareas.length).toBe(2);
 
-      // Clear the textarea (empty JSON should be valid)
-      fireEvent.change(textareas[0], { target: { value: "" } });
+      // Clear both textareas (empty JSON should be valid)
+      fireEvent.change(textareas[0], { target: { value: "{}" } });
+      fireEvent.change(textareas[1], { target: { value: "[]" } });
+
+      // Wait for debounced updates
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 350));
+      });
 
       // Try to run the tool
       const runButton = screen.getByRole("button", { name: /run tool/i });
