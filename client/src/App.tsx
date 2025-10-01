@@ -164,12 +164,12 @@ const App = () => {
       return migrateFromLegacyAuth(legacyToken, legacyHeaderName);
     }
 
-    // Default to Authorization: Bearer as the most common case
+    // Default to empty array
     return [
       {
         name: "Authorization",
         value: "Bearer ",
-        enabled: true,
+        enabled: false,
       },
     ];
   });
