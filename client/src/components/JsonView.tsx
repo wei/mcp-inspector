@@ -6,6 +6,7 @@ import { Copy, CheckCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/lib/hooks/useToast";
 import { getDataType, tryParseJson } from "@/utils/jsonUtils";
+import useCopy from "@/lib/hooks/useCopy";
 
 interface JsonViewProps {
   data: unknown;
@@ -26,21 +27,7 @@ const JsonView = memo(
     isError = false,
   }: JsonViewProps) => {
     const { toast } = useToast();
-    const [copied, setCopied] = useState(false);
-
-    useEffect(() => {
-      let timeoutId: NodeJS.Timeout;
-      if (copied) {
-        timeoutId = setTimeout(() => {
-          setCopied(false);
-        }, 500);
-      }
-      return () => {
-        if (timeoutId) {
-          clearTimeout(timeoutId);
-        }
-      };
-    }, [copied]);
+    const { copied, setCopied } = useCopy();
 
     const normalizedData = useMemo(() => {
       return typeof data === "string"

@@ -98,6 +98,16 @@ The MCP Inspector provides convenient buttons to export server launch configurat
   }
   ```
 
+  **Streamable HTTP transport example:**
+
+  ```json
+  {
+    "type": "streamable-http",
+    "url": "http://localhost:3000/mcp",
+    "note": "For Streamable HTTP connections, add this URL directly in your MCP Client"
+  }
+  ```
+
 - **Servers File** - Copies a complete MCP configuration file structure to your clipboard, with your current server configuration added as `default-server`. This can be saved directly as `mcp.json`.
 
   **STDIO transport example:**
@@ -131,9 +141,23 @@ The MCP Inspector provides convenient buttons to export server launch configurat
   }
   ```
 
+  **Streamable HTTP transport example:**
+
+  ```json
+  {
+    "mcpServers": {
+      "default-server": {
+        "type": "streamable-http",
+        "url": "http://localhost:3000/mcp",
+        "note": "For Streamable HTTP connections, add this URL directly in your MCP Client"
+      }
+    }
+  }
+  ```
+
 These buttons appear in the Inspector UI after you've configured your server settings, making it easy to save and reuse your configurations.
 
-For SSE transport connections, the Inspector provides similar functionality for both buttons. The "Server Entry" button copies the SSE URL configuration that can be added to your existing configuration file, while the "Servers File" button creates a complete configuration file containing the SSE URL for direct use in clients.
+For SSE and Streamable HTTP transport connections, the Inspector provides similar functionality for both buttons. The "Server Entry" button copies the configuration that can be added to your existing configuration file, while the "Servers File" button creates a complete configuration file containing the URL for direct use in clients.
 
 You can paste the Server Entry into your existing `mcp.json` file under your chosen server name, or use the complete Servers File payload to create a new configuration file.
 
@@ -395,6 +419,9 @@ npx @modelcontextprotocol/inspector --cli node build/index.js --method tools/lis
 # Call a specific tool
 npx @modelcontextprotocol/inspector --cli node build/index.js --method tools/call --tool-name mytool --tool-arg key=value --tool-arg another=value2
 
+# Call a tool with JSON arguments
+npx @modelcontextprotocol/inspector --cli node build/index.js --method tools/call --tool-name mytool --tool-arg 'options={"format": "json", "max_tokens": 100}'
+
 # List available resources
 npx @modelcontextprotocol/inspector --cli node build/index.js --method resources/list
 
@@ -406,6 +433,9 @@ npx @modelcontextprotocol/inspector --cli https://my-mcp-server.example.com
 
 # Connect to a remote MCP server (with Streamable HTTP transport)
 npx @modelcontextprotocol/inspector --cli https://my-mcp-server.example.com --transport http --method tools/list
+
+# Connect to a remote MCP server (with custom headers)
+npx @modelcontextprotocol/inspector --cli https://my-mcp-server.example.com --transport http --method tools/list --header "X-API-Key: your-api-key"
 
 # Call a tool on a remote server
 npx @modelcontextprotocol/inspector --cli https://my-mcp-server.example.com --method tools/call --tool-name remotetool --tool-arg param=value
