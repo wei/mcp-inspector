@@ -835,6 +835,7 @@ describe("ToolsTab", () => {
           message: "test message",
           count: 5,
         },
+        undefined,
       );
     });
 

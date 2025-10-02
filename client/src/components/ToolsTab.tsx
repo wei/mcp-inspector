@@ -472,6 +472,9 @@ const ToolsTab = ({
                   )}
                 <Button
                   onClick={async () => {
+                    // Validate JSON inputs before calling tool
+                    if (checkValidationErrors()) return;
+
                     try {
                       setIsToolRunning(true);
                       const meta = metaEntries.reduce<Record<string, unknown>>(
@@ -490,7 +493,7 @@ const ToolsTab = ({
                       setIsToolRunning(false);
                     }
                   }}
-                  disabled={isToolRunning}
+                  disabled={isToolRunning || hasValidationErrors}
                 >
                   {isToolRunning ? (
                     <>
@@ -505,32 +508,6 @@ const ToolsTab = ({
                   )}
                 </Button>
                 <div className="flex gap-2">
-                  <Button
-                    onClick={async () => {
-                      // Validate JSON inputs before calling tool
-                      if (checkValidationErrors()) return;
-
-                      try {
-                        setIsToolRunning(true);
-                        await callTool(selectedTool.name, params);
-                      } finally {
-                        setIsToolRunning(false);
-                      }
-                    }}
-                    disabled={isToolRunning || hasValidationErrors}
-                  >
-                    {isToolRunning ? (
-                      <>
-                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                        Running...
-                      </>
-                    ) : (
-                      <>
-                        <Send className="w-4 h-4 mr-2" />
-                        Run Tool
-                      </>
-                    )}
-                  </Button>
                   <Button
                     onClick={async () => {
                       try {
