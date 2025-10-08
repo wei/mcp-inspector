@@ -5,6 +5,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { TabsContent } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import DynamicJsonForm, { DynamicJsonFormRef } from "./DynamicJsonForm";
 import type { JsonValue, JsonSchemaType } from "@/utils/jsonUtils";
 import {
@@ -180,6 +187,42 @@ const ToolsTab = ({
                               {prop.description || "Toggle this option"}
                             </label>
                           </div>
+                        ) : prop.type === "string" && prop.enum ? (
+                          <Select
+                            value={
+                              params[key] === undefined
+                                ? ""
+                                : String(params[key])
+                            }
+                            onValueChange={(value) => {
+                              if (value === "") {
+                                setParams({
+                                  ...params,
+                                  [key]: undefined,
+                                });
+                              } else {
+                                setParams({
+                                  ...params,
+                                  [key]: value,
+                                });
+                              }
+                            }}
+                          >
+                            <SelectTrigger id={key} className="mt-1">
+                              <SelectValue
+                                placeholder={
+                                  prop.description || "Select an option"
+                                }
+                              />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {prop.enum.map((option) => (
+                                <SelectItem key={option} value={option}>
+                                  {option}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
                         ) : prop.type === "string" ? (
                           <Textarea
                             id={key}
