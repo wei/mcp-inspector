@@ -151,15 +151,39 @@ const ToolsTab = ({
                     const required = isPropertyRequired(key, inputSchema);
                     return (
                       <div key={key}>
-                        <Label
-                          htmlFor={key}
-                          className="block text-sm font-medium text-gray-700 dark:text-gray-300"
-                        >
-                          {key}
-                          {required && (
-                            <span className="text-red-500 ml-1">*</span>
-                          )}
-                        </Label>
+                        <div className="flex justify-between">
+                          <Label
+                            htmlFor={key}
+                            className="block text-sm font-medium text-gray-700 dark:text-gray-300"
+                          >
+                            {key}
+                            {required && (
+                              <span className="text-red-500 ml-1">*</span>
+                            )}
+                          </Label>
+                          {prop.nullable ? (
+                            <div className="flex items-center space-x-2">
+                              <Checkbox
+                                id={key}
+                                name={key}
+                                checked={params[key] === null}
+                                onCheckedChange={(checked: boolean) =>
+                                  setParams({
+                                    ...params,
+                                    [key]: checked ? null : prop.default,
+                                  })
+                                }
+                              />
+                              <label
+                                htmlFor={key}
+                                className="text-sm font-medium text-gray-700 dark:text-gray-300"
+                              >
+                                Null
+                              </label>
+                            </div>
+                          ) : null}
+                        </div>
+
                         {prop.type === "boolean" ? (
                           <div className="flex items-center space-x-2 mt-2">
                             <Checkbox
