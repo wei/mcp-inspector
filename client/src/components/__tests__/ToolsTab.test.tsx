@@ -44,6 +44,16 @@ describe("ToolsTab", () => {
         },
       },
     },
+    {
+      name: "tool4",
+      description: "Tool with nullable field",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          num: { type: ["number", "null"] as const },
+        },
+      },
+    },
   ];
 
   const defaultProps = {
@@ -132,6 +142,38 @@ describe("ToolsTab", () => {
 
     expect(defaultProps.callTool).toHaveBeenCalledWith(mockTools[0].name, {
       num: -42,
+    });
+  });
+
+  it("should allow specifying null value", async () => {
+    const mockCallTool = jest.fn();
+    const toolWithNullableField = mockTools[3];
+
+    renderToolsTab({
+      tools: [toolWithNullableField],
+      selectedTool: toolWithNullableField,
+      callTool: mockCallTool,
+    });
+
+    const nullToggleButton = screen.getByRole("checkbox", { name: /null/i });
+    expect(nullToggleButton).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(nullToggleButton);
+    });
+
+    expect(screen.getByRole("toolinputwrapper").classList).toContain(
+      "pointer-events-none",
+    );
+
+    const runButton = screen.getByRole("button", { name: /run tool/i });
+    await act(async () => {
+      fireEvent.click(runButton);
+    });
+
+    // Tool should have been called with null value
+    expect(mockCallTool).toHaveBeenCalledWith(toolWithNullableField.name, {
+      num: null,
     });
   });
 
