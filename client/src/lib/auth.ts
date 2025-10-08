@@ -157,17 +157,10 @@ export class InspectorOAuthClientProvider implements OAuthClientProvider {
   }
 
   saveClientInformation(clientInformation: OAuthClientInformation) {
-    // Remove client_secret before storing (not needed after initial OAuth flow)
-    const safeInfo = Object.fromEntries(
-      Object.entries(clientInformation).filter(
-        ([key]) => key !== "client_secret",
-      ),
-    ) as OAuthClientInformation;
-
     // Save the dynamically registered client information to session storage
     saveClientInformationToSessionStorage({
       serverUrl: this.serverUrl,
-      clientInformation: safeInfo,
+      clientInformation,
       isPreregistered: false,
     });
   }

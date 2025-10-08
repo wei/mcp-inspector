@@ -3,6 +3,11 @@
 import cors from "cors";
 import { parseArgs } from "node:util";
 import { parse as shellParseArgs } from "shell-quote";
+import nodeFetch, { Headers as NodeHeaders } from "node-fetch";
+
+// Type-compatible wrappers for node-fetch to work with browser-style types
+const fetch = nodeFetch;
+const Headers = NodeHeaders;
 
 import {
   SSEClientTransport,
@@ -232,12 +237,36 @@ const authMiddleware = (
 };
 
 /**
+ * Converts a Node.js ReadableStream to a web-compatible ReadableStream
+ * This is necessary for the EventSource polyfill which expects web streams
+ */
+const createWebReadableStream = (nodeStream: any): ReadableStream => {
+  return new ReadableStream({
+    start(controller) {
+      nodeStream.on("data", (chunk: any) => {
+        controller.enqueue(chunk);
+      });
+      nodeStream.on("end", () => {
+        controller.close();
+      });
+      nodeStream.on("error", (err: any) => {
+        controller.error(err);
+      });
+    },
+  });
+};
+
+/**
  * Creates a `fetch` function that merges dynamic session headers with the
  * headers from the actual request, ensuring that request-specific headers like
- * `Content-Type` are preserved.
+ * `Content-Type` are preserved. For SSE requests, it also converts Node.js
+ * streams to web-compatible streams.
  */
 const createCustomFetch = (headerHolder: { headers: HeadersInit }) => {
-  return (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+  return async (
+    input: RequestInfo | URL,
+    init?: RequestInit,
+  ): Promise<Response> => {
     // Determine the headers from the original request/init.
     // The SDK may pass a Request object or a URL and an init object.
     const originalHeaders =
@@ -252,8 +281,43 @@ const createCustomFetch = (headerHolder: { headers: HeadersInit }) => {
       finalHeaders.set(key, value);
     });
 
-    // This works for both `fetch(url, init)` and `fetch(request)` style calls.
-    return fetch(input, { ...init, headers: finalHeaders });
+    // Convert Headers to a plain object for node-fetch compatibility
+    const headersObject: Record<string, string> = {};
+    finalHeaders.forEach((value, key) => {
+      headersObject[key] = value;
+    });
+
+    // Get the response from node-fetch (cast input and init to handle type differences)
+    const response = await fetch(
+      input as any,
+      { ...init, headers: headersObject } as any,
+    );
+
+    // Check if this is an SSE request by looking at the Accept header
+    const acceptHeader = finalHeaders.get("Accept");
+    const isSSE = acceptHeader?.includes("text/event-stream");
+
+    if (isSSE && response.body) {
+      // For SSE requests, we need to convert the Node.js stream to a web ReadableStream
+      // because the EventSource polyfill expects web-compatible streams
+      const webStream = createWebReadableStream(response.body);
+
+      // Create a new response with the web-compatible stream
+      // Convert node-fetch headers to plain object for web Response compatibility
+      const responseHeaders: Record<string, string> = {};
+      response.headers.forEach((value: string, key: string) => {
+        responseHeaders[key] = value;
+      });
+
+      return new Response(webStream, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: responseHeaders,
+      }) as Response;
+    }
+
+    // For non-SSE requests, return the response as-is (cast to handle type differences)
+    return response as unknown as Response;
   };
 };
 

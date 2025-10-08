@@ -22,6 +22,8 @@ import { SESSION_KEYS, getServerSpecificKey } from "./lib/constants";
 import { AuthDebuggerState, EMPTY_DEBUGGER_STATE } from "./lib/auth-types";
 import { OAuthStateMachine } from "./lib/oauth-state-machine";
 import { cacheToolOutputSchemas } from "./utils/schemaUtils";
+import { cleanParams } from "./utils/paramUtils";
+import type { JsonSchemaType } from "./utils/jsonUtils";
 import React, {
   Suspense,
   useCallback,
@@ -107,6 +109,14 @@ const App = () => {
   const [transportType, setTransportType] = useState<
     "stdio" | "sse" | "streamable-http"
   >(getInitialTransportType);
+  const [connectionType, setConnectionType] = useState<"direct" | "proxy">(
+    () => {
+      return (
+        (localStorage.getItem("lastConnectionType") as "direct" | "proxy") ||
+        "proxy"
+      );
+    },
+  );
   const [logLevel, setLogLevel] = useState<LoggingLevel>("debug");
   const [notifications, setNotifications] = useState<ServerNotification[]>([]);
   const [roots, setRoots] = useState<Root[]>([]);
@@ -154,12 +164,12 @@ const App = () => {
       return migrateFromLegacyAuth(legacyToken, legacyHeaderName);
     }
 
-    // Default to Authorization: Bearer as the most common case
+    // Default to empty array
     return [
       {
         name: "Authorization",
         value: "Bearer ",
-        enabled: true,
+        enabled: false,
       },
     ];
   });
@@ -254,6 +264,7 @@ const App = () => {
     oauthClientId,
     oauthScope,
     config,
+    connectionType,
     onNotification: (notification) => {
       setNotifications((prev) => [...prev, notification as ServerNotification]);
     },
@@ -337,6 +348,10 @@ const App = () => {
   useEffect(() => {
     localStorage.setItem("lastTransportType", transportType);
   }, [transportType]);
+
+  useEffect(() => {
+    localStorage.setItem("lastConnectionType", connectionType);
+  }, [connectionType]);
 
   useEffect(() => {
     if (bearerToken) {
@@ -764,12 +779,18 @@ const App = () => {
     lastToolCallOriginTabRef.current = currentTabRef.current;
 
     try {
+      // Find the tool schema to clean parameters properly
+      const tool = tools.find((t) => t.name === name);
+      const cleanedParams = tool?.inputSchema
+        ? cleanParams(params, tool.inputSchema as JsonSchemaType)
+        : params;
+
       const response = await sendMCPRequest(
         {
           method: "tools/call" as const,
           params: {
             name,
-            arguments: params,
+            arguments: cleanedParams,
             _meta: {
               progressToken: progressTokenRef.current++,
             },
@@ -780,6 +801,8 @@ const App = () => {
       );
 
       setToolResult(response);
+      // Clear any validation errors since tool execution completed
+      setErrors((prev) => ({ ...prev, tools: null }));
     } catch (e) {
       const toolResult: CompatibilityCallToolResult = {
         content: [
@@ -791,6 +814,8 @@ const App = () => {
         isError: true,
       };
       setToolResult(toolResult);
+      // Clear validation errors - tool execution errors are shown in ToolResults
+      setErrors((prev) => ({ ...prev, tools: null }));
     }
   };
 
@@ -882,6 +907,8 @@ const App = () => {
           logLevel={logLevel}
           sendLogLevelRequest={sendLogLevelRequest}
           loggingSupported={!!serverCapabilities?.logging || false}
+          connectionType={connectionType}
+          setConnectionType={setConnectionType}
         />
         <div
           onMouseDown={handleSidebarDragStart}
