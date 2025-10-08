@@ -22,6 +22,8 @@ import { SESSION_KEYS, getServerSpecificKey } from "./lib/constants";
 import { AuthDebuggerState, EMPTY_DEBUGGER_STATE } from "./lib/auth-types";
 import { OAuthStateMachine } from "./lib/oauth-state-machine";
 import { cacheToolOutputSchemas } from "./utils/schemaUtils";
+import { cleanParams } from "./utils/paramUtils";
+import type { JsonSchemaType } from "./utils/jsonUtils";
 import React, {
   Suspense,
   useCallback,
@@ -162,12 +164,12 @@ const App = () => {
       return migrateFromLegacyAuth(legacyToken, legacyHeaderName);
     }
 
-    // Default to Authorization: Bearer as the most common case
+    // Default to empty array
     return [
       {
         name: "Authorization",
         value: "Bearer ",
-        enabled: true,
+        enabled: false,
       },
     ];
   });
@@ -777,12 +779,18 @@ const App = () => {
     lastToolCallOriginTabRef.current = currentTabRef.current;
 
     try {
+      // Find the tool schema to clean parameters properly
+      const tool = tools.find((t) => t.name === name);
+      const cleanedParams = tool?.inputSchema
+        ? cleanParams(params, tool.inputSchema as JsonSchemaType)
+        : params;
+
       const response = await sendMCPRequest(
         {
           method: "tools/call" as const,
           params: {
             name,
-            arguments: params,
+            arguments: cleanedParams,
             _meta: {
               progressToken: progressTokenRef.current++,
             },
@@ -793,6 +801,8 @@ const App = () => {
       );
 
       setToolResult(response);
+      // Clear any validation errors since tool execution completed
+      setErrors((prev) => ({ ...prev, tools: null }));
     } catch (e) {
       const toolResult: CompatibilityCallToolResult = {
         content: [
@@ -804,6 +814,8 @@ const App = () => {
         isError: true,
       };
       setToolResult(toolResult);
+      // Clear validation errors - tool execution errors are shown in ToolResults
+      setErrors((prev) => ({ ...prev, tools: null }));
     }
   };
 

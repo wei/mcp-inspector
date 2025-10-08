@@ -35,7 +35,7 @@ import { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import { useEffect, useState } from "react";
 import { useToast } from "@/lib/hooks/useToast";
 import { z } from "zod";
-import { ConnectionStatus } from "../constants";
+import { ConnectionStatus, CLIENT_IDENTITY } from "../constants";
 import { Notification } from "../notificationTypes";
 import {
   auth,
@@ -47,7 +47,6 @@ import {
   saveClientInformationToSessionStorage,
   discoverScopes,
 } from "../auth";
-import packageJson from "../../../package.json";
 import {
   getMCPProxyAddress,
   getMCPServerRequestMaxTotalTimeout,
@@ -364,20 +363,19 @@ export function useConnection({
   };
 
   const connect = async (_e?: unknown, retryCount: number = 0) => {
-    const client = new Client<Request, Notification, Result>(
-      {
-        name: "mcp-inspector",
-        version: packageJson.version,
-      },
-      {
-        capabilities: {
-          sampling: {},
-          elicitation: {},
-          roots: {
-            listChanged: true,
-          },
+    const clientCapabilities = {
+      capabilities: {
+        sampling: {},
+        elicitation: {},
+        roots: {
+          listChanged: true,
         },
       },
+    };
+
+    const client = new Client<Request, Notification, Result>(
+      CLIENT_IDENTITY,
+      clientCapabilities,
     );
 
     // Only check proxy health for proxy connections
@@ -402,11 +400,37 @@ export function useConnection({
       // Use custom headers (migration is handled in App.tsx)
       let finalHeaders: CustomHeaders = customHeaders || [];
 
-      // Add OAuth token if available and no custom headers are set
-      if (finalHeaders.length === 0) {
+      const isEmptyAuthHeader = (header: CustomHeaders[number]) =>
+        header.name.trim().toLowerCase() === "authorization" &&
+        header.value.trim().toLowerCase() === "bearer";
+
+      // Check for empty Authorization headers and show validation error
+      const hasEmptyAuthHeader = finalHeaders.some(
+        (header) => header.enabled && isEmptyAuthHeader(header),
+      );
+
+      if (hasEmptyAuthHeader) {
+        toast({
+          title: "Invalid Authorization Header",
+          description:
+            "Authorization header is enabled but empty. Please add a token or disable the header.",
+          variant: "destructive",
+        });
+      }
+
+      const needsOAuthToken = !finalHeaders.some(
+        (header) =>
+          header.enabled &&
+          header.name.trim().toLowerCase() === "authorization",
+      );
+
+      if (needsOAuthToken) {
         const oauthToken = (await serverAuthProvider.tokens())?.access_token;
         if (oauthToken) {
+          // Add the OAuth token
           finalHeaders = [
+            // Remove any existing Authorization headers with empty tokens
+            ...finalHeaders.filter((header) => !isEmptyAuthHeader(header)),
             {
               name: "Authorization",
               value: `Bearer ${oauthToken}`,
