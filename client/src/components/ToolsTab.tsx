@@ -121,7 +121,7 @@ const ToolsTab = ({
           renderItem={(tool) => (
             <div className="flex flex-col items-start">
               <span className="flex-1">{tool.name}</span>
-              <span className="text-sm text-gray-500 text-left">
+              <span className="text-sm text-gray-500 text-left line-clamp-3">
                 {tool.description}
               </span>
             </div>
@@ -149,7 +149,7 @@ const ToolsTab = ({
                     </AlertDescription>
                   </Alert>
                 )}
-                <p className="text-sm text-gray-600 dark:text-gray-400">
+                <p className="text-sm text-gray-600 dark:text-gray-400 whitespace-pre-wrap max-h-48 overflow-y-auto">
                   {selectedTool.description}
                 </p>
                 {Object.entries(selectedTool.inputSchema.properties ?? []).map(
