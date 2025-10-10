@@ -680,6 +680,64 @@ describe("ToolsTab", () => {
     });
   });
 
+  describe("Enum Parameters", () => {
+    const toolWithEnumParam: Tool = {
+      name: "enumTool",
+      description: "Tool with enum parameter",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          format: {
+            type: "string" as const,
+            enum: ["json", "xml", "csv", "yaml"],
+            description: "Output format",
+          },
+        },
+      },
+    };
+
+    beforeEach(() => {
+      // Mock scrollIntoView for Radix UI Select
+      Element.prototype.scrollIntoView = jest.fn();
+    });
+
+    it("should render enum parameter as dropdown", () => {
+      renderToolsTab({
+        tools: [toolWithEnumParam],
+        selectedTool: toolWithEnumParam,
+      });
+
+      // Should render a select button instead of textarea
+      const selectTrigger = screen.getByRole("combobox", { name: /format/i });
+      expect(selectTrigger).toBeInTheDocument();
+    });
+
+    it("should render non-enum string parameter as textarea", () => {
+      const toolWithStringParam: Tool = {
+        name: "stringTool",
+        description: "Tool with regular string parameter",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            text: {
+              type: "string" as const,
+              description: "Some text input",
+            },
+          },
+        },
+      };
+
+      renderToolsTab({
+        tools: [toolWithStringParam],
+        selectedTool: toolWithStringParam,
+      });
+
+      // Should render textarea, not select
+      expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+      expect(screen.getByRole("textbox")).toBeInTheDocument();
+    });
+  });
+
   describe("JSON Validation Integration", () => {
     const toolWithJsonParams: Tool = {
       name: "jsonTool",

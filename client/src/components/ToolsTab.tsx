@@ -5,6 +5,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { TabsContent } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import DynamicJsonForm, { DynamicJsonFormRef } from "./DynamicJsonForm";
 import type { JsonValue, JsonSchemaType } from "@/utils/jsonUtils";
 import {
@@ -114,7 +121,7 @@ const ToolsTab = ({
           renderItem={(tool) => (
             <div className="flex flex-col items-start">
               <span className="flex-1">{tool.name}</span>
-              <span className="text-sm text-gray-500 text-left">
+              <span className="text-sm text-gray-500 text-left line-clamp-3">
                 {tool.description}
               </span>
             </div>
@@ -137,10 +144,12 @@ const ToolsTab = ({
                   <Alert variant="destructive">
                     <AlertCircle className="h-4 w-4" />
                     <AlertTitle>Error</AlertTitle>
-                    <AlertDescription>{error}</AlertDescription>
+                    <AlertDescription className="break-all">
+                      {error}
+                    </AlertDescription>
                   </Alert>
                 )}
-                <p className="text-sm text-gray-600 dark:text-gray-400">
+                <p className="text-sm text-gray-600 dark:text-gray-400 whitespace-pre-wrap max-h-48 overflow-y-auto">
                   {selectedTool.description}
                 </p>
                 {Object.entries(selectedTool.inputSchema.properties ?? []).map(
@@ -208,6 +217,42 @@ const ToolsTab = ({
                                 {prop.description || "Toggle this option"}
                               </label>
                             </div>
+                          ) : prop.type === "string" && prop.enum ? (
+                            <Select
+                              value={
+                                params[key] === undefined
+                                  ? ""
+                                  : String(params[key])
+                              }
+                              onValueChange={(value) => {
+                                if (value === "") {
+                                  setParams({
+                                    ...params,
+                                    [key]: undefined,
+                                  });
+                                } else {
+                                  setParams({
+                                    ...params,
+                                    [key]: value,
+                                  });
+                                }
+                              }}
+                            >
+                              <SelectTrigger id={key} className="mt-1">
+                                <SelectValue
+                                  placeholder={
+                                    prop.description || "Select an option"
+                                  }
+                                />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {prop.enum.map((option) => (
+                                  <SelectItem key={option} value={option}>
+                                    {option}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
                           ) : prop.type === "string" ? (
                             <Textarea
                               id={key}
