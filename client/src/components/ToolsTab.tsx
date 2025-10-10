@@ -137,7 +137,9 @@ const ToolsTab = ({
                   <Alert variant="destructive">
                     <AlertCircle className="h-4 w-4" />
                     <AlertTitle>Error</AlertTitle>
-                    <AlertDescription>{error}</AlertDescription>
+                    <AlertDescription className="break-all">
+                      {error}
+                    </AlertDescription>
                   </Alert>
                 )}
                 <p className="text-sm text-gray-600 dark:text-gray-400">
