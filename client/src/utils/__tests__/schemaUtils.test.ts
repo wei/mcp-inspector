@@ -188,6 +188,7 @@ describe("normalizeUnionType", () => {
     expect(normalized.type).toBe("boolean");
     expect(normalized.anyOf).toBeUndefined();
     expect(normalized.description).toBe("Optional boolean parameter");
+    expect(normalized.nullable).toBeTruthy();
   });
 
   test("normalizes array type with string and null to string type", () => {
@@ -200,6 +201,7 @@ describe("normalizeUnionType", () => {
 
     expect(normalized.type).toBe("string");
     expect(normalized.description).toBe("Optional string parameter");
+    expect(normalized.nullable).toBeTruthy();
   });
 
   test("normalizes array type with boolean and null to boolean type", () => {
@@ -212,6 +214,7 @@ describe("normalizeUnionType", () => {
 
     expect(normalized.type).toBe("boolean");
     expect(normalized.description).toBe("Optional boolean parameter");
+    expect(normalized.nullable).toBeTruthy();
   });
 
   test("normalizes anyOf with number and null to number type", () => {
@@ -225,6 +228,7 @@ describe("normalizeUnionType", () => {
     expect(normalized.type).toBe("number");
     expect(normalized.anyOf).toBeUndefined();
     expect(normalized.description).toBe("Optional number parameter");
+    expect(normalized.nullable).toBeTruthy();
   });
 
   test("normalizes anyOf with integer and null to integer type", () => {
@@ -238,6 +242,7 @@ describe("normalizeUnionType", () => {
     expect(normalized.type).toBe("integer");
     expect(normalized.anyOf).toBeUndefined();
     expect(normalized.description).toBe("Optional integer parameter");
+    expect(normalized.nullable).toBeTruthy();
   });
 
   test("normalizes array type with number and null to number type", () => {
@@ -250,6 +255,7 @@ describe("normalizeUnionType", () => {
 
     expect(normalized.type).toBe("number");
     expect(normalized.description).toBe("Optional number parameter");
+    expect(normalized.nullable).toBeTruthy();
   });
 
   test("normalizes array type with integer and null to integer type", () => {
@@ -262,6 +268,7 @@ describe("normalizeUnionType", () => {
 
     expect(normalized.type).toBe("integer");
     expect(normalized.description).toBe("Optional integer parameter");
+    expect(normalized.nullable).toBeTruthy();
   });
 
   test("handles anyOf with reversed order (null first)", () => {
@@ -273,6 +280,7 @@ describe("normalizeUnionType", () => {
 
     expect(normalized.type).toBe("string");
     expect(normalized.anyOf).toBeUndefined();
+    expect(normalized.nullable).toBeTruthy();
   });
 
   test("leaves non-union schemas unchanged", () => {
@@ -294,6 +302,7 @@ describe("normalizeUnionType", () => {
     const normalized = normalizeUnionType(schema);
 
     expect(normalized).toEqual(schema);
+    expect(normalized.nullable).toBeFalsy();
   });
 
   test("leaves anyOf with more than two types unchanged", () => {
@@ -343,6 +352,7 @@ describe("normalizeUnionType", () => {
     expect(normalized.minLength).toBe(1);
     expect(normalized.maxLength).toBe(100);
     expect(normalized.pattern).toBe("^[a-z]+$");
+    expect(normalized.nullable).toBeTruthy();
   });
 });
 
