@@ -52,7 +52,7 @@ const JsonView = memo(
           variant: "destructive",
         });
       }
-    }, [toast, normalizedData]);
+    }, [toast, normalizedData, setCopied]);
 
     return (
       <div className={clsx("p-4 border rounded relative", className)}>
