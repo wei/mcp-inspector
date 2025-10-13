@@ -44,6 +44,16 @@ describe("ToolsTab", () => {
         },
       },
     },
+    {
+      name: "tool4",
+      description: "Tool with nullable field",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          num: { type: ["number", "null"] as const },
+        },
+      },
+    },
   ];
 
   const defaultProps = {
@@ -132,6 +142,38 @@ describe("ToolsTab", () => {
 
     expect(defaultProps.callTool).toHaveBeenCalledWith(mockTools[0].name, {
       num: -42,
+    });
+  });
+
+  it("should allow specifying null value", async () => {
+    const mockCallTool = jest.fn();
+    const toolWithNullableField = mockTools[3];
+
+    renderToolsTab({
+      tools: [toolWithNullableField],
+      selectedTool: toolWithNullableField,
+      callTool: mockCallTool,
+    });
+
+    const nullToggleButton = screen.getByRole("checkbox", { name: /null/i });
+    expect(nullToggleButton).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(nullToggleButton);
+    });
+
+    expect(screen.getByRole("toolinputwrapper").classList).toContain(
+      "pointer-events-none",
+    );
+
+    const runButton = screen.getByRole("button", { name: /run tool/i });
+    await act(async () => {
+      fireEvent.click(runButton);
+    });
+
+    // Tool should have been called with null value
+    expect(mockCallTool).toHaveBeenCalledWith(toolWithNullableField.name, {
+      num: null,
     });
   });
 
@@ -635,6 +677,64 @@ describe("ToolsTab", () => {
       expect(screen.getAllByText("Meta:")).toHaveLength(1);
       expect(screen.getByText(/info/i)).toBeInTheDocument();
       expect(screen.getByText(/version/i)).toBeInTheDocument();
+    });
+  });
+
+  describe("Enum Parameters", () => {
+    const toolWithEnumParam: Tool = {
+      name: "enumTool",
+      description: "Tool with enum parameter",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          format: {
+            type: "string" as const,
+            enum: ["json", "xml", "csv", "yaml"],
+            description: "Output format",
+          },
+        },
+      },
+    };
+
+    beforeEach(() => {
+      // Mock scrollIntoView for Radix UI Select
+      Element.prototype.scrollIntoView = jest.fn();
+    });
+
+    it("should render enum parameter as dropdown", () => {
+      renderToolsTab({
+        tools: [toolWithEnumParam],
+        selectedTool: toolWithEnumParam,
+      });
+
+      // Should render a select button instead of textarea
+      const selectTrigger = screen.getByRole("combobox", { name: /format/i });
+      expect(selectTrigger).toBeInTheDocument();
+    });
+
+    it("should render non-enum string parameter as textarea", () => {
+      const toolWithStringParam: Tool = {
+        name: "stringTool",
+        description: "Tool with regular string parameter",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            text: {
+              type: "string" as const,
+              description: "Some text input",
+            },
+          },
+        },
+      };
+
+      renderToolsTab({
+        tools: [toolWithStringParam],
+        selectedTool: toolWithStringParam,
+      });
+
+      // Should render textarea, not select
+      expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+      expect(screen.getByRole("textbox")).toBeInTheDocument();
     });
   });
 

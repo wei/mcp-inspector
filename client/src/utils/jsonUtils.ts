@@ -41,6 +41,7 @@ export type JsonSchemaType = {
   maximum?: number;
   minLength?: number;
   maxLength?: number;
+  nullable?: boolean;
   pattern?: string;
   format?: string;
   enum?: string[];

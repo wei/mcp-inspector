@@ -141,6 +141,10 @@ const App = () => {
     return localStorage.getItem("lastOauthScope") || "";
   });
 
+  const [oauthClientSecret, setOauthClientSecret] = useState<string>(() => {
+    return localStorage.getItem("lastOauthClientSecret") || "";
+  });
+
   // Custom headers state with migration from legacy auth
   const [customHeaders, setCustomHeaders] = useState<CustomHeaders>(() => {
     const savedHeaders = localStorage.getItem("lastCustomHeaders");
@@ -262,6 +266,7 @@ const App = () => {
     env,
     customHeaders,
     oauthClientId,
+    oauthClientSecret,
     oauthScope,
     config,
     connectionType,
@@ -393,6 +398,10 @@ const App = () => {
   useEffect(() => {
     localStorage.setItem("lastOauthScope", oauthScope);
   }, [oauthScope]);
+
+  useEffect(() => {
+    localStorage.setItem("lastOauthClientSecret", oauthClientSecret);
+  }, [oauthClientSecret]);
 
   useEffect(() => {
     saveInspectorConfig(CONFIG_LOCAL_STORAGE_KEY, config);
@@ -900,6 +909,8 @@ const App = () => {
           setCustomHeaders={setCustomHeaders}
           oauthClientId={oauthClientId}
           setOauthClientId={setOauthClientId}
+          oauthClientSecret={oauthClientSecret}
+          setOauthClientSecret={setOauthClientSecret}
           oauthScope={oauthScope}
           setOauthScope={setOauthScope}
           onConnect={connectMcpServer}
