@@ -34,11 +34,11 @@ The project is organized as a monorepo with workspaces:
 
 ## Tool Input Validation Guidelines
 
-When handling tool input parameters and form fields:
+When implementing or modifying tool input parameter handling in the Inspector:
 
-- **Optional fields with empty values should be omitted entirely** - Do not send empty strings or null values for optional parameters, UNLESS the field has an explicit default value in the schema that matches the current value
-- **Fields with explicit defaults should preserve their default values** - If a field has an explicit default in its schema (e.g., `default: null`), and the current value matches that default, include it in the request. This is a meaningful value the tool expects
-- **Required fields should preserve their values even when empty** - This allows the server to properly validate and return appropriate error messages
-- **Deeper validation should be handled by the server** - Inspector should focus on basic field presence, while the MCP server handles parameter validation according to its schema
+- **Omit optional fields with empty values** - When processing form inputs, omit empty strings or null values for optional parameters, UNLESS the field has an explicit default value in the schema that matches the current value
+- **Preserve explicit default values** - If a field schema contains an explicit default (e.g., `default: null`), and the current value matches that default, include it in the request. This is a meaningful value the tool expects
+- **Always include required fields** - Preserve required field values even when empty, allowing the MCP server to validate and return appropriate error messages
+- **Defer deep validation to the server** - Implement basic field presence checking in the Inspector client, but rely on the MCP server for parameter validation according to its schema
 
-These guidelines ensure clean parameter passing and proper separation of concerns between the Inspector client and MCP servers.
+These guidelines maintain clean parameter passing and proper separation of concerns between the Inspector client and MCP servers.
