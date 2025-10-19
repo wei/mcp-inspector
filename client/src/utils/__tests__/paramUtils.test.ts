@@ -277,4 +277,40 @@ describe("cleanParams", () => {
       // fieldWithDefault omitted because value (null) doesn't match default ("defaultValue")
     });
   });
+
+  it("should fix regression from issue #846 - tools with multiple null defaults", () => {
+    // Reproduces the exact scenario from https://github.com/modelcontextprotocol/inspector/issues/846
+    // In v0.17.0, the cleanParams function would remove all null values,
+    // breaking tools that have parameters with explicit default: null
+    const schema: JsonSchemaType = {
+      type: "object",
+      required: ["requiredString"],
+      properties: {
+        optionalString: { type: ["string", "null"], default: null },
+        optionalNumber: { type: ["number", "null"], default: null },
+        optionalBoolean: { type: ["boolean", "null"], default: null },
+        requiredString: { type: "string" },
+      },
+    };
+
+    // When a user opens the tool in Inspector, fields initialize with their defaults
+    const params = {
+      optionalString: null, // initialized to default
+      optionalNumber: null, // initialized to default
+      optionalBoolean: null, // initialized to default
+      requiredString: "test",
+    };
+
+    const cleaned = cleanParams(params, schema);
+
+    // In v0.16, null defaults were preserved (working behavior)
+    // In v0.17.0, they were removed (regression)
+    // This fix restores the v0.16 behavior
+    expect(cleaned).toEqual({
+      optionalString: null,
+      optionalNumber: null,
+      optionalBoolean: null,
+      requiredString: "test",
+    });
+  });
 });
