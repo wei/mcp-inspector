@@ -181,9 +181,16 @@ const ToolsTab = ({
                                     ...params,
                                     [key]: checked
                                       ? null
-                                      : prop.type === "boolean"
-                                        ? false
-                                        : prop.default,
+                                      : prop.default !== null
+                                        ? prop.default
+                                        : prop.type === "boolean"
+                                          ? false
+                                          : prop.type === "string"
+                                            ? ""
+                                            : prop.type === "number" ||
+                                                prop.type === "integer"
+                                              ? undefined
+                                              : undefined,
                                   })
                                 }
                               />
