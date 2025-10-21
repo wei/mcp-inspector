@@ -46,6 +46,7 @@ import {
   InspectorOAuthClientProvider,
   saveClientInformationToSessionStorage,
   saveScopeToSessionStorage,
+  clearScopeFromSessionStorage,
   discoverScopes,
 } from "../auth";
 import {
@@ -144,6 +145,11 @@ export function useConnection({
   }, [oauthClientId, oauthClientSecret, sseUrl]);
 
   useEffect(() => {
+    if (!oauthScope) {
+      clearScopeFromSessionStorage(sseUrl);
+      return;
+    }
+
     saveScopeToSessionStorage(sseUrl, oauthScope);
   }, [oauthScope, sseUrl]);
 

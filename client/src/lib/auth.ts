@@ -122,6 +122,11 @@ export const saveScopeToSessionStorage = (
   }
 };
 
+export const clearScopeFromSessionStorage = (serverUrl: string) => {
+  const key = getServerSpecificKey(SESSION_KEYS.SCOPE, serverUrl);
+  sessionStorage.removeItem(key);
+};
+
 export class InspectorOAuthClientProvider implements OAuthClientProvider {
   constructor(protected serverUrl: string) {
     // Save the server URL to session storage
@@ -242,9 +247,6 @@ export class InspectorOAuthClientProvider implements OAuthClientProvider {
     );
     sessionStorage.removeItem(
       getServerSpecificKey(SESSION_KEYS.CODE_VERIFIER, this.serverUrl),
-    );
-    sessionStorage.removeItem(
-      getServerSpecificKey(SESSION_KEYS.SCOPE, this.serverUrl),
     );
   }
 }
