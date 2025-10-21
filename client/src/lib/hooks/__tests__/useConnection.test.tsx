@@ -113,6 +113,7 @@ jest.mock("../../auth", () => ({
   clearClientInformationFromSessionStorage: jest.fn(),
   saveClientInformationToSessionStorage: jest.fn(),
   saveScopeToSessionStorage: jest.fn(),
+  clearScopeFromSessionStorage: jest.fn(),
   discoverScopes: jest.fn(),
 }));
 
