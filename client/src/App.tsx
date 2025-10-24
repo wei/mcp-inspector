@@ -198,11 +198,11 @@ const App = () => {
     useState<AuthDebuggerState>(EMPTY_DEBUGGER_STATE);
 
   // Metadata state - persisted in localStorage
-  const [metaData, setMetaData] = useState<Record<string, string>>(() => {
-    const savedMetaData = localStorage.getItem("lastMetaData");
-    if (savedMetaData) {
+  const [metadata, setMetadata] = useState<Record<string, string>>(() => {
+    const savedMetadata = localStorage.getItem("lastMetadata");
+    if (savedMetadata) {
       try {
-        return JSON.parse(savedMetaData);
+        return JSON.parse(savedMetadata);
       } catch (error) {
         console.warn("Failed to parse saved metadata:", error);
       }
@@ -214,9 +214,9 @@ const App = () => {
     setAuthState((prev) => ({ ...prev, ...updates }));
   };
 
-  const handleMetaDataChange = (newMetaData: Record<string, string>) => {
-    setMetaData(newMetaData);
-    localStorage.setItem("lastMetaData", JSON.stringify(newMetaData));
+  const handleMetadataChange = (newMetadata: Record<string, string>) => {
+    setMetadata(newMetadata);
+    localStorage.setItem("lastMetadata", JSON.stringify(newMetadata));
   };
   const nextRequestId = useRef(0);
   const rootsRef = useRef<Root[]>([]);
@@ -319,7 +319,7 @@ const App = () => {
     },
     getRoots: () => rootsRef.current,
     defaultLoggingLevel: logLevel,
-    metaData,
+    metadata,
   });
 
   useEffect(() => {
@@ -813,7 +813,7 @@ const App = () => {
       // Merge general metadata with tool-specific metadata
       // Tool-specific metadata takes precedence over general metadata
       const mergedMeta = {
-        ...metaData, // General metadata first
+        ...metadata, // General metadata first
         progressToken: progressTokenRef.current++,
         ...(meta ?? {}), // Tool-specific metadata overrides
       };
@@ -1185,8 +1185,8 @@ const App = () => {
                     />
                     <AuthDebuggerWrapper />
                     <MetadataTab
-                      metaData={metaData}
-                      onMetaDataChange={handleMetaDataChange}
+                      metadata={metadata}
+                      onMetadataChange={handleMetadataChange}
                     />
                   </>
                 )}

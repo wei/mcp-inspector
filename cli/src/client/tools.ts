@@ -21,11 +21,11 @@ type JsonSchemaType = {
 
 export async function listTools(
   client: Client,
-  metaData?: Record<string, string>,
+  metadata?: Record<string, string>,
 ): Promise<McpResponse> {
   try {
     const params =
-      metaData && Object.keys(metaData).length > 0 ? { _meta: metaData } : {};
+      metadata && Object.keys(metadata).length > 0 ? { _meta: metadata } : {};
     const response = await client.listTools(params);
     return response;
   } catch (error) {
@@ -87,11 +87,11 @@ export async function callTool(
   client: Client,
   name: string,
   args: Record<string, JsonValue>,
-  generalMetaData?: Record<string, string>,
-  toolSpecificMetaData?: Record<string, string>,
+  generalMetadata?: Record<string, string>,
+  toolSpecificMetadata?: Record<string, string>,
 ): Promise<McpResponse> {
   try {
-    const toolsResponse = await listTools(client, generalMetaData);
+    const toolsResponse = await listTools(client, generalMetadata);
     const tools = toolsResponse.tools as Tool[];
     const tool = tools.find((t) => t.name === name);
 
@@ -116,10 +116,10 @@ export async function callTool(
     // Merge general metadata with tool-specific metadata
     // Tool-specific metadata takes precedence over general metadata
     let mergedMeta: Record<string, string> | undefined;
-    if (generalMetaData || toolSpecificMetaData) {
+    if (generalMetadata || toolSpecificMetadata) {
       mergedMeta = {
-        ...(generalMetaData || {}),
-        ...(toolSpecificMetaData || {}),
+        ...(generalMetadata || {}),
+        ...(toolSpecificMetadata || {}),
       };
     }
 

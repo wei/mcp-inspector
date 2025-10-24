@@ -5,22 +5,22 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Trash2, Plus } from "lucide-react";
 
-interface MetaDataEntry {
+interface MetadataEntry {
   key: string;
   value: string;
 }
 
 interface MetadataTabProps {
-  metaData: Record<string, string>;
-  onMetaDataChange: (metaData: Record<string, string>) => void;
+  metadata: Record<string, string>;
+  onMetadataChange: (metadata: Record<string, string>) => void;
 }
 
 const MetadataTab: React.FC<MetadataTabProps> = ({
-  metaData,
-  onMetaDataChange,
+  metadata,
+  onMetadataChange,
 }) => {
-  const [entries, setEntries] = useState<MetaDataEntry[]>(() => {
-    return Object.entries(metaData).map(([key, value]) => ({ key, value }));
+  const [entries, setEntries] = useState<MetadataEntry[]>(() => {
+    return Object.entries(metadata).map(([key, value]) => ({ key, value }));
   });
 
   const addEntry = () => {
@@ -30,7 +30,7 @@ const MetadataTab: React.FC<MetadataTabProps> = ({
   const removeEntry = (index: number) => {
     const newEntries = entries.filter((_, i) => i !== index);
     setEntries(newEntries);
-    updateMetaData(newEntries);
+    updateMetadata(newEntries);
   };
 
   const updateEntry = (
@@ -41,17 +41,17 @@ const MetadataTab: React.FC<MetadataTabProps> = ({
     const newEntries = [...entries];
     newEntries[index][field] = value;
     setEntries(newEntries);
-    updateMetaData(newEntries);
+    updateMetadata(newEntries);
   };
 
-  const updateMetaData = (newEntries: MetaDataEntry[]) => {
-    const metaDataObject: Record<string, string> = {};
+  const updateMetadata = (newEntries: MetadataEntry[]) => {
+    const metadataObject: Record<string, string> = {};
     newEntries.forEach(({ key, value }) => {
       if (key.trim() && value.trim()) {
-        metaDataObject[key.trim()] = value.trim();
+        metadataObject[key.trim()] = value.trim();
       }
     });
-    onMetaDataChange(metaDataObject);
+    onMetadataChange(metadataObject);
   };
 
   return (

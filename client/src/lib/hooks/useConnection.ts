@@ -79,7 +79,7 @@ interface UseConnectionOptions {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   getRoots?: () => any[];
   defaultLoggingLevel?: LoggingLevel;
-  metaData?: Record<string, string>;
+  metadata?: Record<string, string>;
 }
 
 export function useConnection({
@@ -98,7 +98,7 @@ export function useConnection({
   onElicitationRequest,
   getRoots,
   defaultLoggingLevel,
-  metaData = {},
+  metadata = {},
 }: UseConnectionOptions) {
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("disconnected");
@@ -158,13 +158,13 @@ export function useConnection({
       // Add metadata to the request if available, but skip for tool calls
       // as they handle metadata merging separately
       const shouldAddGeneralMeta =
-        request.method !== "tools/call" && Object.keys(metaData).length > 0;
+        request.method !== "tools/call" && Object.keys(metadata).length > 0;
       const requestWithMeta = shouldAddGeneralMeta
         ? {
             ...request,
             params: {
               ...request.params,
-              _meta: metaData,
+              _meta: metadata,
             },
           }
         : request;

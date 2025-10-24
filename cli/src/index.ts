@@ -45,7 +45,7 @@ type Args = {
   toolMeta?: Record<string, string>;
   transport?: "sse" | "stdio" | "http";
   headers?: Record<string, string>;
-  metaData?: Record<string, string>;
+  metadata?: Record<string, string>;
 };
 
 function createTransportOptions(
@@ -123,7 +123,7 @@ async function callMethod(args: Args): Promise<void> {
 
     // Tools methods
     if (args.method === "tools/list") {
-      result = await listTools(client, args.metaData);
+      result = await listTools(client, args.metadata);
     } else if (args.method === "tools/call") {
       if (!args.toolName) {
         throw new Error(
@@ -135,13 +135,13 @@ async function callMethod(args: Args): Promise<void> {
         client,
         args.toolName,
         args.toolArg || {},
-        args.metaData,
+        args.metadata,
         args.toolMeta,
       );
     }
     // Resources methods
     else if (args.method === "resources/list") {
-      result = await listResources(client, args.metaData);
+      result = await listResources(client, args.metadata);
     } else if (args.method === "resources/read") {
       if (!args.uri) {
         throw new Error(
@@ -149,13 +149,13 @@ async function callMethod(args: Args): Promise<void> {
         );
       }
 
-      result = await readResource(client, args.uri, args.metaData);
+      result = await readResource(client, args.uri, args.metadata);
     } else if (args.method === "resources/templates/list") {
-      result = await listResourceTemplates(client, args.metaData);
+      result = await listResourceTemplates(client, args.metadata);
     }
     // Prompts methods
     else if (args.method === "prompts/list") {
-      result = await listPrompts(client, args.metaData);
+      result = await listPrompts(client, args.metadata);
     } else if (args.method === "prompts/get") {
       if (!args.promptName) {
         throw new Error(
@@ -167,7 +167,7 @@ async function callMethod(args: Args): Promise<void> {
         client,
         args.promptName,
         args.promptArgs || {},
-        args.metaData,
+        args.metadata,
       );
     }
     // Logging methods
@@ -333,6 +333,21 @@ function parseArgs(): Args {
       'HTTP headers as "HeaderName: Value" pairs (for HTTP/SSE transports)',
       parseHeaderPair,
       {},
+    )
+    //
+    // Metadata options
+    //
+    .option(
+      "--metadata <pairs...>",
+      "General metadata as key=value pairs (applied to all methods)",
+      parseKeyValuePair,
+      {},
+    )
+    .option(
+      "--tool-metadata <pairs...>",
+      "Tool-specific metadata as key=value pairs (for tools/call method only)",
+      parseKeyValuePair,
+      {},
     );
 
   // Parse only the arguments before --
@@ -340,8 +355,8 @@ function parseArgs(): Args {
 
   const options = program.opts() as Omit<Args, "target"> & {
     header?: Record<string, string>;
-    meta?: Record<string, JsonValue>;
-    toolMeta?: Record<string, JsonValue>;
+    metadata?: Record<string, JsonValue>;
+    toolMetadata?: Record<string, JsonValue>;
   };
 
   let remainingArgs = program.args;
@@ -359,17 +374,17 @@ function parseArgs(): Args {
     target: finalArgs,
     ...options,
     headers: options.header, // commander.js uses 'header' field, map to 'headers'
-    metaData: options.meta
+    metadata: options.metadata
       ? Object.fromEntries(
-          Object.entries(options.meta).map(([key, value]) => [
+          Object.entries(options.metadata).map(([key, value]) => [
             key,
             String(value),
           ]),
         )
       : undefined,
-    toolMeta: options.toolMeta
+    toolMeta: options.toolMetadata
       ? Object.fromEntries(
-          Object.entries(options.toolMeta).map(([key, value]) => [
+          Object.entries(options.toolMetadata).map(([key, value]) => [
             key,
             String(value),
           ]),

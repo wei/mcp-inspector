@@ -14,11 +14,11 @@ type JsonValue =
 // List available prompts
 export async function listPrompts(
   client: Client,
-  metaData?: Record<string, string>,
+  metadata?: Record<string, string>,
 ): Promise<McpResponse> {
   try {
     const params =
-      metaData && Object.keys(metaData).length > 0 ? { _meta: metaData } : {};
+      metadata && Object.keys(metadata).length > 0 ? { _meta: metadata } : {};
     const response = await client.listPrompts(params);
     return response;
   } catch (error) {
@@ -33,7 +33,7 @@ export async function getPrompt(
   client: Client,
   name: string,
   args?: Record<string, JsonValue>,
-  metaData?: Record<string, string>,
+  metadata?: Record<string, string>,
 ): Promise<McpResponse> {
   try {
     // Convert all arguments to strings for prompt arguments
@@ -55,8 +55,8 @@ export async function getPrompt(
       arguments: stringArgs,
     };
 
-    if (metaData && Object.keys(metaData).length > 0) {
-      params._meta = metaData;
+    if (metadata && Object.keys(metadata).length > 0) {
+      params._meta = metadata;
     }
 
     const response = await client.getPrompt(params);

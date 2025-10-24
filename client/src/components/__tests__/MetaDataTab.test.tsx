@@ -5,8 +5,8 @@ import { Tabs } from "@/components/ui/tabs";
 
 describe("MetadataTab", () => {
   const defaultProps = {
-    metaData: {},
-    onMetaDataChange: jest.fn(),
+    metadata: {},
+    onMetadataChange: jest.fn(),
   };
 
   const renderMetadataTab = (props = {}) => {
@@ -52,7 +52,7 @@ describe("MetadataTab", () => {
 
     it("should not show empty state message when entries exist", () => {
       renderMetadataTab({
-        metaData: { key1: "value1" },
+        metadata: { key1: "value1" },
       });
 
       expect(
@@ -65,12 +65,12 @@ describe("MetadataTab", () => {
 
   describe("Initial Data Handling", () => {
     it("should initialize with existing metadata", () => {
-      const initialMetaData = {
+      const initialMetadata = {
         API_KEY: "test-key",
         VERSION: "1.0.0",
       };
 
-      renderMetadataTab({ metaData: initialMetaData });
+      renderMetadataTab({ metadata: initialMetadata });
 
       expect(screen.getByDisplayValue("API_KEY")).toBeInTheDocument();
       expect(screen.getByDisplayValue("test-key")).toBeInTheDocument();
@@ -79,13 +79,13 @@ describe("MetadataTab", () => {
     });
 
     it("should render multiple entries in correct order", () => {
-      const initialMetaData = {
+      const initialMetadata = {
         FIRST: "first-value",
         SECOND: "second-value",
         THIRD: "third-value",
       };
 
-      renderMetadataTab({ metaData: initialMetaData });
+      renderMetadataTab({ metadata: initialMetadata });
 
       const keyInputs = screen.getAllByPlaceholderText("Key");
       const valueInputs = screen.getAllByPlaceholderText("Value");
@@ -94,7 +94,7 @@ describe("MetadataTab", () => {
       expect(valueInputs).toHaveLength(3);
 
       // Check that entries are rendered in the order they appear in the object
-      const entries = Object.entries(initialMetaData);
+      const entries = Object.entries(initialMetadata);
       entries.forEach(([key, value], index) => {
         expect(keyInputs[index]).toHaveValue(key);
         expect(valueInputs[index]).toHaveValue(value);
@@ -157,7 +157,7 @@ describe("MetadataTab", () => {
   describe("Removing Entries", () => {
     it("should render remove button for each entry", () => {
       renderMetadataTab({
-        metaData: { key1: "value1", key2: "value2" },
+        metadata: { key1: "value1", key2: "value2" },
       });
 
       const removeButtons = screen.getAllByRole("button", { name: "" }); // Trash icon buttons have no text
@@ -165,87 +165,87 @@ describe("MetadataTab", () => {
     });
 
     it("should remove entry when remove button is clicked", () => {
-      const onMetaDataChange = jest.fn();
+      const onMetadataChange = jest.fn();
       renderMetadataTab({
-        metaData: { key1: "value1", key2: "value2" },
-        onMetaDataChange,
+        metadata: { key1: "value1", key2: "value2" },
+        onMetadataChange,
       });
 
       const removeButtons = screen.getAllByRole("button", { name: "" });
       fireEvent.click(removeButtons[0]);
 
-      expect(onMetaDataChange).toHaveBeenCalledWith({ key2: "value2" });
+      expect(onMetadataChange).toHaveBeenCalledWith({ key2: "value2" });
     });
 
     it("should remove correct entry when multiple entries exist", () => {
-      const onMetaDataChange = jest.fn();
+      const onMetadataChange = jest.fn();
       renderMetadataTab({
-        metaData: {
+        metadata: {
           FIRST: "first-value",
           SECOND: "second-value",
           THIRD: "third-value",
         },
-        onMetaDataChange,
+        onMetadataChange,
       });
 
       const removeButtons = screen.getAllByRole("button", { name: "" });
       fireEvent.click(removeButtons[1]); // Remove second entry
 
-      expect(onMetaDataChange).toHaveBeenCalledWith({
+      expect(onMetadataChange).toHaveBeenCalledWith({
         FIRST: "first-value",
         THIRD: "third-value",
       });
     });
 
     it("should show empty state message after removing all entries", () => {
-      const onMetaDataChange = jest.fn();
+      const onMetadataChange = jest.fn();
       renderMetadataTab({
-        metaData: { key1: "value1" },
-        onMetaDataChange,
+        metadata: { key1: "value1" },
+        onMetadataChange,
       });
 
       const removeButton = screen.getByRole("button", { name: "" });
       fireEvent.click(removeButton);
 
-      expect(onMetaDataChange).toHaveBeenCalledWith({});
+      expect(onMetadataChange).toHaveBeenCalledWith({});
     });
   });
 
   describe("Editing Entries", () => {
     it("should update key when key input is changed", () => {
-      const onMetaDataChange = jest.fn();
+      const onMetadataChange = jest.fn();
       renderMetadataTab({
-        metaData: { oldKey: "value1" },
-        onMetaDataChange,
+        metadata: { oldKey: "value1" },
+        onMetadataChange,
       });
 
       const keyInput = screen.getByDisplayValue("oldKey");
       fireEvent.change(keyInput, { target: { value: "newKey" } });
 
-      expect(onMetaDataChange).toHaveBeenCalledWith({ newKey: "value1" });
+      expect(onMetadataChange).toHaveBeenCalledWith({ newKey: "value1" });
     });
 
     it("should update value when value input is changed", () => {
-      const onMetaDataChange = jest.fn();
+      const onMetadataChange = jest.fn();
       renderMetadataTab({
-        metaData: { key1: "oldValue" },
-        onMetaDataChange,
+        metadata: { key1: "oldValue" },
+        onMetadataChange,
       });
 
       const valueInput = screen.getByDisplayValue("oldValue");
       fireEvent.change(valueInput, { target: { value: "newValue" } });
 
-      expect(onMetaDataChange).toHaveBeenCalledWith({ key1: "newValue" });
+      expect(onMetadataChange).toHaveBeenCalledWith({ key1: "newValue" });
     });
 
     it("should handle editing multiple entries independently", () => {
-      const onMetaDataChange = jest.fn();
+      const onMetadataChange = jest.fn();
       renderMetadataTab({
-        metaData: {
+        metadata: {
           key1: "value1",
           key2: "value2",
         },
-        onMetaDataChange,
+        onMetadataChange,
       });
 
       const keyInputs = screen.getAllByPlaceholderText("Key");
@@ -253,17 +253,17 @@ describe("MetadataTab", () => {
 
       // Edit first entry key
       fireEvent.change(keyInputs[0], { target: { value: "newKey1" } });
-      expect(onMetaDataChange).toHaveBeenCalledWith({
+      expect(onMetadataChange).toHaveBeenCalledWith({
         newKey1: "value1",
         key2: "value2",
       });
 
       // Clear mock to test second edit independently
-      onMetaDataChange.mockClear();
+      onMetadataChange.mockClear();
 
       // Edit second entry value
       fireEvent.change(valueInputs[1], { target: { value: "newValue2" } });
-      expect(onMetaDataChange).toHaveBeenCalledWith({
+      expect(onMetadataChange).toHaveBeenCalledWith({
         newKey1: "value1",
         key2: "newValue2",
       });
@@ -272,8 +272,8 @@ describe("MetadataTab", () => {
 
   describe("Data Validation and Trimming", () => {
     it("should trim whitespace from keys and values", () => {
-      const onMetaDataChange = jest.fn();
-      renderMetadataTab({ onMetaDataChange });
+      const onMetadataChange = jest.fn();
+      renderMetadataTab({ onMetadataChange });
 
       const addButton = screen.getByRole("button", { name: /add entry/i });
       fireEvent.click(addButton);
@@ -284,14 +284,14 @@ describe("MetadataTab", () => {
       fireEvent.change(keyInput, { target: { value: "  trimmedKey  " } });
       fireEvent.change(valueInput, { target: { value: "  trimmedValue  " } });
 
-      expect(onMetaDataChange).toHaveBeenCalledWith({
+      expect(onMetadataChange).toHaveBeenCalledWith({
         trimmedKey: "trimmedValue",
       });
     });
 
     it("should exclude entries with empty keys or values after trimming", () => {
-      const onMetaDataChange = jest.fn();
-      renderMetadataTab({ onMetaDataChange });
+      const onMetadataChange = jest.fn();
+      renderMetadataTab({ onMetadataChange });
 
       const addButton = screen.getByRole("button", { name: /add entry/i });
       fireEvent.click(addButton);
@@ -308,14 +308,14 @@ describe("MetadataTab", () => {
       fireEvent.change(keyInputs[1], { target: { value: "" } });
       fireEvent.change(valueInputs[1], { target: { value: "someValue" } });
 
-      expect(onMetaDataChange).toHaveBeenCalledWith({
+      expect(onMetadataChange).toHaveBeenCalledWith({
         validKey: "validValue",
       });
     });
 
     it("should exclude entries with whitespace-only keys or values", () => {
-      const onMetaDataChange = jest.fn();
-      renderMetadataTab({ onMetaDataChange });
+      const onMetadataChange = jest.fn();
+      renderMetadataTab({ onMetadataChange });
 
       const addButton = screen.getByRole("button", { name: /add entry/i });
       fireEvent.click(addButton);
@@ -332,14 +332,14 @@ describe("MetadataTab", () => {
       fireEvent.change(keyInputs[1], { target: { value: "   " } });
       fireEvent.change(valueInputs[1], { target: { value: "someValue" } });
 
-      expect(onMetaDataChange).toHaveBeenCalledWith({
+      expect(onMetadataChange).toHaveBeenCalledWith({
         validKey: "validValue",
       });
     });
 
     it("should handle mixed valid and invalid entries", () => {
-      const onMetaDataChange = jest.fn();
-      renderMetadataTab({ onMetaDataChange });
+      const onMetadataChange = jest.fn();
+      renderMetadataTab({ onMetadataChange });
 
       const addButton = screen.getByRole("button", { name: /add entry/i });
       fireEvent.click(addButton);
@@ -361,7 +361,7 @@ describe("MetadataTab", () => {
       fireEvent.change(keyInputs[2], { target: { value: "key3" } });
       fireEvent.change(valueInputs[2], { target: { value: "value3" } });
 
-      expect(onMetaDataChange).toHaveBeenCalledWith({
+      expect(onMetadataChange).toHaveBeenCalledWith({
         key1: "value1",
         key3: "value3",
       });
@@ -371,7 +371,7 @@ describe("MetadataTab", () => {
   describe("Input Accessibility", () => {
     it("should have proper labels for screen readers", () => {
       renderMetadataTab({
-        metaData: { key1: "value1" },
+        metadata: { key1: "value1" },
       });
 
       const keyLabel = screen.getByLabelText("Key", { selector: "input" });
@@ -383,7 +383,7 @@ describe("MetadataTab", () => {
 
     it("should have unique IDs for each input pair", () => {
       renderMetadataTab({
-        metaData: {
+        metadata: {
           key1: "value1",
           key2: "value2",
         },
@@ -414,8 +414,8 @@ describe("MetadataTab", () => {
 
   describe("Edge Cases", () => {
     it("should handle special characters in keys and values", () => {
-      const onMetaDataChange = jest.fn();
-      renderMetadataTab({ onMetaDataChange });
+      const onMetadataChange = jest.fn();
+      renderMetadataTab({ onMetadataChange });
 
       const addButton = screen.getByRole("button", { name: /add entry/i });
       fireEvent.click(addButton);
@@ -430,14 +430,14 @@ describe("MetadataTab", () => {
         target: { value: "value with spaces & symbols $%^" },
       });
 
-      expect(onMetaDataChange).toHaveBeenCalledWith({
+      expect(onMetadataChange).toHaveBeenCalledWith({
         "key-with-special@chars!": "value with spaces & symbols $%^",
       });
     });
 
     it("should handle unicode characters", () => {
-      const onMetaDataChange = jest.fn();
-      renderMetadataTab({ onMetaDataChange });
+      const onMetadataChange = jest.fn();
+      renderMetadataTab({ onMetadataChange });
 
       const addButton = screen.getByRole("button", { name: /add entry/i });
       fireEvent.click(addButton);
@@ -448,14 +448,14 @@ describe("MetadataTab", () => {
       fireEvent.change(keyInput, { target: { value: "🔑_key" } });
       fireEvent.change(valueInput, { target: { value: "值_value_🎯" } });
 
-      expect(onMetaDataChange).toHaveBeenCalledWith({
+      expect(onMetadataChange).toHaveBeenCalledWith({
         "🔑_key": "值_value_🎯",
       });
     });
 
     it("should handle very long keys and values", () => {
-      const onMetaDataChange = jest.fn();
-      renderMetadataTab({ onMetaDataChange });
+      const onMetadataChange = jest.fn();
+      renderMetadataTab({ onMetadataChange });
 
       const addButton = screen.getByRole("button", { name: /add entry/i });
       fireEvent.click(addButton);
@@ -469,14 +469,14 @@ describe("MetadataTab", () => {
       fireEvent.change(keyInput, { target: { value: longKey } });
       fireEvent.change(valueInput, { target: { value: longValue } });
 
-      expect(onMetaDataChange).toHaveBeenCalledWith({
+      expect(onMetadataChange).toHaveBeenCalledWith({
         [longKey]: longValue,
       });
     });
 
     it("should handle duplicate keys by keeping the last one", () => {
-      const onMetaDataChange = jest.fn();
-      renderMetadataTab({ onMetaDataChange });
+      const onMetadataChange = jest.fn();
+      renderMetadataTab({ onMetadataChange });
 
       const addButton = screen.getByRole("button", { name: /add entry/i });
       fireEvent.click(addButton);
@@ -493,44 +493,44 @@ describe("MetadataTab", () => {
       fireEvent.change(valueInputs[1], { target: { value: "secondValue" } });
 
       // The second value should overwrite the first
-      expect(onMetaDataChange).toHaveBeenCalledWith({
+      expect(onMetadataChange).toHaveBeenCalledWith({
         duplicateKey: "secondValue",
       });
     });
   });
 
   describe("Integration with Parent Component", () => {
-    it("should not call onMetaDataChange when component mounts with existing data", () => {
-      const onMetaDataChange = jest.fn();
+    it("should not call onMetadataChange when component mounts with existing data", () => {
+      const onMetadataChange = jest.fn();
       renderMetadataTab({
-        metaData: { key1: "value1" },
-        onMetaDataChange,
+        metadata: { key1: "value1" },
+        onMetadataChange,
       });
 
-      expect(onMetaDataChange).not.toHaveBeenCalled();
+      expect(onMetadataChange).not.toHaveBeenCalled();
     });
 
-    it("should call onMetaDataChange only when user makes changes", () => {
-      const onMetaDataChange = jest.fn();
+    it("should call onMetadataChange only when user makes changes", () => {
+      const onMetadataChange = jest.fn();
       renderMetadataTab({
-        metaData: { key1: "value1" },
-        onMetaDataChange,
+        metadata: { key1: "value1" },
+        onMetadataChange,
       });
 
       // Should not be called on mount
-      expect(onMetaDataChange).not.toHaveBeenCalled();
+      expect(onMetadataChange).not.toHaveBeenCalled();
 
       // Should be called when user changes value
       const valueInput = screen.getByDisplayValue("value1");
       fireEvent.change(valueInput, { target: { value: "newValue" } });
 
-      expect(onMetaDataChange).toHaveBeenCalledTimes(1);
-      expect(onMetaDataChange).toHaveBeenCalledWith({ key1: "newValue" });
+      expect(onMetadataChange).toHaveBeenCalledTimes(1);
+      expect(onMetadataChange).toHaveBeenCalledWith({ key1: "newValue" });
     });
 
     it("should maintain internal state when props change (component doesn't sync with prop changes)", () => {
       const { rerender } = renderMetadataTab({
-        metaData: { key1: "value1" },
+        metadata: { key1: "value1" },
       });
 
       expect(screen.getByDisplayValue("key1")).toBeInTheDocument();
@@ -541,8 +541,8 @@ describe("MetadataTab", () => {
       rerender(
         <Tabs defaultValue="metadata">
           <MetadataTab
-            metaData={{ key2: "value2", key3: "value3" }}
-            onMetaDataChange={jest.fn()}
+            metadata={{ key2: "value2", key3: "value3" }}
+            onMetadataChange={jest.fn()}
           />
         </Tabs>,
       );

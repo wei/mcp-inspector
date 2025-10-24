@@ -4,11 +4,11 @@ import { McpResponse } from "./types.js";
 // List available resources
 export async function listResources(
   client: Client,
-  metaData?: Record<string, string>,
+  metadata?: Record<string, string>,
 ): Promise<McpResponse> {
   try {
     const params =
-      metaData && Object.keys(metaData).length > 0 ? { _meta: metaData } : {};
+      metadata && Object.keys(metadata).length > 0 ? { _meta: metadata } : {};
     const response = await client.listResources(params);
     return response;
   } catch (error) {
@@ -22,12 +22,12 @@ export async function listResources(
 export async function readResource(
   client: Client,
   uri: string,
-  metaData?: Record<string, string>,
+  metadata?: Record<string, string>,
 ): Promise<McpResponse> {
   try {
     const params: any = { uri };
-    if (metaData && Object.keys(metaData).length > 0) {
-      params._meta = metaData;
+    if (metadata && Object.keys(metadata).length > 0) {
+      params._meta = metadata;
     }
     const response = await client.readResource(params);
     return response;
@@ -41,11 +41,11 @@ export async function readResource(
 // List resource templates
 export async function listResourceTemplates(
   client: Client,
-  metaData?: Record<string, string>,
+  metadata?: Record<string, string>,
 ): Promise<McpResponse> {
   try {
     const params =
-      metaData && Object.keys(metaData).length > 0 ? { _meta: metaData } : {};
+      metadata && Object.keys(metadata).length > 0 ? { _meta: metadata } : {};
     const response = await client.listResourceTemplates(params);
     return response;
   } catch (error) {
