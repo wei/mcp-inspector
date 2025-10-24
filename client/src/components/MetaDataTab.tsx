@@ -10,12 +10,12 @@ interface MetaDataEntry {
   value: string;
 }
 
-interface MetaDataTabProps {
+interface MetadataTabProps {
   metaData: Record<string, string>;
   onMetaDataChange: (metaData: Record<string, string>) => void;
 }
 
-const MetaDataTab: React.FC<MetaDataTabProps> = ({
+const MetadataTab: React.FC<MetadataTabProps> = ({
   metaData,
   onMetaDataChange,
 }) => {
@@ -59,7 +59,7 @@ const MetaDataTab: React.FC<MetaDataTabProps> = ({
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <div>
-            <h3 className="text-lg font-semibold">Meta Data</h3>
+            <h3 className="text-lg font-semibold">Metadata</h3>
             <p className="text-sm text-gray-600 dark:text-gray-400">
               Key-value pairs that will be included in all MCP requests
             </p>
@@ -109,7 +109,7 @@ const MetaDataTab: React.FC<MetaDataTabProps> = ({
         {entries.length === 0 && (
           <div className="text-center py-8">
             <p className="text-gray-500 dark:text-gray-400 mb-4">
-              No meta data entries. Click "Add Entry" to add key-value pairs.
+              No metadata entries. Click "Add Entry" to add key-value pairs.
             </p>
           </div>
         )}
@@ -118,4 +118,4 @@ const MetaDataTab: React.FC<MetaDataTabProps> = ({
   );
 };
 
-export default MetaDataTab;
+export default MetadataTab;

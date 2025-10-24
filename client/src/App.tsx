@@ -81,7 +81,7 @@ import {
   CustomHeaders,
   migrateFromLegacyAuth,
 } from "./lib/types/customHeaders";
-import MetaDataTab from "./components/MetaDataTab";
+import MetadataTab from "./components/MetadataTab";
 
 const CONFIG_LOCAL_STORAGE_KEY = "inspectorConfig_v1";
 
@@ -197,14 +197,14 @@ const App = () => {
   const [authState, setAuthState] =
     useState<AuthDebuggerState>(EMPTY_DEBUGGER_STATE);
 
-  // Meta data state - persisted in localStorage
+  // Metadata state - persisted in localStorage
   const [metaData, setMetaData] = useState<Record<string, string>>(() => {
     const savedMetaData = localStorage.getItem("lastMetaData");
     if (savedMetaData) {
       try {
         return JSON.parse(savedMetaData);
       } catch (error) {
-        console.warn("Failed to parse saved meta data:", error);
+        console.warn("Failed to parse saved metadata:", error);
       }
     }
     return {};
@@ -1022,7 +1022,7 @@ const App = () => {
                 </TabsTrigger>
                 <TabsTrigger value="metadata">
                   <Settings className="w-4 h-4 mr-2" />
-                  Meta Data
+                  Metadata
                 </TabsTrigger>
               </TabsList>
 
@@ -1184,7 +1184,7 @@ const App = () => {
                       onRootsChange={handleRootsChange}
                     />
                     <AuthDebuggerWrapper />
-                    <MetaDataTab
+                    <MetadataTab
                       metaData={metaData}
                       onMetaDataChange={handleMetaDataChange}
                     />

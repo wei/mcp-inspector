@@ -1,18 +1,18 @@
 import { render, screen, fireEvent } from "@testing-library/react";
 import "@testing-library/jest-dom";
-import MetaDataTab from "../MetaDataTab";
+import MetadataTab from "../MetadataTab";
 import { Tabs } from "@/components/ui/tabs";
 
-describe("MetaDataTab", () => {
+describe("MetadataTab", () => {
   const defaultProps = {
     metaData: {},
     onMetaDataChange: jest.fn(),
   };
 
-  const renderMetaDataTab = (props = {}) => {
+  const renderMetadataTab = (props = {}) => {
     return render(
       <Tabs defaultValue="metadata">
-        <MetaDataTab {...defaultProps} {...props} />
+        <MetadataTab {...defaultProps} {...props} />
       </Tabs>,
     );
   };
@@ -23,9 +23,9 @@ describe("MetaDataTab", () => {
 
   describe("Initial Rendering", () => {
     it("should render the metadata tab with title and description", () => {
-      renderMetaDataTab();
+      renderMetadataTab();
 
-      expect(screen.getByText("Meta Data")).toBeInTheDocument();
+      expect(screen.getByText("Metadata")).toBeInTheDocument();
       expect(
         screen.getByText(
           "Key-value pairs that will be included in all MCP requests",
@@ -34,30 +34,30 @@ describe("MetaDataTab", () => {
     });
 
     it("should render Add Entry button", () => {
-      renderMetaDataTab();
+      renderMetadataTab();
 
       const addButton = screen.getByRole("button", { name: /add entry/i });
       expect(addButton).toBeInTheDocument();
     });
 
     it("should show empty state message when no entries exist", () => {
-      renderMetaDataTab();
+      renderMetadataTab();
 
       expect(
         screen.getByText(
-          'No meta data entries. Click "Add Entry" to add key-value pairs.',
+          'No metadata entries. Click "Add Entry" to add key-value pairs.',
         ),
       ).toBeInTheDocument();
     });
 
     it("should not show empty state message when entries exist", () => {
-      renderMetaDataTab({
+      renderMetadataTab({
         metaData: { key1: "value1" },
       });
 
       expect(
         screen.queryByText(
-          'No meta data entries. Click "Add Entry" to add key-value pairs.',
+          'No metadata entries. Click "Add Entry" to add key-value pairs.',
         ),
       ).not.toBeInTheDocument();
     });
@@ -70,7 +70,7 @@ describe("MetaDataTab", () => {
         VERSION: "1.0.0",
       };
 
-      renderMetaDataTab({ metaData: initialMetaData });
+      renderMetadataTab({ metaData: initialMetaData });
 
       expect(screen.getByDisplayValue("API_KEY")).toBeInTheDocument();
       expect(screen.getByDisplayValue("test-key")).toBeInTheDocument();
@@ -85,7 +85,7 @@ describe("MetaDataTab", () => {
         THIRD: "third-value",
       };
 
-      renderMetaDataTab({ metaData: initialMetaData });
+      renderMetadataTab({ metaData: initialMetaData });
 
       const keyInputs = screen.getAllByPlaceholderText("Key");
       const valueInputs = screen.getAllByPlaceholderText("Value");
@@ -104,7 +104,7 @@ describe("MetaDataTab", () => {
 
   describe("Adding Entries", () => {
     it("should add a new empty entry when Add Entry button is clicked", () => {
-      renderMetaDataTab();
+      renderMetadataTab();
 
       const addButton = screen.getByRole("button", { name: /add entry/i });
       fireEvent.click(addButton);
@@ -119,7 +119,7 @@ describe("MetaDataTab", () => {
     });
 
     it("should add multiple entries when Add Entry button is clicked multiple times", () => {
-      renderMetaDataTab();
+      renderMetadataTab();
 
       const addButton = screen.getByRole("button", { name: /add entry/i });
 
@@ -135,11 +135,11 @@ describe("MetaDataTab", () => {
     });
 
     it("should hide empty state message after adding first entry", () => {
-      renderMetaDataTab();
+      renderMetadataTab();
 
       expect(
         screen.getByText(
-          'No meta data entries. Click "Add Entry" to add key-value pairs.',
+          'No metadata entries. Click "Add Entry" to add key-value pairs.',
         ),
       ).toBeInTheDocument();
 
@@ -148,7 +148,7 @@ describe("MetaDataTab", () => {
 
       expect(
         screen.queryByText(
-          'No meta data entries. Click "Add Entry" to add key-value pairs.',
+          'No metadata entries. Click "Add Entry" to add key-value pairs.',
         ),
       ).not.toBeInTheDocument();
     });
@@ -156,7 +156,7 @@ describe("MetaDataTab", () => {
 
   describe("Removing Entries", () => {
     it("should render remove button for each entry", () => {
-      renderMetaDataTab({
+      renderMetadataTab({
         metaData: { key1: "value1", key2: "value2" },
       });
 
@@ -166,7 +166,7 @@ describe("MetaDataTab", () => {
 
     it("should remove entry when remove button is clicked", () => {
       const onMetaDataChange = jest.fn();
-      renderMetaDataTab({
+      renderMetadataTab({
         metaData: { key1: "value1", key2: "value2" },
         onMetaDataChange,
       });
@@ -179,7 +179,7 @@ describe("MetaDataTab", () => {
 
     it("should remove correct entry when multiple entries exist", () => {
       const onMetaDataChange = jest.fn();
-      renderMetaDataTab({
+      renderMetadataTab({
         metaData: {
           FIRST: "first-value",
           SECOND: "second-value",
@@ -199,7 +199,7 @@ describe("MetaDataTab", () => {
 
     it("should show empty state message after removing all entries", () => {
       const onMetaDataChange = jest.fn();
-      renderMetaDataTab({
+      renderMetadataTab({
         metaData: { key1: "value1" },
         onMetaDataChange,
       });
@@ -214,7 +214,7 @@ describe("MetaDataTab", () => {
   describe("Editing Entries", () => {
     it("should update key when key input is changed", () => {
       const onMetaDataChange = jest.fn();
-      renderMetaDataTab({
+      renderMetadataTab({
         metaData: { oldKey: "value1" },
         onMetaDataChange,
       });
@@ -227,7 +227,7 @@ describe("MetaDataTab", () => {
 
     it("should update value when value input is changed", () => {
       const onMetaDataChange = jest.fn();
-      renderMetaDataTab({
+      renderMetadataTab({
         metaData: { key1: "oldValue" },
         onMetaDataChange,
       });
@@ -240,7 +240,7 @@ describe("MetaDataTab", () => {
 
     it("should handle editing multiple entries independently", () => {
       const onMetaDataChange = jest.fn();
-      renderMetaDataTab({
+      renderMetadataTab({
         metaData: {
           key1: "value1",
           key2: "value2",
@@ -273,7 +273,7 @@ describe("MetaDataTab", () => {
   describe("Data Validation and Trimming", () => {
     it("should trim whitespace from keys and values", () => {
       const onMetaDataChange = jest.fn();
-      renderMetaDataTab({ onMetaDataChange });
+      renderMetadataTab({ onMetaDataChange });
 
       const addButton = screen.getByRole("button", { name: /add entry/i });
       fireEvent.click(addButton);
@@ -291,7 +291,7 @@ describe("MetaDataTab", () => {
 
     it("should exclude entries with empty keys or values after trimming", () => {
       const onMetaDataChange = jest.fn();
-      renderMetaDataTab({ onMetaDataChange });
+      renderMetadataTab({ onMetaDataChange });
 
       const addButton = screen.getByRole("button", { name: /add entry/i });
       fireEvent.click(addButton);
@@ -315,7 +315,7 @@ describe("MetaDataTab", () => {
 
     it("should exclude entries with whitespace-only keys or values", () => {
       const onMetaDataChange = jest.fn();
-      renderMetaDataTab({ onMetaDataChange });
+      renderMetadataTab({ onMetaDataChange });
 
       const addButton = screen.getByRole("button", { name: /add entry/i });
       fireEvent.click(addButton);
@@ -339,7 +339,7 @@ describe("MetaDataTab", () => {
 
     it("should handle mixed valid and invalid entries", () => {
       const onMetaDataChange = jest.fn();
-      renderMetaDataTab({ onMetaDataChange });
+      renderMetadataTab({ onMetaDataChange });
 
       const addButton = screen.getByRole("button", { name: /add entry/i });
       fireEvent.click(addButton);
@@ -370,7 +370,7 @@ describe("MetaDataTab", () => {
 
   describe("Input Accessibility", () => {
     it("should have proper labels for screen readers", () => {
-      renderMetaDataTab({
+      renderMetadataTab({
         metaData: { key1: "value1" },
       });
 
@@ -382,7 +382,7 @@ describe("MetaDataTab", () => {
     });
 
     it("should have unique IDs for each input pair", () => {
-      renderMetaDataTab({
+      renderMetadataTab({
         metaData: {
           key1: "value1",
           key2: "value2",
@@ -399,7 +399,7 @@ describe("MetaDataTab", () => {
     });
 
     it("should have proper placeholder text", () => {
-      renderMetaDataTab();
+      renderMetadataTab();
 
       const addButton = screen.getByRole("button", { name: /add entry/i });
       fireEvent.click(addButton);
@@ -415,7 +415,7 @@ describe("MetaDataTab", () => {
   describe("Edge Cases", () => {
     it("should handle special characters in keys and values", () => {
       const onMetaDataChange = jest.fn();
-      renderMetaDataTab({ onMetaDataChange });
+      renderMetadataTab({ onMetaDataChange });
 
       const addButton = screen.getByRole("button", { name: /add entry/i });
       fireEvent.click(addButton);
@@ -437,7 +437,7 @@ describe("MetaDataTab", () => {
 
     it("should handle unicode characters", () => {
       const onMetaDataChange = jest.fn();
-      renderMetaDataTab({ onMetaDataChange });
+      renderMetadataTab({ onMetaDataChange });
 
       const addButton = screen.getByRole("button", { name: /add entry/i });
       fireEvent.click(addButton);
@@ -455,7 +455,7 @@ describe("MetaDataTab", () => {
 
     it("should handle very long keys and values", () => {
       const onMetaDataChange = jest.fn();
-      renderMetaDataTab({ onMetaDataChange });
+      renderMetadataTab({ onMetaDataChange });
 
       const addButton = screen.getByRole("button", { name: /add entry/i });
       fireEvent.click(addButton);
@@ -476,7 +476,7 @@ describe("MetaDataTab", () => {
 
     it("should handle duplicate keys by keeping the last one", () => {
       const onMetaDataChange = jest.fn();
-      renderMetaDataTab({ onMetaDataChange });
+      renderMetadataTab({ onMetaDataChange });
 
       const addButton = screen.getByRole("button", { name: /add entry/i });
       fireEvent.click(addButton);
@@ -502,7 +502,7 @@ describe("MetaDataTab", () => {
   describe("Integration with Parent Component", () => {
     it("should not call onMetaDataChange when component mounts with existing data", () => {
       const onMetaDataChange = jest.fn();
-      renderMetaDataTab({
+      renderMetadataTab({
         metaData: { key1: "value1" },
         onMetaDataChange,
       });
@@ -512,7 +512,7 @@ describe("MetaDataTab", () => {
 
     it("should call onMetaDataChange only when user makes changes", () => {
       const onMetaDataChange = jest.fn();
-      renderMetaDataTab({
+      renderMetadataTab({
         metaData: { key1: "value1" },
         onMetaDataChange,
       });
@@ -529,7 +529,7 @@ describe("MetaDataTab", () => {
     });
 
     it("should maintain internal state when props change (component doesn't sync with prop changes)", () => {
-      const { rerender } = renderMetaDataTab({
+      const { rerender } = renderMetadataTab({
         metaData: { key1: "value1" },
       });
 
@@ -540,7 +540,7 @@ describe("MetaDataTab", () => {
       // This is the intended behavior since useState initializer only runs once
       rerender(
         <Tabs defaultValue="metadata">
-          <MetaDataTab
+          <MetadataTab
             metaData={{ key2: "value2", key3: "value3" }}
             onMetaDataChange={jest.fn()}
           />
