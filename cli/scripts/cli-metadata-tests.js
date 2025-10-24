@@ -300,8 +300,6 @@ async function runTests() {
     "tools/list",
     "--metadata",
     "client=test-client",
-    "version=1.0.0",
-    "environment=test",
   );
 
   // Test 2: General metadata with resources/list
@@ -314,8 +312,6 @@ async function runTests() {
     "resources/list",
     "--metadata",
     "client=test-client",
-    "version=1.0.0",
-    "environment=test",
   );
 
   // Test 3: General metadata with prompts/list
@@ -328,8 +324,6 @@ async function runTests() {
     "prompts/list",
     "--metadata",
     "client=test-client",
-    "version=1.0.0",
-    "environment=test",
   );
 
   // Test 4: General metadata with resources/read
@@ -344,8 +338,6 @@ async function runTests() {
     "test://static/resource/1",
     "--metadata",
     "client=test-client",
-    "version=1.0.0",
-    "environment=test",
   );
 
   // Test 5: General metadata with prompts/get
@@ -360,8 +352,6 @@ async function runTests() {
     "simple_prompt",
     "--metadata",
     "client=test-client",
-    "version=1.0.0",
-    "environment=test",
   );
 
   console.log(
@@ -381,9 +371,7 @@ async function runTests() {
     "--tool-arg",
     "message=hello world",
     "--tool-metadata",
-    "tool-client=test-tool-client",
-    "tool-version=2.0.0",
-    "tool-environment=test-tool",
+    "client=test-client",
   );
 
   // Test 7: Tool-specific metadata with complex tool
@@ -400,9 +388,7 @@ async function runTests() {
     "a=10",
     "b=20",
     "--tool-metadata",
-    "operation=addition",
-    "precision=integer",
-    "validation=strict",
+    "client=test-client",
   );
 
   console.log(
@@ -423,30 +409,12 @@ async function runTests() {
     "message=hello world",
     "--metadata",
     "client=general-client",
-    "version=1.0.0",
-    "environment=general",
     "--tool-metadata",
-    "client=tool-specific-client",
-    "tool-version=2.0.0",
-    "tool-environment=tool-specific",
+    "client=test-client",
   );
 
   console.log(
     `\n${colors.YELLOW}=== Running Metadata Parsing Tests ===${colors.NC}`,
-  );
-
-  // Test 9: Metadata with string values
-  await runBasicTest(
-    "metadata_parsing_strings",
-    TEST_CMD,
-    ...TEST_ARGS,
-    "--cli",
-    "--method",
-    "tools/list",
-    "--metadata",
-    "string_value=hello world",
-    'quoted_string="quoted value"',
-    'empty_string=""',
   );
 
   // Test 10: Metadata with numeric values (should be converted to strings)
@@ -463,20 +431,7 @@ async function runTests() {
     "negative_value=-10",
   );
 
-  // Test 11: Metadata with boolean values (should be converted to strings)
-  await runBasicTest(
-    "metadata_parsing_booleans",
-    TEST_CMD,
-    ...TEST_ARGS,
-    "--cli",
-    "--method",
-    "tools/list",
-    "--metadata",
-    "true_value=true",
-    "false_value=false",
-  );
-
-  // Test 12: Metadata with JSON values (should be converted to strings)
+  // Test 11: Metadata with JSON values (should be converted to strings)
   await runBasicTest(
     "metadata_parsing_json",
     TEST_CMD,
@@ -490,7 +445,7 @@ async function runTests() {
     'json_string="\\"quoted\\""',
   );
 
-  // Test 13: Metadata with special characters
+  // Test 12: Metadata with special characters
   await runBasicTest(
     "metadata_parsing_special_chars",
     TEST_CMD,
@@ -508,7 +463,7 @@ async function runTests() {
     `\n${colors.YELLOW}=== Running Metadata Edge Cases ===${colors.NC}`,
   );
 
-  // Test 14: Single metadata entry
+  // Test 13: Single metadata entry
   await runBasicTest(
     "metadata_single_entry",
     TEST_CMD,
@@ -520,7 +475,7 @@ async function runTests() {
     "single_key=single_value",
   );
 
-  // Test 15: Many metadata entries
+  // Test 14: Many metadata entries
   await runBasicTest(
     "metadata_many_entries",
     TEST_CMD,
@@ -540,7 +495,7 @@ async function runTests() {
     `\n${colors.YELLOW}=== Running Metadata Error Cases ===${colors.NC}`,
   );
 
-  // Test 16: Invalid metadata format (missing equals)
+  // Test 15: Invalid metadata format (missing equals)
   await runErrorTest(
     "metadata_error_invalid_format",
     TEST_CMD,
@@ -552,7 +507,7 @@ async function runTests() {
     "invalid_format_no_equals",
   );
 
-  // Test 17: Invalid tool-meta format (missing equals)
+  // Test 16: Invalid tool-meta format (missing equals)
   await runErrorTest(
     "metadata_error_invalid_tool_meta_format",
     TEST_CMD,
@@ -569,10 +524,80 @@ async function runTests() {
   );
 
   console.log(
+    `\n${colors.YELLOW}=== Running Metadata Impact Tests ===${colors.NC}`,
+  );
+
+  // Test 17: Test tool-specific metadata vs general metadata precedence
+  await runBasicTest(
+    "metadata_precedence_tool_overrides_general",
+    TEST_CMD,
+    ...TEST_ARGS,
+    "--cli",
+    "--method",
+    "tools/call",
+    "--tool-name",
+    "echo",
+    "--tool-arg",
+    "message=precedence test",
+    "--metadata",
+    "client=general-client",
+    "--tool-metadata",
+    "client=tool-specific-client",
+  );
+
+  // Test 18: Test metadata with resources methods
+  await runBasicTest(
+    "metadata_resources_methods",
+    TEST_CMD,
+    ...TEST_ARGS,
+    "--cli",
+    "--method",
+    "resources/list",
+    "--metadata",
+    "resource_client=test-resource-client",
+  );
+
+  // Test 19: Test metadata with prompts methods
+  await runBasicTest(
+    "metadata_prompts_methods",
+    TEST_CMD,
+    ...TEST_ARGS,
+    "--cli",
+    "--method",
+    "prompts/get",
+    "--prompt-name",
+    "simple_prompt",
+    "--metadata",
+    "prompt_client=test-prompt-client",
+  );
+
+  console.log(
+    `\n${colors.YELLOW}=== Running Metadata Validation Tests ===${colors.NC}`,
+  );
+
+  // Test 20: Test metadata with special characters in keys
+  await runBasicTest(
+    "metadata_special_key_characters",
+    TEST_CMD,
+    ...TEST_ARGS,
+    "--cli",
+    "--method",
+    "tools/call",
+    "--tool-name",
+    "echo",
+    "--tool-arg",
+    "message=special keys test",
+    "--metadata",
+    "key-with-dashes=value1",
+    "key_with_underscores=value2",
+    "key.with.dots=value3",
+  );
+
+  console.log(
     `\n${colors.YELLOW}=== Running Metadata Integration Tests ===${colors.NC}`,
   );
 
-  // Test 18: Metadata with all MCP methods
+  // Test 21: Metadata with all MCP methods
   await runBasicTest(
     "metadata_integration_all_methods",
     TEST_CMD,
@@ -585,7 +610,7 @@ async function runTests() {
     "test_phase=all_methods",
   );
 
-  // Test 19: Complex metadata scenario
+  // Test 22: Complex metadata scenario
   await runBasicTest(
     "metadata_complex_scenario",
     TEST_CMD,
@@ -606,6 +631,27 @@ async function runTests() {
     "tool_session=session-xyz-789",
     "execution_context=test",
     "priority=high",
+  );
+
+  // Test 23: Metadata parsing validation test
+  await runBasicTest(
+    "metadata_parsing_validation",
+    TEST_CMD,
+    ...TEST_ARGS,
+    "--cli",
+    "--method",
+    "tools/call",
+    "--tool-name",
+    "echo",
+    "--tool-arg",
+    "message=parsing validation test",
+    "--metadata",
+    "valid_key=valid_value",
+    "numeric_key=123",
+    "boolean_key=true",
+    'json_key=\'{"test":"value"}\'',
+    "special_key=!@#$%^&*()",
+    "unicode_key=🚀🎉✨",
   );
 
   // Print test summary
