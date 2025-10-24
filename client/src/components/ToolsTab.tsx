@@ -5,6 +5,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { TabsContent } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import DynamicJsonForm, { DynamicJsonFormRef } from "./DynamicJsonForm";
 import type { JsonValue, JsonSchemaType } from "@/utils/jsonUtils";
 import {
@@ -121,7 +128,7 @@ const ToolsTab = ({
           renderItem={(tool) => (
             <div className="flex flex-col items-start">
               <span className="flex-1">{tool.name}</span>
-              <span className="text-sm text-gray-500 text-left">
+              <span className="text-sm text-gray-500 text-left line-clamp-3">
                 {tool.description}
               </span>
             </div>
@@ -144,10 +151,12 @@ const ToolsTab = ({
                   <Alert variant="destructive">
                     <AlertCircle className="h-4 w-4" />
                     <AlertTitle>Error</AlertTitle>
-                    <AlertDescription>{error}</AlertDescription>
+                    <AlertDescription className="break-all">
+                      {error}
+                    </AlertDescription>
                   </Alert>
                 )}
-                <p className="text-sm text-gray-600 dark:text-gray-400">
+                <p className="text-sm text-gray-600 dark:text-gray-400 whitespace-pre-wrap max-h-48 overflow-y-auto">
                   {selectedTool.description}
                 </p>
                 {Object.entries(selectedTool.inputSchema.properties ?? []).map(
@@ -158,148 +167,225 @@ const ToolsTab = ({
                     const required = isPropertyRequired(key, inputSchema);
                     return (
                       <div key={key}>
-                        <Label
-                          htmlFor={key}
-                          className="block text-sm font-medium text-gray-700 dark:text-gray-300"
-                        >
-                          {key}
-                          {required && (
-                            <span className="text-red-500 ml-1">*</span>
-                          )}
-                        </Label>
-                        {prop.type === "boolean" ? (
-                          <div className="flex items-center space-x-2 mt-2">
-                            <Checkbox
-                              id={key}
-                              name={key}
-                              checked={!!params[key]}
-                              onCheckedChange={(checked: boolean) =>
-                                setParams({
-                                  ...params,
-                                  [key]: checked,
-                                })
-                              }
-                            />
-                            <label
-                              htmlFor={key}
-                              className="text-sm font-medium text-gray-700 dark:text-gray-300"
-                            >
-                              {prop.description || "Toggle this option"}
-                            </label>
-                          </div>
-                        ) : prop.type === "string" ? (
-                          <Textarea
-                            id={key}
-                            name={key}
-                            placeholder={prop.description}
-                            value={
-                              params[key] === undefined
-                                ? ""
-                                : String(params[key])
-                            }
-                            onChange={(e) => {
-                              const value = e.target.value;
-                              if (value === "") {
-                                // Field cleared - set to undefined
-                                setParams({
-                                  ...params,
-                                  [key]: undefined,
-                                });
-                              } else {
-                                // Field has value - keep as string
-                                setParams({
-                                  ...params,
-                                  [key]: value,
-                                });
-                              }
-                            }}
-                            className="mt-1"
-                          />
-                        ) : prop.type === "object" || prop.type === "array" ? (
-                          <div className="mt-1">
-                            <DynamicJsonForm
-                              ref={(ref) => (formRefs.current[key] = ref)}
-                              schema={{
-                                type: prop.type,
-                                properties: prop.properties,
-                                description: prop.description,
-                                items: prop.items,
-                              }}
-                              value={
-                                (params[key] as JsonValue) ??
-                                generateDefaultValue(prop)
-                              }
-                              onChange={(newValue: JsonValue) => {
-                                setParams({
-                                  ...params,
-                                  [key]: newValue,
-                                });
-                                // Check validation after a short delay to allow form to update
-                                setTimeout(checkValidationErrors, 100);
-                              }}
-                            />
-                          </div>
-                        ) : prop.type === "number" ||
-                          prop.type === "integer" ? (
-                          <Input
-                            type="number"
-                            id={key}
-                            name={key}
-                            placeholder={prop.description}
-                            value={
-                              params[key] === undefined
-                                ? ""
-                                : String(params[key])
-                            }
-                            onChange={(e) => {
-                              const value = e.target.value;
-                              if (value === "") {
-                                // Field cleared - set to undefined
-                                setParams({
-                                  ...params,
-                                  [key]: undefined,
-                                });
-                              } else {
-                                // Field has value - try to convert to number, but store input either way
-                                const num = Number(value);
-                                if (!isNaN(num)) {
+                        <div className="flex justify-between">
+                          <Label
+                            htmlFor={key}
+                            className="block text-sm font-medium text-gray-700 dark:text-gray-300"
+                          >
+                            {key}
+                            {required && (
+                              <span className="text-red-500 ml-1">*</span>
+                            )}
+                          </Label>
+                          {prop.nullable ? (
+                            <div className="flex items-center space-x-2">
+                              <Checkbox
+                                id={key}
+                                name={key}
+                                checked={params[key] === null}
+                                onCheckedChange={(checked: boolean) =>
                                   setParams({
                                     ...params,
-                                    [key]: num,
+                                    [key]: checked
+                                      ? null
+                                      : prop.default !== null
+                                        ? prop.default
+                                        : prop.type === "boolean"
+                                          ? false
+                                          : prop.type === "string"
+                                            ? ""
+                                            : prop.type === "number" ||
+                                                prop.type === "integer"
+                                              ? undefined
+                                              : undefined,
+                                  })
+                                }
+                              />
+                              <label
+                                htmlFor={key}
+                                className="text-sm font-medium text-gray-700 dark:text-gray-300"
+                              >
+                                null
+                              </label>
+                            </div>
+                          ) : null}
+                        </div>
+
+                        <div
+                          role="toolinputwrapper"
+                          className={`${prop.nullable && params[key] === null ? "pointer-events-none opacity-50" : ""}`}
+                        >
+                          {prop.type === "boolean" ? (
+                            <div className="flex items-center space-x-2 mt-2">
+                              <Checkbox
+                                id={key}
+                                name={key}
+                                checked={!!params[key]}
+                                onCheckedChange={(checked: boolean) =>
+                                  setParams({
+                                    ...params,
+                                    [key]: checked,
+                                  })
+                                }
+                              />
+                              <label
+                                htmlFor={key}
+                                className="text-sm font-medium text-gray-700 dark:text-gray-300"
+                              >
+                                {prop.description || "Toggle this option"}
+                              </label>
+                            </div>
+                          ) : prop.type === "string" && prop.enum ? (
+                            <Select
+                              value={
+                                params[key] === undefined
+                                  ? ""
+                                  : String(params[key])
+                              }
+                              onValueChange={(value) => {
+                                if (value === "") {
+                                  setParams({
+                                    ...params,
+                                    [key]: undefined,
                                   });
                                 } else {
-                                  // Store invalid input as string - let server validate
                                   setParams({
                                     ...params,
                                     [key]: value,
                                   });
                                 }
+                              }}
+                            >
+                              <SelectTrigger id={key} className="mt-1">
+                                <SelectValue
+                                  placeholder={
+                                    prop.description || "Select an option"
+                                  }
+                                />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {prop.enum.map((option) => (
+                                  <SelectItem key={option} value={option}>
+                                    {option}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          ) : prop.type === "string" ? (
+                            <Textarea
+                              id={key}
+                              name={key}
+                              placeholder={prop.description}
+                              value={
+                                params[key] === undefined
+                                  ? ""
+                                  : String(params[key])
                               }
-                            }}
-                            className="mt-1"
-                          />
-                        ) : (
-                          <div className="mt-1">
-                            <DynamicJsonForm
-                              ref={(ref) => (formRefs.current[key] = ref)}
-                              schema={{
-                                type: prop.type,
-                                properties: prop.properties,
-                                description: prop.description,
-                                items: prop.items,
+                              onChange={(e) => {
+                                const value = e.target.value;
+                                if (value === "") {
+                                  // Field cleared - set to undefined
+                                  setParams({
+                                    ...params,
+                                    [key]: undefined,
+                                  });
+                                } else {
+                                  // Field has value - keep as string
+                                  setParams({
+                                    ...params,
+                                    [key]: value,
+                                  });
+                                }
                               }}
-                              value={params[key] as JsonValue}
-                              onChange={(newValue: JsonValue) => {
-                                setParams({
-                                  ...params,
-                                  [key]: newValue,
-                                });
-                                // Check validation after a short delay to allow form to update
-                                setTimeout(checkValidationErrors, 100);
-                              }}
+                              className="mt-1"
                             />
-                          </div>
-                        )}
+                          ) : prop.type === "object" ||
+                            prop.type === "array" ? (
+                            <div className="mt-1">
+                              <DynamicJsonForm
+                                ref={(ref) => (formRefs.current[key] = ref)}
+                                schema={{
+                                  type: prop.type,
+                                  properties: prop.properties,
+                                  description: prop.description,
+                                  items: prop.items,
+                                }}
+                                value={
+                                  (params[key] as JsonValue) ??
+                                  generateDefaultValue(prop)
+                                }
+                                onChange={(newValue: JsonValue) => {
+                                  setParams({
+                                    ...params,
+                                    [key]: newValue,
+                                  });
+                                  // Check validation after a short delay to allow form to update
+                                  setTimeout(checkValidationErrors, 100);
+                                }}
+                              />
+                            </div>
+                          ) : prop.type === "number" ||
+                            prop.type === "integer" ? (
+                            <Input
+                              type="number"
+                              id={key}
+                              name={key}
+                              placeholder={prop.description}
+                              value={
+                                params[key] === undefined
+                                  ? ""
+                                  : String(params[key])
+                              }
+                              onChange={(e) => {
+                                const value = e.target.value;
+                                if (value === "") {
+                                  // Field cleared - set to undefined
+                                  setParams({
+                                    ...params,
+                                    [key]: undefined,
+                                  });
+                                } else {
+                                  // Field has value - try to convert to number, but store input either way
+                                  const num = Number(value);
+                                  if (!isNaN(num)) {
+                                    setParams({
+                                      ...params,
+                                      [key]: num,
+                                    });
+                                  } else {
+                                    // Store invalid input as string - let server validate
+                                    setParams({
+                                      ...params,
+                                      [key]: value,
+                                    });
+                                  }
+                                }
+                              }}
+                              className="mt-1"
+                            />
+                          ) : (
+                            <div className="mt-1">
+                              <DynamicJsonForm
+                                ref={(ref) => (formRefs.current[key] = ref)}
+                                schema={{
+                                  type: prop.type,
+                                  properties: prop.properties,
+                                  description: prop.description,
+                                  items: prop.items,
+                                }}
+                                value={params[key] as JsonValue}
+                                onChange={(newValue: JsonValue) => {
+                                  setParams({
+                                    ...params,
+                                    [key]: newValue,
+                                  });
+                                  // Check validation after a short delay to allow form to update
+                                  setTimeout(checkValidationErrors, 100);
+                                }}
+                              />
+                            </div>
+                          )}
+                        </div>
                       </div>
                     );
                   },

@@ -67,6 +67,7 @@ interface UseConnectionOptions {
   // Custom headers support
   customHeaders?: CustomHeaders;
   oauthClientId?: string;
+  oauthClientSecret?: string;
   oauthScope?: string;
   config: InspectorConfig;
   connectionType?: "direct" | "proxy";
@@ -90,6 +91,7 @@ export function useConnection({
   env,
   customHeaders,
   oauthClientId,
+  oauthClientSecret,
   oauthScope,
   config,
   connectionType = "proxy",
@@ -127,12 +129,20 @@ export function useConnection({
       return;
     }
 
+    const clientInformation: { client_id: string; client_secret?: string } = {
+      client_id: oauthClientId,
+    };
+
+    if (oauthClientSecret) {
+      clientInformation.client_secret = oauthClientSecret;
+    }
+
     saveClientInformationToSessionStorage({
       serverUrl: sseUrl,
-      clientInformation: { client_id: oauthClientId },
+      clientInformation,
       isPreregistered: true,
     });
-  }, [oauthClientId, sseUrl]);
+  }, [oauthClientId, oauthClientSecret, sseUrl]);
 
   const pushHistory = (request: object, response?: object) => {
     setRequestHistory((prev) => [

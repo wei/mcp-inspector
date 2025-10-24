@@ -44,6 +44,16 @@ describe("ToolsTab", () => {
         },
       },
     },
+    {
+      name: "tool4",
+      description: "Tool with nullable field",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          num: { type: ["number", "null"] as const },
+        },
+      },
+    },
   ];
 
   const defaultProps = {
@@ -140,6 +150,135 @@ describe("ToolsTab", () => {
         num: -42,
       },
       undefined,
+    );
+  });
+
+  it("should allow specifying null value", async () => {
+    const mockCallTool = jest.fn();
+    const toolWithNullableField = mockTools[3];
+
+    renderToolsTab({
+      tools: [toolWithNullableField],
+      selectedTool: toolWithNullableField,
+      callTool: mockCallTool,
+    });
+
+    const nullToggleButton = screen.getByRole("checkbox", { name: /null/i });
+    expect(nullToggleButton).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(nullToggleButton);
+    });
+
+    expect(screen.getByRole("toolinputwrapper").classList).toContain(
+      "pointer-events-none",
+    );
+
+    const runButton = screen.getByRole("button", { name: /run tool/i });
+    await act(async () => {
+      fireEvent.click(runButton);
+    });
+
+    // Tool should have been called with null value
+    expect(mockCallTool).toHaveBeenCalledWith(toolWithNullableField.name, {
+      num: null,
+    });
+  });
+
+  it("should support tri-state nullable boolean (null -> false -> true -> null)", async () => {
+    const mockCallTool = jest.fn();
+    const toolWithNullableBoolean: Tool = {
+      name: "testTool",
+      description: "Tool with nullable boolean",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          optionalBoolean: {
+            type: ["boolean", "null"] as const,
+            default: null,
+          },
+        },
+      },
+    };
+
+    renderToolsTab({
+      tools: [toolWithNullableBoolean],
+      selectedTool: toolWithNullableBoolean,
+      callTool: mockCallTool,
+    });
+
+    const nullCheckbox = screen.getByRole("checkbox", { name: /null/i });
+    const runButton = screen.getByRole("button", { name: /run tool/i });
+
+    // State 1: Initial state should be null (input disabled)
+    const wrapper = screen.getByRole("toolinputwrapper");
+    expect(wrapper.classList).toContain("pointer-events-none");
+    expect(wrapper.classList).toContain("opacity-50");
+
+    // Verify tool is called with null initially
+    await act(async () => {
+      fireEvent.click(runButton);
+    });
+    expect(mockCallTool).toHaveBeenCalledWith(toolWithNullableBoolean.name, {
+      optionalBoolean: null,
+    });
+
+    // State 2: Uncheck null checkbox -> should set value to false and enable input
+    await act(async () => {
+      fireEvent.click(nullCheckbox);
+    });
+    expect(wrapper.classList).not.toContain("pointer-events-none");
+
+    // Clear previous calls to make assertions clearer
+    mockCallTool.mockClear();
+
+    // Verify tool can be called with false
+    await act(async () => {
+      fireEvent.click(runButton);
+    });
+    expect(mockCallTool).toHaveBeenLastCalledWith(
+      toolWithNullableBoolean.name,
+      {
+        optionalBoolean: false,
+      },
+    );
+
+    // State 3: Check boolean checkbox -> should set value to true
+    // Find the boolean checkbox within the input wrapper (to avoid ID conflict with null checkbox)
+    const booleanCheckbox = within(wrapper).getByRole("checkbox");
+
+    mockCallTool.mockClear();
+
+    await act(async () => {
+      fireEvent.click(booleanCheckbox);
+    });
+
+    // Verify tool can be called with true
+    await act(async () => {
+      fireEvent.click(runButton);
+    });
+    expect(mockCallTool).toHaveBeenLastCalledWith(
+      toolWithNullableBoolean.name,
+      {
+        optionalBoolean: true,
+      },
+    );
+
+    // State 4: Check null checkbox again -> should set value back to null and disable input
+    await act(async () => {
+      fireEvent.click(nullCheckbox);
+    });
+    expect(wrapper.classList).toContain("pointer-events-none");
+
+    // Verify tool can be called with null again
+    await act(async () => {
+      fireEvent.click(runButton);
+    });
+    expect(mockCallTool).toHaveBeenLastCalledWith(
+      toolWithNullableBoolean.name,
+      {
+        optionalBoolean: null,
+      },
     );
   });
 
@@ -681,6 +820,64 @@ describe("ToolsTab", () => {
       expect(screen.getAllByText("Meta Schema:")).toHaveLength(1);
       expect(screen.getByText(/info/i)).toBeInTheDocument();
       expect(screen.getByText(/version/i)).toBeInTheDocument();
+    });
+  });
+
+  describe("Enum Parameters", () => {
+    const toolWithEnumParam: Tool = {
+      name: "enumTool",
+      description: "Tool with enum parameter",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          format: {
+            type: "string" as const,
+            enum: ["json", "xml", "csv", "yaml"],
+            description: "Output format",
+          },
+        },
+      },
+    };
+
+    beforeEach(() => {
+      // Mock scrollIntoView for Radix UI Select
+      Element.prototype.scrollIntoView = jest.fn();
+    });
+
+    it("should render enum parameter as dropdown", () => {
+      renderToolsTab({
+        tools: [toolWithEnumParam],
+        selectedTool: toolWithEnumParam,
+      });
+
+      // Should render a select button instead of textarea
+      const selectTrigger = screen.getByRole("combobox", { name: /format/i });
+      expect(selectTrigger).toBeInTheDocument();
+    });
+
+    it("should render non-enum string parameter as textarea", () => {
+      const toolWithStringParam: Tool = {
+        name: "stringTool",
+        description: "Tool with regular string parameter",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            text: {
+              type: "string" as const,
+              description: "Some text input",
+            },
+          },
+        },
+      };
+
+      renderToolsTab({
+        tools: [toolWithStringParam],
+        selectedTool: toolWithStringParam,
+      });
+
+      // Should render textarea, not select
+      expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+      expect(screen.getByRole("textbox")).toBeInTheDocument();
     });
   });
 
