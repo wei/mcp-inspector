@@ -306,7 +306,9 @@ const ToolsTab = ({
                 )}
                 <div className="pb-4">
                   <div className="flex items-center justify-between mb-2">
-                    <h4 className="text-sm font-semibold">Meta:</h4>
+                    <h4 className="text-sm font-semibold">
+                      Tool-specific Metadata:
+                    </h4>
                     <Button
                       size="sm"
                       variant="outline"
