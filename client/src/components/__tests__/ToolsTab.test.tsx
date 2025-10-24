@@ -180,9 +180,13 @@ describe("ToolsTab", () => {
     });
 
     // Tool should have been called with null value
-    expect(mockCallTool).toHaveBeenCalledWith(toolWithNullableField.name, {
-      num: null,
-    });
+    expect(mockCallTool).toHaveBeenCalledWith(
+      toolWithNullableField.name,
+      {
+        num: null,
+      },
+      undefined,
+    );
   });
 
   it("should support tri-state nullable boolean (null -> false -> true -> null)", async () => {
@@ -219,9 +223,13 @@ describe("ToolsTab", () => {
     await act(async () => {
       fireEvent.click(runButton);
     });
-    expect(mockCallTool).toHaveBeenCalledWith(toolWithNullableBoolean.name, {
-      optionalBoolean: null,
-    });
+    expect(mockCallTool).toHaveBeenCalledWith(
+      toolWithNullableBoolean.name,
+      {
+        optionalBoolean: null,
+      },
+      undefined,
+    );
 
     // State 2: Uncheck null checkbox -> should set value to false and enable input
     await act(async () => {
@@ -241,6 +249,7 @@ describe("ToolsTab", () => {
       {
         optionalBoolean: false,
       },
+      undefined,
     );
 
     // State 3: Check boolean checkbox -> should set value to true
@@ -262,6 +271,7 @@ describe("ToolsTab", () => {
       {
         optionalBoolean: true,
       },
+      undefined,
     );
 
     // State 4: Check null checkbox again -> should set value back to null and disable input
@@ -279,6 +289,7 @@ describe("ToolsTab", () => {
       {
         optionalBoolean: null,
       },
+      undefined,
     );
   });
 
