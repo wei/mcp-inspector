@@ -716,10 +716,10 @@ describe("ToolsTab", () => {
     });
   });
 
-  describe("Meta Display", () => {
-    const toolWithMeta = {
+  describe("Metadata Display", () => {
+    const toolWithMetadata = {
       name: "metaTool",
-      description: "Tool with meta",
+      description: "Tool with metadata",
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -732,10 +732,10 @@ describe("ToolsTab", () => {
       },
     } as unknown as Tool;
 
-    it("should display meta section when tool has _meta", () => {
+    it("should display metadata section when tool has _meta", () => {
       renderToolsTab({
-        tools: [toolWithMeta],
-        selectedTool: toolWithMeta,
+        tools: [toolWithMetadata],
+        selectedTool: toolWithMetadata,
       });
 
       expect(screen.getByText("Meta:")).toBeInTheDocument();
@@ -744,10 +744,10 @@ describe("ToolsTab", () => {
       ).toBeInTheDocument();
     });
 
-    it("should toggle meta schema expansion", () => {
+    it("should toggle metadata schema expansion", () => {
       renderToolsTab({
-        tools: [toolWithMeta],
-        selectedTool: toolWithMeta,
+        tools: [toolWithMetadata],
+        selectedTool: toolWithMetadata,
       });
 
       // There might be multiple Expand buttons (Output Schema, Meta). We need the one within Meta section
@@ -777,13 +777,13 @@ describe("ToolsTab", () => {
     });
   });
 
-  describe("Meta submission", () => {
-    it("should send meta values when provided", async () => {
+  describe("Metadata submission", () => {
+    it("should send metadata values when provided", async () => {
       const callToolMock = jest.fn(async () => {});
 
       renderToolsTab({ selectedTool: mockTools[0], callTool: callToolMock });
 
-      // Add a meta key/value pair
+      // Add a metadata key/value pair
       const addPairButton = screen.getByRole("button", { name: /add pair/i });
       await act(async () => {
         fireEvent.click(addPairButton);
@@ -815,19 +815,19 @@ describe("ToolsTab", () => {
     });
   });
 
-  describe("ToolResults Meta", () => {
-    it("should display meta information when present in toolResult", () => {
-      const resultWithMeta = {
+  describe("ToolResults Metadata", () => {
+    it("should display metadata information when present in toolResult", () => {
+      const resultWithMetadata = {
         content: [],
         _meta: { info: "details", version: 2 },
       };
 
       renderToolsTab({
         selectedTool: mockTools[0],
-        toolResult: resultWithMeta,
+        toolResult: resultWithMetadata,
       });
 
-      // Only ToolResults meta should be present since selectedTool has no _meta
+      // Only ToolResults metadata should be present since selectedTool has no _meta
       expect(screen.getAllByText("Meta:")).toHaveLength(1);
       expect(screen.getByText(/info/i)).toBeInTheDocument();
       expect(screen.getByText(/version/i)).toBeInTheDocument();

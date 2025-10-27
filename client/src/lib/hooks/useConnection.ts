@@ -167,9 +167,9 @@ export function useConnection({
 
       // Add metadata to the request if available, but skip for tool calls
       // as they handle metadata merging separately
-      const shouldAddGeneralMeta =
+      const shouldAddGeneralMetadata =
         request.method !== "tools/call" && Object.keys(metadata).length > 0;
-      const requestWithMeta = shouldAddGeneralMeta
+      const requestWithMetadata = shouldAddGeneralMetadata
         ? {
             ...request,
             params: {
@@ -208,16 +208,16 @@ export function useConnection({
       let response;
       try {
         response = await mcpClient.request(
-          requestWithMeta,
+          requestWithMetadata,
           schema,
           mcpRequestOptions,
         );
 
-        pushHistory(requestWithMeta, response);
+        pushHistory(requestWithMetadata, response);
       } catch (error) {
         const errorMessage =
           error instanceof Error ? error.message : String(error);
-        pushHistory(requestWithMeta, { error: errorMessage });
+        pushHistory(requestWithMetadata, { error: errorMessage });
         throw error;
       }
 

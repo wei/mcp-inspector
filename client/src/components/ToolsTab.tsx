@@ -63,7 +63,7 @@ const ToolsTab = ({
   callTool: (
     name: string,
     params: Record<string, unknown>,
-    meta?: Record<string, unknown>,
+    metadata?: Record<string, unknown>,
   ) => Promise<void>;
   selectedTool: Tool | null;
   setSelectedTool: (tool: Tool | null) => void;
@@ -76,8 +76,8 @@ const ToolsTab = ({
   const [params, setParams] = useState<Record<string, unknown>>({});
   const [isToolRunning, setIsToolRunning] = useState(false);
   const [isOutputSchemaExpanded, setIsOutputSchemaExpanded] = useState(false);
-  const [isMetaExpanded, setIsMetaExpanded] = useState(false);
-  const [metaEntries, setMetaEntries] = useState<
+  const [isMetadataExpanded, setIsMetadataExpanded] = useState(false);
+  const [metadataEntries, setMetadataEntries] = useState<
     { id: string; key: string; value: string }[]
   >([]);
   const [hasValidationErrors, setHasValidationErrors] = useState(false);
@@ -400,7 +400,7 @@ const ToolsTab = ({
                       variant="outline"
                       className="h-6 px-2"
                       onClick={() =>
-                        setMetaEntries((prev) => [
+                        setMetadataEntries((prev) => [
                           ...prev,
                           {
                             id:
@@ -419,30 +419,30 @@ const ToolsTab = ({
                       Add Pair
                     </Button>
                   </div>
-                  {metaEntries.length === 0 ? (
+                  {metadataEntries.length === 0 ? (
                     <p className="text-xs text-muted-foreground">
-                      No meta pairs.
+                      No metadata pairs.
                     </p>
                   ) : (
                     <div className="space-y-2">
-                      {metaEntries.map((entry, index) => (
+                      {metadataEntries.map((entry, index) => (
                         <div
                           key={entry.id}
                           className="flex items-center gap-2 w-full"
                         >
                           <Label
-                            htmlFor={`meta-key-${entry.id}`}
+                            htmlFor={`metadata-key-${entry.id}`}
                             className="text-xs shrink-0"
                           >
                             Key
                           </Label>
                           <Input
-                            id={`meta-key-${entry.id}`}
+                            id={`metadata-key-${entry.id}`}
                             value={entry.key}
                             placeholder="e.g. requestId"
                             onChange={(e) => {
                               const value = e.target.value;
-                              setMetaEntries((prev) =>
+                              setMetadataEntries((prev) =>
                                 prev.map((m, i) =>
                                   i === index ? { ...m, key: value } : m,
                                 ),
@@ -451,18 +451,18 @@ const ToolsTab = ({
                             className="h-8 flex-1"
                           />
                           <Label
-                            htmlFor={`meta-value-${entry.id}`}
+                            htmlFor={`metadata-value-${entry.id}`}
                             className="text-xs shrink-0"
                           >
                             Value
                           </Label>
                           <Input
-                            id={`meta-value-${entry.id}`}
+                            id={`metadata-value-${entry.id}`}
                             value={entry.value}
                             placeholder="e.g. 12345"
                             onChange={(e) => {
                               const value = e.target.value;
-                              setMetaEntries((prev) =>
+                              setMetadataEntries((prev) =>
                                 prev.map((m, i) =>
                                   i === index ? { ...m, value } : m,
                                 ),
@@ -475,7 +475,7 @@ const ToolsTab = ({
                             variant="ghost"
                             className="h-8 w-8 p-0 ml-auto shrink-0"
                             onClick={() =>
-                              setMetaEntries((prev) =>
+                              setMetadataEntries((prev) =>
                                 prev.filter((_, i) => i !== index),
                               )
                             }
@@ -533,10 +533,12 @@ const ToolsTab = ({
                         <Button
                           size="sm"
                           variant="ghost"
-                          onClick={() => setIsMetaExpanded(!isMetaExpanded)}
+                          onClick={() =>
+                            setIsMetadataExpanded(!isMetadataExpanded)
+                          }
                           className="h-6 px-2"
                         >
-                          {isMetaExpanded ? (
+                          {isMetadataExpanded ? (
                             <>
                               <ChevronUp className="h-3 w-3 mr-1" />
                               Collapse
@@ -551,7 +553,9 @@ const ToolsTab = ({
                       </div>
                       <div
                         className={`transition-all ${
-                          isMetaExpanded ? "" : "max-h-[8rem] overflow-y-auto"
+                          isMetadataExpanded
+                            ? ""
+                            : "max-h-[8rem] overflow-y-auto"
                         }`}
                       >
                         <JsonView data={selectedTool._meta} />
@@ -565,17 +569,16 @@ const ToolsTab = ({
 
                     try {
                       setIsToolRunning(true);
-                      const meta = metaEntries.reduce<Record<string, unknown>>(
-                        (acc, { key, value }) => {
-                          if (key.trim() !== "") acc[key] = value;
-                          return acc;
-                        },
-                        {},
-                      );
+                      const metadata = metadataEntries.reduce<
+                        Record<string, unknown>
+                      >((acc, { key, value }) => {
+                        if (key.trim() !== "") acc[key] = value;
+                        return acc;
+                      }, {});
                       await callTool(
                         selectedTool.name,
                         params,
-                        Object.keys(meta).length ? meta : undefined,
+                        Object.keys(metadata).length ? metadata : undefined,
                       );
                     } finally {
                       setIsToolRunning(false);

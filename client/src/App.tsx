@@ -808,7 +808,7 @@ const App = () => {
   const callTool = async (
     name: string,
     params: Record<string, unknown>,
-    meta?: Record<string, unknown>,
+    metadata?: Record<string, unknown>,
   ) => {
     lastToolCallOriginTabRef.current = currentTabRef.current;
 
@@ -824,7 +824,7 @@ const App = () => {
       const mergedMeta = {
         ...metadata, // General metadata first
         progressToken: progressTokenRef.current++,
-        ...(meta ?? {}), // Tool-specific metadata overrides
+        ...(metadata ?? {}), // Tool-specific metadata overrides
       };
 
       const response = await sendMCPRequest(
@@ -1148,11 +1148,11 @@ const App = () => {
                       callTool={async (
                         name: string,
                         params: Record<string, unknown>,
-                        meta?: Record<string, unknown>,
+                        metadata?: Record<string, unknown>,
                       ) => {
                         clearError("tools");
                         setToolResult(null);
-                        await callTool(name, params, meta);
+                        await callTool(name, params, metadata);
                       }}
                       selectedTool={selectedTool}
                       setSelectedTool={(tool) => {
