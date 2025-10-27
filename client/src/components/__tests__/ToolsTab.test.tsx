@@ -738,7 +738,7 @@ describe("ToolsTab", () => {
         selectedTool: toolWithMeta,
       });
 
-      expect(screen.getByText("Meta Schema:")).toBeInTheDocument();
+      expect(screen.getByText("Meta:")).toBeInTheDocument();
       expect(
         screen.getByRole("button", { name: /expand/i }),
       ).toBeInTheDocument();
@@ -750,8 +750,8 @@ describe("ToolsTab", () => {
         selectedTool: toolWithMeta,
       });
 
-      // There might be multiple Expand buttons (Output Schema, Meta Schema). We need the one within Meta Schema section
-      const metaHeading = screen.getByText("Meta Schema:");
+      // There might be multiple Expand buttons (Output Schema, Meta). We need the one within Meta section
+      const metaHeading = screen.getByText("Meta:");
       const metaContainer = metaHeading.closest("div");
       expect(metaContainer).toBeTruthy();
       const toggleButton = within(metaContainer as HTMLElement).getByRole(
@@ -815,7 +815,7 @@ describe("ToolsTab", () => {
     });
   });
 
-  describe("ToolResults Meta Schema", () => {
+  describe("ToolResults Meta", () => {
     it("should display meta information when present in toolResult", () => {
       const resultWithMeta = {
         content: [],
@@ -828,7 +828,7 @@ describe("ToolsTab", () => {
       });
 
       // Only ToolResults meta should be present since selectedTool has no _meta
-      expect(screen.getAllByText("Meta Schema:")).toHaveLength(1);
+      expect(screen.getAllByText("Meta:")).toHaveLength(1);
       expect(screen.getByText(/info/i)).toBeInTheDocument();
       expect(screen.getByText(/version/i)).toBeInTheDocument();
     });

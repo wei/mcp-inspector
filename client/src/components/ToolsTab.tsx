@@ -529,7 +529,7 @@ const ToolsTab = ({
                   selectedTool._meta && (
                     <div className="bg-gray-50 dark:bg-gray-900 p-3 rounded-lg">
                       <div className="flex items-center justify-between mb-2">
-                        <h4 className="text-sm font-semibold">Meta Schema:</h4>
+                        <h4 className="text-sm font-semibold">Meta:</h4>
                         <Button
                           size="sm"
                           variant="ghost"
