@@ -821,7 +821,7 @@ const App = () => {
 
       // Merge general metadata with tool-specific metadata
       // Tool-specific metadata takes precedence over general metadata
-      const mergedMeta = {
+      const mergedMetadata = {
         ...metadata, // General metadata first
         progressToken: progressTokenRef.current++,
         ...(metadata ?? {}), // Tool-specific metadata overrides
@@ -833,7 +833,7 @@ const App = () => {
           params: {
             name,
             arguments: cleanedParams,
-            _meta: mergedMeta,
+            _meta: mergedMetadata,
           },
         },
         CompatibilityCallToolResultSchema,

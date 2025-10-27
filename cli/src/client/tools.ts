@@ -115,9 +115,9 @@ export async function callTool(
 
     // Merge general metadata with tool-specific metadata
     // Tool-specific metadata takes precedence over general metadata
-    let mergedMeta: Record<string, string> | undefined;
+    let mergedMetadata: Record<string, string> | undefined;
     if (generalMetadata || toolSpecificMetadata) {
-      mergedMeta = {
+      mergedMetadata = {
         ...(generalMetadata || {}),
         ...(toolSpecificMetadata || {}),
       };
@@ -127,8 +127,8 @@ export async function callTool(
       name: name,
       arguments: convertedArgs,
       _meta:
-        mergedMeta && Object.keys(mergedMeta).length > 0
-          ? mergedMeta
+        mergedMetadata && Object.keys(mergedMetadata).length > 0
+          ? mergedMetadata
           : undefined,
     });
     return response;
