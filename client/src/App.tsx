@@ -808,7 +808,7 @@ const App = () => {
   const callTool = async (
     name: string,
     params: Record<string, unknown>,
-    metadata?: Record<string, unknown>,
+    toolMetadata?: Record<string, unknown>,
   ) => {
     lastToolCallOriginTabRef.current = currentTabRef.current;
 
@@ -822,9 +822,9 @@ const App = () => {
       // Merge general metadata with tool-specific metadata
       // Tool-specific metadata takes precedence over general metadata
       const mergedMetadata = {
-        ...metadata, // General metadata first
+        ...metadata, // General metadata
         progressToken: progressTokenRef.current++,
-        ...(metadata ?? {}), // Tool-specific metadata overrides
+        ...(toolMetadata ?? {}), // Tool-specific metadata
       };
 
       const response = await sendMCPRequest(
