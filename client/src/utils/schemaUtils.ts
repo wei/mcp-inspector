@@ -191,6 +191,16 @@ export function normalizeUnionType(schema: JsonSchemaType): JsonSchemaType {
     return { ...schema, type: "integer", anyOf: undefined, nullable: true };
   }
 
+  // Handle anyOf with exactly array and null (FastMCP pattern)
+  if (
+    schema.anyOf &&
+    schema.anyOf.length === 2 &&
+    schema.anyOf.some((t) => (t as JsonSchemaType).type === "array") &&
+    schema.anyOf.some((t) => (t as JsonSchemaType).type === "null")
+  ) {
+    return { ...schema, type: "array", anyOf: undefined, nullable: true };
+  }
+
   // Handle array type with exactly string and null
   if (
     Array.isArray(schema.type) &&
