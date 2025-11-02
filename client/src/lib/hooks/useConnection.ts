@@ -30,6 +30,8 @@ import {
   Progress,
   LoggingLevel,
   ElicitRequestSchema,
+  JSONRPCMessage,
+  isJSONRPCRequest,
 } from "@modelcontextprotocol/sdk/types.js";
 import { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import { useEffect, useState } from "react";
@@ -57,6 +59,8 @@ import { getMCPServerRequestTimeout } from "@/utils/configUtils";
 import { InspectorConfig } from "../configurationTypes";
 import { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { CustomHeaders } from "../types/customHeaders";
+import { JsonSchemaType } from "@/utils/jsonUtils";
+import { resolveRef } from "@/utils/schemaUtils";
 
 interface UseConnectionOptions {
   transportType: "stdio" | "sse" | "streamable-http";
@@ -680,6 +684,38 @@ export function useConnection({
             : new SSEClientTransport(serverUrl, transportOptions);
 
         await client.connect(transport as Transport);
+
+        const protocolOnMessage = transport.onmessage;
+        if (protocolOnMessage) {
+          transport.onmessage = (message: JSONRPCMessage) => {
+            // Resolve $ref references in requests before validation
+            if (isJSONRPCRequest(message) && message.params?.requestedSchema) {
+              const requestedSchema = message.params
+                .requestedSchema as JsonSchemaType;
+              if (requestedSchema?.properties) {
+                const resolvedProperties = Object.fromEntries(
+                  Object.entries(
+                    requestedSchema.properties as Record<
+                      string,
+                      JsonSchemaType
+                    >,
+                  ).map(([key, propSchema]) => [
+                    key,
+                    resolveRef(propSchema, requestedSchema),
+                  ]),
+                );
+                message.params = {
+                  ...message.params,
+                  requestedSchema: {
+                    ...requestedSchema,
+                    properties: resolvedProperties,
+                  },
+                };
+              }
+            }
+            protocolOnMessage(message);
+          };
+        }
 
         setClientTransport(transport);
 
