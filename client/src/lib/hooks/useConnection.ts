@@ -30,7 +30,6 @@ import {
   Progress,
   LoggingLevel,
   ElicitRequestSchema,
-  isJSONRPCRequest,
 } from "@modelcontextprotocol/sdk/types.js";
 import { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import { useEffect, useState } from "react";
@@ -58,8 +57,7 @@ import { getMCPServerRequestTimeout } from "@/utils/configUtils";
 import { InspectorConfig } from "../configurationTypes";
 import { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { CustomHeaders } from "../types/customHeaders";
-import { JsonSchemaType } from "@/utils/jsonUtils";
-import { resolveRef } from "@/utils/schemaUtils";
+import { resolveRefsInMessage } from "@/utils/schemaUtils";
 
 interface UseConnectionOptions {
   transportType: "stdio" | "sse" | "streamable-http";
@@ -687,29 +685,8 @@ export function useConnection({
         const protocolOnMessage = transport.onmessage;
         if (protocolOnMessage) {
           transport.onmessage = (message) => {
-            // Resolve $ref references in requests before validation
-            if (isJSONRPCRequest(message) && message.params?.requestedSchema) {
-              const requestedSchema = message.params
-                .requestedSchema as JsonSchemaType;
-              if (requestedSchema?.properties) {
-                const resolvedProperties = Object.fromEntries(
-                  Object.entries(requestedSchema.properties).map(
-                    ([key, propSchema]) => [
-                      key,
-                      resolveRef(propSchema, requestedSchema),
-                    ],
-                  ),
-                );
-                message.params = {
-                  ...message.params,
-                  requestedSchema: {
-                    ...requestedSchema,
-                    properties: resolvedProperties,
-                  },
-                };
-              }
-            }
-            protocolOnMessage(message);
+            const resolvedMessage = resolveRefsInMessage(message);
+            protocolOnMessage(resolvedMessage);
           };
         }
 
