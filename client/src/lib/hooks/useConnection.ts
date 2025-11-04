@@ -30,7 +30,6 @@ import {
   Progress,
   LoggingLevel,
   ElicitRequestSchema,
-  JSONRPCMessage,
   isJSONRPCRequest,
 } from "@modelcontextprotocol/sdk/types.js";
 import { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
@@ -687,22 +686,19 @@ export function useConnection({
 
         const protocolOnMessage = transport.onmessage;
         if (protocolOnMessage) {
-          transport.onmessage = (message: JSONRPCMessage) => {
+          transport.onmessage = (message) => {
             // Resolve $ref references in requests before validation
             if (isJSONRPCRequest(message) && message.params?.requestedSchema) {
               const requestedSchema = message.params
                 .requestedSchema as JsonSchemaType;
               if (requestedSchema?.properties) {
                 const resolvedProperties = Object.fromEntries(
-                  Object.entries(
-                    requestedSchema.properties as Record<
-                      string,
-                      JsonSchemaType
-                    >,
-                  ).map(([key, propSchema]) => [
-                    key,
-                    resolveRef(propSchema, requestedSchema),
-                  ]),
+                  Object.entries(requestedSchema.properties).map(
+                    ([key, propSchema]) => [
+                      key,
+                      resolveRef(propSchema, requestedSchema),
+                    ],
+                  ),
                 );
                 message.params = {
                   ...message.params,
