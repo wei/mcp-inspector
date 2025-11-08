@@ -45,6 +45,8 @@ import {
   clearClientInformationFromSessionStorage,
   InspectorOAuthClientProvider,
   saveClientInformationToSessionStorage,
+  saveScopeToSessionStorage,
+  clearScopeFromSessionStorage,
   discoverScopes,
 } from "../auth";
 import {
@@ -142,6 +144,15 @@ export function useConnection({
       isPreregistered: true,
     });
   }, [oauthClientId, oauthClientSecret, sseUrl]);
+
+  useEffect(() => {
+    if (!oauthScope) {
+      clearScopeFromSessionStorage(sseUrl);
+      return;
+    }
+
+    saveScopeToSessionStorage(sseUrl, oauthScope);
+  }, [oauthScope, sseUrl]);
 
   const pushHistory = (request: object, response?: object) => {
     setRequestHistory((prev) => [
@@ -347,10 +358,9 @@ export function useConnection({
         }
         scope = await discoverScopes(sseUrl, resourceMetadata);
       }
-      const serverAuthProvider = new InspectorOAuthClientProvider(
-        sseUrl,
-        scope,
-      );
+
+      saveScopeToSessionStorage(sseUrl, scope);
+      const serverAuthProvider = new InspectorOAuthClientProvider(sseUrl);
 
       const result = await auth(serverAuthProvider, {
         serverUrl: sseUrl,
