@@ -536,6 +536,175 @@ describe("useConnection", () => {
         title: "A Connectable Node",
       });
     });
+
+    test("resolves $ref references to $defs in requestedSchema", async () => {
+      const mockProtocolOnMessage = jest.fn();
+
+      mockSSETransport.onmessage = mockProtocolOnMessage;
+
+      const { result } = renderHook(() => useConnection(defaultProps));
+
+      await act(async () => {
+        await result.current.connect();
+      });
+
+      const mockRequestWithDefs: JSONRPCMessage = {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "elicitation/create",
+        params: {
+          message: "Please provide your information",
+          requestedSchema: {
+            type: "object",
+            properties: {
+              user: {
+                $ref: "#/$defs/UserInput",
+              },
+            },
+            $defs: {
+              UserInput: {
+                type: "object",
+                properties: {
+                  name: {
+                    type: "string",
+                    title: "Name",
+                  },
+                  age: {
+                    type: "integer",
+                    title: "Age",
+                    minimum: 0,
+                  },
+                },
+                required: ["name"],
+              },
+            },
+          },
+        },
+      };
+
+      await act(async () => {
+        mockSSETransport.onmessage!(mockRequestWithDefs);
+      });
+
+      expect(mockProtocolOnMessage).toHaveBeenCalledTimes(1);
+
+      const message = mockProtocolOnMessage.mock.calls[0][0];
+      // The $ref should be resolved to the actual UserInput definition
+      expect(message.params.requestedSchema.properties.user).toEqual({
+        type: "object",
+        properties: {
+          name: {
+            type: "string",
+            title: "Name",
+          },
+          age: {
+            type: "integer",
+            title: "Age",
+            minimum: 0,
+          },
+        },
+        required: ["name"],
+      });
+    });
+    test("resolves nested $ref references within $defs definitions", async () => {
+      const mockProtocolOnMessage = jest.fn();
+
+      mockSSETransport.onmessage = mockProtocolOnMessage;
+
+      const { result } = renderHook(() => useConnection(defaultProps));
+
+      await act(async () => {
+        await result.current.connect();
+      });
+
+      // This mirrors the pattern from FastMCP where a definition references another definition
+      const mockRequestWithNestedDefs: JSONRPCMessage = {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "elicitation/create",
+        params: {
+          message: "Please provide your information",
+          requestedSchema: {
+            type: "object",
+            properties: {
+              person: {
+                $ref: "#/$defs/PersonWithAddress",
+              },
+            },
+            $defs: {
+              PersonWithAddress: {
+                type: "object",
+                properties: {
+                  name: {
+                    type: "string",
+                    title: "Name",
+                  },
+                  address: {
+                    $ref: "#/$defs/Address", // ← Nested ref: definition references another definition
+                  },
+                },
+                required: ["name", "address"],
+              },
+              Address: {
+                type: "object",
+                properties: {
+                  street: {
+                    type: "string",
+                    title: "Street",
+                  },
+                  city: {
+                    type: "string",
+                    title: "City",
+                  },
+                  zipcode: {
+                    type: "string",
+                    title: "Zipcode",
+                  },
+                },
+                required: ["street", "city", "zipcode"],
+              },
+            },
+          },
+        },
+      };
+
+      await act(async () => {
+        mockSSETransport.onmessage!(mockRequestWithNestedDefs);
+      });
+
+      expect(mockProtocolOnMessage).toHaveBeenCalledTimes(1);
+
+      const message = mockProtocolOnMessage.mock.calls[0][0];
+      // The $ref should be resolved, and nested refs within $defs should also be resolved
+      expect(message.params.requestedSchema.properties.person).toEqual({
+        type: "object",
+        properties: {
+          name: {
+            type: "string",
+            title: "Name",
+          },
+          address: {
+            type: "object",
+            properties: {
+              street: {
+                type: "string",
+                title: "Street",
+              },
+              city: {
+                type: "string",
+                title: "City",
+              },
+              zipcode: {
+                type: "string",
+                title: "Zipcode",
+              },
+            },
+            required: ["street", "city", "zipcode"],
+          },
+        },
+        required: ["name", "address"],
+      });
+    });
   });
 
   describe("URL Port Handling", () => {
