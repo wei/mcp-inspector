@@ -302,7 +302,7 @@ export function formatFieldLabel(key: string): string {
 }
 
 /**
- * Resolves $ref references in a JSON-RPC message's requestedSchema
+ * Resolves `$ref` references in a JSON-RPC "elicitation/create" message's `requestedSchema` field
  * @param message The JSON-RPC message that may contain $ref references
  * @returns A new message with resolved $ref references, or the original message if no resolution is needed
  */
@@ -325,10 +325,11 @@ export function resolveRefsInMessage(message: JSONRPCMessage): JSONRPCMessage {
         ...requestedSchema,
         properties: Object.fromEntries(
           Object.entries(requestedSchema.properties).map(
-            ([key, propSchema]) => [
-              key,
-              resolveRef(propSchema, requestedSchema),
-            ],
+            ([key, propSchema]) => {
+              const resolved = resolveRef(propSchema, requestedSchema);
+              const normalized = normalizeUnionType(resolved);
+              return [key, normalized];
+            },
           ),
         ),
       },

@@ -510,12 +510,13 @@ describe("useConnection", () => {
           requestedSchema: {
             type: "object",
             properties: {
-              name: {
-                $ref: "#/properties/nameDef",
-              },
-              nameDef: {
+              source: {
                 type: "string",
-                title: "Name",
+                minLength: 1,
+                title: "A Connectable Node",
+              },
+              target: {
+                $ref: "#/properties/source",
               },
             },
           },
@@ -529,9 +530,10 @@ describe("useConnection", () => {
       expect(mockProtocolOnMessage).toHaveBeenCalledTimes(1);
 
       const message = mockProtocolOnMessage.mock.calls[0][0];
-      expect(message.params.requestedSchema.properties.name).toEqual({
+      expect(message.params.requestedSchema.properties.target).toEqual({
         type: "string",
-        title: "Name",
+        minLength: 1,
+        title: "A Connectable Node",
       });
     });
   });
