@@ -1,5 +1,7 @@
 # MCP Inspector Development Guide
 
+> **Note:** Inspector V2 is under development to address architectural and UX improvements. These guidelines apply to the current version (V1). See [CONTRIBUTING.md](CONTRIBUTING.md) for information about V2 development.
+
 ## Build Commands
 
 - Build all: `npm run build`
