@@ -2,6 +2,11 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import MetadataTab from "../MetadataTab";
 import { Tabs } from "@/components/ui/tabs";
+import {
+  META_NAME_RULES_MESSAGE,
+  META_PREFIX_RULES_MESSAGE,
+  RESERVED_NAMESPACE_MESSAGE,
+} from "@/utils/metaUtils";
 
 describe("MetadataTab", () => {
   const defaultProps = {
@@ -270,6 +275,38 @@ describe("MetadataTab", () => {
     });
   });
 
+  describe("Reserved Metadata Keys", () => {
+    test.each`
+      description                             | value                             | message                       | shouldDisableValue
+      ${"reserved keys with prefix"}          | ${"modelcontextprotocol.io/flip"} | ${RESERVED_NAMESPACE_MESSAGE} | ${true}
+      ${"reserved root without slash"}        | ${"modelcontextprotocol.io"}      | ${RESERVED_NAMESPACE_MESSAGE} | ${true}
+      ${"nested modelcontextprotocol domain"} | ${"api.modelcontextprotocol.org"} | ${RESERVED_NAMESPACE_MESSAGE} | ${false}
+      ${"nested mcp domain"}                  | ${"tools.mcp.com/path"}           | ${RESERVED_NAMESPACE_MESSAGE} | ${false}
+      ${"invalid name segments"}              | ${"custom/bad-"}                  | ${META_NAME_RULES_MESSAGE}    | ${false}
+      ${"invalid prefix labels"}              | ${"1invalid-prefix/value"}        | ${META_PREFIX_RULES_MESSAGE}  | ${false}
+    `(
+      "should display an error for $description",
+      ({ value, message, shouldDisableValue }) => {
+        const onMetadataChange = jest.fn();
+        renderMetadataTab({ onMetadataChange });
+
+        const addButton = screen.getByRole("button", { name: /add entry/i });
+        fireEvent.click(addButton);
+
+        const keyInput = screen.getByPlaceholderText("Key");
+        fireEvent.change(keyInput, { target: { value } });
+
+        const valueInput = screen.getByPlaceholderText("Value");
+        if (shouldDisableValue) {
+          expect(valueInput).toBeDisabled();
+        }
+
+        expect(screen.getByText(message)).toBeInTheDocument();
+        expect(onMetadataChange).toHaveBeenLastCalledWith({});
+      },
+    );
+  });
+
   describe("Data Validation and Trimming", () => {
     it("should trim whitespace from keys and values", () => {
       const onMetadataChange = jest.fn();
@@ -413,7 +450,7 @@ describe("MetadataTab", () => {
   });
 
   describe("Edge Cases", () => {
-    it("should handle special characters in keys and values", () => {
+    it("should flag invalid names that contain unsupported characters", () => {
       const onMetadataChange = jest.fn();
       renderMetadataTab({ onMetadataChange });
 
@@ -430,12 +467,11 @@ describe("MetadataTab", () => {
         target: { value: "value with spaces & symbols $%^" },
       });
 
-      expect(onMetadataChange).toHaveBeenCalledWith({
-        "key-with-special@chars!": "value with spaces & symbols $%^",
-      });
+      expect(screen.getByText(META_NAME_RULES_MESSAGE)).toBeInTheDocument();
+      expect(onMetadataChange).toHaveBeenLastCalledWith({});
     });
 
-    it("should handle unicode characters", () => {
+    it("should reject unicode names that do not start with an alphanumeric character", () => {
       const onMetadataChange = jest.fn();
       renderMetadataTab({ onMetadataChange });
 
@@ -448,9 +484,8 @@ describe("MetadataTab", () => {
       fireEvent.change(keyInput, { target: { value: "🔑_key" } });
       fireEvent.change(valueInput, { target: { value: "值_value_🎯" } });
 
-      expect(onMetadataChange).toHaveBeenCalledWith({
-        "🔑_key": "值_value_🎯",
-      });
+      expect(screen.getByText(META_NAME_RULES_MESSAGE)).toBeInTheDocument();
+      expect(onMetadataChange).toHaveBeenLastCalledWith({});
     });
 
     it("should handle very long keys and values", () => {

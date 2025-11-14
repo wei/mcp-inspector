@@ -40,6 +40,15 @@ import JsonView from "./JsonView";
 import ToolResults from "./ToolResults";
 import { useToast } from "@/lib/hooks/useToast";
 import useCopy from "@/lib/hooks/useCopy";
+import { cn } from "@/lib/utils";
+import {
+  META_NAME_RULES_MESSAGE,
+  META_PREFIX_RULES_MESSAGE,
+  RESERVED_NAMESPACE_MESSAGE,
+  hasValidMetaName,
+  hasValidMetaPrefix,
+  isReservedMetaKey,
+} from "@/utils/metaUtils";
 
 // Type guard to safely detect the optional _meta field without using `any`
 const hasMeta = (tool: Tool): tool is Tool & { _meta: unknown } =>
@@ -121,6 +130,21 @@ const ToolsTab = ({
     // Clear form refs for the previous tool
     formRefs.current = {};
   }, [selectedTool]);
+
+  const hasReservedMetadataEntry = metadataEntries.some(({ key }) => {
+    const trimmedKey = key.trim();
+    return trimmedKey !== "" && isReservedMetaKey(trimmedKey);
+  });
+
+  const hasInvalidMetaPrefixEntry = metadataEntries.some(({ key }) => {
+    const trimmedKey = key.trim();
+    return trimmedKey !== "" && !hasValidMetaPrefix(trimmedKey);
+  });
+
+  const hasInvalidMetaNameEntry = metadataEntries.some(({ key }) => {
+    const trimmedKey = key.trim();
+    return trimmedKey !== "" && !hasValidMetaName(trimmedKey);
+  });
 
   return (
     <TabsContent value="tools">
@@ -438,67 +462,101 @@ const ToolsTab = ({
                     </p>
                   ) : (
                     <div className="space-y-2">
-                      {metadataEntries.map((entry, index) => (
-                        <div
-                          key={entry.id}
-                          className="flex items-center gap-2 w-full"
-                        >
-                          <Label
-                            htmlFor={`metadata-key-${entry.id}`}
-                            className="text-xs shrink-0"
-                          >
-                            Key
-                          </Label>
-                          <Input
-                            id={`metadata-key-${entry.id}`}
-                            value={entry.key}
-                            placeholder="e.g. requestId"
-                            onChange={(e) => {
-                              const value = e.target.value;
-                              setMetadataEntries((prev) =>
-                                prev.map((m, i) =>
-                                  i === index ? { ...m, key: value } : m,
-                                ),
-                              );
-                            }}
-                            className="h-8 flex-1"
-                          />
-                          <Label
-                            htmlFor={`metadata-value-${entry.id}`}
-                            className="text-xs shrink-0"
-                          >
-                            Value
-                          </Label>
-                          <Input
-                            id={`metadata-value-${entry.id}`}
-                            value={entry.value}
-                            placeholder="e.g. 12345"
-                            onChange={(e) => {
-                              const value = e.target.value;
-                              setMetadataEntries((prev) =>
-                                prev.map((m, i) =>
-                                  i === index ? { ...m, value } : m,
-                                ),
-                              );
-                            }}
-                            className="h-8 flex-1"
-                          />
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className="h-8 w-8 p-0 ml-auto shrink-0"
-                            onClick={() =>
-                              setMetadataEntries((prev) =>
-                                prev.filter((_, i) => i !== index),
-                              )
-                            }
-                            aria-label={`Remove meta pair ${index + 1}`}
-                          >
-                            -
-                          </Button>
-                        </div>
-                      ))}
+                      {metadataEntries.map((entry, index) => {
+                        const trimmedKey = entry.key.trim();
+                        const hasInvalidPrefix =
+                          trimmedKey !== "" && !hasValidMetaPrefix(trimmedKey);
+                        const isReservedKey =
+                          trimmedKey !== "" && isReservedMetaKey(trimmedKey);
+                        const hasInvalidName =
+                          trimmedKey !== "" && !hasValidMetaName(trimmedKey);
+                        const validationMessage = hasInvalidPrefix
+                          ? META_PREFIX_RULES_MESSAGE
+                          : isReservedKey
+                            ? RESERVED_NAMESPACE_MESSAGE
+                            : hasInvalidName
+                              ? META_NAME_RULES_MESSAGE
+                              : null;
+                        return (
+                          <div key={entry.id} className="space-y-1">
+                            <div className="flex items-center gap-2 w-full">
+                              <Label
+                                htmlFor={`metadata-key-${entry.id}`}
+                                className="text-xs shrink-0"
+                              >
+                                Key
+                              </Label>
+                              <Input
+                                id={`metadata-key-${entry.id}`}
+                                value={entry.key}
+                                placeholder="e.g. requestId"
+                                onChange={(e) => {
+                                  const value = e.target.value;
+                                  setMetadataEntries((prev) =>
+                                    prev.map((m, i) =>
+                                      i === index ? { ...m, key: value } : m,
+                                    ),
+                                  );
+                                }}
+                                className={cn(
+                                  "h-8 flex-1",
+                                  validationMessage &&
+                                    "border-red-500 focus-visible:ring-red-500 focus-visible:ring-1",
+                                )}
+                                aria-invalid={Boolean(validationMessage)}
+                              />
+                              <Label
+                                htmlFor={`metadata-value-${entry.id}`}
+                                className="text-xs shrink-0"
+                              >
+                                Value
+                              </Label>
+                              <Input
+                                id={`metadata-value-${entry.id}`}
+                                value={entry.value}
+                                placeholder="e.g. 12345"
+                                onChange={(e) => {
+                                  const value = e.target.value;
+                                  setMetadataEntries((prev) =>
+                                    prev.map((m, i) =>
+                                      i === index ? { ...m, value } : m,
+                                    ),
+                                  );
+                                }}
+                                className="h-8 flex-1"
+                                disabled={Boolean(validationMessage)}
+                              />
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className="h-8 w-8 p-0 ml-auto shrink-0"
+                                onClick={() =>
+                                  setMetadataEntries((prev) =>
+                                    prev.filter((_, i) => i !== index),
+                                  )
+                                }
+                                aria-label={`Remove meta pair ${index + 1}`}
+                              >
+                                -
+                              </Button>
+                            </div>
+                            {validationMessage && (
+                              <p className="text-xs text-red-600 dark:text-red-400">
+                                {validationMessage}
+                              </p>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
+                  )}
+                  {(hasReservedMetadataEntry ||
+                    hasInvalidMetaPrefixEntry ||
+                    hasInvalidMetaNameEntry) && (
+                    <p className="text-xs text-red-600 dark:text-red-400">
+                      Remove reserved or invalid metadata keys (prefix/name)
+                      before running the tool.
+                    </p>
                   )}
                 </div>
                 {selectedTool.outputSchema && (
@@ -585,7 +643,15 @@ const ToolsTab = ({
                       const metadata = metadataEntries.reduce<
                         Record<string, unknown>
                       >((acc, { key, value }) => {
-                        if (key.trim() !== "") acc[key] = value;
+                        const trimmedKey = key.trim();
+                        if (
+                          trimmedKey !== "" &&
+                          hasValidMetaPrefix(trimmedKey) &&
+                          !isReservedMetaKey(trimmedKey) &&
+                          hasValidMetaName(trimmedKey)
+                        ) {
+                          acc[trimmedKey] = value;
+                        }
                         return acc;
                       }, {});
                       await callTool(
@@ -597,7 +663,13 @@ const ToolsTab = ({
                       setIsToolRunning(false);
                     }
                   }}
-                  disabled={isToolRunning || hasValidationErrors}
+                  disabled={
+                    isToolRunning ||
+                    hasValidationErrors ||
+                    hasReservedMetadataEntry ||
+                    hasInvalidMetaPrefixEntry ||
+                    hasInvalidMetaNameEntry
+                  }
                 >
                   {isToolRunning ? (
                     <>

@@ -4,6 +4,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Trash2, Plus } from "lucide-react";
+import { cn } from "@/lib/utils";
+import {
+  META_NAME_RULES_MESSAGE,
+  META_PREFIX_RULES_MESSAGE,
+  RESERVED_NAMESPACE_MESSAGE,
+  hasValidMetaName,
+  hasValidMetaPrefix,
+  isReservedMetaKey,
+} from "@/utils/metaUtils";
 
 interface MetadataEntry {
   key: string;
@@ -47,8 +56,15 @@ const MetadataTab: React.FC<MetadataTabProps> = ({
   const updateMetadata = (newEntries: MetadataEntry[]) => {
     const metadataObject: Record<string, string> = {};
     newEntries.forEach(({ key, value }) => {
-      if (key.trim() && value.trim()) {
-        metadataObject[key.trim()] = value.trim();
+      const trimmedKey = key.trim();
+      if (
+        trimmedKey &&
+        value.trim() &&
+        hasValidMetaPrefix(trimmedKey) &&
+        !isReservedMetaKey(trimmedKey) &&
+        hasValidMetaName(trimmedKey)
+      ) {
+        metadataObject[trimmedKey] = value.trim();
       }
     });
     onMetadataChange(metadataObject);
@@ -71,39 +87,72 @@ const MetadataTab: React.FC<MetadataTabProps> = ({
         </div>
 
         <div className="space-y-3">
-          {entries.map((entry, index) => (
-            <div key={index} className="flex items-center space-x-2">
-              <div className="flex-1">
-                <Label htmlFor={`key-${index}`} className="sr-only">
-                  Key
-                </Label>
-                <Input
-                  id={`key-${index}`}
-                  placeholder="Key"
-                  value={entry.key}
-                  onChange={(e) => updateEntry(index, "key", e.target.value)}
-                />
+          {entries.map((entry, index) => {
+            const trimmedKey = entry.key.trim();
+            const hasInvalidPrefix =
+              trimmedKey !== "" && !hasValidMetaPrefix(trimmedKey);
+            const isReservedKey =
+              trimmedKey !== "" && isReservedMetaKey(trimmedKey);
+            const hasInvalidName =
+              trimmedKey !== "" && !hasValidMetaName(trimmedKey);
+            const validationMessage = hasInvalidPrefix
+              ? META_PREFIX_RULES_MESSAGE
+              : isReservedKey
+                ? RESERVED_NAMESPACE_MESSAGE
+                : hasInvalidName
+                  ? META_NAME_RULES_MESSAGE
+                  : null;
+            return (
+              <div key={index} className="space-y-1">
+                <div className="flex items-center space-x-2">
+                  <div className="flex-1">
+                    <Label htmlFor={`key-${index}`} className="sr-only">
+                      Key
+                    </Label>
+                    <Input
+                      id={`key-${index}`}
+                      placeholder="Key"
+                      value={entry.key}
+                      onChange={(e) =>
+                        updateEntry(index, "key", e.target.value)
+                      }
+                      aria-invalid={Boolean(validationMessage)}
+                      className={cn(
+                        validationMessage &&
+                          "border-red-500 focus-visible:ring-red-500 focus-visible:ring-1",
+                      )}
+                    />
+                  </div>
+                  <div className="flex-1">
+                    <Label htmlFor={`value-${index}`} className="sr-only">
+                      Value
+                    </Label>
+                    <Input
+                      id={`value-${index}`}
+                      placeholder="Value"
+                      value={entry.value}
+                      onChange={(e) =>
+                        updateEntry(index, "value", e.target.value)
+                      }
+                      disabled={Boolean(validationMessage)}
+                    />
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => removeEntry(index)}
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </Button>
+                </div>
+                {validationMessage && (
+                  <p className="text-xs text-red-600 dark:text-red-400">
+                    {validationMessage}
+                  </p>
+                )}
               </div>
-              <div className="flex-1">
-                <Label htmlFor={`value-${index}`} className="sr-only">
-                  Value
-                </Label>
-                <Input
-                  id={`value-${index}`}
-                  placeholder="Value"
-                  value={entry.value}
-                  onChange={(e) => updateEntry(index, "value", e.target.value)}
-                />
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => removeEntry(index)}
-              >
-                <Trash2 className="w-4 h-4" />
-              </Button>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
         {entries.length === 0 && (

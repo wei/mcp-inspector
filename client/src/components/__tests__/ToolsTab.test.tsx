@@ -6,6 +6,11 @@ import { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { Tabs } from "@/components/ui/tabs";
 import { cacheToolOutputSchemas } from "@/utils/schemaUtils";
 import { within } from "@testing-library/react";
+import {
+  META_NAME_RULES_MESSAGE,
+  META_PREFIX_RULES_MESSAGE,
+  RESERVED_NAMESPACE_MESSAGE,
+} from "@/utils/metaUtils";
 
 describe("ToolsTab", () => {
   beforeEach(() => {
@@ -813,6 +818,37 @@ describe("ToolsTab", () => {
         { requestId: "abc123" },
       );
     });
+  });
+
+  describe("Reserved metadata keys", () => {
+    test.each`
+      description                             | value                             | message
+      ${"reserved metadata prefix"}           | ${"modelcontextprotocol.io/flip"} | ${RESERVED_NAMESPACE_MESSAGE}
+      ${"reserved root without slash"}        | ${"modelcontextprotocol.io"}      | ${RESERVED_NAMESPACE_MESSAGE}
+      ${"nested modelcontextprotocol domain"} | ${"api.modelcontextprotocol.org"} | ${RESERVED_NAMESPACE_MESSAGE}
+      ${"nested mcp domain"}                  | ${"tools.mcp.com/resource"}       | ${RESERVED_NAMESPACE_MESSAGE}
+      ${"invalid name segment"}               | ${"custom/bad-"}                  | ${META_NAME_RULES_MESSAGE}
+      ${"invalid prefix label"}               | ${"1invalid-prefix/value"}        | ${META_PREFIX_RULES_MESSAGE}
+    `(
+      "should block execution when $description is provided",
+      async ({ value, message }) => {
+        renderToolsTab({ selectedTool: mockTools[0] });
+
+        const addPairButton = screen.getByRole("button", { name: /add pair/i });
+        await act(async () => {
+          fireEvent.click(addPairButton);
+        });
+
+        const keyInput = screen.getByPlaceholderText("e.g. requestId");
+        await act(async () => {
+          fireEvent.change(keyInput, { target: { value } });
+        });
+
+        const runButton = screen.getByRole("button", { name: /run tool/i });
+        expect(runButton).toBeDisabled();
+        expect(screen.getByText(message)).toBeInTheDocument();
+      },
+    );
   });
 
   describe("ToolResults Metadata", () => {
