@@ -1,7 +1,8 @@
 import type { JsonValue, JsonSchemaType, JsonObject } from "./jsonUtils";
 import Ajv from "ajv";
 import type { ValidateFunction } from "ajv";
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { Tool, JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import { isJSONRPCRequest } from "@modelcontextprotocol/sdk/types.js";
 
 const ajv = new Ajv();
 
@@ -146,6 +147,50 @@ export function isPropertyRequired(
 }
 
 /**
+ * Resolves $ref references in JSON schema
+ * @param schema The schema that may contain $ref
+ * @param rootSchema The root schema to resolve references against
+ * @returns The resolved schema without $ref
+ */
+export function resolveRef(
+  schema: JsonSchemaType,
+  rootSchema: JsonSchemaType,
+): JsonSchemaType {
+  if (!("$ref" in schema) || !schema.$ref) {
+    return schema;
+  }
+
+  const ref = schema.$ref;
+
+  // Handle simple #/properties/name references
+  if (ref.startsWith("#/")) {
+    const path = ref.substring(2).split("/");
+    let current: unknown = rootSchema;
+
+    for (const segment of path) {
+      if (
+        current &&
+        typeof current === "object" &&
+        current !== null &&
+        segment in current
+      ) {
+        current = (current as Record<string, unknown>)[segment];
+      } else {
+        // If reference cannot be resolved, return the original schema
+        console.warn(`Could not resolve $ref: ${ref}`);
+        return schema;
+      }
+    }
+
+    return current as JsonSchemaType;
+  }
+
+  // For other types of references, return the original schema
+  console.warn(`Unsupported $ref format: ${ref}`);
+  return schema;
+}
+
+/**
  * Normalizes union types (like string|null from FastMCP) to simple types for form rendering
  * @param schema The JSON schema to normalize
  * @returns A normalized schema or the original schema
@@ -189,6 +234,16 @@ export function normalizeUnionType(schema: JsonSchemaType): JsonSchemaType {
     schema.anyOf.some((t) => (t as JsonSchemaType).type === "null")
   ) {
     return { ...schema, type: "integer", anyOf: undefined, nullable: true };
+  }
+
+  // Handle anyOf with exactly array and null (FastMCP pattern)
+  if (
+    schema.anyOf &&
+    schema.anyOf.length === 2 &&
+    schema.anyOf.some((t) => (t as JsonSchemaType).type === "array") &&
+    schema.anyOf.some((t) => (t as JsonSchemaType).type === "null")
+  ) {
+    return { ...schema, type: "array", anyOf: undefined, nullable: true };
   }
 
   // Handle array type with exactly string and null
@@ -244,4 +299,42 @@ export function formatFieldLabel(key: string): string {
     .replace(/([A-Z])/g, " $1") // Insert space before capital letters
     .replace(/_/g, " ") // Replace underscores with spaces
     .replace(/^\w/, (c) => c.toUpperCase()); // Capitalize first letter
+}
+
+/**
+ * Resolves `$ref` references in a JSON-RPC "elicitation/create" message's `requestedSchema` field
+ * @param message The JSON-RPC message that may contain $ref references
+ * @returns A new message with resolved $ref references, or the original message if no resolution is needed
+ */
+export function resolveRefsInMessage(message: JSONRPCMessage): JSONRPCMessage {
+  if (!isJSONRPCRequest(message) || !message.params?.requestedSchema) {
+    return message;
+  }
+
+  const requestedSchema = message.params.requestedSchema as JsonSchemaType;
+
+  if (!requestedSchema?.properties) {
+    return message;
+  }
+
+  const resolvedMessage = {
+    ...message,
+    params: {
+      ...message.params,
+      requestedSchema: {
+        ...requestedSchema,
+        properties: Object.fromEntries(
+          Object.entries(requestedSchema.properties).map(
+            ([key, propSchema]) => {
+              const resolved = resolveRef(propSchema, requestedSchema);
+              const normalized = normalizeUnionType(resolved);
+              return [key, normalized];
+            },
+          ),
+        ),
+      },
+    },
+  };
+
+  return resolvedMessage;
 }

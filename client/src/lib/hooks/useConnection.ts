@@ -46,6 +46,8 @@ import {
   clearClientInformationFromSessionStorage,
   InspectorOAuthClientProvider,
   saveClientInformationToSessionStorage,
+  saveScopeToSessionStorage,
+  clearScopeFromSessionStorage,
   discoverScopes,
 } from "../auth";
 import {
@@ -58,6 +60,7 @@ import { getMCPServerRequestTimeout } from "@/utils/configUtils";
 import { InspectorConfig } from "../configurationTypes";
 import { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { CustomHeaders } from "../types/customHeaders";
+import { resolveRefsInMessage } from "@/utils/schemaUtils";
 
 interface UseConnectionOptions {
   transportType: "stdio" | "sse" | "streamable-http";
@@ -82,6 +85,7 @@ interface UseConnectionOptions {
   getRoots?: () => any[];
   defaultLoggingLevel?: LoggingLevel;
   serverImplementation?: Implementation;
+  metadata?: Record<string, string>;
 }
 
 export function useConnection({
@@ -101,6 +105,7 @@ export function useConnection({
   onElicitationRequest,
   getRoots,
   defaultLoggingLevel,
+  metadata = {},
 }: UseConnectionOptions) {
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("disconnected");
@@ -146,6 +151,15 @@ export function useConnection({
     });
   }, [oauthClientId, oauthClientSecret, sseUrl]);
 
+  useEffect(() => {
+    if (!oauthScope) {
+      clearScopeFromSessionStorage(sseUrl);
+      return;
+    }
+
+    saveScopeToSessionStorage(sseUrl, oauthScope);
+  }, [oauthScope, sseUrl]);
+
   const pushHistory = (request: object, response?: object) => {
     setRequestHistory((prev) => [
       ...prev,
@@ -166,6 +180,20 @@ export function useConnection({
     }
     try {
       const abortController = new AbortController();
+
+      // Add metadata to the request if available, but skip for tool calls
+      // as they handle metadata merging separately
+      const shouldAddGeneralMetadata =
+        request.method !== "tools/call" && Object.keys(metadata).length > 0;
+      const requestWithMetadata = shouldAddGeneralMetadata
+        ? {
+            ...request,
+            params: {
+              ...request.params,
+              _meta: metadata,
+            },
+          }
+        : request;
 
       // prepare MCP Client request options
       const mcpRequestOptions: RequestOptions = {
@@ -195,13 +223,17 @@ export function useConnection({
 
       let response;
       try {
-        response = await mcpClient.request(request, schema, mcpRequestOptions);
+        response = await mcpClient.request(
+          requestWithMetadata,
+          schema,
+          mcpRequestOptions,
+        );
 
-        pushHistory(request, response);
+        pushHistory(requestWithMetadata, response);
       } catch (error) {
         const errorMessage =
           error instanceof Error ? error.message : String(error);
-        pushHistory(request, { error: errorMessage });
+        pushHistory(requestWithMetadata, { error: errorMessage });
         throw error;
       }
 
@@ -350,10 +382,9 @@ export function useConnection({
         }
         scope = await discoverScopes(sseUrl, resourceMetadata);
       }
-      const serverAuthProvider = new InspectorOAuthClientProvider(
-        sseUrl,
-        scope,
-      );
+
+      saveScopeToSessionStorage(sseUrl, scope);
+      const serverAuthProvider = new InspectorOAuthClientProvider(sseUrl);
 
       const result = await auth(serverAuthProvider, {
         serverUrl: sseUrl,
@@ -684,6 +715,14 @@ export function useConnection({
             : new SSEClientTransport(serverUrl, transportOptions);
 
         await client.connect(transport as Transport);
+
+        const protocolOnMessage = transport.onmessage;
+        if (protocolOnMessage) {
+          transport.onmessage = (message) => {
+            const resolvedMessage = resolveRefsInMessage(message);
+            protocolOnMessage(resolvedMessage);
+          };
+        }
 
         setClientTransport(transport);
 
