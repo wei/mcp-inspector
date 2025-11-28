@@ -241,17 +241,30 @@ const authMiddleware = (
  * This is necessary for the EventSource polyfill which expects web streams
  */
 const createWebReadableStream = (nodeStream: any): ReadableStream => {
+  let closed = false;
   return new ReadableStream({
     start(controller) {
       nodeStream.on("data", (chunk: any) => {
-        controller.enqueue(chunk);
+        if (!closed) {
+          controller.enqueue(chunk);
+        }
       });
       nodeStream.on("end", () => {
-        controller.close();
+        if (!closed) {
+          closed = true;
+          controller.close();
+        }
       });
       nodeStream.on("error", (err: any) => {
-        controller.error(err);
+        if (!closed) {
+          closed = true;
+          controller.error(err);
+        }
       });
+    },
+    cancel() {
+      closed = true;
+      nodeStream.destroy();
     },
   });
 };
@@ -526,6 +539,7 @@ app.delete(
           res.status(404).end("Transport not found for sessionId " + sessionId);
         } else {
           await serverTransport.terminateSession();
+          await serverTransport.close();
           webAppTransports.delete(sessionId);
           serverTransports.delete(sessionId);
           sessionHeaderHolders.delete(sessionId);
