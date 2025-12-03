@@ -11,7 +11,11 @@ import { Input } from "@/components/ui/input";
 import JsonEditor from "./JsonEditor";
 import { updateValueAtPath } from "@/utils/jsonUtils";
 import { generateDefaultValue } from "@/utils/schemaUtils";
-import type { JsonValue, JsonSchemaType } from "@/utils/jsonUtils";
+import type {
+  JsonValue,
+  JsonSchemaType,
+  JsonSchemaConst,
+} from "@/utils/jsonUtils";
 import { useToast } from "@/lib/hooks/useToast";
 import { CheckCheck, Copy } from "lucide-react";
 
@@ -88,7 +92,9 @@ const DynamicJsonForm = forwardRef<DynamicJsonFormRef, DynamicJsonFormProps>(
       if (!hasType) return false;
 
       const includesType = (t: string) =>
-        Array.isArray(s.type) ? s.type.includes(t as any) : s.type === t;
+        Array.isArray(s.type)
+          ? (s.type as ReadonlyArray<string>).includes(t)
+          : s.type === t;
 
       // Primitive at top-level
       if (primitiveTypes.some(includesType)) return true;
@@ -299,9 +305,11 @@ const DynamicJsonForm = forwardRef<DynamicJsonFormRef, DynamicJsonFormProps>(
       switch (fieldType) {
         case "string": {
           // Titled single-select using oneOf/anyOf with const/title pairs
-          const titledOptions = (propSchema.oneOf ?? propSchema.anyOf)?.filter(
-            (opt) => (opt as any).const !== undefined,
-          ) as { const: string; title?: string }[] | undefined;
+          const titledOptions = (
+            (propSchema.oneOf ?? propSchema.anyOf) as
+              | (JsonSchemaType | JsonSchemaConst)[]
+              | undefined
+          )?.filter((opt): opt is JsonSchemaConst => "const" in opt);
 
           if (titledOptions && titledOptions.length > 0) {
             return (
@@ -326,7 +334,10 @@ const DynamicJsonForm = forwardRef<DynamicJsonFormRef, DynamicJsonFormProps>(
                 >
                   <option value="">Select an option...</option>
                   {titledOptions.map((option) => (
-                    <option key={option.const} value={option.const}>
+                    <option
+                      key={String(option.const)}
+                      value={String(option.const)}
+                    >
                       {option.title ?? String(option.const)}
                     </option>
                   ))}
@@ -337,8 +348,8 @@ const DynamicJsonForm = forwardRef<DynamicJsonFormRef, DynamicJsonFormProps>(
 
           // Untitled single-select using enum (with optional legacy enumNames for labels)
           if (propSchema.enum) {
-            const names = Array.isArray((propSchema as any).enumNames)
-              ? (propSchema as any).enumNames
+            const names = Array.isArray(propSchema.enumNames)
+              ? propSchema.enumNames
               : undefined;
             return (
               <div className="space-y-2">
@@ -525,18 +536,20 @@ const DynamicJsonForm = forwardRef<DynamicJsonFormRef, DynamicJsonFormProps>(
           const itemSchema = propSchema.items as JsonSchemaType;
           let multiOptions: { value: string; label: string }[] | null = null;
 
-          const titledMulti = (itemSchema.anyOf ?? itemSchema.oneOf)?.filter(
-            (opt) => (opt as any).const !== undefined,
-          ) as { const: string; title?: string }[] | undefined;
+          const titledMulti = (
+            (itemSchema.anyOf ?? itemSchema.oneOf) as
+              | (JsonSchemaType | JsonSchemaConst)[]
+              | undefined
+          )?.filter((opt): opt is JsonSchemaConst => "const" in opt);
 
           if (titledMulti && titledMulti.length > 0) {
             multiOptions = titledMulti.map((o) => ({
-              value: o.const,
+              value: String(o.const),
               label: o.title ?? String(o.const),
             }));
           } else if (itemSchema.enum) {
-            const names = Array.isArray((itemSchema as any).enumNames)
-              ? (itemSchema as any).enumNames
+            const names = Array.isArray(itemSchema.enumNames)
+              ? itemSchema.enumNames
               : undefined;
             multiOptions = itemSchema.enum.map((v, i) => ({
               value: v,
