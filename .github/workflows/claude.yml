@@ -42,13 +42,13 @@ jobs:
             } else {
               prNumber = context.payload.pull_request.number;
             }
-            
+
             const pr = await github.rest.pulls.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
               pull_number: prNumber
             });
-            
+
             core.setOutput('sha', pr.data.head.sha);
             core.setOutput('repo', pr.data.head.repo.full_name);
 
