@@ -361,7 +361,13 @@ export function useConnection({
       (error instanceof SseError && error.code === 401) ||
       (error instanceof StreamableHTTPError && error.code === 401) ||
       (error instanceof Error && error.message.includes("401")) ||
-      (error instanceof Error && error.message.includes("Unauthorized"))
+  const is401Error = (error: unknown): boolean => {
+    return (
+      (error instanceof SseError && error.code === 401) ||
+      (error instanceof StreamableHTTPError && error.code === 401) ||
+      (error instanceof Error && error.message.includes("401")) ||
+      (error instanceof Error && error.message.includes("Unauthorized")) ||
+      (error instanceof Error && error.message.includes("Missing Authorization header"))
     );
   };
 
