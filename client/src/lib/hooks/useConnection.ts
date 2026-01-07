@@ -7,6 +7,7 @@ import {
 import {
   StreamableHTTPClientTransport,
   StreamableHTTPClientTransportOptions,
+  StreamableHTTPError,
 } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   ClientNotification,
@@ -358,8 +359,11 @@ export function useConnection({
   const is401Error = (error: unknown): boolean => {
     return (
       (error instanceof SseError && error.code === 401) ||
+      (error instanceof StreamableHTTPError && error.code === 401) ||
       (error instanceof Error && error.message.includes("401")) ||
-      (error instanceof Error && error.message.includes("Unauthorized"))
+      (error instanceof Error && error.message.includes("Unauthorized")) ||
+      (error instanceof Error &&
+        error.message.includes("Missing Authorization header"))
     );
   };
 
