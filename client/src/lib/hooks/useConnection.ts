@@ -367,7 +367,8 @@ export function useConnection({
       (error instanceof StreamableHTTPError && error.code === 401) ||
       (error instanceof Error && error.message.includes("401")) ||
       (error instanceof Error && error.message.includes("Unauthorized")) ||
-      (error instanceof Error && error.message.includes("Missing Authorization header"))
+      (error instanceof Error &&
+        error.message.includes("Missing Authorization header"))
     );
   };
 
