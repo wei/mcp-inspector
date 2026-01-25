@@ -85,39 +85,42 @@ const AnnotationBadges = ({
   const idempotent = getValueAndImplied(annotations?.idempotentHint, false);
   const openWorld = getValueAndImplied(annotations?.openWorldHint, true);
 
+  // Descriptions from MCP spec
   const badges = [
     {
       label: "Read-only",
       value: readOnly.value,
       implied: readOnly.implied,
+      description: "Tool does not modify its environment",
     },
     {
       label: "Destructive",
       value: destructive.value,
       implied: destructive.implied,
+      description:
+        "Tool may perform destructive updates (delete/overwrite data)",
     },
     {
       label: "Idempotent",
       value: idempotent.value,
       implied: idempotent.implied,
+      description: "Calling repeatedly with same args has no additional effect",
     },
     {
       label: "Open-world",
       value: openWorld.value,
       implied: openWorld.implied,
+      description:
+        "Tool may interact with external entities beyond its local environment",
     },
   ];
 
   return (
     <div className="flex flex-wrap gap-1 mt-2">
-      {badges.map(({ label, value, implied }) => (
+      {badges.map(({ label, value, implied, description }) => (
         <span
           key={label}
-          title={
-            implied
-              ? `${value ? "Yes" : "No"} (implied default)`
-              : `${value ? "Yes" : "No"} (explicitly set)`
-          }
+          title={`${description}\n\nValue: ${value ? "Yes" : "No"} (${implied ? "implied default" : "explicitly set"})`}
           className={cn(
             "inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border",
             implied && "border-dashed opacity-60",
