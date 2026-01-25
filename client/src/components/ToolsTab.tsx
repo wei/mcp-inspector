@@ -24,6 +24,7 @@ import {
   CompatibilityCallToolResult,
   ListToolsResult,
   Tool,
+  ToolAnnotations,
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   Loader2,
@@ -55,6 +56,63 @@ import {
 // Type guard to safely detect the optional _meta field without using `any`
 const hasMeta = (tool: Tool): tool is Tool & { _meta: unknown } =>
   typeof (tool as { _meta?: unknown })._meta !== "undefined";
+
+// Type guard to safely detect the optional annotations field
+const hasAnnotations = (
+  tool: Tool,
+): tool is Tool & { annotations: ToolAnnotations } =>
+  typeof (tool as { annotations?: unknown }).annotations !== "undefined" &&
+  (tool as { annotations?: unknown }).annotations !== null;
+
+// Helper to render annotation badges
+const AnnotationBadges = ({
+  annotations,
+}: {
+  annotations: ToolAnnotations;
+}) => {
+  const badges: {
+    label: string;
+    variant: "default" | "destructive" | "secondary" | "outline";
+  }[] = [];
+
+  if (annotations.readOnlyHint === true) {
+    badges.push({ label: "Read-only", variant: "secondary" });
+  }
+  if (annotations.destructiveHint === true) {
+    badges.push({ label: "Destructive", variant: "destructive" });
+  }
+  if (annotations.idempotentHint === true) {
+    badges.push({ label: "Idempotent", variant: "outline" });
+  }
+  if (annotations.openWorldHint === true) {
+    badges.push({ label: "Open-world", variant: "default" });
+  }
+
+  if (badges.length === 0) return null;
+
+  return (
+    <div className="flex flex-wrap gap-1 mt-2">
+      {badges.map(({ label, variant }) => (
+        <span
+          key={label}
+          className={cn(
+            "inline-flex items-center px-2 py-0.5 rounded text-xs font-medium",
+            variant === "destructive" &&
+              "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200",
+            variant === "secondary" &&
+              "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200",
+            variant === "outline" &&
+              "bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200 border border-gray-300 dark:border-gray-600",
+            variant === "default" &&
+              "bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200",
+          )}
+        >
+          {label}
+        </span>
+      ))}
+    </div>
+  );
+};
 
 const ToolsTab = ({
   tools,
@@ -213,6 +271,9 @@ const ToolsTab = ({
                 <p className="text-sm text-gray-600 dark:text-gray-400 whitespace-pre-wrap max-h-48 overflow-y-auto">
                   {selectedTool.description}
                 </p>
+                {hasAnnotations(selectedTool) && (
+                  <AnnotationBadges annotations={selectedTool.annotations} />
+                )}
                 {Object.entries(selectedTool.inputSchema.properties ?? []).map(
                   ([key, value]) => {
                     // First resolve any $ref references
