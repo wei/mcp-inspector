@@ -17,6 +17,7 @@ export const SESSION_KEYS = {
   PREREGISTERED_CLIENT_INFORMATION: "mcp_preregistered_client_information",
   SERVER_METADATA: "mcp_server_metadata",
   AUTH_DEBUGGER_STATE: "mcp_auth_debugger_state",
+  SCOPE: "mcp_scope",
 } as const;
 
 // Generate server-specific session storage keys
@@ -74,5 +75,12 @@ export const DEFAULT_INSPECTOR_CONFIG: InspectorConfig = {
       "Session token for authenticating with the MCP Proxy Server (displayed in proxy console on startup)",
     value: "",
     is_session_item: true,
+  },
+  MCP_TASK_TTL: {
+    label: "Task TTL",
+    description:
+      "Default Time-to-Live (TTL) in milliseconds for newly created tasks",
+    value: 60000,
+    is_session_item: false,
   },
 } as const;

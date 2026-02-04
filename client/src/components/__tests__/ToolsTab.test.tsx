@@ -3,9 +3,14 @@ import "@testing-library/jest-dom";
 import { describe, it, jest, beforeEach } from "@jest/globals";
 import ToolsTab from "../ToolsTab";
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { Tabs } from "@/components/ui/tabs";
-import { cacheToolOutputSchemas } from "@/utils/schemaUtils";
+import { Tabs } from "../ui/tabs";
+import { cacheToolOutputSchemas } from "../../utils/schemaUtils";
 import { within } from "@testing-library/react";
+import {
+  META_NAME_RULES_MESSAGE,
+  META_PREFIX_RULES_MESSAGE,
+  RESERVED_NAMESPACE_MESSAGE,
+} from "../../utils/metaUtils";
 
 describe("ToolsTab", () => {
   beforeEach(() => {
@@ -119,9 +124,14 @@ describe("ToolsTab", () => {
       fireEvent.click(submitButton);
     });
 
-    expect(defaultProps.callTool).toHaveBeenCalledWith(mockTools[1].name, {
-      count: 42,
-    });
+    expect(defaultProps.callTool).toHaveBeenCalledWith(
+      mockTools[1].name,
+      {
+        count: 42,
+      },
+      undefined,
+      false,
+    );
   });
 
   it("should allow typing negative numbers", async () => {
@@ -140,9 +150,14 @@ describe("ToolsTab", () => {
       fireEvent.click(submitButton);
     });
 
-    expect(defaultProps.callTool).toHaveBeenCalledWith(mockTools[0].name, {
-      num: -42,
-    });
+    expect(defaultProps.callTool).toHaveBeenCalledWith(
+      mockTools[0].name,
+      {
+        num: -42,
+      },
+      undefined,
+      false,
+    );
   });
 
   it("should allow specifying null value", async () => {
@@ -172,9 +187,14 @@ describe("ToolsTab", () => {
     });
 
     // Tool should have been called with null value
-    expect(mockCallTool).toHaveBeenCalledWith(toolWithNullableField.name, {
-      num: null,
-    });
+    expect(mockCallTool).toHaveBeenCalledWith(
+      toolWithNullableField.name,
+      {
+        num: null,
+      },
+      undefined,
+      false,
+    );
   });
 
   it("should support tri-state nullable boolean (null -> false -> true -> null)", async () => {
@@ -211,9 +231,14 @@ describe("ToolsTab", () => {
     await act(async () => {
       fireEvent.click(runButton);
     });
-    expect(mockCallTool).toHaveBeenCalledWith(toolWithNullableBoolean.name, {
-      optionalBoolean: null,
-    });
+    expect(mockCallTool).toHaveBeenCalledWith(
+      toolWithNullableBoolean.name,
+      {
+        optionalBoolean: null,
+      },
+      undefined,
+      false,
+    );
 
     // State 2: Uncheck null checkbox -> should set value to false and enable input
     await act(async () => {
@@ -233,6 +258,8 @@ describe("ToolsTab", () => {
       {
         optionalBoolean: false,
       },
+      undefined,
+      false,
     );
 
     // State 3: Check boolean checkbox -> should set value to true
@@ -254,6 +281,8 @@ describe("ToolsTab", () => {
       {
         optionalBoolean: true,
       },
+      undefined,
+      false,
     );
 
     // State 4: Check null checkbox again -> should set value back to null and disable input
@@ -271,6 +300,8 @@ describe("ToolsTab", () => {
       {
         optionalBoolean: null,
       },
+      undefined,
+      false,
     );
   });
 
@@ -697,10 +728,10 @@ describe("ToolsTab", () => {
     });
   });
 
-  describe("Meta Display", () => {
-    const toolWithMeta = {
+  describe("Metadata Display", () => {
+    const toolWithMetadata = {
       name: "metaTool",
-      description: "Tool with meta",
+      description: "Tool with metadata",
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -713,10 +744,10 @@ describe("ToolsTab", () => {
       },
     } as unknown as Tool;
 
-    it("should display meta section when tool has _meta", () => {
+    it("should display metadata section when tool has _meta", () => {
       renderToolsTab({
-        tools: [toolWithMeta],
-        selectedTool: toolWithMeta,
+        tools: [toolWithMetadata],
+        selectedTool: toolWithMetadata,
       });
 
       expect(screen.getByText("Meta:")).toBeInTheDocument();
@@ -725,10 +756,10 @@ describe("ToolsTab", () => {
       ).toBeInTheDocument();
     });
 
-    it("should toggle meta expansion", () => {
+    it("should toggle metadata schema expansion", () => {
       renderToolsTab({
-        tools: [toolWithMeta],
-        selectedTool: toolWithMeta,
+        tools: [toolWithMetadata],
+        selectedTool: toolWithMetadata,
       });
 
       // There might be multiple Expand buttons (Output Schema, Meta). We need the one within Meta section
@@ -758,19 +789,89 @@ describe("ToolsTab", () => {
     });
   });
 
-  describe("ToolResults Meta", () => {
-    it("should display meta information when present in toolResult", () => {
-      const resultWithMeta = {
+  describe("Metadata submission", () => {
+    it("should send metadata values when provided", async () => {
+      const callToolMock = jest.fn(async () => {});
+
+      renderToolsTab({ selectedTool: mockTools[0], callTool: callToolMock });
+
+      // Add a metadata key/value pair
+      const addPairButton = screen.getByRole("button", { name: /add pair/i });
+      await act(async () => {
+        fireEvent.click(addPairButton);
+      });
+
+      // Fill key and value
+      const keyInputs = screen.getAllByLabelText(/key/i);
+      const valueInputs = screen.getAllByLabelText(/value/i);
+      expect(keyInputs.length).toBeGreaterThan(0);
+      expect(valueInputs.length).toBeGreaterThan(0);
+
+      await act(async () => {
+        fireEvent.change(keyInputs[0], { target: { value: "requestId" } });
+        fireEvent.change(valueInputs[0], { target: { value: "abc123" } });
+      });
+
+      // Run tool
+      const runButton = screen.getByRole("button", { name: /run tool/i });
+      await act(async () => {
+        fireEvent.click(runButton);
+      });
+
+      expect(callToolMock).toHaveBeenCalledTimes(1);
+      expect(callToolMock).toHaveBeenLastCalledWith(
+        mockTools[0].name,
+        expect.any(Object),
+        { requestId: "abc123" },
+        false,
+      );
+    });
+  });
+
+  describe("Reserved metadata keys", () => {
+    test.each`
+      description                             | value                             | message
+      ${"reserved metadata prefix"}           | ${"modelcontextprotocol.io/flip"} | ${RESERVED_NAMESPACE_MESSAGE}
+      ${"reserved root without slash"}        | ${"modelcontextprotocol.io"}      | ${RESERVED_NAMESPACE_MESSAGE}
+      ${"nested modelcontextprotocol domain"} | ${"api.modelcontextprotocol.org"} | ${RESERVED_NAMESPACE_MESSAGE}
+      ${"nested mcp domain"}                  | ${"tools.mcp.com/resource"}       | ${RESERVED_NAMESPACE_MESSAGE}
+      ${"invalid name segment"}               | ${"custom/bad-"}                  | ${META_NAME_RULES_MESSAGE}
+      ${"invalid prefix label"}               | ${"1invalid-prefix/value"}        | ${META_PREFIX_RULES_MESSAGE}
+    `(
+      "should block execution when $description is provided",
+      async ({ value, message }) => {
+        renderToolsTab({ selectedTool: mockTools[0] });
+
+        const addPairButton = screen.getByRole("button", { name: /add pair/i });
+        await act(async () => {
+          fireEvent.click(addPairButton);
+        });
+
+        const keyInput = screen.getByPlaceholderText("e.g. requestId");
+        await act(async () => {
+          fireEvent.change(keyInput, { target: { value } });
+        });
+
+        const runButton = screen.getByRole("button", { name: /run tool/i });
+        expect(runButton).toBeDisabled();
+        expect(screen.getByText(message)).toBeInTheDocument();
+      },
+    );
+  });
+
+  describe("ToolResults Metadata", () => {
+    it("should display metadata information when present in toolResult", () => {
+      const resultWithMetadata = {
         content: [],
         _meta: { info: "details", version: 2 },
       };
 
       renderToolsTab({
         selectedTool: mockTools[0],
-        toolResult: resultWithMeta,
+        toolResult: resultWithMetadata,
       });
 
-      // Only ToolResults meta should be present since selectedTool has no _meta
+      // Only ToolResults metadata should be present since selectedTool has no _meta
       expect(screen.getAllByText("Meta:")).toHaveLength(1);
       expect(screen.getByText(/info/i)).toBeInTheDocument();
       expect(screen.getByText(/version/i)).toBeInTheDocument();
@@ -986,6 +1087,8 @@ describe("ToolsTab", () => {
           message: "test message",
           count: 5,
         },
+        undefined,
+        false,
       );
     });
 

@@ -1,7 +1,8 @@
 import type { JsonValue, JsonSchemaType, JsonObject } from "./jsonUtils";
 import Ajv from "ajv";
 import type { ValidateFunction } from "ajv";
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { Tool, JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import { isJSONRPCRequest } from "@modelcontextprotocol/sdk/types.js";
 
 const ajv = new Ajv();
 
@@ -99,6 +100,7 @@ export function generateDefaultValue(
     propertyName && parentSchema
       ? isPropertyRequired(propertyName, parentSchema)
       : false;
+  const isRootSchema = propertyName === undefined && parentSchema === undefined;
 
   switch (schema.type) {
     case "string":
@@ -111,19 +113,27 @@ export function generateDefaultValue(
     case "array":
       return isRequired ? [] : undefined;
     case "object": {
-      if (!schema.properties) return isRequired ? {} : undefined;
+      if (!schema.properties) {
+        return isRequired || isRootSchema ? {} : undefined;
+      }
 
       const obj: JsonObject = {};
-      // Only include properties that are required according to the schema's required array
+      // Include required properties OR optional properties that declare a default
       Object.entries(schema.properties).forEach(([key, prop]) => {
-        if (isPropertyRequired(key, schema)) {
+        const hasExplicitDefault =
+          "default" in prop && (prop as JsonSchemaType).default !== undefined;
+        if (isPropertyRequired(key, schema) || hasExplicitDefault) {
           const value = generateDefaultValue(prop, key, schema);
           if (value !== undefined) {
             obj[key] = value;
           }
         }
       });
-      return isRequired ? obj : Object.keys(obj).length > 0 ? obj : undefined;
+
+      if (Object.keys(obj).length === 0) {
+        return isRequired || isRootSchema ? {} : undefined;
+      }
+      return obj;
     }
     case "null":
       return null;
@@ -302,4 +312,42 @@ export function formatFieldLabel(key: string): string {
     .replace(/([A-Z])/g, " $1") // Insert space before capital letters
     .replace(/_/g, " ") // Replace underscores with spaces
     .replace(/^\w/, (c) => c.toUpperCase()); // Capitalize first letter
+}
+
+/**
+ * Resolves `$ref` references in a JSON-RPC "elicitation/create" message's `requestedSchema` field
+ * @param message The JSON-RPC message that may contain $ref references
+ * @returns A new message with resolved $ref references, or the original message if no resolution is needed
+ */
+export function resolveRefsInMessage(message: JSONRPCMessage): JSONRPCMessage {
+  if (!isJSONRPCRequest(message) || !message.params?.requestedSchema) {
+    return message;
+  }
+
+  const requestedSchema = message.params.requestedSchema as JsonSchemaType;
+
+  if (!requestedSchema?.properties) {
+    return message;
+  }
+
+  const resolvedMessage = {
+    ...message,
+    params: {
+      ...message.params,
+      requestedSchema: {
+        ...requestedSchema,
+        properties: Object.fromEntries(
+          Object.entries(requestedSchema.properties).map(
+            ([key, propSchema]) => {
+              const resolved = resolveRef(propSchema, requestedSchema);
+              const normalized = normalizeUnionType(resolved);
+              return [key, normalized];
+            },
+          ),
+        ),
+      },
+    },
+  };
+
+  return resolvedMessage;
 }
