@@ -29,7 +29,7 @@ jobs:
       # Cache Playwright browsers
       - name: Cache Playwright browsers
         id: cache-playwright
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/ms-playwright # The default Playwright cache path
           key: ${{ runner.os }}-playwright-${{ hashFiles('package-lock.json') }} # Cache key based on OS and package-lock.json
