@@ -173,7 +173,7 @@ const ToolsTab = ({
                 <IconDisplay icons={(tool as WithIcons).icons} size="sm" />
               </div>
               <div className="flex flex-col flex-1 min-w-0">
-                <span className="truncate">{tool.name}</span>
+                <span className="truncate">{tool.title || tool.name}</span>
                 <span className="text-sm text-gray-500 text-left line-clamp-2">
                   {tool.description}
                 </span>
@@ -196,7 +196,9 @@ const ToolsTab = ({
                 />
               )}
               <h3 className="font-semibold">
-                {selectedTool ? selectedTool.name : "Select a tool"}
+                {selectedTool
+                  ? selectedTool.title || selectedTool.name
+                  : "Select a tool"}
               </h3>
             </div>
           </div>
