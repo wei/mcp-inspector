@@ -123,11 +123,9 @@ const AnnotationBadges = ({
           title={`${description}\n\nValue: ${value ? "Yes" : "No"} (${implied ? "implied default" : "explicitly set"})`}
           className={cn(
             "inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border",
+            "bg-slate-100 text-slate-700 border-slate-300 dark:bg-slate-800 dark:text-slate-300 dark:border-slate-600",
             implied && "border-dashed opacity-60",
             !implied && "border-solid",
-            value
-              ? "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200 border-green-300 dark:border-green-700"
-              : "bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400 border-gray-300 dark:border-gray-600",
           )}
         >
           {value ? "✓" : "✗"} {label}
