@@ -181,9 +181,11 @@ const ToolsTab = ({
   const { copied, setCopied } = useCopy();
 
   // Function to check if any form has validation errors
-  const checkValidationErrors = () => {
+  const checkValidationErrors = (validateChildren: boolean = false) => {
     const errors = Object.values(formRefs.current).some(
-      (ref) => ref && !ref.validateJson().isValid,
+      (ref) =>
+        ref &&
+        (validateChildren ? !ref.validateJson().isValid : ref.hasJsonError()),
     );
     setHasValidationErrors(errors);
     return errors;
@@ -250,7 +252,7 @@ const ToolsTab = ({
                 <IconDisplay icons={(tool as WithIcons).icons} size="sm" />
               </div>
               <div className="flex flex-col flex-1 min-w-0">
-                <span className="truncate">{tool.name}</span>
+                <span className="truncate">{tool.title || tool.name}</span>
                 <span className="text-sm text-gray-500 text-left line-clamp-2">
                   {tool.description}
                 </span>
@@ -273,7 +275,9 @@ const ToolsTab = ({
                 />
               )}
               <h3 className="font-semibold">
-                {selectedTool ? selectedTool.name : "Select a tool"}
+                {selectedTool
+                  ? selectedTool.title || selectedTool.name
+                  : "Select a tool"}
               </h3>
             </div>
           </div>
@@ -761,7 +765,7 @@ const ToolsTab = ({
                 <Button
                   onClick={async () => {
                     // Validate JSON inputs before calling tool
-                    if (checkValidationErrors()) return;
+                    if (checkValidationErrors(true)) return;
 
                     try {
                       setIsToolRunning(true);
