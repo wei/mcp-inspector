@@ -42,7 +42,6 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     if: github.event_name == 'release'
-    environment: release
     needs: build
 
     permissions:
@@ -69,7 +68,6 @@ jobs:
   publish-github-container-registry:
     runs-on: ubuntu-latest
     if: github.event_name == 'release'
-    environment: release
     needs: build
     permissions:
       contents: read
