@@ -54,7 +54,7 @@ jobs:
 
       - name: Checkout PR branch
         if: steps.pr.outcome == 'success'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ steps.pr.outputs.sha }}
           repository: ${{ steps.pr.outputs.repo }}
@@ -62,7 +62,7 @@ jobs:
 
       - name: Checkout repository
         if: steps.pr.outcome != 'success'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
