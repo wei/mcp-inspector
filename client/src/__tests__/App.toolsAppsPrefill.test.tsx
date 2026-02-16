@@ -13,20 +13,18 @@ type ToolListEntry = {
   _meta: Record<string, unknown>;
 };
 
-let latestAppsTabProps:
-  | {
-      tools: ToolListEntry[];
-      prefilledToolCall?: {
-        id: number;
-        toolName: string;
-        params: Record<string, unknown>;
-        result: {
-          content: Array<{ type: string; text: string }>;
-        };
-      } | null;
-      onPrefilledToolCallConsumed?: (callId: number) => void;
-    }
-  | undefined;
+type AppsTabProps = {
+  tools: ToolListEntry[];
+  prefilledToolCall?: {
+    id: number;
+    toolName: string;
+    params: Record<string, unknown>;
+    result: {
+      content: Array<{ type: string; text: string }>;
+    };
+  } | null;
+  onPrefilledToolCallConsumed?: (callId: number) => void;
+};
 
 // Mock auth dependencies first
 jest.mock("@modelcontextprotocol/sdk/client/auth.js", () => ({
@@ -164,8 +162,7 @@ jest.mock("../components/ToolsTab", () => ({
 
 jest.mock("../components/AppsTab", () => ({
   __esModule: true,
-  default: (props: typeof latestAppsTabProps) => {
-    latestAppsTabProps = props;
+  default: (props: AppsTabProps) => {
     const prefilled =
       props && "prefilledToolCall" in props ? props.prefilledToolCall : null;
     const tools = props && "tools" in props ? props.tools : [];
@@ -200,7 +197,6 @@ describe("App - Tools to Apps prefilled handoff", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    latestAppsTabProps = undefined;
     window.location.hash = "#tools";
   });
 
