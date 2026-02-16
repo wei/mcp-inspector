@@ -78,7 +78,7 @@ const ToolsTab = ({
     params: Record<string, unknown>,
     metadata?: Record<string, unknown>,
     runAsTask?: boolean,
-  ) => Promise<void>;
+  ) => Promise<CompatibilityCallToolResult>;
   selectedTool: Tool | null;
   setSelectedTool: (tool: Tool | null) => void;
   toolResult: CompatibilityCallToolResult | null;

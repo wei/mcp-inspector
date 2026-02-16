@@ -1,0 +1,226 @@
+diff --git a/node_modules/@mcp-ui/client/dist/index.mjs b/node_modules/@mcp-ui/client/dist/index.mjs
+index 38fbac3..fa81be4 100644
+--- a/node_modules/@mcp-ui/client/dist/index.mjs
++++ b/node_modules/@mcp-ui/client/dist/index.mjs
+@@ -8417,23 +8417,40 @@ const $h = "io.modelcontextprotocol/ui", Ih = {
+ }, jh = {
+   [$h]: Ih
+ }, kh = 1e4;
+-async function wh(e) {
+-  const i = document.createElement("iframe");
+-  i.style.width = "100%", i.style.height = "600px", i.style.border = "none", i.style.backgroundColor = "transparent", i.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms");
+-  const r = new Promise((a, t) => {
+-    let n = !1;
+-    const o = () => {
+-      window.removeEventListener("message", u), i.removeEventListener("error", l);
+-    }, s = setTimeout(() => {
+-      n || (n = !0, o(), t(new Error("Timed out waiting for sandbox proxy iframe to be ready")));
+-    }, kh), u = (d) => {
+-      d.source === i.contentWindow && d.data && d.data.method === $f && (n || (n = !0, clearTimeout(s), o(), a()));
++function Fh(e) {
++  if (!e || typeof e != "object")
++    return "";
++  const i = [];
++  return e.camera && i.push("camera"), e.microphone && i.push("microphone"), e.geolocation && i.push("geolocation"), e.clipboardWrite && i.push("clipboard-write"), i.join("; ");
++}
++function Jh(e) {
++  if (!e || typeof e != "object")
++    return {};
++  const i = "_meta" in e && e._meta && typeof e._meta == "object" ? e._meta : "meta" in e && e.meta && typeof e.meta == "object" ? e.meta : void 0, r = i && typeof i.ui == "object" && i.ui ? i.ui : void 0;
++  return {
++    csp: r && typeof r.csp == "object" ? r.csp : void 0,
++    permissions: r && typeof r.permissions == "object" ? r.permissions : void 0
++  };
++}
++async function wh(e, i) {
++  const r = document.createElement("iframe");
++  r.style.width = "100%", r.style.height = "600px", r.style.border = "none", r.style.backgroundColor = "transparent", r.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms");
++  const a = Fh(i);
++  a && r.setAttribute("allow", a);
++  const t = new Promise((n, o) => {
++    let s = !1;
++    const u = () => {
++      window.removeEventListener("message", d), r.removeEventListener("error", l);
++    }, c = setTimeout(() => {
++      s || (s = !0, u(), o(new Error("Timed out waiting for sandbox proxy iframe to be ready")));
++    }, kh), d = (v) => {
++      v.source === r.contentWindow && v.data && v.data.method === $f && (s || (s = !0, clearTimeout(c), u(), n()));
+     }, l = () => {
+-      n || (n = !0, clearTimeout(s), o(), t(new Error("Failed to load sandbox proxy iframe")));
++      s || (s = !0, clearTimeout(c), u(), o(new Error("Failed to load sandbox proxy iframe")));
+     };
+-    window.addEventListener("message", u), i.addEventListener("error", l);
++    window.addEventListener("message", d), r.addEventListener("error", l);
+   });
+-  return i.src = e.href, { iframe: i, onReady: r };
++  return r.src = e.href, { iframe: r, onReady: t };
+ }
+ async function Sh(e, i) {
+   let r, a;
+@@ -8467,7 +8484,12 @@ async function xh(e, i) {
+     t = atob(a.blob);
+   else
+     throw new Error("Unsupported UI resource content format: " + JSON.stringify(a));
+-  return t;
++  const o = Jh(a);
++  return {
++    html: t,
++    csp: o.csp,
++    permissions: o.permissions
++  };
+ }
+ function Eh(e, i) {
+   const r = new URL(e.href);
+@@ -8496,7 +8518,7 @@ const zh = (e) => {
+       var ne, Q;
+       try {
+         $.current && ((ne = b.current) != null && ne.contains($.current)) && (b.current.removeChild($.current), $.current = null, I.current = null, N.current = null);
+-        const { iframe: H, onReady: ge } = await wh(k);
++        const { iframe: H, onReady: ge } = await wh(k, r.permissions);
+         if (!R || ($.current = H, I.current = V, N.current = a, b.current && b.current.appendChild(H), await ge, !R) || (a.onsizechange = async (ae) => {
+           var st;
+           (st = J.current) == null || st.call(J, ae), $.current && (ae.width !== void 0 && ($.current.style.width = `${ae.width}px`), ae.height !== void 0 && ($.current.style.height = `${ae.height}px`));
+@@ -8518,21 +8540,22 @@ const zh = (e) => {
+     })(), () => {
+       R = !1;
+     };
+-  }, [r.url, r.csp, a]), q(() => {
++  }, [r.url, r.csp, r.permissions, a]), q(() => {
+     if (!c || !i || N.current !== a) return;
+     (async () => {
+       var V;
+       try {
+         console.log("[AppFrame] Sending HTML to sandbox"), await a.sendSandboxResourceReady({
+           html: i,
+-          csp: r.csp
++          csp: r.csp,
++          permissions: r.permissions
+         });
+       } catch (R) {
+         const ve = R instanceof Error ? R : new Error(String(R));
+         g(ve), (V = O.current) == null || V.call(O, ve);
+       }
+     })();
+-  }, [c, i, a, r.csp]), q(() => {
++  }, [c, i, a, r.csp, r.permissions]), q(() => {
+     c && l && o && N.current === a && (console.log("[AppFrame] Sending tool input:", o), a.sendToolInput({ arguments: o }));
+   }, [a, c, l, o]), q(() => {
+     c && l && s && N.current === a && (console.log("[AppFrame] Sending tool result:", s), a.sendToolResult(s));
+@@ -8574,9 +8597,9 @@ const zh = (e) => {
+     onListResourceTemplates: J,
+     onReadResource: U,
+     onListPrompts: O
+-  } = e, [k, V] = Se(null), [R, ve] = Se(o ?? null), [ne, Q] = Se(null), H = F(f), ge = F(v), ae = F(g), st = F(b), Ue = F($), er = F(I), tr = F(N), ir = F(J), We = F(U), rr = F(O);
++  } = e, [k, V] = Se(null), [R, ve] = Se(o ?? null), [ne, Q] = Se(null), [H, ge] = Se({ csp: void 0, permissions: void 0 }), ae = F(f), st = F(v), Ue = F(g), er = F(b), tr = F($), ir = F(I), We = F(N), rr = F(J), He = F(U), qe = F(O);
+   q(() => {
+-    H.current = f, ge.current = v, ae.current = g, st.current = b, Ue.current = $, er.current = I, tr.current = N, ir.current = J, We.current = U, rr.current = O;
++    ae.current = f, st.current = v, Ue.current = g, er.current = b, tr.current = $, ir.current = I, We.current = N, rr.current = J, He.current = U, qe.current = O;
+   }), Qa(
+     i,
+     () => ({
+@@ -8604,31 +8627,31 @@ const zh = (e) => {
+           }
+         );
+         if (K.onmessage = async (G, A) => {
+-          if (H.current)
+-            return H.current(G, A);
++          if (ae.current)
++            return ae.current(G, A);
+           throw new ba(ya.MethodNotFound, "Method not found");
+         }, K.onopenlink = async (G, A) => {
+-          if (ge.current)
+-            return ge.current(G, A);
++          if (st.current)
++            return st.current(G, A);
+           throw new ba(ya.MethodNotFound, "Method not found");
+         }, K.onloggingmessage = (G) => {
+-          ae.current && ae.current(G);
+-        }, er.current && (K.oncalltool = (G, A) => er.current(G, A)), tr.current && (K.onlistresources = (G, A) => tr.current(G, A)), ir.current && (K.onlistresourcetemplates = (G, A) => ir.current(G, A)), We.current && (K.onreadresource = (G, A) => We.current(G, A)), rr.current && (K.onlistprompts = (G, A) => rr.current(G, A)), !ut) return;
++          Ue.current && Ue.current(G);
++        }, ir.current && (K.oncalltool = (G, A) => ir.current(G, A)), We.current && (K.onlistresources = (G, A) => We.current(G, A)), rr.current && (K.onlistresourcetemplates = (G, A) => rr.current(G, A)), He.current && (K.onreadresource = (G, A) => He.current(G, A)), qe.current && (K.onlistprompts = (G, A) => qe.current(G, A)), !ut) return;
+         V(K);
+       } catch (oe) {
+         if (console.error("[AppRenderer] Error creating bridge:", oe), !ut) return;
+         const K = oe instanceof Error ? oe : new Error(String(oe));
+-        Q(K), (Oe = Ue.current) == null || Oe.call(Ue, K);
++        Q(K), (Oe = tr.current) == null || Oe.call(tr, K);
+       }
+     })(), () => {
+       ut = !1;
+     };
+   }, [r]), q(() => {
+     if (o) {
+-      ve(o);
++      ve(o), ge({ csp: void 0, permissions: void 0 });
+       return;
+     }
+-    const ut = !!r, ga = !!n && !!We.current;
++    const ut = !!r, ga = !!n && !!He.current;
+     if (!ut && !ga) {
+       Q(
+         new Error(
+@@ -8637,6 +8660,7 @@ const zh = (e) => {
+       );
+       return;
+     }
++    ge({ csp: void 0, permissions: void 0 });
+     let Oe = !0;
+     return (async () => {
+       var K, G;
+@@ -8657,10 +8681,12 @@ const zh = (e) => {
+         if (!Oe) return;
+         console.log(`[AppRenderer] Reading resource HTML from: ${A}`);
+         let Ne;
+-        if (r)
+-          Ne = await xh(r, { uri: A });
+-        else if (We.current) {
+-          const Re = await We.current({ uri: A }, {});
++        if (r) {
++          const Re = await xh(r, { uri: A });
++          if (!Oe) return;
++          Ne = Re.html, ge({ csp: Re.csp, permissions: Re.permissions });
++        } else if (He.current) {
++          const Re = await He.current({ uri: A }, {});
+           if (!Re.contents || Re.contents.length !== 1)
+             throw new Error("Unsupported UI resource content length: " + ((K = Re.contents) == null ? void 0 : K.length));
+           const _e = Re.contents[0], ha = (dm) => dm === va;
+@@ -8670,6 +8696,8 @@ const zh = (e) => {
+             Ne = atob(_e.blob);
+           else
+             throw new Error("Unsupported UI resource content format: " + JSON.stringify(_e));
++          const mt = Jh(_e);
++          ge({ csp: mt.csp, permissions: mt.permissions });
+         } else
+           throw new Error("No way to read resource HTML");
+         if (!Oe) return;
+@@ -8677,7 +8705,7 @@ const zh = (e) => {
+       } catch (A) {
+         if (!Oe) return;
+         const Ne = A instanceof Error ? A : new Error(String(A));
+-        Q(Ne), (G = Ue.current) == null || G.call(Ue, Ne);
++        Q(Ne), (G = tr.current) == null || G.call(tr, Ne);
+       }
+     })(), () => {
+       Oe = !1;
+@@ -8689,7 +8717,11 @@ const zh = (e) => {
+   }, [k, l]), q(() => {
+     k && d && k.sendToolCancelled({});
+   }, [k, d]);
+-  const lm = st.current;
++  const lm = er.current, dm = {
++    ...t,
++    csp: H.csp ?? t.csp,
++    permissions: H.permissions ?? t.permissions
++  };
+   return ne ? /* @__PURE__ */ bt("div", { style: { color: "red", padding: "1rem" }, children: [
+     "Error: ",
+     ne.message
+@@ -8697,7 +8729,7 @@ const zh = (e) => {
+     zh,
+     {
+       html: R,
+-      sandbox: t,
++      sandbox: dm,
+       appBridge: k,
+       toolInput: s,
+       toolResult: u,

@@ -2,7 +2,10 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import { describe, it, jest, beforeEach } from "@jest/globals";
 import AppRenderer from "../AppRenderer";
-import { Tool, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import {
+  Tool,
+  CompatibilityCallToolResult,
+} from "@modelcontextprotocol/sdk/types.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { RequestHandlerExtra } from "@mcp-ui/client";
 import { McpUiMessageResult } from "@modelcontextprotocol/ext-apps";
@@ -16,7 +19,7 @@ type BridgeEvent = {
 type MockMcpUiRendererProps = {
   toolName: string;
   toolInput?: Record<string, unknown>;
-  toolResult?: CallToolResult;
+  toolResult?: CompatibilityCallToolResult;
   onMessage?: (
     params: { role: "user"; content: { type: "text"; text: string }[] },
     extra: RequestHandlerExtra,
@@ -111,16 +114,6 @@ jest.mock("@mcp-ui/client", () => {
   };
 });
 
-const createDeferred = <T,>() => {
-  let resolve!: (value: T) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
-};
-
 describe("AppRenderer", () => {
   const mockTool: Tool = {
     name: "testApp",
@@ -137,12 +130,6 @@ describe("AppRenderer", () => {
   } as Tool & { _meta?: { ui?: { resourceUri?: string } } };
 
   const mockMcpClient = {
-    request: jest.fn(
-      () =>
-        new Promise<CallToolResult>(() => {
-          // Intentionally unresolved for baseline rendering tests.
-        }),
-    ),
     getServerCapabilities: jest.fn().mockReturnValue({}),
     setNotificationHandler: jest.fn(),
   } as unknown as Client;
@@ -151,6 +138,7 @@ describe("AppRenderer", () => {
     sandboxPath: "/sandbox",
     tool: mockTool,
     mcpClient: mockMcpClient,
+    toolResult: null,
   };
 
   beforeEach(() => {
@@ -187,37 +175,18 @@ describe("AppRenderer", () => {
     });
   });
 
-  it("should call tools/call and send tool input/result after app initialization", async () => {
-    const mockResult: CallToolResult = {
+  it("should send provided tool input and tool result after app initialization", async () => {
+    const result: CompatibilityCallToolResult = {
       content: [{ type: "text", text: "Budget initialized" }],
     };
-    const requestMock = jest.fn().mockResolvedValue(mockResult);
-    const mcpClient = {
-      ...mockMcpClient,
-      request: requestMock,
-    } as unknown as Client;
 
     render(
       <AppRenderer
         {...defaultProps}
-        mcpClient={mcpClient}
         toolInput={{ monthlyBudget: 2500 }}
+        toolResult={result}
       />,
     );
-
-    await waitFor(() => {
-      expect(requestMock).toHaveBeenCalledWith(
-        {
-          method: "tools/call",
-          params: {
-            name: "testApp",
-            arguments: { monthlyBudget: 2500 },
-          },
-        },
-        expect.any(Object),
-        expect.objectContaining({ signal: expect.any(AbortSignal) }),
-      );
-    });
 
     expect(mockBridgeEvents).toHaveLength(0);
 
@@ -237,25 +206,49 @@ describe("AppRenderer", () => {
       (event) =>
         event.toolName === "testApp" && event.type === "sendToolResult",
     );
-    expect(resultEvent?.payload).toEqual(mockResult);
+    expect(resultEvent?.payload).toEqual(result);
   });
 
-  it("should send an app-consumable error result when tools/call fails", async () => {
-    const requestMock = jest
-      .fn()
-      .mockRejectedValue(new Error("tool execution failed"));
-    const mcpClient = {
-      ...mockMcpClient,
-      request: requestMock,
-    } as unknown as Client;
-
+  it("should not send tool result event when toolResult is null", async () => {
     render(
-      <AppRenderer {...defaultProps} mcpClient={mcpClient} toolInput={{}} />,
+      <AppRenderer
+        {...defaultProps}
+        toolInput={{ monthlyBudget: 2500 }}
+        toolResult={null}
+      />,
     );
 
+    fireEvent.click(screen.getByTestId("initialize-app"));
+
     await waitFor(() => {
-      expect(requestMock).toHaveBeenCalledTimes(1);
+      const inputEvents = mockBridgeEvents.filter(
+        (event) =>
+          event.toolName === "testApp" && event.type === "sendToolInput",
+      );
+      expect(inputEvents).toHaveLength(1);
     });
+
+    const resultEvents = mockBridgeEvents.filter(
+      (event) =>
+        event.toolName === "testApp" && event.type === "sendToolResult",
+    );
+    expect(resultEvents).toHaveLength(0);
+  });
+
+  it("should normalize compatibility wrapper tool results before sending", async () => {
+    const wrappedResult = {
+      toolResult: {
+        content: [{ type: "text", text: "Wrapped result payload" }],
+      },
+    } as CompatibilityCallToolResult;
+
+    render(
+      <AppRenderer
+        {...defaultProps}
+        toolInput={{ monthlyBudget: 2500 }}
+        toolResult={wrappedResult}
+      />,
+    );
 
     fireEvent.click(screen.getByTestId("initialize-app"));
 
@@ -264,95 +257,8 @@ describe("AppRenderer", () => {
         (event) =>
           event.toolName === "testApp" && event.type === "sendToolResult",
       );
-
-      expect(resultEvent?.payload).toEqual({
-        content: [{ type: "text", text: "tool execution failed" }],
-        isError: true,
-      });
+      expect(resultEvent).toBeTruthy();
+      expect(resultEvent?.payload).toEqual(wrappedResult.toolResult);
     });
-  });
-
-  it("should ignore stale tool results after switching app tools", async () => {
-    const firstResult: CallToolResult = {
-      content: [{ type: "text", text: "stale result" }],
-    };
-    const secondResult: CallToolResult = {
-      content: [{ type: "text", text: "fresh result" }],
-    };
-
-    const firstRequest = createDeferred<CallToolResult>();
-    const secondRequest = createDeferred<CallToolResult>();
-    const requestMock = jest
-      .fn()
-      .mockReturnValueOnce(firstRequest.promise)
-      .mockReturnValueOnce(secondRequest.promise);
-
-    const mcpClient = {
-      ...mockMcpClient,
-      request: requestMock,
-    } as unknown as Client;
-
-    const { rerender } = render(
-      <AppRenderer
-        {...defaultProps}
-        mcpClient={mcpClient}
-        toolInput={{ month: "january" }}
-      />,
-    );
-
-    await waitFor(() => {
-      expect(requestMock).toHaveBeenCalledTimes(1);
-    });
-
-    const secondTool = {
-      ...mockTool,
-      name: "budgetAllocatorApp",
-    };
-
-    rerender(
-      <AppRenderer
-        {...defaultProps}
-        mcpClient={mcpClient}
-        tool={secondTool}
-        toolInput={{ month: "february" }}
-      />,
-    );
-
-    await waitFor(() => {
-      expect(requestMock).toHaveBeenCalledTimes(2);
-    });
-
-    secondRequest.resolve(secondResult);
-    await waitFor(() => {
-      expect(screen.getByTestId("tool-result")).toHaveTextContent(
-        "fresh result",
-      );
-    });
-
-    fireEvent.click(screen.getByTestId("initialize-app"));
-
-    await waitFor(() => {
-      const freshEvents = mockBridgeEvents.filter(
-        (event) =>
-          event.toolName === "budgetAllocatorApp" &&
-          event.type === "sendToolResult",
-      );
-      expect(freshEvents).toHaveLength(1);
-      expect(freshEvents[0].payload).toEqual(secondResult);
-    });
-
-    firstRequest.resolve(firstResult);
-    await Promise.resolve();
-    await Promise.resolve();
-
-    const secondToolResultEvents = mockBridgeEvents.filter(
-      (event) =>
-        event.toolName === "budgetAllocatorApp" &&
-        event.type === "sendToolResult",
-    );
-
-    expect(secondToolResultEvents).toHaveLength(1);
-    expect(secondToolResultEvents[0].payload).toEqual(secondResult);
-    expect(screen.getByTestId("tool-result")).toHaveTextContent("fresh result");
   });
 });

@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
   Tool,
   ContentBlock,
+  CompatibilityCallToolResult,
   CallToolResult,
   CallToolResultSchema,
   ServerNotification,
@@ -26,6 +27,7 @@ interface AppRendererProps {
   tool: Tool;
   mcpClient: Client | null;
   toolInput?: Record<string, unknown>;
+  toolResult?: CompatibilityCallToolResult | null;
   onNotification?: (notification: ServerNotification) => void;
 }
 
@@ -34,12 +36,31 @@ const AppRenderer = ({
   tool,
   mcpClient,
   toolInput,
+  toolResult,
   onNotification,
 }: AppRendererProps) => {
   const [error, setError] = useState<string | null>(null);
-  const [toolResult, setToolResult] = useState<CallToolResult | undefined>();
-  const latestRunIdRef = useRef(0);
   const { toast } = useToast();
+
+  const normalizedToolResult = useMemo<CallToolResult | undefined>(() => {
+    if (!toolResult) {
+      return undefined;
+    }
+
+    if ("content" in toolResult) {
+      const parsedResult = CallToolResultSchema.safeParse(toolResult);
+      return parsedResult.success ? parsedResult.data : undefined;
+    }
+
+    if ("toolResult" in toolResult) {
+      const parsedResult = CallToolResultSchema.safeParse(
+        toolResult.toolResult,
+      );
+      return parsedResult.success ? parsedResult.data : undefined;
+    }
+
+    return undefined;
+  }, [toolResult]);
 
   const hostContext: McpUiHostContext = useMemo(
     () => ({
@@ -89,67 +110,6 @@ const AppRenderer = ({
     }
   };
 
-  useEffect(() => {
-    if (!mcpClient) {
-      setToolResult(undefined);
-      return;
-    }
-
-    const runId = ++latestRunIdRef.current;
-    const abortController = new AbortController();
-    setToolResult(undefined);
-
-    const runTool = async () => {
-      try {
-        const result = await mcpClient.request(
-          {
-            method: "tools/call",
-            params: {
-              name: tool.name,
-              arguments: toolInput ?? {},
-            },
-          },
-          CallToolResultSchema,
-          { signal: abortController.signal },
-        );
-
-        if (
-          abortController.signal.aborted ||
-          runId !== latestRunIdRef.current
-        ) {
-          return;
-        }
-
-        setToolResult(result);
-      } catch (runError) {
-        if (
-          abortController.signal.aborted ||
-          runId !== latestRunIdRef.current
-        ) {
-          return;
-        }
-
-        const message =
-          runError instanceof Error ? runError.message : String(runError);
-        setToolResult({
-          content: [
-            {
-              type: "text",
-              text: message,
-            },
-          ],
-          isError: true,
-        });
-      }
-    };
-
-    void runTool();
-
-    return () => {
-      abortController.abort();
-    };
-  }, [mcpClient, tool.name, toolInput]);
-
   if (!mcpClient) {
     return (
       <Alert>
@@ -180,7 +140,7 @@ const AppRenderer = ({
           toolName={tool.name}
           hostContext={hostContext}
           toolInput={toolInput}
-          toolResult={toolResult}
+          toolResult={normalizedToolResult}
           sandbox={{
             url: new URL(sandboxPath, window.location.origin),
           }}
