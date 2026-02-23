@@ -73,6 +73,7 @@ describe("ToolsTab", () => {
     error: null,
     resourceContent: {},
     onReadResource: jest.fn(),
+    serverSupportsTaskRequests: true,
   };
 
   const renderToolsTab = (props = {}) => {
@@ -153,6 +154,38 @@ describe("ToolsTab", () => {
     expect(requiredCheckbox).toBeInTheDocument();
     expect(requiredCheckbox.getAttribute("aria-checked")).toBe("true");
     expect(requiredCheckbox).toBeDisabled();
+  });
+
+  it("should hide run-as-task checkbox when serverSupportsTaskRequests is false even for required/optional tools", async () => {
+    const requiredTool: ExtendedTool = {
+      ...mockTools[0],
+      name: "requiredTool",
+      execution: { taskSupport: "required" },
+    };
+    const optionalTool: ExtendedTool = {
+      ...mockTools[0],
+      name: "optionalTool",
+      execution: { taskSupport: "optional" },
+    };
+
+    const { rerender } = renderToolsTab({
+      selectedTool: requiredTool,
+      serverSupportsTaskRequests: false,
+    });
+
+    expect(screen.queryByLabelText(/run as task/i)).not.toBeInTheDocument();
+
+    rerender(
+      <Tabs defaultValue="tools">
+        <ToolsTab
+          {...defaultProps}
+          selectedTool={optionalTool}
+          serverSupportsTaskRequests={false}
+        />
+      </Tabs>,
+    );
+
+    expect(screen.queryByLabelText(/run as task/i)).not.toBeInTheDocument();
   });
 
   it("should handle integer type inputs", async () => {

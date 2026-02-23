@@ -177,6 +177,7 @@ const ToolsTab = ({
   error,
   resourceContent,
   onReadResource,
+  serverSupportsTaskRequests,
 }: {
   tools: Tool[];
   listTools: () => void;
@@ -195,6 +196,7 @@ const ToolsTab = ({
   error: string | null;
   resourceContent: Record<string, string>;
   onReadResource?: (uri: string) => void;
+  serverSupportsTaskRequests: boolean;
 }) => {
   const [params, setParams] = useState<Record<string, unknown>>({});
   const [runAsTask, setRunAsTask] = useState(false);
@@ -239,15 +241,17 @@ const ToolsTab = ({
       ];
     });
     setParams(Object.fromEntries(params));
-    const taskSupport = getTaskSupport(selectedTool);
-    setRunAsTask(taskSupport === "required");
+    const toolTaskSupport = serverSupportsTaskRequests
+      ? getTaskSupport(selectedTool)
+      : "forbidden";
+    setRunAsTask(toolTaskSupport === "required");
 
     // Reset validation errors when switching tools
     setHasValidationErrors(false);
 
     // Clear form refs for the previous tool
     formRefs.current = {};
-  }, [selectedTool]);
+  }, [selectedTool, serverSupportsTaskRequests]);
 
   const hasReservedMetadataEntry = metadataEntries.some(({ key }) => {
     const trimmedKey = key.trim();
@@ -264,7 +268,9 @@ const ToolsTab = ({
     return trimmedKey !== "" && !hasValidMetaName(trimmedKey);
   });
 
-  const taskSupport = getTaskSupport(selectedTool);
+  const taskSupport = serverSupportsTaskRequests
+    ? getTaskSupport(selectedTool)
+    : "forbidden";
 
   return (
     <TabsContent value="tools">
