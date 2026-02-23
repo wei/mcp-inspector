@@ -1,7 +1,7 @@
 import { render, screen, fireEvent, act } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import { describe, it, jest, beforeEach } from "@jest/globals";
-import ToolsTab from "../ToolsTab";
+import ToolsTab, { ExtendedTool } from "../ToolsTab";
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { Tabs } from "../ui/tabs";
 import { cacheToolOutputSchemas } from "../../utils/schemaUtils";
@@ -11,13 +11,6 @@ import {
   META_PREFIX_RULES_MESSAGE,
   RESERVED_NAMESPACE_MESSAGE,
 } from "../../utils/metaUtils";
-
-interface ExtendedTool extends Tool {
-  _meta?: Record<string, unknown>;
-  execution?: {
-    taskSupport?: "forbidden" | "required" | "optional";
-  };
-}
 
 describe("ToolsTab", () => {
   beforeEach(() => {

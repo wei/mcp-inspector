@@ -51,12 +51,12 @@ import {
   hasValidMetaName,
   hasValidMetaPrefix,
   isReservedMetaKey,
-} from "../utils/metaUtils";
+} from "@/utils/metaUtils";
 
 /**
  * Extended Tool type that includes optional fields used by the inspector.
  */
-interface ExtendedTool extends Tool, WithIcons {
+export interface ExtendedTool extends Tool, WithIcons {
   _meta?: Record<string, unknown>;
   execution?: {
     taskSupport?: "forbidden" | "required" | "optional";
@@ -69,7 +69,7 @@ const hasMeta = (
 ): tool is ExtendedTool & { _meta: Record<string, unknown> } =>
   typeof (tool as ExtendedTool)._meta !== "undefined";
 
-// Type guard to detect execution.taskSupport
+// Returns the execution.taskSupport value for a tool, defaulting to "forbidden" per MCP spec
 const getTaskSupport = (
   tool: Tool | null,
 ): "forbidden" | "required" | "optional" => {
@@ -83,7 +83,7 @@ const getTaskSupport = (
   ) {
     return taskSupport;
   }
-  return "optional";
+  return "forbidden";
 };
 
 // Type guard to safely detect the optional annotations field
@@ -263,6 +263,8 @@ const ToolsTab = ({
     const trimmedKey = key.trim();
     return trimmedKey !== "" && !hasValidMetaName(trimmedKey);
   });
+
+  const taskSupport = getTaskSupport(selectedTool);
 
   return (
     <TabsContent value="tools">
@@ -777,7 +779,7 @@ const ToolsTab = ({
                       </div>
                     </div>
                   )}
-                {getTaskSupport(selectedTool) !== "forbidden" && (
+                {taskSupport !== "forbidden" && (
                   <div className="flex items-center space-x-2">
                     <Checkbox
                       id="run-as-task"
@@ -785,7 +787,7 @@ const ToolsTab = ({
                       onCheckedChange={(checked: boolean) =>
                         setRunAsTask(checked)
                       }
-                      disabled={getTaskSupport(selectedTool) === "required"}
+                      disabled={taskSupport === "required"}
                     />
                     <Label
                       htmlFor="run-as-task"
