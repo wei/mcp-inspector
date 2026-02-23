@@ -24,6 +24,7 @@ import {
   CompatibilityCallToolResult,
   ListToolsResult,
   Tool,
+  ToolAnnotations,
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   Loader2,
@@ -85,6 +86,84 @@ const getTaskSupport = (
   return "optional";
 };
 
+// Type guard to safely detect the optional annotations field
+const hasAnnotations = (
+  tool: Tool,
+): tool is Tool & { annotations: ToolAnnotations } =>
+  typeof (tool as { annotations?: unknown }).annotations !== "undefined" &&
+  (tool as { annotations?: unknown }).annotations !== null;
+
+// Helper to render annotation badges
+// Shows all 4 annotation values with their state (true/false/implied default)
+const AnnotationBadges = ({
+  annotations,
+}: {
+  annotations: ToolAnnotations | undefined;
+}) => {
+  // Spec defaults: readOnlyHint=false, destructiveHint=true, idempotentHint=false, openWorldHint=true
+  const getValueAndImplied = (
+    value: boolean | undefined,
+    defaultValue: boolean,
+  ): { value: boolean; implied: boolean } => ({
+    value: value ?? defaultValue,
+    implied: value === undefined,
+  });
+
+  const readOnly = getValueAndImplied(annotations?.readOnlyHint, false);
+  const destructive = getValueAndImplied(annotations?.destructiveHint, true);
+  const idempotent = getValueAndImplied(annotations?.idempotentHint, false);
+  const openWorld = getValueAndImplied(annotations?.openWorldHint, true);
+
+  // Descriptions from MCP spec
+  const badges = [
+    {
+      label: "Read-only",
+      value: readOnly.value,
+      implied: readOnly.implied,
+      description: "Tool does not modify its environment",
+    },
+    {
+      label: "Destructive",
+      value: destructive.value,
+      implied: destructive.implied,
+      description:
+        "Tool may perform destructive updates (delete/overwrite data)",
+    },
+    {
+      label: "Idempotent",
+      value: idempotent.value,
+      implied: idempotent.implied,
+      description: "Calling repeatedly with same args has no additional effect",
+    },
+    {
+      label: "Open-world",
+      value: openWorld.value,
+      implied: openWorld.implied,
+      description:
+        "Tool may interact with external entities beyond its local environment",
+    },
+  ];
+
+  return (
+    <div className="flex flex-wrap gap-1 mt-2">
+      {badges.map(({ label, value, implied, description }) => (
+        <span
+          key={label}
+          title={`${description}\n\nValue: ${value ? "Yes" : "No"} (${implied ? "implied default" : "explicitly set"})`}
+          className={cn(
+            "inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border",
+            "bg-slate-100 text-slate-700 border-slate-300 dark:bg-slate-800 dark:text-slate-300 dark:border-slate-600",
+            implied && "border-dashed opacity-60",
+            !implied && "border-solid",
+          )}
+        >
+          {value ? "✓" : "✗"} {label}
+        </span>
+      ))}
+    </div>
+  );
+};
+
 const ToolsTab = ({
   tools,
   listTools,
@@ -107,7 +186,7 @@ const ToolsTab = ({
     params: Record<string, unknown>,
     metadata?: Record<string, unknown>,
     runAsTask?: boolean,
-  ) => Promise<void>;
+  ) => Promise<CompatibilityCallToolResult>;
   selectedTool: Tool | null;
   setSelectedTool: (tool: Tool | null) => void;
   toolResult: CompatibilityCallToolResult | null;
@@ -247,6 +326,13 @@ const ToolsTab = ({
                 <p className="text-sm text-gray-600 dark:text-gray-400 whitespace-pre-wrap max-h-48 overflow-y-auto">
                   {selectedTool.description}
                 </p>
+                <AnnotationBadges
+                  annotations={
+                    hasAnnotations(selectedTool)
+                      ? selectedTool.annotations
+                      : undefined
+                  }
+                />
                 {Object.entries(selectedTool.inputSchema.properties ?? []).map(
                   ([key, value]) => {
                     // First resolve any $ref references
