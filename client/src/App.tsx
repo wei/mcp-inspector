@@ -1526,6 +1526,9 @@ const App = () => {
                       error={errors.prompts}
                     />
                     <ToolsTab
+                      serverSupportsTaskRequests={
+                        !!serverCapabilities?.tasks?.requests?.tools?.call
+                      }
                       tools={tools}
                       listTools={() => {
                         clearError("tools");
