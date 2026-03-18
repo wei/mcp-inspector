@@ -30,6 +30,7 @@ import {
   hasValidMetaPrefix,
   isReservedMetaKey,
 } from "@/utils/metaUtils";
+import { getToolUiResourceUri } from "@modelcontextprotocol/ext-apps/app-bridge";
 import { AuthDebuggerState, EMPTY_DEBUGGER_STATE } from "./lib/auth-types";
 import { OAuthStateMachine } from "./lib/oauth-state-machine";
 import { createProxyFetch } from "./lib/proxyFetch";
@@ -52,6 +53,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import {
+  AppWindow,
   Bell,
   Files,
   FolderTree,
@@ -76,6 +78,7 @@ import SamplingTab, { PendingRequest } from "./components/SamplingTab";
 import Sidebar from "./components/Sidebar";
 import ToolsTab from "./components/ToolsTab";
 import TasksTab from "./components/TasksTab";
+import AppsTab from "./components/AppsTab";
 import { InspectorConfig } from "./lib/configurationTypes";
 import {
   getMCPProxyAddress,
@@ -99,6 +102,27 @@ import {
 import MetadataTab from "./components/MetadataTab";
 
 const CONFIG_LOCAL_STORAGE_KEY = "inspectorConfig_v1";
+
+type PrefilledAppsToolCall = {
+  id: number;
+  toolName: string;
+  params: Record<string, unknown>;
+  result: CompatibilityCallToolResult;
+};
+
+const hasAppResourceUri = (tool: Tool): boolean => {
+  return Boolean(getToolUiResourceUri(tool));
+};
+
+const cloneToolParams = (
+  source: Record<string, unknown>,
+): Record<string, unknown> => {
+  try {
+    return structuredClone(source);
+  } catch {
+    return { ...source };
+  }
+};
 
 const filterReservedMetadata = (
   metadata: Record<string, string>,
@@ -127,12 +151,17 @@ const App = () => {
   const [resourceContentMap, setResourceContentMap] = useState<
     Record<string, string>
   >({});
+  const [fetchingResources, setFetchingResources] = useState<Set<string>>(
+    new Set(),
+  );
   const [prompts, setPrompts] = useState<Prompt[]>([]);
   const [promptContent, setPromptContent] = useState<string>("");
   const [tools, setTools] = useState<Tool[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [toolResult, setToolResult] =
     useState<CompatibilityCallToolResult | null>(null);
+  const [prefilledAppsToolCall, setPrefilledAppsToolCall] =
+    useState<PrefilledAppsToolCall | null>(null);
   const [errors, setErrors] = useState<Record<string, string | null>>({
     resources: null,
     prompts: null,
@@ -287,6 +316,7 @@ const App = () => {
   const [nextToolCursor, setNextToolCursor] = useState<string | undefined>();
   const [nextTaskCursor, setNextTaskCursor] = useState<string | undefined>();
   const progressTokenRef = useRef(0);
+  const prefilledAppsToolCallIdRef = useRef(0);
 
   const [activeTab, setActiveTab] = useState<string>(() => {
     const hash = window.location.hash.slice(1);
@@ -309,11 +339,13 @@ const App = () => {
       ...(serverCapabilities?.prompts ? ["prompts"] : []),
       ...(serverCapabilities?.tools ? ["tools"] : []),
       ...(serverCapabilities?.tasks ? ["tasks"] : []),
+      "apps",
       "ping",
       "sampling",
       "elicitations",
       "roots",
       "auth",
+      "metadata",
     ];
 
     if (!validTabs.includes(originatingTab)) return;
@@ -441,11 +473,13 @@ const App = () => {
         ...(serverCapabilities?.prompts ? ["prompts"] : []),
         ...(serverCapabilities?.tools ? ["tools"] : []),
         ...(serverCapabilities?.tasks ? ["tasks"] : []),
+        "apps",
         "ping",
         "sampling",
         "elicitations",
         "roots",
         "auth",
+        "metadata",
       ];
 
       const isValidTab = validTabs.includes(hash);
@@ -473,6 +507,13 @@ const App = () => {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mcpClient, activeTab]);
+
+  useEffect(() => {
+    if (mcpClient && activeTab === "apps" && serverCapabilities?.tools) {
+      void listTools();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mcpClient, activeTab, serverCapabilities?.tools]);
 
   useEffect(() => {
     localStorage.setItem("lastCommand", command);
@@ -766,11 +807,13 @@ const App = () => {
             ...(serverCapabilities?.prompts ? ["prompts"] : []),
             ...(serverCapabilities?.tools ? ["tools"] : []),
             ...(serverCapabilities?.tasks ? ["tasks"] : []),
+            "apps",
             "ping",
             "sampling",
             "elicitations",
             "roots",
             "auth",
+            "metadata",
           ];
 
           if (validTabs.includes(originatingTab)) {
@@ -860,22 +903,48 @@ const App = () => {
   };
 
   const readResource = async (uri: string) => {
+    if (fetchingResources.has(uri) || resourceContentMap[uri]) {
+      return;
+    }
+
+    console.log("[App] Reading resource:", uri);
+    setFetchingResources((prev) => new Set(prev).add(uri));
     lastToolCallOriginTabRef.current = currentTabRef.current;
 
-    const response = await sendMCPRequest(
-      {
-        method: "resources/read" as const,
-        params: { uri },
-      },
-      ReadResourceResultSchema,
-      "resources",
-    );
-    const content = JSON.stringify(response, null, 2);
-    setResourceContent(content);
-    setResourceContentMap((prev) => ({
-      ...prev,
-      [uri]: content,
-    }));
+    try {
+      const response = await sendMCPRequest(
+        {
+          method: "resources/read" as const,
+          params: { uri },
+        },
+        ReadResourceResultSchema,
+        "resources",
+      );
+      console.log("[App] Resource read response:", {
+        uri,
+        responseLength: JSON.stringify(response).length,
+        hasContents: !!(response as { contents?: unknown[] }).contents,
+      });
+      const content = JSON.stringify(response, null, 2);
+      setResourceContent(content);
+      setResourceContentMap((prev) => ({
+        ...prev,
+        [uri]: content,
+      }));
+    } catch (error) {
+      console.error(`[App] Failed to read resource ${uri}:`, error);
+      const errorString = (error as Error).message ?? String(error);
+      setResourceContentMap((prev) => ({
+        ...prev,
+        [uri]: JSON.stringify({ error: errorString }),
+      }));
+    } finally {
+      setFetchingResources((prev) => {
+        const next = new Set(prev);
+        next.delete(uri);
+        return next;
+      });
+    }
   };
 
   const subscribeToResource = async (uri: string) => {
@@ -942,7 +1011,7 @@ const App = () => {
     params: Record<string, unknown>,
     toolMetadata?: Record<string, unknown>,
     runAsTask?: boolean,
-  ) => {
+  ): Promise<CompatibilityCallToolResult> => {
     lastToolCallOriginTabRef.current = currentTabRef.current;
 
     try {
@@ -1010,7 +1079,7 @@ const App = () => {
           "_meta" in (response as Record<string, unknown>)
             ? ((response as { _meta?: Record<string, unknown> })._meta ?? {})
             : undefined;
-        setToolResult({
+        let latestToolResult: CompatibilityCallToolResult = {
           content: [
             {
               type: "text",
@@ -1021,7 +1090,8 @@ const App = () => {
             ...(initialResponseMeta || {}),
             "io.modelcontextprotocol/related-task": { taskId },
           },
-        } as CompatibilityCallToolResult);
+        };
+        setToolResult(latestToolResult);
 
         // Polling loop
         let taskCompleted = false;
@@ -1058,12 +1128,13 @@ const App = () => {
                   CompatibilityCallToolResultSchema,
                 );
                 console.log(`Result received for task ${taskId}:`, result);
-                setToolResult(result as CompatibilityCallToolResult);
+                latestToolResult = result as CompatibilityCallToolResult;
+                setToolResult(latestToolResult);
 
                 // Refresh tasks list to show completed state
                 void listTasks();
               } else {
-                setToolResult({
+                latestToolResult = {
                   content: [
                     {
                       type: "text",
@@ -1071,7 +1142,8 @@ const App = () => {
                     },
                   ],
                   isError: true,
-                });
+                };
+                setToolResult(latestToolResult);
                 // Refresh tasks list to show failed/cancelled state
                 void listTasks();
               }
@@ -1085,7 +1157,7 @@ const App = () => {
                   ? ((response as { _meta?: Record<string, unknown> })._meta ??
                     {})
                   : undefined;
-              setToolResult({
+              latestToolResult = {
                 content: [
                   {
                     type: "text",
@@ -1096,13 +1168,14 @@ const App = () => {
                   ...(pollingResponseMeta || {}),
                   "io.modelcontextprotocol/related-task": { taskId },
                 },
-              } as CompatibilityCallToolResult);
+              };
+              setToolResult(latestToolResult);
               // Refresh tasks list to show progress
               void listTasks();
             }
           } catch (pollingError) {
             console.error("Error polling task status:", pollingError);
-            setToolResult({
+            latestToolResult = {
               content: [
                 {
                   type: "text",
@@ -1110,16 +1183,22 @@ const App = () => {
                 },
               ],
               isError: true,
-            });
+            };
+            setToolResult(latestToolResult);
             taskCompleted = true;
           }
         }
         setIsPollingTask(false);
+        // Clear any validation errors since tool execution completed
+        setErrors((prev) => ({ ...prev, tools: null }));
+        return latestToolResult;
       } else {
-        setToolResult(response as CompatibilityCallToolResult);
+        const directResult = response as CompatibilityCallToolResult;
+        setToolResult(directResult);
+        // Clear any validation errors since tool execution completed
+        setErrors((prev) => ({ ...prev, tools: null }));
+        return directResult;
       }
-      // Clear any validation errors since tool execution completed
-      setErrors((prev) => ({ ...prev, tools: null }));
     } catch (e) {
       const toolResult: CompatibilityCallToolResult = {
         content: [
@@ -1133,6 +1212,7 @@ const App = () => {
       setToolResult(toolResult);
       // Clear validation errors - tool execution errors are shown in ToolResults
       setErrors((prev) => ({ ...prev, tools: null }));
+      return toolResult;
     }
   };
 
@@ -1319,6 +1399,10 @@ const App = () => {
                   <ListTodo className="w-4 h-4 mr-2" />
                   Tasks
                 </TabsTrigger>
+                <TabsTrigger value="apps">
+                  <AppWindow className="w-4 h-4 mr-2" />
+                  Apps
+                </TabsTrigger>
                 <TabsTrigger value="ping">
                   <Bell className="w-4 h-4 mr-2" />
                   Ping
@@ -1453,6 +1537,9 @@ const App = () => {
                       error={errors.prompts}
                     />
                     <ToolsTab
+                      serverSupportsTaskRequests={
+                        !!serverCapabilities?.tasks?.requests?.tools?.call
+                      }
                       tools={tools}
                       listTools={() => {
                         clearError("tools");
@@ -1471,7 +1558,26 @@ const App = () => {
                       ) => {
                         clearError("tools");
                         setToolResult(null);
-                        await callTool(name, params, metadata, runAsTask);
+                        const result = await callTool(
+                          name,
+                          params,
+                          metadata,
+                          runAsTask,
+                        );
+                        const calledTool = tools.find(
+                          (tool) => tool.name === name,
+                        );
+                        if (calledTool && hasAppResourceUri(calledTool)) {
+                          setPrefilledAppsToolCall({
+                            id: ++prefilledAppsToolCallIdRef.current,
+                            toolName: name,
+                            params: cloneToolParams(params),
+                            result,
+                          });
+                        } else {
+                          setPrefilledAppsToolCall(null);
+                        }
+                        return result;
                       }}
                       selectedTool={selectedTool}
                       setSelectedTool={(tool) => {
@@ -1507,6 +1613,35 @@ const App = () => {
                       }}
                       error={errors.tasks}
                       nextCursor={nextTaskCursor}
+                    />
+                    <AppsTab
+                      sandboxPath={`${getMCPProxyAddress(config)}/sandbox`}
+                      tools={tools}
+                      listTools={() => {
+                        clearError("tools");
+                        listTools();
+                      }}
+                      callTool={async (
+                        name: string,
+                        params: Record<string, unknown>,
+                        metadata?: Record<string, unknown>,
+                        runAsTask?: boolean,
+                      ) => {
+                        clearError("tools");
+                        setToolResult(null);
+                        return callTool(name, params, metadata, runAsTask);
+                      }}
+                      prefilledToolCall={prefilledAppsToolCall}
+                      onPrefilledToolCallConsumed={(callId) => {
+                        setPrefilledAppsToolCall((prev) =>
+                          prev?.id === callId ? null : prev,
+                        );
+                      }}
+                      error={errors.tools}
+                      mcpClient={mcpClient}
+                      onNotification={(notification) => {
+                        setNotifications((prev) => [...prev, notification]);
+                      }}
                     />
                     <ConsoleTab />
                     <PingTab
