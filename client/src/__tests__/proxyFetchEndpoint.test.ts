@@ -47,7 +47,7 @@ describe("POST /fetch endpoint", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        url: "https://example.com/",
+        url: "http://example.com/",
         init: { method: "GET" },
       }),
     });
@@ -64,7 +64,7 @@ describe("POST /fetch endpoint", () => {
         "X-MCP-Proxy-Auth": "Bearer wrong-token",
       },
       body: JSON.stringify({
-        url: "https://example.com/",
+        url: "http://example.com/",
         init: { method: "GET" },
       }),
     });
@@ -79,7 +79,7 @@ describe("POST /fetch endpoint", () => {
         "X-MCP-Proxy-Auth": `Bearer ${TEST_TOKEN}`,
       },
       body: JSON.stringify({
-        url: "https://example.com/",
+        url: "http://example.com/",
         init: { method: "GET" },
       }),
     });

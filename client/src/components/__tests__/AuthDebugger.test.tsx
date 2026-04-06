@@ -807,6 +807,7 @@ describe("AuthDebugger", () => {
 
       expect(mockDiscoverAuthorizationServerMetadata).toHaveBeenCalledWith(
         new URL("https://custom-auth.example.com/mcp/tenant"),
+        { fetchFn: undefined },
       );
     });
 
