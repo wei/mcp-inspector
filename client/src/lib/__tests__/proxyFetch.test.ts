@@ -112,15 +112,93 @@ describe("createProxyFetch", () => {
     expect(body).toBe('{"issuer":"https://example.com"}');
   });
 
-  it("throws when proxy returns non-ok response", async () => {
+  it("returns non-ok Response when upstream status is not 2xx (mirrored by proxy)", async () => {
     mockFetch.mockResolvedValue({
       ok: false,
+      status: 404,
+      statusText: "Not Found",
+      json: () =>
+        Promise.resolve({
+          ok: false,
+          status: 404,
+          statusText: "Not Found",
+          headers: { "content-type": "application/json" },
+          body: '{"error":"not_found"}',
+        }),
+    });
+
+    const fetchFn = createProxyFetch(configWithProxy);
+    const response = await fetchFn("https://example.com/.well-known/missing");
+
+    expect(response.ok).toBe(false);
+    expect(response.status).toBe(404);
+    expect(response.statusText).toBe("Not Found");
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(await response.text()).toBe('{"error":"not_found"}');
+  });
+
+  it("returns non-ok Response when upstream returns 400 with token-endpoint error JSON (RFC 6749)", async () => {
+    const tokenErrorBody =
+      '{"error":"invalid_grant","error_description":"code expired"}';
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 400,
+      statusText: "Bad Request",
+      json: () =>
+        Promise.resolve({
+          ok: false,
+          status: 400,
+          statusText: "Bad Request",
+          headers: { "content-type": "application/json" },
+          body: tokenErrorBody,
+        }),
+    });
+
+    const fetchFn = createProxyFetch(configWithProxy);
+    const response = await fetchFn("https://example.com/oauth/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: "grant_type=authorization_code&code=x",
+    });
+
+    expect(response.ok).toBe(false);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: "invalid_grant",
+      error_description: "code expired",
+    });
+  });
+
+  it("throws when proxy POST returns JSON error envelope (e.g. 401 invalid session)", async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 401,
       statusText: "Unauthorized",
+      json: () =>
+        Promise.resolve({
+          error: "Unauthorized",
+          message:
+            "Authentication required. Use the session token shown in the console when starting the server.",
+        }),
     });
 
     const fetchFn = createProxyFetch(configWithProxy);
     await expect(fetchFn("https://example.com/")).rejects.toThrow(
-      "Proxy fetch failed: Unauthorized",
+      "Authentication required. Use the session token shown in the console when starting the server.",
+    );
+  });
+
+  it("throws when proxy response is not valid JSON", async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 502,
+      statusText: "Bad Gateway",
+      json: () => Promise.reject(new SyntaxError("Unexpected token")),
+    });
+
+    const fetchFn = createProxyFetch(configWithProxy);
+    await expect(fetchFn("https://example.com/")).rejects.toThrow(
+      "Proxy fetch failed: 502 Bad Gateway",
     );
   });
 

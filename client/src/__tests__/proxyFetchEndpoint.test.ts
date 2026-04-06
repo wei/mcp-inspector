@@ -3,6 +3,7 @@
  * Spawns the server and hits it like any other HTTP client would.
  */
 import { spawn, type ChildProcess } from "child_process";
+import { createServer, type Server } from "http";
 import { resolve } from "path";
 
 const TEST_PORT = 16321;
@@ -88,5 +89,50 @@ describe("POST /fetch endpoint", () => {
     expect(body.ok).toBe(true);
     expect(body.status).toBe(200);
     expect(body.body).toBeDefined();
+  });
+
+  it("mirrors upstream 404 (non-2xx) when auth token is valid", async () => {
+    const upstream: Server = createServer((req, res) => {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end('{"error":"not_found"}');
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      upstream.once("error", reject);
+      upstream.listen(0, "127.0.0.1", () => resolve());
+    });
+
+    const addr = upstream.address();
+    if (!addr || typeof addr === "string") {
+      upstream.close();
+      throw new Error("Expected TCP listen address");
+    }
+    const upstreamUrl = `http://127.0.0.1:${addr.port}/missing`;
+
+    try {
+      const res = await fetch(`${baseUrl}/fetch`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-MCP-Proxy-Auth": `Bearer ${TEST_TOKEN}`,
+        },
+        body: JSON.stringify({
+          url: upstreamUrl,
+          init: { method: "GET" },
+        }),
+      });
+
+      expect(res.status).toBe(404);
+      const body = (await res.json()) as {
+        ok: boolean;
+        status: number;
+        body: string;
+      };
+      expect(body.ok).toBe(false);
+      expect(body.status).toBe(404);
+      expect(JSON.parse(body.body)).toEqual({ error: "not_found" });
+    } finally {
+      await new Promise<void>((r) => upstream.close(() => r()));
+    }
   });
 });
