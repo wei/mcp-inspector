@@ -221,4 +221,24 @@ describe("createProxyFetch", () => {
     const callBody = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(callBody.url).toBe("https://example.com/discovery");
   });
+
+  it("uses Request.url when input is a Request (not [object Request])", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          headers: {},
+          body: "",
+        }),
+    });
+
+    const fetchFn = createProxyFetch(configWithProxy);
+    await fetchFn(new Request("https://example.com/from-request"));
+
+    const callBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(callBody.url).toBe("https://example.com/from-request");
+  });
 });

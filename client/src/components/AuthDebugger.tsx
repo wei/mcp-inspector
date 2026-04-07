@@ -108,8 +108,13 @@ const AuthDebugger = ({
     });
   }, [serverUrl, updateAuthState]);
 
-  const fetchFn =
-    connectionType === "proxy" && config ? createProxyFetch(config) : undefined;
+  const fetchFn = useMemo(
+    () =>
+      connectionType === "proxy" && config
+        ? createProxyFetch(config)
+        : undefined,
+    [connectionType, config],
+  );
 
   const stateMachine = useMemo(
     () => new OAuthStateMachine(serverUrl, updateAuthState, fetchFn),

@@ -844,6 +844,24 @@ app.post(
     try {
       const { url, init } = req.body as { url: string; init?: RequestInit };
 
+      if (typeof url !== "string" || url.length === 0) {
+        res.status(400).json({ error: "Missing or invalid url" });
+        return;
+      }
+
+      let parsedUrl: URL;
+      try {
+        parsedUrl = new URL(url);
+      } catch {
+        res.status(400).json({ error: "Invalid URL" });
+        return;
+      }
+
+      if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+        res.status(400).json({ error: "Only http/https URLs are allowed" });
+        return;
+      }
+
       const response = await fetch(url, {
         method: init?.method ?? "GET",
         headers: (init?.headers as Record<string, string>) ?? {},

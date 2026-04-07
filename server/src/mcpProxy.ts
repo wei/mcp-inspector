@@ -12,6 +12,9 @@ import { isJSONRPCRequest } from "@modelcontextprotocol/sdk/types.js";
  * the band are assigned over time — e.g. **-32002** is used for **ResourceNotFound** in parts of
  * the MCP ecosystem). We use **-32099** so this inspector-only bridge error stays clear of those
  * registered meanings; the client still keys off `error.data` shape, not the number alone.
+ *
+ * Keep in sync with `client/src/lib/constants.ts`; drift is caught by
+ * `client/src/lib/__tests__/mcpProxyTransportErrorCode.test.ts`.
  */
 export const MCP_PROXY_TRANSPORT_ERROR_CODE = -32099;
 
@@ -62,8 +65,8 @@ export function serializeProxyTransportError(
   } else if (error instanceof SseError) {
     if (error.code !== undefined) attachHttpStatusIfValid(error.code);
   }
-  const u = headerHolder?.lastUpstream401;
-  if (u && headerHolder) {
+  if (headerHolder?.lastUpstream401) {
+    const u = headerHolder.lastUpstream401;
     data.upstream401 = {
       wwwAuthenticate: u.wwwAuthenticate,
       body: u.body,

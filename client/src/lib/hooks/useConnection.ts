@@ -379,8 +379,6 @@ export function useConnection({
     }
   };
 
-  const is401Error = isConnectionAuthError;
-
   const isProxyAuthError = (error: unknown): boolean => {
     return (
       error instanceof Error &&
@@ -389,7 +387,7 @@ export function useConnection({
   };
 
   const handleAuthError = async (error: unknown) => {
-    if (is401Error(error)) {
+    if (isConnectionAuthError(error)) {
       let scope = oauthScope?.trim();
       const fetchFn =
         connectionType === "proxy" ? createProxyFetch(config) : undefined;
@@ -820,7 +818,7 @@ export function useConnection({
         if (shouldRetry) {
           return connect(undefined, retryCount + 1);
         }
-        if (is401Error(error)) {
+        if (isConnectionAuthError(error)) {
           // Don't set error state if we're about to redirect for auth
 
           return;

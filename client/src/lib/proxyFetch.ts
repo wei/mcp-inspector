@@ -92,7 +92,12 @@ export function createProxyFetch(config: InspectorConfig): typeof fetch {
     input: RequestInfo | URL,
     init?: RequestInit,
   ): Promise<Response> => {
-    const url = typeof input === "string" ? input : input.toString();
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof Request
+          ? input.url
+          : input.toString();
 
     // Serialize body for JSON transport. URLSearchParams and similar don't
     // JSON-serialize (they become {}), so we must convert to string first.
