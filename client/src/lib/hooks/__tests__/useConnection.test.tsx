@@ -5,12 +5,17 @@ import {
   ClientRequest,
   CreateTaskResultSchema,
   JSONRPCMessage,
+  McpError,
 } from "@modelcontextprotocol/sdk/types.js";
 import type {
   AnySchema,
   SchemaOutput,
 } from "@modelcontextprotocol/sdk/server/zod-compat.js";
-import { DEFAULT_INSPECTOR_CONFIG, CLIENT_IDENTITY } from "../../constants";
+import {
+  DEFAULT_INSPECTOR_CONFIG,
+  CLIENT_IDENTITY,
+  MCP_PROXY_TRANSPORT_ERROR_CODE,
+} from "../../constants";
 import {
   SSEClientTransportOptions,
   SseError,
@@ -94,17 +99,38 @@ jest.mock("@modelcontextprotocol/sdk/client/sse.js", () => {
   };
 });
 
-jest.mock("@modelcontextprotocol/sdk/client/streamableHttp.js", () => ({
-  StreamableHTTPClientTransport: jest.fn((url, options) => {
-    mockStreamableHTTPTransport.url = url;
-    mockStreamableHTTPTransport.options = options;
-    return mockStreamableHTTPTransport;
-  }),
-}));
+jest.mock("@modelcontextprotocol/sdk/client/streamableHttp.js", () => {
+  class StreamableHTTPError extends Error {
+    code: number;
+    constructor(code: number, message: string) {
+      super(`Streamable HTTP error: ${message}`);
+      this.code = code;
+    }
+  }
 
-jest.mock("@modelcontextprotocol/sdk/client/auth.js", () => ({
-  auth: jest.fn().mockResolvedValue("AUTHORIZED"),
-}));
+  return {
+    StreamableHTTPError,
+    StreamableHTTPClientTransport: jest.fn((url, options) => {
+      mockStreamableHTTPTransport.url = url;
+      mockStreamableHTTPTransport.options = options;
+      return mockStreamableHTTPTransport;
+    }),
+  };
+});
+
+jest.mock("@modelcontextprotocol/sdk/client/auth.js", () => {
+  class UnauthorizedError extends Error {
+    constructor(message?: string) {
+      super(message ?? "Unauthorized");
+      this.name = "UnauthorizedError";
+    }
+  }
+
+  return {
+    UnauthorizedError,
+    auth: jest.fn().mockResolvedValue("AUTHORIZED"),
+  };
+});
 
 // Mock the toast hook
 const mockToast = jest.fn();
@@ -1573,6 +1599,71 @@ describe("useConnection", () => {
         expect.any(Object),
         expect.not.objectContaining({ fetchFn: expect.anything() }),
       );
+    });
+  });
+
+  describe("Inspector proxy McpError auth recovery", () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
+      mockAuth.mockResolvedValue("AUTHORIZED");
+      mockDiscoverScopes.mockResolvedValue(undefined);
+      mockClient.connect.mockResolvedValue(undefined);
+    });
+
+    const attemptConnect = async (
+      props: Parameters<typeof useConnection>[0] = defaultProps,
+    ) => {
+      const { result } = renderHook(() => useConnection(props));
+      await act(async () => {
+        try {
+          await result.current.connect();
+        } catch {
+          // connect may throw when auth recovery does not retry
+        }
+      });
+    };
+
+    it("invokes auth when connect fails with inspector proxy transport McpError and upstream401 data", async () => {
+      mockClient.connect.mockRejectedValueOnce(
+        new McpError(MCP_PROXY_TRANSPORT_ERROR_CODE, "proxy transport", {
+          upstream401: { body: "{}", contentType: "application/json" },
+        }),
+      );
+      await attemptConnect();
+      expect(mockAuth).toHaveBeenCalledWith(
+        expect.any(Object),
+        expect.objectContaining({
+          serverUrl: defaultProps.sseUrl,
+        }),
+      );
+    });
+
+    it("invokes auth when connect fails with inspector proxy transport McpError and httpStatus 401", async () => {
+      mockClient.connect.mockRejectedValueOnce(
+        new McpError(MCP_PROXY_TRANSPORT_ERROR_CODE, "proxy transport", {
+          httpStatus: 401,
+        }),
+      );
+      await attemptConnect();
+      expect(mockAuth).toHaveBeenCalled();
+    });
+
+    it("does not invoke auth for inspector proxy McpError without auth payload", async () => {
+      mockClient.connect.mockRejectedValueOnce(
+        new McpError(MCP_PROXY_TRANSPORT_ERROR_CODE, "proxy transport", {
+          message: "upstream failure",
+        }),
+      );
+      await attemptConnect();
+      expect(mockAuth).not.toHaveBeenCalled();
+    });
+
+    it("does not invoke auth when httpStatus is 401 but JSON-RPC code is not inspector proxy", async () => {
+      mockClient.connect.mockRejectedValueOnce(
+        new McpError(-32603, "Internal error", { httpStatus: 401 }),
+      );
+      await attemptConnect();
+      expect(mockAuth).not.toHaveBeenCalled();
     });
   });
 

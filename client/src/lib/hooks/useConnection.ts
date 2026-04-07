@@ -1,13 +1,11 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
   SSEClientTransport,
-  SseError,
   SSEClientTransportOptions,
 } from "@modelcontextprotocol/sdk/client/sse.js";
 import {
   StreamableHTTPClientTransport,
   StreamableHTTPClientTransportOptions,
-  StreamableHTTPError,
 } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   ClientNotification,
@@ -51,6 +49,7 @@ import { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import { useEffect, useRef, useState } from "react";
 import { useToast } from "@/lib/hooks/useToast";
 import { ConnectionStatus, CLIENT_IDENTITY } from "../constants";
+import { isConnectionAuthError } from "../connectionAuthErrors";
 import { Notification } from "../notificationTypes";
 import {
   auth,
@@ -380,16 +379,7 @@ export function useConnection({
     }
   };
 
-  const is401Error = (error: unknown): boolean => {
-    return (
-      (error instanceof SseError && error.code === 401) ||
-      (error instanceof StreamableHTTPError && error.code === 401) ||
-      (error instanceof Error && error.message.includes("401")) ||
-      (error instanceof Error && error.message.includes("Unauthorized")) ||
-      (error instanceof Error &&
-        error.message.includes("Missing Authorization header"))
-    );
-  };
+  const is401Error = isConnectionAuthError;
 
   const isProxyAuthError = (error: unknown): boolean => {
     return (
