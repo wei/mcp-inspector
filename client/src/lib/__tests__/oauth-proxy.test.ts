@@ -120,7 +120,51 @@ describe("OAuth Proxy Utilities", () => {
           mockConfig,
         ),
       ).rejects.toThrow(
-        "Failed to discover OAuth metadata: Not found: Metadata not found",
+        "Not found: Metadata not found. The OAuth endpoint may not exist or be misconfigured.",
+      );
+    });
+
+    it("should fall back to root well-known URL for non-root paths", async () => {
+      const mockMetadata = {
+        issuer: "https://auth.example.com",
+        authorization_endpoint: "https://auth.example.com/authorize",
+        token_endpoint: "https://auth.example.com/token",
+        response_types_supported: ["code"],
+        grant_types_supported: ["authorization_code"],
+      };
+
+      // First call (path-aware) fails with 404
+      (global.fetch as jest.Mock).mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        statusText: "Not Found",
+        json: async () => ({ error: "Not found" }),
+      });
+
+      // Second call (root fallback) succeeds
+      (global.fetch as jest.Mock).mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockMetadata,
+      });
+
+      const result = await discoverAuthorizationServerMetadataViaProxy(
+        new URL("https://auth.example.com/tenant"),
+        mockConfig,
+      );
+
+      expect(result).toEqual(mockMetadata);
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+      // First attempt: path-aware URL
+      expect(global.fetch).toHaveBeenNthCalledWith(
+        1,
+        "http://localhost:6277/oauth/metadata?url=https%3A%2F%2Fauth.example.com%2F.well-known%2Foauth-authorization-server%2Ftenant",
+        expect.any(Object),
+      );
+      // Second attempt: root fallback URL
+      expect(global.fetch).toHaveBeenNthCalledWith(
+        2,
+        "http://localhost:6277/oauth/metadata?url=https%3A%2F%2Fauth.example.com%2F.well-known%2Foauth-authorization-server",
+        expect.any(Object),
       );
     });
 
@@ -139,9 +183,7 @@ describe("OAuth Proxy Utilities", () => {
           new URL("https://auth.example.com"),
           mockConfig,
         ),
-      ).rejects.toThrow(
-        "Failed to discover OAuth metadata: Server error (500): Internal Server Error",
-      );
+      ).rejects.toThrow("Server error (500): Internal Server Error");
     });
   });
 
@@ -190,7 +232,49 @@ describe("OAuth Proxy Utilities", () => {
           mockConfig,
         ),
       ).rejects.toThrow(
-        "Failed to discover resource metadata: Not found: Resource metadata not found",
+        "Not found: Resource metadata not found. The OAuth endpoint may not exist or be misconfigured.",
+      );
+    });
+
+    it("should fall back to root well-known URL for non-root paths", async () => {
+      const mockMetadata = {
+        resource: "https://api.example.com/mcp",
+        authorization_servers: ["https://auth.example.com"],
+        scopes_supported: ["read", "write"],
+      };
+
+      // First call (path-aware) fails with 404
+      (global.fetch as jest.Mock).mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        statusText: "Not Found",
+        json: async () => ({ error: "Not found" }),
+      });
+
+      // Second call (root fallback) succeeds
+      (global.fetch as jest.Mock).mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockMetadata,
+      });
+
+      const result = await discoverOAuthProtectedResourceMetadataViaProxy(
+        "https://api.example.com/mcp",
+        mockConfig,
+      );
+
+      expect(result).toEqual(mockMetadata);
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+      // First attempt: path-aware URL
+      expect(global.fetch).toHaveBeenNthCalledWith(
+        1,
+        "http://localhost:6277/oauth/resource-metadata?url=https%3A%2F%2Fapi.example.com%2F.well-known%2Foauth-protected-resource%2Fmcp",
+        expect.any(Object),
+      );
+      // Second attempt: root fallback URL
+      expect(global.fetch).toHaveBeenNthCalledWith(
+        2,
+        "http://localhost:6277/oauth/resource-metadata?url=https%3A%2F%2Fapi.example.com%2F.well-known%2Foauth-protected-resource",
+        expect.any(Object),
       );
     });
   });
