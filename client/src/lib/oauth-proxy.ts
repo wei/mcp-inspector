@@ -125,7 +125,7 @@ export async function discoverAuthorizationServerMetadataViaProxy(
   authServerUrl: URL,
   config: InspectorConfig,
 ): Promise<OAuthMetadata> {
-  // Construct the well-known URL per RFC 8414
+  // Construct the path-aware well-known URL per RFC 8414
   const pathname = authServerUrl.pathname.endsWith("/")
     ? authServerUrl.pathname.slice(0, -1)
     : authServerUrl.pathname;
@@ -143,9 +143,21 @@ export async function discoverAuthorizationServerMetadataViaProxy(
       { url: wellKnownUrl.toString() },
     );
   } catch (error) {
-    throw new Error(
-      `Failed to discover OAuth metadata: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    // If path-aware discovery fails and we have a non-root path, fall back to root discovery
+    if (pathname && pathname !== "/") {
+      const rootWellKnownUrl = new URL(
+        `/.well-known/oauth-authorization-server`,
+        authServerUrl,
+      );
+      return await proxyFetch<OAuthMetadata>(
+        "/oauth/metadata",
+        "GET",
+        config,
+        undefined,
+        { url: rootWellKnownUrl.toString() },
+      );
+    }
+    throw error;
   }
 }
 
@@ -179,9 +191,21 @@ export async function discoverOAuthProtectedResourceMetadataViaProxy(
       { url: wellKnownUrl.toString() },
     );
   } catch (error) {
-    throw new Error(
-      `Failed to discover resource metadata: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    // If path-aware discovery fails and we have a non-root path, fall back to root discovery
+    if (pathname && pathname !== "/") {
+      const rootWellKnownUrl = new URL(
+        `/.well-known/oauth-protected-resource`,
+        url,
+      );
+      return await proxyFetch<OAuthProtectedResourceMetadata>(
+        "/oauth/resource-metadata",
+        "GET",
+        config,
+        undefined,
+        { url: rootWellKnownUrl.toString() },
+      );
+    }
+    throw error;
   }
 }
 
