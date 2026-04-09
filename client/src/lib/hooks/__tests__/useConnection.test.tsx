@@ -1513,8 +1513,6 @@ describe("useConnection", () => {
         if (expectScopeCall) {
           expect(mockDiscoverScopes).toHaveBeenCalledWith(
             defaultProps.sseUrl,
-            "proxy",
-            defaultProps.config,
             undefined,
           );
         } else {
@@ -1539,8 +1537,6 @@ describe("useConnection", () => {
 
       expect(mockDiscoverScopes).toHaveBeenCalledWith(
         defaultProps.sseUrl,
-        "proxy",
-        defaultProps.config,
         undefined,
       );
       expect(mockAuth).toHaveBeenCalledWith(expect.any(Object), {

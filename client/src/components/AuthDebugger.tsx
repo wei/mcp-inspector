@@ -7,15 +7,12 @@ import { OAuthFlowProgress } from "./OAuthFlowProgress";
 import { OAuthStateMachine } from "../lib/oauth-state-machine";
 import { SESSION_KEYS } from "../lib/constants";
 import { validateRedirectUrl } from "@/utils/urlValidation";
-import { InspectorConfig } from "../lib/configurationTypes";
 
 export interface AuthDebuggerProps {
   serverUrl: string;
   onBack: () => void;
   authState: AuthDebuggerState;
   updateAuthState: (updates: Partial<AuthDebuggerState>) => void;
-  connectionType: "direct" | "proxy";
-  config: InspectorConfig;
 }
 
 interface StatusMessageProps {
@@ -63,8 +60,6 @@ const AuthDebugger = ({
   onBack,
   authState,
   updateAuthState,
-  connectionType,
-  config,
 }: AuthDebuggerProps) => {
   // Check for existing tokens on mount
   useEffect(() => {
@@ -108,9 +103,8 @@ const AuthDebugger = ({
   }, [serverUrl, updateAuthState]);
 
   const stateMachine = useMemo(
-    () =>
-      new OAuthStateMachine(serverUrl, updateAuthState, connectionType, config),
-    [serverUrl, updateAuthState, connectionType, config],
+    () => new OAuthStateMachine(serverUrl, updateAuthState),
+    [serverUrl, updateAuthState],
   );
 
   const proceedToNextStep = useCallback(async () => {
@@ -156,16 +150,11 @@ const AuthDebugger = ({
         latestError: null,
       };
 
-      const oauthMachine = new OAuthStateMachine(
-        serverUrl,
-        (updates) => {
-          // Update our temporary state during the process
-          currentState = { ...currentState, ...updates };
-          // But don't call updateAuthState yet
-        },
-        connectionType,
-        config,
-      );
+      const oauthMachine = new OAuthStateMachine(serverUrl, (updates) => {
+        // Update our temporary state during the process
+        currentState = { ...currentState, ...updates };
+        // But don't call updateAuthState yet
+      });
 
       // Manually step through each stage of the OAuth flow
       while (currentState.oauthStep !== "complete") {
