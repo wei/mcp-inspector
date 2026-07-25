@@ -220,8 +220,10 @@ vi.mock("@inspector/core/react/useInspectorClient.js", () => ({
     status: "connected",
     capabilities: {},
     clientCapabilities: {},
-    // Left undefined so `initializeResult` stays undefined and the
-    // ConnectionInfoModal (gated on it) never mounts during the test.
+    // Undefined models a modern server that omitted the optional serverInfo. As
+    // of #1772 `initializeResult` is still built when connected (with a
+    // catalog-name fallback), so this exercises that path — see the "#1772"
+    // describe block.
     serverInfo: undefined,
     instructions: undefined,
   })),
@@ -358,7 +360,9 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
     currentLogLevel?: string;
     activeTab?: string;
     erroredServerId?: string;
+    initializeResult?: { serverInfo: { name: string; version: string } };
     onActiveTabChange: (tab: string) => void;
+    onConnectionInfo: () => void;
     onToggleConnection: (id: string) => void;
     onToolsUiChange: (next: {
       selectedToolName?: string;
@@ -425,6 +429,11 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
       </span>
       <span data-testid="log-level">{props.currentLogLevel}</span>
       <span data-testid="active-tab">{props.activeTab ?? "none"}</span>
+      <span data-testid="init-result">
+        {props.initializeResult
+          ? `name:${props.initializeResult.serverInfo.name || "(empty)"}`
+          : "none"}
+      </span>
       <span data-testid="errored-server">
         {props.erroredServerId ?? "none"}
       </span>
@@ -432,6 +441,9 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
         switch-servers-tab
       </button>
       <button onClick={() => props.onToggleConnection("A")}>connect</button>
+      <button onClick={() => props.onConnectionInfo()}>
+        open-connection-info
+      </button>
       <button
         onClick={() =>
           props.onToolsUiChange({
@@ -537,6 +549,7 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
 }));
 
 import App from "./App";
+import { SERVER_INFO_NOT_REPORTED_LABEL } from "./components/groups/ConnectionInfoContent/ConnectionInfoContent";
 import { OAUTH_CALLBACK_PATH } from "./utils/oauthFlow.js";
 import { INSPECTOR_SERVERS_TAB } from "./utils/inspectorTabs.js";
 import {
@@ -622,6 +635,94 @@ describe("App failed-connection card border (#1621)", () => {
     await waitFor(() =>
       expect(screen.getByTestId("errored-server")).toHaveTextContent("none"),
     );
+  });
+});
+
+describe("App initializeResult when connected without serverInfo (#1772)", () => {
+  beforeEach(() => {
+    clientInstances.length = 0;
+    vi.mocked(useInspectorClient).mockReturnValue(DEFAULT_USE_INSPECTOR_CLIENT);
+  });
+
+  // A modern-era `server/discover` makes `serverInfo` optional, so a conforming
+  // modern server can be `connected` with `serverInfo === undefined`. The header
+  // (and its whole tab bar) is gated on `initializeResult` downstream, so it must
+  // still be built in that case — otherwise the connected server shows no menu.
+  it("builds initializeResult when connected even though serverInfo is undefined", () => {
+    // DEFAULT_USE_INSPECTOR_CLIENT is exactly this case: connected + no serverInfo.
+    renderWithMantine(<App />);
+    expect(screen.getByTestId("init-result")).not.toHaveTextContent("none");
+  });
+
+  it("falls back to the active server's catalog name when serverInfo is undefined", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+    // Connect server "A" (PlotRocket) via the mocked InspectorView control so it
+    // becomes the active server; serverInfo is still undefined (default mock), so
+    // the synthesized name must come from the catalog entry.
+    await user.click(screen.getByText("connect"));
+    await waitFor(() =>
+      expect(screen.getByTestId("init-result")).toHaveTextContent(
+        "name:PlotRocket",
+      ),
+    );
+  });
+
+  it("does not build initializeResult while disconnected", () => {
+    vi.mocked(useInspectorClient).mockReturnValue({
+      ...DEFAULT_USE_INSPECTOR_CLIENT,
+      status: "disconnected",
+    });
+    renderWithMantine(<App />);
+    expect(screen.getByTestId("init-result")).toHaveTextContent("none");
+  });
+
+  it("uses the reported serverInfo name when present (legacy / stamped modern)", () => {
+    vi.mocked(useInspectorClient).mockReturnValue({
+      ...DEFAULT_USE_INSPECTOR_CLIENT,
+      serverInfo: { name: "real-server", version: "2.0.0" },
+    });
+    renderWithMantine(<App />);
+    expect(screen.getByTestId("init-result")).toHaveTextContent(
+      "name:real-server",
+    );
+  });
+
+  // Pins the App → ConnectionInfoModal wiring of `serverInfoReported`: without
+  // this, hard-coding it to `true` would keep the suite green and silently
+  // reintroduce the fidelity bug.
+  it("passes serverInfoReported=false to the modal, which shows 'not reported' (serverInfo omitted)", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect")); // active server = A
+    await user.click(screen.getByText("open-connection-info"));
+    await waitFor(() =>
+      expect(screen.getAllByText(SERVER_INFO_NOT_REPORTED_LABEL)).toHaveLength(
+        2,
+      ),
+    );
+    // The synthesized catalog name is not presented as the server's report.
+    // Exact-match query on purpose: the mocked InspectorView's `init-result` span
+    // prints "name:PlotRocket" (prefixed), so this only matches a bare "PlotRocket"
+    // — i.e. the modal's Name cell — not the harness span.
+    expect(screen.queryByText("PlotRocket")).not.toBeInTheDocument();
+  });
+
+  it("passes serverInfoReported=true to the modal, which shows the reported name", async () => {
+    vi.mocked(useInspectorClient).mockReturnValue({
+      ...DEFAULT_USE_INSPECTOR_CLIENT,
+      serverInfo: { name: "real-server", version: "2.0.0" },
+    });
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await user.click(screen.getByText("open-connection-info"));
+    await waitFor(() =>
+      expect(screen.getByText("real-server")).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByText(SERVER_INFO_NOT_REPORTED_LABEL),
+    ).not.toBeInTheDocument();
   });
 });
 
