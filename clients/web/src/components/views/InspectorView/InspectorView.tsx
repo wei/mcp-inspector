@@ -17,6 +17,7 @@ import {
 } from "@mantine/core";
 import { useLocalStorage } from "@mantine/hooks";
 import type {
+  Implementation,
   InitializeResult,
   LoggingLevel,
   Prompt,
@@ -169,6 +170,27 @@ const LOGS_TAB = "Logs";
 const PROTOCOL_TAB = "Protocol";
 const NETWORK_TAB = "Network";
 const CONSOLE_TAB = "Console";
+
+// Resolve the server name the connected header renders. A server may report
+// `serverInfo` with a blank `name` (#1774) — empty or whitespace-only — and the
+// header must never show a nameless title, so fall back to the active server's
+// catalog name when the reported name is blank (`.trim()` catches "   ", the
+// same non-conforming class an empty string is). This is a display-only
+// fallback: the Connection Info modal stays faithful to the raw report because
+// it reads App's untouched `initializeResult` + `serverInfoReported`, not this
+// resolved value. (App already folds the catalog name into
+// `initializeResult.serverInfo` for the modern-omitted case where serverInfo is
+// absent entirely (#1772); this covers the reported-but-blank-name case that
+// `??` fallback doesn't reach.)
+function resolveHeaderServerInfo(
+  serverInfo: Implementation,
+  servers: ServerEntry[],
+  activeServerId: string | undefined,
+): Implementation {
+  if (serverInfo.name?.trim()) return serverInfo;
+  const catalogName = servers.find((s) => s.id === activeServerId)?.name;
+  return catalogName ? { ...serverInfo, name: catalogName } : serverInfo;
+}
 
 const ALL_TABS: string[] = [
   SERVERS_TAB,
@@ -1274,7 +1296,11 @@ export function InspectorView({
         {connectionStatus === "connected" && initializeResult ? (
           <ViewHeader
             connected
-            serverInfo={initializeResult.serverInfo}
+            serverInfo={resolveHeaderServerInfo(
+              initializeResult.serverInfo,
+              serversInput,
+              activeServer,
+            )}
             status={connectionStatus}
             latencyMs={latencyMs}
             activeTab={activeTab}

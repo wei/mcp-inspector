@@ -96,6 +96,42 @@ describe("ConnectionInfoContent", () => {
     expect(screen.getAllByText("—")).toHaveLength(3);
   });
 
+  it("renders an em-dash when the reported name is missing", () => {
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={{
+          ...fullResult,
+          // Non-conforming server: `name` is runtime-absent (the field is typed
+          // non-null). Pins the `?.trim()` tolerance — symmetric with the
+          // "version is missing" test above — so it reads "—", not a crash.
+          serverInfo: { version: "1.0.0" } as never,
+        }}
+        clientCapabilities={fullClientCaps}
+        transport="stdio"
+      />,
+    );
+    expect(screen.getByText("1.0.0")).toBeInTheDocument();
+    expect(screen.getAllByText("—")).toHaveLength(3);
+  });
+
+  it("renders an em-dash when the reported name is whitespace-only", () => {
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={{
+          ...fullResult,
+          serverInfo: { name: "   ", version: "1.0.0" },
+        }}
+        clientCapabilities={fullClientCaps}
+        transport="stdio"
+      />,
+    );
+    // A whitespace-only reported name is the same non-conforming class as an
+    // empty one (#1774): it must read as unknown ("—"), not a visually blank
+    // row. Stays faithful — never borrows the catalog name.
+    expect(screen.getByText("1.0.0")).toBeInTheDocument();
+    expect(screen.getAllByText("—")).toHaveLength(3);
+  });
+
   it("shows 'not reported' for name and version when serverInfo was not reported", () => {
     renderWithMantine(
       <ConnectionInfoContent
