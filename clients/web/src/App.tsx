@@ -3,6 +3,7 @@ import {
   Anchor,
   Box,
   List,
+  Paper,
   Stack,
   Text,
   useComputedColorScheme,
@@ -270,10 +271,12 @@ function messagesToLogEntries(messages: MessageEntry[]): LogEntryData[] {
   for (const m of messages) {
     if (m.direction !== "notification") continue;
     // MessageEntry.message is a JSONRPC union; notifications have `method`
-    // but not `id`. Narrow with an `in` check before the cast.
+    // but not `id`. Narrow with an `in` check, then confirm the method.
     if (!("method" in m.message)) continue;
     if (m.message.method !== "notifications/message") continue;
-    const params = (m.message as unknown as LoggingMessageNotification).params;
+    // The method check pins this to a logging notification; its `params` are
+    // only generically typed on the JSONRPC union, so cast just that value.
+    const params = m.message.params as LoggingMessageNotification["params"];
     out.push({
       receivedAt: m.timestamp,
       params,
@@ -381,6 +384,34 @@ function bodyDroppedToastId(serverId: string): string {
 
 const CLIENT_CONFIG_LOAD_ERROR_NOTIFICATION_ID = "client-config-load-error";
 
+// Shared "list of likely causes" styling for the warning-toast bodies below.
+const ToastCauseList = List.withProps({ size: "sm", spacing: 2 });
+
+// The "open the relevant settings/details" link rendered at the bottom of each
+// warning-toast body. Same static shape across all three toasts; each passes
+// its own `onClick`.
+const ToastLinkButton = Anchor.withProps({
+  component: "button",
+  type: "button",
+  size: "sm",
+});
+
+// Sticky re-auth banner bar. A `Paper` so every static style is a prop: `shadow`
+// emits `var(--mantine-shadow-sm)` (identical to the old CSS), and the stacking
+// order goes through `styles.root` since Mantine has no `z` prop.
+const ReAuthBannerBar = Paper.withProps({
+  px: "md",
+  pt: "xs",
+  pos: "sticky",
+  top: 60,
+  bg: "var(--mantine-color-body)",
+  shadow: "sm",
+  styles: { root: { zIndex: 200 } },
+  // Paper's default `radius: "md"` would round this full-bleed sticky bar's
+  // corners; the bar it replaced (a Box) had none.
+  radius: 0,
+});
+
 // Body of the "response body dropped" warning toast: a one-line summary of what
 // happened, the likely causes, and a link that opens this server's settings
 // (on the Options section) so the user can raise the Network Log Size if it's
@@ -399,7 +430,7 @@ const FetchBodyDroppedToastMessage = ({
       out (the log hit its {maxFetchRequests}-request limit), so the body
       couldn&apos;t be shown. This usually indicates:
     </Text>
-    <List size="sm" spacing={2}>
+    <ToastCauseList>
       <List.Item>
         a chatty or misbehaving server (notification storms, rapid polling)
       </List.Item>
@@ -410,10 +441,10 @@ const FetchBodyDroppedToastMessage = ({
       <List.Item>
         the Network Log Size set too low for this server&apos;s traffic
       </List.Item>
-    </List>
-    <Anchor component="button" type="button" size="sm" onClick={onAdjust}>
+    </ToastCauseList>
+    <ToastLinkButton onClick={onAdjust}>
       Adjust Network Log Size for this server
-    </Anchor>
+    </ToastLinkButton>
   </Stack>
 );
 
@@ -431,9 +462,9 @@ const OutputValidationToastMessage = ({
       tool&apos;s outputSchema. The inspector renders it anyway, but strict MCP
       clients may not.
     </Text>
-    <Anchor component="button" type="button" size="sm" onClick={onViewDetails}>
+    <ToastLinkButton onClick={onViewDetails}>
       View validation details
-    </Anchor>
+    </ToastLinkButton>
   </Stack>
 );
 
@@ -450,9 +481,9 @@ const UrlElicitationErrorToastMessage = ({
       The server reported a URLElicitationRequired error but listed no required
       elicitations, so there&apos;s nothing to open.
     </Text>
-    <Anchor component="button" type="button" size="sm" onClick={onViewDetails}>
+    <ToastLinkButton onClick={onViewDetails}>
       View error details
-    </Anchor>
+    </ToastLinkButton>
   </Stack>
 );
 
@@ -4183,20 +4214,13 @@ function App() {
     <>
       <Box>
         {reAuthBanner ? (
-          <Box
-            className="reauth-banner-bar"
-            px="md"
-            pt="xs"
-            pos="sticky"
-            top={60}
-            bg="var(--mantine-color-body)"
-          >
+          <ReAuthBannerBar>
             <ReAuthBanner
               message={reAuthBanner.message}
               onReauthenticate={onReauthenticateFromBanner}
               onDismiss={() => setReAuthBanner(null)}
             />
-          </Box>
+          </ReAuthBannerBar>
         ) : null}
         <InspectorView
           deepLink={deepLink}

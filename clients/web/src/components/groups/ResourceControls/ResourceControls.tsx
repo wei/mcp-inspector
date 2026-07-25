@@ -21,6 +21,21 @@ import { ListToggle } from "../../elements/ListToggle/ListToggle";
 import { ResourceListItem } from "../ResourceListItem/ResourceListItem";
 import { ResourceSubscribedItem } from "../ResourceSubscribedItem/ResourceSubscribedItem";
 
+// A tight, non-wrapping horizontal row (search field + toggle; count + stream
+// badge).
+const TightRow = Group.withProps({ gap: "xs", wrap: "nowrap" });
+
+// Fills the full-height `sidebar` Card (flex column) so the scroll region below
+// can claim the remaining space; `mih: 0` lets that child shrink and scroll
+// instead of overflowing the card (#1462).
+const SidebarStack = Stack.withProps({ gap: "sm", flex: 1, mih: 0 });
+
+const SearchInput = TextInput.withProps({
+  flex: 1,
+  placeholder: "Search...",
+  rightSectionPointerEvents: "auto",
+});
+
 export interface ResourceControlsProps {
   resources: Resource[];
   templates: ResourceTemplate[];
@@ -201,21 +216,15 @@ export function ResourceControls({
   }
 
   return (
-    // Fills the full-height `sidebar` Card (flex column) so the scroll region
-    // below can claim the remaining space; `mih: 0` lets that child shrink and
-    // scroll instead of overflowing the card (#1462).
-    <Stack gap="sm" flex={1} mih={0}>
+    <SidebarStack>
       <Group justify="space-between">
         <Title order={4}>Resources</Title>
         <ListChangedIndicator visible={listChanged} onRefresh={onRefreshList} />
       </Group>
-      <Group gap="xs" wrap="nowrap">
-        <TextInput
-          flex={1}
-          placeholder="Search..."
+      <TightRow>
+        <SearchInput
           value={searchText}
           onChange={(e) => onSearchChange(e.currentTarget.value)}
-          rightSectionPointerEvents="auto"
           rightSection={
             searchText ? (
               <ClearButton onClick={() => onSearchChange("")} />
@@ -223,22 +232,22 @@ export function ResourceControls({
           }
         />
         <ListToggle compact={!allExpanded} onToggle={handleToggleList} />
-      </Group>
+      </TightRow>
       <ListPaginationControls {...pagination} />
+      {/* Stays inline: Accordion is a compound, `multiple`-discriminated generic,
+          so `.withProps({ multiple: true, ... })` loses its JSX call signature
+          (same tooling limit as Box). */}
       <Accordion
         multiple
         variant="disclosure"
         chevron={<RiArrowRightSLine />}
-        value={visibleOpenSections}
-        onChange={handleOpenSectionsChange}
         flex={1}
         mih={0}
-        // Disable Mantine's panel height animation: its Collapse drives the
-        // open/close via an inline `height` that briefly jumps the panel to its
-        // full natural height, fighting the flex sizing (the panels are
-        // flex-distributed and scroll). With it off, flex controls the height
-        // cleanly. The chevron still rotates smoothly (CSS, in App.css). #1462
+        // Disable Mantine's panel height animation so flex controls the height
+        // cleanly (the chevron still rotates smoothly via CSS in App.css). #1462
         transitionDuration={0}
+        value={visibleOpenSections}
+        onChange={handleOpenSectionsChange}
       >
         <Accordion.Item
           value="resources"
@@ -302,7 +311,7 @@ export function ResourceControls({
             )}
           >
             <Accordion.Control disabled={filteredSubscriptions.length === 0}>
-              <Group gap="xs" wrap="nowrap">
+              <TightRow>
                 <Text span>
                   {formatSectionCount(
                     "Subscriptions",
@@ -312,7 +321,7 @@ export function ResourceControls({
                 {streamStatus && (
                   <SubscriptionStreamBadge status={streamStatus} />
                 )}
-              </Group>
+              </TightRow>
             </Accordion.Control>
             <Accordion.Panel>
               <Stack gap="xs">
@@ -330,6 +339,6 @@ export function ResourceControls({
           </Accordion.Item>
         )}
       </Accordion>
-    </Stack>
+    </SidebarStack>
   );
 }
