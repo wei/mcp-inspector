@@ -48,7 +48,7 @@ spec. After this work, every dumb component consumes either:
     `Tool[]`, `Prompt[]`, `Resource[]`, `ResourceTemplate[]`, `Task[]`.
   - `core/react/{useMessageLog,useStderrLog,useFetchRequestLog}.ts` — log
     wrapper consumers.
-  - `clients/web/src/lib/types/customHeaders.ts` — `CustomHeader` /
+  - `clients/web/src/utils/customHeaders.ts` — `CustomHeader` /
     `CustomHeaders` shape, used by `ServerSettingsForm`.
   - `clients/web/src/utils/schemaUtils.ts` + `clients/web/src/utils/jsonUtils.ts`
     — JSON Schema typing (`JsonValue`, `JsonSchemaType`, `JsonObject`) and
@@ -181,9 +181,10 @@ have no v1.5 equivalent):
 **Tab enum placement**: `InspectorTab` is a UI-routing concept, not an MCP
 or transport concept. Place it under `clients/web/src/types/navigation.ts`
 rather than in `core/mcp/types.ts`. Everything else lives in `core/mcp/types.ts`.
+_(Superseded by [#1785](https://github.com/modelcontextprotocol/inspector/issues/1785): the live tab-id type is `InspectorTabId` in `clients/web/src/utils/inspectorTabs.ts`, and the `navigation.ts` `InspectorTab` here is dead and slated for removal — a pure UI domain type belongs in `utils/`, per the `src/lib` vs `src/utils` rule in AGENTS.md.)_
 
-**Custom headers**: copy `clients/web/src/lib/types/customHeaders.ts` from
-v1.5 verbatim. It owns `CustomHeader` / `CustomHeaders` shape used by
+**Custom headers**: `clients/web/src/utils/customHeaders.ts` is a verbatim
+copy of the v1.5 module. It owns `CustomHeader` / `CustomHeaders` shape used by
 `ServerSettingsForm` and the experimental panel.
 
 **JSON Schema typing for `SchemaForm`**: copy v1.5's
