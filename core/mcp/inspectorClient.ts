@@ -186,6 +186,7 @@ import type {
 import {
   AuthRecoveryRequiredError,
   EMA_STEP_UP_PENDING_URL,
+  findNestedAuthError,
   isAuthChallengeError,
   isConnectAuthRecoveryError,
   parseAuthChallengeFromError,
@@ -534,6 +535,22 @@ export class InspectorClient extends InspectorClientEventTarget {
   private transportConfig: MCPServerConfig;
   /** null until first transport is built; then true for in-process OAuth runners. */
   private directAuthRecoveryActive: boolean | null = null;
+  /**
+   * Nesting depth of in-flight silent auth recoveries. `withDirectAuthRecovery`
+   * bounds retries per call (`attempt >= 1`), but a satisfied outcome recovers
+   * by running a *nested* `connect()`, which starts its own recovery with a
+   * fresh counter — so a server that keeps answering 401 with freshly refreshed
+   * tokens would recurse without bound. Counted across the nesting boundary and
+   * capped at {@link InspectorClient.MAX_NESTED_AUTH_RECOVERIES}.
+   */
+  private authRecoveryDepth = 0;
+  /**
+   * Cap on nested silent recoveries. One is the normal case (challenge →
+   * refresh → reconnect); a couple more absorb a legitimately re-challenged
+   * reconnect. Beyond that the credentials are not fixing the challenge, so the
+   * challenge is surfaced to the caller instead of recovered again.
+   */
+  private static readonly MAX_NESTED_AUTH_RECOVERIES = 3;
   /**
    * Opt-in from {@link InspectorClientOptions.directAuthRecovery}: when true and
    * the live transport is direct (not {@link RemoteClientTransport}), RPCs use
@@ -1710,7 +1727,29 @@ export class InspectorClient extends InspectorClientEventTarget {
         this.directAuthRecoveryActive !== false &&
         this.isHttpOAuthConfig() &&
         oauthManager &&
-        transportOptions.authProvider
+        // No stored tokens means no authProvider (see above), and then a 401 on
+        // the era-negotiation probe reaches the SDK as a raw `SdkHttpError`.
+        // The probe's classifier ignores the HTTP status — it only looks for a
+        // JSON-RPC error body — so it verdicts "not a modern server", and pin
+        // ("modern") mode rethrows that as ERA_NEGOTIATION_FAILED with the 401
+        // discarded entirely: no status, not even a cause. Intercepting makes
+        // the 401 a typed AuthChallengeError, which survives the probe as
+        // `data.cause` for `findNestedAuthError` to recover (#1805).
+        //
+        // WORKAROUND (#1807, upstream modelcontextprotocol/typescript-sdk#2561):
+        // remove this clause once the SDK classifies a probe 401/403 as
+        // auth-required. `findNestedAuthError` is the permanent fix; the
+        // `|| this.probesProtocolEra()` clause below exists only to compensate
+        // for that upstream gap and should be deleted with it.
+        //
+        // Known, accepted side effect of turning intercept on with no stored
+        // tokens: `parseAuthChallengeFromResponse` treats 403 as a challenge
+        // too, so a probe answered 403 for a *non-auth* reason (a gateway
+        // rejecting the unknown `server/discover` method, say) now starts OAuth
+        // discovery instead of letting "auto" fall back to the legacy
+        // `initialize`. The outcome is a surfaced `oauthError`, not a hang, and
+        // it goes away with this clause.
+        (transportOptions.authProvider || this.probesProtocolEra())
       ) {
         transportOptions.interceptAuthChallenges = true;
       }
@@ -1772,8 +1811,45 @@ export class InspectorClient extends InspectorClientEventTarget {
       // Promise.race. On timeout, tear the transport down so the next
       // connect() starts clean and the upstream socket isn't left hanging.
       const connectTimeoutMs = this.serverSettings?.connectionTimeout ?? 0;
-      const connectPromise = this.client.connect(this.transport);
-      const runConnect = async (): Promise<void> => {
+      // Unwrap here — the earliest point — so an auth error the SDK's
+      // era-negotiation probe buried in its cause chain is surfaced before
+      // anything downstream inspects it: `withDirectAuthRecovery` (whose
+      // `isAuthChallengeError` check is shallow), the outer catch's
+      // `isConnectAuthRecoveryError` status guard, and every client's connect
+      // error handling. See {@link findNestedAuthError} (#1805).
+      const connectPromise = this.client
+        .connect(this.transport)
+        .catch((err: unknown) => {
+          throw findNestedAuthError(err) ?? err;
+        });
+      // Set when a satisfied auth recovery already completed a full connect()
+      // underneath us — see the short-circuit in `runConnect`.
+      let recoveredByNestedConnect = false;
+      const runConnect = async (attempt: number): Promise<void> => {
+        if (attempt > 0) {
+          // The *retry* leg of `withDirectAuthRecovery`: the challenge was
+          // satisfied silently (e.g. a refresh token), so
+          // `reconnectAfterAuthRecovery()` has already run a complete
+          // `connect()` — handshake, server info, `connect` event and all.
+          // `connectPromise` is created once, outside this closure, so
+          // re-awaiting it here would rethrow the *original* rejection and
+          // reject a `connect()` whose client is in fact connected. Short-
+          // circuit instead, and let the caller skip the post-connect block the
+          // nested connect already ran (dispatching a second `connect` event
+          // would re-trigger every list-state manager's refresh).
+          //
+          // Keyed off the leg rather than live status: an `onclose` landing
+          // between the nested connect and here would flip status off
+          // "connected" and fall through to the rejected `connectPromise`,
+          // reporting the stale handshake 401 as the reason the session died.
+          recoveredByNestedConnect = true;
+          if (this.status !== "connected") {
+            throw new Error(
+              "Connection closed during authorization recovery, after re-authorizing successfully",
+            );
+          }
+          return;
+        }
         if (connectTimeoutMs > 0) {
           connectPromise.catch(() => {});
           let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1805,6 +1881,10 @@ export class InspectorClient extends InspectorClientEventTarget {
           await this.disconnect().catch(() => {});
         }
         throw err;
+      }
+      if (recoveredByNestedConnect) {
+        // The nested connect() from the auth recovery did all of the below.
+        return;
       }
       this.status = "connected";
       this.dispatchTypedEvent("statusChange", this.status);
@@ -5263,18 +5343,46 @@ export class InspectorClient extends InspectorClientEventTarget {
     return this.directAuthRecovery && this.directAuthRecoveryActive === true;
   }
 
+  /**
+   * True when connect() sends the SDK's `server/discover` negotiation probe —
+   * i.e. `protocolEra` is "auto", or "modern" (`{ pin: MODERN_PROTOCOL_VERSION }`).
+   * Legacy is the default for an absent `mode`, matching the SDK.
+   *
+   * `versionNegotiation` is a public option, so a caller can pin a revision the
+   * repo's own {@link eraToVersionNegotiation} never produces (it only ever
+   * pins {@link MODERN_PROTOCOL_VERSION}). That is still "probing" and
+   * deliberately reports true: per the SDK, *any* `{ pin }` sends the
+   * connect-time `server/discover` — "the connect-time `server/discover` must
+   * offer it. No fallback" — so the pinned revision doesn't change whether the
+   * probe (and hence the buried-401 problem) happens. Only "legacy" skips it.
+   */
+  private probesProtocolEra(): boolean {
+    const mode = this.versionNegotiation.mode;
+    return mode !== undefined && mode !== "legacy";
+  }
+
   private async withDirectAuthRecovery<T>(
-    operation: () => Promise<T>,
+    operation: (attempt: number) => Promise<T>,
     context?: { method?: string; toolName?: string },
     attempt = 0,
   ): Promise<T> {
     try {
-      return await operation();
+      // `attempt` is passed through so an operation can tell the first leg from
+      // the post-recovery retry leg — `connect()` needs that distinction, and
+      // live connection status is a racy proxy for it.
+      return await operation(attempt);
     } catch (err) {
       if (attempt >= 1 || !this.usesDirectAuthRecovery()) {
         throw err;
       }
       if (!isAuthChallengeError(err)) {
+        throw err;
+      }
+      if (
+        this.authRecoveryDepth >= InspectorClient.MAX_NESTED_AUTH_RECOVERIES
+      ) {
+        // Refreshed credentials are not satisfying the server: recovering again
+        // would just re-enter the nested connect() below. Surface the challenge.
         throw err;
       }
       const challenge = parseAuthChallengeFromError(err, context);
@@ -5295,7 +5403,12 @@ export class InspectorClient extends InspectorClientEventTarget {
         if (this.activeToolCallAbortController) {
           this.activeToolCallAbortController = undefined;
         }
-        await this.reconnectAfterAuthRecovery();
+        this.authRecoveryDepth += 1;
+        try {
+          await this.reconnectAfterAuthRecovery();
+        } finally {
+          this.authRecoveryDepth -= 1;
+        }
         this.dispatchTypedEvent("authChallengeRecovered", { challenge });
         return this.withDirectAuthRecovery(operation, context, attempt + 1);
       }
@@ -5318,11 +5431,11 @@ export class InspectorClient extends InspectorClientEventTarget {
   }
 
   private async invokeMcpClient<T>(
-    operation: () => Promise<T>,
+    operation: (attempt: number) => Promise<T>,
     context?: { method?: string; toolName?: string },
   ): Promise<T> {
     if (!this.usesDirectAuthRecovery()) {
-      return operation();
+      return operation(0);
     }
     return this.withDirectAuthRecovery(operation, context);
   }
