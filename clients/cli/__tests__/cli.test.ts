@@ -23,7 +23,7 @@ import {
   createListRootsTool,
   createTestServerInfo,
 } from "@modelcontextprotocol/inspector-test-server";
-import type { MCPServerConfig } from "@modelcontextprotocol/inspector-core/mcp/index.js";
+import type { MCPServerConfig } from "@inspector/core/mcp/index.js";
 
 describe("CLI Tests", () => {
   describe("Basic CLI Mode", () => {
@@ -452,7 +452,7 @@ describe("CLI Tests", () => {
         // the config file into the connection's settings.
         const sawHeader = server
           .getRecordedRequests()
-          .some((r) => r.headers["x-custom-token"] === "secret-123");
+          .some((r) => r.headers?.["x-custom-token"] === "secret-123");
         expect(sawHeader).toBe(true);
       } finally {
         await server.stop();
@@ -493,7 +493,7 @@ describe("CLI Tests", () => {
         expectCliSuccess(result);
         const tokens = server
           .getRecordedRequests()
-          .map((r) => r.headers["x-custom-token"]);
+          .map((r) => r.headers?.["x-custom-token"]);
         expect(tokens).toContain("from-cli");
         expect(tokens).not.toContain("from-disk");
       } finally {

@@ -17,6 +17,12 @@ import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  reachableScripts,
+  rootReachesScript,
+  rootRunsClientValidate,
+  tokenize,
+} from "./lib/npm-scripts.mjs";
 
 const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -48,39 +54,6 @@ const MANIFESTS = [
   "clients/tui",
   "clients/launcher",
 ];
-
-/** Split a shell-ish command string into args, honoring double quotes. */
-function tokenize(command) {
-  const tokens = [];
-  const re = /"([^"]*)"|(\S+)/g;
-  let m;
-  while ((m = re.exec(command)) !== null) {
-    tokens.push(m[1] !== undefined ? m[1] : m[2]);
-  }
-  return tokens;
-}
-
-/**
- * Names of scripts transitively reachable from `entry` by following `npm run
- * <name>` references within a manifest. Used so we only trust a `format:check`
- * glob that CI actually runs — a `prettier --check` script that nothing invokes
- * from `validate` doesn't gate anything, and counting its globs would let the
- * gate be silently unwired (the file still "matches a glob" that never runs).
- */
-function reachableScripts(scripts, entry = "validate") {
-  const reached = new Set();
-  const queue = [entry];
-  const runRef = /npm run ([\w:-]+)/g;
-  while (queue.length > 0) {
-    const name = queue.shift();
-    if (reached.has(name)) continue;
-    reached.add(name);
-    const cmd = scripts?.[name];
-    if (typeof cmd !== "string") continue;
-    for (const m of cmd.matchAll(runRef)) queue.push(m[1]);
-  }
-  return reached;
-}
 
 /**
  * Extract the path/glob args from every `prettier --check …` in a manifest's
@@ -159,15 +132,8 @@ function clientsUnreachedFromRoot() {
   const rootPkg = JSON.parse(
     readFileSync(path.join(repoRoot, "package.json"), "utf8"),
   );
-  const reachedNames = reachableScripts(rootPkg.scripts);
-  const reachedCommands = [...reachedNames]
-    .map((n) => rootPkg.scripts?.[n])
-    .filter((c) => typeof c === "string");
   return MANIFESTS.filter((dir) => dir !== ".").filter(
-    (dir) =>
-      !reachedCommands.some(
-        (c) => c.includes(`cd ${dir}`) && /npm run validate/.test(c),
-      ),
+    (dir) => !rootRunsClientValidate(rootPkg.scripts, dir),
   );
 }
 
@@ -198,6 +164,19 @@ function trackedSourceFiles() {
     { cwd: repoRoot, encoding: "utf8" },
   );
   return out.split("\n").filter(Boolean);
+}
+
+// Vouch for the sibling guard: a guard can't detect being unrun itself, but the
+// two coverage guards can each assert the other is still wired into `validate`,
+// so dropping either is caught here. Only deleting both slips through.
+const rootScripts = JSON.parse(
+  readFileSync(path.join(repoRoot, "package.json"), "utf8"),
+).scripts;
+if (!rootReachesScript(rootScripts, "verify:typecheck-coverage")) {
+  console.error(
+    "verify:format-coverage — the root `validate` no longer runs `verify:typecheck-coverage` (its sibling guard). Restore it.",
+  );
+  process.exit(1);
 }
 
 const unreachedClients = clientsUnreachedFromRoot();

@@ -48,21 +48,38 @@ const h = vi.hoisted(() => {
   const openUrl = vi.fn().mockResolvedValue(undefined);
   // Shared OAuth-related spies so a test can configure resolve/reject and
   // assert calls regardless of which per-server FakeClient instance App built.
+  // Each spy is typed against the real InspectorClient method signature so its
+  // implementation and `mockResolvedValue` / return payloads stay in sync with
+  // the client (this is what keeps a stale `{ kind: "satisfied" }` literal from
+  // narrowing `handleAuthChallenge`'s return). Note vitest does NOT type-check
+  // `toHaveBeenCalledWith(...)` arguments against the mock's signature, so those
+  // assertions stay runtime-only. The FakeClient wrappers below forward the same
+  // `Parameters<…>` tuple, which spreads cleanly (a tuple, not `unknown[]`).
   const clientSpies = {
-    authenticate: vi.fn(
-      async (): Promise<string | undefined> => "https://auth.example/start",
+    authenticate: vi.fn<InspectorClient["authenticate"]>(
+      async () => new URL("https://auth.example/start"),
     ),
-    clearOAuthTokens: vi.fn(),
-    completeOAuthFlow: vi.fn(async (): Promise<void> => {}),
-    getOAuthState: vi.fn(async () => undefined),
-    callTool: vi.fn(),
-    checkAuthChallengeSatisfied: vi.fn(async () => false),
-    handleAuthChallenge: vi.fn(async () => ({ kind: "satisfied" as const })),
+    clearOAuthTokens: vi.fn<InspectorClient["clearOAuthTokens"]>(
+      async () => {},
+    ),
+    completeOAuthFlow: vi.fn<InspectorClient["completeOAuthFlow"]>(
+      async () => {},
+    ),
+    getOAuthState: vi.fn<InspectorClient["getOAuthState"]>(
+      async () => undefined,
+    ),
+    callTool: vi.fn<InspectorClient["callTool"]>(),
+    checkAuthChallengeSatisfied: vi.fn<
+      InspectorClient["checkAuthChallengeSatisfied"]
+    >(async () => false),
+    handleAuthChallenge: vi.fn<InspectorClient["handleAuthChallenge"]>(
+      async () => ({ kind: "satisfied" }),
+    ),
   };
   // Captured options from the most recent callbackServer.start(), so a test can
   // drive the onCallback / onError handlers the OAuth flows register.
   interface CallbackOpts {
-    onCallback: (p: { code: string }) => Promise<void> | void;
+    onCallback: (p: { code: string; iss?: string }) => Promise<void> | void;
     onError: (p: { error?: string; error_description?: string }) => void;
   }
   const cb: { opts: CallbackOpts | null } = { opts: null };
@@ -124,16 +141,24 @@ const h = vi.hoisted(() => {
           | "sse"
           | "streamable-http",
     );
-    authenticate = (...a: unknown[]) => clientSpies.authenticate(...a);
-    clearOAuthTokens = (...a: unknown[]) => clientSpies.clearOAuthTokens(...a);
-    completeOAuthFlow = (...a: unknown[]) =>
-      clientSpies.completeOAuthFlow(...a);
-    getOAuthState = (...a: unknown[]) => clientSpies.getOAuthState(...a);
-    callTool = (...a: unknown[]) => clientSpies.callTool(...a);
-    checkAuthChallengeSatisfied = (...a: unknown[]) =>
-      clientSpies.checkAuthChallengeSatisfied(...a);
-    handleAuthChallenge = (...a: unknown[]) =>
-      clientSpies.handleAuthChallenge(...a);
+    authenticate = (...a: Parameters<InspectorClient["authenticate"]>) =>
+      clientSpies.authenticate(...a);
+    clearOAuthTokens = (
+      ...a: Parameters<InspectorClient["clearOAuthTokens"]>
+    ) => clientSpies.clearOAuthTokens(...a);
+    completeOAuthFlow = (
+      ...a: Parameters<InspectorClient["completeOAuthFlow"]>
+    ) => clientSpies.completeOAuthFlow(...a);
+    getOAuthState = (...a: Parameters<InspectorClient["getOAuthState"]>) =>
+      clientSpies.getOAuthState(...a);
+    callTool = (...a: Parameters<InspectorClient["callTool"]>) =>
+      clientSpies.callTool(...a);
+    checkAuthChallengeSatisfied = (
+      ...a: Parameters<InspectorClient["checkAuthChallengeSatisfied"]>
+    ) => clientSpies.checkAuthChallengeSatisfied(...a);
+    handleAuthChallenge = (
+      ...a: Parameters<InspectorClient["handleAuthChallenge"]>
+    ) => clientSpies.handleAuthChallenge(...a);
     readResource = vi.fn(async () => ({
       result: { contents: [{ uri: "file://x", text: "hello" }] },
     }));
@@ -263,6 +288,7 @@ vi.mock("../src/utils/openUrl.js", () => ({
 }));
 
 import App from "../src/App.js";
+import type { InspectorClient } from "@inspector/core/mcp/index.js";
 import type { TuiServer } from "../src/tui-servers.js";
 import {
   AuthRecoveryRequiredError,
@@ -581,7 +607,9 @@ beforeEach(() => {
   h.clientInstances.length = 0;
   h.runner.override = null;
   h.clientSpies.authenticate.mockReset();
-  h.clientSpies.authenticate.mockResolvedValue("https://auth.example/start");
+  h.clientSpies.authenticate.mockResolvedValue(
+    new URL("https://auth.example/start"),
+  );
   h.clientSpies.clearOAuthTokens.mockReset();
   h.clientSpies.completeOAuthFlow.mockReset();
   h.clientSpies.completeOAuthFlow.mockResolvedValue(undefined);
