@@ -1,0 +1,5721 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import * as z from "zod/v4";
+import { InspectorClient } from "@inspector/core/mcp/inspectorClient.js";
+import {
+  MessageLogState,
+  FetchRequestLogState,
+  StderrLogState,
+  PagedResourcesState,
+  PagedResourceTemplatesState,
+  PagedPromptsState,
+  ManagedResourcesState,
+  ManagedPromptsState,
+  ManagedToolsState,
+} from "@inspector/core/mcp/state/index.js";
+import { createTransportNode } from "@inspector/core/mcp/node/transport.js";
+import { ToolCallCancelledError } from "@inspector/core/mcp/toolCallCancelledError.js";
+import { SamplingCreateMessage } from "@inspector/core/mcp/samplingCreateMessage.js";
+import { ElicitationCreateMessage } from "@inspector/core/mcp/elicitationCreateMessage.js";
+import {
+  getTestMcpServerCommand,
+  createTestServerHttp,
+  type TestServerHttp,
+  waitForEvent,
+  waitForProgressCount,
+  createEchoTool,
+  createTestServerInfo,
+  createFileResourceTemplate,
+  createCollectSampleTool,
+  createCollectFormElicitationTool,
+  createCollectUrlElicitationTool,
+  createUrlElicitationFormTool,
+  createSendNotificationTool,
+  createSendProgressTool,
+  createListRootsTool,
+  createArgsPrompt,
+  createNumberedTools,
+  createNumberedResources,
+  createNumberedResourceTemplates,
+  createNumberedPrompts,
+  getTaskServerConfig,
+  createElicitationTaskTool,
+  createSamplingTaskTool,
+  createProgressTaskTool,
+  createTaskTool,
+  createAddResourceTool,
+  createAddToolTool,
+  createAddPromptTool,
+} from "@modelcontextprotocol/inspector-test-server";
+import type {
+  MessageEntry,
+  ConnectionStatus,
+  FetchRequestEntryBase,
+} from "@inspector/core/mcp/types.js";
+import type { JsonValue } from "@inspector/core/json/jsonUtils.js";
+import type {
+  TypedEvent,
+  TaskWithOptionalCreatedAt,
+} from "@inspector/core/mcp/inspectorClientEventTarget.js";
+import type {
+  CreateMessageResult,
+  ElicitResult,
+  CallToolResult,
+  Task,
+  Tool,
+  Resource,
+  ResourceTemplateType as ResourceTemplate,
+  Prompt,
+  Progress,
+  ContentBlock,
+} from "@modelcontextprotocol/client";
+import {
+  LOG_LEVEL_META_KEY,
+  RELATED_TASK_META_KEY,
+  SdkError,
+  SdkErrorCode,
+} from "@modelcontextprotocol/client";
+
+/** Get all tools from the client via listTools() (paginates if needed). */
+async function getAllTools(client: InspectorClient): Promise<Tool[]> {
+  const collected: Tool[] = [];
+  let cursor: string | undefined;
+  for (let i = 0; i < 100; i++) {
+    const r = await client.listTools(cursor);
+    collected.push(...r.tools);
+    cursor = r.nextCursor;
+    if (!cursor) break;
+  }
+  return collected;
+}
+
+/** Get a tool by name from the client via listTools() (paginates if needed). */
+async function getTool(client: InspectorClient, name: string): Promise<Tool> {
+  const tool = (await getAllTools(client)).find((t) => t.name === name);
+  if (tool) return tool;
+  throw new Error(`Tool ${name} not found`);
+}
+
+/** Get all resources from the client via listResources() (paginates if needed). */
+async function getAllResources(
+  client: InspectorClient,
+  metadata?: Record<string, string>,
+): Promise<Resource[]> {
+  const collected: Resource[] = [];
+  let cursor: string | undefined;
+  for (let i = 0; i < 100; i++) {
+    const r = await client.listResources(cursor, metadata);
+    collected.push(...r.resources);
+    cursor = r.nextCursor;
+    if (!cursor) break;
+  }
+  return collected;
+}
+
+/** Get all resource templates via listResourceTemplates() (paginates if needed). */
+async function getAllResourceTemplates(
+  client: InspectorClient,
+  metadata?: Record<string, string>,
+): Promise<ResourceTemplate[]> {
+  const collected: ResourceTemplate[] = [];
+  let cursor: string | undefined;
+  for (let i = 0; i < 100; i++) {
+    const r = await client.listResourceTemplates(cursor, metadata);
+    collected.push(...r.resourceTemplates);
+    cursor = r.nextCursor;
+    if (!cursor) break;
+  }
+  return collected;
+}
+
+/** Get all prompts via listPrompts() (paginates if needed). */
+async function getAllPrompts(
+  client: InspectorClient,
+  metadata?: Record<string, string>,
+): Promise<Prompt[]> {
+  const collected: Prompt[] = [];
+  let cursor: string | undefined;
+  for (let i = 0; i < 100; i++) {
+    const r = await client.listPrompts(cursor, metadata);
+    collected.push(...r.prompts);
+    cursor = r.nextCursor;
+    if (!cursor) break;
+  }
+  return collected;
+}
+
+/** Minimal Tool shape for tests that need to call a tool by name (e.g. server returns "not found"). */
+function minimalTool(name: string): Tool {
+  return { name, description: "", inputSchema: { type: "object" } };
+}
+
+describe("InspectorClient", () => {
+  let client: InspectorClient | null;
+  let server: TestServerHttp | null;
+  let serverCommand: { command: string; args: string[] };
+
+  beforeEach(() => {
+    serverCommand = getTestMcpServerCommand();
+    server = null;
+  });
+
+  afterEach(async () => {
+    // Orderly teardown: disconnect client first, then stop server.
+    // HTTP test server sets closing before close so in-flight progress tools skip sending.
+    if (client) {
+      try {
+        await client.disconnect();
+      } catch {
+        // Ignore disconnect errors
+      }
+      client = null;
+    }
+    if (server) {
+      try {
+        await server.stop();
+      } catch {
+        // Ignore server stop errors
+      }
+      server = null;
+    }
+  });
+
+  describe("Connection Management", () => {
+    it("should create client with stdio transport", () => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        { environment: { transport: createTransportNode } },
+      );
+
+      expect(client.getStatus()).toBe("disconnected");
+      expect(client.getServerType()).toBe("stdio");
+    });
+
+    it("should connect to server", async () => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+
+      await client.connect();
+
+      expect(client.getStatus()).toBe("connected");
+    });
+
+    it("should disconnect from server", async () => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+
+      await client.connect();
+      expect(client.getStatus()).toBe("connected");
+
+      await client.disconnect();
+      expect(client.getStatus()).toBe("disconnected");
+    });
+
+    it("should clear server state on disconnect", async () => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+      const pagedResourcesState = new PagedResourcesState(client);
+      const pagedPromptsState = new PagedPromptsState(client);
+
+      await client.connect();
+      expect((await client.listTools()).tools.length).toBeGreaterThan(0);
+      await pagedResourcesState.loadPage();
+      await pagedPromptsState.loadPage();
+      expect(pagedResourcesState.getResources().length).toBeGreaterThan(0);
+      expect(pagedPromptsState.getPrompts().length).toBeGreaterThan(0);
+
+      await client.disconnect();
+      expect(pagedResourcesState.getResources().length).toBe(0);
+      expect(pagedPromptsState.getPrompts().length).toBe(0);
+
+      pagedResourcesState.destroy();
+      pagedPromptsState.destroy();
+    });
+
+    it("MessageLogState clears across a disconnect → reconnect cycle", async () => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+      const messageLogState = new MessageLogState(client);
+      await client.connect();
+      await getAllTools(client);
+      const firstConnectMessages = messageLogState.getMessages();
+      expect(firstConnectMessages.length).toBeGreaterThan(0);
+
+      await client.disconnect();
+      await client.connect();
+      await getAllTools(client);
+      const secondConnectMessages = messageLogState.getMessages();
+      expect(secondConnectMessages.length).toBeGreaterThan(0);
+      if (firstConnectMessages.length > 0 && secondConnectMessages.length > 0) {
+        const lastFirstMessage =
+          firstConnectMessages[firstConnectMessages.length - 1];
+        const firstSecondMessage = secondConnectMessages[0];
+        if (lastFirstMessage && firstSecondMessage) {
+          expect(firstSecondMessage.timestamp.getTime()).toBeGreaterThanOrEqual(
+            lastFirstMessage.timestamp.getTime(),
+          );
+        }
+      }
+      messageLogState.destroy();
+    });
+
+    it("rejects connect() with a timeout error when serverSettings.connectionTimeout fires", async () => {
+      // Stub transport whose start() never resolves — simulates a slow /
+      // unreachable upstream. InspectorClient.connect() should race against
+      // serverSettings.connectionTimeout and reject with a descriptive error;
+      // status should end up in "error", and the client should have
+      // internally torn down the transport (next connect() must rebuild).
+      const hangingTransport = {
+        start: () => new Promise<void>(() => {}),
+        send: async () => {},
+        close: async () => {},
+        onclose: undefined,
+        onerror: undefined,
+        onmessage: undefined,
+        sessionId: undefined,
+      };
+      const fakeFactory = () => ({
+        transport:
+          hangingTransport as unknown as import("@modelcontextprotocol/client").Transport,
+      });
+      client = new InspectorClient(
+        { type: "streamable-http", url: "http://localhost:1/never" },
+        {
+          environment: { transport: fakeFactory },
+          serverSettings: {
+            headers: [],
+            env: [],
+            metadata: [],
+            connectionTimeout: 50,
+            requestTimeout: 0,
+            taskTtl: 0,
+            maxFetchRequests: 1000,
+            roots: [],
+          },
+        },
+      );
+
+      const before = Date.now();
+      await expect(client.connect()).rejects.toThrow(
+        /Connection timed out after 50 ms/,
+      );
+      const elapsed = Date.now() - before;
+      // Sanity: the race should fire near the configured timeout, not at
+      // some far-future SDK default.
+      expect(elapsed).toBeLessThan(2000);
+      // connect() rejected → the outer catch transitions status to "error"
+      // (the same end state any other handshake failure would produce).
+      expect(client.getStatus()).toBe("error");
+    });
+
+    it("holds status at connecting when connect fails with a recoverable 401", async () => {
+      const unauthorizedTransport = {
+        start: async () => {
+          const err = new Error("Unauthorized") as Error & { status?: number };
+          err.status = 401;
+          throw err;
+        },
+        send: async () => {},
+        close: async () => {},
+        onclose: undefined,
+        onerror: undefined,
+        onmessage: undefined,
+        sessionId: undefined,
+      };
+      const fakeFactory = () => ({
+        transport:
+          unauthorizedTransport as unknown as import("@modelcontextprotocol/client").Transport,
+      });
+      client = new InspectorClient(
+        { type: "streamable-http", url: "http://localhost:8081/mcp" },
+        { environment: { transport: fakeFactory } },
+      );
+
+      await expect(client.connect()).rejects.toMatchObject({ status: 401 });
+      expect(client.getStatus()).toBe("connecting");
+    });
+  });
+
+  describe("Message Tracking", () => {
+    it("should track requests (via MessageLogState)", async () => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+      const messageLogState = new MessageLogState(client);
+      await client.connect();
+      await getAllTools(client);
+
+      const messages = messageLogState.getMessages();
+      expect(messages.length).toBeGreaterThan(0);
+      const request = messages.find((m) => m.direction === "request");
+      expect(request).toBeDefined();
+      if (request) {
+        expect("method" in request.message).toBe(true);
+      }
+      messageLogState.destroy();
+    });
+
+    it("should track responses (via MessageLogState)", async () => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+      const messageLogState = new MessageLogState(client);
+      await client.connect();
+      await getAllTools(client);
+
+      const messages = messageLogState.getMessages();
+      const request = messages.find((m) => m.direction === "request");
+      expect(request).toBeDefined();
+      if (request && "response" in request) {
+        expect(request.response).toBeDefined();
+        expect(request.duration).toBeDefined();
+      }
+      messageLogState.destroy();
+    });
+
+    it("should emit message events", async () => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+
+      const messageEvents: MessageEntry[] = [];
+      client.addEventListener("message", (event) => {
+        messageEvents.push(event.detail);
+      });
+
+      await client.connect();
+      await getAllTools(client);
+
+      expect(messageEvents.length).toBeGreaterThan(0);
+    });
+
+    it("MessageLogState getMessages(predicate) returns only matching entries", async () => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+      const messageLogState = new MessageLogState(client);
+      await client.connect();
+      await getAllTools(client);
+
+      const all = messageLogState.getMessages();
+      expect(all.length).toBeGreaterThan(0);
+
+      const requests = messageLogState.getMessages(
+        (m) => m.direction === "request",
+      );
+      expect(requests.length).toBeLessThanOrEqual(all.length);
+      expect(requests.every((m) => m.direction === "request")).toBe(true);
+
+      const notifications = messageLogState.getMessages(
+        (m) => m.direction === "notification",
+      );
+      expect(notifications.every((m) => m.direction === "notification")).toBe(
+        true,
+      );
+      messageLogState.destroy();
+    });
+
+    it("matches responses to requests when a sibling listener fires a request inside the same connect event (regression for unmatched */list responses)", async () => {
+      // Reproduces the pre-fix bug where MessageLogState's clear-on-connect
+      // listener ran after sibling state-manager onConnect listeners had
+      // already synchronously tracked their initial list requests. That clear
+      // wiped pendingRequestEntries before the responses arrived, leaving
+      // the history with unmatched "response" entries marked PENDING.
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        { environment: { transport: createTransportNode } },
+      );
+      const messageLogState = new MessageLogState(client);
+
+      // Simulate the App.tsx wiring: ManagedToolsState et al. register their
+      // own connect listeners that synchronously fire `void client.listTools()`.
+      const refreshClient = client;
+      client.addEventListener("connect", () => {
+        void refreshClient.listTools();
+      });
+
+      await client.connect();
+      // Settle: drain pending microtasks so the listTools response can fold.
+      await new Promise((r) => setTimeout(r, 100));
+
+      const requests = messageLogState
+        .getMessages()
+        .filter((m) => m.direction === "request");
+      const orphanResponses = messageLogState
+        .getMessages()
+        .filter((m) => m.direction === "response");
+      const listToolsReq = requests.find(
+        (m) => (m.message as { method?: string }).method === "tools/list",
+      );
+      expect(listToolsReq).toBeDefined();
+      // Its response must be folded into the request entry, not pushed as a
+      // separate "response" entry.
+      expect(listToolsReq?.response).toBeDefined();
+      expect(listToolsReq?.duration).toBeGreaterThanOrEqual(0);
+      expect(orphanResponses).toEqual([]);
+
+      messageLogState.destroy();
+    });
+  });
+
+  describe("Fetch Request Tracking", () => {
+    it("should track HTTP requests for SSE transport", async () => {
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createEchoTool()],
+        serverType: "sse",
+      });
+
+      await server.start();
+      client = new InspectorClient(
+        {
+          type: "sse",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+
+      const fetchRequestLogState = new FetchRequestLogState(client);
+      await client.connect();
+      await getAllTools(client);
+
+      const fetchRequests = fetchRequestLogState.getFetchRequests();
+      expect(fetchRequests.length).toBeGreaterThan(0);
+      const request = fetchRequests[0];
+      expect(request).toBeDefined();
+      if (request) {
+        expect(request.url).toContain("/sse");
+        expect(request.method).toBe("GET");
+        expect(request.category).toBe("transport");
+      }
+      fetchRequestLogState.destroy();
+    });
+
+    it("should track HTTP requests for streamable-http transport", async () => {
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createEchoTool()],
+      });
+
+      await server.start();
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+
+      const fetchRequestLogState = new FetchRequestLogState(client);
+      await client.connect();
+      await getAllTools(client);
+
+      const fetchRequests = fetchRequestLogState.getFetchRequests();
+      expect(fetchRequests.length).toBeGreaterThan(0);
+      const request = fetchRequests[0];
+      expect(request).toBeDefined();
+      if (request) {
+        expect(request.url).toContain("/mcp");
+        expect(request.method).toBe("POST");
+        expect(request.category).toBe("transport");
+      }
+      fetchRequestLogState.destroy();
+    });
+
+    it("should track request and response details", async () => {
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createEchoTool()],
+      });
+
+      await server.start();
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+
+      const fetchRequestLogState = new FetchRequestLogState(client);
+      await client.connect();
+      await getAllTools(client);
+
+      const fetchRequests = fetchRequestLogState.getFetchRequests();
+      expect(fetchRequests.length).toBeGreaterThan(0);
+      const request = fetchRequests.find((r) => r.responseStatus !== undefined);
+      expect(request).toBeDefined();
+      if (request) {
+        expect(request.requestHeaders).toBeDefined();
+        expect(request.responseStatus).toBeDefined();
+        expect(request.responseHeaders).toBeDefined();
+        expect(request.duration).toBeDefined();
+        expect(request.category).toBe("transport");
+      }
+      fetchRequestLogState.destroy();
+    });
+
+    it("should emit fetchRequest events", async () => {
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createEchoTool()],
+      });
+
+      await server.start();
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+
+      const fetchRequestEvents: FetchRequestEntryBase[] = [];
+      client.addEventListener("fetchRequest", (event) => {
+        fetchRequestEvents.push(event.detail);
+      });
+
+      await client.connect();
+      await getAllTools(client);
+
+      expect(fetchRequestEvents.length).toBeGreaterThan(0);
+    });
+
+    it("should emit fetchRequest events", async () => {
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createEchoTool()],
+      });
+
+      await server.start();
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+
+      const entries: unknown[] = [];
+      client.addEventListener("fetchRequest", (e) => {
+        entries.push((e as CustomEvent).detail);
+      });
+
+      await client.connect();
+      await getAllTools(client);
+
+      expect(entries.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe("Server Data Management", () => {
+    it("getServerSettings returns the constructor settings; setServerSettings replaces them live (#1444)", () => {
+      const initial = {
+        headers: [],
+        env: [],
+        metadata: [],
+        connectionTimeout: 0,
+        requestTimeout: 0,
+        taskTtl: 0,
+        maxFetchRequests: 1000,
+        autoRefreshOnListChanged: false,
+        roots: [],
+      };
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+          serverSettings: initial,
+        },
+      );
+      expect(client.getServerSettings()?.autoRefreshOnListChanged).toBe(false);
+      client.setServerSettings({ ...initial, autoRefreshOnListChanged: true });
+      expect(client.getServerSettings()?.autoRefreshOnListChanged).toBe(true);
+    });
+
+    it("should auto-fetch server contents when enabled", async () => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+
+      await client.connect();
+
+      expect((await client.listTools()).tools.length).toBeGreaterThan(0);
+      expect(client.getCapabilities()).toBeDefined();
+      expect(client.getServerInfo()).toBeDefined();
+    });
+
+    it("exposes the negotiated protocol version after connect (stdio)", async () => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+
+      expect(client.getProtocolVersion()).toBeUndefined();
+      await client.connect();
+      // The SDK Client's getNegotiatedProtocolVersion() supplies the version
+      // for both eras.
+      expect(client.getProtocolVersion()).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      // A legacy connect reports the legacy era; there is no server/discover
+      // result without a probe.
+      expect(client.getProtocolEra()).toBe("legacy");
+      expect(client.getDiscoverResult()).toBeUndefined();
+
+      await client.disconnect();
+      expect(client.getProtocolVersion()).toBeUndefined();
+      expect(client.getProtocolEra()).toBeUndefined();
+      expect(client.getDiscoverResult()).toBeUndefined();
+    });
+
+    it("negotiates the legacy era under versionNegotiation 'auto' against a legacy server (stdio)", async () => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+          // Auto probes server/discover, then falls back to the initialize
+          // handshake on this legacy test server — so the negotiated era is
+          // legacy and getProtocolEra() reports it (vs. undefined on a plain
+          // legacy connect).
+          versionNegotiation: { mode: "auto" },
+        },
+      );
+
+      await client.connect();
+      expect(client.getProtocolEra()).toBe("legacy");
+      expect(client.getProtocolVersion()).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      // A legacy server has no server/discover result even when probed.
+      expect(client.getDiscoverResult()).toBeUndefined();
+
+      await client.disconnect();
+    });
+
+    it("should not auto-fetch server contents when disabled", async () => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+
+      await client.connect();
+
+      // Client no longer stores tools; listTools() still returns server tools when called
+      expect((await client.listTools()).tools.length).toBeGreaterThan(0);
+    });
+
+    it("managed list states populate on connect (regression: capability gate must see capabilities before the connect event)", async () => {
+      // Regression for #1395 + connect-ordering: the managed list-state managers
+      // refresh on the "connect" event and gate their list RPC on
+      // getCapabilities(). If "connect" is dispatched before fetchServerInfo()
+      // populates capabilities, the synchronous gate reads undefined and wipes
+      // the list to empty — tools/prompts/resources all vanish on every connect.
+      // The single fix is shared by all the managed states, so we cover tools
+      // and resources (two distinct capabilities) to guard against a future
+      // change gating only one primitive differently.
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        { environment: { transport: createTransportNode } },
+      );
+      const toolsState = new ManagedToolsState(client);
+      const resourcesState = new ManagedResourcesState(client);
+
+      // Await the change events the connect-triggered refresh() emits rather than
+      // a fixed sleep — refresh() is async past its synchronous capability gate.
+      const toolsChanged = waitForEvent(toolsState, "toolsChange");
+      const resourcesChanged = waitForEvent(resourcesState, "resourcesChange");
+      await client.connect();
+      await Promise.all([toolsChanged, resourcesChanged]);
+
+      expect(client.getCapabilities()?.tools).toBeDefined();
+      expect(toolsState.getTools().length).toBeGreaterThan(0);
+      expect(client.getCapabilities()?.resources).toBeDefined();
+      expect(resourcesState.getResources().length).toBeGreaterThan(0);
+
+      toolsState.destroy();
+      resourcesState.destroy();
+    });
+  });
+
+  describe("Tool Methods", () => {
+    beforeEach(async () => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+      await client.connect();
+    });
+
+    it("should list tools", async () => {
+      const result = await client!.listTools();
+      expect(Array.isArray(result.tools)).toBe(true);
+      expect(result.tools.length).toBeGreaterThan(0);
+    });
+
+    it("should call tool with string arguments", async () => {
+      const tool = await getTool(client!, "echo");
+      const result = await client!.callTool(tool, {
+        message: "hello world",
+      });
+
+      expect(result).toHaveProperty("result");
+      expect(result.success).toBe(true);
+      expect(result.result).toHaveProperty("content");
+      const content = result.result!.content as ContentBlock[];
+      expect(Array.isArray(content)).toBe(true);
+      expect(content[0]).toHaveProperty("type", "text");
+      expect("text" in content[0] && content[0].text).toContain("hello world");
+    });
+
+    it("should call tool with number arguments", async () => {
+      const tool = await getTool(client!, "get_sum");
+      const result = await client!.callTool(tool, {
+        a: 42,
+        b: 58,
+      });
+      expect(result.success).toBe(true);
+
+      expect(result.result).toHaveProperty("content");
+      const content = result.result!.content as ContentBlock[];
+      const resultData = JSON.parse(
+        "text" in content[0] ? content[0].text : "",
+      );
+      expect(resultData.result).toBe(100);
+    });
+
+    it("should call tool with boolean arguments", async () => {
+      const tool = await getTool(client!, "get_annotated_message");
+      const result = await client!.callTool(tool, {
+        messageType: "success",
+        includeImage: true,
+      });
+
+      expect(result.result).toHaveProperty("content");
+      const content = result.result!.content as ContentBlock[];
+      expect(content.length).toBeGreaterThan(1);
+      const hasImage = content.some(
+        (item: ContentBlock) => "type" in item && item.type === "image",
+      );
+      expect(hasImage).toBe(true);
+    });
+
+    it("should return both content and structuredContent for tool with outputSchema (get_temp)", async () => {
+      const tool = await getTool(client!, "get_temp");
+      const result = await client!.callTool(tool, {
+        city: "Seattle",
+        units: "C",
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.result).toBeDefined();
+      expect(result.result).toHaveProperty("content");
+      expect(result.result).toHaveProperty("structuredContent");
+
+      const content = result.result!.content as Array<{
+        type: string;
+        text?: string;
+      }>;
+      expect(Array.isArray(content)).toBe(true);
+      expect(content[0].type).toBe("text");
+      expect(content[0].text).toContain("Seattle");
+      expect(content[0].text).toContain("25");
+      expect(content[0].text).toContain("degrees C");
+
+      const structured = result.result!.structuredContent as Record<
+        string,
+        unknown
+      >;
+      expect(structured).toEqual({
+        temperature: 25,
+        unit: "C",
+        city: "Seattle",
+      });
+    });
+
+    it("throws on output-schema validation when structuredContent has extra properties (get_temp_extra)", async () => {
+      // get_temp_extra returns an undeclared `extra` property. The SDK client
+      // validates structuredContent against the strict output schema and
+      // throws, so the default path delivers no result to the caller.
+      const tool = await getTool(client!, "get_temp_extra");
+      await expect(
+        client!.callTool(tool, { city: "Oslo", units: "C" }),
+      ).rejects.toThrow(/output schema|additional propert/i);
+    });
+
+    it("delivers the raw result when skipOutputValidation is set (get_temp_extra)", async () => {
+      // The MCP Apps passthrough path bypasses host-side output validation so a
+      // schema-violating-but-real result still reaches the app.
+      const tool = await getTool(client!, "get_temp_extra");
+      const result = await client!.callTool(
+        tool,
+        { city: "Oslo", units: "C" },
+        undefined,
+        undefined,
+        undefined,
+        { skipOutputValidation: true },
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.result).toBeDefined();
+      const structured = result.result!.structuredContent as Record<
+        string,
+        unknown
+      >;
+      expect(structured).toMatchObject({
+        temperature: 25,
+        unit: "C",
+        city: "Oslo",
+        extra: "undeclared",
+      });
+      // Non-fatal advisory: the result was delivered, but the mismatch is
+      // reported so callers can warn that strict clients would reject it.
+      expect(result.outputValidationError ?? "").toMatch(
+        /additional propert|output schema|schema/i,
+      );
+    });
+
+    it("does not set outputValidationError when the result matches the schema (get_temp)", async () => {
+      const tool = await getTool(client!, "get_temp");
+      const result = await client!.callTool(
+        tool,
+        { city: "Oslo", units: "C" },
+        undefined,
+        undefined,
+        undefined,
+        { skipOutputValidation: true },
+      );
+      expect(result.success).toBe(true);
+      expect(result.outputValidationError).toBeUndefined();
+    });
+
+    it("should handle tool not found", async () => {
+      // SDK v2 change (#1624): an unknown-tool call now *rejects* with a
+      // ProtocolError (-32602) instead of resolving an `isError: true` result.
+      // callTool records the failed call and rethrows, so the caller sees a
+      // rejection whose message names the missing tool.
+      await expect(
+        client!.callTool(minimalTool("nonexistent-tool"), {}),
+      ).rejects.toThrow(/not found|unknown tool|nonexistent-tool/i);
+    });
+
+    it("cancelToolCall() is a no-op (returns false) when no call is in flight", () => {
+      expect(client!.cancelToolCall()).toBe(false);
+    });
+
+    it("ToolCallCancelledError carries the tool name when known, and reads generically without one", () => {
+      expect(new ToolCallCancelledError("echo").message).toContain('"echo"');
+      expect(new ToolCallCancelledError().message).toBe(
+        "Tool call was cancelled.",
+      );
+    });
+
+    it("cancelToolCall() aborts the in-flight call: rejects with ToolCallCancelledError, and records no failed call", async () => {
+      const tool = await getTool(client!, "echo");
+
+      let failedCallCount = 0;
+      client!.addEventListener("toolCallResultChange", (event) => {
+        if (!event.detail.success) failedCallCount++;
+      });
+
+      // Start the call, then cancel synchronously — before the response can be
+      // processed — so the abort always wins the race regardless of tool speed.
+      const promise = client!.callTool(tool, { message: "hello world" });
+      expect(client!.cancelToolCall()).toBe(true);
+
+      await expect(promise).rejects.toBeInstanceOf(ToolCallCancelledError);
+
+      // SDK v2 change (spec §9.2): cancellation now surfaces as a stream/connection
+      // abort rather than a guaranteed `notifications/cancelled` frame. v2's
+      // `callTool` awaits output-validator compilation before it issues the
+      // `tools/call` request, so a synchronous cancel aborts the shared signal
+      // *before* that request registers — the SDK then takes its pre-aborted
+      // early-reject path and emits no cancellation frame. The user-facing
+      // behavior we care about is unchanged: the call rejects with
+      // ToolCallCancelledError and is not recorded as a failed call.
+
+      // Cancelling is intentional, so it is not recorded as a failed tool call.
+      expect(failedCallCount).toBe(0);
+
+      // The controller was cleared, so a second cancel is a no-op.
+      expect(client!.cancelToolCall()).toBe(false);
+    });
+
+    it("a disconnect mid-call does not surface as a ToolCallCancelledError", async () => {
+      // disconnect() aborts the same in-flight controller, but with a different
+      // reason than cancelToolCall(). The call must reject as an ordinary error,
+      // not a user-cancel — so App doesn't show a misleading "cancelled" toast.
+      // Use a genuinely slow tool (over HTTP) so the call is still in flight when
+      // we disconnect; echo would complete before teardown.
+      await client!.disconnect();
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createSendProgressTool()],
+      });
+      await server.start();
+      client = new InspectorClient(
+        { type: "streamable-http", url: server.url },
+        {
+          environment: { transport: createTransportNode },
+          clientIdentity: { name: "test", version: "1.0.0" },
+        },
+      );
+      await client.connect();
+      const tool = await getTool(client, "send_progress");
+
+      // 20 units * 200ms ≈ 4s — comfortably still running when we disconnect.
+      const promise = client.callTool(tool, { units: 20, delayMs: 200 });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      await client.disconnect();
+
+      let caught: unknown;
+      try {
+        await promise;
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeDefined();
+      expect(caught).not.toBeInstanceOf(ToolCallCancelledError);
+    });
+
+    it("should paginate tools when maxPageSize is set", async () => {
+      // Disconnect and create a new server with pagination
+      await client!.disconnect();
+      if (server) {
+        await server.stop();
+      }
+
+      // Create server with 10 tools and page size of 3
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: createNumberedTools(10),
+        maxPageSize: {
+          tools: 3,
+        },
+      });
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          clientIdentity: { name: "test", version: "1.0.0" },
+        },
+      );
+
+      await client.connect();
+
+      // First page should have 3 tools
+      const page1 = await client.listTools();
+      expect(page1.tools.length).toBe(3);
+      expect(page1.nextCursor).toBeDefined();
+      expect(page1.tools[0]?.name).toBe("tool_1");
+      expect(page1.tools[1]?.name).toBe("tool_2");
+      expect(page1.tools[2]?.name).toBe("tool_3");
+
+      // Second page should have 3 more tools
+      const page2 = await client.listTools(page1.nextCursor);
+      expect(page2.tools.length).toBe(3);
+      expect(page2.nextCursor).toBeDefined();
+      expect(page2.tools[0]?.name).toBe("tool_4");
+      expect(page2.tools[1]?.name).toBe("tool_5");
+      expect(page2.tools[2]?.name).toBe("tool_6");
+
+      // Third page should have 3 more tools
+      const page3 = await client.listTools(page2.nextCursor);
+      expect(page3.tools.length).toBe(3);
+      expect(page3.nextCursor).toBeDefined();
+      expect(page3.tools[0]?.name).toBe("tool_7");
+      expect(page3.tools[1]?.name).toBe("tool_8");
+      expect(page3.tools[2]?.name).toBe("tool_9");
+
+      // Fourth page should have 1 tool and no next cursor
+      const page4 = await client.listTools(page3.nextCursor);
+      expect(page4.tools.length).toBe(1);
+      expect(page4.nextCursor).toBeUndefined();
+      expect(page4.tools[0]?.name).toBe("tool_10");
+    });
+
+    it("listAllTools aggregates every page via the SDK's cache-aware verb (#1721)", async () => {
+      // Disconnect and create a new server with pagination
+      await client!.disconnect();
+      if (server) {
+        await server.stop();
+      }
+
+      // 10 tools, page size 3 → 4 wire pages the SDK walks internally.
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: createNumberedTools(10),
+        maxPageSize: { tools: 3 },
+      });
+      await server.start();
+
+      client = new InspectorClient(
+        { type: "streamable-http", url: server.url },
+        {
+          environment: { transport: createTransportNode },
+          clientIdentity: { name: "test", version: "1.0.0" },
+        },
+      );
+      await client.connect();
+
+      // One call returns the fully-aggregated list (no per-page cursor
+      // surfaced), unlike the single-page listTools() above. `cacheMode:
+      // "refresh"` forces a wire fetch — a no-op here (no ttlMs hints) but the
+      // path the managed refresh uses.
+      const all = await client.listAllTools({ cacheMode: "refresh" });
+      expect(all.tools.map((t) => t.name)).toEqual(
+        Array.from({ length: 10 }, (_, i) => `tool_${i + 1}`),
+      );
+    });
+
+    it("listAllResources / listAllPrompts / listAllResourceTemplates aggregate too (#1721)", async () => {
+      await client!.disconnect();
+      if (server) {
+        await server.stop();
+      }
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: createNumberedTools(2),
+      });
+      await server.start();
+      client = new InspectorClient(
+        { type: "streamable-http", url: server.url },
+        {
+          environment: { transport: createTransportNode },
+          clientIdentity: { name: "test", version: "1.0.0" },
+        },
+      );
+      await client.connect();
+
+      // Exercises the remaining three aggregate methods (empty is fine — the
+      // point is the SDK verb runs and returns a well-formed shape). Default
+      // cacheMode ('use') for these.
+      const resources = await client.listAllResources();
+      const prompts = await client.listAllPrompts({ metadata: { k: "v" } });
+      const templates = await client.listAllResourceTemplates();
+      expect(Array.isArray(resources.resources)).toBe(true);
+      expect(Array.isArray(prompts.prompts)).toBe(true);
+      expect(Array.isArray(templates.resourceTemplates)).toBe(true);
+    });
+  });
+
+  describe("Default metadata (server-wide _meta)", () => {
+    function metaOf(req: { message: unknown }): Record<string, unknown> {
+      const params = (req.message as { params?: { _meta?: unknown } }).params;
+      return (params?._meta as Record<string, unknown>) ?? {};
+    }
+
+    it("merges defaultMetadata into the _meta of outgoing tools/list and tools/call", async () => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+          defaultMetadata: { tenant: "acme", env: "prod" },
+        },
+      );
+      const messageLogState = new MessageLogState(client);
+      await client.connect();
+      await client.listTools();
+      const tool = await getTool(client, "echo");
+      await client.callTool(tool, { message: "hi" });
+
+      const requests = messageLogState
+        .getMessages()
+        .filter((m) => m.direction === "request");
+      const listToolsReq = requests.find(
+        (m) => (m.message as { method?: string }).method === "tools/list",
+      );
+      const callToolReq = requests.find(
+        (m) => (m.message as { method?: string }).method === "tools/call",
+      );
+      expect(listToolsReq).toBeDefined();
+      expect(callToolReq).toBeDefined();
+      expect(metaOf(listToolsReq!)).toMatchObject({
+        tenant: "acme",
+        env: "prod",
+      });
+      expect(metaOf(callToolReq!)).toMatchObject({
+        tenant: "acme",
+        env: "prod",
+      });
+      messageLogState.destroy();
+    });
+
+    it("call-time metadata overrides defaultMetadata on key collision", async () => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+          defaultMetadata: { tenant: "acme" },
+        },
+      );
+      const messageLogState = new MessageLogState(client);
+      await client.connect();
+      const tool = await getTool(client, "echo");
+      await client.callTool(tool, { message: "hi" }, { tenant: "override" });
+
+      const callToolReq = messageLogState
+        .getMessages()
+        .find(
+          (m) =>
+            m.direction === "request" &&
+            (m.message as { method?: string }).method === "tools/call",
+        );
+      expect(callToolReq).toBeDefined();
+      expect(metaOf(callToolReq!).tenant).toBe("override");
+      messageLogState.destroy();
+    });
+
+    it("does not inject defaults into _meta when defaultMetadata is unset", async () => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+          // defaultMetadata omitted on purpose
+        },
+      );
+      const messageLogState = new MessageLogState(client);
+      await client.connect();
+      await client.listTools();
+
+      const listToolsReq = messageLogState
+        .getMessages()
+        .find(
+          (m) =>
+            m.direction === "request" &&
+            (m.message as { method?: string }).method === "tools/list",
+        );
+      expect(listToolsReq).toBeDefined();
+      // The SDK auto-injects a `progressToken` for progress-tracked requests
+      // — that's an SDK concern, not user metadata. Assert only that none of
+      // our example default keys leak through when defaultMetadata is unset.
+      const meta = metaOf(listToolsReq!);
+      expect(meta.tenant).toBeUndefined();
+      expect(meta.env).toBeUndefined();
+      messageLogState.destroy();
+    });
+  });
+
+  describe("Resource Methods", () => {
+    beforeEach(async () => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+      await client.connect();
+    });
+
+    it("should list resources", async () => {
+      const resources = await getAllResources(client!);
+      expect(Array.isArray(resources)).toBe(true);
+    });
+
+    it("should read resource", async () => {
+      const resources = await getAllResources(client!);
+      if (resources.length > 0) {
+        const uri = resources[0]!.uri;
+        const readResult = await client!.readResource(uri);
+        expect(readResult).toHaveProperty("result");
+        expect(readResult.result).toHaveProperty("contents");
+      }
+    });
+
+    it("should paginate resources when maxPageSize is set", async () => {
+      // Disconnect and create a new server with pagination
+      await client!.disconnect();
+      if (server) {
+        await server.stop();
+      }
+
+      // Create server with 10 resources and page size of 3
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        resources: createNumberedResources(10),
+        maxPageSize: {
+          resources: 3,
+        },
+      });
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          clientIdentity: { name: "test", version: "1.0.0" },
+        },
+      );
+
+      await client.connect();
+
+      // First page should have 3 resources
+      const page1 = await client.listResources();
+      expect(page1.resources.length).toBe(3);
+      expect(page1.nextCursor).toBeDefined();
+      expect(page1.resources[0]?.uri).toBe("test://resource_1");
+      expect(page1.resources[1]?.uri).toBe("test://resource_2");
+      expect(page1.resources[2]?.uri).toBe("test://resource_3");
+
+      // Second page should have 3 more resources
+      const page2 = await client.listResources(page1.nextCursor);
+      expect(page2.resources.length).toBe(3);
+      expect(page2.nextCursor).toBeDefined();
+      expect(page2.resources[0]?.uri).toBe("test://resource_4");
+      expect(page2.resources[1]?.uri).toBe("test://resource_5");
+      expect(page2.resources[2]?.uri).toBe("test://resource_6");
+
+      // Third page should have 3 more resources
+      const page3 = await client.listResources(page2.nextCursor);
+      expect(page3.resources.length).toBe(3);
+      expect(page3.nextCursor).toBeDefined();
+      expect(page3.resources[0]?.uri).toBe("test://resource_7");
+      expect(page3.resources[1]?.uri).toBe("test://resource_8");
+      expect(page3.resources[2]?.uri).toBe("test://resource_9");
+
+      // Fourth page should have 1 resource and no next cursor
+      const page4 = await client.listResources(page3.nextCursor);
+      expect(page4.resources.length).toBe(1);
+      expect(page4.nextCursor).toBeUndefined();
+      expect(page4.resources[0]?.uri).toBe("test://resource_10");
+
+      const allResources = await getAllResources(client);
+      expect(allResources.length).toBe(10);
+    });
+
+    it("should suppress events during listAllResources pagination and emit final event", async () => {
+      await client!.disconnect();
+      if (server) {
+        await server.stop();
+      }
+
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        resources: createNumberedResources(6),
+        maxPageSize: {
+          resources: 2,
+        },
+      });
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          clientIdentity: { name: "test", version: "1.0.0" },
+        },
+      );
+
+      await client.connect();
+
+      const managedState = new ManagedResourcesState(client);
+      const events: Resource[][] = [];
+      managedState.addEventListener("resourcesChange", (e) => {
+        events.push(e.detail);
+      });
+
+      await managedState.refresh();
+      expect(managedState.getResources().length).toBe(6);
+      expect(events.length).toBe(1);
+      expect(events[0]!.length).toBe(6);
+      managedState.destroy();
+    });
+
+    it("should accumulate resources when paginating with cursor", async () => {
+      await client!.disconnect();
+      if (server) {
+        await server.stop();
+      }
+
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        resources: createNumberedResources(6),
+        maxPageSize: { resources: 2 },
+      });
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          clientIdentity: { name: "test", version: "1.0.0" },
+        },
+      );
+
+      await client.connect();
+      const pagedState = new PagedResourcesState(client);
+
+      expect(pagedState.getResources().length).toBe(0);
+
+      const page1 = await pagedState.loadPage();
+      expect(page1.resources.length).toBe(2);
+      expect(pagedState.getResources().length).toBe(2);
+      expect(pagedState.getResources()[0]?.uri).toBe("test://resource_1");
+      expect(pagedState.getResources()[1]?.uri).toBe("test://resource_2");
+
+      const page2 = await pagedState.loadPage(page1.nextCursor);
+      expect(page2.resources.length).toBe(2);
+      expect(pagedState.getResources().length).toBe(4);
+      expect(pagedState.getResources()[2]?.uri).toBe("test://resource_3");
+      expect(pagedState.getResources()[3]?.uri).toBe("test://resource_4");
+
+      const page3 = await pagedState.loadPage(page2.nextCursor);
+      expect(page3.resources.length).toBe(2);
+      expect(pagedState.getResources().length).toBe(6);
+      expect(pagedState.getResources()[4]?.uri).toBe("test://resource_5");
+      expect(pagedState.getResources()[5]?.uri).toBe("test://resource_6");
+
+      const page1Again = await pagedState.loadPage();
+      expect(page1Again.resources.length).toBe(2);
+      expect(pagedState.getResources().length).toBe(2);
+      expect(pagedState.getResources()[0]?.uri).toBe("test://resource_1");
+
+      pagedState.destroy();
+    });
+
+    it("should emit resourcesChange events when paginating", async () => {
+      await client!.disconnect();
+      if (server) {
+        await server.stop();
+      }
+
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        resources: createNumberedResources(6),
+        maxPageSize: { resources: 2 },
+      });
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          clientIdentity: { name: "test", version: "1.0.0" },
+        },
+      );
+
+      await client.connect();
+      const pagedState = new PagedResourcesState(client);
+      const events: Resource[][] = [];
+      pagedState.addEventListener("resourcesChange", (e) => {
+        events.push(e.detail);
+      });
+
+      const page1 = await pagedState.loadPage();
+      expect(events.length).toBe(1);
+      expect(events[0]!.length).toBe(2);
+
+      await pagedState.loadPage(page1.nextCursor);
+      expect(events.length).toBe(2);
+      expect(events[1]!.length).toBe(4);
+
+      pagedState.destroy();
+    });
+
+    it("should emit resourcesChange when loading pages via PagedResourcesState", async () => {
+      await client!.disconnect();
+      if (server) {
+        await server.stop();
+      }
+
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        resources: createNumberedResources(6),
+        maxPageSize: { resources: 2 },
+      });
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          clientIdentity: { name: "test", version: "1.0.0" },
+        },
+      );
+
+      await client.connect();
+      const pagedState = new PagedResourcesState(client);
+      const events: Resource[][] = [];
+      pagedState.addEventListener("resourcesChange", (e) => {
+        events.push(e.detail);
+      });
+
+      await pagedState.loadPage();
+      expect(pagedState.getResources().length).toBe(2);
+      expect(events.length).toBe(1);
+
+      pagedState.destroy();
+    });
+
+    it("should clear resources and emit event", async () => {
+      await client!.disconnect();
+      if (server) {
+        await server.stop();
+      }
+
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        resources: createNumberedResources(3),
+      });
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          clientIdentity: { name: "test", version: "1.0.0" },
+        },
+      );
+
+      await client.connect();
+      const pagedState = new PagedResourcesState(client);
+      await pagedState.loadPage();
+      expect(pagedState.getResources().length).toBe(3);
+
+      const events: Resource[][] = [];
+      pagedState.addEventListener("resourcesChange", (e) => {
+        events.push(e.detail);
+      });
+
+      pagedState.clear();
+      expect(pagedState.getResources().length).toBe(0);
+      expect(events.length).toBe(1);
+      expect(events[0]!.length).toBe(0);
+
+      pagedState.destroy();
+    });
+  });
+
+  describe("Resource Template Methods", () => {
+    beforeEach(async () => {
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        resourceTemplates: [createFileResourceTemplate()],
+      });
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          clientIdentity: { name: "test", version: "1.0.0" },
+        },
+      );
+
+      await client.connect();
+    });
+
+    it("should list resource templates", async () => {
+      const resourceTemplates = await getAllResourceTemplates(client!);
+      expect(Array.isArray(resourceTemplates)).toBe(true);
+      expect(resourceTemplates.length).toBeGreaterThan(0);
+
+      const templates = resourceTemplates;
+      const fileTemplate = templates.find((t) => t.name === "file");
+      expect(fileTemplate).toBeDefined();
+      expect(fileTemplate?.uriTemplate).toBe("file:///{path}");
+    });
+
+    it("should read resource from template", async () => {
+      const templates = await getAllResourceTemplates(client!);
+      const fileTemplate = templates.find((t) => t.name === "file");
+      expect(fileTemplate).toBeDefined();
+
+      // Use a URI that matches the template pattern file:///{path}
+      // The path variable will be "test.txt"
+      const expandedUri = "file:///test.txt";
+
+      // Read the resource using the expanded URI
+      const readResult = await client!.readResource(expandedUri);
+      expect(readResult).toHaveProperty("result");
+      expect(readResult.result).toHaveProperty("contents");
+      const contents = readResult.result.contents;
+      expect(Array.isArray(contents)).toBe(true);
+      expect(contents.length).toBeGreaterThan(0);
+
+      const content = contents[0];
+      expect(content).toHaveProperty("uri");
+      if (content && "text" in content) {
+        expect(content.text).toContain("Mock file content for: test.txt");
+      }
+    });
+
+    it("should include resources from template list callback in listResources", async () => {
+      // Create a server with a resource template that has a list callback
+      const listCallback = async () => {
+        return ["file:///file1.txt", "file:///file2.txt", "file:///file3.txt"];
+      };
+
+      await client!.disconnect();
+      if (server) {
+        await server.stop();
+      }
+
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        resourceTemplates: [
+          createFileResourceTemplate(undefined, listCallback),
+        ],
+      });
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          clientIdentity: { name: "test", version: "1.0.0" },
+        },
+      );
+
+      await client.connect();
+
+      const resources = await getAllResources(client);
+      expect(Array.isArray(resources)).toBe(true);
+
+      // Verify that the resources from the list callback are included
+      const uris = resources.map((r) => r.uri);
+      expect(uris).toContain("file:///file1.txt");
+      expect(uris).toContain("file:///file2.txt");
+      expect(uris).toContain("file:///file3.txt");
+    });
+
+    it("should paginate resource templates when maxPageSize is set", async () => {
+      // Disconnect and create a new server with pagination
+      await client!.disconnect();
+      if (server) {
+        await server.stop();
+      }
+
+      // Create server with 10 resource templates and page size of 3
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        resourceTemplates: createNumberedResourceTemplates(10),
+        maxPageSize: {
+          resourceTemplates: 3,
+        },
+      });
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          clientIdentity: { name: "test", version: "1.0.0" },
+        },
+      );
+
+      await client.connect();
+
+      // First page should have 3 templates
+      const page1 = await client.listResourceTemplates();
+      expect(page1.resourceTemplates.length).toBe(3);
+      expect(page1.nextCursor).toBeDefined();
+      expect(page1.resourceTemplates[0]?.uriTemplate).toBe(
+        "test://template_1/{param}",
+      );
+      expect(page1.resourceTemplates[1]?.uriTemplate).toBe(
+        "test://template_2/{param}",
+      );
+      expect(page1.resourceTemplates[2]?.uriTemplate).toBe(
+        "test://template_3/{param}",
+      );
+
+      // Second page should have 3 more templates
+      const page2 = await client.listResourceTemplates(page1.nextCursor);
+      expect(page2.resourceTemplates.length).toBe(3);
+      expect(page2.nextCursor).toBeDefined();
+      expect(page2.resourceTemplates[0]?.uriTemplate).toBe(
+        "test://template_4/{param}",
+      );
+      expect(page2.resourceTemplates[1]?.uriTemplate).toBe(
+        "test://template_5/{param}",
+      );
+      expect(page2.resourceTemplates[2]?.uriTemplate).toBe(
+        "test://template_6/{param}",
+      );
+
+      // Third page should have 3 more templates
+      const page3 = await client.listResourceTemplates(page2.nextCursor);
+      expect(page3.resourceTemplates.length).toBe(3);
+      expect(page3.nextCursor).toBeDefined();
+      expect(page3.resourceTemplates[0]?.uriTemplate).toBe(
+        "test://template_7/{param}",
+      );
+      expect(page3.resourceTemplates[1]?.uriTemplate).toBe(
+        "test://template_8/{param}",
+      );
+      expect(page3.resourceTemplates[2]?.uriTemplate).toBe(
+        "test://template_9/{param}",
+      );
+
+      // Fourth page should have 1 template and no next cursor
+      const page4 = await client.listResourceTemplates(page3.nextCursor);
+      expect(page4.resourceTemplates.length).toBe(1);
+      expect(page4.nextCursor).toBeUndefined();
+      expect(page4.resourceTemplates[0]?.uriTemplate).toBe(
+        "test://template_10/{param}",
+      );
+
+      const allTemplates = await getAllResourceTemplates(client);
+      expect(allTemplates.length).toBe(10);
+    });
+
+    it("should accumulate resource templates when paginating with cursor", async () => {
+      await client!.disconnect();
+      if (server) {
+        await server.stop();
+      }
+
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        resourceTemplates: createNumberedResourceTemplates(6),
+        maxPageSize: { resourceTemplates: 2 },
+      });
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          clientIdentity: { name: "test", version: "1.0.0" },
+        },
+      );
+
+      await client.connect();
+      const pagedState = new PagedResourceTemplatesState(client);
+
+      expect(pagedState.getResourceTemplates().length).toBe(0);
+
+      const page1 = await pagedState.loadPage();
+      expect(page1.resourceTemplates.length).toBe(2);
+      expect(pagedState.getResourceTemplates().length).toBe(2);
+      expect(pagedState.getResourceTemplates()[0]?.uriTemplate).toBe(
+        "test://template_1/{param}",
+      );
+      expect(pagedState.getResourceTemplates()[1]?.uriTemplate).toBe(
+        "test://template_2/{param}",
+      );
+
+      const page2 = await pagedState.loadPage(page1.nextCursor);
+      expect(page2.resourceTemplates.length).toBe(2);
+      expect(pagedState.getResourceTemplates().length).toBe(4);
+      expect(pagedState.getResourceTemplates()[2]?.uriTemplate).toBe(
+        "test://template_3/{param}",
+      );
+      expect(pagedState.getResourceTemplates()[3]?.uriTemplate).toBe(
+        "test://template_4/{param}",
+      );
+
+      const page3 = await pagedState.loadPage(page2.nextCursor);
+      expect(page3.resourceTemplates.length).toBe(2);
+      expect(pagedState.getResourceTemplates().length).toBe(6);
+      expect(pagedState.getResourceTemplates()[4]?.uriTemplate).toBe(
+        "test://template_5/{param}",
+      );
+      expect(pagedState.getResourceTemplates()[5]?.uriTemplate).toBe(
+        "test://template_6/{param}",
+      );
+
+      const page1Again = await pagedState.loadPage();
+      expect(page1Again.resourceTemplates.length).toBe(2);
+      expect(pagedState.getResourceTemplates().length).toBe(2);
+      expect(pagedState.getResourceTemplates()[0]?.uriTemplate).toBe(
+        "test://template_1/{param}",
+      );
+
+      pagedState.destroy();
+    });
+
+    it("should clear resource templates and emit event", async () => {
+      await client!.disconnect();
+      if (server) {
+        await server.stop();
+      }
+
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        resourceTemplates: createNumberedResourceTemplates(3),
+      });
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          clientIdentity: { name: "test", version: "1.0.0" },
+        },
+      );
+
+      await client.connect();
+      const pagedState = new PagedResourceTemplatesState(client);
+      await pagedState.loadPage();
+      expect(pagedState.getResourceTemplates().length).toBe(3);
+
+      const events: ResourceTemplate[][] = [];
+      pagedState.addEventListener("resourceTemplatesChange", (e) => {
+        events.push(e.detail);
+      });
+
+      pagedState.clear();
+      expect(pagedState.getResourceTemplates().length).toBe(0);
+      expect(events.length).toBe(1);
+      expect(events[0]!.length).toBe(0);
+
+      pagedState.destroy();
+    });
+  });
+
+  describe("Prompt Methods", () => {
+    beforeEach(async () => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+      await client.connect();
+    });
+
+    it("should list prompts", async () => {
+      const prompts = await getAllPrompts(client!);
+      expect(Array.isArray(prompts)).toBe(true);
+    });
+
+    it("should paginate prompts when maxPageSize is set", async () => {
+      // Disconnect and create a new server with pagination
+      await client!.disconnect();
+      if (server) {
+        await server.stop();
+      }
+
+      // Create server with 10 prompts and page size of 3
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        prompts: createNumberedPrompts(10),
+        maxPageSize: {
+          prompts: 3,
+        },
+      });
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          clientIdentity: { name: "test", version: "1.0.0" },
+        },
+      );
+
+      await client.connect();
+
+      // First page should have 3 prompts
+      const page1 = await client.listPrompts();
+      expect(page1.prompts.length).toBe(3);
+      expect(page1.nextCursor).toBeDefined();
+      expect(page1.prompts[0]?.name).toBe("prompt_1");
+      expect(page1.prompts[1]?.name).toBe("prompt_2");
+      expect(page1.prompts[2]?.name).toBe("prompt_3");
+
+      // Second page should have 3 more prompts
+      const page2 = await client.listPrompts(page1.nextCursor);
+      expect(page2.prompts.length).toBe(3);
+      expect(page2.nextCursor).toBeDefined();
+      expect(page2.prompts[0]?.name).toBe("prompt_4");
+      expect(page2.prompts[1]?.name).toBe("prompt_5");
+      expect(page2.prompts[2]?.name).toBe("prompt_6");
+
+      // Third page should have 3 more prompts
+      const page3 = await client.listPrompts(page2.nextCursor);
+      expect(page3.prompts.length).toBe(3);
+      expect(page3.nextCursor).toBeDefined();
+      expect(page3.prompts[0]?.name).toBe("prompt_7");
+      expect(page3.prompts[1]?.name).toBe("prompt_8");
+      expect(page3.prompts[2]?.name).toBe("prompt_9");
+
+      // Fourth page should have 1 prompt and no next cursor
+      const page4 = await client.listPrompts(page3.nextCursor);
+      expect(page4.prompts.length).toBe(1);
+      expect(page4.nextCursor).toBeUndefined();
+      expect(page4.prompts[0]?.name).toBe("prompt_10");
+
+      const allPrompts = await getAllPrompts(client);
+      expect(allPrompts.length).toBe(10);
+    });
+
+    it("should suppress events during listAllPrompts pagination and emit final event", async () => {
+      await client!.disconnect();
+      if (server) {
+        await server.stop();
+      }
+
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        prompts: createNumberedPrompts(6),
+        maxPageSize: { prompts: 2 },
+      });
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          clientIdentity: { name: "test", version: "1.0.0" },
+        },
+      );
+
+      await client.connect();
+
+      const managedState = new ManagedPromptsState(client);
+      const events: Prompt[][] = [];
+      managedState.addEventListener("promptsChange", (e) => {
+        events.push(e.detail);
+      });
+
+      await managedState.refresh();
+      expect(managedState.getPrompts().length).toBe(6);
+      expect(events.length).toBe(1);
+      expect(events[0]!.length).toBe(6);
+      managedState.destroy();
+    });
+
+    it("should accumulate prompts when paginating with cursor", async () => {
+      await client!.disconnect();
+      if (server) {
+        await server.stop();
+      }
+
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        prompts: createNumberedPrompts(6),
+        maxPageSize: { prompts: 2 },
+      });
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          clientIdentity: { name: "test", version: "1.0.0" },
+        },
+      );
+
+      await client.connect();
+      const pagedState = new PagedPromptsState(client);
+
+      expect(pagedState.getPrompts().length).toBe(0);
+
+      const page1 = await pagedState.loadPage();
+      expect(page1.prompts.length).toBe(2);
+      expect(pagedState.getPrompts().length).toBe(2);
+      expect(pagedState.getPrompts()[0]?.name).toBe("prompt_1");
+      expect(pagedState.getPrompts()[1]?.name).toBe("prompt_2");
+
+      const page2 = await pagedState.loadPage(page1.nextCursor);
+      expect(page2.prompts.length).toBe(2);
+      expect(pagedState.getPrompts().length).toBe(4);
+      expect(pagedState.getPrompts()[2]?.name).toBe("prompt_3");
+      expect(pagedState.getPrompts()[3]?.name).toBe("prompt_4");
+
+      const page3 = await pagedState.loadPage(page2.nextCursor);
+      expect(page3.prompts.length).toBe(2);
+      expect(pagedState.getPrompts().length).toBe(6);
+      expect(pagedState.getPrompts()[4]?.name).toBe("prompt_5");
+      expect(pagedState.getPrompts()[5]?.name).toBe("prompt_6");
+
+      const page1Again = await pagedState.loadPage();
+      expect(page1Again.prompts.length).toBe(2);
+      expect(pagedState.getPrompts().length).toBe(2);
+      expect(pagedState.getPrompts()[0]?.name).toBe("prompt_1");
+
+      pagedState.destroy();
+    });
+
+    it("should emit promptsChange events when paginating", async () => {
+      await client!.disconnect();
+      if (server) {
+        await server.stop();
+      }
+
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        prompts: createNumberedPrompts(6),
+        maxPageSize: {
+          prompts: 2,
+        },
+      });
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          clientIdentity: { name: "test", version: "1.0.0" },
+        },
+      );
+
+      await client.connect();
+      const pagedState = new PagedPromptsState(client);
+      const events: Prompt[][] = [];
+      pagedState.addEventListener("promptsChange", (e) => {
+        events.push(e.detail);
+      });
+
+      const page1 = await pagedState.loadPage();
+      expect(events.length).toBe(1);
+      expect(events[0]!.length).toBe(2);
+
+      await pagedState.loadPage(page1.nextCursor);
+      expect(events.length).toBe(2);
+      expect(events[1]!.length).toBe(4);
+
+      pagedState.destroy();
+    });
+
+    it("should clear prompts and emit event", async () => {
+      await client!.disconnect();
+      if (server) {
+        await server.stop();
+      }
+
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        prompts: createNumberedPrompts(3),
+      });
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          clientIdentity: { name: "test", version: "1.0.0" },
+        },
+      );
+
+      await client.connect();
+      const pagedState = new PagedPromptsState(client);
+      await pagedState.loadPage();
+      expect(pagedState.getPrompts().length).toBe(3);
+
+      const events: Prompt[][] = [];
+      pagedState.addEventListener("promptsChange", (e) => {
+        events.push(e.detail);
+      });
+
+      pagedState.clear();
+      expect(pagedState.getPrompts().length).toBe(0);
+      expect(events.length).toBe(1);
+      expect(events[0]!.length).toBe(0);
+
+      pagedState.destroy();
+    });
+  });
+
+  describe("Progress Tracking", () => {
+    it("should dispatch progressNotification events when progress notifications are received", async () => {
+      const { createSendProgressTool } =
+        await import("@modelcontextprotocol/inspector-test-server");
+
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createSendProgressTool()],
+      });
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          clientIdentity: { name: "test", version: "1.0.0" },
+          progress: true,
+        },
+      );
+
+      await client.connect();
+
+      const progressToken = 12345;
+
+      const sendProgressTool = await getTool(client, "send_progress");
+      client.callTool(
+        sendProgressTool,
+        {
+          units: 3,
+          delayMs: 50,
+          total: 3,
+          message: "Test progress",
+        },
+        undefined, // generalMetadata
+        { progressToken: progressToken.toString() }, // toolSpecificMetadata
+      );
+
+      const progressEvents = await waitForProgressCount(client, 3, {
+        timeout: 3000,
+      });
+
+      expect(progressEvents.length).toBe(3);
+      expect(progressEvents[0]).toMatchObject({
+        progress: 1,
+        total: 3,
+        message: "Test progress (1/3)",
+        progressToken: progressToken.toString(),
+      });
+
+      // Verify second progress event
+      expect(progressEvents[1]).toMatchObject({
+        progress: 2,
+        total: 3,
+        message: "Test progress (2/3)",
+        progressToken: progressToken.toString(),
+      });
+
+      // Verify third progress event
+      expect(progressEvents[2]).toMatchObject({
+        progress: 3,
+        total: 3,
+        message: "Test progress (3/3)",
+        progressToken: progressToken.toString(),
+      });
+
+      await client!.disconnect();
+      await server.stop();
+    });
+
+    it("should not dispatch progressNotification events when progress is disabled", async () => {
+      const { createSendProgressTool } =
+        await import("@modelcontextprotocol/inspector-test-server");
+
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createSendProgressTool()],
+      });
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          clientIdentity: { name: "test", version: "1.0.0" },
+          progress: false, // Disable progress
+        },
+      );
+
+      await client.connect();
+
+      const progressEvents: Progress[] = [];
+      const progressListener = (event: TypedEvent<"progressNotification">) => {
+        progressEvents.push(event.detail);
+      };
+      client.addEventListener("progressNotification", progressListener);
+
+      const progressToken = 12345;
+
+      // Call the tool with progressToken in metadata
+      const sendProgressTool = await getTool(client, "send_progress");
+      await client.callTool(
+        sendProgressTool,
+        {
+          units: 2,
+          delayMs: 50,
+        },
+        undefined, // generalMetadata
+        { progressToken: progressToken.toString() }, // toolSpecificMetadata
+      );
+
+      // Observation window: we assert no progressNotification events; can't wait for a non-event.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      // Remove listener
+      client.removeEventListener("progressNotification", progressListener);
+
+      // Verify no progress events were received
+      expect(progressEvents.length).toBe(0);
+
+      await client!.disconnect();
+      await server.stop();
+    });
+
+    it("should handle progress notifications without total", async () => {
+      const { createSendProgressTool } =
+        await import("@modelcontextprotocol/inspector-test-server");
+
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createSendProgressTool()],
+      });
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          clientIdentity: { name: "test", version: "1.0.0" },
+          progress: true,
+        },
+      );
+
+      await client.connect();
+
+      const progressToken = 67890;
+
+      const sendProgressTool2 = await getTool(client, "send_progress");
+      client.callTool(
+        sendProgressTool2,
+        {
+          units: 2,
+          delayMs: 50,
+          message: "Indeterminate progress",
+        },
+        undefined, // generalMetadata
+        { progressToken: progressToken.toString() }, // toolSpecificMetadata
+      );
+
+      const progressEvents = await waitForProgressCount(client, 2, {
+        timeout: 3000,
+      });
+
+      expect(progressEvents.length).toBe(2);
+      expect(progressEvents[0]).toMatchObject({
+        progress: 1,
+        message: "Indeterminate progress (1/2)",
+        progressToken: progressToken.toString(),
+      });
+      expect((progressEvents[0] as { total?: number }).total).toBeUndefined();
+
+      expect(progressEvents[1]).toMatchObject({
+        progress: 2,
+        message: "Indeterminate progress (2/2)",
+        progressToken: progressToken.toString(),
+      });
+      expect((progressEvents[1] as { total?: number }).total).toBeUndefined();
+
+      await client!.disconnect();
+      await server.stop();
+    });
+
+    it("should complete when timeout and resetTimeoutOnProgress are set (options passed through)", async () => {
+      const { createSendProgressTool } =
+        await import("@modelcontextprotocol/inspector-test-server");
+
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createSendProgressTool()],
+      });
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          clientIdentity: { name: "test", version: "1.0.0" },
+          progress: true,
+          timeout: 2000,
+          resetTimeoutOnProgress: true,
+        },
+      );
+
+      await client.connect();
+
+      const progressToken = 999;
+      const sendProgressTool = await getTool(client, "send_progress");
+      const result = await client.callTool(
+        sendProgressTool,
+        { units: 3, delayMs: 100, total: 3, message: "Timeout test" },
+        undefined,
+        { progressToken: progressToken.toString() },
+      );
+
+      expect(result.success).toBe(true);
+      expect((result.result as { content?: unknown[] }).content).toBeDefined();
+      const text = (
+        result.result as { content?: { type: string; text?: string }[] }
+      ).content?.find((c) => c.type === "text")?.text;
+      expect(text).toContain("Completed 3 progress notifications");
+
+      await client.disconnect();
+      await server.stop();
+    });
+
+    it("should not timeout when resetTimeoutOnProgress is true and progress is sent (reset extends timeout)", async () => {
+      const { createSendProgressTool } =
+        await import("@modelcontextprotocol/inspector-test-server");
+
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createSendProgressTool()],
+      });
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          clientIdentity: { name: "test", version: "1.0.0" },
+          progress: true,
+          timeout: 350,
+          resetTimeoutOnProgress: true,
+        },
+      );
+
+      await client.connect();
+
+      const sendProgressTool = await getTool(client, "send_progress");
+      const result = await client.callTool(
+        sendProgressTool,
+        { units: 4, delayMs: 200, total: 4, message: "Reset test" },
+        undefined,
+        { progressToken: "reset-test" },
+      );
+
+      expect(result.success).toBe(true);
+      expect((result.result as { content?: unknown[] }).content).toBeDefined();
+      const text = (
+        result.result as { content?: { type: string; text?: string }[] }
+      ).content?.find((c) => c.type === "text")?.text;
+      expect(text).toContain("Completed 4 progress notifications");
+
+      await client.disconnect();
+      await server.stop();
+    });
+
+    it("should timeout with RequestTimeout when resetTimeoutOnProgress is false and gap exceeds timeout", async () => {
+      const { createSendProgressTool } =
+        await import("@modelcontextprotocol/inspector-test-server");
+
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createSendProgressTool()],
+      });
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          clientIdentity: { name: "test", version: "1.0.0" },
+          progress: true,
+          timeout: 150,
+          resetTimeoutOnProgress: false,
+        },
+      );
+
+      await client.connect();
+
+      const progressToken = 888;
+      const sendProgressToolTimeout = await getTool(client, "send_progress");
+      let err: unknown;
+      try {
+        await client.callTool(
+          sendProgressToolTimeout,
+          { units: 4, delayMs: 200, total: 4, message: "Timeout test" },
+          undefined,
+          { progressToken: progressToken.toString() },
+        );
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeInstanceOf(SdkError);
+      expect((err as SdkError).code).toBe(SdkErrorCode.RequestTimeout);
+
+      await client.disconnect();
+      await server.stop();
+    });
+  });
+
+  describe("Logging", () => {
+    it("should set logging level when server supports it", async () => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+          initialLoggingLevel: "debug",
+        },
+      );
+
+      await client.connect();
+
+      // If server supports logging, the level should be set
+      // We can't directly verify this, but it shouldn't throw
+      const capabilities = client.getCapabilities();
+      if (capabilities?.logging) {
+        await client.setLoggingLevel("info");
+      }
+    });
+
+    it("does not stamp the modern per-request log level on a legacy connection (#1629)", async () => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        { environment: { transport: createTransportNode } },
+      );
+      const messageLogState = new MessageLogState(client);
+      await client.connect();
+
+      // Setting the modern level is a no-op on a legacy server: the era gate in
+      // mergeMeta means the `logLevel` `_meta` key is never stamped there.
+      client.setModernLogLevel("debug");
+      expect(client.getModernLogLevel()).toBe("debug");
+
+      const tool = await getTool(client, "echo");
+      await client.callTool(tool, { message: "hi" });
+
+      const callToolReq = messageLogState
+        .getMessages()
+        .find(
+          (m) =>
+            m.direction === "request" &&
+            (m.message as { method?: string }).method === "tools/call",
+        );
+      expect(callToolReq).toBeDefined();
+      const params = (callToolReq!.message as { params?: { _meta?: unknown } })
+        .params;
+      const meta = (params?._meta as Record<string, unknown>) ?? {};
+      expect(meta[LOG_LEVEL_META_KEY]).toBeUndefined();
+      messageLogState.destroy();
+    });
+
+    it("should track stderr logs for stdio transport", async () => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+          pipeStderr: true,
+        },
+      );
+
+      const stderrLogState = new StderrLogState(client);
+      await client.connect();
+
+      const testMessage = `stderr-direct-${Date.now()}`;
+      const writeToStderrTool = await getTool(client, "write_to_stderr");
+      await client.callTool(writeToStderrTool, { message: testMessage });
+
+      // The child's stderr is piped out-of-band from the tool's JSON-RPC
+      // response, so the "data" chunk carrying `testMessage` can still be in
+      // flight when `callTool` resolves. Reading the log synchronously here
+      // races that chunk (the historical flake). Poll until the line lands
+      // instead of asserting on a single sample.
+      await vi.waitFor(
+        () => {
+          const logs = stderrLogState.getStderrLogs();
+          expect(Array.isArray(logs)).toBe(true);
+          const matching = logs.filter((l) => l.message.includes(testMessage));
+          expect(matching.length).toBeGreaterThan(0);
+          expect(matching[0]!.message).toContain(testMessage);
+        },
+        { timeout: 5000, interval: 25 },
+      );
+      stderrLogState.destroy();
+    });
+  });
+
+  describe("Events", () => {
+    it("should emit statusChange events", async () => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+
+      const statuses: ConnectionStatus[] = [];
+      client.addEventListener("statusChange", (event) => {
+        statuses.push(event.detail);
+      });
+
+      await client.connect();
+      await client.disconnect();
+
+      expect(statuses).toContain("connecting");
+      expect(statuses).toContain("connected");
+      expect(statuses).toContain("disconnected");
+    });
+
+    it("should emit connect event", async () => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+
+      let connectFired = false;
+      client.addEventListener("connect", () => {
+        connectFired = true;
+      });
+
+      await client.connect();
+      expect(connectFired).toBe(true);
+    });
+
+    it("should emit disconnect event", async () => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+
+      let disconnectFired = false;
+      client.addEventListener("disconnect", () => {
+        disconnectFired = true;
+      });
+
+      await client.connect();
+      await client.disconnect();
+      expect(disconnectFired).toBe(true);
+    });
+
+    it("emits an error event and sets status to error on a mid-session transport failure", async () => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+
+      const errors: Error[] = [];
+      client.addEventListener("error", (event) => {
+        errors.push(event.detail);
+      });
+
+      await client.connect();
+      expect(client.getStatus()).toBe("connected");
+
+      // Simulate the transport dying mid-session (stdio crash / SSE drop /
+      // HTTP 5xx) by invoking the `onerror` the client attached to the base
+      // transport — the same callback the SDK fires on a real failure.
+      const baseTransport = (
+        client as unknown as {
+          baseTransport: { onerror?: (error: Error) => void };
+        }
+      ).baseTransport;
+      const failure = new Error("stdio subprocess crashed");
+      baseTransport.onerror?.(failure);
+
+      expect(client.getStatus()).toBe("error");
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toBe(failure);
+
+      await client.disconnect();
+    });
+
+    it("still emits error when onclose lands before onerror on a mid-session crash", async () => {
+      // Many transports fire BOTH onclose and onerror on a real crash, in a
+      // transport-dependent order. When onclose lands first it flips status to
+      // "disconnected"; the guard must NOT swallow the trailing onerror's
+      // reason (its only surface). Regression lock for the #1489 re-review.
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+
+      const errors: Error[] = [];
+      client.addEventListener("error", (event) => {
+        errors.push(event.detail);
+      });
+
+      await client.connect();
+      expect(client.getStatus()).toBe("connected");
+
+      const baseTransport = (
+        client as unknown as {
+          baseTransport: {
+            onclose?: () => void;
+            onerror?: (error: Error) => void;
+          };
+        }
+      ).baseTransport;
+
+      // onclose first → status "disconnected"; then the trailing onerror.
+      baseTransport.onclose?.();
+      expect(client.getStatus()).toBe("disconnected");
+      const failure = new Error("stdio subprocess crashed");
+      baseTransport.onerror?.(failure);
+
+      expect(client.getStatus()).toBe("error");
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toBe(failure);
+
+      await client.disconnect();
+    });
+
+    it("holds status at error when a trailing onclose lands after onerror (#1490)", async () => {
+      // The reverse ordering of the test above: onerror lands first (status
+      // "error"), then the trailing onclose arrives. A bare
+      // `if (status !== "disconnected")` onclose guard would downgrade "error"
+      // back to "disconnected", so the persistent terminal status differed by
+      // transport ordering. onclose must now treat "error" as terminal and
+      // leave it untouched, while still emitting `disconnect` so teardown
+      // consumers fire identically in both orderings.
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+
+      const errors: Error[] = [];
+      let disconnects = 0;
+      client.addEventListener("error", (event) => {
+        errors.push(event.detail);
+      });
+      client.addEventListener("disconnect", () => {
+        disconnects++;
+      });
+
+      await client.connect();
+      expect(client.getStatus()).toBe("connected");
+
+      const baseTransport = (
+        client as unknown as {
+          baseTransport: {
+            onclose?: () => void;
+            onerror?: (error: Error) => void;
+          };
+        }
+      ).baseTransport;
+
+      // onerror first → status "error".
+      const failure = new Error("stdio subprocess crashed");
+      baseTransport.onerror?.(failure);
+      expect(client.getStatus()).toBe("error");
+
+      // Trailing onclose must NOT downgrade "error" to "disconnected"...
+      baseTransport.onclose?.();
+      expect(client.getStatus()).toBe("error");
+      // ...but must still fire `disconnect` exactly once so session teardown
+      // (e.g. App resets the active server) happens regardless of ordering.
+      expect(disconnects).toBe(1);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toBe(failure);
+
+      await client.disconnect();
+    });
+
+    it("emits disconnect on a mid-session crash regardless of onclose/onerror ordering (#1490)", async () => {
+      // Both real-world orderings must settle on the same observable outcome:
+      // final status "error" and exactly one `disconnect` event.
+      const run = async (order: "onclose-first" | "onerror-first") => {
+        const c = new InspectorClient(
+          {
+            type: "stdio",
+            command: serverCommand.command,
+            args: serverCommand.args,
+          },
+          { environment: { transport: createTransportNode } },
+        );
+        let disconnects = 0;
+        c.addEventListener("disconnect", () => {
+          disconnects++;
+        });
+        await c.connect();
+        const bt = (
+          c as unknown as {
+            baseTransport: {
+              onclose?: () => void;
+              onerror?: (error: Error) => void;
+            };
+          }
+        ).baseTransport;
+        const failure = new Error("crash");
+        if (order === "onclose-first") {
+          bt.onclose?.();
+          bt.onerror?.(failure);
+        } else {
+          bt.onerror?.(failure);
+          bt.onclose?.();
+        }
+        // Snapshot before the cleanup disconnect() below, which fires its own
+        // disconnect events as it tears the (still-live) real transport down.
+        const result = { status: c.getStatus(), disconnects };
+        await c.disconnect();
+        return result;
+      };
+
+      const closeFirst = await run("onclose-first");
+      const errorFirst = await run("onerror-first");
+
+      expect(closeFirst).toEqual({ status: "error", disconnects: 1 });
+      expect(errorFirst).toEqual({ status: "error", disconnects: 1 });
+    });
+
+    it("fires disconnect exactly once when explicitly disconnecting from a crashed (error) state (#1490)", async () => {
+      // After a crash holds status at "error", close() can fire the transport's
+      // onclose synchronously. onclose would emit `disconnect` (status held at
+      // "error"), and then disconnect()'s own guard — seeing "error" still
+      // != "disconnected" — would emit it a second time. The `disconnecting`
+      // ownership flag must collapse that to exactly one event regardless of
+      // whether the SDK closes synchronously.
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        { environment: { transport: createTransportNode } },
+      );
+      await client.connect();
+
+      const baseTransport = (
+        client as unknown as {
+          baseTransport: { onerror?: (error: Error) => void };
+        }
+      ).baseTransport;
+      baseTransport.onerror?.(new Error("stdio subprocess crashed"));
+      expect(client.getStatus()).toBe("error");
+
+      // Listener attached AFTER the crash so it counts only the explicit
+      // disconnect()'s events.
+      let disconnects = 0;
+      client.addEventListener("disconnect", () => {
+        disconnects++;
+      });
+      await client.disconnect();
+
+      expect(disconnects).toBe(1);
+      expect(client.getStatus()).toBe("disconnected");
+    });
+
+    it("fires disconnect exactly once on a synchronous close() from error (deterministic sync-close pin, #1490)", async () => {
+      // The test above uses the real stdio transport, whose close() may invoke
+      // onclose asynchronously — so it asserts the invariant but does not
+      // deterministically exercise the sync-close branch that double-fired
+      // (onclose firing INSIDE close(), before disconnect()'s guard runs).
+      // Here we force that exact timing: override the SDK client's close() to
+      // invoke the transport's onclose synchronously. Without the
+      // `disconnecting` flag this asserts 2; with it, 1.
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        { environment: { transport: createTransportNode } },
+      );
+      await client.connect();
+
+      const baseTransport = (
+        client as unknown as {
+          baseTransport: {
+            onclose?: () => void;
+            onerror?: (error: Error) => void;
+          };
+        }
+      ).baseTransport;
+      // Put the client into the crashed "error" state.
+      baseTransport.onerror?.(new Error("stdio subprocess crashed"));
+      expect(client.getStatus()).toBe("error");
+
+      // Force close() to fire onclose synchronously (the sync-close branch),
+      // then delegate to the real close() so the subprocess is still torn down.
+      const sdkClient = (
+        client as unknown as { client: { close: () => Promise<void> } }
+      ).client;
+      const realClose = sdkClient.close.bind(sdkClient);
+      sdkClient.close = async () => {
+        baseTransport.onclose?.();
+        await realClose();
+      };
+
+      // Listener attached AFTER the crash so it counts only disconnect()'s events.
+      let disconnects = 0;
+      client.addEventListener("disconnect", () => {
+        disconnects++;
+      });
+      await client.disconnect();
+
+      expect(disconnects).toBe(1);
+      expect(client.getStatus()).toBe("disconnected");
+    });
+
+    it("does not emit an error event when the handshake rejects connect()", async () => {
+      // A transport whose start() rejects makes connect() reject (handshake
+      // failure). The caller gets the reason via the rejected promise, so the
+      // client must NOT also dispatch the `error` event (which is reserved for
+      // non-awaited, mid-session failures). See #1323.
+      const failingFactory = () => ({
+        transport: {
+          start: () => Promise.reject(new Error("handshake refused")),
+          send: async () => {},
+          close: async () => {},
+          onclose: undefined,
+          onerror: undefined,
+          onmessage: undefined,
+          sessionId: undefined,
+        } as unknown as import("@modelcontextprotocol/client").Transport,
+      });
+      client = new InspectorClient(
+        { type: "streamable-http", url: "http://localhost:1/never" },
+        { environment: { transport: failingFactory } },
+      );
+
+      let errorFired = false;
+      client.addEventListener("error", () => {
+        errorFired = true;
+      });
+
+      await expect(client.connect()).rejects.toThrow(/handshake refused/);
+      expect(client.getStatus()).toBe("error");
+      expect(errorFired).toBe(false);
+    });
+
+    it("does not emit error or flip to error when onerror fires during the handshake", async () => {
+      // The transport listeners are attached before the handshake runs, so a
+      // transport that reports a connect-time error via `onerror` (some SDK
+      // transports do this in addition to rejecting connect()) must NOT be
+      // treated as a mid-session failure: that would double-report a handshake
+      // error the awaited connect() rejection already surfaces. See #1323.
+      let rejectStart: (error: Error) => void = () => {};
+      const startPromise = new Promise<void>((_resolve, reject) => {
+        rejectStart = reject;
+      });
+      const transport = {
+        start: () => startPromise,
+        send: async () => {},
+        close: async () => {},
+        onclose: undefined as undefined | (() => void),
+        onerror: undefined as undefined | ((error: Error) => void),
+        onmessage: undefined,
+        sessionId: undefined,
+      };
+      const factory = () => ({
+        transport:
+          transport as unknown as import("@modelcontextprotocol/client").Transport,
+      });
+      client = new InspectorClient(
+        { type: "streamable-http", url: "http://localhost:1/never" },
+        { environment: { transport: factory } },
+      );
+
+      let errorFired = false;
+      client.addEventListener("error", () => {
+        errorFired = true;
+      });
+
+      // Kick off connect() without awaiting — it parks on the hanging start().
+      // `status` is "connecting" and `onerror` is wired by this point.
+      const pending = client.connect().catch(() => {});
+      expect(client.getStatus()).toBe("connecting");
+
+      // A connect-time transport error arrives via onerror.
+      transport.onerror?.(new Error("socket error mid-handshake"));
+
+      // It must be ignored: still connecting, no error event dispatched.
+      expect(client.getStatus()).toBe("connecting");
+      expect(errorFired).toBe(false);
+
+      // Unblock the handshake so connect() settles (and tears down cleanly).
+      rejectStart(new Error("aborted"));
+      await pending;
+      // connect()'s catch transitions to "error" via the rejection path —
+      // still without dispatching the `error` event.
+      expect(client.getStatus()).toBe("error");
+      expect(errorFired).toBe(false);
+    });
+  });
+
+  describe("Sampling Requests", () => {
+    it("should handle sampling requests from server and respond", async () => {
+      // Create a test server with the collect_sample tool
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createCollectSampleTool()],
+        serverType: "streamable-http",
+      });
+
+      await server.start();
+
+      // Create client with sampling enabled
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          sample: true, // Enable sampling capability
+        },
+      );
+
+      await client.connect();
+
+      // Set up Promise to wait for sampling request event
+      const samplingRequestPromise = new Promise<SamplingCreateMessage>(
+        (resolve) => {
+          client!.addEventListener(
+            "newPendingSample",
+            (event) => {
+              resolve(event.detail);
+            },
+            { once: true },
+          );
+        },
+      );
+
+      // Start the tool call (don't await yet - it will block until sampling is responded to)
+      const collectSampleTool = await getTool(client, "collect_sample");
+      const toolResultPromise = client.callTool(collectSampleTool, {
+        text: "Hello, world!",
+      });
+
+      // Wait for the sampling request to arrive via event
+      const pendingSample = await samplingRequestPromise;
+
+      // Verify we received a sampling request
+      expect(pendingSample.request.method).toBe("sampling/createMessage");
+      const messages = pendingSample.request.params.messages;
+      expect(messages.length).toBeGreaterThan(0);
+      const firstMessage = messages[0];
+      expect(firstMessage).toBeDefined();
+      if (
+        firstMessage &&
+        firstMessage.content &&
+        typeof firstMessage.content === "object" &&
+        "text" in firstMessage.content
+      ) {
+        expect((firstMessage.content as { text: string }).text).toBe(
+          "Hello, world!",
+        );
+      }
+
+      // Respond to the sampling request
+      const samplingResponse: CreateMessageResult = {
+        model: "test-model",
+        role: "assistant",
+        stopReason: "endTurn",
+        content: {
+          type: "text",
+          text: "This is a test response",
+        },
+      };
+
+      await pendingSample.respond(samplingResponse);
+
+      // Now await the tool result (it should complete now that we've responded)
+      const toolResult = await toolResultPromise;
+
+      // Verify the tool result contains the sampling response
+      expect(toolResult).toBeDefined();
+      expect(toolResult.success).toBe(true);
+      expect(toolResult.result).toBeDefined();
+      expect(toolResult.result!.content).toBeDefined();
+      expect(Array.isArray(toolResult.result!.content)).toBe(true);
+      const toolContent = toolResult.result!.content as ContentBlock[];
+      expect(toolContent.length).toBeGreaterThan(0);
+      const toolMessage = toolContent[0];
+      expect(toolMessage).toBeDefined();
+      expect(toolMessage.type).toBe("text");
+      if (toolMessage.type === "text") {
+        expect(toolMessage.text).toContain("Sampling response:");
+        expect(toolMessage.text).toContain("test-model");
+        expect(toolMessage.text).toContain("This is a test response");
+      }
+
+      // Verify the pending sample was removed
+      const pendingSamples = client.getPendingSamples();
+      expect(pendingSamples.length).toBe(0);
+    });
+  });
+
+  describe("Server-Initiated Notifications", () => {
+    it("should receive server-initiated notifications via stdio transport", async () => {
+      // Note: stdio test server uses getDefaultServerConfig which now includes send_notification tool
+      // Create client with stdio transport
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+
+      await client.connect();
+
+      // Set up Promise to wait for notification
+      const notificationPromise = new Promise<MessageEntry>((resolve) => {
+        client!.addEventListener("message", (event) => {
+          const entry = event.detail;
+          if (entry.direction === "notification") {
+            resolve(entry);
+          }
+        });
+      });
+
+      // Call the send_notification tool
+      const sendNotifTool = await getTool(client, "send_notification");
+      await client.callTool(sendNotifTool, {
+        message: "Test notification from stdio",
+        level: "info",
+      });
+
+      // Wait for the notification
+      const notificationEntry = await notificationPromise;
+
+      // Validate the notification
+      expect(notificationEntry).toBeDefined();
+      expect(notificationEntry.direction).toBe("notification");
+      if ("method" in notificationEntry.message) {
+        expect(notificationEntry.message.method).toBe("notifications/message");
+        if ("params" in notificationEntry.message) {
+          const params = notificationEntry.message.params as Record<
+            string,
+            unknown
+          >;
+          expect((params.data as { message: string }).message).toBe(
+            "Test notification from stdio",
+          );
+          expect(params.level).toBe("info");
+          expect(params.logger).toBe("test-server");
+        }
+      }
+    });
+
+    it("should receive server-initiated notifications via SSE transport", async () => {
+      // Create a test server with the send_notification tool and logging enabled
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createSendNotificationTool()],
+        serverType: "sse",
+        logging: true, // Required for notifications/message
+      });
+
+      await server.start();
+
+      // Create client with SSE transport
+      client = new InspectorClient(
+        {
+          type: "sse",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+
+      await client.connect();
+
+      // Set up Promise to wait for notification
+      const notificationPromise = new Promise<MessageEntry>((resolve) => {
+        client!.addEventListener("message", (event) => {
+          const entry = event.detail;
+          if (entry.direction === "notification") {
+            resolve(entry);
+          }
+        });
+      });
+
+      // Call the send_notification tool
+      const sendNotifToolSse = await getTool(client, "send_notification");
+      await client.callTool(sendNotifToolSse, {
+        message: "Test notification from SSE",
+        level: "warning",
+      });
+
+      // Wait for the notification
+      const notificationEntry = await notificationPromise;
+
+      // Validate the notification
+      expect(notificationEntry).toBeDefined();
+      expect(notificationEntry.direction).toBe("notification");
+      if ("method" in notificationEntry.message) {
+        expect(notificationEntry.message.method).toBe("notifications/message");
+        if ("params" in notificationEntry.message) {
+          const params = notificationEntry.message.params as Record<
+            string,
+            unknown
+          >;
+          expect((params.data as { message: string }).message).toBe(
+            "Test notification from SSE",
+          );
+          expect(params.level).toBe("warning");
+          expect(params.logger).toBe("test-server");
+        }
+      }
+    });
+
+    it("should receive server-initiated notifications via streamable-http transport", async () => {
+      // Create a test server with the send_notification tool and logging enabled
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createSendNotificationTool()],
+        serverType: "streamable-http",
+        logging: true, // Required for notifications/message
+      });
+
+      await server.start();
+
+      // Create client with streamable-http transport
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+
+      await client.connect();
+
+      // Set up Promise to wait for notification
+      const notificationPromise = new Promise<MessageEntry>((resolve) => {
+        client!.addEventListener("message", (event) => {
+          const entry = event.detail;
+          if (entry.direction === "notification") {
+            resolve(entry);
+          }
+        });
+      });
+
+      // Call the send_notification tool
+      const sendNotifToolHttp = await getTool(client, "send_notification");
+      await client.callTool(sendNotifToolHttp, {
+        message: "Test notification from streamable-http",
+        level: "error",
+      });
+
+      // Wait for the notification
+      const notificationEntry = await notificationPromise;
+
+      // Validate the notification
+      expect(notificationEntry).toBeDefined();
+      expect(notificationEntry.direction).toBe("notification");
+      if ("method" in notificationEntry.message) {
+        expect(notificationEntry.message.method).toBe("notifications/message");
+        if ("params" in notificationEntry.message) {
+          const params = notificationEntry.message.params as Record<
+            string,
+            unknown
+          >;
+          expect((params.data as { message: string }).message).toBe(
+            "Test notification from streamable-http",
+          );
+          expect(params.level).toBe("error");
+          expect(params.logger).toBe("test-server");
+        }
+      }
+    });
+  });
+
+  describe("Elicitation Requests", () => {
+    it("should handle form-based elicitation requests from server and respond", async () => {
+      // Create a test server with the collectElicitation tool
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createCollectFormElicitationTool()],
+        serverType: "streamable-http",
+      });
+
+      await server.start();
+
+      // Create client with elicitation enabled
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          elicit: true, // Enable elicitation capability
+        },
+      );
+
+      await client.connect();
+
+      // Set up Promise to wait for elicitation request event
+      const elicitationRequestPromise = new Promise<ElicitationCreateMessage>(
+        (resolve) => {
+          client!.addEventListener(
+            "newPendingElicitation",
+            (event) => {
+              resolve(event.detail);
+            },
+            { once: true },
+          );
+        },
+      );
+
+      // Start the tool call (don't await yet - it will block until elicitation is responded to)
+      const collectElicitationTool = await getTool(
+        client,
+        "collect_elicitation",
+      );
+      const toolResultPromise = client.callTool(collectElicitationTool, {
+        message: "Please provide your name",
+        schema: {
+          type: "object",
+          properties: {
+            name: {
+              type: "string",
+              description: "Your name",
+            },
+          },
+          required: ["name"],
+        },
+      });
+
+      // Wait for the elicitation request to arrive via event
+      const pendingElicitation = await elicitationRequestPromise;
+
+      // Verify we received an elicitation request
+      expect(pendingElicitation.request.method).toBe("elicitation/create");
+      expect(pendingElicitation.request.params.message).toBe(
+        "Please provide your name",
+      );
+      if ("requestedSchema" in pendingElicitation.request.params) {
+        expect(pendingElicitation.request.params.requestedSchema).toBeDefined();
+        expect(pendingElicitation.request.params.requestedSchema.type).toBe(
+          "object",
+        );
+      }
+
+      // Respond to the elicitation request
+      const elicitationResponse: ElicitResult = {
+        action: "accept",
+        content: {
+          name: "Test User",
+        },
+      };
+
+      await pendingElicitation.respond(elicitationResponse);
+
+      // Now await the tool result (it should complete now that we've responded)
+      const toolResult = await toolResultPromise;
+
+      // Verify the tool result contains the elicitation response
+      expect(toolResult).toBeDefined();
+      expect(toolResult.success).toBe(true);
+      expect(toolResult.result).toBeDefined();
+      expect(toolResult.result!.content).toBeDefined();
+      expect(Array.isArray(toolResult.result!.content)).toBe(true);
+      const toolContent = toolResult.result!.content as ContentBlock[];
+      expect(toolContent.length).toBeGreaterThan(0);
+      const toolMessage = toolContent[0];
+      expect(toolMessage).toBeDefined();
+      expect(toolMessage.type).toBe("text");
+      if (toolMessage.type === "text") {
+        expect(toolMessage.text).toContain("Elicitation response:");
+        expect(toolMessage.text).toContain("accept");
+        expect(toolMessage.text).toContain("Test User");
+      }
+
+      // Verify the pending elicitation was removed
+      const pendingElicitations = client.getPendingElicitations();
+      expect(pendingElicitations.length).toBe(0);
+    });
+
+    it("should handle URL-based elicitation requests from server and respond", async () => {
+      // Create a test server with the collect_url_elicitation tool
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createCollectUrlElicitationTool()],
+        serverType: "streamable-http",
+      });
+
+      await server.start();
+
+      // Create client with elicitation enabled
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          elicit: { url: true }, // Enable elicitation capability
+        },
+      );
+
+      await client.connect();
+
+      // Set up Promise to wait for elicitation request event
+      const elicitationRequestPromise = new Promise<ElicitationCreateMessage>(
+        (resolve) => {
+          client!.addEventListener(
+            "newPendingElicitation",
+            (event) => {
+              resolve(event.detail);
+            },
+            { once: true },
+          );
+        },
+      );
+
+      // Start the tool call (don't await yet - it will block until elicitation is responded to)
+      const collectUrlElicitationTool = await getTool(
+        client,
+        "collect_url_elicitation",
+      );
+      const toolResultPromise = client.callTool(collectUrlElicitationTool, {
+        message: "Please visit the URL to complete authentication",
+        url: "https://example.com/auth",
+        elicitationId: "test-url-elicitation-123",
+      });
+
+      // Wait for the elicitation request to arrive via event
+      const pendingElicitation = await elicitationRequestPromise;
+
+      // Verify we received a URL-based elicitation request
+      expect(pendingElicitation.request.method).toBe("elicitation/create");
+      expect(pendingElicitation.request.params.message).toBe(
+        "Please visit the URL to complete authentication",
+      );
+      expect(pendingElicitation.request.params.mode).toBe("url");
+      if (pendingElicitation.request.params.mode === "url") {
+        expect(pendingElicitation.request.params.url).toBe(
+          "https://example.com/auth",
+        );
+        expect(pendingElicitation.request.params.elicitationId).toBe(
+          "test-url-elicitation-123",
+        );
+      }
+
+      // Respond to the URL-based elicitation request
+      const elicitationResponse: ElicitResult = {
+        action: "accept",
+        content: {
+          // URL-based elicitation typically doesn't have form data, but we can include metadata
+          completed: true,
+        },
+      };
+
+      await pendingElicitation.respond(elicitationResponse);
+
+      // Now await the tool result (it should complete now that we've responded)
+      const toolResult = await toolResultPromise;
+
+      // Verify the tool result contains the elicitation response
+      expect(toolResult).toBeDefined();
+      expect(toolResult.success).toBe(true);
+      expect(toolResult.result).toBeDefined();
+      expect(toolResult.result!.content).toBeDefined();
+      expect(Array.isArray(toolResult.result!.content)).toBe(true);
+      const toolContent = toolResult.result!.content as ContentBlock[];
+      expect(toolContent.length).toBeGreaterThan(0);
+      const toolMessage = toolContent[0];
+      expect(toolMessage).toBeDefined();
+      expect(toolMessage.type).toBe("text");
+      if (toolMessage.type === "text") {
+        expect(toolMessage.text).toContain("URL elicitation response:");
+        expect(toolMessage.text).toContain("accept");
+      }
+
+      // Verify the pending elicitation was removed
+      const pendingElicitations = client.getPendingElicitations();
+      expect(pendingElicitations.length).toBe(0);
+    });
+
+    it("should handle url_elicitation_form: accept elicitation, receive completion notification, update pending state, and return tool result", async () => {
+      const submittedValue = "inspector-client-test-value-99";
+
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createUrlElicitationFormTool()],
+        serverType: "streamable-http",
+      });
+
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          elicit: { url: true },
+        },
+      );
+
+      await client.connect();
+
+      // Track pendingElicitationsChange events: expect [1] when elicitation arrives, [0] when complete notification received
+      const pendingElicitationsChangeEvents: ElicitationCreateMessage[][] = [];
+      client!.addEventListener(
+        "pendingElicitationsChange",
+        (event: TypedEvent<"pendingElicitationsChange">) => {
+          pendingElicitationsChangeEvents.push([...event.detail]);
+        },
+      );
+
+      const elicitationRequestPromise = new Promise<ElicitationCreateMessage>(
+        (resolve) => {
+          client!.addEventListener(
+            "newPendingElicitation",
+            (event) => resolve(event.detail),
+            { once: true },
+          );
+        },
+      );
+
+      const urlElicitationFormTool = await getTool(
+        client,
+        "url_elicitation_form",
+      );
+      const toolResultPromise = client.callTool(urlElicitationFormTool, {});
+
+      const pendingElicitation = await elicitationRequestPromise;
+
+      expect(pendingElicitation.request.method).toBe("elicitation/create");
+      expect(pendingElicitation.request.params?.mode).toBe("url");
+      const url =
+        pendingElicitation.request.params?.mode === "url"
+          ? pendingElicitation.request.params.url
+          : null;
+      const elicitationId =
+        pendingElicitation.request.params?.mode === "url"
+          ? pendingElicitation.request.params.elicitationId
+          : null;
+      expect(url).toBeTruthy();
+      expect(elicitationId).toBeTruthy();
+
+      expect(client.getPendingElicitations()).toHaveLength(1);
+
+      // Respond with accept (unblocks server); then submit form to trigger completion notification
+      await pendingElicitation.respond({ action: "accept" });
+
+      const formData = new URLSearchParams({
+        value: submittedValue,
+        elicitation: elicitationId!,
+      });
+      await fetch(url!, {
+        method: "POST",
+        body: formData,
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      });
+
+      const toolResult = await toolResultPromise;
+
+      expect(toolResult).toBeDefined();
+      expect(toolResult.success).toBe(true);
+      expect(toolResult.result?.content).toBeDefined();
+      const content = toolResult.result!.content as Array<{
+        type: string;
+        text?: string;
+      }>;
+      const textBlock = content.find((c) => c.type === "text");
+      expect(textBlock?.text).toContain("Collected value:");
+      expect(textBlock?.text).toContain(submittedValue);
+
+      expect(client.getPendingElicitations()).toHaveLength(0);
+
+      // Verify event sequence: addPendingElicitation -> [1], then complete notification -> [0]
+      expect(pendingElicitationsChangeEvents.length).toBeGreaterThanOrEqual(2);
+      expect(pendingElicitationsChangeEvents[0]).toHaveLength(1);
+      const lastEvent =
+        pendingElicitationsChangeEvents[
+          pendingElicitationsChangeEvents.length - 1
+        ];
+      expect(lastEvent).toHaveLength(0);
+    });
+  });
+
+  describe("Roots Support", () => {
+    it("should handle roots/list request from server and return roots", async () => {
+      // Create a test server with the list_roots tool
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createListRootsTool()],
+        serverType: "streamable-http",
+      });
+
+      await server.start();
+
+      // Create client with roots enabled
+      const initialRoots = [
+        { uri: "file:///test1", name: "Test Root 1" },
+        { uri: "file:///test2", name: "Test Root 2" },
+      ];
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          roots: initialRoots, // Enable roots capability
+        },
+      );
+
+      await client.connect();
+
+      // Call the list_roots tool - it will call roots/list on the client
+      const listRootsTool = await getTool(client, "list_roots");
+      const toolResult = await client.callTool(listRootsTool, {});
+
+      // Verify the tool result contains the roots
+      expect(toolResult).toBeDefined();
+      expect(toolResult.success).toBe(true);
+      expect(toolResult.result).toBeDefined();
+      expect(toolResult.result!.content).toBeDefined();
+      expect(Array.isArray(toolResult.result!.content)).toBe(true);
+      const toolContent = toolResult.result!.content as ContentBlock[];
+      expect(toolContent.length).toBeGreaterThan(0);
+      const toolMessage = toolContent[0];
+      expect(toolMessage).toBeDefined();
+      expect(toolMessage.type).toBe("text");
+      if (toolMessage.type === "text") {
+        expect(toolMessage.text).toContain("Roots:");
+        expect(toolMessage.text).toContain("file:///test1");
+        expect(toolMessage.text).toContain("file:///test2");
+      }
+
+      // Verify getRoots() returns the roots
+      const roots = client.getRoots();
+      expect(roots).toEqual(initialRoots);
+
+      await client.disconnect();
+      await server.stop();
+    });
+
+    it("should send roots/list_changed notification when roots are updated", async () => {
+      // Create a test server - clients can send roots/list_changed notifications to any server
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        serverType: "streamable-http",
+      });
+
+      await server.start();
+
+      // Create client with roots enabled
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          roots: [], // Enable roots capability with empty array
+        },
+      );
+
+      await client.connect();
+
+      // Clear any recorded requests from connection
+      server.clearRecordings();
+
+      // Update roots
+      const newRoots = [
+        { uri: "file:///new1", name: "New Root 1" },
+        { uri: "file:///new2", name: "New Root 2" },
+      ];
+      await client.setRoots(newRoots);
+
+      const rootsChangedNotification = await server.waitUntilRecorded(
+        (req) => req.method === "notifications/roots/list_changed",
+        { timeout: 5000, interval: 10 },
+      );
+
+      expect(rootsChangedNotification.method).toBe(
+        "notifications/roots/list_changed",
+      );
+
+      // Verify getRoots() returns the new roots
+      const roots = client.getRoots();
+      expect(roots).toEqual(newRoots);
+
+      // Verify rootsChange event was dispatched
+      const rootsChangePromise = new Promise<CustomEvent>((resolve) => {
+        client!.addEventListener(
+          "rootsChange",
+          (event) => {
+            resolve(event);
+          },
+          { once: true },
+        );
+      });
+
+      await client.setRoots([{ uri: "file:///updated", name: "Updated" }]);
+
+      const rootsChangeEvent = await rootsChangePromise;
+      expect(rootsChangeEvent.detail).toEqual([
+        { uri: "file:///updated", name: "Updated" },
+      ]);
+
+      // Verify another notification was sent
+      const updatedRequests = server.getRecordedRequests();
+      const secondNotification = updatedRequests.filter(
+        (req) => req.method === "notifications/roots/list_changed",
+      );
+      expect(secondNotification.length).toBeGreaterThanOrEqual(1);
+
+      await client!.disconnect();
+      await server.stop();
+    });
+  });
+
+  describe("Completions", () => {
+    it("should get completions for resource template variable", async () => {
+      // Create a test server with a resource template that has completion support
+      const completionCallback = (argName: string, value: string): string[] => {
+        if (argName === "path") {
+          const files = ["file1.txt", "file2.txt", "file3.txt"];
+          return files.filter((f) => f.startsWith(value));
+        }
+        return [];
+      };
+
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        resourceTemplates: [createFileResourceTemplate(completionCallback)],
+      });
+
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+
+      await client.connect();
+
+      // Request completions for "file" variable with partial value "file1"
+      const result = await client.getCompletions(
+        { type: "ref/resource", uri: "file:///{path}" },
+        "path",
+        "file1",
+      );
+
+      expect(result.values).toContain("file1.txt");
+      expect(result.values.length).toBeGreaterThan(0);
+
+      await client.disconnect();
+      await server.stop();
+    });
+
+    it("should get completions for prompt argument", async () => {
+      // Create a test server with a prompt that has completion support
+      const cityCompletions = (value: string): string[] => {
+        const cities = ["New York", "Los Angeles", "Chicago", "Houston"];
+        return cities.filter((c) =>
+          c.toLowerCase().startsWith(value.toLowerCase()),
+        );
+      };
+
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        prompts: [
+          createArgsPrompt({
+            city: cityCompletions,
+          }),
+        ],
+      });
+
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+
+      await client.connect();
+
+      // Request completions for "city" argument with partial value "New"
+      const result = await client.getCompletions(
+        { type: "ref/prompt", name: "args_prompt" },
+        "city",
+        "New",
+      );
+
+      expect(result.values).toContain("New York");
+      expect(result.values.length).toBeGreaterThan(0);
+
+      await client.disconnect();
+      await server.stop();
+    });
+
+    it("should return empty array when server does not support completions", async () => {
+      // Create a test server without completion support
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        resourceTemplates: [createFileResourceTemplate()], // No completion callback
+      });
+
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+
+      await client.connect();
+
+      // Request completions - should return empty array (MethodNotFound handled gracefully)
+      const result = await client.getCompletions(
+        { type: "ref/resource", uri: "file:///{path}" },
+        "path",
+        "file",
+      );
+
+      expect(result.values).toEqual([]);
+
+      await client.disconnect();
+      await server.stop();
+    });
+
+    it("should get completions with context (other arguments)", async () => {
+      // Create a test server with a prompt that uses context
+      const stateCompletions = (
+        value: string,
+        context?: Record<string, string>,
+      ): string[] => {
+        const statesByCity: Record<string, string[]> = {
+          "New York": ["NY", "New York State"],
+          "Los Angeles": ["CA", "California"],
+        };
+
+        const city = context?.city;
+        if (city && statesByCity[city]) {
+          return statesByCity[city].filter((s) =>
+            s.toLowerCase().startsWith(value.toLowerCase()),
+          );
+        }
+        return ["NY", "CA", "TX", "FL"].filter((s) =>
+          s.toLowerCase().startsWith(value.toLowerCase()),
+        );
+      };
+
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        prompts: [
+          createArgsPrompt({
+            state: stateCompletions,
+          }),
+        ],
+      });
+
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+
+      await client.connect();
+
+      // Request completions for "state" with context (city="New York")
+      const result = await client.getCompletions(
+        { type: "ref/prompt", name: "args_prompt" },
+        "state",
+        "N",
+        { city: "New York" },
+      );
+
+      expect(result.values).toContain("NY");
+      expect(result.values).toContain("New York State");
+
+      await client.disconnect();
+      await server.stop();
+    });
+
+    it("should handle async completion callbacks", async () => {
+      // Create a test server with async completion callback
+      const asyncCompletionCallback = async (
+        _argName: string,
+        value: string,
+      ): Promise<string[]> => {
+        // Simulate async I/O in completion callback; fixture behavior, not a test wait.
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        const files = ["async1.txt", "async2.txt", "async3.txt"];
+        return files.filter((f) => f.startsWith(value));
+      };
+
+      server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        resourceTemplates: [
+          createFileResourceTemplate(asyncCompletionCallback),
+        ],
+      });
+
+      await server.start();
+
+      client = new InspectorClient(
+        {
+          type: "streamable-http",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+
+      await client.connect();
+
+      const result = await client.getCompletions(
+        { type: "ref/resource", uri: "file:///{path}" },
+        "path",
+        "async1",
+      );
+
+      expect(result.values).toContain("async1.txt");
+
+      await client.disconnect();
+      await server.stop();
+    });
+  });
+
+  describe("Task Support", () => {
+    beforeEach(async () => {
+      // Create server with task support
+      const taskConfig = {
+        ...getTaskServerConfig(),
+        serverType: "sse" as const,
+      };
+      server = createTestServerHttp(taskConfig);
+      await server.start();
+      client = new InspectorClient(
+        {
+          type: "sse",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+      await client.connect();
+    });
+
+    it("should detect task capabilities", () => {
+      const capabilities = client!.getTaskCapabilities();
+      expect(capabilities).toBeDefined();
+      expect(capabilities?.list).toBe(true);
+      expect(capabilities?.cancel).toBe(true);
+    });
+
+    it("should list tasks (empty initially)", async () => {
+      const result = await client!.listRequestorTasks();
+      expect(result).toHaveProperty("tasks");
+      expect(Array.isArray(result.tasks)).toBe(true);
+    });
+
+    it("should run tool as task (callTool with taskOptions returns task reference, poll getRequestorTask/getRequestorTaskResult yields result)", async () => {
+      // Same path as web App "Run as task": callTool with taskOptions -> task reference -> poll until completed
+      const optionalTaskTool = await getTool(client!, "optional_task");
+      const invocation = await client!.callTool(
+        optionalTaskTool,
+        { message: "e2e-run-as-task" },
+        undefined,
+        undefined,
+        { ttl: 5000 },
+      );
+
+      expect(invocation.success).toBe(true);
+      expect(invocation.result).toBeDefined();
+      expect(typeof invocation.result).toBe("object");
+      const rawResult = invocation.result as Record<string, unknown>;
+      expect(rawResult.task).toBeDefined();
+      const taskRef = rawResult.task as {
+        taskId: string;
+        status: string;
+        pollInterval?: number;
+      };
+      expect(taskRef.taskId).toBeDefined();
+      expect(typeof taskRef.taskId).toBe("string");
+      expect(taskRef.taskId.length).toBeGreaterThan(0);
+      expect(taskRef.status).toBeDefined();
+      expect(typeof taskRef.status).toBe("string");
+
+      const taskId = taskRef.taskId;
+      const pollIntervalMs = taskRef.pollInterval ?? 1000;
+      const timeoutMs = 12000;
+      const start = Date.now();
+      let task = await client!.getRequestorTask(taskId);
+      while (
+        task.status !== "completed" &&
+        task.status !== "failed" &&
+        task.status !== "cancelled"
+      ) {
+        expect(Date.now() - start).toBeLessThan(timeoutMs);
+        await new Promise((r) => setTimeout(r, pollIntervalMs));
+        task = await client!.getRequestorTask(taskId);
+      }
+
+      expect(task.status).toBe("completed");
+
+      const result = await client!.getRequestorTaskResult(taskId);
+      expect(result).toBeDefined();
+      expect(result).toHaveProperty("content");
+      expect(Array.isArray(result.content)).toBe(true);
+      expect(result.content.length).toBe(1);
+      const firstContent = result.content[0];
+      expect(firstContent).toBeDefined();
+      expect(firstContent!.type).toBe("text");
+      expect(firstContent!).toHaveProperty("text");
+      const resultText = JSON.parse((firstContent as { text: string }).text);
+      expect(resultText.message).toBe("Task completed: e2e-run-as-task");
+      expect(resultText.taskId).toBe(taskId);
+
+      const listResult = await client!.listRequestorTasks();
+      const found = listResult.tasks.some((t) => t.taskId === taskId);
+      expect(found).toBe(true);
+    });
+
+    it("should call tool with task support using callToolStream", async () => {
+      const toolCallTaskUpdatedEvents: Array<{
+        taskId: string;
+        task: TaskWithOptionalCreatedAt;
+        result?: CallToolResult;
+        error?: unknown;
+      }> = [];
+      const toolCallResultEvents: Array<{
+        toolName: string;
+        params: Record<string, JsonValue>;
+        result: CallToolResult | null;
+        timestamp: Date;
+        success: boolean;
+        error?: string;
+        metadata?: Record<string, string>;
+      }> = [];
+
+      client!.addEventListener(
+        "toolCallTaskUpdated",
+        (event: TypedEvent<"toolCallTaskUpdated">) => {
+          toolCallTaskUpdatedEvents.push(event.detail);
+        },
+      );
+      client!.addEventListener(
+        "toolCallResultChange",
+        (event: TypedEvent<"toolCallResultChange">) => {
+          toolCallResultEvents.push(event.detail);
+        },
+      );
+
+      const simpleTaskTool = await getTool(client!, "simple_task");
+      const result = await client!.callToolStream(simpleTaskTool, {
+        message: "test task",
+      });
+
+      // Validate final result
+      expect(result.success).toBe(true);
+      expect(result.result).toBeDefined();
+      expect(result.result).not.toBeNull();
+      expect(result.result).toHaveProperty("content");
+
+      // Validate result content structure
+      const toolResult = result.result!;
+      expect(toolResult.content).toBeDefined();
+      expect(Array.isArray(toolResult.content)).toBe(true);
+      expect(toolResult.content.length).toBe(1);
+
+      const firstContent = toolResult.content[0];
+      expect(firstContent).toBeDefined();
+      expect(firstContent).not.toBeUndefined();
+      expect(firstContent!.type).toBe("text");
+
+      // Validate result content value
+      if (firstContent && firstContent.type === "text") {
+        expect(firstContent.text).toBeDefined();
+        const resultText = JSON.parse(firstContent.text);
+        expect(resultText.message).toBe("Task completed: test task");
+        expect(resultText.taskId).toBeDefined();
+        expect(typeof resultText.taskId).toBe("string");
+      } else {
+        expect(firstContent?.type).toBe("text");
+      }
+
+      // Validate toolCallTaskUpdated events - first is task created, then status updates, last has result
+      expect(toolCallTaskUpdatedEvents.length).toBeGreaterThanOrEqual(1);
+      const createdEvent = toolCallTaskUpdatedEvents[0]!;
+      expect(createdEvent.taskId).toBeDefined();
+      expect(typeof createdEvent.taskId).toBe("string");
+      expect(createdEvent.task).toBeDefined();
+      expect(createdEvent.task.taskId).toBe(createdEvent.taskId);
+      expect(createdEvent.task.status).toBe("working");
+      expect(createdEvent.task).toHaveProperty("ttl");
+      expect(createdEvent.task).toHaveProperty("lastUpdatedAt");
+
+      const taskId = createdEvent.taskId;
+
+      // All events are for the same task and have valid structure
+      const statuses = toolCallTaskUpdatedEvents.map((event) => {
+        expect(event.taskId).toBe(taskId);
+        expect(event.task.taskId).toBe(taskId);
+        expect(event.task).toHaveProperty("status");
+        expect(event.task).toHaveProperty("ttl");
+        expect(event.task).toHaveProperty("lastUpdatedAt");
+        if (event.task.lastUpdatedAt) {
+          expect(typeof event.task.lastUpdatedAt).toBe("string");
+          expect(() => new Date(event.task.lastUpdatedAt!)).not.toThrow();
+        }
+        return event.task.status;
+      });
+
+      expect(statuses[statuses.length - 1]).toBe("completed");
+      statuses.forEach((status) => {
+        expect(["working", "completed"]).toContain(status);
+      });
+      if (toolCallTaskUpdatedEvents.length > 1) {
+        expect(statuses[0]).toBe("working");
+        expect(statuses[statuses.length - 1]).toBe("completed");
+      } else {
+        expect(statuses[0]).toBe("completed");
+      }
+
+      // Last event must have result (completed)
+      const completedEvent = toolCallTaskUpdatedEvents.find(
+        (e) => e.result !== undefined,
+      )!;
+      expect(completedEvent).toBeDefined();
+      expect(completedEvent.taskId).toBe(taskId);
+      expect(completedEvent.result).toBeDefined();
+      expect(completedEvent.result).toEqual(toolResult);
+
+      // Validate toolCallResultChange event
+      expect(toolCallResultEvents.length).toBe(1);
+      const toolCallEvent = toolCallResultEvents[0]!;
+      expect(toolCallEvent.toolName).toBe("simple_task");
+      expect(toolCallEvent.params).toEqual({ message: "test task" });
+      expect(toolCallEvent.success).toBe(true);
+      expect(toolCallEvent.result).toEqual(toolResult);
+      expect(toolCallEvent.timestamp).toBeInstanceOf(Date);
+
+      // Validate task in requestor tasks (from server list)
+      const { tasks: requestorTasks } = await client!.listRequestorTasks();
+      const cachedTask = requestorTasks.find((t) => t.taskId === taskId);
+      expect(cachedTask).toBeDefined();
+      expect(cachedTask!.taskId).toBe(taskId);
+      expect(cachedTask!.status).toBe("completed");
+      expect(cachedTask!).toHaveProperty("ttl");
+      expect(cachedTask!).toHaveProperty("lastUpdatedAt");
+
+      // Validate consistency: taskId from all sources matches
+      expect(createdEvent.taskId).toBe(taskId);
+      expect(completedEvent.taskId).toBe(taskId);
+      expect(cachedTask!.taskId).toBe(taskId);
+      if (firstContent && firstContent.type === "text") {
+        const resultText = JSON.parse(firstContent.text);
+        expect(resultText.taskId).toBe(taskId);
+      }
+    });
+
+    it("should accept taskOptions (ttl) in callToolStream", async () => {
+      const simpleTaskTtlTool = await getTool(client!, "simple_task");
+      const result = await client!.callToolStream(
+        simpleTaskTtlTool,
+        { message: "ttl-test" },
+        undefined,
+        undefined,
+        { ttl: 99999 },
+      );
+      expect(result.success).toBe(true);
+      expect(result.result).toBeDefined();
+      const { tasks } = await client!.listRequestorTasks();
+      const task = tasks.find((t) => t.taskId && t.status === "completed");
+      expect(task).toBeDefined();
+      expect(task).toHaveProperty("ttl");
+    });
+
+    it("emits requestorTaskProgress tagged with the owning taskId during a task-augmented call", async () => {
+      // Core-side progress→task correlation (#1422): the wrapped onprogress in
+      // callToolStream tags each tick with the taskId it owns, so App can map
+      // progress to the right TaskCard. The progress_task tool emits 5 ticks.
+      const progressEvents: Array<{ taskId: string; progress: Progress }> = [];
+      client!.addEventListener(
+        "requestorTaskProgress",
+        (event: TypedEvent<"requestorTaskProgress">) => {
+          progressEvents.push(event.detail);
+        },
+      );
+
+      // Capture the created taskId from the toolCall event stream for comparison.
+      let createdTaskId: string | undefined;
+      client!.addEventListener(
+        "toolCallTaskUpdated",
+        (event: TypedEvent<"toolCallTaskUpdated">) => {
+          createdTaskId ??= event.detail.taskId;
+        },
+      );
+
+      const progressTool = await getTool(client!, "progress_task");
+      const result = await client!.callToolStream(progressTool, {
+        message: "with progress",
+      });
+      expect(result.success).toBe(true);
+
+      expect(progressEvents.length).toBeGreaterThan(0);
+      // Every tick is tagged with the same (and the correct) task id.
+      const taskIds = new Set(progressEvents.map((e) => e.taskId));
+      expect(taskIds.size).toBe(1);
+      const [taggedTaskId] = [...taskIds];
+      expect(typeof taggedTaskId).toBe("string");
+      expect(taggedTaskId!.length).toBeGreaterThan(0);
+      expect(taggedTaskId).toBe(createdTaskId);
+      // The payload carries the server's progress units.
+      expect(progressEvents.some((e) => e.progress.total === 5)).toBe(true);
+    });
+
+    it("does not emit requestorTaskProgress when progress is globally disabled", async () => {
+      // The callToolStream onprogress wrapper is gated on `this.progress`, so a
+      // client with progress disabled neither requests a progress token nor
+      // emits requestorTaskProgress — task calls respect the same toggle as
+      // every other call path. The task still completes.
+      const noProgressClient = new InspectorClient(
+        { type: "sse", url: server!.url },
+        { environment: { transport: createTransportNode }, progress: false },
+      );
+      await noProgressClient.connect();
+      try {
+        const progressEvents: Array<{ taskId: string; progress: Progress }> =
+          [];
+        noProgressClient.addEventListener(
+          "requestorTaskProgress",
+          (event: TypedEvent<"requestorTaskProgress">) => {
+            progressEvents.push(event.detail);
+          },
+        );
+        const progressTool = await getTool(noProgressClient, "progress_task");
+        const result = await noProgressClient.callToolStream(progressTool, {
+          message: "no progress",
+        });
+        expect(result.success).toBe(true);
+        expect(progressEvents).toHaveLength(0);
+      } finally {
+        await noProgressClient.disconnect();
+      }
+    });
+
+    it("should get task by taskId", async () => {
+      // First create a task
+      const simpleTaskByIdTool = await getTool(client!, "simple_task");
+      const result = await client!.callToolStream(simpleTaskByIdTool, {
+        message: "test",
+      });
+      expect(result.success).toBe(true);
+
+      // Get the taskId from server task list
+      const { tasks: activeTasks } = await client!.listRequestorTasks();
+      expect(activeTasks.length).toBeGreaterThan(0);
+      const activeTask = activeTasks[0];
+      expect(activeTask).toBeDefined();
+      const taskId = activeTask!.taskId;
+
+      // Get the task
+      const task = await client!.getRequestorTask(taskId);
+      expect(task).toBeDefined();
+      expect(task.taskId).toBe(taskId);
+      expect(task.status).toBe("completed");
+    });
+
+    it("should get task result", async () => {
+      // First create a task
+      const simpleTaskResultTool = await getTool(client!, "simple_task");
+      const result = await client!.callToolStream(simpleTaskResultTool, {
+        message: "test result",
+      });
+      expect(result.success).toBe(true);
+      expect(result.result).toBeDefined();
+      expect(result.result).not.toBeNull();
+
+      // Get the taskId from server task list
+      const { tasks: requestorTasks } = await client!.listRequestorTasks();
+      expect(requestorTasks.length).toBeGreaterThan(0);
+      const task = requestorTasks.find((t) => t.status === "completed");
+      expect(task).toBeDefined();
+      const taskId = task!.taskId;
+
+      // Get the task result
+      const taskResult = await client!.getRequestorTaskResult(taskId);
+
+      // Validate result structure
+      expect(taskResult).toBeDefined();
+      expect(taskResult).toHaveProperty("content");
+      expect(Array.isArray(taskResult.content)).toBe(true);
+      expect(taskResult.content.length).toBe(1);
+
+      // Validate content structure
+      const firstContent = taskResult.content[0];
+      expect(firstContent).toBeDefined();
+      expect(firstContent).not.toBeUndefined();
+      expect(firstContent!.type).toBe("text");
+
+      // Validate content value
+      if (firstContent && firstContent.type === "text") {
+        expect(firstContent.text).toBeDefined();
+        const resultText = JSON.parse(firstContent.text);
+        expect(resultText.message).toBe("Task completed: test result");
+        expect(resultText.taskId).toBe(taskId);
+      } else {
+        expect(firstContent?.type).toBe("text");
+      }
+
+      // Validate that getTaskResult returns the same result as callToolStream
+      expect(taskResult).toEqual(result.result);
+    });
+
+    it("should throw error when calling callTool on task-required tool", async () => {
+      const simpleTaskRequiredTool = await getTool(client!, "simple_task");
+      await expect(
+        client!.callTool(simpleTaskRequiredTool, { message: "test" }),
+      ).rejects.toThrow("requires task support");
+    });
+
+    it("should clear tasks on disconnect", async () => {
+      // Create a task
+      const simpleTaskDisconnectTool = await getTool(client!, "simple_task");
+      await client!.callToolStream(simpleTaskDisconnectTool, {
+        message: "test",
+      });
+      const listBefore = await client!.listRequestorTasks();
+      expect(listBefore.tasks.length).toBeGreaterThan(0);
+
+      // Disconnect
+      await client!.disconnect();
+
+      // After disconnect we cannot list tasks (not connected); test that client is disconnected
+      expect(client!.getStatus()).toBe("disconnected");
+    });
+
+    it("should call tool with taskSupport: forbidden (immediate result, no task)", async () => {
+      // forbiddenTask should return immediately without creating a task
+      const forbiddenTaskTool = await getTool(client!, "forbidden_task");
+      const result = await client!.callToolStream(forbiddenTaskTool, {
+        message: "test",
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.result).toHaveProperty("content");
+      // No task should be created (forbidden_task returns immediately)
+      const { tasks } = await client!.listRequestorTasks();
+      expect(tasks.length).toBe(0);
+    });
+
+    it("should call tool with taskSupport: optional (may or may not create task)", async () => {
+      // optionalTask may create a task or return immediately
+      const optionalTaskStreamTool = await getTool(client!, "optional_task");
+      const result = await client!.callToolStream(optionalTaskStreamTool, {
+        message: "test",
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.result).toHaveProperty("content");
+      // Task may or may not be created - both are valid
+    });
+
+    it("should handle task failure and dispatch taskFailed event", async () => {
+      await client!.disconnect();
+      await server?.stop();
+
+      // Create a task tool that will fail after a short delay
+      const failingTask = createTaskTool({
+        name: "failingTask",
+        delayMs: 100,
+        failAfterDelay: 50, // Fail after 50ms
+      });
+
+      const taskConfig = getTaskServerConfig();
+      const failConfig = {
+        ...taskConfig,
+        serverType: "sse" as const,
+        tools: [failingTask, ...(taskConfig.tools || [])],
+      };
+      server = createTestServerHttp(failConfig);
+      await server.start();
+      client = new InspectorClient(
+        {
+          type: "sse",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+      await client!.connect();
+
+      const failedPromise = expect(
+        (async () => {
+          const failingTaskTool = await getTool(client!, "failingTask");
+          return client!.callToolStream(failingTaskTool, { message: "test" });
+        })(),
+      ).rejects.toThrow();
+
+      const taskFailedDetail = await new Promise<{
+        taskId: string;
+        task: TaskWithOptionalCreatedAt;
+        error?: unknown;
+      }>((resolve, reject) => {
+        const timeout = setTimeout(
+          () =>
+            reject(
+              new Error("Timeout waiting for toolCallTaskUpdated with error"),
+            ),
+          2000,
+        );
+        const handler = (
+          e: Event & {
+            detail: {
+              taskId: string;
+              task: TaskWithOptionalCreatedAt;
+              error?: unknown;
+            };
+          },
+        ) => {
+          if (e.detail.error !== undefined) {
+            clearTimeout(timeout);
+            client!.removeEventListener("toolCallTaskUpdated", handler);
+            resolve(e.detail);
+          }
+        };
+        client!.addEventListener("toolCallTaskUpdated", handler);
+      });
+      expect(taskFailedDetail.taskId).toBeDefined();
+      expect(taskFailedDetail.error).toBeDefined();
+
+      await failedPromise;
+    });
+
+    it("should cancel a running task", async () => {
+      await client!.disconnect();
+      await server?.stop();
+
+      // Create a longer-running task tool
+      const longRunningTask = createTaskTool({
+        name: "longRunningTask",
+        delayMs: 2000, // 2 seconds
+      });
+
+      const taskConfig = getTaskServerConfig();
+      const cancelConfig = {
+        ...taskConfig,
+        serverType: "sse" as const,
+        tools: [longRunningTask, ...(taskConfig.tools || [])],
+      };
+      server = createTestServerHttp(cancelConfig);
+      await server.start();
+      client = new InspectorClient(
+        {
+          type: "sse",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+        },
+      );
+      await client!.connect();
+
+      const longRunningTaskTool = await getTool(client!, "longRunningTask");
+      const taskPromise = client!.callToolStream(longRunningTaskTool, {
+        message: "test",
+      });
+
+      const taskCreatedDetail = await waitForEvent<{
+        taskId: string;
+        task: TaskWithOptionalCreatedAt;
+      }>(client, "toolCallTaskUpdated", { timeout: 3000 });
+      const taskId = taskCreatedDetail.taskId;
+      expect(taskId).toBeDefined();
+
+      // Collect the optimistic task updates the stream emits. The cancellation
+      // ends the stream with a generic error; the terminal update must report
+      // "cancelled" (not "failed") so the UI lands on the true state without
+      // waiting for a refresh (#1455).
+      const taskUpdates: TaskWithOptionalCreatedAt[] = [];
+      const onRequestorTaskUpdated = (
+        e: CustomEvent<{ taskId: string; task: TaskWithOptionalCreatedAt }>,
+      ) => {
+        taskUpdates.push(e.detail.task);
+      };
+      client!.addEventListener(
+        "requestorTaskUpdated",
+        onRequestorTaskUpdated as EventListener,
+      );
+
+      const cancelledPromise = waitForEvent<{ taskId: string }>(
+        client,
+        "taskCancelled",
+        { timeout: 3000 },
+      );
+      await client!.cancelRequestorTask(taskId);
+
+      const [cancelledResult, taskResult] = await Promise.allSettled([
+        cancelledPromise,
+        taskPromise,
+      ]);
+      client!.removeEventListener(
+        "requestorTaskUpdated",
+        onRequestorTaskUpdated as EventListener,
+      );
+      expect(cancelledResult.status).toBe("fulfilled");
+      const cancelledDetail = (
+        cancelledResult as PromiseFulfilledResult<{ taskId: string }>
+      ).value;
+      expect(cancelledDetail.taskId).toBe(taskId);
+      expect(taskResult.status).toBe("rejected");
+
+      // The terminal optimistic update is "cancelled", never "failed".
+      const terminalUpdate = taskUpdates.find((t) =>
+        ["completed", "failed", "cancelled"].includes(t.status),
+      );
+      expect(terminalUpdate?.status).toBe("cancelled");
+
+      const task = await client!.getRequestorTask(taskId);
+      expect(task.status).toBe("cancelled");
+    });
+
+    it("should handle elicitation with task (input_required flow)", async () => {
+      await client!.disconnect();
+      await server?.stop();
+
+      const elicitationConfig = {
+        ...getTaskServerConfig(),
+        serverType: "sse" as const,
+        tools: [
+          createElicitationTaskTool("taskWithElicitation"),
+          ...(getTaskServerConfig().tools || []),
+        ],
+      };
+      server = createTestServerHttp(elicitationConfig);
+      await server.start();
+      client = new InspectorClient(
+        {
+          type: "sse",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          elicit: true,
+        },
+      );
+      await client.connect();
+
+      const elicitationPromise = waitForEvent<ElicitationCreateMessage>(
+        client,
+        "newPendingElicitation",
+        { timeout: 2000 },
+      );
+      const taskWithElicitationTool = await getTool(
+        client,
+        "taskWithElicitation",
+      );
+      const taskPromise = client.callToolStream(taskWithElicitationTool, {
+        message: "test",
+      });
+
+      const elicitation = await elicitationPromise;
+
+      // Verify elicitation was received
+      expect(elicitation).toBeDefined();
+
+      // Verify task status is input_required (if taskId was extracted)
+      if (elicitation.taskId) {
+        const { tasks: activeTasks } = await client.listRequestorTasks();
+        const task = activeTasks.find((t) => t.taskId === elicitation.taskId);
+        if (task) {
+          expect(task.status).toBe("input_required");
+        }
+      }
+
+      // Respond to elicitation with correct format
+      await elicitation.respond({
+        action: "accept",
+        content: {
+          input: "test input",
+        },
+      });
+
+      // Wait for task to complete
+      const result = await taskPromise;
+      expect(result.success).toBe(true);
+    });
+
+    it("should handle sampling with task (input_required flow)", async () => {
+      await client!.disconnect();
+      await server?.stop();
+
+      const samplingConfig = {
+        ...getTaskServerConfig(),
+        serverType: "sse" as const,
+        tools: [
+          createSamplingTaskTool("taskWithSampling"),
+          ...(getTaskServerConfig().tools || []),
+        ],
+      };
+      server = createTestServerHttp(samplingConfig);
+      await server.start();
+      client = new InspectorClient(
+        {
+          type: "sse",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          sample: true,
+        },
+      );
+      await client!.connect();
+
+      const samplingPromise = waitForEvent<SamplingCreateMessage>(
+        client,
+        "newPendingSample",
+        { timeout: 3000 },
+      );
+      const taskCreatedPromise = waitForEvent<{ taskId: string; task: Task }>(
+        client,
+        "toolCallTaskUpdated",
+        { timeout: 3000 },
+      );
+      const taskWithSamplingTool = await getTool(client!, "taskWithSampling");
+      const taskPromise = client!.callToolStream(taskWithSamplingTool, {
+        message: "test",
+      });
+
+      const sample = await samplingPromise;
+      expect(sample).toBeDefined();
+
+      const taskCreatedDetail = await taskCreatedPromise;
+      const task = await client!.getRequestorTask(taskCreatedDetail.taskId);
+      expect(task).toBeDefined();
+      expect(task!.status).toBe("input_required");
+
+      // Respond to sampling with correct format
+      await sample.respond({
+        model: "test-model",
+        role: "assistant",
+        stopReason: "endTurn",
+        content: {
+          type: "text",
+          text: "Sampling response",
+        },
+      });
+
+      // Wait for task to complete
+      const result = await taskPromise;
+      expect(result.success).toBe(true);
+    });
+
+    it("should handle progress notifications linked to tasks", async () => {
+      await client!.disconnect();
+      await server?.stop();
+
+      // createProgressTaskTool defaults to 5 progress units with 2000ms delay
+      // Progress notifications are sent at delayMs / progressUnits intervals (400ms each)
+      const progressConfig = {
+        ...getTaskServerConfig(),
+        serverType: "sse" as const,
+        tools: [
+          createProgressTaskTool("taskWithProgress", 2000, 5),
+          ...(getTaskServerConfig().tools || []),
+        ],
+      };
+      server = createTestServerHttp(progressConfig);
+      await server.start();
+      client = new InspectorClient(
+        {
+          type: "sse",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          progress: true,
+        },
+      );
+      await client!.connect();
+
+      const progressToken = Math.random().toString();
+
+      const taskCreatedPromise = waitForEvent<{ taskId: string; task: Task }>(
+        client,
+        "toolCallTaskUpdated",
+        { timeout: 5000 },
+      );
+      const progressPromise = waitForProgressCount(client!, 5, {
+        timeout: 5000,
+      });
+      const taskWithProgressTool = await getTool(client!, "taskWithProgress");
+      const resultPromise = client!.callToolStream(
+        taskWithProgressTool,
+        { message: "test" },
+        undefined,
+        { progressToken },
+      );
+
+      const taskCreatedDetail = await taskCreatedPromise;
+      const taskId = taskCreatedDetail.taskId;
+      expect(taskId).toBeDefined();
+
+      const taskCompletedDetail = await new Promise<{
+        taskId: string;
+        task: TaskWithOptionalCreatedAt;
+        result?: unknown;
+      }>((resolve, reject) => {
+        const timeout = setTimeout(
+          () =>
+            reject(
+              new Error("Timeout waiting for toolCallTaskUpdated with result"),
+            ),
+          5000,
+        );
+        const handler = (
+          e: Event & {
+            detail: {
+              taskId: string;
+              task: TaskWithOptionalCreatedAt;
+              result?: unknown;
+            };
+          },
+        ) => {
+          if (e.detail.result !== undefined) {
+            clearTimeout(timeout);
+            client!.removeEventListener("toolCallTaskUpdated", handler);
+            resolve(e.detail);
+          }
+        };
+        client!.addEventListener("toolCallTaskUpdated", handler);
+      });
+
+      const progressEvents = await progressPromise;
+      const result = await resultPromise;
+
+      // Verify task completed successfully
+      expect(result.success).toBe(true);
+      expect(result.result).toBeDefined();
+      expect(result.result).not.toBeNull();
+      expect(result.result).toHaveProperty("content");
+
+      // Validate the actual tool call response content
+      const toolResult = result.result!;
+      expect(toolResult.content).toBeDefined();
+      expect(Array.isArray(toolResult.content)).toBe(true);
+      expect(toolResult.content.length).toBe(1);
+
+      const firstContent = toolResult.content[0];
+      expect(firstContent).toBeDefined();
+      expect(firstContent).not.toBeUndefined();
+      expect(firstContent!.type).toBe("text");
+
+      // Assert it's a text content block (for TypeScript narrowing)
+      expect(firstContent!.type === "text").toBe(true);
+
+      // TypeScript type narrowing - we've already asserted it's text
+      if (firstContent && firstContent.type === "text") {
+        expect(firstContent.text).toBeDefined();
+        // Parse and validate the JSON text content
+        const resultText = JSON.parse(firstContent.text);
+        expect(resultText.message).toBe("Task completed: test");
+        expect(resultText.taskId).toBe(taskId);
+      } else {
+        // This should never happen due to the assertion above, but TypeScript needs it
+        expect(firstContent?.type).toBe("text");
+      }
+
+      expect(taskCompletedDetail.taskId).toBe(taskId);
+      expect(taskCompletedDetail.result).toBeDefined();
+      expect(taskCompletedDetail.result).toEqual(toolResult);
+
+      expect(progressEvents.length).toBe(5);
+      progressEvents.forEach((evt: unknown, index: number) => {
+        const event = evt as {
+          progressToken: string;
+          progress: number;
+          total: number;
+          message: string;
+          _meta?: Record<string, unknown>;
+        };
+        expect(event.progressToken).toBe(progressToken);
+        expect(event.progress).toBe(index + 1);
+        expect(event.total).toBe(5);
+        expect(event.message).toBe(`Processing... ${index + 1}/5`);
+        expect(event._meta).toBeDefined();
+        expect(event._meta?.[RELATED_TASK_META_KEY]).toBeDefined();
+        const relatedTask = event._meta?.[RELATED_TASK_META_KEY] as {
+          taskId: string;
+        };
+        expect(relatedTask.taskId).toBe(taskId);
+      });
+
+      // Verify task is in completed state (from server list)
+      const { tasks: activeTasks } = await client!.listRequestorTasks();
+      const completedTask = activeTasks.find((t) => t.taskId === taskId);
+      expect(completedTask).toBeDefined();
+      expect(completedTask!.status).toBe("completed");
+    });
+
+    it("should handle listTasks pagination", async () => {
+      const simpleTaskPaginationTool = await getTool(client!, "simple_task");
+      await client!.callToolStream(simpleTaskPaginationTool, {
+        message: "task1",
+      });
+      await client!.callToolStream(simpleTaskPaginationTool, {
+        message: "task2",
+      });
+      await client!.callToolStream(simpleTaskPaginationTool, {
+        message: "task3",
+      });
+      const result = await client!.listRequestorTasks();
+      expect(result.tasks.length).toBeGreaterThan(0);
+
+      // If there's a nextCursor, test pagination
+      if (result.nextCursor) {
+        const nextPage = await client!.listRequestorTasks(result.nextCursor);
+        expect(nextPage.tasks).toBeDefined();
+        expect(Array.isArray(nextPage.tasks)).toBe(true);
+      }
+    });
+  });
+
+  describe("Receiver tasks (e2e)", () => {
+    it("server sends createMessage with params.task, client returns task, test responds, server gets payload via tasks/get and tasks/result", async () => {
+      if (client) await client.disconnect();
+      client = null;
+      await server?.stop();
+
+      const config = {
+        ...getTaskServerConfig(),
+        serverType: "sse" as const,
+        tools: [
+          createTaskTool({
+            name: "receiverE2ESampling",
+            samplingText: "Reply for e2e",
+            receiverTaskTtl: 5000,
+          }),
+          ...(getTaskServerConfig().tools || []),
+        ],
+      };
+      server = createTestServerHttp(config);
+      await server.start();
+      client = new InspectorClient(
+        {
+          type: "sse",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          sample: true,
+          receiverTasks: true,
+          receiverTaskTtlMs: 10_000,
+        },
+      );
+      await client.connect();
+
+      const samplingPromise = waitForEvent<SamplingCreateMessage>(
+        client,
+        "newPendingSample",
+        { timeout: 5000 },
+      );
+      const receiverE2ESamplingTool = await getTool(
+        client,
+        "receiverE2ESampling",
+      );
+      const taskPromise = client.callToolStream(receiverE2ESamplingTool, {
+        message: "e2e",
+      });
+
+      const sample = await samplingPromise;
+      expect(sample).toBeDefined();
+
+      await sample.respond({
+        model: "e2e-model",
+        role: "assistant",
+        stopReason: "endTurn",
+        content: { type: "text", text: "E2E receiver response" },
+      });
+
+      const result = await taskPromise;
+      expect(result.success).toBe(true);
+      expect(result.result).toBeDefined();
+      expect(result.result).not.toBeNull();
+      expect(result.result!.content).toBeDefined();
+      const content = result.result!.content!;
+      const textBlock = Array.isArray(content) ? content[0] : content;
+      expect(textBlock).toBeDefined();
+      expect(
+        textBlock &&
+          typeof textBlock === "object" &&
+          "type" in textBlock &&
+          textBlock.type === "text",
+      ).toBe(true);
+      if (textBlock && typeof textBlock === "object" && "text" in textBlock) {
+        expect((textBlock as { text: string }).text).toBe(
+          "E2E receiver response",
+        );
+      }
+    });
+
+    it("server sends elicit with params.task, client returns task, test responds, server gets payload via tasks/get and tasks/result", async () => {
+      if (client) await client.disconnect();
+      client = null;
+      await server?.stop();
+
+      const config = {
+        ...getTaskServerConfig(),
+        serverType: "sse" as const,
+        tools: [
+          createTaskTool({
+            name: "receiverE2EElicit",
+            elicitationSchema: z.object({
+              input: z.string().describe("User input"),
+            }),
+            receiverTaskTtl: 5000,
+          }),
+          ...(getTaskServerConfig().tools || []),
+        ],
+      };
+      server = createTestServerHttp(config);
+      await server.start();
+      client = new InspectorClient(
+        {
+          type: "sse",
+          url: server.url,
+        },
+        {
+          environment: { transport: createTransportNode },
+          elicit: true,
+          receiverTasks: true,
+          receiverTaskTtlMs: 10_000,
+        },
+      );
+      await client.connect();
+
+      const elicitationPromise = waitForEvent<ElicitationCreateMessage>(
+        client,
+        "newPendingElicitation",
+        { timeout: 5000 },
+      );
+      const receiverE2EElicitTool = await getTool(client, "receiverE2EElicit");
+      const taskPromise = client.callToolStream(receiverE2EElicitTool, {
+        message: "e2e",
+      });
+
+      const elicitation = await elicitationPromise;
+      expect(elicitation).toBeDefined();
+
+      await elicitation.respond({
+        action: "accept",
+        content: { input: "E2E elicitation input" },
+      });
+
+      const result = await taskPromise;
+      expect(result.success).toBe(true);
+      expect(result.result).toBeDefined();
+      expect(result.result).not.toBeNull();
+      expect(result.result!.content).toBeDefined();
+      // Elicit payload from tasks/result is JSON in a text block
+      const content = result.result!.content!;
+      const textBlock = Array.isArray(content) ? content[0] : content;
+      expect(
+        textBlock && typeof textBlock === "object" && "text" in textBlock,
+      ).toBe(true);
+      const parsed = JSON.parse((textBlock as { text: string }).text) as Record<
+        string,
+        unknown
+      >;
+      expect(parsed.input).toBe("E2E elicitation input");
+    });
+  });
+
+  describe("Coverage backfill (#1310)", () => {
+    describe("guard methods without server / OAuth", () => {
+      it("returns no-op defaults from OAuth getters when oauthManager is unset", async () => {
+        const c = new InspectorClient(
+          {
+            type: "stdio",
+            command: serverCommand.command,
+            args: serverCommand.args,
+          },
+          { environment: { transport: createTransportNode } },
+        );
+        await expect(c.getOAuthTokens()).resolves.toBeUndefined();
+        await expect(c.isOAuthAuthorized()).resolves.toBe(false);
+        expect(c.getOAuthFlowStep()).toBeUndefined();
+        expect(c.getOAuthFlowState()).toBeUndefined();
+        await expect(c.getOAuthState()).resolves.toBeUndefined();
+        // clearOAuthTokens is a no-op when there is no manager
+        await expect(c.clearOAuthTokens()).resolves.toBeUndefined();
+      });
+
+      it("setOAuthConfig throws when oauthManager is unset", () => {
+        const c = new InspectorClient(
+          {
+            type: "stdio",
+            command: serverCommand.command,
+            args: serverCommand.args,
+          },
+          { environment: { transport: createTransportNode } },
+        );
+        expect(() => c.setOAuthConfig({ clientId: "x" })).toThrow(
+          /OAuth config must be set at creation/,
+        );
+      });
+
+      it("authenticate throws via ensureOAuthManager when oauthManager is unset", async () => {
+        const c = new InspectorClient(
+          {
+            type: "stdio",
+            command: serverCommand.command,
+            args: serverCommand.args,
+          },
+          { environment: { transport: createTransportNode } },
+        );
+        await expect(c.authenticate()).rejects.toThrow(/OAuth not configured/);
+      });
+
+      it("simple session/roots/subscription accessors return empty defaults before connect", () => {
+        const c = new InspectorClient(
+          {
+            type: "stdio",
+            command: serverCommand.command,
+            args: serverCommand.args,
+          },
+          { environment: { transport: createTransportNode } },
+        );
+        expect(c.getSessionId()).toBeUndefined();
+        // saveSession is a no-op when there is no sessionId
+        expect(() => c.saveSession()).not.toThrow();
+        c.setSessionId("session-123");
+        expect(c.getSessionId()).toBe("session-123");
+
+        expect(c.getSubscribedResources()).toEqual([]);
+        expect(c.isSubscribedToResource("file:///nope")).toBe(false);
+        // No server capabilities loaded yet -> subscriptions unsupported
+        expect(c.supportsResourceSubscriptions()).toBe(false);
+        // No instructions loaded before connect
+        expect(c.getInstructions()).toBeUndefined();
+        // Roots default to [] when undefined
+        expect(c.getRoots()).toEqual([]);
+      });
+
+      it("subscribe / unsubscribe error when server doesn't advertise subscribe capability", async () => {
+        // Stdio test server doesn't advertise resources.subscribe by default
+        server = createTestServerHttp({
+          serverInfo: createTestServerInfo(),
+          resources: createNumberedResources(2),
+        });
+        await server.start();
+        client = new InspectorClient(
+          { type: "streamable-http", url: server.url },
+          { environment: { transport: createTransportNode } },
+        );
+        await client.connect();
+
+        await expect(
+          client.subscribeToResource("test://resource_1"),
+        ).rejects.toThrow(/does not support resource subscriptions/);
+        // unsubscribe path doesn't guard on capability; it calls the SDK which
+        // will reject because the server has no unsubscribe handler.
+        await expect(
+          client.unsubscribeFromResource("test://resource_1"),
+        ).rejects.toThrow(
+          /Failed to unsubscribe to resource|Failed to unsubscribe from resource|Method not found/,
+        );
+      });
+    });
+
+    describe("subscribe / unsubscribe happy path", () => {
+      it("subscribes, reports state, then unsubscribes, when server advertises subscribe", async () => {
+        server = createTestServerHttp({
+          serverInfo: createTestServerInfo(),
+          resources: createNumberedResources(2),
+          subscriptions: true,
+        });
+        await server.start();
+        client = new InspectorClient(
+          { type: "streamable-http", url: server.url },
+          { environment: { transport: createTransportNode } },
+        );
+        await client.connect();
+
+        expect(client.supportsResourceSubscriptions()).toBe(true);
+
+        await client.subscribeToResource("test://resource_1");
+        expect(client.getSubscribedResources()).toContain("test://resource_1");
+        expect(client.isSubscribedToResource("test://resource_1")).toBe(true);
+
+        await client.unsubscribeFromResource("test://resource_1");
+        expect(client.getSubscribedResources()).not.toContain(
+          "test://resource_1",
+        );
+        expect(client.isSubscribedToResource("test://resource_1")).toBe(false);
+      });
+    });
+
+    describe("getPrompt + readResourceFromTemplate", () => {
+      beforeEach(async () => {
+        server = createTestServerHttp({
+          serverInfo: createTestServerInfo(),
+          resourceTemplates: [createFileResourceTemplate()],
+          prompts: [createArgsPrompt()],
+        });
+        await server.start();
+        client = new InspectorClient(
+          { type: "streamable-http", url: server.url },
+          { environment: { transport: createTransportNode } },
+        );
+        await client.connect();
+      });
+
+      it("getPrompt fetches and returns an invocation, dispatching no extra error", async () => {
+        const invocation = await client!.getPrompt("args_prompt", {
+          city: "Hartford",
+          state: "Connecticut",
+        });
+        expect(invocation.name).toBe("args_prompt");
+        expect(invocation.params).toEqual({
+          city: "Hartford",
+          state: "Connecticut",
+        });
+        expect(invocation.result).toBeDefined();
+        expect(invocation.timestamp).toBeInstanceOf(Date);
+      });
+
+      it("readResourceFromTemplate expands and reads the resource", async () => {
+        const invocation = await client!.readResourceFromTemplate(
+          "file:///{path}",
+          { path: "report.txt" },
+        );
+        expect(invocation.uriTemplate).toBe("file:///{path}");
+        expect(invocation.expandedUri).toBe("file:///report.txt");
+        expect(invocation.params).toEqual({ path: "report.txt" });
+        expect(invocation.result).toBeDefined();
+      });
+
+      it("readResourceFromTemplate throws when expansion fails", async () => {
+        // Pass a syntactically invalid template; UriTemplate ctor throws
+        await expect(
+          client!.readResourceFromTemplate("file:///{unclosed", {
+            unclosed: "x",
+          }),
+        ).rejects.toThrow(/Failed to expand URI template/);
+      });
+    });
+
+    describe("capability detection after connect", () => {
+      it("round-trips listChanged + subscribe flags via getCapabilities()", async () => {
+        // The handler-registration arrows in InspectorClient fire during
+        // connect only when the matching server capability is advertised.
+        // Exercise all four conditional branches in one connect by enabling
+        // tools/resources/prompts listChanged + resource subscriptions.
+        // The resources/prompts arrays are required for the test server to
+        // actually emit those capability blocks (an empty list omits the
+        // capability rather than advertising an empty one).
+        server = createTestServerHttp({
+          serverInfo: createTestServerInfo(),
+          tools: [createEchoTool()],
+          resources: createNumberedResources(1),
+          prompts: [createArgsPrompt()],
+          listChanged: { tools: true, resources: true, prompts: true },
+          subscriptions: true,
+        });
+        await server.start();
+        client = new InspectorClient(
+          { type: "streamable-http", url: server.url },
+          { environment: { transport: createTransportNode } },
+        );
+        await client.connect();
+
+        const caps = client.getCapabilities();
+        expect(caps?.tools?.listChanged).toBe(true);
+        expect(caps?.resources?.listChanged).toBe(true);
+        expect(caps?.prompts?.listChanged).toBe(true);
+        expect(caps?.resources?.subscribe).toBe(true);
+      });
+    });
+
+    describe("setLoggingLevel guards", () => {
+      it("throws when the server does not advertise logging support", async () => {
+        server = createTestServerHttp({
+          serverInfo: createTestServerInfo(),
+          tools: [createEchoTool()],
+        });
+        await server.start();
+        client = new InspectorClient(
+          { type: "streamable-http", url: server.url },
+          { environment: { transport: createTransportNode } },
+        );
+        await client.connect();
+        await expect(client.setLoggingLevel("info")).rejects.toThrow(
+          /Server does not support logging/,
+        );
+      });
+    });
+
+    describe("getAppRendererClient", () => {
+      it("returns null before connect, and a cached proxy after connect", async () => {
+        server = createTestServerHttp({
+          serverInfo: createTestServerInfo(),
+          tools: [createEchoTool()],
+        });
+        await server.start();
+        const c = new InspectorClient(
+          { type: "streamable-http", url: server.url },
+          { environment: { transport: createTransportNode } },
+        );
+        // Disconnected => null
+        expect(c.getAppRendererClient()).toBeNull();
+
+        client = c;
+        await c.connect();
+
+        const proxy1 = c.getAppRendererClient();
+        expect(proxy1).not.toBeNull();
+        // Second call returns the cached proxy
+        expect(c.getAppRendererClient()).toBe(proxy1);
+        expect(
+          typeof (proxy1 as unknown as { setNotificationHandler?: unknown })
+            .setNotificationHandler,
+        ).toBe("function");
+      });
+
+      it("translates the ext-apps v1 schema-first setNotificationHandler call to v2's method-string form", async () => {
+        // Regression: `@modelcontextprotocol/ext-apps` (SDK v1 peer) subscribes
+        // with `setNotificationHandler(NotificationSchema, handler)`. On SDK v2
+        // that throws "'[object Object]' is not a spec notification method",
+        // breaking App rendering at connect. The proxy must translate the
+        // schema (whose `.shape.method.value` is the method literal) to the
+        // method string so the handler still fires on the real notification.
+        server = createTestServerHttp({
+          serverInfo: createTestServerInfo(),
+          tools: [createAddToolTool()],
+          listChanged: { tools: true },
+        });
+        await server.start();
+        const c = new InspectorClient(
+          { type: "streamable-http", url: server.url },
+          { environment: { transport: createTransportNode } },
+        );
+        client = c;
+        await c.connect();
+
+        const proxy = c.getAppRendererClient() as unknown as {
+          setNotificationHandler: (
+            schema: unknown,
+            handler: () => void,
+          ) => void;
+        };
+        // A v1-style Zod notification schema, as ext-apps passes it (NOT a
+        // string): its `.shape.method.value` carries the method literal.
+        const v1StyleSchema = {
+          shape: { method: { value: "notifications/tools/list_changed" } },
+        };
+        let handlerFired = false;
+        expect(() =>
+          proxy.setNotificationHandler(v1StyleSchema, () => {
+            handlerFired = true;
+          }),
+        ).not.toThrow();
+
+        // The registration must land under the extracted method string: trigger
+        // a real tools/list_changed and confirm the schema-first handler runs.
+        const addToolTool = await getTool(c, "add_tool");
+        await c.callTool(addToolTool, {
+          name: "added_via_schema_first",
+          description: "added at runtime",
+        });
+        await vi.waitFor(() => expect(handlerFired).toBe(true), {
+          timeout: 5000,
+        });
+
+        // A native string-first call (ours) passes through unchanged.
+        expect(() =>
+          proxy.setNotificationHandler(
+            "notifications/prompts/list_changed",
+            () => {},
+          ),
+        ).not.toThrow();
+
+        // An unrecognized first arg (no `.shape.method.value`) can't be
+        // translated and falls through to the SDK, which rejects it clearly —
+        // we don't silently swallow a genuinely-malformed registration.
+        expect(() =>
+          proxy.setNotificationHandler({} as unknown, () => {}),
+        ).toThrow(/not a spec notification method/);
+      });
+    });
+
+    describe("list_changed + resourceUpdated notifications", () => {
+      it("dispatches toolsListChanged when the server emits notifications/tools/list_changed", async () => {
+        server = createTestServerHttp({
+          serverInfo: createTestServerInfo(),
+          tools: [createAddToolTool()],
+          listChanged: { tools: true },
+        });
+        await server.start();
+        client = new InspectorClient(
+          { type: "streamable-http", url: server.url },
+          { environment: { transport: createTransportNode } },
+        );
+        await client.connect();
+
+        const fired = waitForEvent(client, "toolsListChanged", {
+          timeout: 5000,
+        });
+        const addToolTool = await getTool(client, "add_tool");
+        await client.callTool(addToolTool, {
+          name: "newly_added",
+          description: "added at runtime",
+        });
+        await fired;
+      });
+
+      it("dispatches resourcesListChanged when the server emits resources/list_changed", async () => {
+        server = createTestServerHttp({
+          serverInfo: createTestServerInfo(),
+          tools: [createAddResourceTool()],
+          resources: createNumberedResources(1),
+          listChanged: { resources: true },
+        });
+        await server.start();
+        client = new InspectorClient(
+          { type: "streamable-http", url: server.url },
+          { environment: { transport: createTransportNode } },
+        );
+        await client.connect();
+
+        const fired = waitForEvent(client, "resourcesListChanged", {
+          timeout: 5000,
+        });
+        const addResourceTool = await getTool(client, "add_resource");
+        await client.callTool(addResourceTool, {
+          uri: "res://new",
+          name: "new",
+          text: "hi",
+        });
+        await fired;
+      });
+
+      it("dispatches promptsListChanged when the server emits prompts/list_changed", async () => {
+        server = createTestServerHttp({
+          serverInfo: createTestServerInfo(),
+          tools: [createAddPromptTool()],
+          prompts: [createArgsPrompt()],
+          listChanged: { prompts: true },
+        });
+        await server.start();
+        client = new InspectorClient(
+          { type: "streamable-http", url: server.url },
+          { environment: { transport: createTransportNode } },
+        );
+        await client.connect();
+
+        const fired = waitForEvent(client, "promptsListChanged", {
+          timeout: 5000,
+        });
+        const addPromptTool = await getTool(client, "add_prompt");
+        await client.callTool(addPromptTool, {
+          name: "new_prompt",
+          description: "added at runtime",
+          promptString: "hello",
+        });
+        await fired;
+      });
+    });
+
+    describe("misc tiny branches", () => {
+      it("connect() is a no-op when status is already 'connected'", async () => {
+        server = createTestServerHttp({
+          serverInfo: createTestServerInfo(),
+          tools: [createEchoTool()],
+        });
+        await server.start();
+        client = new InspectorClient(
+          { type: "streamable-http", url: server.url },
+          { environment: { transport: createTransportNode } },
+        );
+        await client.connect();
+        expect(client.getStatus()).toBe("connected");
+        // Second connect() should hit the early-return branch
+        await client.connect();
+        expect(client.getStatus()).toBe("connected");
+      });
+
+      it("connect() throws 'Client not initialized' when this.client is null", async () => {
+        const c = new InspectorClient(
+          {
+            type: "stdio",
+            command: serverCommand.command,
+            args: serverCommand.args,
+          },
+          { environment: { transport: createTransportNode } },
+        );
+        (c as unknown as { client: unknown }).client = null;
+        await expect(c.connect()).rejects.toThrow(/Client not initialized/);
+      });
+
+      it("getTaskCapabilities() returns undefined when the server has no tasks capability", async () => {
+        server = createTestServerHttp({
+          serverInfo: createTestServerInfo(),
+          tools: [createEchoTool()],
+        });
+        await server.start();
+        client = new InspectorClient(
+          { type: "streamable-http", url: server.url },
+          { environment: { transport: createTransportNode } },
+        );
+        await client.connect();
+        expect(client.getTaskCapabilities()).toBeUndefined();
+      });
+
+      it("elicit form mode adds form to elicitation capability (constructor branch)", () => {
+        const c = new InspectorClient(
+          {
+            type: "stdio",
+            command: serverCommand.command,
+            args: serverCommand.args,
+          },
+          {
+            environment: { transport: createTransportNode },
+            // Hits the `this.elicit.form` branch in the constructor's
+            // elicitationCap.form assignment block
+            elicit: { form: true },
+          },
+        );
+        expect(c.getStatus()).toBe("disconnected");
+      });
+
+      it("receiver-task internals: TTL cleanup and cancel terminate via private surface", async () => {
+        // Drive the private createReceiverTask + cancelReceiverTask + TTL-cleanup
+        // paths by reaching into the instance. These are server-driven in
+        // practice (tasks/cancel from server), but the existing receiver-task
+        // e2e tests don't exercise the cancel path; this is the focused unit
+        // pass the issue suggested.
+        const c = new InspectorClient(
+          {
+            type: "stdio",
+            command: serverCommand.command,
+            args: serverCommand.args,
+          },
+          { environment: { transport: createTransportNode } },
+        );
+        const internal = c as unknown as {
+          createReceiverTask: (opts: {
+            ttl?: number;
+            initialStatus: "input_required" | "working";
+            statusMessage?: string;
+          }) => {
+            task: { taskId: string; status: string };
+            payloadPromise: Promise<unknown>;
+          };
+          cancelReceiverTask: (taskId: string) => {
+            taskId: string;
+            status: string;
+          };
+          listReceiverTasks: () => Array<{ taskId: string; status: string }>;
+          getReceiverTask: (taskId: string) => unknown;
+          getReceiverTaskPayload: (taskId: string) => Promise<unknown>;
+          receiverTaskRecords: Map<string, unknown>;
+        };
+
+        // Short TTL so the cleanup setTimeout fires in-test
+        const record = internal.createReceiverTask({
+          ttl: 50,
+          initialStatus: "working",
+          statusMessage: "running",
+        });
+        // Capture the rejection's message for the assertion below. (Not for
+        // unhandled-rejection suppression — `createReceiverTask` marks the
+        // promise handled at the source.)
+        const payloadResult = record.payloadPromise.catch(
+          (e) => (e as Error).message,
+        );
+        expect(record.task.taskId).toBeDefined();
+        // listReceiverTasks contains the new task
+        const list = internal.listReceiverTasks();
+        expect(list.some((t) => t.taskId === record.task.taskId)).toBe(true);
+        expect(internal.getReceiverTask(record.task.taskId)).toBeDefined();
+
+        // getReceiverTaskPayload on an unknown id throws InvalidParams
+        await expect(
+          internal.getReceiverTaskPayload("does-not-exist"),
+        ).rejects.toThrow(/Unknown taskId/);
+
+        // Cancel before TTL fires
+        const cancelled = internal.cancelReceiverTask(record.task.taskId);
+        expect(cancelled.status).toBe("cancelled");
+        await expect(payloadResult).resolves.toBe("Task cancelled");
+        // Cancel again — record is in terminal state, returns existing task
+        const reCancel = internal.cancelReceiverTask(record.task.taskId);
+        expect(reCancel.status).toBe("cancelled");
+
+        // cancelReceiverTask on an unknown id throws InvalidParams
+        expect(() => internal.cancelReceiverTask("nope")).toThrow(
+          /Unknown taskId/,
+        );
+
+        // Drive the TTL-cleanup path: create a record with very short ttl and
+        // let setTimeout fire — receiverTaskRecords drops the entry.
+        const ttlRecord = internal.createReceiverTask({
+          ttl: 20,
+          initialStatus: "working",
+          statusMessage: "running",
+        });
+        await new Promise<void>((r) => setTimeout(r, 80));
+        expect(internal.receiverTaskRecords.has(ttlRecord.task.taskId)).toBe(
+          false,
+        );
+      });
+    });
+
+    describe("defensive guards when client is uninitialized", () => {
+      // These guards exist as TypeScript narrows for the `Client | null` field
+      // even though the constructor always assigns it. Force the field to null
+      // via a private-field cast so we can exercise the throw branches once,
+      // rather than sprinkling `if` guards through tests for each method.
+      //
+      // NOTE: keep this list in sync with the `if (!this.client) throw …`
+      // sites in core/mcp/inspectorClient.ts. If a guard is removed during a
+      // future refactor (e.g. when the field becomes `Client` instead of
+      // `Client | null`) this test will silently under-cover rather than
+      // fail — the matching call below should be removed at the same time.
+      function nullify(c: InspectorClient): void {
+        (c as unknown as { client: unknown }).client = null;
+      }
+
+      it("public methods that require a client throw or short-circuit when client is null", async () => {
+        const c = new InspectorClient(
+          {
+            type: "stdio",
+            command: serverCommand.command,
+            args: serverCommand.args,
+          },
+          { environment: { transport: createTransportNode } },
+        );
+        nullify(c);
+
+        const expectThrow = async (
+          fn: () => Promise<unknown>,
+          msg = "Client is not connected",
+        ) => {
+          await expect(fn()).rejects.toThrow(msg);
+        };
+
+        // listing / pagination
+        await expectThrow(() => c.listTools());
+        await expectThrow(() => c.listResources());
+        await expectThrow(() => c.listResourceTemplates());
+        await expectThrow(() => c.listPrompts());
+
+        // aggregate (all-page, cache-aware) listing (#1721)
+        await expectThrow(() => c.listAllTools());
+        await expectThrow(() => c.listAllResources());
+        await expectThrow(() => c.listAllResourceTemplates());
+        await expectThrow(() => c.listAllPrompts());
+
+        // single-item fetch
+        await expectThrow(() =>
+          c.callTool({ name: "x" } as unknown as Tool, {}),
+        );
+        await expectThrow(() => c.readResource("res://x"));
+        await expectThrow(() =>
+          c.readResourceFromTemplate("file:///{p}", { p: "x" }),
+        );
+        await expectThrow(() => c.getPrompt("x"));
+
+        // logging guard fires the "not connected" branch first
+        await expectThrow(() => c.setLoggingLevel("info"));
+
+        // roots + subscriptions
+        await expectThrow(() => c.setRoots([]));
+        await expectThrow(() => c.subscribeToResource("res://x"));
+        await expectThrow(() => c.unsubscribeFromResource("res://x"));
+
+        // requestor task ops
+        await expectThrow(() => c.getRequestorTask("t"));
+        await expectThrow(() => c.getRequestorTaskResult("t"));
+        await expectThrow(() => c.cancelRequestorTask("t"));
+        await expectThrow(() => c.listRequestorTasks());
+
+        // ping
+        await expectThrow(() => c.ping(), "Client not initialized");
+
+        // callToolStream: throws synchronously? Actually returns Promise from
+        // the iterator's first .next() — call and assert rejection.
+        await expectThrow(() =>
+          c.callToolStream({ name: "x" } as unknown as Tool, {}),
+        );
+
+        // getCompletions short-circuits to { values: [] } rather than throwing
+        await expect(
+          c.getCompletions({ type: "ref/prompt", name: "x" }, "arg", "val"),
+        ).resolves.toEqual({ values: [] });
+      });
+    });
+
+    describe("OAuth + stdio transport", () => {
+      it("authenticate() throws because stdio transports have no server URL", async () => {
+        const c = new InspectorClient(
+          {
+            type: "stdio",
+            command: serverCommand.command,
+            args: serverCommand.args,
+          },
+          {
+            environment: {
+              transport: createTransportNode,
+              oauth: {
+                // Minimal stubs — providers won't ever be reached because
+                // getServerUrl throws first.
+                storage: {} as never,
+                navigation: {} as never,
+                redirectUrlProvider: {} as never,
+              },
+            },
+          },
+        );
+        // ensureOAuthManager hits the manager (since oauth env was supplied)
+        // and the manager calls getServerUrl() which throws for stdio.
+        await expect(c.authenticate()).rejects.toThrow(
+          /OAuth is only supported for HTTP-based transports/,
+        );
+      });
+    });
+  });
+});

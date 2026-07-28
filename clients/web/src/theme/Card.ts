@@ -1,0 +1,98 @@
+import { Card } from "@mantine/core";
+
+export const ThemeCard = Card.extend({
+  defaultProps: {
+    padding: "lg",
+    radius: "md",
+    withBorder: true,
+  },
+  classNames: (_theme, props) => {
+    if (props.variant === "responsive") return { root: "card-responsive" };
+    return {};
+  },
+  styles: (_theme, props) => {
+    if (props.variant === "disabled") {
+      return {
+        root: {
+          backgroundColor: "var(--inspector-surface-card)",
+          opacity: 0.4,
+          pointerEvents: "none",
+        },
+      };
+    }
+    if (props.variant === "sidebar") {
+      // Sidebar container that grows with its content but never taller than the
+      // screen's available area (`max-height: 100%` of the full-height column
+      // wrapper) — like the Tools panel. Lays its content out as a column and
+      // hides overflow so that, once capped, the flex accordion below the fixed
+      // title/search takes over per-section scrolling rather than the card
+      // bleeding past the viewport (#1462).
+      return {
+        root: {
+          backgroundColor: "var(--inspector-surface-card)",
+          maxHeight: "100%",
+          display: "flex",
+          flexDirection: "column",
+          overflow: "hidden",
+        },
+      };
+    }
+    if (props.variant === "highlighted") {
+      // Freshly-added / called-out server card: a prominent green border draws
+      // the eye until the highlight is dismissed (#1535). Only the color/width
+      // are set here — the border itself comes from the inherited
+      // `withBorder: true` default above, so keep that default if changing it.
+      return {
+        root: {
+          backgroundColor: "var(--inspector-surface-card)",
+          borderColor: "var(--inspector-highlight-border)",
+          borderWidth: 2,
+        },
+      };
+    }
+    if (props.variant === "errored") {
+      // Server card whose last connection attempt failed: a red border flags it
+      // until another server is connected/attempted (#1621). Mirrors the
+      // `highlighted` variant; the border itself comes from the inherited
+      // `withBorder: true` default above.
+      return {
+        root: {
+          backgroundColor: "var(--inspector-surface-card)",
+          borderColor: "var(--inspector-error-border)",
+          borderWidth: 2,
+        },
+      };
+    }
+    if (props.variant === "preview") {
+      // Container for the resource preview / template form panels: sizes to
+      // content (no forced height) but caps at the screen's available area
+      // via consumer-set `mah`. `overflow: hidden` lets a flex-shrunk inner
+      // ScrollArea take over scrolling when content exceeds the cap, instead
+      // of the whole card bleeding past the viewport.
+      return {
+        root: {
+          backgroundColor: "var(--inspector-surface-card)",
+          overflow: "hidden",
+        },
+      };
+    }
+    if (props.variant === "inset") {
+      // Monitor-list entry (Protocol / Network message cards): a recessed
+      // surface so each card reads as sunk into its panel — light-grey against
+      // the white surround in light mode, the standard card tone in dark. Uses
+      // `--inspector-surface-inset` (see App.css). Also raises any content-view
+      // Code blocks inside it to a white (light-mode) surface via the cascade
+      // variable the Code theme reads, so they read as raised on the grey card
+      // rather than blending into it.
+      return {
+        root: {
+          backgroundColor: "var(--inspector-surface-inset)",
+          "--inspector-code-surface": "var(--inspector-surface-code-oncard)",
+        } as Record<string, string>,
+      };
+    }
+    return {
+      root: { backgroundColor: "var(--inspector-surface-card)" },
+    };
+  },
+});

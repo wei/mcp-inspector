@@ -1,0 +1,44 @@
+{
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.test.tsbuildinfo",
+    "types": ["vite/client", "@testing-library/jest-dom", "node", "express"],
+    "paths": {
+      "@inspector/core/*": ["../../core/*"],
+      "@modelcontextprotocol/inspector-test-server": ["../../test-servers/src/index.ts"],
+      "react": ["./node_modules/@types/react"],
+      "react-dom": ["./node_modules/@types/react-dom"],
+      "react/jsx-runtime": ["./node_modules/@types/react/jsx-runtime"],
+      "vitest": ["./node_modules/vitest"],
+      "pino": ["./node_modules/pino"],
+      "hono": ["./node_modules/hono"],
+      "hono/streaming": [
+        "./node_modules/hono/dist/types/helper/streaming/index"
+      ],
+      "@hono/node-server": ["./node_modules/@hono/node-server"],
+      "atomically": ["./node_modules/atomically"],
+      "chokidar": ["./node_modules/chokidar"],
+      "express": ["./node_modules/@types/express"],
+      "yaml": ["./node_modules/yaml"],
+      "@napi-rs/keyring": ["./node_modules/@napi-rs/keyring"],
+      "react-syntax-highlighter/dist/esm/prism-light": [
+        "./src/types/react-syntax-highlighter-prism-light"
+      ],
+      "react-syntax-highlighter/dist/esm/styles/prism/tomorrow": [
+        "./src/types/react-syntax-highlighter-style"
+      ],
+      "react-syntax-highlighter/dist/esm/languages/prism/*": [
+        "./src/types/react-syntax-highlighter-grammar"
+      ]
+    }
+  },
+  "include": [
+    "src/**/*.test.ts",
+    "src/**/*.test.tsx",
+    "src/test/**/*.ts",
+    "src/test/**/*.tsx",
+    "../../core/**/__tests__/**/*.ts",
+    "../../core/**/__tests__/**/*.tsx"
+  ],
+  "exclude": []
+}

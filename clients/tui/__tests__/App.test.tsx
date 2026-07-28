@@ -1,0 +1,1504 @@
+import React from "react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { render } from "ink-testing-library";
+
+type RenderResult = ReturnType<typeof render>;
+
+vi.mock("ink-scroll-view", () => import("./helpers/inkScrollViewMock.js"));
+vi.mock("ink-form", () => import("./helpers/inkFormMock.js"));
+
+// ---------------------------------------------------------------------------
+// Controllable mock of the entire @inspector/core surface App.tsx depends on.
+// `ctrl` is mutated by individual tests (reset in beforeEach) to drive what the
+// hooks return and what the InspectorClient methods do.
+// ---------------------------------------------------------------------------
+const h = vi.hoisted(() => {
+  interface Ctrl {
+    status: string;
+    capabilities: Record<string, unknown> | null;
+    serverInfo: { name?: string; version?: string } | null;
+    instructions: string | null;
+    serverType: "stdio" | "sse" | "streamable-http";
+    oauthFlowState: unknown;
+    tools: unknown[];
+    resources: unknown[];
+    resourceTemplates: unknown[];
+    prompts: unknown[];
+    messages: unknown[];
+    fetchRequests: unknown[];
+    stderrLogs: unknown[];
+  }
+  const ctrl: Ctrl = {
+    status: "disconnected",
+    capabilities: null,
+    serverInfo: null,
+    instructions: null,
+    serverType: "stdio",
+    oauthFlowState: null,
+    tools: [],
+    resources: [],
+    resourceTemplates: [],
+    prompts: [],
+    messages: [],
+    fetchRequests: [],
+    stderrLogs: [],
+  };
+  const connect = vi.fn().mockResolvedValue(undefined);
+  const disconnect = vi.fn().mockResolvedValue(undefined);
+  const openUrl = vi.fn().mockResolvedValue(undefined);
+  // Shared OAuth-related spies so a test can configure resolve/reject and
+  // assert calls regardless of which per-server FakeClient instance App built.
+  // Each spy is typed against the real InspectorClient method signature so its
+  // implementation and `mockResolvedValue` / return payloads stay in sync with
+  // the client (this is what keeps a stale `{ kind: "satisfied" }` literal from
+  // narrowing `handleAuthChallenge`'s return). Note vitest does NOT type-check
+  // `toHaveBeenCalledWith(...)` arguments against the mock's signature, so those
+  // assertions stay runtime-only. The FakeClient wrappers below forward the same
+  // `Parameters<…>` tuple, which spreads cleanly (a tuple, not `unknown[]`).
+  const clientSpies = {
+    authenticate: vi.fn<InspectorClient["authenticate"]>(
+      async () => new URL("https://auth.example/start"),
+    ),
+    clearOAuthTokens: vi.fn<InspectorClient["clearOAuthTokens"]>(
+      async () => {},
+    ),
+    completeOAuthFlow: vi.fn<InspectorClient["completeOAuthFlow"]>(
+      async () => {},
+    ),
+    getOAuthState: vi.fn<InspectorClient["getOAuthState"]>(
+      async () => undefined,
+    ),
+    callTool: vi.fn<InspectorClient["callTool"]>(),
+    checkAuthChallengeSatisfied: vi.fn<
+      InspectorClient["checkAuthChallengeSatisfied"]
+    >(async () => false),
+    handleAuthChallenge: vi.fn<InspectorClient["handleAuthChallenge"]>(
+      async () => ({ kind: "satisfied" }),
+    ),
+  };
+  // Captured options from the most recent callbackServer.start(), so a test can
+  // drive the onCallback / onError handlers the OAuth flows register.
+  interface CallbackOpts {
+    onCallback: (p: { code: string; iss?: string }) => Promise<void> | void;
+    onError: (p: { error?: string; error_description?: string }) => void;
+  }
+  const cb: { opts: CallbackOpts | null } = { opts: null };
+  const callbackStart = vi.fn(async (opts: CallbackOpts) => {
+    cb.opts = opts;
+    return { redirectUrl: "http://localhost/cb" };
+  });
+  const callbackStop = vi.fn().mockResolvedValue(undefined);
+  const createOAuthCallbackServer = vi.fn(() => ({
+    start: callbackStart,
+    stop: callbackStop,
+  }));
+  // Registry of the auth-lifecycle listeners App registers per client, so a test
+  // can fire authChallengeAmbient / authChallengeRecovered / authChallengeInteractive
+  // / oauthError against whichever FakeClient instance App built.
+  // Each entry records which FakeClient registered the handler so a test can
+  // fire an event for a single client (`fireClientEventFor`) — needed to truly
+  // assert the per-server `selectedServerRef.current !== serverName` guards,
+  // not merely execute them. `fireClientEvent` still fires every client's
+  // handler for the event (the common single-server case).
+  type EventEntry = { client: unknown; fn: (event: unknown) => void };
+  const clientEvents = new Map<string, Set<EventEntry>>();
+  const clientInstances: Array<{ cfg?: { type?: string; url?: string } }> = [];
+  const fireClientEvent = (event: string, detail?: unknown) => {
+    clientEvents.get(event)?.forEach((e) => e.fn({ detail }));
+  };
+  const fireClientEventFor = (
+    client: unknown,
+    event: string,
+    detail?: unknown,
+  ) => {
+    clientEvents.get(event)?.forEach((e) => {
+      if (e.client === client) e.fn({ detail });
+    });
+  };
+  // Optional per-test override for runRunnerInteractiveOAuth. Left null, the real
+  // runner runs (existing tests drive it via the captured callback opts); set it
+  // to return a specific { kind } to deterministically exercise the result
+  // branches without steering the real callback flow.
+  const runner: {
+    override: null | ((opts: unknown) => Promise<unknown>);
+  } = { override: null };
+  class FakeManager {
+    destroy = vi.fn();
+  }
+  class FakeClient {
+    cfg: { type?: string; url?: string } | undefined;
+    constructor(config?: { type?: string; url?: string }) {
+      this.cfg = config;
+      clientInstances.push(this);
+    }
+    // Derive the transport type from the server config the client was built
+    // with (config.type aligns with the serverType union) so per-server gating
+    // (logging/requests tabs) works in mixed catalogs; fall back to ctrl.
+    getServerType = vi.fn(
+      () =>
+        (this.cfg?.type ?? ctrl.serverType) as
+          | "stdio"
+          | "sse"
+          | "streamable-http",
+    );
+    authenticate = (...a: Parameters<InspectorClient["authenticate"]>) =>
+      clientSpies.authenticate(...a);
+    clearOAuthTokens = (
+      ...a: Parameters<InspectorClient["clearOAuthTokens"]>
+    ) => clientSpies.clearOAuthTokens(...a);
+    completeOAuthFlow = (
+      ...a: Parameters<InspectorClient["completeOAuthFlow"]>
+    ) => clientSpies.completeOAuthFlow(...a);
+    getOAuthState = (...a: Parameters<InspectorClient["getOAuthState"]>) =>
+      clientSpies.getOAuthState(...a);
+    callTool = (...a: Parameters<InspectorClient["callTool"]>) =>
+      clientSpies.callTool(...a);
+    checkAuthChallengeSatisfied = (
+      ...a: Parameters<InspectorClient["checkAuthChallengeSatisfied"]>
+    ) => clientSpies.checkAuthChallengeSatisfied(...a);
+    handleAuthChallenge = (
+      ...a: Parameters<InspectorClient["handleAuthChallenge"]>
+    ) => clientSpies.handleAuthChallenge(...a);
+    readResource = vi.fn(async () => ({
+      result: { contents: [{ uri: "file://x", text: "hello" }] },
+    }));
+    addEventListener = vi.fn((event: string, fn: (event: unknown) => void) => {
+      if (!clientEvents.has(event)) clientEvents.set(event, new Set());
+      clientEvents.get(event)!.add({ client: this, fn });
+    });
+    removeEventListener = vi.fn(
+      (event: string, fn: (event: unknown) => void) => {
+        const set = clientEvents.get(event);
+        if (!set) return;
+        for (const entry of set) {
+          if (entry.fn === fn) {
+            set.delete(entry);
+            break;
+          }
+        }
+      },
+    );
+    // Reject so the unmount cleanup's `.catch(() => {})` arrow is exercised.
+    disconnect = vi.fn().mockRejectedValue(new Error("cleanup disconnect"));
+  }
+  return {
+    ctrl,
+    connect,
+    disconnect,
+    openUrl,
+    clientSpies,
+    cb,
+    createOAuthCallbackServer,
+    callbackStart,
+    callbackStop,
+    clientEvents,
+    clientInstances,
+    fireClientEvent,
+    fireClientEventFor,
+    runner,
+    FakeManager,
+    FakeClient,
+    useInspectorClient: vi.fn(() => ({
+      status: ctrl.status,
+      capabilities: ctrl.capabilities,
+      serverInfo: ctrl.serverInfo,
+      instructions: ctrl.instructions,
+      connect,
+      disconnect,
+    })),
+    useManagedTools: vi.fn(() => ({ tools: ctrl.tools })),
+    useManagedResources: vi.fn(() => ({ resources: ctrl.resources })),
+    useManagedResourceTemplates: vi.fn(() => ({
+      resourceTemplates: ctrl.resourceTemplates,
+    })),
+    useManagedPrompts: vi.fn(() => ({ prompts: ctrl.prompts })),
+    useMessageLog: vi.fn(() => ({ messages: ctrl.messages })),
+    useFetchRequestLog: vi.fn(() => ({ fetchRequests: ctrl.fetchRequests })),
+    useStderrLog: vi.fn(() => ({ stderrLogs: ctrl.stderrLogs })),
+  };
+});
+
+vi.mock("@inspector/core/mcp/index.js", () => ({
+  InspectorClient: h.FakeClient,
+}));
+vi.mock("@inspector/core/mcp/state/index.js", () => ({
+  ManagedToolsState: h.FakeManager,
+  ManagedResourcesState: h.FakeManager,
+  ManagedResourceTemplatesState: h.FakeManager,
+  ManagedPromptsState: h.FakeManager,
+  MessageLogState: h.FakeManager,
+  FetchRequestLogState: h.FakeManager,
+  StderrLogState: h.FakeManager,
+}));
+vi.mock("@inspector/core/mcp/node/index.js", () => ({
+  createTransportNode: vi.fn(),
+}));
+vi.mock("@inspector/core/react/useInspectorClient.js", () => ({
+  useInspectorClient: h.useInspectorClient,
+}));
+vi.mock("@inspector/core/react/useManagedTools.js", () => ({
+  useManagedTools: h.useManagedTools,
+}));
+vi.mock("@inspector/core/react/useManagedResources.js", () => ({
+  useManagedResources: h.useManagedResources,
+}));
+vi.mock("@inspector/core/react/useManagedResourceTemplates.js", () => ({
+  useManagedResourceTemplates: h.useManagedResourceTemplates,
+}));
+vi.mock("@inspector/core/react/useManagedPrompts.js", () => ({
+  useManagedPrompts: h.useManagedPrompts,
+}));
+vi.mock("@inspector/core/react/useMessageLog.js", () => ({
+  useMessageLog: h.useMessageLog,
+}));
+vi.mock("@inspector/core/react/useFetchRequestLog.js", () => ({
+  useFetchRequestLog: h.useFetchRequestLog,
+}));
+vi.mock("@inspector/core/react/useStderrLog.js", () => ({
+  useStderrLog: h.useStderrLog,
+}));
+vi.mock("@inspector/core/auth/index.js", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@inspector/core/auth/index.js")>();
+  return {
+    ...actual,
+    CallbackNavigation: class {},
+    MutableRedirectUrlProvider: class {
+      redirectUrl = "";
+    },
+  };
+});
+vi.mock("@inspector/core/auth/node/index.js", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@inspector/core/auth/node/index.js")>();
+  return {
+    ...actual,
+    createOAuthCallbackServer: h.createOAuthCallbackServer,
+    NodeOAuthStorage: class {},
+    runRunnerInteractiveOAuth: (opts: unknown) =>
+      h.runner.override
+        ? h.runner.override(opts)
+        : actual.runRunnerInteractiveOAuth(
+            opts as Parameters<typeof actual.runRunnerInteractiveOAuth>[0],
+          ),
+  };
+});
+vi.mock("../src/utils/openUrl.js", () => ({
+  openUrl: h.openUrl,
+}));
+
+import App from "../src/App.js";
+import type { InspectorClient } from "@inspector/core/mcp/index.js";
+import type { TuiServer } from "../src/tui-servers.js";
+import {
+  AuthRecoveryRequiredError,
+  EMA_STEP_UP_PENDING_URL,
+} from "@inspector/core/auth/challenge.js";
+import { EmaClientNotConfiguredError } from "@inspector/core/auth/ema/clientConfigError.js";
+
+const tick = () => new Promise((r) => setTimeout(r, 25));
+const callbackUrlConfig = { hostname: "127.0.0.1", port: 0, pathname: "/cb" };
+const emptyClientConfig = {};
+
+function stdioServer(): Record<string, TuiServer> {
+  return {
+    alpha: {
+      config: { type: "stdio", command: "node", args: ["s.js"] },
+    } as never,
+    beta: {
+      config: { type: "stdio", command: "node", args: ["b.js"] },
+    } as never,
+  };
+}
+
+function httpServer(): Record<string, TuiServer> {
+  return {
+    web: { config: { type: "streamable-http", url: "http://x" } } as never,
+  };
+}
+
+// Single-server catalogs auto-select their only server on mount, so action
+// tests can drive accelerators without first navigating the server list.
+function oneStdio(): Record<string, TuiServer> {
+  return {
+    alpha: {
+      config: { type: "stdio", command: "node", args: ["s.js"] },
+    } as never,
+  };
+}
+
+// Single streamable-http server catalog (auto-selected on mount).
+function oneHttp(): Record<string, TuiServer> {
+  return {
+    web: { config: { type: "streamable-http", url: "http://x" } } as never,
+  };
+}
+
+function oneEmaHttp(): Record<string, TuiServer> {
+  return {
+    ema: {
+      config: { type: "streamable-http", url: "http://localhost:8080/mcp" },
+      settings: {
+        requestTimeout: 0,
+        metadata: [],
+        headers: [],
+        env: [],
+        roots: [],
+        maxFetchRequests: 1000,
+        taskTtl: 0,
+        connectionTimeout: 0,
+        oauthClientId: "client_ema_test",
+        oauthScopes: "tools:read",
+        enterpriseManaged: true,
+      },
+    } as never,
+  };
+}
+
+// Two OAuth-capable http servers (first auto-selected). Drives the per-server
+// auth-event guards (events from the non-selected server return early) and the
+// "a step-up is already pending for another server" branch.
+function twoHttp(): Record<string, TuiServer> {
+  return {
+    web: { config: { type: "streamable-http", url: "http://a" } } as never,
+    api: { config: { type: "streamable-http", url: "http://b" } } as never,
+  };
+}
+
+// Mixed catalog: an OAuth-capable http server first (auto-selected) followed by
+// a stdio server � drives per-server tab gating + the tab-switch-away effects.
+function httpThenStdio(): Record<string, TuiServer> {
+  return {
+    web: { config: { type: "streamable-http", url: "http://x" } } as never,
+    cli: {
+      config: { type: "stdio", command: "node", args: ["s.js"] },
+    } as never,
+  };
+}
+
+function stdioThenHttp(): Record<string, TuiServer> {
+  return {
+    cli: {
+      config: { type: "stdio", command: "node", args: ["s.js"] },
+    } as never,
+    web: { config: { type: "streamable-http", url: "http://x" } } as never,
+  };
+}
+
+// An http server carrying saved settings (metadata, oauth creds, timeout) to
+// exercise the per-server option-building branches in the mount effect.
+function httpWithSettings(): Record<string, TuiServer> {
+  return {
+    web: {
+      config: { type: "streamable-http", url: "http://x" },
+      settings: {
+        requestTimeout: 5000,
+        metadata: [
+          { key: "team", value: "alpha" },
+          { key: "  ", value: "ignored" },
+        ],
+        oauthClientId: "cid",
+        oauthClientSecret: "secret",
+        oauthScopes: "read write",
+      },
+    } as never,
+  };
+}
+
+// Realistic minimal fixtures for tab content / details modals.
+const sampleTool = {
+  name: "alpha",
+  description: "Tool desc line1\nline2",
+  inputSchema: { type: "object", properties: { x: { type: "string" } } },
+};
+const sampleResource = {
+  name: "res1",
+  uri: "file://x",
+  description: "rdesc",
+  mimeType: "text/plain",
+};
+const sampleTemplate = {
+  name: "tmpl1",
+  uriTemplate: "file://{id}",
+  description: "tdesc",
+};
+const promptWithArgs = {
+  name: "p1",
+  description: "pdesc",
+  arguments: [{ name: "arg1", description: "a1" }],
+};
+const promptNoName = { name: "", description: "no name prompt" };
+const reqMessage = {
+  id: "m1",
+  direction: "request",
+  message: { jsonrpc: "2.0", id: 1, method: "tools/list" },
+  response: { jsonrpc: "2.0", id: 1, result: {} },
+  timestamp: new Date(0),
+  duration: 5,
+};
+const notifMessage = {
+  id: "m2",
+  direction: "notification",
+  message: { jsonrpc: "2.0", method: "notifications/message" },
+  timestamp: new Date(0),
+};
+const fullRequest = {
+  id: "r1",
+  method: "POST",
+  url: "http://x/mcp",
+  category: "transport",
+  responseStatus: 200,
+  responseStatusText: "OK",
+  duration: 12,
+  timestamp: new Date(0),
+  requestHeaders: { "content-type": "application/json" },
+  requestBody: JSON.stringify({ a: 1 }),
+  responseHeaders: { "x-h": "v" },
+  responseBody: JSON.stringify({ ok: true }),
+};
+const errorRequest = {
+  id: "r2",
+  method: "GET",
+  url: "http://x/auth",
+  category: "auth",
+  error: "boom",
+  timestamp: new Date(0),
+  requestHeaders: { accept: "*/*" },
+  requestBody: "not json{",
+  responseBody: "also not json{",
+};
+const respMessage = {
+  id: "m3",
+  direction: "response",
+  message: { jsonrpc: "2.0", id: 2, result: { ok: true } },
+  timestamp: new Date(0),
+};
+const bareRequest = {
+  id: "r3",
+  method: "GET",
+  url: "http://x/idle",
+  category: "transport",
+  timestamp: new Date(0),
+  requestHeaders: {},
+};
+const stderrLog = { timestamp: new Date(0), message: "log line" };
+
+// Track rendered instances so each is unmounted after its test � concurrent
+// mounted ink apps share raw-mode stdin handling and interfere with useInput.
+const mounted: RenderResult[] = [];
+
+function renderApp(servers: Record<string, TuiServer>) {
+  const r = render(
+    <App
+      mcpServers={servers}
+      clientConfig={emptyClientConfig}
+      callbackUrlConfig={callbackUrlConfig}
+    />,
+  );
+  mounted.push(r);
+  return r;
+}
+
+/**
+ * Render and absorb ink-testing-library's intermittently-dropped first
+ * keypress with a benign no-op key ("x" is not bound while the server list is
+ * focused), so subsequent navigation keys register deterministically.
+ */
+async function mount(servers: Record<string, TuiServer>) {
+  const r = renderApp(servers);
+  await tick();
+  r.stdin.write("x");
+  await tick();
+  return r;
+}
+
+// Arrow / shift-tab only parse as those keys when ESC-prefixed (a bare "[B" is
+// read as the literal characters). Tab and Enter are real control characters.
+const ESC = String.fromCharCode(27);
+const DOWN = `${ESC}[B`;
+const UP = `${ESC}[A`;
+const RIGHT = `${ESC}[C`;
+const LEFT = `${ESC}[D`;
+const STAB = `${ESC}[Z`;
+const TAB = "\t";
+const ENTER = "\r";
+
+/**
+ * Write each key in order. ink re-subscribes the active component's useInput on
+ * re-render, so a key that changes focus/tab must let that re-render flush
+ * before the next key � otherwise the next key is routed to the old handler.
+ * Two ticks per key keeps multi-step navigation deterministic under the heavier
+ * v8 coverage instrumentation (where a single tick can race the render).
+ */
+async function press(r: RenderResult, keys: string[]) {
+  for (const k of keys) {
+    r.stdin.write(k);
+    await tick();
+    await tick();
+  }
+}
+
+/**
+ * Poll until `predicate` is true (or the tries run out). React + ink schedule
+ * renders across several macrotasks, so async state set by a flow can take more
+ * than one fixed tick to land under coverage instrumentation.
+ *
+ * The default budget (POLL_TRIES × 25ms tick) is generous on purpose: a poll
+ * exits the instant the predicate is true, so a high ceiling never slows a
+ * passing assertion — it only widens the margin for the slow path. Flows with
+ * an extra async hop (e.g. the step-up OAuth runner before the success frame)
+ * plus React commits can exceed a tight budget under CI load with v8 coverage,
+ * which is what made the step-up frame assertions intermittently time out.
+ */
+const POLL_TRIES = 100;
+
+async function waitUntil(predicate: () => boolean, tries = POLL_TRIES) {
+  for (let i = 0; i < tries; i++) {
+    if (predicate()) return;
+    await tick();
+  }
+}
+
+/**
+ * Poll the frame until it contains `substr` (or the tries run out). Render
+ * settling races a single fixed tick under v8 coverage instrumentation, so
+ * frame assertions that follow a mount/keypress use this instead of one tick.
+ */
+async function waitForFrame(
+  r: RenderResult,
+  substr: string,
+  tries = POLL_TRIES,
+) {
+  await waitUntil(() => (r.lastFrame() ?? "").includes(substr), tries);
+}
+
+/** Poll until the frame contains `substr`, then assert it � stable under load. */
+async function expectFrame(r: RenderResult, substr: string) {
+  await waitForFrame(r, substr);
+  expect(r.lastFrame() ?? "").toContain(substr);
+}
+
+beforeEach(() => {
+  Object.assign(h.ctrl, {
+    status: "disconnected",
+    capabilities: null,
+    serverInfo: null,
+    instructions: null,
+    serverType: "stdio",
+    oauthFlowState: null,
+    tools: [],
+    resources: [],
+    resourceTemplates: [],
+    prompts: [],
+    messages: [],
+    fetchRequests: [],
+    stderrLogs: [],
+  });
+  h.connect.mockClear();
+  h.connect.mockResolvedValue(undefined);
+  h.disconnect.mockClear();
+  h.disconnect.mockResolvedValue(undefined);
+  h.openUrl.mockClear();
+  h.openUrl.mockResolvedValue(undefined);
+  h.cb.opts = null;
+  h.callbackStart.mockClear();
+  h.callbackStop.mockClear();
+  h.clientEvents.clear();
+  h.clientInstances.length = 0;
+  h.runner.override = null;
+  h.clientSpies.authenticate.mockReset();
+  h.clientSpies.authenticate.mockResolvedValue(
+    new URL("https://auth.example/start"),
+  );
+  h.clientSpies.clearOAuthTokens.mockReset();
+  h.clientSpies.completeOAuthFlow.mockReset();
+  h.clientSpies.completeOAuthFlow.mockResolvedValue(undefined);
+  h.clientSpies.getOAuthState.mockReset();
+  h.clientSpies.getOAuthState.mockResolvedValue(undefined);
+  h.clientSpies.callTool.mockReset();
+  h.clientSpies.checkAuthChallengeSatisfied.mockReset();
+  h.clientSpies.checkAuthChallengeSatisfied.mockResolvedValue(false);
+  h.clientSpies.handleAuthChallenge.mockReset();
+  h.clientSpies.handleAuthChallenge.mockResolvedValue({ kind: "satisfied" });
+});
+
+afterEach(() => {
+  while (mounted.length) mounted.pop()?.unmount();
+});
+
+describe("App (foundation)", () => {
+  it("renders the server list with the MCP Servers header", async () => {
+    const r = renderApp(stdioServer());
+    await expectFrame(r, "MCP Servers");
+    const frame = r.lastFrame() ?? "";
+    expect(frame).toContain("alpha");
+    expect(frame).toContain("beta");
+  });
+
+  it("auto-selects the first server and shows its config", async () => {
+    const r = renderApp(stdioServer());
+    await expectFrame(r, "Server Configuration");
+  });
+
+  it("moves selection down to the next server with the down arrow", async () => {
+    const r = await mount(stdioServer());
+    await press(r, [DOWN]); // alpha -> beta
+    await expectFrame(r, "b.js");
+  });
+
+  it("connects with 'c' when disconnected", async () => {
+    const { stdin } = await mount(oneStdio());
+    stdin.write("c");
+    await tick();
+    expect(h.connect).toHaveBeenCalled();
+  });
+
+  it("disconnects with 'd' when connected", async () => {
+    h.ctrl.status = "connected";
+    const { stdin } = await mount(oneStdio());
+    stdin.write("d");
+    await tick();
+    expect(h.disconnect).toHaveBeenCalled();
+  });
+
+  it("switches tabs via accelerator keys", async () => {
+    const r = await mount(stdioServer());
+    await press(r, ["t"]); // tools tab (server is auto-selected)
+    await expectFrame(r, "Tools");
+  });
+
+  it("cycles focus with tab and shift+tab", async () => {
+    const { stdin } = renderApp(stdioServer());
+    await tick();
+    stdin.write("[B");
+    await tick();
+    stdin.write("\t"); // forward
+    await tick();
+    // shift+tab is delivered as ESC [ Z
+    stdin.write("[Z");
+    await tick();
+    // no assertion on hidden focus state � exercising the branches
+  });
+
+  it("shows the Auth tab via the accelerator for an OAuth-capable server", async () => {
+    h.ctrl.serverType = "streamable-http";
+    const r = await mount(httpServer());
+    await press(r, ["a"]);
+    await expectFrame(r, "OAuth");
+  });
+
+  it("renders connected status with capabilities", async () => {
+    h.ctrl.status = "connected";
+    h.ctrl.capabilities = { tools: {}, resources: {}, prompts: {} };
+    h.ctrl.serverInfo = { name: "srv", version: "1.0.0" };
+    const r = await mount(oneStdio());
+    await expectFrame(r, "connected");
+  });
+});
+
+describe("App (status, layout, modals)", () => {
+  it("renders the connecting status symbol/color", async () => {
+    h.ctrl.status = "connecting";
+    const r = await mount(oneStdio());
+    await expectFrame(r, "connecting");
+  });
+
+  it("renders the error status symbol/color", async () => {
+    h.ctrl.status = "error";
+    const r = await mount(oneStdio());
+    await expectFrame(r, "error");
+  });
+
+  it("shows error status when an http server has a 401 response logged", async () => {
+    h.ctrl.status = "error";
+    h.ctrl.fetchRequests = [{ ...errorRequest, responseStatus: 401 }];
+    const r = await mount(oneHttp());
+    await expectFrame(r, "error");
+    await expectFrame(r, "Network (1)");
+  });
+
+  it("updates dimensions when the terminal resizes", async () => {
+    const r = await mount(oneStdio());
+    process.stdout.emit("resize");
+    await tick();
+    await expectFrame(r, "MCP Servers");
+  });
+
+  it("renders Tools tab content when connected", async () => {
+    h.ctrl.status = "connected";
+    h.ctrl.tools = [sampleTool];
+    const r = await mount(oneStdio());
+    await press(r, ["t"]);
+    const f = r.lastFrame() ?? "";
+    expect(f).toContain("Tools (1)");
+    expect(f).toContain("alpha");
+  });
+
+  it("opens the tool test modal with Enter from the list pane", async () => {
+    h.ctrl.status = "connected";
+    h.ctrl.tools = [sampleTool];
+    const r = await mount(oneStdio());
+    await press(r, ["t", TAB, ENTER]);
+    await expectFrame(r, "MOCK_FORM");
+    await press(r, [ESC]); // ESC closes the modal
+    expect(r.lastFrame() ?? "").not.toContain("MOCK_FORM");
+  });
+
+  it("opens the tool details modal with '+' and closes it on ESC", async () => {
+    h.ctrl.status = "connected";
+    h.ctrl.tools = [sampleTool];
+    const r = await mount(oneStdio());
+    await press(r, ["t", TAB, TAB, "+"]);
+    await expectFrame(r, "Input Schema:");
+    expect(r.lastFrame() ?? "").toContain("Full JSON:");
+    await press(r, [ESC]);
+    expect(r.lastFrame() ?? "").not.toContain("Full JSON:");
+  });
+
+  it("fetches a resource and opens its details modal", async () => {
+    h.ctrl.status = "connected";
+    h.ctrl.resources = [sampleResource];
+    const r = await mount(oneStdio());
+    await press(r, ["r", TAB, ENTER]);
+    await tick();
+    await press(r, [TAB, "+"]);
+    await expectFrame(r, "Full JSON:");
+  });
+
+  it("opens the resource template test modal via Enter on a template", async () => {
+    h.ctrl.status = "connected";
+    h.ctrl.resources = [sampleResource];
+    h.ctrl.resourceTemplates = [sampleTemplate];
+    const r = await mount(oneStdio());
+    await press(r, ["r", TAB, DOWN, ENTER]);
+    await expectFrame(r, "MOCK_FORM");
+    await press(r, [ESC]);
+    expect(r.lastFrame() ?? "").not.toContain("MOCK_FORM");
+  });
+
+  it("opens the prompt test modal via Enter on a prompt with arguments", async () => {
+    h.ctrl.status = "connected";
+    h.ctrl.prompts = [promptWithArgs];
+    const r = await mount(oneStdio());
+    await press(r, ["m", TAB, ENTER]);
+    await expectFrame(r, "MOCK_FORM");
+    await press(r, [ESC]);
+    expect(r.lastFrame() ?? "").not.toContain("MOCK_FORM");
+  });
+
+  it("opens the prompt details modal with '+'", async () => {
+    h.ctrl.status = "connected";
+    h.ctrl.prompts = [promptWithArgs];
+    const r = await mount(oneStdio());
+    await press(r, ["m", TAB, TAB, "+"]);
+    const f = r.lastFrame() ?? "";
+    expect(f).toContain("Arguments:");
+    expect(f).toContain("Full JSON:");
+  });
+
+  it("opens details for a nameless prompt with no arguments", async () => {
+    h.ctrl.status = "connected";
+    h.ctrl.prompts = [promptNoName];
+    const r = await mount(oneStdio());
+    await press(r, ["m", TAB, TAB, "+"]);
+    const f = r.lastFrame() ?? "";
+    expect(f).toContain("Prompt: Unknown");
+    expect(f).not.toContain("Arguments:");
+  });
+
+  it("opens message details for a request message (with response)", async () => {
+    h.ctrl.messages = [reqMessage];
+    const r = await mount(oneStdio());
+    await press(r, ["p", TAB, TAB, "+"]);
+    const f = r.lastFrame() ?? "";
+    expect(f).toContain("Direction: request");
+    expect(f).toContain("Response:");
+  });
+
+  it("opens message details for a notification message", async () => {
+    h.ctrl.messages = [notifMessage];
+    const r = await mount(oneStdio());
+    await press(r, ["p", TAB, TAB, "+"]);
+    await expectFrame(r, "Notification:");
+  });
+
+  it("opens message details for a response message", async () => {
+    h.ctrl.messages = [respMessage];
+    const r = await mount(oneStdio());
+    await press(r, ["p", TAB, TAB, "+"]);
+    await expectFrame(r, "Response:");
+  });
+
+  it("opens in-progress request details (no status, error, or bodies)", async () => {
+    h.ctrl.status = "connected";
+    h.ctrl.fetchRequests = [bareRequest];
+    const r = await mount(oneHttp());
+    await press(r, ["n", TAB, TAB, "+"]);
+    await expectFrame(r, "Request Headers:");
+  });
+
+  it("connects with 'c' from the error state", async () => {
+    h.ctrl.status = "error";
+    const r = await mount(oneStdio());
+    await press(r, ["c"]);
+    await tick();
+    expect(h.connect).toHaveBeenCalled();
+  });
+
+  it("disconnects with 'd' from the connecting state", async () => {
+    h.ctrl.status = "connecting";
+    const r = await mount(oneStdio());
+    await press(r, ["d"]);
+    await tick();
+    expect(h.disconnect).toHaveBeenCalled();
+  });
+
+  it("renders the Network tab and opens full request details", async () => {
+    h.ctrl.status = "connected";
+    h.ctrl.fetchRequests = [fullRequest];
+    const r = await mount(oneHttp());
+    await press(r, ["n", TAB, TAB, "+"]);
+    const f = r.lastFrame() ?? "";
+    expect(f).toContain("Request Headers:");
+    expect(f).toContain("Status: 200");
+  });
+
+  it("opens error-request details (error branch + unparseable bodies)", async () => {
+    h.ctrl.status = "connected";
+    h.ctrl.fetchRequests = [errorRequest];
+    const r = await mount(oneHttp());
+    await press(r, ["n", TAB, TAB, "+"]);
+    await expectFrame(r, "Error: boom");
+  });
+
+  it("renders the Console tab for a stdio server", async () => {
+    h.ctrl.status = "connected";
+    h.ctrl.stderrLogs = [stderrLog];
+    const r = await mount(oneStdio());
+    await press(r, ["o"]);
+    const f = r.lastFrame() ?? "";
+    expect(f).toContain("Console (1)");
+    expect(f).toContain("log line");
+  });
+});
+
+describe("App (input handling, focus, effects)", () => {
+  it("switches tabs with left/right arrows when the tabs row is focused", async () => {
+    h.ctrl.status = "connected";
+    const r = await mount(oneHttp());
+    await press(r, [TAB]); // serverList -> tabs
+    await press(r, [LEFT, RIGHT, RIGHT, LEFT]); // wrap + cycle both directions
+    await expectFrame(r, "MCP Servers");
+  });
+
+  it("switches tabs with arrows on a stdio server (logging tab, no requests)", async () => {
+    h.ctrl.status = "connected";
+    const r = await mount(oneStdio());
+    await press(r, [TAB]); // serverList -> tabs
+    await press(r, [RIGHT, RIGHT, LEFT]);
+    await expectFrame(r, "MCP Servers");
+  });
+
+  it("updates the resources tab count when the resource list changes", async () => {
+    h.ctrl.status = "connected";
+    h.ctrl.resources = [];
+    const r = await mount(oneStdio());
+    await press(r, ["r"]);
+    h.ctrl.resources = [sampleResource];
+    await press(r, [TAB]); // a focus change forces a re-render with new resources
+    await tick();
+    await expectFrame(r, "Resources (1)");
+  });
+
+  it("exits on Ctrl+C", async () => {
+    const r = await mount(oneStdio());
+    r.stdin.write("\x03"); // ETX -> ctrl+c
+    await tick();
+    expect(r.lastFrame() ?? "").toBeDefined();
+  });
+
+  it("exits on Escape", async () => {
+    const r = await mount(oneStdio());
+    await press(r, [ESC]);
+    expect(r.lastFrame() ?? "").toBeDefined();
+  });
+
+  it("moves and wraps server selection with up and down arrows", async () => {
+    const r = await mount(stdioServer()); // alpha(0), beta(1); alpha selected
+    await press(r, [DOWN]); // alpha -> beta (down, index+1)
+    await press(r, [UP]); // beta -> alpha (up, index-1)
+    await press(r, [UP]); // alpha -> beta (up wrap to last)
+    await press(r, [DOWN]); // beta -> alpha (down wrap to first)
+    await expectFrame(r, "Server Configuration");
+  });
+
+  it("handles arrow keys with an empty server catalog", async () => {
+    const r = await mount({});
+    await press(r, [UP, DOWN]);
+    await expectFrame(r, "MCP Servers");
+  });
+
+  it("cycles focus order through the messages tab panes", async () => {
+    h.ctrl.messages = [reqMessage];
+    const r = await mount(oneStdio());
+    await press(r, ["p"]);
+    await press(r, [TAB, TAB, TAB, TAB]); // forward through messages focusOrder
+    await press(r, [STAB, STAB]); // reverse
+    await expectFrame(r, "Protocol");
+  });
+
+  it("cycles focus order through the requests tab panes", async () => {
+    h.ctrl.status = "connected";
+    h.ctrl.fetchRequests = [fullRequest];
+    const r = await mount(oneHttp());
+    await press(r, ["n"]);
+    await press(r, [TAB, TAB, TAB, TAB]);
+    await press(r, [STAB, STAB]);
+    await expectFrame(r, "Network");
+  });
+
+  it("switches away from the Auth tab when selecting a non-OAuth server", async () => {
+    const r = await mount(httpThenStdio());
+    await press(r, ["a", STAB, STAB, DOWN]);
+    await waitUntil(() => (r.lastFrame() ?? "").includes("Type: stdio"));
+    await expectFrame(r, "Server Configuration");
+    expect(r.lastFrame() ?? "").not.toContain("No OAuth information yet");
+  });
+
+  it("switches away from the Console tab when selecting a non-stdio server", async () => {
+    const r = await mount(stdioThenHttp());
+    await press(r, ["o"]); // Console tab (stdio)
+    await press(r, [STAB]); // tabs -> serverList
+    await press(r, [DOWN]); // select the http server -> effect leaves Console
+    await expectFrame(r, "Server Configuration");
+  });
+
+  it("swallows connect errors", async () => {
+    h.connect.mockRejectedValue(new Error("connfail"));
+    const r = await mount(oneStdio());
+    await press(r, ["c"]);
+    await tick();
+    expect(h.connect).toHaveBeenCalled();
+  });
+
+  it("builds a client with saved settings (metadata, oauth, timeout)", async () => {
+    const r = await mount(httpWithSettings());
+    await expectFrame(r, "MCP Servers");
+  });
+
+  it("passes top-level oauth client credentials into an http client", async () => {
+    const r = render(
+      <App
+        mcpServers={oneHttp()}
+        clientConfig={emptyClientConfig}
+        callbackUrlConfig={callbackUrlConfig}
+        clientId="cid"
+        clientSecret="sec"
+        clientMetadataUrl="http://meta"
+      />,
+    );
+    mounted.push(r);
+    await tick();
+    await expectFrame(r, "MCP Servers");
+  });
+});
+
+describe("App (OAuth flows)", () => {
+  const unauthorized = Object.assign(new Error("request failed (401)"), {
+    status: 401,
+  });
+
+  it("runs OAuth on connect when the server returns 401", async () => {
+    h.connect.mockRejectedValueOnce(unauthorized).mockResolvedValue(undefined);
+    h.clientSpies.authenticate.mockResolvedValue(undefined);
+    const r = await mount(oneHttp());
+    await press(r, ["c"]);
+    await waitUntil(() => h.callbackStart.mock.calls.length > 0);
+    expect(h.disconnect).toHaveBeenCalled();
+    expect(h.clientSpies.authenticate).toHaveBeenCalled();
+    expect(h.connect).toHaveBeenCalledTimes(2);
+  });
+
+  it("completes OAuth when the callback fires during a 401 connect", async () => {
+    h.connect.mockRejectedValueOnce(unauthorized).mockResolvedValue(undefined);
+    const r = await mount(oneHttp());
+    await press(r, ["c"]);
+    await waitUntil(() => h.cb.opts !== null);
+    await h.cb.opts!.onCallback({ code: "abc", iss: "https://as.example" });
+    await tick();
+    expect(h.clientSpies.completeOAuthFlow).toHaveBeenCalledWith(
+      "abc",
+      "https://as.example",
+    );
+  });
+
+  it("reports an OAuth callback error during a 401 connect", async () => {
+    h.connect.mockRejectedValueOnce(unauthorized);
+    const r = await mount(oneHttp());
+    await press(r, ["c"]);
+    await waitUntil(() => h.cb.opts !== null);
+    h.cb.opts!.onError({ error_description: "denied" });
+    await expectFrame(r, "denied");
+  });
+
+  it("clears OAuth state from the Auth tab", async () => {
+    const r = await mount(oneHttp());
+    await press(r, ["a", "s"]);
+    await tick();
+    expect(h.clientSpies.clearOAuthTokens).toHaveBeenCalled();
+  });
+
+  it("reports callback completion failure during a 401 connect", async () => {
+    h.connect.mockRejectedValueOnce(unauthorized);
+    h.clientSpies.completeOAuthFlow.mockRejectedValue(new Error("qcfail"));
+    const r = await mount(oneHttp());
+    await press(r, ["c"]);
+    await waitUntil(() => h.cb.opts !== null);
+    await h.cb.opts!.onCallback({ code: "x" });
+    await expectFrame(r, "qcfail");
+  });
+
+  it("stringifies a non-Error authenticate rejection on 401 connect", async () => {
+    h.connect.mockRejectedValueOnce(unauthorized);
+    h.clientSpies.authenticate.mockRejectedValue("plainstring");
+    const r = await mount(oneHttp());
+    await press(r, ["c"]);
+    await expectFrame(r, "plainstring");
+  });
+
+  it("uses the default OAuth error label when the callback error is empty", async () => {
+    h.connect.mockRejectedValueOnce(unauthorized);
+    const r = await mount(oneHttp());
+    await press(r, ["c"]);
+    await waitUntil(() => h.cb.opts !== null);
+    h.cb.opts!.onError({});
+    await expectFrame(r, "OAuth error");
+  });
+
+  it("falls back to params.error when the callback has no description", async () => {
+    h.connect.mockRejectedValueOnce(unauthorized);
+    const r = await mount(oneHttp());
+    await press(r, ["c"]);
+    await waitUntil(() => h.cb.opts !== null);
+    h.cb.opts!.onError({ error: "oauth-error-code" });
+    await expectFrame(r, "oauth-error-code");
+  });
+
+  it("wraps a non-Error callback completion failure into an Error", async () => {
+    h.connect.mockRejectedValueOnce(unauthorized);
+    h.clientSpies.completeOAuthFlow.mockRejectedValue("cb-string");
+    const r = await mount(oneHttp());
+    await press(r, ["c"]);
+    await waitUntil(() => h.cb.opts !== null);
+    await h.cb.opts!.onCallback({ code: "x" });
+    await expectFrame(r, "cb-string");
+  });
+
+  it("shows EMA step-up confirmation on tool auth recovery instead of auto OAuth", async () => {
+    const challenge = {
+      reason: "insufficient_scope" as const,
+      requiredScopes: ["env:read"],
+      authorizationScopes: ["tools:read", "env:read"],
+      context: { toolName: "get-env" },
+    };
+    h.clientSpies.callTool.mockRejectedValue(
+      new AuthRecoveryRequiredError(EMA_STEP_UP_PENDING_URL, challenge, {
+        emaStepUpConfirm: true,
+      }),
+    );
+    h.clientSpies.checkAuthChallengeSatisfied.mockResolvedValue(false);
+    h.ctrl.status = "connected";
+    h.ctrl.tools = [sampleTool];
+    const r = await mount(oneEmaHttp());
+    await press(r, ["t", TAB, ENTER]);
+    await expectFrame(r, "MOCK_FORM");
+    await press(r, [ENTER]);
+    await waitUntil(() => h.clientSpies.callTool.mock.calls.length > 0);
+    await expectFrame(r, "organization before it can continue");
+    const frame = r.lastFrame() ?? "";
+    expect(frame).toMatch(/organization|get-env/i);
+    expect(frame).not.toMatch(/opens browser/i);
+    expect(frame).not.toMatch(/OAuth: authenticating/i);
+    expect(h.callbackStart).not.toHaveBeenCalled();
+  });
+
+  it("runs confirmed EMA step-up via handleAuthChallenge when user authorizes", async () => {
+    const challenge = {
+      reason: "insufficient_scope" as const,
+      requiredScopes: ["env:read"],
+      authorizationScopes: ["tools:read", "env:read"],
+      context: { toolName: "get-env" },
+    };
+    h.clientSpies.callTool.mockRejectedValue(
+      new AuthRecoveryRequiredError(EMA_STEP_UP_PENDING_URL, challenge, {
+        emaStepUpConfirm: true,
+      }),
+    );
+    h.clientSpies.checkAuthChallengeSatisfied.mockResolvedValue(false);
+    h.clientSpies.handleAuthChallenge.mockResolvedValue({ kind: "satisfied" });
+    h.ctrl.status = "connected";
+    h.ctrl.tools = [sampleTool];
+    const r = await mount(oneEmaHttp());
+    await press(r, ["t", TAB, ENTER]);
+    await expectFrame(r, "MOCK_FORM");
+    await press(r, [ENTER]);
+    await waitUntil(() => h.clientSpies.callTool.mock.calls.length > 0);
+    await expectFrame(r, "organization before it can continue");
+    await press(r, ["a"]);
+    await waitUntil(
+      () => h.clientSpies.handleAuthChallenge.mock.calls.length > 0,
+    );
+    expect(h.clientSpies.handleAuthChallenge).toHaveBeenCalledWith(challenge, {
+      confirmedStepUp: true,
+    });
+    expect(h.callbackStart).not.toHaveBeenCalled();
+    await expectFrame(r, "Step-up authorization succeeded");
+  });
+});
+
+describe("App (mid-session auth lifecycle events)", () => {
+  it("shows the ambient-refresh message then clears it on recovery", async () => {
+    const r = await mount(oneHttp());
+    await press(r, ["a"]); // Auth tab so oauthMessage is visible
+    h.fireClientEvent("authChallengeAmbient");
+    await expectFrame(r, "Refreshing authorization");
+    h.fireClientEvent("authChallengeRecovered");
+    await waitUntil(
+      () => !(r.lastFrame() ?? "").includes("Refreshing authorization"),
+    );
+    expect(r.lastFrame() ?? "").not.toContain("Refreshing authorization");
+  });
+
+  it("surfaces an oauthError event for both Error and non-Error payloads", async () => {
+    const r = await mount(oneHttp());
+    await press(r, ["a"]);
+    h.fireClientEvent("oauthError", { error: new Error("oauth boom") });
+    await expectFrame(r, "oauth boom");
+    h.fireClientEvent("oauthError", { error: "plain oauth string" });
+    await expectFrame(r, "plain oauth string");
+  });
+
+  it("clears OAuth tokens and disconnects when connected", async () => {
+    h.ctrl.status = "connected";
+    const r = await mount(oneHttp());
+    await press(r, ["a", "s"]);
+    await waitUntil(() => h.clientSpies.clearOAuthTokens.mock.calls.length > 0);
+    expect(h.clientSpies.clearOAuthTokens).toHaveBeenCalled();
+    expect(h.disconnect).toHaveBeenCalled();
+  });
+
+  const stepUpChallenge = {
+    reason: "insufficient_scope" as const,
+    requiredScopes: ["env:read"],
+    authorizationScopes: ["tools:read", "env:read"],
+    context: { toolName: "get-env" },
+  };
+
+  it("presents a standard step-up on an interactive auth-challenge event", async () => {
+    h.clientSpies.checkAuthChallengeSatisfied.mockResolvedValue(false);
+    const r = await mount(oneHttp());
+    await press(r, ["a"]);
+    h.fireClientEvent("authChallengeInteractive", {
+      authorizationUrl: new URL("https://as.example/authorize"),
+      challenge: stepUpChallenge,
+    });
+    await expectFrame(r, "needs additional OAuth scopes");
+  });
+
+  it("skips step-up when the challenge is already satisfied (interactive event)", async () => {
+    h.clientSpies.checkAuthChallengeSatisfied.mockResolvedValue(true);
+    const r = await mount(oneHttp());
+    await press(r, ["a"]);
+    h.fireClientEvent("authChallengeInteractive", {
+      authorizationUrl: new URL("https://as.example/authorize"),
+      challenge: stepUpChallenge,
+    });
+    await expectFrame(r, "Authorization updated");
+  });
+
+  it("auto-runs OAuth on an interactive reauth event (no step-up confirm)", async () => {
+    h.clientSpies.checkAuthChallengeSatisfied.mockResolvedValue(false);
+    const r = await mount(oneHttp());
+    await press(r, ["a"]);
+    h.fireClientEvent("authChallengeInteractive", {
+      authorizationUrl: new URL("https://as.example/authorize"),
+      challenge: { reason: "unauthorized" as const },
+    });
+    await waitUntil(() => h.callbackStart.mock.calls.length > 0);
+    expect(h.callbackStart).toHaveBeenCalled();
+  });
+
+  it("routes a connect AuthRecoveryRequiredError into recovery", async () => {
+    h.connect
+      .mockRejectedValueOnce(
+        new AuthRecoveryRequiredError(new URL("https://as.example/authorize"), {
+          reason: "unauthorized",
+        }),
+      )
+      .mockResolvedValue(undefined);
+    h.clientSpies.checkAuthChallengeSatisfied.mockResolvedValue(false);
+    const r = await mount(oneHttp());
+    await press(r, ["c"]);
+    await waitUntil(() => h.callbackStart.mock.calls.length > 0);
+    expect(h.callbackStart).toHaveBeenCalled();
+  });
+
+  it("surfaces an EMA-client-not-configured error on connect", async () => {
+    h.connect.mockRejectedValue(
+      new EmaClientNotConfiguredError("not_configured"),
+    );
+    const r = await mount(oneEmaHttp());
+    await press(r, ["a", "c"]);
+    await waitUntil(() => (r.lastFrame() ?? "").length > 0);
+    await expectFrame(r, "enterprise");
+  });
+});
+
+describe("App (step-up authorize outcomes)", () => {
+  const challenge = {
+    reason: "insufficient_scope" as const,
+    requiredScopes: ["env:read"],
+    authorizationScopes: ["tools:read", "env:read"],
+    context: { toolName: "get-env" },
+  };
+
+  async function presentEmaStepUp() {
+    h.clientSpies.callTool.mockRejectedValue(
+      new AuthRecoveryRequiredError(EMA_STEP_UP_PENDING_URL, challenge, {
+        emaStepUpConfirm: true,
+      }),
+    );
+    h.clientSpies.checkAuthChallengeSatisfied.mockResolvedValue(false);
+    h.ctrl.status = "connected";
+    h.ctrl.tools = [sampleTool];
+    const r = await mount(oneEmaHttp());
+    await press(r, ["t", TAB, ENTER]);
+    await expectFrame(r, "MOCK_FORM");
+    await press(r, [ENTER]);
+    await waitUntil(() => h.clientSpies.callTool.mock.calls.length > 0);
+    await expectFrame(r, "organization before it can continue");
+    return r;
+  }
+
+  it("reports a failed EMA step-up outcome", async () => {
+    const r = await presentEmaStepUp();
+    h.clientSpies.handleAuthChallenge.mockResolvedValue({
+      kind: "failed",
+      error: new Error("mint failed"),
+    });
+    await press(r, ["a"]);
+    await expectFrame(r, "mint failed");
+  });
+
+  it("runs interactive OAuth when EMA step-up returns interactive", async () => {
+    const r = await presentEmaStepUp();
+    h.clientSpies.handleAuthChallenge.mockResolvedValue({
+      kind: "interactive",
+      challenge,
+      authorizationUrl: new URL("https://as.example/authorize"),
+    });
+    await press(r, ["a"]);
+    await waitUntil(() => h.callbackStart.mock.calls.length > 0);
+    expect(h.callbackStart).toHaveBeenCalled();
+  });
+
+  it("surfaces an error when EMA handleAuthChallenge throws", async () => {
+    const r = await presentEmaStepUp();
+    h.clientSpies.handleAuthChallenge.mockRejectedValue(
+      new Error("challenge boom"),
+    );
+    await press(r, ["a"]);
+    await expectFrame(r, "challenge boom");
+  });
+
+  it("cancels a pending step-up with 'c'", async () => {
+    const r = await presentEmaStepUp();
+    await press(r, ["c"]);
+    await expectFrame(r, "Authorization cancelled");
+  });
+
+  it("completes an EMA interactive step-up when OAuth succeeds", async () => {
+    const r = await presentEmaStepUp();
+    h.clientSpies.handleAuthChallenge.mockResolvedValue({
+      kind: "interactive",
+      challenge,
+      authorizationUrl: new URL("https://as.example/authorize"),
+    });
+    h.runner.override = async () => ({ kind: "success" });
+    await press(r, ["a"]);
+    await expectFrame(r, "Step-up authorization succeeded");
+  });
+
+  it("completes an EMA interactive step-up when OAuth returns already_authorized", async () => {
+    const r = await presentEmaStepUp();
+    h.clientSpies.handleAuthChallenge.mockResolvedValue({
+      kind: "interactive",
+      challenge,
+      authorizationUrl: new URL("https://as.example/authorize"),
+    });
+    h.runner.override = async () => ({ kind: "already_authorized" });
+    await press(r, ["a"]);
+    await expectFrame(r, "Step-up authorization succeeded");
+  });
+});
+
+describe("App (OAuth result branches)", () => {
+  const unauthorized = Object.assign(new Error("request failed (401)"), {
+    status: 401,
+  });
+  const stepUpChallenge = {
+    reason: "insufficient_scope" as const,
+    requiredScopes: ["env:read"],
+    authorizationScopes: ["tools:read", "env:read"],
+    context: { toolName: "get-env" },
+  };
+  const authUrl = () => new URL("https://as.example/authorize");
+
+  it("re-connects after OAuth returns already_authorized on a 401", async () => {
+    h.connect.mockRejectedValueOnce(unauthorized).mockResolvedValue(undefined);
+    h.runner.override = async () => ({ kind: "already_authorized" });
+    const r = await mount(oneHttp());
+    await press(r, ["c"]);
+    await waitUntil(() => h.connect.mock.calls.length >= 2);
+    expect(h.connect).toHaveBeenCalledTimes(2);
+  });
+
+  it("handles an unsupported OAuth result on a 401 without reconnecting", async () => {
+    h.connect.mockRejectedValueOnce(unauthorized).mockResolvedValue(undefined);
+    h.runner.override = async () => ({ kind: "failed" });
+    const r = await mount(oneHttp());
+    await press(r, ["c"]);
+    await tick();
+    await tick();
+    expect(h.connect).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes an AuthRecoveryRequiredError thrown during 401 OAuth to recovery", async () => {
+    h.connect.mockRejectedValueOnce(unauthorized).mockResolvedValue(undefined);
+    h.runner.override = async () => {
+      throw new AuthRecoveryRequiredError(authUrl(), {
+        reason: "unauthorized",
+      });
+    };
+    h.clientSpies.checkAuthChallengeSatisfied.mockResolvedValue(true);
+    const r = await mount(oneHttp());
+    await press(r, ["c"]);
+    await waitUntil(() => h.disconnect.mock.calls.length > 0);
+    await press(r, ["a"]); // view the Auth tab where oauthMessage renders
+    await expectFrame(r, "Authorization updated");
+  });
+
+  it("surfaces an EMA-not-configured error thrown during 401 OAuth", async () => {
+    h.connect.mockRejectedValueOnce(unauthorized).mockResolvedValue(undefined);
+    h.runner.override = async () => {
+      throw new EmaClientNotConfiguredError("disabled");
+    };
+    const r = await mount(oneHttp());
+    await press(r, ["a", "c"]);
+    await expectFrame(r, "enterprise");
+  });
+
+  it("completes a standard step-up authorize when OAuth succeeds", async () => {
+    h.clientSpies.checkAuthChallengeSatisfied.mockResolvedValue(false);
+    h.runner.override = async () => ({ kind: "success" });
+    const r = await mount(oneHttp());
+    await press(r, ["a"]);
+    h.fireClientEvent("authChallengeInteractive", {
+      authorizationUrl: authUrl(),
+      challenge: stepUpChallenge,
+    });
+    await expectFrame(r, "needs additional OAuth scopes");
+    await press(r, ["a"]);
+    await expectFrame(r, "Step-up authorization succeeded");
+  });
+
+  it("completes a standard step-up authorize when OAuth returns already_authorized", async () => {
+    h.clientSpies.checkAuthChallengeSatisfied.mockResolvedValue(false);
+    h.runner.override = async () => ({ kind: "already_authorized" });
+    const r = await mount(oneHttp());
+    await press(r, ["a"]);
+    h.fireClientEvent("authChallengeInteractive", {
+      authorizationUrl: authUrl(),
+      challenge: stepUpChallenge,
+    });
+    await expectFrame(r, "needs additional OAuth scopes");
+    await press(r, ["a"]);
+    await expectFrame(r, "Step-up authorization succeeded");
+  });
+
+  it("shows insufficient-scope message when step-up OAuth stays insufficient", async () => {
+    h.clientSpies.checkAuthChallengeSatisfied.mockResolvedValue(false);
+    h.runner.override = async () => ({
+      kind: "insufficient_scope",
+      challenge: stepUpChallenge,
+    });
+    const r = await mount(oneHttp());
+    await press(r, ["a"]);
+    h.fireClientEvent("authChallengeInteractive", {
+      authorizationUrl: authUrl(),
+      challenge: stepUpChallenge,
+    });
+    await expectFrame(r, "needs additional OAuth scopes");
+    await press(r, ["a"]);
+    await expectFrame(r, "were not granted");
+  });
+
+  it("skips reauth when already satisfied (interactive event)", async () => {
+    h.clientSpies.checkAuthChallengeSatisfied.mockResolvedValue(true);
+    const r = await mount(oneHttp());
+    await press(r, ["a"]);
+    h.fireClientEvent("authChallengeInteractive", {
+      authorizationUrl: authUrl(),
+      challenge: { reason: "unauthorized" },
+    });
+    await expectFrame(r, "Authorization updated");
+  });
+
+  it("completes reauth via OAuth on an interactive event", async () => {
+    h.clientSpies.checkAuthChallengeSatisfied.mockResolvedValue(false);
+    h.runner.override = async () => ({ kind: "success" });
+    const r = await mount(oneHttp());
+    await press(r, ["a"]);
+    h.fireClientEvent("authChallengeInteractive", {
+      authorizationUrl: authUrl(),
+      challenge: { reason: "unauthorized" },
+    });
+    await expectFrame(r, "Authorization updated. Retry your action");
+  });
+
+  it("completes reauth when OAuth returns already_authorized", async () => {
+    h.clientSpies.checkAuthChallengeSatisfied.mockResolvedValue(false);
+    h.runner.override = async () => ({ kind: "already_authorized" });
+    const r = await mount(oneHttp());
+    await press(r, ["a"]);
+    h.fireClientEvent("authChallengeInteractive", {
+      authorizationUrl: authUrl(),
+      challenge: { reason: "unauthorized" },
+    });
+    await expectFrame(r, "Authorization updated. Retry your action");
+  });
+
+  it("ignores auth lifecycle events from a non-selected server", async () => {
+    const r = await mount(twoHttp()); // web is selected; api is not
+    await press(r, ["a"]);
+    const api = h.clientInstances.find((c) => c.cfg?.url === "http://b");
+    const web = h.clientInstances.find((c) => c.cfg?.url === "http://a");
+    // Firing ONLY the non-selected server's handlers must hit the
+    // `selectedServerRef.current !== serverName` guard on each listener and set
+    // no message — if any guard were removed, a negative assertion would fail.
+    h.fireClientEventFor(api, "authChallengeAmbient");
+    h.fireClientEventFor(api, "authChallengeRecovered");
+    h.fireClientEventFor(api, "oauthError", {
+      error: new Error("api-only error"),
+    });
+    await tick();
+    expect(r.lastFrame() ?? "").not.toContain("Refreshing authorization");
+    expect(r.lastFrame() ?? "").not.toContain("api-only error");
+    // The selected server's handlers do act (guard false): ambient refreshes,
+    // then an error surfaces.
+    h.fireClientEventFor(web, "authChallengeAmbient");
+    await expectFrame(r, "Refreshing authorization");
+    h.fireClientEventFor(web, "oauthError", { error: new Error("web error") });
+    await expectFrame(r, "web error");
+  });
+});

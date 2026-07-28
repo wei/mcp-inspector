@@ -1,0 +1,260 @@
+/**
+ * Vite plugin that adds Hono middleware for /api/* and the MCP Apps sandbox.
+ * Receives WebServerConfig only (from runner or from buildWebServerConfigFromEnv in vite.config).
+ *
+ * `apply: 'serve'` confines the plugin to `vite dev` / `vite preview` — vitest
+ * projects share this config but never run the dev server, so the plugin stays
+ * inert there.
+ */
+
+import type { IncomingMessage, ServerResponse } from "node:http";
+import type { Plugin } from "vite";
+import open from "open";
+// Direct leaf import — the `core/mcp/remote/node/index.ts` barrel re-exports
+// from `../constants.js`, which would otherwise drag the broader
+// `core/mcp/remote/index.ts` barrel (including `createRemoteLogger`, with its
+// `pino/browser.js` import) into Vite's config-time module graph and produce
+// spurious "could not resolve" warnings during build.
+import { createRemoteApp } from "../../../core/mcp/remote/node/server.ts";
+import { createSandboxController } from "./sandbox-controller.js";
+import { injectAuthToken } from "./inject-auth-token.js";
+import type { WebServerConfig } from "./web-server-config.js";
+import {
+  webServerConfigToInitialPayload,
+  printServerBanner,
+} from "./web-server-config.js";
+
+export function honoMiddlewarePlugin(config: WebServerConfig): Plugin {
+  // Resolved once `configureServer` runs (createRemoteApp generates a token
+  // when none is supplied). Captured here so the `transformIndexHtml` hook —
+  // which fires per index.html request, after `configureServer` — can embed it
+  // into the served page. Stays "" when auth is dangerously omitted or under
+  // Vitest (where `configureServer` returns early), making injection a no-op.
+  let resolvedAuthToken = "";
+  return {
+    name: "hono-api-middleware",
+    // Embed the API token into the dev-served index.html so a reload at the
+    // bare URL (no `?MCP_INSPECTOR_API_TOKEN=…`) still authenticates. The
+    // prod server applies the same injection in `server.ts`.
+    transformIndexHtml(html) {
+      return injectAuthToken(html, resolvedAuthToken);
+    },
+    // `apply: 'serve'` keeps the plugin out of `vite build`, but Vitest still
+    // instantiates a Vite server in middleware mode (no HTTP server) for
+    // transforms and invokes `configureServer` regardless. Returning early
+    // when `server.httpServer` is missing keeps the plugin inert in that
+    // context — only an actual `vite dev` (or `vite preview`) instance has
+    // an HTTP server to attach to.
+    apply: "serve",
+    async configureServer(server) {
+      // Skip the plugin entirely under Vitest. The storybook project runs
+      // tests in a real headless Chromium and spins up a Vite server with
+      // `httpServer` attached — that would otherwise pass the next guard and
+      // attach the Hono backend (sandbox HTTP server, banner, auto-open) for
+      // every test run. Component stories never hit `/api/*`, so the plugin
+      // brings no value to that context and only adds noise / port churn.
+      if (process.env.VITEST) {
+        return;
+      }
+      if (!server.httpServer) {
+        return;
+      }
+
+      const sandboxController = createSandboxController({
+        port: config.sandboxPort,
+        host: config.sandboxHost,
+        allowedOrigins: config.allowedOrigins,
+      });
+      await sandboxController.start();
+
+      const {
+        app: honoApp,
+        authToken: resolvedToken,
+        close: closeApi,
+      } = createRemoteApp({
+        authToken: config.dangerouslyOmitAuth ? undefined : config.authToken,
+        dangerouslyOmitAuth: config.dangerouslyOmitAuth,
+        storageDir: config.storageDir,
+        mcpConfigPath: config.mcpConfigPath,
+        writable: config.writable,
+        initialServers: config.initialServers ?? undefined,
+        allowedOrigins: config.allowedOrigins,
+        sandboxUrl: sandboxController.getUrl() ?? undefined,
+        logger: config.logger,
+        initialConfig: webServerConfigToInitialPayload(config),
+      });
+
+      // Expose the resolved token to `transformIndexHtml`. Left empty when
+      // auth is dangerously omitted so the page carries no token global.
+      resolvedAuthToken = config.dangerouslyOmitAuth ? "" : resolvedToken;
+
+      // Chain the API close (mcp.json watcher) and the sandbox into the
+      // Vite server's close so dev-server restarts release both resources.
+      const originalClose = server.close.bind(server);
+      server.close = async () => {
+        await closeApi();
+        await sandboxController.close();
+        return originalClose();
+      };
+
+      const sandboxUrl = sandboxController.getUrl();
+
+      const logBanner = () => {
+        const address = server.httpServer?.address();
+        const actualPort =
+          typeof address === "object" && address !== null
+            ? address.port
+            : config.port;
+
+        const url = printServerBanner(
+          config,
+          actualPort,
+          resolvedToken,
+          sandboxUrl ?? undefined,
+        );
+
+        if (config.autoOpen) {
+          open(url);
+        }
+      };
+
+      server.httpServer.once("listening", () => {
+        setImmediate(async () => {
+          // Pre-bundle the app entry before opening the browser so the first
+          // page load does not race Vite's dep optimizer (504 Outdated Optimize Dep).
+          try {
+            await server.warmupRequest("/src/main.tsx");
+          } catch (err) {
+            console.warn("[vite] entry warmup failed:", err);
+          }
+          logBanner();
+        });
+      });
+
+      const honoMiddleware = async (
+        req: IncomingMessage,
+        res: ServerResponse,
+        next: (err?: unknown) => void,
+      ) => {
+        try {
+          const pathname = req.url || "";
+          if (!pathname.startsWith("/api")) {
+            return next();
+          }
+          const url = `http://${req.headers.host}${pathname}`;
+          const headers = new Headers();
+          Object.entries(req.headers).forEach(
+            ([key, value]: [string, string | string[] | undefined]) => {
+              if (value) {
+                headers.set(
+                  key,
+                  Array.isArray(value) ? value.join(", ") : value,
+                );
+              }
+            },
+          );
+          const init: RequestInit = { method: req.method, headers };
+          if (req.method !== "GET" && req.method !== "HEAD") {
+            const chunks: Buffer[] = [];
+            req.on("data", (chunk: Buffer) => chunks.push(chunk));
+            // Listen for `end`, `error`, AND `close`. Without `error`/`close`
+            // an aborted upload (browser navigates away mid-POST) leaves this
+            // promise pending forever, leaking memory and the connection.
+            // We resolve on every terminal event — partial body bytes flow on
+            // to Hono; the underlying fetch will fail downstream if the
+            // payload is truncated, which is the expected behavior on abort.
+            await new Promise<void>((resolve) => {
+              req.once("end", () => resolve());
+              req.once("error", () => resolve());
+              req.once("close", () => resolve());
+            });
+            if (chunks.length > 0) {
+              init.body = Buffer.concat(chunks);
+            }
+          }
+          const response = await honoApp.fetch(new Request(url, init));
+          res.statusCode = response.status;
+          response.headers.forEach((value, key) => {
+            res.setHeader(key, value);
+          });
+          const isSSE = response.headers
+            .get("content-type")
+            ?.includes("text/event-stream");
+          if (isSSE) {
+            res.setHeader("X-Accel-Buffering", "no");
+            res.setHeader("Cache-Control", "no-cache");
+            res.setHeader("Connection", "keep-alive");
+          }
+          if (response.body) {
+            res.flushHeaders?.();
+            const reader = response.body.getReader();
+
+            // The browser can drop a streaming response mid-flight — an SSE
+            // connection closing, a navigation, or an HMR reload. Once it does,
+            // `res` is destroyed and further writes fail with
+            // ERR_STREAM_DESTROYED / EPIPE / ECONNRESET. Treat those as a
+            // normal end: cancel the upstream reader and stop quietly rather
+            // than logging a spurious error. (Cancelling resolves the awaiting
+            // `reader.read()`, so the pump loop exits on its own.)
+            const isDisconnect = (code?: string): boolean =>
+              code === "ERR_STREAM_DESTROYED" ||
+              code === "EPIPE" ||
+              code === "ECONNRESET";
+
+            let clientGone = false;
+            const onClose = (): void => {
+              clientGone = true;
+              reader.cancel().catch(() => {});
+            };
+            // Without an `error` listener a failed write becomes an uncaught
+            // exception; absorb benign disconnects and log anything else.
+            const onError = (err: Error): void => {
+              clientGone = true;
+              reader.cancel().catch(() => {});
+              if (!isDisconnect((err as NodeJS.ErrnoException).code)) {
+                console.error("[Hono Middleware] Response error:", err);
+              }
+            };
+            res.on("close", onClose);
+            res.on("error", onError);
+
+            const pump = async (): Promise<void> => {
+              try {
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done || clientGone || res.destroyed) break;
+                  // Await each write so a slow client applies backpressure
+                  // instead of the proxy buffering the entire stream.
+                  await new Promise<void>((resolve, reject) => {
+                    res.write(Buffer.from(value), (err) =>
+                      err ? reject(err) : resolve(),
+                    );
+                  });
+                }
+              } catch (err) {
+                const code = (err as NodeJS.ErrnoException | null)?.code;
+                if (!clientGone && !res.destroyed && !isDisconnect(code)) {
+                  console.error("[Hono Middleware] Stream error:", err);
+                }
+              } finally {
+                res.off("close", onClose);
+                res.off("error", onError);
+                await reader.cancel().catch(() => {});
+                if (!res.writableEnded && !res.destroyed) {
+                  res.end();
+                }
+              }
+            };
+            void pump();
+          } else {
+            res.end();
+          }
+        } catch (error) {
+          next(error);
+        }
+      };
+
+      server.middlewares.use(honoMiddleware);
+    },
+  };
+}

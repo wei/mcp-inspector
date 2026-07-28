@@ -1,0 +1,2386 @@
+/**
+ * Hono-based remote server for MCP transports.
+ * Hosts /api/config, /api/mcp/connect, send, events, disconnect, /api/fetch, /api/log,
+ * /api/storage/:storeId, /api/servers (+ /api/servers/:id), /api/import-source.
+ */
+
+import { randomBytes, timingSafeEqual } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { stat as fsStat } from "node:fs/promises";
+import { homedir } from "node:os";
+import type pino from "pino";
+import {
+  getDefaultStorageDir,
+  getDefaultMcpConfigPath,
+  getStoreFilePath,
+  validateStoreId,
+  readStoreFile,
+  writeStoreFile,
+  deleteStoreFile,
+  parseStore,
+  serializeStore,
+} from "../../../storage/store-io.js";
+import type { LogEvent } from "pino";
+import { Hono } from "hono";
+import type { Context, Env, Next } from "hono";
+import { streamSSE } from "hono/streaming";
+import { watch as chokidarWatch, type FSWatcher } from "chokidar";
+import { createTransportNode } from "../../node/transport.js";
+import type {
+  RemoteConnectRequest,
+  RemoteSendRequest,
+  RemoteSetAuthStateRequest,
+} from "../types.js";
+import type { JSONRPCMessage } from "@modelcontextprotocol/client";
+import { AuthChallengeError } from "../../../auth/challenge.js";
+import {
+  DEFAULT_MAX_FETCH_REQUESTS,
+  DEFAULT_TASK_TTL_MS,
+  isModernLogLevel,
+} from "../../types.js";
+import type {
+  InspectorServerSettings,
+  MCPConfig,
+  MCPServerConfig,
+  StdioServerConfig,
+  StoredMCPServer,
+} from "../../types.js";
+import {
+  DEFAULT_SEED_CONFIG,
+  envPairsToRecord,
+  expectedSecretFields,
+  extractSecretsFromStored,
+  INSPECTOR_FIELD_KEYS,
+  inspectorSettingsToStoredFields,
+  isProtocolEra,
+  mergeSecretsIntoStored,
+  normalizeServerType,
+  storedFieldsToInspectorSettings,
+  stripInspectorFields,
+} from "../../serverList.js";
+import { toRecord } from "../../../json/jsonUtils.js";
+import { resolveImportSource } from "../../import/resolveSource.js";
+import { RemoteSession } from "./remote-session.js";
+import { createRemoteAuthProvider } from "./tokenAuthProvider.js";
+import { API_SERVER_ENV_VARS } from "../constants.js";
+import {
+  KeychainUnavailableError,
+  KeyringSecretStore,
+  type SecretStore,
+} from "../../../auth/node/secret-store.js";
+import {
+  deleteClientConfigStore,
+  readClientConfigStore,
+  writeClientConfigStore,
+} from "../../../client/node-persistence.js";
+import { formatClientConfigLoadError } from "../../../client/config-parse.js";
+import { envSecretField } from "../../../auth/secret-fields.js";
+import { ZodError } from "zod";
+
+/**
+ * Shape of the initial config returned by GET /api/config (defaults for client).
+ */
+export interface InitialConfigPayload {
+  defaultCommand?: string;
+  defaultArgs?: string[];
+  defaultTransport?: string;
+  defaultServerUrl?: string;
+  defaultCwd?: string;
+  defaultEnvironment: Record<string, string>;
+  /**
+   * Whether the session's server list is writable (catalog) or read-only
+   * (a `--config` session file or ad-hoc seeded server). Absent → treated as
+   * true by clients for backward compatibility. Drives whether the web UI
+   * shows catalog CRUD affordances.
+   */
+  writable?: boolean;
+  /**
+   * The Inspector version (from the root `package.json`), so the browser — which
+   * can't read the filesystem the way the CLI/TUI do — can display it. Absent on
+   * a legacy backend that predates the field; the UI just shows nothing then.
+   */
+  version?: string;
+}
+
+export interface RemoteServerOptions {
+  /** Optional auth token. If not provided, uses API_SERVER_ENV_VARS.AUTH_TOKEN env var or generates one. Ignored when dangerouslyOmitAuth is true. */
+  authToken?: string;
+
+  /**
+   * When true, do not require x-mcp-remote-auth on API routes.
+   * Origin validation (allowedOrigins) still applies.
+   * Set via DANGEROUSLY_OMIT_AUTH env var; not recommended for any exposed deployment.
+   */
+  dangerouslyOmitAuth?: boolean;
+
+  /** Optional: validate Origin header against allowed origins (for CORS) */
+  allowedOrigins?: string[];
+
+  /** Optional pino file logger. When set, /api/log forwards received events to it. */
+  logger?: pino.Logger;
+
+  /** Optional storage directory for /api/storage/:storeId. Default: ~/.mcp-inspector/storage */
+  storageDir?: string;
+
+  /** Optional path for the user's server list file (/api/servers). Default: ~/.mcp-inspector/mcp.json */
+  mcpConfigPath?: string;
+
+  /**
+   * When false, the server list is read-only for this session: all
+   * `/api/servers` mutations (POST/PUT/DELETE/order) are rejected with 403,
+   * the file is never seeded on first read, and on-disk plaintext secrets are
+   * not migrated into the keychain (migration is a write). Used for the web
+   * launcher's read-only `--config` session file and ad-hoc seeded servers, so
+   * a foreign config passed at launch is never silently rewritten. Defaults to
+   * true (the default catalog and `--catalog` are writable).
+   */
+  writable?: boolean;
+
+  /**
+   * In-memory server list served by GET /api/servers instead of reading from
+   * disk. Set by the web launcher to seed an ad-hoc `--server-url` / command
+   * target (with `--header`) without writing any file. Implies a read-only
+   * session — pass `writable: false` alongside it. When set, `mcpConfigPath`
+   * is ignored for reads and the file watcher is not started.
+   */
+  initialServers?: MCPConfig;
+
+  /** Optional sandbox URL for MCP Apps tab. When set, GET /api/config includes sandboxUrl. */
+  sandboxUrl?: string;
+
+  /** Initial config for GET /api/config. Caller must pass this (e.g. from webServerConfigToInitialPayload(config)). */
+  initialConfig: InitialConfigPayload;
+
+  /**
+   * Backend for per-server secret values that we keep out of mcp.json
+   * (OAuth client secret, stdio env values). Defaults to a
+   * `KeyringSecretStore` that talks to the OS keychain via
+   * `@napi-rs/keyring`. Tests inject `InMemorySecretStore` so the suite
+   * doesn't need libsecret on Linux CI runners.
+   */
+  secretStore?: SecretStore;
+}
+
+export interface CreateRemoteAppResult {
+  /** The Hono app */
+  app: Hono;
+  /** The auth token (from options, env var, or generated). Returned so caller can embed in client. */
+  authToken: string;
+  /**
+   * Tear down stateful resources owned by the app (currently the lazy
+   * chokidar watcher behind `/api/servers/events`). Long-lived prod callers
+   * (the standalone server, the vite dev plugin) chain this into their own
+   * HTTP-server close so the watcher is released on shutdown. Tests that
+   * exercise SSE should call it in teardown — tests that never subscribe
+   * never start the watcher and can omit it without leaking.
+   *
+   * Resolves once the subscriber set is cleared and the watcher is closed.
+   * Individual SSE stream callbacks held inside `streamSSE` are not awaited
+   * here — they resolve on their own when the underlying socket aborts.
+   * Callers that need to be sure those have settled (e.g. the standalone
+   * server) should call `httpServer.closeAllConnections()` *after* this.
+   */
+  close: () => Promise<void>;
+}
+
+/**
+ * Hono middleware for origin validation (CORS and DNS rebinding protection).
+ * Validates Origin header against allowedOrigins if provided.
+ */
+function createOriginMiddleware(allowedOrigins?: string[]) {
+  return async (c: Context, next: Next) => {
+    // If no allowedOrigins configured, skip validation (allow all)
+    if (!allowedOrigins || allowedOrigins.length === 0) {
+      await next();
+      return;
+    }
+
+    const origin = c.req.header("origin");
+
+    // Handle CORS preflight requests
+    if (c.req.method === "OPTIONS") {
+      if (origin && allowedOrigins.includes(origin)) {
+        c.header("Access-Control-Allow-Origin", origin);
+        c.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+        c.header(
+          "Access-Control-Allow-Headers",
+          "Content-Type, x-mcp-remote-auth",
+        );
+        c.header("Access-Control-Max-Age", "86400"); // 24 hours
+        return c.body(null, 204);
+      }
+      // Invalid origin for preflight - return 403
+      return c.json(
+        {
+          error: "Forbidden",
+          message:
+            "Invalid origin. Request blocked to prevent DNS rebinding attacks.",
+        },
+        403,
+      );
+    }
+
+    // For actual requests, validate origin if present
+    if (origin) {
+      if (!allowedOrigins.includes(origin)) {
+        return c.json(
+          {
+            error: "Forbidden",
+            message:
+              "Invalid origin. Request blocked to prevent DNS rebinding attacks. Configure allowed origins via allowedOrigins option.",
+          },
+          403,
+        );
+      }
+      // Set CORS header for allowed origin
+      c.header("Access-Control-Allow-Origin", origin);
+    }
+    // If no origin header (same-origin or non-browser client), allow request
+
+    await next();
+  };
+}
+
+/**
+ * Hono middleware for auth token validation.
+ * Expects Bearer token format: x-mcp-remote-auth: Bearer <token>
+ */
+function createAuthMiddleware(authToken: string) {
+  return async (c: Context, next: Next) => {
+    const authHeader = c.req.header("x-mcp-remote-auth");
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return c.json(
+        {
+          error: "Unauthorized",
+          message:
+            "Authentication required. Use the x-mcp-remote-auth header with Bearer token.",
+        },
+        401,
+      );
+    }
+
+    const providedToken = authHeader.substring(7); // Remove 'Bearer ' prefix
+    const expectedToken = authToken;
+
+    // Convert to buffers for timing-safe comparison
+    const providedBuffer = Buffer.from(providedToken);
+    const expectedBuffer = Buffer.from(expectedToken);
+
+    // Check length first to prevent timing attacks
+    if (providedBuffer.length !== expectedBuffer.length) {
+      return c.json(
+        {
+          error: "Unauthorized",
+          message:
+            "Authentication required. Use the x-mcp-remote-auth header with Bearer token.",
+        },
+        401,
+      );
+    }
+
+    // Perform timing-safe comparison
+    if (!timingSafeEqual(providedBuffer, expectedBuffer)) {
+      return c.json(
+        {
+          error: "Unauthorized",
+          message:
+            "Authentication required. Use the x-mcp-remote-auth header with Bearer token.",
+        },
+        401,
+      );
+    }
+
+    await next();
+  };
+}
+
+function forwardLogEvent(
+  logger: pino.Logger,
+  logEvent: Partial<LogEvent>,
+): void {
+  const levelLabel = (logEvent?.level?.label ?? "info").toLowerCase();
+  const method = toRecord(logger)[levelLabel];
+  if (typeof method !== "function") return;
+
+  const bindings = Object.assign(
+    {},
+    ...(Array.isArray(logEvent.bindings) ? logEvent.bindings : []),
+  );
+  const messages = Array.isArray(logEvent.messages) ? logEvent.messages : [];
+
+  if (messages.length === 0) {
+    (method as (obj: object) => void).call(logger, bindings);
+    return;
+  }
+
+  const first = messages[0];
+  if (typeof first === "object" && first !== null && !Array.isArray(first)) {
+    const obj = { ...bindings, ...(first as Record<string, unknown>) };
+    const msg = messages[1];
+    const args = messages.slice(2);
+    (method as (obj: object, msg?: unknown, ...args: unknown[]) => void).call(
+      logger,
+      obj,
+      msg,
+      ...args,
+    );
+  } else {
+    const msg = messages[0];
+    const args = messages.slice(1);
+    (method as (obj: object, msg?: unknown, ...args: unknown[]) => void).call(
+      logger,
+      bindings,
+      msg,
+      ...args,
+    );
+  }
+}
+
+// Exported for unit coverage of the `subscriptions/listen` exemption (#1630).
+export function requestIdForSendWait(
+  message: JSONRPCMessage,
+): string | number | undefined {
+  if (
+    "method" in message &&
+    "id" in message &&
+    message.id !== null &&
+    message.id !== undefined
+  ) {
+    // `subscriptions/listen` (modern era, #1630) is a long-lived stream request:
+    // it never produces a JSON-RPC response — it's answered by a
+    // `notifications/subscriptions/acknowledged` and, only on graceful close, an
+    // empty result. Waiting for a response would block `/api/mcp/send` for the
+    // full timeout, delaying the client's `listen()` (which awaits `send()`) and
+    // then tearing the stream down (`closed`) when the wait finally rejects,
+    // which spuriously drives the reconnect loop. Don't wait: the ack and all
+    // stream notifications reach the client over the SSE event channel.
+    if (message.method === "subscriptions/listen") {
+      return undefined;
+    }
+    return message.id;
+  }
+  return undefined;
+}
+
+export function createRemoteApp(
+  options: RemoteServerOptions,
+): CreateRemoteAppResult {
+  const dangerouslyOmitAuth = !!options.dangerouslyOmitAuth;
+
+  // Determine auth token when auth is enabled: options > env var > generate
+  const authToken = dangerouslyOmitAuth
+    ? ""
+    : options.authToken ||
+      process.env[API_SERVER_ENV_VARS.AUTH_TOKEN] ||
+      randomBytes(32).toString("hex");
+
+  const app = new Hono<Env>();
+  const sessions = new Map<string, RemoteSession>();
+  const { logger: fileLogger, allowedOrigins } = options;
+  const storageDir = options.storageDir ?? getDefaultStorageDir();
+  const mcpConfigPath = options.mcpConfigPath ?? getDefaultMcpConfigPath();
+  const secretStore: SecretStore =
+    options.secretStore ?? new KeyringSecretStore();
+
+  // Read-only session support (#1481/#1483). `writable: false` rejects every
+  // /api/servers mutation and suppresses the seed/migrate writes on read.
+  // `initialServers` serves an in-memory list (ad-hoc launch) with no file at
+  // all. Both default off so the catalog path is unchanged.
+  const writable = options.writable ?? true;
+  const inMemoryServers = options.initialServers;
+  // Watch only a real on-disk catalog/session file — never for an in-memory
+  // ad-hoc list (there is nothing to watch and the default path is unrelated).
+  // A read-only `--config` *file* is still watched on purpose: read-only blocks
+  // UI-driven writes, not external observation, so an external edit to the file
+  // should still refresh the UI. (`writable` does not gate watching.)
+  const watchable = !inMemoryServers;
+
+  // --- /api/servers/events: file-watch fanout state -----------------------
+  //
+  // Subscribers are SSE writers added by GET /api/servers/events and removed
+  // on stream abort. The chokidar watcher is created lazily on the first
+  // subscription and torn down again when the last one leaves, so tests (and
+  // headless tools) that never open the channel never spin up a real fs
+  // watcher. The `lastWrittenMtimeMs` field is captured after every write we
+  // initiate ourselves; the watcher handler stat()s on each event and
+  // suppresses the broadcast if the mtime matches — that's how we avoid
+  // refreshing every connected browser tab for our own POST/PUT/DELETE.
+  const serverEventSubscribers = new Set<(data: string) => void>();
+  let mcpConfigWatcher: FSWatcher | null = null;
+  let lastWrittenMtimeMs: number | null = null;
+
+  const broadcastServerListChange = (): void => {
+    const payload = JSON.stringify({ type: "change" });
+    for (const send of serverEventSubscribers) {
+      try {
+        send(payload);
+      } catch {
+        // Each subscriber owns its own write loop and cleans itself up in
+        // onAbort; swallowing here keeps one bad stream from blocking the
+        // fanout to the rest.
+      }
+    }
+  };
+
+  const writeMcpAndTrackMtime = async (data: string): Promise<void> => {
+    // If an external editor wrote the file between our previous write and
+    // this one, chokidar's `awaitWriteFinish` will coalesce both events
+    // into a single watcher fire whose mtime matches what we're about to
+    // write — and the watcher handler will then suppress the broadcast.
+    // Peer subscribers (e.g. a second browser tab) would never learn about
+    // the external edit. Detect that case here by comparing the current
+    // on-disk mtime against our last tracked mtime; broadcast after the
+    // write completes so peers re-fetch.
+    //
+    // This is a notification-of-divergence, not a preservation guarantee:
+    // depending on whether the external write landed before or after the
+    // route handler's `readMcpConfig()`, the external edit's content may
+    // already be inside our serialized payload (it'll round-trip) or it
+    // may have been read-around and the next `writeStoreFile` below will
+    // overwrite it. Either way peers learn there's been a change and
+    // re-fetch the resulting authoritative on-disk state. Preserving the
+    // external edit's content in the second ordering would require a
+    // read-modify-write retry loop, which is outside this PR's scope and
+    // probably not worth it for a single-user local dev tool.
+    //
+    // The originating tab's mutator triggers its own refresh on PUT/POST
+    // success, so this extra broadcast is intended for peers only — a
+    // double refresh on the originating tab is cheap (same GET, same
+    // payload) and acceptable.
+    let externalEditDetected = false;
+    if (lastWrittenMtimeMs !== null) {
+      try {
+        const s = await fsStat(mcpConfigPath);
+        if (s.mtimeMs !== lastWrittenMtimeMs) {
+          externalEditDetected = true;
+        }
+      } catch {
+        // File missing → an external delete slipped in between our writes.
+        // Treat as an external edit so peers learn about it.
+        externalEditDetected = true;
+      }
+    }
+
+    await writeStoreFile(mcpConfigPath, data);
+    try {
+      const s = await fsStat(mcpConfigPath);
+      lastWrittenMtimeMs = s.mtimeMs;
+    } catch {
+      // If the stat fails the next watcher event will broadcast — that's the
+      // correct fallback (the only cost is a redundant client refresh).
+    }
+
+    if (externalEditDetected) {
+      broadcastServerListChange();
+    }
+  };
+
+  const handleWatcherEvent = async (event: string): Promise<void> => {
+    if (event !== "add" && event !== "change" && event !== "unlink") return;
+    if (event !== "unlink") {
+      try {
+        const s = await fsStat(mcpConfigPath);
+        if (lastWrittenMtimeMs !== null && s.mtimeMs === lastWrittenMtimeMs) {
+          return;
+        }
+      } catch {
+        // File vanished between event and stat — broadcast so subscribers
+        // re-fetch and the GET handler can re-seed on the next read.
+      }
+    }
+    broadcastServerListChange();
+  };
+
+  const handleWatcherError = (err: unknown): void => {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (fileLogger) {
+      fileLogger.warn({ err: msg }, "mcp.json watcher error");
+    } else {
+      console.warn("[mcp.json watcher]", msg);
+    }
+  };
+
+  const ensureWatcher = (): void => {
+    if (mcpConfigWatcher) return;
+    // `awaitWriteFinish` coalesces the multi-event sequence editors produce
+    // when they save via temp-file + rename (the watched path briefly
+    // disappears then reappears). The stability threshold also covers our
+    // own atomically-written rename, so a single backend POST yields one
+    // event to inspect rather than an unlink/add pair.
+    mcpConfigWatcher = chokidarWatch(mcpConfigPath, {
+      ignoreInitial: true,
+      awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 50 },
+    });
+    mcpConfigWatcher.on("all", (event) => {
+      void handleWatcherEvent(event);
+    });
+    mcpConfigWatcher.on("error", handleWatcherError);
+  };
+
+  const maybeStopWatcher = async (): Promise<void> => {
+    if (serverEventSubscribers.size > 0) return;
+    if (!mcpConfigWatcher) return;
+    const w = mcpConfigWatcher;
+    mcpConfigWatcher = null;
+    try {
+      await w.close();
+    } catch {
+      // Closing a chokidar instance can throw on already-closed handles
+      // (e.g. if the underlying fs watch was unhooked by a signal). The
+      // resource is gone either way; nothing to do.
+    }
+  };
+
+  // Apply origin validation middleware first (before auth)
+  // This prevents DNS rebinding attacks by validating Origin header
+  app.use("*", createOriginMiddleware(allowedOrigins));
+
+  // Apply auth middleware unless dangerously omitted
+  if (!dangerouslyOmitAuth) {
+    app.use("*", createAuthMiddleware(authToken));
+  }
+
+  app.get("/api/config", (c) => {
+    const payload = {
+      ...options.initialConfig,
+      writable,
+      ...(options.sandboxUrl ? { sandboxUrl: options.sandboxUrl } : {}),
+    };
+    return c.json(payload);
+  });
+
+  app.post("/api/mcp/connect", async (c) => {
+    let body: RemoteConnectRequest;
+    try {
+      body = (await c.req.json()) as RemoteConnectRequest;
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const config = body.config as MCPServerConfig;
+    if (!config) {
+      return c.json({ error: "Missing config" }, 400);
+    }
+
+    const sessionId = crypto.randomUUID();
+    const session = new RemoteSession(sessionId);
+
+    let transport: Awaited<ReturnType<typeof createTransportNode>>["transport"];
+    let authHandle: ReturnType<typeof createRemoteAuthProvider>;
+    try {
+      const initialAuthState =
+        body.authState ??
+        (body.oauthTokens ? { oauthTokens: body.oauthTokens } : undefined);
+      authHandle = createRemoteAuthProvider(initialAuthState);
+
+      const result = createTransportNode(config, {
+        pipeStderr: true,
+        onStderr: (entry) => session.onStderr(entry),
+        onFetchRequest: (entry) => session.onFetchRequest(entry),
+        onFetchResponseBody: (id, body) =>
+          session.onFetchResponseBody(id, body),
+        authProvider: authHandle?.provider,
+        settings: body.settings,
+        // Always intercept 401/403 on the node MCP transport. Without this, the
+        // SDK's built-in auth() retry on a frozen token snapshot can hang or
+        // succeed locally while /api/mcp/send still awaits a JSON-RPC response.
+        interceptAuthChallenges: true,
+      });
+      transport = result.transport;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: `Failed to create transport: ${msg}` }, 500);
+    }
+
+    session.setAuthProviderHandle(authHandle ?? null);
+    session.setTransport(transport);
+    transport.onmessage = (msg) => session.onMessage(msg);
+
+    // Track if transport closes/errors during start - this matches local behavior
+    // If transport.start() throws, we catch it. If it resolves but transport closes immediately,
+    // we detect that too (process failure after spawn).
+    let transportFailed = false;
+    let transportError: string | null = null;
+
+    const originalOnclose = transport.onclose;
+    const originalOnerror = transport.onerror;
+
+    // Set up error handlers BEFORE calling start() so we catch failures during start
+    transport.onerror = (err) => {
+      if (session.handleTransportAuthError(err)) {
+        originalOnerror?.(err);
+        return;
+      }
+      transportFailed = true;
+      transportError = err instanceof Error ? err.message : String(err);
+      originalOnerror?.(err);
+    };
+
+    transport.onclose = () => {
+      const session = sessions.get(sessionId);
+      if (session) {
+        // Mark transport as dead but don't delete session yet
+        // We'll notify client via SSE and cleanup when client disconnects
+        const errorMsg =
+          transportError || "Transport closed - process may have exited";
+        session.markTransportDead(errorMsg);
+        // If no client connected yet, the client may still be about to
+        // open /api/mcp/events for this session — common path when the
+        // subprocess fails during startup, after we've already returned
+        // 200 with the sessionId. Hold the session (with the queued
+        // stderr + transport_error event) for a grace window so the
+        // events endpoint can drain them and surface a real error to
+        // the user. The endpoint cleans up on stream close; this TTL
+        // sweeps sessions whose client never connects at all.
+        if (!session.hasEventConsumer()) {
+          // This sweep is a best-effort GC of an abandoned session, not work
+          // the process must stay alive for — unref it so a pending timer
+          // can't keep the event loop (or a test worker) alive for 30s after
+          // everything else has finished.
+          setTimeout(() => {
+            const stale = sessions.get(sessionId);
+            if (stale && !stale.hasEventConsumer()) {
+              sessions.delete(sessionId);
+            }
+          }, 30_000).unref();
+        }
+      } else {
+        // Session not created yet - failed during start
+        transportFailed = true;
+        transportError =
+          transportError ||
+          "Transport closed during start - process may have failed";
+      }
+      originalOnclose?.();
+    };
+
+    try {
+      // transport.start() should throw if process fails to start
+      // If it resolves, the process should be running
+      await transport.start();
+
+      // Check if transport failed during start (onerror/onclose fired synchronously)
+      if (transportFailed) {
+        const errorMsg = transportError || "Transport failed during start";
+        return c.json({ error: `Failed to start transport: ${errorMsg}` }, 500);
+      }
+    } catch (err) {
+      // transport.start() threw - this is the expected failure path
+      if (err instanceof AuthChallengeError) {
+        try {
+          await transport.close();
+        } catch {
+          // Best-effort cleanup when connect fails with auth challenge.
+        }
+        session.noteAuthChallengeDeliveredViaHttp();
+        return c.json({
+          ok: false,
+          kind: "auth_challenge",
+          authChallenge: err.authChallenge,
+        });
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      // Preserve 401 only when the transport/SDK reports it (no message guessing)
+      const status =
+        (err as { code?: number; status?: number }).code ??
+        (err as { code?: number; status?: number }).status;
+      const is401 = status === 401;
+      return c.json(
+        { error: `Failed to start transport: ${msg}` },
+        is401 ? 401 : 500,
+      );
+    }
+
+    // Transport started successfully - add to sessions
+    sessions.set(sessionId, session);
+
+    return c.json({ sessionId });
+  });
+
+  app.post("/api/mcp/send", async (c) => {
+    let body: RemoteSendRequest & { sessionId?: string };
+    try {
+      body = (await c.req.json()) as RemoteSendRequest & { sessionId?: string };
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const { sessionId, message, relatedRequestId } = body;
+    if (!sessionId || !message) {
+      return c.json({ error: "Missing sessionId or message" }, 400);
+    }
+
+    const session = sessions.get(sessionId);
+    if (!session) {
+      return c.json({ error: "Session not found" }, 404);
+    }
+
+    // Check if transport is dead - return error immediately (matches local behavior)
+    if (session.isTransportDead()) {
+      const errorMsg = session.getTransportError() || "Transport closed";
+      return c.json({ ok: false, kind: "transport_error", error: errorMsg });
+    }
+
+    session.beginSend();
+    const requestId = requestIdForSendWait(message);
+    let responseWait: Promise<void> | undefined;
+    if (requestId !== undefined) {
+      responseWait = session.waitForRequestResponse(requestId);
+      // Auth errors may reject the wait via onerror while send() also throws.
+      void responseWait.catch(() => {});
+    }
+    try {
+      await session.transport.send(message, {
+        relatedRequestId: relatedRequestId as string | number | undefined,
+      });
+      if (responseWait) {
+        await responseWait;
+      }
+      return c.json({ ok: true });
+    } catch (err) {
+      if (requestId !== undefined) {
+        session.cancelRequestWait(requestId);
+      }
+      if (err instanceof AuthChallengeError) {
+        session.noteAuthChallengeDeliveredViaHttp();
+        return c.json({
+          ok: false,
+          kind: "auth_challenge",
+          authChallenge: err.authChallenge,
+        });
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ ok: false, kind: "transport_error", error: msg });
+    } finally {
+      session.endSend();
+    }
+  });
+
+  app.get("/api/mcp/events", async (c) => {
+    const sessionId = c.req.query("sessionId");
+    if (!sessionId) {
+      return c.json({ error: "Missing sessionId query" }, 400);
+    }
+
+    const session = sessions.get(sessionId);
+    if (!session) {
+      return c.json({ error: "Session not found" }, 404);
+    }
+
+    return streamSSE(c, async (stream) => {
+      session.setEventConsumer((event) => {
+        const data = JSON.stringify(event);
+        void stream.writeSSE({
+          event: event.type,
+          data,
+        });
+      });
+
+      // Crash-on-startup path: if the subprocess died between POST
+      // /api/mcp/connect (which returned 200) and this GET, the session is
+      // alive but the transport is dead. setEventConsumer above just
+      // drained the queued stderr + the transport_error event. Yield once
+      // so the writeSSE writes flush, then return — closing the stream and
+      // surfacing the real error instead of a bare 404 / silent hang.
+      if (session.isTransportDead()) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        session.clearEventConsumer();
+        sessions.delete(sessionId);
+        return;
+      }
+
+      stream.onAbort(() => {
+        // Client disconnected - clear event consumer
+        const shouldCleanup = session.clearEventConsumer();
+        stream.close();
+
+        // If transport is dead and no client connected, cleanup session
+        if (shouldCleanup || session.isTransportDead()) {
+          sessions.delete(sessionId);
+        }
+      });
+
+      // Keep the stream open until the client disconnects. Hono's streamSSE
+      // closes the stream when this callback returns, so we must not return
+      // until the connection is aborted.
+      await new Promise<void>((resolve) => {
+        stream.onAbort(() => {
+          // Cleanup happens in onAbort handler above
+          resolve();
+        });
+      });
+    });
+  });
+
+  app.post("/api/mcp/disconnect", async (c) => {
+    let body: { sessionId?: string };
+    try {
+      body = (await c.req.json()) as { sessionId?: string };
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const sessionId = body.sessionId;
+    if (!sessionId) {
+      return c.json({ error: "Missing sessionId" }, 400);
+    }
+
+    const session = sessions.get(sessionId);
+    if (session) {
+      session.clearEventConsumer();
+      await session.transport.close();
+      sessions.delete(sessionId);
+    }
+
+    return c.json({ ok: true });
+  });
+
+  app.post("/api/mcp/auth-state", async (c) => {
+    let body: RemoteSetAuthStateRequest;
+    try {
+      body = (await c.req.json()) as RemoteSetAuthStateRequest;
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const { sessionId, authState } = body;
+    if (!sessionId || !authState) {
+      return c.json({ error: "Missing sessionId or authState" }, 400);
+    }
+
+    const session = sessions.get(sessionId);
+    if (!session) {
+      return c.json({ error: "Session not found" }, 404);
+    }
+
+    if (session.isTransportDead()) {
+      const errorMsg = session.getTransportError() || "Transport closed";
+      return c.json({ ok: false, kind: "transport_error", error: errorMsg });
+    }
+
+    try {
+      session.setAuthState(authState);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: msg }, 400);
+    }
+
+    return c.json({ ok: true });
+  });
+
+  app.post("/api/fetch", async (c) => {
+    let body: {
+      url: string;
+      method?: string;
+      headers?: Record<string, string>;
+      body?: string;
+    };
+    try {
+      body = (await c.req.json()) as typeof body;
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const { url, method = "GET", headers = {}, body: reqBody } = body;
+    if (!url) {
+      return c.json({ error: "Missing url" }, 400);
+    }
+
+    try {
+      const res = await fetch(url, {
+        method,
+        headers: new Headers(headers),
+        body: reqBody,
+      });
+
+      const resHeaders: Record<string, string> = {};
+      res.headers.forEach((v, k) => {
+        resHeaders[k] = v;
+      });
+
+      const contentType = res.headers.get("content-type");
+      const isStream =
+        contentType?.includes("text/event-stream") ||
+        contentType?.includes("application/x-ndjson");
+      let resBody: string | undefined;
+      if (!isStream && res.body) {
+        resBody = await res.text();
+      }
+
+      return c.json({
+        ok: res.ok,
+        status: res.status,
+        statusText: res.statusText,
+        headers: resHeaders,
+        body: resBody,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: msg }, 500);
+    }
+  });
+
+  app.post("/api/log", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as Partial<LogEvent>;
+    if (fileLogger) {
+      forwardLogEvent(fileLogger, body);
+    }
+    return c.json({ ok: true });
+  });
+
+  app.get("/api/storage/:storeId", async (c) => {
+    const storeId = c.req.param("storeId");
+    if (!storeId || !validateStoreId(storeId)) {
+      return c.json({ error: "Invalid storeId" }, 400);
+    }
+
+    const filePath = getStoreFilePath(storageDir, storeId);
+
+    try {
+      if (storeId === "client") {
+        const config = await readClientConfigStore(filePath, secretStore);
+        return c.json(config);
+      }
+
+      const raw = await readStoreFile(filePath);
+      if (raw === null) {
+        return c.json({}, 200);
+      }
+      const store = parseStore(raw);
+      return c.json(store);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      return c.json({ error: `Failed to read store: ${msg}` }, 500);
+    }
+  });
+
+  app.post("/api/storage/:storeId", async (c) => {
+    const storeId = c.req.param("storeId");
+    if (!storeId || !validateStoreId(storeId)) {
+      return c.json({ error: "Invalid storeId" }, 400);
+    }
+
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const filePath = getStoreFilePath(storageDir, storeId);
+
+    try {
+      if (storeId === "client") {
+        await writeClientConfigStore(filePath, body, secretStore);
+        return c.json({ ok: true });
+      }
+
+      const jsonData = serializeStore(body);
+      await writeStoreFile(filePath, jsonData);
+      return c.json({ ok: true });
+    } catch (error) {
+      // A malformed client.json body fails `parseClientConfig` with a ZodError
+      // — that's a client error (bad request), not a server failure. Return 400
+      // with the same human-readable formatting the load path uses, rather than
+      // letting it fall through to the generic 500 below.
+      if (error instanceof ZodError) {
+        return c.json({ error: formatClientConfigLoadError(error) }, 400);
+      }
+      const keychainResp =
+        storeId === "client" ? keychainErrorResponse(c, error) : undefined;
+      if (keychainResp) return keychainResp;
+      const msg = error instanceof Error ? error.message : String(error);
+      return c.json({ error: `Failed to write store: ${msg}` }, 500);
+    }
+  });
+
+  app.delete("/api/storage/:storeId", async (c) => {
+    const storeId = c.req.param("storeId");
+    if (!storeId || !validateStoreId(storeId)) {
+      return c.json({ error: "Invalid storeId" }, 400);
+    }
+
+    const filePath = getStoreFilePath(storageDir, storeId);
+
+    try {
+      if (storeId === "client") {
+        await deleteClientConfigStore(filePath, secretStore);
+        return c.json({ ok: true });
+      }
+
+      await deleteStoreFile(filePath);
+      return c.json({ ok: true });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      return c.json({ error: `Failed to delete store: ${msg}` }, 500);
+    }
+  });
+
+  // --- /api/servers (server list backed by mcp.json) ---
+
+  // Match handleWatcherError's pattern: log to the configured logger if
+  // present, fall back to console.warn for visibility in `npm run dev`
+  // where no logger is wired up. Both gates below feed user-visible
+  // signals (legacy on-disk shape, client bug smuggling fields), so a
+  // silent drop is worse than a console line.
+  const logWarn = (bindings: Record<string, unknown>, msg: string): void => {
+    if (fileLogger) {
+      fileLogger.warn(bindings, msg);
+    } else {
+      console.warn("[mcp.json]", msg, bindings);
+    }
+  };
+
+  // Defensive normalize so editor-edited files with type:"http" or missing
+  // type round-trip into the canonical form on every read. Inspector-
+  // extension fields (headers / metadata / connectionTimeout / requestTimeout
+  // / oauth) sit at the top level of each entry post-#1358; this function
+  // is the read-side gate — it validates each field's shape and drops
+  // anything malformed with a logged warn, so a hand-edited file with
+  // `headers: "oops"` can't put garbage rows into the form.
+  //
+  // Legacy `settings` nodes written by the pre-#1358 build (one #1352
+  // release on v2/main that never shipped stable) are dropped with a
+  // warn — those persisted headers / metadata / timeouts / OAuth
+  // credentials are intentionally lost on first read (hard cutover per
+  // #1358 decision 4). Users re-enter via the form or hand-edit into the
+  // flat shape.
+  const isStringRecord = (v: unknown): v is Record<string, string> => {
+    if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
+    for (const val of Object.values(v as Record<string, unknown>)) {
+      if (typeof val !== "string") return false;
+    }
+    return true;
+  };
+  const isKvArray = (v: unknown): v is { key: string; value: string }[] => {
+    if (!Array.isArray(v)) return false;
+    return v.every(
+      (e) =>
+        e !== null &&
+        typeof e === "object" &&
+        typeof (e as Record<string, unknown>).key === "string" &&
+        typeof (e as Record<string, unknown>).value === "string",
+    );
+  };
+  const isOauthObject = (
+    v: unknown,
+  ): v is {
+    clientId?: string;
+    clientSecret?: string;
+    scopes?: string;
+    enterpriseManaged?: boolean;
+  } => {
+    if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
+    const o = v as Record<string, unknown>;
+    for (const k of ["clientId", "clientSecret", "scopes"] as const) {
+      if (o[k] !== undefined && typeof o[k] !== "string") return false;
+    }
+    if (
+      o.enterpriseManaged !== undefined &&
+      typeof o.enterpriseManaged !== "boolean"
+    ) {
+      return false;
+    }
+    return true;
+  };
+  // A roots array: each entry must have a string `uri` and, when present, a
+  // string `name` (SDK `Root`). Other keys (e.g. `_meta`) pass through — we
+  // only gate the two fields the Inspector reads/writes.
+  const isRootArray = (v: unknown): v is { uri: string; name?: string }[] => {
+    if (!Array.isArray(v)) return false;
+    return v.every((e) => {
+      if (e === null || typeof e !== "object") return false;
+      const o = e as Record<string, unknown>;
+      if (typeof o.uri !== "string") return false;
+      if (o.name !== undefined && typeof o.name !== "string") return false;
+      return true;
+    });
+  };
+  // `Number.isFinite` rejects `Infinity` and `NaN` as well as non-numbers,
+  // matching the write-side semantics in `validateSettings`. A hand-edited
+  // file with `connectionTimeout: Infinity` would otherwise pass the guard
+  // and propagate to the form (where it has no useful meaning).
+  const isNonNegNumber = (v: unknown): v is number =>
+    typeof v === "number" && Number.isFinite(v) && v >= 0;
+
+  const normalizeMcpServers = (
+    raw: unknown,
+  ): Record<string, StoredMCPServer> => {
+    if (!raw || typeof raw !== "object") return {};
+    const out: Record<string, StoredMCPServer> = {};
+    for (const [id, val] of Object.entries(raw as Record<string, unknown>)) {
+      if (!val || typeof val !== "object") continue;
+      // `valObj` is the per-entry object we'll mutate in place via the
+      // `delete` calls below. Safe because the only callers
+      // (`readMcpConfig` and the GET handler's file-present branch — the
+      // seed branch returns `DEFAULT_SEED_CONFIG` without normalizing)
+      // pass in freshly-parsed JSON they don't retain a reference to
+      // elsewhere.
+      const valObj = val as Record<string, unknown>;
+
+      // Strip a legacy nested `settings` node before normalizeServerType
+      // would spread it through. Hard cutover per decision 4.
+      if ("settings" in valObj) {
+        logWarn(
+          { route: "/api/servers", id, droppedKey: "settings" },
+          "Dropping legacy `settings` node from mcp.json entry — fields now live at the top level. Re-enter via the settings form or hand-edit the file into the flat shape.",
+        );
+        delete valObj.settings;
+      }
+
+      // Per-field shape validation on the Inspector-extension keys. The
+      // write path (validateSettings) is symmetric — same checks. Drop
+      // bad shapes individually so a single malformed key doesn't take
+      // out the rest of the entry; log so the user can fix the file.
+      if ("headers" in valObj && !isStringRecord(valObj.headers)) {
+        logWarn(
+          { route: "/api/servers", id, droppedKey: "headers" },
+          "Dropping malformed `headers` field — expected `Record<string, string>`.",
+        );
+        delete valObj.headers;
+      }
+      if ("metadata" in valObj && !isKvArray(valObj.metadata)) {
+        logWarn(
+          { route: "/api/servers", id, droppedKey: "metadata" },
+          "Dropping malformed `metadata` field — expected `Array<{ key: string, value: string }>`.",
+        );
+        delete valObj.metadata;
+      }
+      if (
+        "connectionTimeout" in valObj &&
+        !isNonNegNumber(valObj.connectionTimeout)
+      ) {
+        logWarn(
+          { route: "/api/servers", id, droppedKey: "connectionTimeout" },
+          "Dropping malformed `connectionTimeout` field — expected non-negative number.",
+        );
+        delete valObj.connectionTimeout;
+      }
+      if (
+        "requestTimeout" in valObj &&
+        !isNonNegNumber(valObj.requestTimeout)
+      ) {
+        logWarn(
+          { route: "/api/servers", id, droppedKey: "requestTimeout" },
+          "Dropping malformed `requestTimeout` field — expected non-negative number.",
+        );
+        delete valObj.requestTimeout;
+      }
+      if ("taskTtl" in valObj && !isNonNegNumber(valObj.taskTtl)) {
+        logWarn(
+          { route: "/api/servers", id, droppedKey: "taskTtl" },
+          "Dropping malformed `taskTtl` field — expected non-negative number.",
+        );
+        delete valObj.taskTtl;
+      }
+      if (
+        "maxFetchRequests" in valObj &&
+        !isNonNegNumber(valObj.maxFetchRequests)
+      ) {
+        logWarn(
+          { route: "/api/servers", id, droppedKey: "maxFetchRequests" },
+          "Dropping malformed `maxFetchRequests` field — expected non-negative number.",
+        );
+        delete valObj.maxFetchRequests;
+      }
+      if ("oauth" in valObj && !isOauthObject(valObj.oauth)) {
+        logWarn(
+          { route: "/api/servers", id, droppedKey: "oauth" },
+          "Dropping malformed `oauth` field — expected `{ clientId?, clientSecret?, scopes?, enterpriseManaged? }`.",
+        );
+        delete valObj.oauth;
+      }
+      if ("roots" in valObj && !isRootArray(valObj.roots)) {
+        logWarn(
+          { route: "/api/servers", id, droppedKey: "roots" },
+          "Dropping malformed `roots` field — expected `Array<{ uri: string, name?: string }>`.",
+        );
+        delete valObj.roots;
+      }
+      if ("protocolEra" in valObj && !isProtocolEra(valObj.protocolEra)) {
+        logWarn(
+          { route: "/api/servers", id, droppedKey: "protocolEra" },
+          "Dropping malformed `protocolEra` field — expected 'legacy', 'auto', or 'modern'.",
+        );
+        delete valObj.protocolEra;
+      }
+      if (
+        "modernLogLevel" in valObj &&
+        !isModernLogLevel(valObj.modernLogLevel)
+      ) {
+        logWarn(
+          { route: "/api/servers", id, droppedKey: "modernLogLevel" },
+          "Dropping malformed `modernLogLevel` field — expected 'off' or a logging level.",
+        );
+        delete valObj.modernLogLevel;
+      }
+
+      out[id] = normalizeServerType(
+        valObj as Record<string, unknown> & { type?: string },
+      ) as StoredMCPServer;
+    }
+    return out;
+  };
+
+  // Build a single on-disk entry from `{ config, settings }`, normalizing the
+  // type discriminator and splatting Inspector-extension fields onto the
+  // entry as direct keys (post-#1358 flat shape).
+  //
+  // `normalizeServerType` spreads unknown keys from the incoming config
+  // through verbatim, so a caller that included `config.settings` (or any
+  // of the now-flat Inspector keys) on the wire would smuggle those values
+  // onto the stored entry — bypassing `validateSettings`. Strip them here
+  // so `validateSettings` remains the single write path for those fields.
+  // Log a warning if we observe this — it indicates a client bug (settings
+  // travel through the body's top-level `settings` field per the kept-
+  // envelope wire shape from #1358 decision 5, not nested in config).
+  //
+  // `id` is threaded through purely so the warning correlates to a specific
+  // entry; the route ultimately reaches here via POST or PUT and both know
+  // the target id at call time.
+  //
+  // The set of guarded keys is the source-of-truth `INSPECTOR_FIELD_KEYS`
+  // plus the legacy `"settings"` wrapper key. Adding a new Inspector-
+  // extension field to `StoredMCPServer` propagates through the
+  // `satisfies` check in `serverList.ts` and updates this guard
+  // automatically; nothing to remember to update here.
+  const SMUGGLE_GUARDED_KEYS: ReadonlySet<string> = new Set<string>([
+    ...INSPECTOR_FIELD_KEYS,
+    "settings",
+  ]);
+  const buildStoredEntry = (
+    id: string,
+    config: unknown,
+    settings: InspectorServerSettings | undefined,
+  ): StoredMCPServer => {
+    // `unknown` parameter contract: be honest about the shape rather than
+    // assuming the route layer's pre-checks. The route handlers do reject
+    // non-object config before reaching here, but this helper should stay
+    // safe to call from anywhere.
+    const configObj: Record<string, unknown> =
+      config !== null && typeof config === "object"
+        ? (config as Record<string, unknown>)
+        : {};
+    const smuggled: string[] = [];
+    const configOnly: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(configObj)) {
+      if (SMUGGLE_GUARDED_KEYS.has(k)) {
+        smuggled.push(k);
+        continue;
+      }
+      configOnly[k] = v;
+    }
+    if (smuggled.length > 0) {
+      logWarn(
+        { route: "/api/servers", id, smuggledKeys: smuggled },
+        "Stripping Inspector-extension keys from request body's `config` — those must travel through the top-level `settings` field, not nested inside `config`.",
+      );
+    }
+    const normalized = normalizeServerType(
+      configOnly as Record<string, unknown> & { type?: string },
+    ) as StoredMCPServer;
+    if (settings !== undefined) {
+      Object.assign(normalized, inspectorSettingsToStoredFields(settings));
+    }
+    return normalized;
+  };
+
+  // Write-through for the stdio `env` / `cwd` config fields edited via the
+  // Server Settings modal. They are NOT Inspector-extension fields (the
+  // transport reads them off `config`), so `inspectorSettingsToStoredFields`
+  // doesn't emit them. Instead, on a settings-only patch the settings mirror is
+  // authoritative: this maps `settings.env` / `settings.cwd` back onto the
+  // stored stdio config, including clearing (empty list / blank cwd → field
+  // removed) so a user can delete a value through the modal.
+  //
+  // Each field is only written when the caller actually *sent* it (`provided`).
+  // An absent field on the wire means "leave the stored value alone" — without
+  // this gate an `env`-unaware client doing a settings patch (e.g. just bumping
+  // a timeout) would silently wipe the server's `env`/`cwd`, since
+  // `validateSettings` coerces a missing `env` to `[]` (which otherwise reads as
+  // "clear"). The integrated web client always resends the full GET-rehydrated
+  // `env`, so it is unaffected either way; this protects the raw HTTP contract.
+  // No-op for non-stdio entries. Mutates `entry` in place.
+  const applyStdioSettingsToConfig = (
+    entry: StoredMCPServer,
+    settings: InspectorServerSettings,
+    provided: { env: boolean; cwd: boolean },
+  ): void => {
+    if (!(entry.type === "stdio" || entry.type === undefined)) return;
+    const stdio = entry as StdioServerConfig & StoredMCPServer;
+    if (provided.env) {
+      const env = envPairsToRecord(settings.env);
+      if (Object.keys(env).length > 0) {
+        stdio.env = env;
+      } else {
+        delete stdio.env;
+      }
+    }
+    if (provided.cwd) {
+      const cwd = settings.cwd?.trim();
+      if (cwd) {
+        stdio.cwd = cwd;
+      } else {
+        delete stdio.cwd;
+      }
+    }
+  };
+
+  // Structurally validates an InspectorServerSettings payload off the wire so
+  // a malformed body can't persist to disk and crash the UI later (e.g.
+  // `settings: []` or `settings: { headers: "oops" }`). Mirrors the lenient
+  // read on `normalizeMcpServers` so the only fully-trusted invariant is
+  // "what we accept on the write path."
+  const validateSettings = (
+    raw: unknown,
+  ):
+    | {
+        ok: true;
+        value: InspectorServerSettings;
+        // Whether the caller actually sent `env` / `cwd` (vs. them being absent
+        // and defaulted). The write-through uses this to preserve a stored
+        // `config.env`/`cwd` on a patch that omits the field, rather than
+        // treating "absent" as "clear".
+        envProvided: boolean;
+        cwdProvided: boolean;
+      }
+    | { ok: false; error: string } => {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+      return { ok: false, error: "settings must be an object" };
+    }
+    const obj = raw as Record<string, unknown>;
+    const isKvArray = (v: unknown): v is { key: string; value: string }[] => {
+      if (!Array.isArray(v)) return false;
+      return v.every(
+        (e) =>
+          e !== null &&
+          typeof e === "object" &&
+          typeof (e as Record<string, unknown>).key === "string" &&
+          typeof (e as Record<string, unknown>).value === "string",
+      );
+    };
+    const isBooleanRecord = (v: unknown): v is Record<string, boolean> => {
+      if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
+      return Object.values(v as Record<string, unknown>).every(
+        (flag) => typeof flag === "boolean",
+      );
+    };
+    if (!isKvArray(obj.headers)) {
+      return {
+        ok: false,
+        error: "settings.headers must be an array of { key, value }",
+      };
+    }
+    if (!isKvArray(obj.metadata)) {
+      return {
+        ok: false,
+        error: "settings.metadata must be an array of { key, value }",
+      };
+    }
+    // env is optional on the wire (older clients / non-stdio servers won't send
+    // it); when present it must be an array of { key, value } like headers.
+    if (obj.env !== undefined && !isKvArray(obj.env)) {
+      return {
+        ok: false,
+        error: "settings.env must be an array of { key, value }",
+      };
+    }
+    // cwd is optional; when present it must be a string. Empty coerces to absent
+    // below (matching the read side), which the write-through reads as "clear".
+    if (obj.cwd !== undefined && typeof obj.cwd !== "string") {
+      return { ok: false, error: "settings.cwd must be a string" };
+    }
+    if (
+      typeof obj.connectionTimeout !== "number" ||
+      obj.connectionTimeout < 0
+    ) {
+      return {
+        ok: false,
+        error: "settings.connectionTimeout must be a non-negative number",
+      };
+    }
+    if (typeof obj.requestTimeout !== "number" || obj.requestTimeout < 0) {
+      return {
+        ok: false,
+        error: "settings.requestTimeout must be a non-negative number",
+      };
+    }
+    // taskTtl is optional on the wire (older clients won't send it); when
+    // present it must be a non-negative number, otherwise it defaults below.
+    if (
+      obj.taskTtl !== undefined &&
+      (typeof obj.taskTtl !== "number" || obj.taskTtl < 0)
+    ) {
+      return {
+        ok: false,
+        error: "settings.taskTtl must be a non-negative number",
+      };
+    }
+    // Optional on the wire (older clients won't send it); when present it must
+    // be a boolean. Absent reads back as false below.
+    if (
+      obj.autoRefreshOnListChanged !== undefined &&
+      typeof obj.autoRefreshOnListChanged !== "boolean"
+    ) {
+      return {
+        ok: false,
+        error: "settings.autoRefreshOnListChanged must be a boolean",
+      };
+    }
+    // Optional on the wire; boolean when present, else defaults to false below.
+    if (
+      obj.paginatedLists !== undefined &&
+      typeof obj.paginatedLists !== "boolean"
+    ) {
+      return {
+        ok: false,
+        error: "settings.paginatedLists must be a boolean",
+      };
+    }
+    // maxFetchRequests is optional on the wire (older clients won't send it);
+    // when present it must be a non-negative number (0 = unlimited), otherwise
+    // it defaults below.
+    if (
+      obj.maxFetchRequests !== undefined &&
+      (typeof obj.maxFetchRequests !== "number" || obj.maxFetchRequests < 0)
+    ) {
+      return {
+        ok: false,
+        error: "settings.maxFetchRequests must be a non-negative number",
+      };
+    }
+    for (const optional of [
+      "oauthClientId",
+      "oauthClientSecret",
+      "oauthScopes",
+    ] as const) {
+      if (obj[optional] !== undefined && typeof obj[optional] !== "string") {
+        return { ok: false, error: `settings.${optional} must be a string` };
+      }
+    }
+    if (
+      obj.enterpriseManaged !== undefined &&
+      typeof obj.enterpriseManaged !== "boolean"
+    ) {
+      return {
+        ok: false,
+        error: "settings.enterpriseManaged must be a boolean",
+      };
+    }
+    if (
+      obj.oauthOnInsufficientScope !== undefined &&
+      obj.oauthOnInsufficientScope !== "reauthorize" &&
+      obj.oauthOnInsufficientScope !== "throw"
+    ) {
+      return {
+        ok: false,
+        error:
+          "settings.oauthOnInsufficientScope must be 'reauthorize' or 'throw'",
+      };
+    }
+    // roots is optional on the wire (older clients won't send it); when
+    // present it must be an array of `{ uri, name? }`. Reuses the same
+    // module-scope `isRootArray` guard the read path applies in
+    // `normalizeMcpServers`, so the two paths can't drift.
+    if (obj.roots !== undefined && !isRootArray(obj.roots)) {
+      return {
+        ok: false,
+        error: "settings.roots must be an array of { uri, name? }",
+      };
+    }
+    // protocolEra is optional on the wire (older clients won't send it); when
+    // present it must be one of the three era literals, otherwise it defaults
+    // to absent (→ legacy) below.
+    if (obj.protocolEra !== undefined && !isProtocolEra(obj.protocolEra)) {
+      return {
+        ok: false,
+        error: "settings.protocolEra must be 'legacy', 'auto', or 'modern'",
+      };
+    }
+    // modernLogLevel is optional on the wire; when present it must be "off" or
+    // one of the eight logging levels, otherwise it defaults to absent below.
+    if (
+      obj.modernLogLevel !== undefined &&
+      !isModernLogLevel(obj.modernLogLevel)
+    ) {
+      return {
+        ok: false,
+        error:
+          "settings.modernLogLevel must be 'off' or a logging level (debug…emergency)",
+      };
+    }
+    // advertisedExtensions is optional on the wire (older clients won't send
+    // it); when present it must be a flat record of boolean flags keyed by
+    // extension id, otherwise it defaults to absent below.
+    if (
+      obj.advertisedExtensions !== undefined &&
+      !isBooleanRecord(obj.advertisedExtensions)
+    ) {
+      return {
+        ok: false,
+        error:
+          "settings.advertisedExtensions must be an object of boolean flags",
+      };
+    }
+    // Build the validated value from explicitly named fields rather than
+    // casting the raw object through. Unknown keys silently drop so a
+    // misconfigured client can't smuggle stowaways onto disk, and consumers
+    // can rely on the validated shape being exactly InspectorServerSettings.
+    // Empty-string OAuth fields coerce to absent — the form emits `""` when
+    // the user clears an input, and an empty `oauthClientId` on disk would
+    // later be misread as "OAuth configured."
+    const value: InspectorServerSettings = {
+      headers: obj.headers as { key: string; value: string }[],
+      // Absent → empty list, matching the read side. The write-through drops
+      // empty-key rows and clears `config.env` when the list is empty.
+      env: isKvArray(obj.env) ? obj.env : [],
+      metadata: obj.metadata as { key: string; value: string }[],
+      connectionTimeout: obj.connectionTimeout as number,
+      requestTimeout: obj.requestTimeout as number,
+      // Absent → product default, matching the read side
+      // (storedFieldsToInspectorSettings). The default is the omit-sentinel in
+      // inspectorSettingsToStoredFields, so this won't write a spurious taskTtl
+      // to disk for a client that didn't send one.
+      taskTtl:
+        typeof obj.taskTtl === "number" ? obj.taskTtl : DEFAULT_TASK_TTL_MS,
+      // Absent → false, matching the read side. The omit-on-false logic lives
+      // in inspectorSettingsToStoredFields, so a false value writes nothing.
+      autoRefreshOnListChanged: obj.autoRefreshOnListChanged === true,
+      // Absent → false, matching the read side (omit-on-false on the write side).
+      paginatedLists: obj.paginatedLists === true,
+      // Absent → product default, matching the read side. The default is the
+      // omit-sentinel in inspectorSettingsToStoredFields, so a client that
+      // didn't send one writes no spurious maxFetchRequests to disk.
+      maxFetchRequests:
+        typeof obj.maxFetchRequests === "number"
+          ? obj.maxFetchRequests
+          : DEFAULT_MAX_FETCH_REQUESTS,
+      // Absent → empty list, matching the read side
+      // (storedFieldsToInspectorSettings). Empty rows are dropped on the way
+      // to disk by inspectorSettingsToStoredFields, so an empty array here
+      // writes no spurious `roots` field.
+      roots: isRootArray(obj.roots) ? obj.roots : [],
+    };
+    if (typeof obj.oauthClientId === "string" && obj.oauthClientId !== "") {
+      value.oauthClientId = obj.oauthClientId;
+    }
+    if (
+      typeof obj.oauthClientSecret === "string" &&
+      obj.oauthClientSecret !== ""
+    ) {
+      value.oauthClientSecret = obj.oauthClientSecret;
+    }
+    if (typeof obj.oauthScopes === "string" && obj.oauthScopes !== "") {
+      value.oauthScopes = obj.oauthScopes;
+    }
+    if (obj.enterpriseManaged === true) {
+      value.enterpriseManaged = true;
+    }
+    if (
+      obj.oauthOnInsufficientScope === "reauthorize" ||
+      obj.oauthOnInsufficientScope === "throw"
+    ) {
+      value.oauthOnInsufficientScope = obj.oauthOnInsufficientScope;
+    }
+    // Optional; when a valid era is present, carry it. Absence reads back as the
+    // default era downstream (eraToVersionNegotiation is not called for absent).
+    if (isProtocolEra(obj.protocolEra)) {
+      value.protocolEra = obj.protocolEra;
+    }
+    // Optional; carry a valid modern log level. Absence reads back as the
+    // default (DEFAULT_MODERN_LOG_LEVEL) downstream.
+    if (isModernLogLevel(obj.modernLogLevel)) {
+      value.modernLogLevel = obj.modernLogLevel;
+    }
+    // Optional; carry a non-empty boolean-flag map. Empty/absent reads back as
+    // unset downstream (omit-on-empty in inspectorSettingsToStoredFields), so a
+    // client that sent none writes no spurious advertisedExtensions to disk.
+    if (
+      isBooleanRecord(obj.advertisedExtensions) &&
+      Object.keys(obj.advertisedExtensions).length > 0
+    ) {
+      value.advertisedExtensions = { ...obj.advertisedExtensions };
+    }
+    // Empty cwd coerces to absent on the value (matching the read side); the
+    // write-through distinguishes "sent cwd: '' " (clear) from "cwd omitted"
+    // (preserve) via `cwdProvided` below rather than the value alone.
+    if (typeof obj.cwd === "string" && obj.cwd !== "") {
+      value.cwd = obj.cwd;
+    }
+    return {
+      ok: true,
+      value,
+      envProvided: obj.env !== undefined,
+      cwdProvided: obj.cwd !== undefined,
+    };
+  };
+
+  // In-process serialization for the read-modify-write flow on the
+  // mutating routes (POST/PUT/DELETE). `atomically` guarantees torn-write
+  // safety on the file itself, but two concurrent requests can both read the
+  // same baseline and the second write clobbers the first. Single-user local
+  // dev tool, so this is a guardrail rather than a hot-path concern, but it
+  // avoids a real lost-update once file watching (#1345) or any remote/
+  // multi-client usage lands.
+  let writeQueue: Promise<void> = Promise.resolve();
+  const withWriteLock = async <T>(fn: () => Promise<T>): Promise<T> => {
+    const prev = writeQueue;
+    let release: () => void = () => {};
+    writeQueue = new Promise<void>((r) => {
+      release = r;
+    });
+    try {
+      await prev;
+      return await fn();
+    } finally {
+      release();
+    }
+  };
+
+  // Load current config from disk. ENOENT → empty. A valid-JSON file without
+  // `mcpServers` is treated as empty (the user may have deliberately wiped it
+  // or a future field arrived above the key). Invalid JSON surfaces a 500
+  // from the route's outer try — we'd rather flag corruption than silently
+  // present "no servers" and let the next write clobber the broken file.
+  // The seed-write on first GET happens in the route, not here, so mutating
+  // routes don't accidentally trigger it.
+  const readMcpConfig = async (): Promise<MCPConfig> => {
+    const raw = await readStoreFile(mcpConfigPath);
+    if (raw === null) return { mcpServers: {} };
+    const parsed = parseStore(raw) as { mcpServers?: unknown } | null;
+    return { mcpServers: normalizeMcpServers(parsed?.mcpServers) };
+  };
+
+  // ---- Keychain helpers -------------------------------------------------
+  //
+  // Centralizes the "write the secrets in this entry to the keychain" and
+  // "fetch all secrets for this entry from the keychain" steps so the
+  // POST/PUT/DELETE/GET handlers stay readable. Each operation translates a
+  // `KeychainUnavailableError` from the underlying store into a Hono 503
+  // — the only realistic trigger is Linux without libsecret, and the user
+  // can install it without restarting.
+
+  // Same Promise.all reasoning as `readKeychainEntriesFor`: each set
+  // is a native round-trip and there's no ordering requirement among
+  // distinct (id, field) keys. If the keychain is unavailable every
+  // set will reject — Promise.all surfaces the first rejection, which
+  // is the right signal for the route handler (translates to 503).
+  const writeKeychainEntriesFor = async (
+    id: string,
+    secrets: Record<string, string>,
+  ): Promise<void> => {
+    await Promise.all(
+      Object.entries(secrets).map(([field, value]) =>
+        secretStore.set(id, field, value),
+      ),
+    );
+  };
+
+  // Fetch every keychain value an entry could need into a flat record
+  // keyed by field name. Used by the GET handler to rehydrate the on-disk
+  // stripped shape into the shape today's browser code expects. Missing
+  // fields are simply absent from the result (so `mergeSecretsIntoStored`
+  // leaves the disk value untouched).
+  // Issue many keychain reads in parallel. On macOS each round-trip to
+  // Keychain Services is 10-50ms; a server with 20 entries × 5 env vars
+  // each would otherwise serialize to ~5s of rehydration on every GET.
+  // `@napi-rs/keyring`'s async APIs release the event loop, so
+  // Promise.all is a real win, not just stylistic.
+  const readKeychainEntriesFor = async (
+    id: string,
+    fields: string[],
+  ): Promise<Record<string, string>> => {
+    const values = await Promise.all(
+      fields.map(
+        async (field) => [field, await secretStore.get(id, field)] as const,
+      ),
+    );
+    const out: Record<string, string> = {};
+    for (const [field, v] of values) {
+      if (v !== null) out[field] = v;
+    }
+    return out;
+  };
+
+  // Cheap structural check used by the GET handler to decide whether
+  // to enter the write lock for migration. Pure — no keychain or disk
+  // access. The actual migration (`migratePlaintextSecrets`) writes
+  // to the keychain, so we must not run it speculatively outside the
+  // lock; this predicate lets us keep the fast path lock-free.
+  const hasPlaintextSecrets = (config: MCPConfig): boolean => {
+    for (const stored of Object.values(config.mcpServers)) {
+      const { secrets } = extractSecretsFromStored(stored);
+      if (Object.keys(secrets).length > 0) return true;
+    }
+    return false;
+  };
+
+  // Migrate plaintext secrets in a freshly-read mcp.json into the
+  // keychain. Idempotent: when the keychain already has a value for
+  // `(id, field)`, that value wins and the disk plaintext is dropped
+  // unread. Returns the rewritten config plus a flag so the GET handler
+  // knows whether to persist the cleanup.
+  //
+  // When the keychain is unavailable (Linux without libsecret), the
+  // first `secretStore.set` throws `KeychainUnavailableError`. We catch
+  // it and abandon the migration for this GET — the on-disk file stays
+  // as-is so the user's secret isn't lost, and the next GET retries
+  // (e.g. after the user installs libsecret).
+  const migratePlaintextSecrets = async (
+    config: MCPConfig,
+  ): Promise<{ migrated: MCPConfig; changed: boolean }> => {
+    let changed = false;
+    const next: MCPConfig = { mcpServers: {} };
+    try {
+      for (const [id, stored] of Object.entries(config.mcpServers)) {
+        const { stripped, secrets } = extractSecretsFromStored(stored);
+        if (Object.keys(secrets).length === 0) {
+          next.mcpServers[id] = stored;
+          continue;
+        }
+        for (const [field, value] of Object.entries(secrets)) {
+          const existing = await secretStore.get(id, field);
+          if (existing === null) {
+            await secretStore.set(id, field, value);
+          }
+          // existing !== null → keychain already had a value for this
+          // (id, field); keep the keychain authoritative and drop the
+          // plaintext from disk. This handles the case where a user has
+          // edited mcp.json by hand after the original migration.
+        }
+        next.mcpServers[id] = stripped;
+        changed = true;
+      }
+    } catch (err) {
+      if (err instanceof KeychainUnavailableError) {
+        if (fileLogger) {
+          fileLogger.warn(
+            { err: err.message },
+            "Keychain unavailable; skipping plaintext-secret migration on this read. Existing mcp.json plaintext values are preserved.",
+          );
+        }
+        // Partial-migration semantics: if `set` threw partway through
+        // the loop, some servers may already have keychain entries
+        // while others don't. We deliberately return the original
+        // `config` (not the partial `next`) so the disk file stays
+        // intact — the next successful GET runs the migration again,
+        // and the idempotent "keychain wins on conflict" branch
+        // (`existing !== null`) silently absorbs the already-set
+        // entries. No data loss; one wasted set on retry per
+        // already-migrated entry.
+        return { migrated: config, changed: false };
+      }
+      throw err;
+    }
+    return { migrated: next, changed };
+  };
+
+  // Rehydrate every server's secrets so the GET response matches what
+  // the browser saw before the keychain split. Runs after migration in
+  // the GET handler.
+  const rehydrateConfig = async (config: MCPConfig): Promise<MCPConfig> => {
+    const out: MCPConfig = { mcpServers: {} };
+    for (const [id, stored] of Object.entries(config.mcpServers)) {
+      const fields = expectedSecretFields(stored);
+      const secrets = await readKeychainEntriesFor(id, fields);
+      out.mcpServers[id] = mergeSecretsIntoStored(stored, secrets);
+    }
+    return out;
+  };
+
+  // Fields the previous entry held that the new entry doesn't —
+  // candidates for deletion after the disk write succeeds. Returned
+  // as an array so the caller can decide where in the write sequence
+  // to perform the destructive operation (we want it after the disk
+  // write so a failed disk write doesn't leave the user with their
+  // old config on disk but missing keychain entries).
+  const computeObsoleteFields = (
+    previousFields: Set<string>,
+    nextSecrets: Record<string, string>,
+  ): string[] => {
+    const nextFieldSet = new Set(Object.keys(nextSecrets));
+    const obsolete: string[] = [];
+    for (const field of previousFields) {
+      if (!nextFieldSet.has(field)) obsolete.push(field);
+    }
+    return obsolete;
+  };
+
+  /**
+   * Merge keychain secrets for a server-id rename. PUT payload values win
+   * over the old id's keychain entries; keychain fills fields missing from
+   * the payload (e.g. config-modal rename that does not re-send stripped
+   * secrets). Filtered to the new on-disk entry's expected fields so env
+   * keys removed during the rename are not carried over.
+   */
+  const mergeRenameKeychainSecrets = (
+    stripped: StoredMCPServer,
+    keychainSecrets: Record<string, string>,
+    nextSecrets: Record<string, string>,
+  ): Record<string, string> => {
+    const allowedFields = new Set(expectedSecretFields(stripped));
+    const merged = { ...keychainSecrets, ...nextSecrets };
+    const out: Record<string, string> = {};
+    for (const [field, value] of Object.entries(merged)) {
+      if (allowedFields.has(field)) out[field] = value;
+    }
+    return out;
+  };
+
+  // Parallel for symmetry with `readKeychainEntriesFor` /
+  // `writeKeychainEntriesFor`: distinct (id, field) deletes have no
+  // ordering requirement, and `secretStore.delete` is already a silent
+  // no-op on unavailability so Promise.all has no failure-mode surprise.
+  const deleteKeychainFields = async (
+    id: string,
+    fields: string[],
+  ): Promise<void> => {
+    await Promise.all(fields.map((field) => secretStore.delete(id, field)));
+  };
+
+  const keychainErrorResponse = (
+    c: Context,
+    err: unknown,
+  ): Response | undefined => {
+    if (err instanceof KeychainUnavailableError) {
+      return c.json({ error: err.message }, 503);
+    }
+    return undefined;
+  };
+
+  // Reject catalog mutations in a read-only session. Checked first in each
+  // mutating route — before body parse or existence checks — so a read-only
+  // backend answers uniformly and never leaks whether an id exists (403, not
+  // 404). Returns a Response to short-circuit, or undefined to proceed.
+  const requireWritable = (c: Context): Response | undefined => {
+    if (writable) return undefined;
+    return c.json({ error: "Server list is read-only for this session." }, 403);
+  };
+
+  app.get("/api/servers", async (c) => {
+    try {
+      // In-memory session (ad-hoc launch): serve the seeded list verbatim.
+      // No disk read, no seed, no migration — there is no file. Ad-hoc env /
+      // header values live as plaintext in this list and flow straight to
+      // POST /api/mcp/connect, which is what makes `--header` take effect.
+      if (inMemoryServers) {
+        const normalized: MCPConfig = {
+          mcpServers: normalizeMcpServers(inMemoryServers.mcpServers),
+        };
+        return c.json(await rehydrateConfig(normalized));
+      }
+
+      // Fast path: peek at the file without taking the write lock. Most
+      // GETs land here — file exists, no plaintext to migrate. The
+      // unlocked read is safe because we don't write anything in this
+      // branch; a concurrent mutation just means the response is a
+      // snapshot from a moment ago.
+      const raw = await readStoreFile(mcpConfigPath);
+      if (raw !== null) {
+        const parsed = parseStore(raw) as { mcpServers?: unknown } | null;
+        const onDisk: MCPConfig = {
+          mcpServers: normalizeMcpServers(parsed?.mcpServers),
+        };
+        // Read-only session file (`--config`): never migrate (a write) and
+        // never seed. Return the file as-is so a foreign config is shown but
+        // its bytes — and any plaintext secrets — are left untouched on disk.
+        if (!writable) {
+          return c.json(await rehydrateConfig(onDisk));
+        }
+        if (!hasPlaintextSecrets(onDisk)) {
+          return c.json(await rehydrateConfig(onDisk));
+        }
+      } else if (!writable) {
+        // Read-only and the file is absent: present an empty list rather than
+        // seeding the default sample servers into a path the user pointed us at.
+        return c.json({ mcpServers: {} });
+      }
+
+      // Slow path: either the file is missing (first-launch seed) or it
+      // contains plaintext we need to migrate. Both branches write the
+      // file, so the entire read + decide + write sequence must happen
+      // inside the write lock — otherwise a concurrent POST/PUT/DELETE
+      // could land between our unlocked read and our locked write, and
+      // we'd clobber it. Re-read once we hold the lock so the decision
+      // is based on the same snapshot we're about to mutate.
+      const settled = await withWriteLock(async () => {
+        const rawInside = await readStoreFile(mcpConfigPath);
+        if (rawInside === null) {
+          // Still absent after taking the lock → no concurrent POST
+          // beat us to it; seed the file ourselves. The seed has no
+          // secrets so nothing else to do.
+          await writeMcpAndTrackMtime(serializeStore(DEFAULT_SEED_CONFIG));
+          return DEFAULT_SEED_CONFIG;
+        }
+        const parsedInside = parseStore(rawInside) as {
+          mcpServers?: unknown;
+        } | null;
+        const inside: MCPConfig = {
+          mcpServers: normalizeMcpServers(parsedInside?.mcpServers),
+        };
+        // A concurrent POST may have run between the unlocked peek and
+        // the lock acquisition — if the file now has no plaintext to
+        // migrate, leave it alone and return the latest snapshot.
+        if (!hasPlaintextSecrets(inside)) return inside;
+        const { migrated, changed } = await migratePlaintextSecrets(inside);
+        if (changed) {
+          await writeMcpAndTrackMtime(serializeStore(migrated));
+        }
+        return migrated;
+      });
+      return c.json(await rehydrateConfig(settled));
+    } catch (error) {
+      const keychainResp = keychainErrorResponse(c, error);
+      if (keychainResp) return keychainResp;
+      const msg = error instanceof Error ? error.message : String(error);
+      return c.json({ error: `Failed to read server list: ${msg}` }, 500);
+    }
+  });
+
+  // Read another MCP client's well-known config file on this host and return
+  // its servers in canonical form, for the "Import config" source picker
+  // (#1348). Read-only: it never writes, so it's allowed even in a read-only
+  // session (the subsequent POST /api/servers per chosen entry is what's gated).
+  // `?type=` selects the strategy (claude-desktop | cursor | cline | vscode);
+  // an unknown type is a 400. When none of the strategy's well-known paths exist
+  // the response is `{ found: false, searched }` so the UI can fall back to the
+  // file picker; when a path exists but won't parse, `{ found: true, error }`.
+  app.get("/api/import-source", (c) => {
+    const type = c.req.query("type") ?? "";
+    const result = resolveImportSource(
+      type,
+      process.platform,
+      homedir(),
+      (path) => (existsSync(path) ? readFileSync(path, "utf-8") : null),
+    );
+    if (!result) {
+      return c.json(
+        { error: `Unknown import source: ${type || "(none)"}` },
+        400,
+      );
+    }
+    return c.json(result);
+  });
+
+  app.post("/api/servers", async (c) => {
+    const ro = requireWritable(c);
+    if (ro) return ro;
+    let body: { id?: unknown; config?: unknown; settings?: unknown };
+    try {
+      body = (await c.req.json()) as {
+        id?: unknown;
+        config?: unknown;
+        settings?: unknown;
+      };
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    if (typeof body.id !== "string" || !validateStoreId(body.id)) {
+      return c.json(
+        {
+          error:
+            "Invalid id: must be non-empty and contain only alphanumeric, hyphen, or underscore",
+        },
+        400,
+      );
+    }
+    if (!body.config || typeof body.config !== "object") {
+      return c.json({ error: "Missing or invalid config" }, 400);
+    }
+    // Settings on POST: optional. `undefined` → no settings node persisted.
+    // Any provided value must structurally match InspectorServerSettings.
+    let postSettings: InspectorServerSettings | undefined;
+    if (body.settings !== undefined && body.settings !== null) {
+      const validated = validateSettings(body.settings);
+      if (!validated.ok) return c.json({ error: validated.error }, 400);
+      postSettings = validated.value;
+    }
+    const id = body.id;
+
+    try {
+      return await withWriteLock(async () => {
+        const current = await readMcpConfig();
+        if (id in current.mcpServers) {
+          return c.json({ error: `Server '${id}' already exists` }, 409);
+        }
+        const built = buildStoredEntry(id, body.config, postSettings);
+        // Split secret values out of the new entry — the stripped shape
+        // goes to disk, the values go to the keychain.
+        const { stripped, secrets } = extractSecretsFromStored(built);
+        // Order: sweep → keychain → disk. The keychain write is the
+        // only step that can hard-fail (KeychainUnavailableError on
+        // `set`); doing it before the disk write means a 503 leaves no
+        // disk entry behind, so a retry POST isn't trapped at 409. The
+        // initial sweep handles the case where a previous DELETE failed
+        // midway and left orphans under the same id the user is now
+        // reusing; it's a silent no-op when the keychain is unavailable.
+        await secretStore.deleteAllForServer(id);
+        await writeKeychainEntriesFor(id, secrets);
+        current.mcpServers[id] = stripped;
+        await writeMcpAndTrackMtime(serializeStore(current));
+        return c.json({ ok: true });
+      });
+    } catch (error) {
+      const keychainResp = keychainErrorResponse(c, error);
+      if (keychainResp) return keychainResp;
+      const msg = error instanceof Error ? error.message : String(error);
+      return c.json({ error: `Failed to add server: ${msg}` }, 500);
+    }
+  });
+
+  // Reorder the on-disk `mcpServers` map. Registered before
+  // `PUT /api/servers/:id` so the literal `/order` segment isn't captured
+  // as an `:id` param ("order" would otherwise be a valid store id). The
+  // request body is `{ order: string[] }` — the complete set of server ids
+  // in the desired iteration order. We reject (409) unless that set matches
+  // the on-disk set exactly, so a reorder racing an external add/remove
+  // can't silently drop or duplicate an entry. Reordering touches no secret
+  // values, so we just permute the existing stripped entries and reuse the
+  // same atomic-write + watcher-notify path as the other mutators.
+  app.put("/api/servers/order", async (c) => {
+    const ro = requireWritable(c);
+    if (ro) return ro;
+    let body: { order?: unknown };
+    try {
+      body = (await c.req.json()) as { order?: unknown };
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    if (
+      !Array.isArray(body.order) ||
+      !body.order.every((id): id is string => typeof id === "string")
+    ) {
+      return c.json({ error: "order must be an array of strings" }, 400);
+    }
+    const order = body.order;
+    if (new Set(order).size !== order.length) {
+      return c.json({ error: "order contains duplicate ids" }, 400);
+    }
+
+    try {
+      return await withWriteLock(async () => {
+        const current = await readMcpConfig();
+        const currentIds = Object.keys(current.mcpServers);
+        // Exact-set match: same size and every requested id present on disk.
+        // The duplicate check above plus equal sizes guarantees this is a
+        // permutation, never a partial reorder that would drop an entry.
+        const currentSet = new Set(currentIds);
+        const sameSet =
+          currentIds.length === order.length &&
+          order.every((id) => currentSet.has(id));
+        if (!sameSet) {
+          return c.json(
+            {
+              error:
+                "order does not match the current server set (it may have changed on disk)",
+            },
+            409,
+          );
+        }
+        const next: MCPConfig = { mcpServers: {} };
+        for (const id of order) {
+          // Non-null: `sameSet` proves every `id` is a key of the map.
+          next.mcpServers[id] = current.mcpServers[id]!;
+        }
+        await writeMcpAndTrackMtime(serializeStore(next));
+        return c.json({ ok: true });
+      });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      return c.json({ error: `Failed to reorder servers: ${msg}` }, 500);
+    }
+  });
+
+  app.put("/api/servers/:id", async (c) => {
+    const ro = requireWritable(c);
+    if (ro) return ro;
+    const originalId = c.req.param("id");
+    if (!originalId || !validateStoreId(originalId)) {
+      return c.json({ error: "Invalid id" }, 400);
+    }
+    let body: { id?: unknown; config?: unknown; settings?: unknown };
+    try {
+      body = (await c.req.json()) as {
+        id?: unknown;
+        config?: unknown;
+        settings?: unknown;
+      };
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    // Config on PUT: optional. If the field is omitted, preserve the
+    // existing transport config from disk. This makes "patch only settings"
+    // a first-class shape — callers like updateServerSettings don't have to
+    // snapshot the current config off in-memory state (which could race
+    // against a concurrent refresh and silently revert a separate edit).
+    // A provided config must structurally be an object; we let
+    // `normalizeServerType` do the lenient type coercion downstream.
+    if (
+      body.config !== undefined &&
+      (body.config === null || typeof body.config !== "object")
+    ) {
+      return c.json({ error: "Invalid config" }, 400);
+    }
+    // Settings on PUT have three intents:
+    //   - field omitted (`undefined`)  → preserve the existing settings node
+    //   - explicit `null`              → clear the settings node
+    //   - a settings object            → validate and apply
+    // Preserving on omission means callers that only want to update config
+    // (e.g. ServerConfigModal save) don't silently wipe persisted settings.
+    type SettingsIntent =
+      | { kind: "preserve" }
+      | { kind: "clear" }
+      | {
+          kind: "apply";
+          value: InspectorServerSettings;
+          envProvided: boolean;
+          cwdProvided: boolean;
+        };
+    let settingsIntent: SettingsIntent;
+    if (body.settings === undefined) {
+      settingsIntent = { kind: "preserve" };
+    } else if (body.settings === null) {
+      settingsIntent = { kind: "clear" };
+    } else {
+      const validated = validateSettings(body.settings);
+      if (!validated.ok) return c.json({ error: validated.error }, 400);
+      settingsIntent = {
+        kind: "apply",
+        value: validated.value,
+        envProvided: validated.envProvided,
+        cwdProvided: validated.cwdProvided,
+      };
+    }
+    const newId = typeof body.id === "string" ? body.id : originalId;
+    if (!validateStoreId(newId)) {
+      return c.json({ error: "Invalid new id" }, 400);
+    }
+
+    try {
+      return await withWriteLock(async () => {
+        const current = await readMcpConfig();
+        if (!(originalId in current.mcpServers)) {
+          return c.json({ error: `Server '${originalId}' not found` }, 404);
+        }
+        if (newId !== originalId && newId in current.mcpServers) {
+          return c.json({ error: `Server '${newId}' already exists` }, 409);
+        }
+        // Rebuild preserving insertion order; replace the original key in
+        // place so the file diff stays minimal when not renaming. Writing
+        // the full map back also means normalize-on-read self-heals any
+        // malformed settings node on *other* servers in the file — a
+        // deliberate side-effect of using `readMcpConfig` + full rewrite
+        // here.
+        const existing = current.mcpServers[originalId];
+        /* v8 ignore next 5 -- the `in` check above guarantees this branch is unreachable; narrowing without the non-null assertion keeps TS happy and makes the contract explicit for future refactors. */
+        if (!existing) {
+          return c.json({ error: `Server '${originalId}' not found` }, 404);
+        }
+        // Split the existing entry into its SDK-only config (no Inspector-
+        // extension fields) and its lifted settings, then apply patch
+        // semantics from the body to each. The flat-on-disk Inspector
+        // fields are sliced off `existing` so the preserve-on-omit `config`
+        // path doesn't accidentally carry them through as raw disk keys —
+        // they need to flow through `buildStoredEntry` so empty `settings`
+        // intents can clear them.
+        //
+        // `stripInspectorFields` + `storedFieldsToInspectorSettings` both
+        // derive from the same `INSPECTOR_FIELD_KEYS` set, so adding a new
+        // Inspector-extension field to `StoredMCPServer` doesn't silently
+        // leak through this preserve path.
+        const existingConfig = stripInspectorFields(existing);
+        const existingSettings = storedFieldsToInspectorSettings(existing);
+        const nextConfig =
+          body.config !== undefined ? body.config : existingConfig;
+        let nextSettings: InspectorServerSettings | undefined;
+        switch (settingsIntent.kind) {
+          case "preserve":
+            nextSettings = existingSettings;
+            break;
+          case "clear":
+            nextSettings = undefined;
+            break;
+          case "apply":
+            nextSettings = settingsIntent.value;
+            break;
+        }
+        // Build the new entry, then split off secrets before writing to
+        // disk. Reconcile uses the previously-stored entry to know which
+        // keychain fields existed so any field the user removed (env
+        // key dropped, OAuth secret cleared) gets cleaned up rather
+        // than orphaned.
+        const built = buildStoredEntry(newId, nextConfig, nextSettings);
+        // stdio env/cwd are config fields editable from both the Add/Edit modal
+        // (patches `config`) and the Server Settings modal (patches `settings`).
+        // On a settings-only *apply* (config preserved) the settings mirror is
+        // authoritative for the fields the caller actually sent — write those
+        // through onto the stored config so edits and explicit clears take
+        // effect, while a field the caller omitted leaves the stored value
+        // untouched. When a config body was provided it owns env/cwd and the
+        // settings mirror is ignored; a preserve/clear settings intent never
+        // touches config env/cwd. Runs before secret extraction so a removed env
+        // key reconciles out of the keychain.
+        if (body.config === undefined && settingsIntent.kind === "apply") {
+          applyStdioSettingsToConfig(built, settingsIntent.value, {
+            env: settingsIntent.envProvided,
+            cwd: settingsIntent.cwdProvided,
+          });
+          // When the caller omitted `env`, the stored env is preserved
+          // structurally but its values are blanked on disk (the real values
+          // live in the keychain). Rehydrate those onto `built` so the secret
+          // extraction + reconcile below re-persist them, instead of treating
+          // the blanked keys as "removed" and sweeping them from the keychain.
+          // The integrated web client always resends the full GET-rehydrated
+          // env, so this only matters for env-unaware raw HTTP callers.
+          if (
+            !settingsIntent.envProvided &&
+            (built.type === "stdio" || built.type === undefined)
+          ) {
+            const stdio = built as StdioServerConfig & StoredMCPServer;
+            if (stdio.env && Object.keys(stdio.env).length > 0) {
+              const keys = Object.keys(stdio.env);
+              const existingSecrets = await readKeychainEntriesFor(
+                originalId,
+                keys.map((k) => envSecretField(k)),
+              );
+              const rehydrated: Record<string, string> = { ...stdio.env };
+              for (const k of keys) {
+                const v = existingSecrets[envSecretField(k)];
+                if (v !== undefined) rehydrated[k] = v;
+              }
+              stdio.env = rehydrated;
+            }
+          }
+        }
+        const { stripped, secrets } = extractSecretsFromStored(built);
+        const next: MCPConfig = { mcpServers: {} };
+        for (const [key, val] of Object.entries(current.mcpServers)) {
+          if (key === originalId) {
+            next.mcpServers[newId] = stripped;
+          } else {
+            next.mcpServers[key] = val;
+          }
+        }
+        // Ordering: write the new keychain entries first, then the
+        // disk file, then clean up obsolete keychain entries.
+        //
+        // - Keychain set is the only hard-fail step (it raises 503 on
+        //   `KeychainUnavailableError`). Doing it first means a failed
+        //   set leaves both disk and keychain in their pre-PUT state;
+        //   the user retries and nothing is half-applied.
+        // - The disk write happens after the keychain is fully primed,
+        //   so a successful disk write is also a fully-consistent end
+        //   state.
+        // - Obsolete deletion comes last because it's destructive: if
+        //   we deleted first and then the disk write failed, the user
+        //   would still see the old config on disk but with missing
+        //   keychain values. With the current order a failed disk
+        //   write leaves orphan keychain entries — recoverable on the
+        //   next reconcile or `deleteAllForServer` sweep.
+        if (newId !== originalId) {
+          const previousFields = expectedSecretFields(existing);
+          const keychainSecrets = await readKeychainEntriesFor(
+            originalId,
+            previousFields,
+          );
+          const secretsToWrite = mergeRenameKeychainSecrets(
+            stripped,
+            keychainSecrets,
+            secrets,
+          );
+          await writeKeychainEntriesFor(newId, secretsToWrite);
+          await writeMcpAndTrackMtime(serializeStore(next));
+          await secretStore.deleteAllForServer(originalId);
+        } else {
+          // In-place update: same id, possibly different fields. Set
+          // the new values first, then write disk, then drop obsolete
+          // fields (env keys the user removed, OAuth secret cleared).
+          const previousFields = new Set(expectedSecretFields(existing));
+          const obsolete = computeObsoleteFields(previousFields, secrets);
+          await writeKeychainEntriesFor(newId, secrets);
+          await writeMcpAndTrackMtime(serializeStore(next));
+          await deleteKeychainFields(newId, obsolete);
+        }
+        return c.json({ ok: true });
+      });
+    } catch (error) {
+      const keychainResp = keychainErrorResponse(c, error);
+      if (keychainResp) return keychainResp;
+      const msg = error instanceof Error ? error.message : String(error);
+      return c.json({ error: `Failed to update server: ${msg}` }, 500);
+    }
+  });
+
+  app.delete("/api/servers/:id", async (c) => {
+    const ro = requireWritable(c);
+    if (ro) return ro;
+    const id = c.req.param("id");
+    if (!id || !validateStoreId(id)) {
+      return c.json({ error: "Invalid id" }, 400);
+    }
+
+    try {
+      return await withWriteLock(async () => {
+        const current = await readMcpConfig();
+        if (!(id in current.mcpServers)) {
+          // Idempotent DELETE — but still sweep the keychain in case a
+          // prior delete failed after rewriting the file and orphaned
+          // entries are sitting there.
+          await secretStore.deleteAllForServer(id);
+          return c.json({ ok: true });
+        }
+        delete current.mcpServers[id];
+        await writeMcpAndTrackMtime(serializeStore(current));
+        await secretStore.deleteAllForServer(id);
+        return c.json({ ok: true });
+      });
+    } catch (error) {
+      const keychainResp = keychainErrorResponse(c, error);
+      if (keychainResp) return keychainResp;
+      const msg = error instanceof Error ? error.message : String(error);
+      return c.json({ error: `Failed to delete server: ${msg}` }, 500);
+    }
+  });
+
+  // Server-sent events for `mcp.json` external edits. The payload is
+  // intentionally empty-of-meaning ({"type":"change"}) — the client only
+  // cares that *something* happened on disk and re-fetches GET /api/servers
+  // to get the authoritative state. This sidesteps any drift between an
+  // event payload and the canonical normalize-on-read shape.
+  app.get("/api/servers/events", async (c) => {
+    return streamSSE(c, async (stream) => {
+      const send = (data: string): void => {
+        void stream.writeSSE({ event: "change", data });
+      };
+      // An in-memory ad-hoc list never changes and has no file to watch, so we
+      // hold the stream open (so the client's fetch resolves cleanly) but
+      // register no subscriber and start no watcher — there is nothing to emit.
+      if (watchable) {
+        serverEventSubscribers.add(send);
+        ensureWatcher();
+      }
+
+      stream.onAbort(() => {
+        serverEventSubscribers.delete(send);
+        void maybeStopWatcher();
+        stream.close();
+      });
+
+      // Hono closes the stream the moment this callback returns, so hold the
+      // promise open until the client aborts. Cleanup happens in the
+      // onAbort handler registered above.
+      await new Promise<void>((resolve) => {
+        stream.onAbort(() => resolve());
+      });
+    });
+  });
+
+  return {
+    app,
+    authToken,
+    close: async () => {
+      serverEventSubscribers.clear();
+      await maybeStopWatcher();
+    },
+  };
+}

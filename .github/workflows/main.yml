@@ -1,9 +1,10 @@
+name: Run install, format, lint, build, and test on every push
+
 on:
   push:
-    branches:
-      - main
-
-  pull_request:
+  # A published GitHub release triggers the `publish` job below. The release's
+  # target commit determines which workflow runs — so this only publishes when a
+  # release is cut from a commit that carries this (v2) workflow.
   release:
     types: [published]
 
@@ -12,63 +13,161 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout code
+        uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v6
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
         with:
-          node-version-file: package.json
-          cache: npm
+          node-version: '22.x'
+          cache: 'npm'
 
-      # Working around https://github.com/npm/cli/issues/4828
-      # - run: npm ci
-      - run: npm install --no-package-lock
+      - name: Install dependencies (root + all clients)
+        # The root postinstall (scripts/install-clients.mjs) cascades
+        # `npm install` into clients/web, clients/cli, clients/tui, and
+        # clients/launcher, so this single step sets up every client.
+        run: npm install
 
-      - name: Check formatting
-        run: npm run prettier-check
+      - name: Validate (coverage guards, format, lint, typecheck, build, fast tests)
+        # Runs the two coverage guards first (verify:format-coverage +
+        # verify:typecheck-coverage), then validate:core, then each client's
+        # self-validation: format:check + lint + typecheck + build + test (no
+        # coverage instrumentation — fast). This also builds every client bundle
+        # (web dist, cli/tui/launcher) that the smokes below need. The heavier
+        # per-file coverage gate runs in its own step below. Unit tests run in
+        # both steps (fast here, instrumented under coverage); the double unit
+        # run is an accepted trade-off for keeping this fast build step intact.
+        # A future optimization could split coverage into per-client parallel
+        # jobs, but that's a larger restructure and deliberately out of scope.
+        run: npm run validate
 
-      - name: Check version consistency
-        run: npm run check-version
+      - name: Enforce per-file coverage gate (≥90% on all four dimensions)
+        # CI-ENFORCED coverage gate (#1550): runs `npm run coverage`, which
+        # chains every client's `test:coverage` (v8-instrumented) and fails the
+        # job if ANY file drops below 90% on lines, statements, functions, or
+        # branches. This is the whole point of the step — a PR that regresses
+        # coverage below the threshold now blocks merge instead of relying on a
+        # contributor remembering to run the gate locally.
+        #
+        # This also covers the web integration project: web's `test:coverage`
+        # runs `--project=unit --project=integration --coverage`, so the former
+        # standalone `Run web integration tests` step was removed to avoid
+        # running the integration suite twice.
+        run: npm run coverage
 
-      - name: Check linting
-        working-directory: ./client
-        run: npm run lint
+      - name: Verify the browser-externalized-builtin build gate (#1769)
+        # Runs a real `vite build` with a Node built-in forced into the browser
+        # graph and asserts the build FAILS via the #1769 gate. The unit tests
+        # cover the detection logic against a captured message; only this real
+        # build catches the risk the issue calls out — that the Vite warning
+        # phrasing drifts across releases, silently disabling the message-keyed
+        # gate. It restores the mutated entry afterward (see the script).
+        run: npm run verify:build-gate
 
-      - name: Run client tests
-        working-directory: ./client
-        run: npm test
+      # Playwright chromium is installed BEFORE the smokes because
+      # `smoke:web:browser` (the headless-browser boot smoke, #1615) drives the
+      # prod web bundle in chromium — restoring/installing it here lets that
+      # smoke reuse the cache instead of downloading its own copy. The Storybook
+      # step below reuses the same install.
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('clients/web/package-lock.json') }}
 
-      - run: npm run build
+      - name: Install Playwright browsers
+        working-directory: ./clients/web
+        run: npx playwright install --with-deps chromium
 
+      - name: Run cross-client smokes
+        # End-to-end smokes through the built launcher (--help dispatch + prod
+        # CLI/web). Not part of any client's `validate`: it needs the
+        # cli/tui/launcher bundles, which `validate` above already built
+        # (smoke:web builds clients/web/dist on demand — #1486). smoke:web:browser
+        # boots the prod web bundle in headless chromium (#1615). smoke:tui
+        # self-skips here — the Ink TUI needs a real TTY (raw mode) that headless
+        # CI lacks, so its boot/render check is local-only.
+        run: npm run smoke
+
+      - name: Run Storybook play-function tests
+        working-directory: ./clients/web
+        run: npm run test:storybook
+
+  # Publish the single `@modelcontextprotocol/inspector` package to npm on a
+  # published GitHub release. v2 is not an npm workspace, so there is no
+  # `publish-all` / `--workspaces` (v1) — just one `npm publish`, whose `prepack`
+  # (`npm run build`) builds every client bundle into the `files` allowlist.
+  # `pack:verify` runs first as the pre-publish gate: it builds, packs the real
+  # tarball, installs it into a clean throwaway consumer, and drives the
+  # installed `mcp-inspector` bin (web/cli/tui) end to end — so a broken package
+  # is caught before it reaches npm rather than after.
   publish:
     runs-on: ubuntu-latest
     if: github.event_name == 'release'
     environment: release
     needs: build
-
+    # Serialize publishes so two releases cut in quick succession can't run
+    # overlapping `npm publish`es. Never cancel an in-flight publish.
+    concurrency:
+      group: publish-npm
+      cancel-in-progress: false
     permissions:
       contents: read
+      # Required for npm provenance (`--provenance` mints a signed attestation
+      # via GitHub's OIDC token). The repo is public, so provenance is available.
       id-token: write
-
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
         with:
-          node-version-file: package.json
-          cache: npm
-          registry-url: "https://registry.npmjs.org"
+          node-version: '22.x'
+          cache: 'npm'
+          registry-url: 'https://registry.npmjs.org'
 
-      # Working around https://github.com/npm/cli/issues/4828
-      # - run: npm ci
-      - run: npm install --no-package-lock
-
-      # OIDC trusted publishing requires npm >=11.5.1; Node 22's bundled npm is 10.x.
-      - name: Ensure npm CLI supports OIDC trusted publishing
-        run: npm install -g npm@^11.5.1
-
-      - run: npm run publish-all
+      - name: Assert release tag matches package version
+        # `npm publish` ships whatever `version` is in the root package.json,
+        # regardless of the release's tag. Fail fast (before the heavy install /
+        # pack:verify) if they disagree — e.g. a release drafted without running
+        # `npm version`, or cut from the wrong commit — since publishing is
+        # irreversible. Tolerates the conventional leading `v` (npm version tags
+        # as `vX.Y.Z`). The tag arrives via `env:` (not spliced into the script)
+        # to avoid the script-injection surface of interpolating `${{ }}` into a
+        # `run:` block.
         env:
-          NPM_CONFIG_PROVENANCE: "true"
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          PKG="$(node -p "require('./package.json').version")"
+          if [ "${TAG#v}" != "$PKG" ]; then
+            echo "Release tag '$TAG' does not match package.json version '$PKG'"
+            exit 1
+          fi
 
+      - name: Install dependencies (root + all clients)
+        run: npm install
+
+      - name: Verify the publishable tarball end to end
+        # Builds, `npm pack`s, installs the tarball into a clean consumer, and
+        # drives the installed bin. Needs registry access to pull the tarball's
+        # runtime deps — available here. `smoke:tui` inside it self-skips on CI.
+        run: npm run pack:verify
+
+      - name: Publish to npm (single package, with provenance)
+        # `prepack` (`npm run build`) rebuilds the client bundles into the tarball.
+        # The build runs three times on this path (build job → pack:verify →
+        # prepack); the redundancy is intentional — each is a clean-tree rebuild
+        # and the `prepack` one is what actually populates the published tarball,
+        # so don't "optimize" it away.
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # Build and push the multi-arch container image to GHCR on a published
+  # release. The image installs the packed tarball (`Dockerfile`) so it ships
+  # the same artifact as npm. Independent of the npm `publish` job (both gated on
+  # the release event) — a container failure doesn't block the npm publish.
   publish-github-container-registry:
     runs-on: ubuntu-latest
     if: github.event_name == 'release'
@@ -80,7 +179,8 @@ jobs:
       attestations: write
       id-token: write
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout code
+        uses: actions/checkout@v6
 
       - name: Log in to the Container registry
         uses: docker/login-action@v4
@@ -94,6 +194,14 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}
+          # Be explicit rather than relying on `flavor.latest=auto`: on a release
+          # cut both the version tags and `latest` land, so the README's bare
+          # `ghcr.io/…/inspector` (implicit `:latest`) never 404s.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          flavor: |
+            latest=true
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3

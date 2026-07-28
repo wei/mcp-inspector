@@ -1,0 +1,255 @@
+import { useState, useEffect, useCallback } from "react";
+import type { InspectorClientProtocol } from "../mcp/inspectorClientProtocol.js";
+import type { AppRendererClient } from "../mcp/inspectorClientProtocol.js";
+import type { TypedEvent } from "../mcp/inspectorClientEventTarget.js";
+import type { ConnectionStatus } from "../mcp/types.js";
+import type {
+  ClientCapabilities,
+  ServerCapabilities,
+  Implementation,
+  ProtocolEra,
+  DiscoverResult,
+} from "@modelcontextprotocol/client";
+import type { ExcludedTool } from "../mcp/types.js";
+
+// Module-scope frozen object so the `?? EMPTY_CLIENT_CAPABILITIES`
+// fallback below doesn't return a fresh literal on every render —
+// downstream `useMemo`/`useEffect` deps that key on `clientCapabilities`
+// would otherwise invalidate every tick when no client is attached.
+const EMPTY_CLIENT_CAPABILITIES: ClientCapabilities = Object.freeze({});
+
+export interface UseInspectorClientResult {
+  status: ConnectionStatus;
+  capabilities?: ServerCapabilities;
+  clientCapabilities: ClientCapabilities;
+  serverInfo?: Implementation;
+  instructions?: string;
+  protocolVersion?: string;
+  /**
+   * Protocol era negotiated with the server (SEP §7.8): `"legacy"` for the
+   * 2025-11-25 initialize handshake, `"modern"` for the 2026-era sessionless
+   * model. Populated for every era once connected (a plain legacy connect
+   * reports `"legacy"`); undefined only when not connected. (#1626)
+   */
+  protocolEra?: ProtocolEra;
+  /**
+   * The `server/discover` result on a probed/pinned connect — server identity,
+   * capabilities, and supported versions learned without an initialize
+   * handshake. Undefined on a legacy connect. (#1626)
+   */
+  discoverResult?: DiscoverResult;
+  /**
+   * Tools the SDK excluded from `tools/list` for invalid `x-mcp-header`
+   * annotations (SEP-2243), each with its reason. Empty on legacy/stdio
+   * connections and before connect (#1632).
+   */
+  excludedTools: ExcludedTool[];
+  /**
+   * Message from the most recent mid-session transport failure (the client's
+   * `error` event — stdio crash, SSE drop, HTTP 5xx). Stays set until the next
+   * connection attempt (`status` → `"connecting"`) clears it, so consumers can
+   * render it without subscribing to the event directly. Handshake failures do
+   * NOT populate this — they reject the `connect()` promise instead.
+   */
+  lastError?: string;
+  appRendererClient: AppRendererClient | null;
+  connect: () => Promise<void>;
+  disconnect: () => Promise<void>;
+}
+
+/**
+ * React hook that subscribes to InspectorClient events and provides reactive
+ * connection state. Log lists (message / stderr / fetch) live in dedicated
+ * state managers consumed via useMessageLog / useStderrLog / useFetchRequestLog.
+ *
+ * Note: `appRendererClient` is read lazily from the client on every render
+ * and is NOT subscribed. It changes once at connect time and is not expected
+ * to change again during a session, so callers will see the current value
+ * on any rerender triggered by status / capabilities / serverInfo / instructions.
+ * If a future use case requires autonomous updates when the renderer attaches,
+ * add an `appRendererClientChange` event to `InspectorClientEventMap` and
+ * subscribe here.
+ */
+export function useInspectorClient(
+  inspectorClient: InspectorClientProtocol | null,
+): UseInspectorClientResult {
+  const [status, setStatus] = useState<ConnectionStatus>(
+    inspectorClient?.getStatus() ?? "disconnected",
+  );
+  const [capabilities, setCapabilities] = useState<
+    ServerCapabilities | undefined
+  >(inspectorClient?.getCapabilities());
+  const [serverInfo, setServerInfo] = useState<Implementation | undefined>(
+    inspectorClient?.getServerInfo(),
+  );
+  const [instructions, setInstructions] = useState<string | undefined>(
+    inspectorClient?.getInstructions(),
+  );
+  const [protocolVersion, setProtocolVersion] = useState<string | undefined>(
+    inspectorClient?.getProtocolVersion(),
+  );
+  const [protocolEra, setProtocolEra] = useState<ProtocolEra | undefined>(
+    inspectorClient?.getProtocolEra(),
+  );
+  const [discoverResult, setDiscoverResult] = useState<
+    DiscoverResult | undefined
+  >(inspectorClient?.getDiscoverResult());
+  const [excludedTools, setExcludedTools] = useState<ExcludedTool[]>(
+    inspectorClient?.getExcludedTools() ?? [],
+  );
+  const [lastError, setLastError] = useState<string | undefined>(undefined);
+
+  useEffect(() => {
+    if (!inspectorClient) {
+      setStatus("disconnected");
+      setCapabilities(undefined);
+      setServerInfo(undefined);
+      setInstructions(undefined);
+      setProtocolVersion(undefined);
+      setProtocolEra(undefined);
+      setDiscoverResult(undefined);
+      setExcludedTools([]);
+      setLastError(undefined);
+      return;
+    }
+
+    setStatus(inspectorClient.getStatus());
+    setCapabilities(inspectorClient.getCapabilities());
+    setServerInfo(inspectorClient.getServerInfo());
+    setInstructions(inspectorClient.getInstructions());
+    setProtocolVersion(inspectorClient.getProtocolVersion());
+    setProtocolEra(inspectorClient.getProtocolEra());
+    setDiscoverResult(inspectorClient.getDiscoverResult());
+    setExcludedTools(inspectorClient.getExcludedTools());
+    setLastError(undefined);
+
+    const onStatusChange = (event: TypedEvent<"statusChange">) => {
+      setStatus(event.detail);
+      // A fresh connection attempt clears any stale error from the prior
+      // session so the UI doesn't keep showing why the last transport died.
+      if (event.detail === "connecting") {
+        setLastError(undefined);
+      }
+    };
+    const onError = (event: TypedEvent<"error">) => {
+      setLastError(event.detail.message);
+    };
+    const onCapabilitiesChange = (event: TypedEvent<"capabilitiesChange">) => {
+      setCapabilities(event.detail);
+    };
+    const onServerInfoChange = (event: TypedEvent<"serverInfoChange">) => {
+      setServerInfo(event.detail);
+    };
+    const onInstructionsChange = (event: TypedEvent<"instructionsChange">) => {
+      setInstructions(event.detail);
+    };
+    const onProtocolVersionChange = (
+      event: TypedEvent<"protocolVersionChange">,
+    ) => {
+      setProtocolVersion(event.detail);
+    };
+    const onProtocolEraChange = (event: TypedEvent<"protocolEraChange">) => {
+      setProtocolEra(event.detail);
+    };
+    const onDiscoverResultChange = (
+      event: TypedEvent<"discoverResultChange">,
+    ) => {
+      setDiscoverResult(event.detail);
+    };
+    const onExcludedToolsChange = (
+      event: TypedEvent<"excludedToolsChange">,
+    ) => {
+      setExcludedTools(event.detail);
+    };
+
+    inspectorClient.addEventListener("statusChange", onStatusChange);
+    inspectorClient.addEventListener("error", onError);
+    inspectorClient.addEventListener(
+      "capabilitiesChange",
+      onCapabilitiesChange,
+    );
+    inspectorClient.addEventListener("serverInfoChange", onServerInfoChange);
+    inspectorClient.addEventListener(
+      "instructionsChange",
+      onInstructionsChange,
+    );
+    inspectorClient.addEventListener(
+      "protocolVersionChange",
+      onProtocolVersionChange,
+    );
+    inspectorClient.addEventListener("protocolEraChange", onProtocolEraChange);
+    inspectorClient.addEventListener(
+      "discoverResultChange",
+      onDiscoverResultChange,
+    );
+    inspectorClient.addEventListener(
+      "excludedToolsChange",
+      onExcludedToolsChange,
+    );
+
+    return () => {
+      inspectorClient.removeEventListener("statusChange", onStatusChange);
+      inspectorClient.removeEventListener("error", onError);
+      inspectorClient.removeEventListener(
+        "capabilitiesChange",
+        onCapabilitiesChange,
+      );
+      inspectorClient.removeEventListener(
+        "serverInfoChange",
+        onServerInfoChange,
+      );
+      inspectorClient.removeEventListener(
+        "instructionsChange",
+        onInstructionsChange,
+      );
+      inspectorClient.removeEventListener(
+        "protocolVersionChange",
+        onProtocolVersionChange,
+      );
+      inspectorClient.removeEventListener(
+        "protocolEraChange",
+        onProtocolEraChange,
+      );
+      inspectorClient.removeEventListener(
+        "discoverResultChange",
+        onDiscoverResultChange,
+      );
+      inspectorClient.removeEventListener(
+        "excludedToolsChange",
+        onExcludedToolsChange,
+      );
+    };
+  }, [inspectorClient]);
+
+  const connect = useCallback(async () => {
+    if (!inspectorClient) return;
+    await inspectorClient.connect();
+  }, [inspectorClient]);
+
+  const disconnect = useCallback(async () => {
+    if (!inspectorClient) return;
+    await inspectorClient.disconnect();
+  }, [inspectorClient]);
+
+  return {
+    status,
+    capabilities,
+    // Read lazily on every render rather than subscribed: client capabilities
+    // are built once in InspectorClient's constructor (from `sample`, `elicit`,
+    // `roots`, `receiverTasks`) and never mutate during a session, so there's
+    // no event to subscribe to. The module-scope frozen empty object is the
+    // stable fallback when no client is attached.
+    clientCapabilities:
+      inspectorClient?.getClientCapabilities() ?? EMPTY_CLIENT_CAPABILITIES,
+    serverInfo,
+    instructions,
+    protocolVersion,
+    protocolEra,
+    discoverResult,
+    excludedTools,
+    lastError,
+    appRendererClient: inspectorClient?.getAppRendererClient() ?? null,
+    connect,
+    disconnect,
+  };
+}

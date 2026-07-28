@@ -1,0 +1,52 @@
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
+    "target": "ES2023",
+    /* DOM is included so dev-backend files (and transitively core/) can use
+     * Web Fetch APIs (Request, Response, Headers, RequestInfo) without losing
+     * type info. Node 18+ provides these as globals at runtime; the DOM lib
+     * is the canonical source of their type declarations. */
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "types": ["node"],
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+
+    /* Linting */
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true,
+
+    /* Path aliases. The dev-backend files imported by vite.config.ts
+     * (vite-hono-plugin.ts, web-server-config.ts, server.ts,
+     * start-vite-dev-server.ts) live in src/ and import from @inspector/core/*;
+     * tsc follows those transitive imports while type-checking vite.config.ts,
+     * so this tsconfig needs the same alias tsconfig.app.json has.
+     *
+     * Paths are relative to this config file (no `baseUrl` — deprecated in
+     * TypeScript 6 / removed in 7).
+     */
+    "paths": {
+      "@inspector/core/*": ["../../core/*"],
+      "pino": ["./node_modules/pino"],
+      "hono": ["./node_modules/hono"],
+      "hono/streaming": [
+        "./node_modules/hono/dist/types/helper/streaming/index"
+      ],
+      "@hono/node-server": ["./node_modules/@hono/node-server"],
+      "atomically": ["./node_modules/atomically"],
+      "chokidar": ["./node_modules/chokidar"],
+      "@napi-rs/keyring": ["./node_modules/@napi-rs/keyring"]
+    }
+  },
+  "include": ["vite.config.ts", "tsup.runner.config.ts", "server/**/*.ts"]
+}

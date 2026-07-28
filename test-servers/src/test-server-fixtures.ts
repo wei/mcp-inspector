@@ -1,0 +1,2506 @@
+/**
+ * Shared test fixtures for composable MCP test servers
+ *
+ * This module provides helper functions for creating test tools, prompts, and resources.
+ * For the core composable server types and createMcpServer function, see composable-test-server.ts
+ */
+
+import * as z from "zod/v4";
+import {
+  RELATED_TASK_META_KEY,
+  inputRequired,
+  type Implementation,
+  type ElicitRequestFormParams,
+  type ElicitRequestURLParams,
+  type GetTaskResult,
+  type CallToolResult,
+} from "@modelcontextprotocol/server";
+import {
+  CreateMessageResultSchema,
+  CreateTaskResultSchema,
+  ElicitResultSchema,
+  GetTaskResultSchema,
+} from "@modelcontextprotocol/core";
+import type {
+  ToolDefinition,
+  TaskToolDefinition,
+  ResourceDefinition,
+  PromptDefinition,
+  ResourceTemplateDefinition,
+  ServerConfig,
+  TestServerContext,
+  TaskRequestHandlerExtra,
+  CreateTaskRequestHandlerExtra,
+  HandlerExtra,
+  ShapeOutput,
+} from "./composable-test-server.js";
+import { getTestServerControl } from "./test-server-control.js";
+
+/** Build a CallToolResult from a text message (and optional isError). */
+function toToolResult(text: string, isError?: boolean): CallToolResult {
+  return {
+    content: [{ type: "text", text }],
+    ...(isError && { isError: true }),
+  };
+}
+
+// Re-export types and functions from composable-test-server for backward compatibility
+export type {
+  ToolDefinition,
+  TaskToolDefinition,
+  ResourceDefinition,
+  PromptDefinition,
+  ResourceTemplateDefinition,
+  ServerConfig,
+} from "./composable-test-server.js";
+export { createMcpServer } from "./composable-test-server.js";
+
+/**
+ * Create multiple numbered tools for pagination testing
+ * @param count Number of tools to create
+ * @returns Array of tool definitions
+ */
+export function createNumberedTools(count: number): ToolDefinition[] {
+  const tools: ToolDefinition[] = [];
+  for (let i = 1; i <= count; i++) {
+    tools.push({
+      name: `tool_${i}`,
+      description: `Test tool number ${i}`,
+      inputSchema: {
+        message: z.string().describe(`Message for tool ${i}`),
+      },
+      handler: async (params: Record<string, unknown>) => {
+        return toToolResult(`Tool ${i}: ${params.message as string}`);
+      },
+    });
+  }
+  return tools;
+}
+
+/**
+ * Create multiple numbered resources for pagination testing
+ * @param count Number of resources to create
+ * @returns Array of resource definitions
+ */
+export function createNumberedResources(count: number): ResourceDefinition[] {
+  const resources: ResourceDefinition[] = [];
+  for (let i = 1; i <= count; i++) {
+    resources.push({
+      name: `resource_${i}`,
+      uri: `test://resource_${i}`,
+      description: `Test resource number ${i}`,
+      mimeType: "text/plain",
+      text: `Content for resource ${i}`,
+    });
+  }
+  return resources;
+}
+
+/**
+ * Create multiple numbered resource templates for pagination testing
+ * @param count Number of resource templates to create
+ * @returns Array of resource template definitions
+ */
+export function createNumberedResourceTemplates(
+  count: number,
+): ResourceTemplateDefinition[] {
+  const templates: ResourceTemplateDefinition[] = [];
+  for (let i = 1; i <= count; i++) {
+    templates.push({
+      name: `template_${i}`,
+      uriTemplate: `test://template_${i}/{param}`,
+      description: `Test resource template number ${i}`,
+      handler: async (uri: URL, variables: Record<string, unknown>) => {
+        return {
+          contents: [
+            {
+              uri: uri.toString(),
+              mimeType: "text/plain",
+              text: `Content for template ${i} with param ${variables.param}`,
+            },
+          ],
+        };
+      },
+    });
+  }
+  return templates;
+}
+
+/**
+ * Create multiple numbered prompts for pagination testing
+ * @param count Number of prompts to create
+ * @returns Array of prompt definitions
+ */
+export function createNumberedPrompts(count: number): PromptDefinition[] {
+  const prompts: PromptDefinition[] = [];
+  for (let i = 1; i <= count; i++) {
+    prompts.push({
+      name: `prompt_${i}`,
+      description: `Test prompt number ${i}`,
+      promptString: `This is prompt ${i}`,
+    });
+  }
+  return prompts;
+}
+
+/**
+ * Create an "echo" tool that echoes back the input message
+ */
+export function createEchoTool(): ToolDefinition {
+  return {
+    name: "echo",
+    description: "Echo back the input message",
+    inputSchema: {
+      message: z.string().describe("Message to echo back"),
+    },
+    handler: async (
+      params: Record<string, unknown>,
+      _context?: TestServerContext,
+    ) => {
+      return toToolResult(`Echo: ${params.message as string}`);
+    },
+  };
+}
+
+/**
+ * Create a "get-env" tool matching @modelcontextprotocol/server-everything.
+ * Returns the server process environment as pretty-printed JSON text.
+ */
+export function createGetEnvTool(): ToolDefinition {
+  return {
+    name: "get-env",
+    description:
+      "Returns all environment variables, helpful for debugging MCP server configuration",
+    inputSchema: {},
+    handler: async () => {
+      return toToolResult(JSON.stringify(process.env, null, 2));
+    },
+  };
+}
+
+/**
+ * Create a tool that writes a message to stderr. Used to test stderr capture/piping.
+ */
+export function createWriteToStderrTool(): ToolDefinition {
+  return {
+    name: "write_to_stderr",
+    description: "Write a message to stderr (for testing stderr capture)",
+    inputSchema: {
+      message: z.string().describe("Message to write to stderr"),
+    },
+    handler: async (params: Record<string, unknown>) => {
+      const msg = params.message as string;
+      process.stderr.write(`${msg}\n`);
+      return toToolResult(`Wrote to stderr: ${msg}`);
+    },
+  };
+}
+
+/**
+ * Create an "add" tool that adds two numbers together
+ */
+export function createAddTool(): ToolDefinition {
+  return {
+    name: "add",
+    description: "Add two numbers together",
+    inputSchema: {
+      a: z.number().describe("First number"),
+      b: z.number().describe("Second number"),
+    },
+    handler: async (
+      params: Record<string, unknown>,
+      _context?: TestServerContext,
+    ) => {
+      const a = params.a as number;
+      const b = params.b as number;
+      return toToolResult(JSON.stringify({ result: a + b }));
+    },
+  };
+}
+
+/**
+ * Create a "get_weather" tool carrying a SEP-2243 `x-mcp-header` annotation on
+ * its `city` argument, so a modern client mirrors the value into a
+ * `Mcp-Param-City` header (Base64-sentinel-encoded when the value is non-ASCII).
+ * Used by the `modern-network-http` showcase to exercise the Network tab's
+ * `Mcp-Param-*` decode.
+ */
+export function createGetWeatherTool(): ToolDefinition {
+  return {
+    name: "get_weather",
+    description:
+      "Get the weather for a city (its `city` argument mirrors to Mcp-Param-City)",
+    inputSchema: {
+      city: z.string().describe("City name").meta({ "x-mcp-header": "City" }),
+    },
+    handler: async (params: Record<string, unknown>) => {
+      return toToolResult(`Weather in ${params.city as string}: sunny, 24°C`);
+    },
+  };
+}
+
+/**
+ * Create a tool whose SEP-2243 `x-mcp-header` annotation is INVALID: the header
+ * name `"Bad Header"` contains a space, so it is not a valid RFC 9110 token.
+ * The whole tool definition is therefore invalid, and a conforming Streamable
+ * HTTP client MUST exclude it from `tools/list`. The server still serves it in
+ * the raw list (it only warns), so the Inspector can re-list raw and surface it
+ * as excluded with the reason (#1632).
+ */
+export function createInvalidHeaderTool(): ToolDefinition {
+  return {
+    name: "invalid_header_tool",
+    description:
+      "A tool with an invalid x-mcp-header annotation; conforming clients exclude it.",
+    inputSchema: {
+      value: z
+        .string()
+        .describe("A value")
+        .meta({ "x-mcp-header": "Bad Header" }),
+    },
+    handler: async () => toToolResult("should have been excluded"),
+  };
+}
+
+/**
+ * Create a no-op "trigger" tool whose `tools/call` is intercepted by the modern
+ * leg's spec-error injector (`injectSpecErrors`) to return a crafted
+ * SEP-2243/SEP-2575 error. The handler is a harmless fallback for the
+ * (never-reached) case where the injector is off.
+ */
+export function createSpecErrorTriggerTool(
+  name: string,
+  description: string,
+): ToolDefinition {
+  return {
+    name,
+    description,
+    inputSchema: {},
+    handler: async () =>
+      toToolResult(`(${name}) injector disabled — no error returned`),
+  };
+}
+
+/**
+ * Create a "get_sum" tool that returns the sum of two numbers (alias for add)
+ */
+export function createGetSumTool(): ToolDefinition {
+  return {
+    name: "get_sum",
+    description: "Get the sum of two numbers",
+    inputSchema: {
+      a: z.number().describe("First number"),
+      b: z.number().describe("Second number"),
+    },
+    handler: async (
+      params: Record<string, unknown>,
+      _context?: TestServerContext,
+    ) => {
+      const a = params.a as number;
+      const b = params.b as number;
+      return toToolResult(JSON.stringify({ result: a + b }));
+    },
+  };
+}
+
+/**
+ * Create a "collect_sample" tool that sends a sampling request and returns the response
+ */
+export function createCollectSampleTool(): ToolDefinition {
+  return {
+    name: "collect_sample",
+    description:
+      "Send a sampling request with the given text and return the response",
+    inputSchema: {
+      text: z.string().describe("Text to send in the sampling request"),
+    },
+    handler: async (
+      params: Record<string, unknown>,
+      context?: TestServerContext,
+    ): Promise<CallToolResult> => {
+      if (!context) {
+        throw new Error("Server context not available");
+      }
+      const server = context.server;
+
+      const text = params.text as string;
+
+      // Send a sampling/createMessage request to the client using the SDK's createMessage method
+      try {
+        const result = await server.server.createMessage({
+          messages: [
+            {
+              role: "user" as const,
+              content: {
+                type: "text" as const,
+                text: text,
+              },
+            },
+          ],
+          maxTokens: 100, // Required parameter
+        });
+
+        return toToolResult(`Sampling response: ${JSON.stringify(result)}`);
+      } catch (error) {
+        console.error(
+          "[collect_sample] Error sending/receiving sampling request:",
+          error,
+        );
+        throw error;
+      }
+    },
+  };
+}
+
+/**
+ * Create a "list_roots" tool that calls roots/list and returns the roots
+ */
+export function createListRootsTool(): ToolDefinition {
+  return {
+    name: "list_roots",
+    description: "List the current roots configured on the client",
+    inputSchema: {},
+    handler: async (
+      _params: Record<string, unknown>,
+      context?: TestServerContext,
+    ): Promise<CallToolResult> => {
+      if (!context) {
+        throw new Error("Server context not available");
+      }
+      const server = context.server;
+
+      try {
+        // Call roots/list on the client using the SDK's listRoots method
+        const result = await server.server.listRoots();
+
+        return toToolResult(`Roots: ${JSON.stringify(result.roots, null, 2)}`);
+      } catch (error) {
+        return toToolResult(
+          `Error listing roots: ${error instanceof Error ? error.message : String(error)}`,
+          true,
+        );
+      }
+    },
+  };
+}
+
+/**
+ * Create a "collectElicitation" tool that sends an elicitation request and returns the response
+ */
+export function createCollectFormElicitationTool(): ToolDefinition {
+  return {
+    name: "collect_elicitation",
+    description:
+      "Send an elicitation request with the given message and schema and return the response",
+    inputSchema: {
+      message: z
+        .string()
+        .describe("Message to send in the elicitation request"),
+      schema: z.unknown().describe("JSON schema for the elicitation request"),
+    },
+    handler: async (
+      params: Record<string, unknown>,
+      context?: TestServerContext,
+    ): Promise<CallToolResult> => {
+      if (!context) {
+        throw new Error("Server context not available");
+      }
+      const server = context.server;
+
+      const message = params.message as string;
+      const schema =
+        params.schema as ElicitRequestFormParams["requestedSchema"];
+
+      // Send a form-based elicitation request using the SDK's elicitInput method
+      try {
+        const elicitationParams: ElicitRequestFormParams = {
+          message,
+          requestedSchema: schema,
+        };
+
+        const result = await server.server.elicitInput(elicitationParams);
+
+        return toToolResult(`Elicitation response: ${JSON.stringify(result)}`);
+      } catch (error) {
+        console.error(
+          "[collectElicitation] Error sending/receiving elicitation request:",
+          error,
+        );
+        throw error;
+      }
+    },
+  };
+}
+
+/**
+ * Create an "mrtr_confirm" tool exercising the modern (2026-07-28) multi
+ * round-trip request (MRTR) flow. On the first call it returns an
+ * `input_required` result embedding a form elicitation ("Confirm: <action>?");
+ * the client fulfils it and retries with `inputResponses`, on which the handler
+ * returns the final result. This is the modern replacement for a server→client
+ * `elicitation/create` request — `createCollectFormElicitationTool` (which calls
+ * `server.elicitInput`) is legacy-only and errors on the 2026-07-28 leg.
+ *
+ * Used by `test-servers/configs/modern-mrtr-http.json` so the Inspector's
+ * History view can render a real MRTR round-trip as one grouped conversation.
+ */
+// Process-wide counter so each original MRTR call mints a DISTINCT
+// `requestState`. It must live at MODULE scope, not inside `createMrtrTool` or
+// its handler closure: the modern (2026-07-28) leg is stateless — the SDK's
+// `createMcpHandler` rebuilds the server (and every tool closure) per request
+// (see `test-server-http.ts` `startModernHttp`), so a per-closure counter would
+// reset to 0 on every request and every token would end in `:1`, defeating the
+// point. A stable-per-action token would let two same-action calls (whose rounds
+// land adjacently in the History log) fold into a single `MrtrConversation`,
+// since grouping clusters contiguous entries sharing a token — confusing for a
+// demo whose whole point is eyeballing the grouping. Only bumped on the mint
+// (first) round; the retry echoes the token, it isn't re-minted. Real SDK tokens
+// are already unique per operation.
+let mrtrMintCount = 0;
+
+export function createMrtrTool(): ToolDefinition {
+  return {
+    name: "mrtr_confirm",
+    description:
+      "Multi round-trip tool: asks the client to confirm an action via an embedded elicitation, then completes.",
+    inputSchema: {
+      action: z
+        .string()
+        .describe("The action to confirm before the tool completes"),
+    },
+    handler: async (
+      params: Record<string, unknown>,
+      _context?: TestServerContext,
+      extra?: HandlerExtra,
+    ) => {
+      const action =
+        typeof params.action === "string" ? params.action : "the action";
+      const responses = extra?.inputResponses;
+
+      // First round: no answers yet — return input_required embedding a form
+      // elicitation and an opaque requestState the client echoes on retry.
+      if (!responses || responses.confirm === undefined) {
+        return inputRequired({
+          inputRequests: {
+            confirm: inputRequired.elicit({
+              message: `Confirm: ${action}?`,
+              requestedSchema: {
+                type: "object",
+                properties: {
+                  confirm: { type: "boolean", title: "Confirm" },
+                },
+                required: ["confirm"],
+              },
+            }),
+          },
+          requestState: `mrtr:${action}:${++mrtrMintCount}`,
+        });
+      }
+
+      // Retry round: the client fulfilled the elicitation and echoed the answer.
+      return toToolResult(
+        `MRTR complete — confirmation for "${action}": ${JSON.stringify(responses.confirm)}`,
+      );
+    },
+  };
+}
+
+/**
+ * A two-round MRTR tool: it asks for a first value, then (on the retry) a second
+ * value, then completes. Exercises the manual driver's loop across MORE than one
+ * `input_required` round.
+ *
+ * The modern leg is stateless and each retry carries only THAT round's
+ * `inputResponses` (spec-correct — the client does not accumulate prior
+ * answers). So the tool tracks which step it is on via the opaque `requestState`
+ * the client echoes back, not via accumulated responses. Used to verify the
+ * Inspector surfaces each embedded elicitation in turn and only completes after
+ * both are answered (#1704).
+ */
+export function createMrtrMultiRoundTool(): ToolDefinition {
+  return {
+    name: "mrtr_two_step",
+    description:
+      "Two-round MRTR tool: collects a first value, then a second value, then completes.",
+    inputSchema: {},
+    handler: async (
+      _params: Record<string, unknown>,
+      _context?: TestServerContext,
+      extra?: HandlerExtra,
+    ) => {
+      const step =
+        typeof extra?.requestState === "string" ? extra.requestState : "start";
+      if (step === "start") {
+        return inputRequired({
+          inputRequests: {
+            first: inputRequired.elicit({
+              message: "Step 1: enter the first value",
+              requestedSchema: {
+                type: "object",
+                properties: { value: { type: "string", title: "First" } },
+                required: ["value"],
+              },
+            }),
+          },
+          requestState: `mrtr-two:step2:${++mrtrMintCount}`,
+        });
+      }
+      if (step.startsWith("mrtr-two:step2")) {
+        return inputRequired({
+          inputRequests: {
+            second: inputRequired.elicit({
+              message: "Step 2: enter the second value",
+              requestedSchema: {
+                type: "object",
+                properties: { value: { type: "string", title: "Second" } },
+                required: ["value"],
+              },
+            }),
+          },
+          requestState: `mrtr-two:done:${++mrtrMintCount}`,
+        });
+      }
+      return toToolResult(
+        `MRTR two-step complete — final answer: ${JSON.stringify(
+          extra?.inputResponses?.second,
+        )}`,
+      );
+    },
+  };
+}
+
+/**
+ * An MRTR tool that embeds a `roots/list` request. The Inspector auto-answers it
+ * from the configured roots (no pending UX), so the retry carries the client's
+ * `{ roots }` result and the tool completes reporting how many roots it saw.
+ * Used to verify silent roots fulfilment mid-MRTR (#1704).
+ */
+export function createMrtrRootsTool(): ToolDefinition {
+  return {
+    name: "mrtr_roots",
+    description:
+      "MRTR tool that asks the client for its roots, then completes reporting the count.",
+    inputSchema: {},
+    handler: async (
+      _params: Record<string, unknown>,
+      _context?: TestServerContext,
+      extra?: HandlerExtra,
+    ) => {
+      const responses = extra?.inputResponses;
+      if (!responses || responses.roots === undefined) {
+        return inputRequired({
+          inputRequests: { roots: inputRequired.listRoots() },
+          requestState: `mrtr-roots:${++mrtrMintCount}`,
+        });
+      }
+      const rootsResult = responses.roots as { roots?: unknown[] };
+      const count = Array.isArray(rootsResult.roots)
+        ? rootsResult.roots.length
+        : 0;
+      return toToolResult(
+        `MRTR roots complete — client reported ${count} root(s)`,
+      );
+    },
+  };
+}
+
+/**
+ * An MRTR tool that embeds a `sampling/createMessage` request. On the retry the
+ * client's sampling result is echoed back and the tool completes. Verifies the
+ * driver surfaces an embedded sampling request through the pending-request UI
+ * the same way it does an elicitation (#1704).
+ */
+export function createMrtrSamplingTool(): ToolDefinition {
+  return {
+    name: "mrtr_sample",
+    description:
+      "MRTR tool that asks the client to sample an LLM completion, then completes.",
+    inputSchema: {},
+    handler: async (
+      _params: Record<string, unknown>,
+      _context?: TestServerContext,
+      extra?: HandlerExtra,
+    ) => {
+      const responses = extra?.inputResponses;
+      if (!responses || responses.sample === undefined) {
+        return inputRequired({
+          inputRequests: {
+            sample: inputRequired.createMessage({
+              messages: [
+                {
+                  role: "user",
+                  content: { type: "text", text: "Say hello." },
+                },
+              ],
+              maxTokens: 64,
+            }),
+          },
+          requestState: `mrtr-sample:${++mrtrMintCount}`,
+        });
+      }
+      return toToolResult(
+        `MRTR sample complete — echoed: ${JSON.stringify(responses.sample)}`,
+      );
+    },
+  };
+}
+
+/**
+ * A pathological MRTR tool that ALWAYS returns `input_required` and never
+ * completes. Used to verify the manual driver bounds the loop (its
+ * `MRTR_MAX_ROUNDS` cap) instead of spinning forever (#1704).
+ */
+export function createMrtrLoopTool(): ToolDefinition {
+  return {
+    name: "mrtr_loop",
+    description:
+      "Pathological MRTR tool that never completes — always returns input_required.",
+    inputSchema: {},
+    handler: async () => {
+      return inputRequired({
+        inputRequests: {
+          again: inputRequired.elicit({
+            message: "Answer again (this never completes)",
+            requestedSchema: {
+              type: "object",
+              properties: { value: { type: "string", title: "Value" } },
+            },
+          }),
+        },
+        requestState: `mrtr-loop:${++mrtrMintCount}`,
+      });
+    },
+  };
+}
+
+/**
+ * An MRTR tool exercising the driver's param-shaping edge cases (#1704):
+ *  - Round 1 embeds an elicitation but mints NO `requestState` (so the retry
+ *    carries `inputResponses` and no `requestState`).
+ *  - Round 2 is `requestState`-only: it carries a `requestState` and NO
+ *    `inputRequests` (so the retry carries `requestState` and no
+ *    `inputResponses`).
+ *  - Round 3 completes.
+ */
+export function createMrtrEdgeCaseTool(): ToolDefinition {
+  return {
+    name: "mrtr_edge",
+    description:
+      "MRTR tool covering the inputRequests-only and requestState-only round shapes.",
+    inputSchema: {},
+    handler: async (
+      _params: Record<string, unknown>,
+      _context?: TestServerContext,
+      extra?: HandlerExtra,
+    ) => {
+      const state =
+        typeof extra?.requestState === "string" ? extra.requestState : "";
+      // Round 2: the client answered round 1's elicitation. Bounce a
+      // requestState-only round (no embedded requests) to move to the final leg.
+      if (extra?.inputResponses?.note !== undefined) {
+        return inputRequired({
+          requestState: `mrtr-edge:final:${++mrtrMintCount}`,
+        });
+      }
+      // Round 3: the requestState-only round came back — complete.
+      if (state.startsWith("mrtr-edge:final")) {
+        return toToolResult("MRTR edge complete");
+      }
+      // Round 1: embed an elicitation with NO requestState.
+      return inputRequired({
+        inputRequests: {
+          note: inputRequired.elicit({
+            message: "Edge round 1: enter a note",
+            requestedSchema: {
+              type: "object",
+              properties: { value: { type: "string", title: "Note" } },
+            },
+          }),
+        },
+      });
+    },
+  };
+}
+
+/**
+ * Create a "url_elicitation_form" tool that spins up a simple HTTP server on a dynamic
+ * port with a form page, sends that URL via URL elicitation, and on form submit collects
+ * the text input, includes it in the tool response, and closes the server.
+ */
+export function createUrlElicitationFormTool(): ToolDefinition {
+  return {
+    name: "url_elicitation_form",
+    description:
+      "Present a form via URL elicitation; collects submitted text and returns it in the tool response",
+    inputSchema: {
+      message: z
+        .string()
+        .optional()
+        .describe(
+          "Message to show in the elicitation (default: prompt for input)",
+        ),
+    },
+    handler: async (
+      params: Record<string, unknown>,
+      context?: TestServerContext,
+    ): Promise<CallToolResult> => {
+      if (!context) {
+        throw new Error("Server context not available");
+      }
+      const server = context.server;
+      const message =
+        (params.message as string) || "Please submit a value in the form";
+
+      const elicitationId = `url-form-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+
+      let resolveFormData!: (value: string) => void;
+      const formDataPromise = new Promise<string>((resolve) => {
+        resolveFormData = resolve;
+      });
+
+      const completionNotifier =
+        server.server.createElicitationCompletionNotifier(elicitationId);
+
+      const { createServer } = await import("node:http");
+      const { createServer: createNetServer } = await import("node:net");
+
+      const formHtml = (elicitationId: string) => `
+<!DOCTYPE html>
+<html>
+<head><title>Submit Value</title></head>
+<body>
+  <form method="POST" action="/">
+    <input type="hidden" name="elicitation" value="${elicitationId}" />
+    <label>Value: <input type="text" name="value" required /></label>
+    <button type="submit">Submit</button>
+  </form>
+</body>
+</html>`;
+
+      const successHtml = `
+<!DOCTYPE html>
+<html>
+<head><title>Submitted</title></head>
+<body><p>Submitted. You can close this window.</p></body>
+</html>`;
+
+      const httpServer = createServer((req, res) => {
+        if (req.method === "GET" && req.url === "/") {
+          res.writeHead(200, { "Content-Type": "text/html" });
+          res.end(formHtml(elicitationId));
+          return;
+        }
+        if (req.method === "POST" && req.url === "/") {
+          let body = "";
+          req.on("data", (chunk) => {
+            body += chunk.toString();
+          });
+          req.on("end", () => {
+            const params = new URLSearchParams(body);
+            const value = params.get("value") ?? "";
+            completionNotifier().catch(() => {});
+            resolveFormData(value);
+            httpServer.close();
+            res.writeHead(200, { "Content-Type": "text/html" });
+            res.end(successHtml);
+          });
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+
+      const port = await new Promise<number>((resolve, reject) => {
+        const s = createNetServer();
+        s.listen(0, "127.0.0.1", () => {
+          const addr = s.address() as { port: number };
+          s.close(() => resolve(addr.port));
+        });
+        s.on("error", reject);
+      });
+
+      httpServer.listen(port, "127.0.0.1");
+      const url = `http://127.0.0.1:${port}/`;
+
+      try {
+        const result = await server.server.elicitInput({
+          mode: "url",
+          message,
+          elicitationId,
+          url,
+        });
+
+        if (result.action !== "accept") {
+          httpServer.close();
+          return toToolResult(
+            `Elicitation ${result.action}: user did not accept`,
+          );
+        }
+
+        const collectedValue = await formDataPromise;
+        return toToolResult(`Collected value: ${collectedValue}`);
+      } catch (error) {
+        httpServer.close();
+        throw error;
+      }
+    },
+  };
+}
+
+/**
+ * Create a "collect_url_elicitation" tool that sends a URL-based elicitation request
+ * to the client and returns the response
+ */
+export function createCollectUrlElicitationTool(): ToolDefinition {
+  return {
+    name: "collect_url_elicitation",
+    description:
+      "Send a URL-based elicitation request with the given message and URL and return the response",
+    inputSchema: {
+      message: z
+        .string()
+        .describe("Message to send in the elicitation request"),
+      url: z.string().url().describe("URL for the user to navigate to"),
+      elicitationId: z
+        .string()
+        .optional()
+        .describe("Optional elicitation ID (generated if not provided)"),
+    },
+    handler: async (
+      params: Record<string, unknown>,
+      context?: TestServerContext,
+    ): Promise<CallToolResult> => {
+      if (!context) {
+        throw new Error("Server context not available");
+      }
+      const server = context.server;
+
+      const message = params.message as string;
+      const url = params.url as string;
+      const elicitationId =
+        (params.elicitationId as string) ||
+        `url-elicitation-${Date.now()}-${Math.random()}`;
+
+      // Send a URL-based elicitation request using the SDK's elicitInput method
+      try {
+        const elicitationParams: ElicitRequestURLParams = {
+          mode: "url",
+          message,
+          elicitationId,
+          url,
+        };
+
+        const result = await server.server.elicitInput(elicitationParams);
+
+        return toToolResult(
+          `URL elicitation response: ${JSON.stringify(result)}`,
+        );
+      } catch (error) {
+        console.error(
+          "[collect_url_elicitation] Error sending/receiving URL elicitation request:",
+          error,
+        );
+        throw error;
+      }
+    },
+  };
+}
+
+/**
+ * Create a "send_notification" tool that sends a notification message from the server
+ */
+export function createSendNotificationTool(): ToolDefinition {
+  return {
+    name: "send_notification",
+    description: "Send a notification message from the server",
+    inputSchema: {
+      message: z.string().describe("Notification message to send"),
+      level: z
+        .enum([
+          "debug",
+          "info",
+          "notice",
+          "warning",
+          "error",
+          "critical",
+          "alert",
+          "emergency",
+        ])
+        .optional()
+        .describe("Log level for the notification"),
+    },
+    handler: async (
+      params: Record<string, unknown>,
+      context?: TestServerContext,
+      extra?: HandlerExtra,
+    ): Promise<CallToolResult> => {
+      if (!context) {
+        throw new Error("Server context not available");
+      }
+
+      const message = params.message as string;
+      const level = (params.level as string) || "info";
+
+      // Emit the log through the SDK's request-scoped, threshold-gated
+      // `extra.log` (`ctx.mcpReq.log`) when available. It applies the era-correct
+      // gating for us: on the modern (2026-07-28) leg it drops the message unless
+      // the client opted in via the per-request `logLevel` `_meta` (and honors
+      // that level's severity), and streams the admitted log on THIS request's
+      // SSE response; on legacy it honors the session level from
+      // `logging/setLevel`. The global `server.server.notification()` fallback is
+      // for any caller without per-request context (older/in-process paths) and
+      // emits unconditionally on the session transport.
+      try {
+        if (extra?.log) {
+          await extra.log(level, { message }, "test-server");
+        } else {
+          await context.server.server.notification({
+            method: "notifications/message",
+            params: { level, logger: "test-server", data: { message } },
+          });
+        }
+        return toToolResult(`Notification sent: ${message}`);
+      } catch (error) {
+        console.error("[send_notification] Error sending notification:", error);
+        throw error;
+      }
+    },
+  };
+}
+
+/**
+ * Create a "get-annotated-message" tool that returns a message with optional image
+ */
+export function createGetAnnotatedMessageTool(): ToolDefinition {
+  return {
+    name: "get_annotated_message",
+    description: "Get an annotated message",
+    inputSchema: {
+      messageType: z
+        .enum(["success", "error", "warning", "info"])
+        .describe("Type of message"),
+      includeImage: z
+        .boolean()
+        .optional()
+        .describe("Whether to include an image"),
+    },
+    handler: async (
+      params: Record<string, unknown>,
+      _context?: TestServerContext,
+    ): Promise<CallToolResult> => {
+      const messageType = params.messageType as string;
+      const includeImage = params.includeImage as boolean | undefined;
+      const message = `This is a ${messageType} message`;
+      const content: Array<
+        | { type: "text"; text: string }
+        | { type: "image"; data: string; mimeType: string }
+      > = [
+        {
+          type: "text",
+          text: message,
+        },
+      ];
+
+      if (includeImage) {
+        content.push({
+          type: "image",
+          data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", // 1x1 transparent PNG
+          mimeType: "image/png",
+        });
+      }
+
+      return { content };
+    },
+  };
+}
+
+/** Output schema for get_temp: temperature, unit, city */
+const GetTempOutputSchema = z.object({
+  temperature: z.number().describe("Temperature value"),
+  unit: z.string().describe("C or F"),
+  city: z.string().describe("City name"),
+});
+
+/**
+ * Create a "get_temp" tool that returns both content (human-readable) and structuredContent (schema-validated).
+ * Takes city and units (C/F), returns mock temperature 25 and matching text + structured output.
+ */
+export function createGetTempTool(): ToolDefinition {
+  return {
+    name: "get_temp",
+    description:
+      "Get the current temperature for a city (mock; returns 25 in requested units)",
+    inputSchema: {
+      city: z.string().describe("City name"),
+      units: z.enum(["C", "F"]).describe("Temperature units"),
+    },
+    outputSchema: GetTempOutputSchema,
+    handler: async (params: Record<string, unknown>) => {
+      const city = (params.city as string) || "Unknown";
+      const unit = (params.units as "C" | "F") || "C";
+      const temperature = 25;
+      const text = `The temperature in ${city} is ${temperature} degrees ${unit}`;
+      return {
+        content: [{ type: "text" as const, text }],
+        structuredContent: { temperature, unit, city },
+      };
+    },
+  };
+}
+
+/**
+ * Create a "get_temp_extra" tool that declares the same output schema as
+ * get_temp but returns an EXTRA, undeclared property in structuredContent.
+ *
+ * The SDK server validates output via zod safeParse (which strips unknown keys
+ * and passes), then sends the ORIGINAL structuredContent — so the extra key
+ * reaches the wire. The SDK *client* validates that payload against the strict
+ * JSON schema derived from the output schema and rejects it
+ * ("must NOT have additional properties"). This mirrors real-world servers
+ * (e.g. MCP App tools) whose results legacy hosts render but whose strict
+ * client validation otherwise denies. Used to exercise
+ * InspectorClient.callTool's `skipOutputValidation` option.
+ */
+export function createGetTempExtraTool(): ToolDefinition {
+  return {
+    name: "get_temp_extra",
+    description:
+      "Like get_temp, but returns an extra structuredContent property that violates the output schema (for validation-bypass testing)",
+    inputSchema: {
+      city: z.string().describe("City name"),
+      units: z.enum(["C", "F"]).describe("Temperature units"),
+    },
+    outputSchema: GetTempOutputSchema,
+    handler: async (params: Record<string, unknown>) => {
+      const city = (params.city as string) || "Unknown";
+      const unit = (params.units as "C" | "F") || "C";
+      const temperature = 25;
+      const text = `The temperature in ${city} is ${temperature} degrees ${unit}`;
+      return {
+        content: [{ type: "text" as const, text }],
+        // `extra` is not in GetTempOutputSchema → strict client validation fails.
+        structuredContent: { temperature, unit, city, extra: "undeclared" },
+      };
+    },
+  };
+}
+
+/**
+ * Create a "simple_prompt" prompt definition
+ */
+export function createSimplePrompt(): PromptDefinition {
+  return {
+    name: "simple_prompt",
+    description: "A simple prompt for testing",
+    promptString: "This is a simple prompt for testing purposes.",
+  };
+}
+
+/**
+ * Create an "args_prompt" prompt that accepts arguments
+ */
+export function createArgsPrompt(
+  completions?: Record<
+    string,
+    (
+      argumentValue: string,
+      context?: Record<string, string>,
+    ) => Promise<string[]> | string[]
+  >,
+): PromptDefinition {
+  return {
+    name: "args_prompt",
+    description: "A prompt that accepts arguments for testing",
+    promptString: "This is a prompt with arguments: city={city}, state={state}",
+    argsSchema: {
+      city: z.string().describe("City name"),
+      state: z.string().describe("State name"),
+    },
+    completions,
+  };
+}
+
+/** Canonical URI for the {@link createMcpAppDemoResource} UI resource, referenced by {@link createMcpAppDemoTool}'s `_meta.ui.resourceUri`. Exported so tests can assert against it without redefining the literal. */
+export const MCP_APP_DEMO_URI = "ui://demo/widget.html";
+
+/**
+ * Minimal MCP App widget that exercises the host-side UI protocol surface
+ * (size-changed, ui/message, log notification, host-context render). Kept as a
+ * single inline HTML string with no external scripts so the sandbox CSP's
+ * locked-down defaults are sufficient.
+ *
+ * The lone `rgba(0,0,0,0.06)` is a deliberate exception to the AGENTS.md
+ * color-token rule: this is a self-contained static fixture served into the
+ * sandbox iframe, not a Mantine component, so the `--inspector-*` CSS custom
+ * properties (defined in the web client's App.css) are not in scope here.
+ */
+const MCP_APP_DEMO_HTML = `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>mcp-app-demo widget</title>
+    <style>
+      body { margin: 0; font-family: system-ui, sans-serif; padding: 16px; }
+      pre { background: rgba(0,0,0,0.06); padding: 8px; border-radius: 6px; }
+    </style>
+  </head>
+  <body>
+    <h2 id="title">mcp-app-demo</h2>
+    <pre id="ctx">waiting for ui/initialize…</pre>
+    <script type="module">
+      // Per spec, ui/initialize is a View→Host REQUEST: the view sends it on
+      // load and the host responds with hostContext + capabilities. The view
+      // then sends notifications/initialized once it has rendered.
+      // Production apps should use @modelcontextprotocol/ext-apps (the App
+      // class handles the handshake and origin discipline internally) — this
+      // fixture is a minimal no-SDK demo of the raw protocol for testing the
+      // host side.
+      const INIT_ID = 1;
+      let nextId = 2;
+      // Captured from the host's ui/initialize RESPONSE; thereafter every send
+      // targets, and every receive is checked against, this exact origin so a
+      // sibling frame on a different origin cannot inject or intercept traffic.
+      let HOST_ORIGIN = null;
+      const send = (msg) =>
+        window.parent.postMessage(
+          { jsonrpc: "2.0", ...msg },
+          HOST_ORIGIN ?? "*",
+        );
+      let lastCtx = {};
+      const renderCtx = (patch) => {
+        // host-context-changed carries a PARTIAL (only changed fields per
+        // spec); merge into the running snapshot so unchanged fields persist.
+        lastCtx = { ...lastCtx, ...patch };
+        document.getElementById("ctx").textContent = JSON.stringify(
+          {
+            theme: lastCtx.theme,
+            displayMode: lastCtx.displayMode,
+            containerDimensions: lastCtx.containerDimensions,
+          },
+          null,
+          2,
+        );
+      };
+      const onInitialized = (hostContext) => {
+        renderCtx(hostContext);
+        // Signal the view is ready (host gates view→host requests on this).
+        send({ method: "ui/notifications/initialized" });
+        // Standard MCP log notification — surfaced by the host's log panel.
+        send({
+          method: "notifications/message",
+          params: { level: "info", data: "mcp-app-demo initialized" },
+        });
+        // Tell the host the rendered content height.
+        send({
+          method: "ui/notifications/size-changed",
+          params: {
+            width: document.body.clientWidth,
+            height: document.body.scrollHeight,
+          },
+        });
+        // Submit one user-role message via ui/message.
+        send({
+          id: nextId++,
+          method: "ui/message",
+          params: {
+            content: [{ type: "text", text: "hello from mcp-app-demo" }],
+          },
+        });
+      };
+      window.addEventListener("message", (ev) => {
+        if (HOST_ORIGIN !== null && ev.origin !== HOST_ORIGIN) return;
+        const m = ev.data;
+        if (!m || m.jsonrpc !== "2.0") return;
+        if (m.id === INIT_ID && m.result) {
+          HOST_ORIGIN = ev.origin;
+          onInitialized(m.result.hostContext);
+        } else if (m.method === "ui/notifications/host-context-changed") {
+          // params IS the partial McpUiHostContext (spec.types.d.ts:290).
+          renderCtx(m.params);
+        }
+      });
+      // Kick off the handshake.
+      send({
+        id: INIT_ID,
+        method: "ui/initialize",
+        params: {
+          protocolVersion: "2026-01-26",
+          appInfo: { name: "mcp-app-demo", version: "1.0.0" },
+          appCapabilities: {},
+        },
+      });
+    </script>
+  </body>
+</html>`;
+
+/**
+ * Tool definition for the MCP App demo. Carries `_meta.ui.resourceUri` so
+ * clients recognize it as an App tool; the call result echoes the input title
+ * so the rendered widget can be visually correlated with the call.
+ */
+export function createMcpAppDemoTool(): ToolDefinition {
+  return {
+    name: "mcp_app_demo",
+    description:
+      "Render a minimal MCP App widget that exercises size-changed, ui/message, logging, and host-context rendering.",
+    inputSchema: {
+      title: z.string().describe("Heading shown in the rendered widget"),
+    },
+    _meta: {
+      ui: { resourceUri: MCP_APP_DEMO_URI, visibility: ["model", "app"] },
+    },
+    handler: async (params: Record<string, unknown>) => {
+      return toToolResult(
+        `mcp_app_demo rendered with title="${String(params.title)}"`,
+      );
+    },
+  };
+}
+
+/**
+ * UI resource for {@link createMcpAppDemoTool}. Declares a permissive
+ * `_meta.ui.csp` (no external connect/resource domains) and a sample
+ * `permissions` block so `--app-info` and the host's CSP enforcement both have
+ * something to read.
+ */
+export function createMcpAppDemoResource(): ResourceDefinition {
+  return {
+    name: "mcp_app_demo_widget",
+    uri: MCP_APP_DEMO_URI,
+    description: "Inline HTML widget for the mcp_app_demo tool",
+    mimeType: "text/html",
+    text: MCP_APP_DEMO_HTML,
+    _meta: {
+      ui: {
+        csp: { connectDomains: [], resourceDomains: [] },
+        permissions: { clipboard: false },
+        prefersBorder: true,
+      },
+    },
+  };
+}
+
+/**
+ * Create an "architecture" resource definition
+ */
+export function createArchitectureResource(): ResourceDefinition {
+  return {
+    name: "architecture",
+    uri: "demo://resource/static/document/architecture.md",
+    description: "Architecture documentation",
+    mimeType: "text/markdown",
+    text: `# Architecture Documentation
+
+This is a test resource for the MCP test server.
+
+## Overview
+
+This resource is used for testing resource reading functionality in the CLI.
+
+## Sections
+
+- Introduction
+- Design
+- Implementation
+- Testing
+
+## Notes
+
+This is a static resource provided by the test MCP server.
+`,
+  };
+}
+
+/**
+ * Create a "test_cwd" resource that exposes the current working directory (generally useful when testing with the stdio test server)
+ */
+export function createTestCwdResource(): ResourceDefinition {
+  return {
+    name: "test_cwd",
+    uri: "test://cwd",
+    description: "Current working directory of the test server",
+    mimeType: "text/plain",
+    text: process.cwd(),
+  };
+}
+
+/**
+ * Create a "test_env" resource that exposes environment variables (generally useful when testing with the stdio test server)
+ */
+export function createTestEnvResource(): ResourceDefinition {
+  return {
+    name: "test_env",
+    uri: "test://env",
+    description: "Environment variables available to the test server",
+    mimeType: "application/json",
+    text: JSON.stringify(process.env, null, 2),
+  };
+}
+
+/**
+ * Create a "test_argv" resource that exposes command-line arguments (generally useful when testing with the stdio test server)
+ */
+export function createTestArgvResource(): ResourceDefinition {
+  return {
+    name: "test_argv",
+    uri: "test://argv",
+    description: "Command-line arguments the test server was started with",
+    mimeType: "application/json",
+    text: JSON.stringify(process.argv, null, 2),
+  };
+}
+
+/**
+ * Create minimal server info for test servers
+ */
+export function createTestServerInfo(
+  name: string = "test-server",
+  version: string = "1.0.0",
+): Implementation {
+  return {
+    name,
+    version,
+  };
+}
+
+/**
+ * Create a "file" resource template that reads files by path
+ */
+export function createFileResourceTemplate(
+  completionCallback?: (
+    argumentName: string,
+    value: string,
+    context?: Record<string, string>,
+  ) => Promise<string[]> | string[],
+  listCallback?: () => Promise<string[]> | string[],
+): ResourceTemplateDefinition {
+  return {
+    name: "file",
+    uriTemplate: "file:///{path}",
+    description: "Read a file by path",
+    inputSchema: {
+      path: z.string().describe("File path to read"),
+    },
+    handler: async (uri: URL, params: Record<string, unknown>) => {
+      const path = params.path as string;
+      // For testing, return a mock file content
+      return {
+        contents: [
+          {
+            uri: uri.toString(),
+            mimeType: "text/plain",
+            text: `Mock file content for: ${path}\nThis is a test resource template.`,
+          },
+        ],
+      };
+    },
+    complete: completionCallback,
+    list: listCallback,
+  };
+}
+
+/**
+ * Create a "user" resource template that returns user data by ID
+ */
+export function createUserResourceTemplate(
+  completionCallback?: (
+    argumentName: string,
+    value: string,
+    context?: Record<string, string>,
+  ) => Promise<string[]> | string[],
+  listCallback?: () => Promise<string[]> | string[],
+): ResourceTemplateDefinition {
+  return {
+    name: "user",
+    uriTemplate: "user://{userId}",
+    description: "Get user data by ID",
+    inputSchema: {
+      userId: z.string().describe("User ID"),
+    },
+    handler: async (uri: URL, params: Record<string, unknown>) => {
+      const userId = params.userId as string;
+      return {
+        contents: [
+          {
+            uri: uri.toString(),
+            mimeType: "application/json",
+            text: JSON.stringify(
+              {
+                id: userId,
+                name: `User ${userId}`,
+                email: `user${userId}@example.com`,
+                role: "test-user",
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    },
+    complete: completionCallback,
+    list: listCallback,
+  };
+}
+
+/**
+ * Create a tool that adds a resource to the server and sends list_changed notification
+ */
+export function createAddResourceTool(): ToolDefinition {
+  return {
+    name: "add_resource",
+    description:
+      "Add a resource to the server and send list_changed notification",
+    inputSchema: {
+      uri: z.string().describe("Resource URI"),
+      name: z.string().describe("Resource name"),
+      description: z.string().optional().describe("Resource description"),
+      mimeType: z.string().optional().describe("Resource MIME type"),
+      text: z.string().optional().describe("Resource text content"),
+    },
+    handler: async (
+      params: Record<string, unknown>,
+      context?: TestServerContext,
+    ) => {
+      if (!context) {
+        throw new Error("Server context not available");
+      }
+
+      const { server, state } = context;
+
+      // Register with SDK (returns RegisteredResource)
+      const registered = server.registerResource(
+        params.name as string,
+        params.uri as string,
+        {
+          description: params.description as string | undefined,
+          mimeType: params.mimeType as string | undefined,
+        },
+        async () => {
+          return {
+            contents: params.text
+              ? [
+                  {
+                    uri: params.uri as string,
+                    mimeType: params.mimeType as string | undefined,
+                    text: params.text as string,
+                  },
+                ]
+              : [],
+          };
+        },
+      );
+
+      // Track in state (keyed by URI)
+      state.registeredResources.set(params.uri as string, registered);
+
+      // Send notification if capability enabled
+      if (state.listChangedConfig.resources) {
+        server.sendResourceListChanged();
+      }
+
+      return toToolResult(`Resource ${params.uri} added`);
+    },
+  };
+}
+
+/**
+ * Create a tool that removes a resource from the server by URI and sends list_changed notification
+ */
+export function createRemoveResourceTool(): ToolDefinition {
+  return {
+    name: "remove_resource",
+    description:
+      "Remove a resource from the server by URI and send list_changed notification",
+    inputSchema: {
+      uri: z.string().describe("Resource URI to remove"),
+    },
+    handler: async (
+      params: Record<string, unknown>,
+      context?: TestServerContext,
+    ) => {
+      if (!context) {
+        throw new Error("Server context not available");
+      }
+
+      const { server, state } = context;
+
+      // Find registered resource by URI
+      const resource = state.registeredResources.get(params.uri as string);
+      if (!resource) {
+        throw new Error(`Resource with URI ${params.uri} not found`);
+      }
+
+      // Remove from SDK registry
+      resource.remove();
+
+      // Remove from tracking
+      state.registeredResources.delete(params.uri as string);
+
+      // Send notification if capability enabled
+      if (state.listChangedConfig.resources) {
+        server.sendResourceListChanged();
+      }
+
+      return toToolResult(`Resource ${params.uri} removed`);
+    },
+  };
+}
+
+/**
+ * Create a tool that adds a tool to the server and sends list_changed notification
+ */
+export function createAddToolTool(): ToolDefinition {
+  return {
+    name: "add_tool",
+    description: "Add a tool to the server and send list_changed notification",
+    inputSchema: {
+      name: z.string().describe("Tool name"),
+      description: z.string().describe("Tool description"),
+      inputSchema: z.unknown().optional().describe("Tool input schema"),
+    },
+    handler: async (
+      params: Record<string, unknown>,
+      context?: TestServerContext,
+    ) => {
+      if (!context) {
+        throw new Error("Server context not available");
+      }
+
+      const { server, state } = context;
+
+      // Register with SDK (returns RegisteredTool)
+      const registered = server.registerTool(
+        params.name as string,
+        {
+          description: params.description as string,
+          inputSchema: params.inputSchema as
+            | Record<string, z.ZodType>
+            | undefined,
+        },
+        async () => {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Tool ${params.name} executed`,
+              },
+            ],
+          };
+        },
+      );
+
+      // Track in state (keyed by name)
+      state.registeredTools.set(params.name as string, registered);
+
+      // Send notification if capability enabled
+      // Note: sendToolListChanged() is synchronous on McpServer but internally calls async Server method
+      // We don't await it, but the tool should be registered before sending the notification
+      if (state.listChangedConfig.tools) {
+        // Small delay to ensure tool is fully registered in SDK's internal state
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        server.sendToolListChanged();
+      }
+
+      return toToolResult(`Tool ${params.name} added`);
+    },
+  };
+}
+
+/**
+ * Create a tool that removes a tool from the server by name and sends list_changed notification
+ */
+export function createRemoveToolTool(): ToolDefinition {
+  return {
+    name: "remove_tool",
+    description:
+      "Remove a tool from the server by name and send list_changed notification",
+    inputSchema: {
+      name: z.string().describe("Tool name to remove"),
+    },
+    handler: async (
+      params: Record<string, unknown>,
+      context?: TestServerContext,
+    ) => {
+      if (!context) {
+        throw new Error("Server context not available");
+      }
+
+      const { server, state } = context;
+
+      // Find registered tool by name
+      const tool = state.registeredTools.get(params.name as string);
+      if (!tool) {
+        throw new Error(`Tool ${params.name} not found`);
+      }
+
+      // Remove from SDK registry
+      tool.remove();
+
+      // Remove from tracking
+      state.registeredTools.delete(params.name as string);
+
+      // Send notification if capability enabled
+      if (state.listChangedConfig.tools) {
+        server.sendToolListChanged();
+      }
+
+      return toToolResult(`Tool ${params.name} removed`);
+    },
+  };
+}
+
+/**
+ * Create a tool that adds a prompt to the server and sends list_changed notification
+ */
+export function createAddPromptTool(): ToolDefinition {
+  return {
+    name: "add_prompt",
+    description:
+      "Add a prompt to the server and send list_changed notification",
+    inputSchema: {
+      name: z.string().describe("Prompt name"),
+      description: z.string().optional().describe("Prompt description"),
+      promptString: z.string().describe("Prompt text"),
+      argsSchema: z.unknown().optional().describe("Prompt arguments schema"),
+    },
+    handler: async (
+      params: Record<string, unknown>,
+      context?: TestServerContext,
+    ) => {
+      if (!context) {
+        throw new Error("Server context not available");
+      }
+
+      const { server, state } = context;
+
+      // Register with SDK (returns RegisteredPrompt)
+      const registered = server.registerPrompt(
+        params.name as string,
+        {
+          description: params.description as string | undefined,
+          argsSchema: params.argsSchema as
+            | Record<string, z.ZodType>
+            | undefined,
+        },
+        async () => {
+          return {
+            messages: [
+              {
+                role: "user" as const,
+                content: {
+                  type: "text" as const,
+                  text: params.promptString as string,
+                },
+              },
+            ],
+          };
+        },
+      );
+
+      // Track in state (keyed by name)
+      state.registeredPrompts.set(params.name as string, registered);
+
+      // Send notification if capability enabled
+      if (state.listChangedConfig.prompts) {
+        server.sendPromptListChanged();
+      }
+
+      return toToolResult(`Prompt ${params.name} added`);
+    },
+  };
+}
+
+/**
+ * Create a tool that updates an existing resource's content and sends resource updated notification
+ */
+export function createUpdateResourceTool(): ToolDefinition {
+  return {
+    name: "update_resource",
+    description:
+      "Update an existing resource's content and send resource updated notification",
+    inputSchema: {
+      uri: z.string().describe("Resource URI to update"),
+      text: z.string().describe("New resource text content"),
+    },
+    handler: async (
+      params: Record<string, unknown>,
+      context?: TestServerContext,
+    ) => {
+      if (!context) {
+        throw new Error("Server context not available");
+      }
+
+      const { server, state } = context;
+
+      // Find registered resource by URI
+      const resource = state.registeredResources.get(params.uri as string);
+      if (!resource) {
+        throw new Error(`Resource with URI ${params.uri} not found`);
+      }
+
+      // Get the current resource metadata to preserve mimeType
+      const currentResource = state.registeredResources.get(
+        params.uri as string,
+      );
+      const mimeType = currentResource?.metadata?.mimeType || "text/plain";
+
+      // Update the resource's callback to return new content
+      resource.update({
+        callback: async () => {
+          return {
+            contents: [
+              {
+                uri: params.uri as string,
+                mimeType,
+                text: params.text as string,
+              },
+            ],
+          };
+        },
+      });
+
+      // Send resource updated notification only if subscribed
+      const uri = params.uri as string;
+      if (state.resourceSubscriptions.has(uri)) {
+        await server.server.sendResourceUpdated({
+          uri,
+        });
+      }
+
+      return toToolResult(`Resource ${params.uri} updated`);
+    },
+  };
+}
+
+/**
+ * Create a tool that sends progress notifications during execution
+ * @param name Tool name (default: "send_progress")
+ * @returns Tool definition
+ */
+export function createSendProgressTool(
+  name: string = "send_progress",
+): ToolDefinition {
+  return {
+    name,
+    description:
+      "Send progress notifications during tool execution, then return a result",
+    inputSchema: {
+      units: z
+        .number()
+        .int()
+        .positive()
+        .describe("Number of progress units to send"),
+      delayMs: z
+        .number()
+        .int()
+        .nonnegative()
+        .default(100)
+        .describe("Delay in milliseconds between progress notifications"),
+      total: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Total number of units (for percentage calculation)"),
+      message: z
+        .string()
+        .optional()
+        .describe("Progress message to include in notifications"),
+    },
+    handler: async (
+      params: Record<string, unknown>,
+      context?: TestServerContext,
+      extra?: HandlerExtra,
+    ): Promise<CallToolResult> => {
+      if (!context) {
+        throw new Error("Server context not available");
+      }
+      const server = context.server;
+
+      const units = params.units as number;
+      const delayMs = (params.delayMs as number) || 100;
+      const total = params.total as number | undefined;
+      const message = (params.message as string) || "Processing...";
+
+      // Extract progressToken from metadata
+      const progressToken = extra?._meta?.progressToken as
+        | string
+        | number
+        | undefined;
+
+      // Send progress notifications
+      let sent = 0;
+      for (let i = 1; i <= units; i++) {
+        if (context.serverControl?.isClosing()) {
+          break;
+        }
+        // Wait before sending notification (except for the first one)
+        if (i > 1 && delayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+        if (context.serverControl?.isClosing()) {
+          break;
+        }
+
+        if (progressToken !== undefined) {
+          const progressParams: {
+            progress: number;
+            total?: number;
+            message?: string;
+            progressToken: string | number;
+          } = {
+            progress: i,
+            message: `${message} (${i}/${units})`,
+            progressToken,
+          };
+          if (total !== undefined) {
+            progressParams.total = total;
+          }
+
+          try {
+            await server.server.notification(
+              {
+                method: "notifications/progress",
+                params: progressParams,
+              },
+              { relatedRequestId: extra?.requestId },
+            );
+            sent = i;
+          } catch (error) {
+            console.error(
+              "[send_progress] Error sending progress notification:",
+              error,
+            );
+            break;
+          }
+        }
+      }
+
+      return toToolResult(
+        `Completed ${sent} progress notifications (units: ${sent}, total: ${total ?? units})`,
+      );
+    },
+  };
+}
+
+export function createRemovePromptTool(): ToolDefinition {
+  return {
+    name: "remove_prompt",
+    description:
+      "Remove a prompt from the server by name and send list_changed notification",
+    inputSchema: {
+      name: z.string().describe("Prompt name to remove"),
+    },
+    handler: async (
+      params: Record<string, unknown>,
+      context?: TestServerContext,
+    ) => {
+      if (!context) {
+        throw new Error("Server context not available");
+      }
+
+      const { server, state } = context;
+
+      // Find registered prompt by name
+      const prompt = state.registeredPrompts.get(params.name as string);
+      if (!prompt) {
+        throw new Error(`Prompt ${params.name} not found`);
+      }
+
+      // Remove from SDK registry
+      prompt.remove();
+
+      // Remove from tracking
+      state.registeredPrompts.delete(params.name as string);
+
+      // Send notification if capability enabled
+      if (state.listChangedConfig.prompts) {
+        server.sendPromptListChanged();
+      }
+
+      return toToolResult(`Prompt ${params.name} removed`);
+    },
+  };
+}
+
+/** Options for creating an immediate (non-task) tool that completes after a delay */
+export interface ImmediateToolOptions {
+  name?: string; // default: "flexibleTask"
+  delayMs?: number; // default: 1000
+}
+
+/** Options for creating a task tool (createTask + getTask + getTaskResult) with optional progress, elicitation, sampling, etc. */
+export interface TaskToolOptions {
+  name?: string; // default: "flexibleTask"
+  taskSupport?: "required" | "optional"; // default: "required"
+  delayMs?: number; // default: 1000 (time before task completes)
+  progressUnits?: number; // If provided, send progress notifications
+  elicitationSchema?: z.ZodTypeAny; // If provided, require elicitation with this schema
+  samplingText?: string; // If provided, require sampling with this text
+  failAfterDelay?: number; // If set, task fails after this delay (ms)
+  cancelAfterDelay?: number; // If set, task cancels itself after this delay (ms)
+  /** If set, send params.task: { ttl } so the client creates a receiver task and returns { task } immediately */
+  receiverTaskTtl?: number;
+}
+
+/** Payload we receive from the client via tasks/result when using receiver-task mode */
+interface ReceiverTaskPayload {
+  content: unknown;
+  isElicit?: boolean;
+}
+
+/**
+ * Poll the client for a receiver task until terminal, then fetch tasks/result.
+ * Used when the server sent a create (elicitation or sampling) with params.task and got { task } back.
+ */
+async function pollReceiverTaskPayload(
+  extra: CreateTaskRequestHandlerExtra,
+  clientTaskId: string,
+  resultSchema: z.ZodTypeAny,
+  isElicit: boolean,
+): Promise<ReceiverTaskPayload | null> {
+  for (let i = 0; i < 50; i++) {
+    if (getTestServerControl()?.isClosing()) break;
+    const getRes = await extra.sendRequest(
+      { method: "tasks/get", params: { taskId: clientTaskId } },
+      GetTaskResultSchema,
+    );
+    const status = (getRes as { status: string }).status;
+    if (
+      status === "completed" ||
+      status === "failed" ||
+      status === "cancelled"
+    ) {
+      if (status === "completed") {
+        try {
+          const payload = await extra.sendRequest(
+            { method: "tasks/result", params: { taskId: clientTaskId } },
+            resultSchema,
+          );
+          return {
+            content: (payload as { content?: unknown }).content,
+            isElicit: isElicit ? true : undefined,
+          };
+        } catch {
+          // tasks/result may fail if task failed
+        }
+      }
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return null;
+}
+
+/** Params for the async task execution runner used by the task tool */
+interface RunTaskExecutionParams {
+  task: { taskId: string };
+  extra: CreateTaskRequestHandlerExtra;
+  message?: string;
+  progressToken?: string | number;
+  options: TaskToolOptions;
+}
+
+/**
+ * Runs the task execution (input phase, progress, delay, fail/cancel, completion).
+ * Invoked fire-and-forget from createTask after creating the task.
+ */
+async function runTaskExecution(params: RunTaskExecutionParams): Promise<void> {
+  const { task, extra, message, progressToken, options } = params;
+  const {
+    delayMs = 1000,
+    progressUnits,
+    elicitationSchema,
+    samplingText,
+    failAfterDelay,
+    cancelAfterDelay,
+    receiverTaskTtl,
+  } = options;
+
+  let receiverTaskPayload: ReceiverTaskPayload | null = null;
+
+  try {
+    // --- Input phase: elicitation or sampling (optional receiver-task polling) ---
+    if (elicitationSchema) {
+      await extra.taskStore.updateTaskStatus(task.taskId, "input_required");
+      try {
+        const jsonSchema = z.toJSONSchema(
+          elicitationSchema,
+        ) as ElicitRequestFormParams["requestedSchema"];
+        const elicitationParams: ElicitRequestFormParams = {
+          message: `Please provide input for task ${task.taskId}`,
+          requestedSchema: jsonSchema,
+          _meta: {
+            [RELATED_TASK_META_KEY]: { taskId: task.taskId },
+          },
+          ...(receiverTaskTtl != null && { task: { ttl: receiverTaskTtl } }),
+        };
+        const elicitResponse = await extra.sendRequest(
+          {
+            method: "elicitation/create",
+            params: elicitationParams,
+          },
+          (receiverTaskTtl != null
+            ? z.union([ElicitResultSchema, CreateTaskResultSchema])
+            : ElicitResultSchema) as typeof ElicitResultSchema,
+        );
+        // The union result may carry a `task` handle that `ElicitResult` doesn't
+        // model. That field is optional, so a single narrowing cast reaches it.
+        const elicitWithTask = elicitResponse as {
+          task?: { taskId: string };
+        };
+        if (receiverTaskTtl != null && elicitWithTask?.task) {
+          receiverTaskPayload =
+            (await pollReceiverTaskPayload(
+              extra,
+              elicitWithTask.task.taskId,
+              ElicitResultSchema,
+              true,
+            )) ?? null;
+        }
+        await extra.taskStore.updateTaskStatus(task.taskId, "working");
+      } catch (error) {
+        console.error("[flexibleTask] Elicitation error:", error);
+        await extra.taskStore.updateTaskStatus(
+          task.taskId,
+          "failed",
+          error instanceof Error ? error.message : String(error),
+        );
+        return;
+      }
+    }
+
+    if (samplingText) {
+      await extra.taskStore.updateTaskStatus(task.taskId, "input_required");
+      try {
+        const samplingResponse = await extra.sendRequest(
+          {
+            method: "sampling/createMessage",
+            params: {
+              messages: [
+                {
+                  role: "user",
+                  content: { type: "text", text: samplingText },
+                },
+              ],
+              maxTokens: 100,
+              _meta: {
+                [RELATED_TASK_META_KEY]: { taskId: task.taskId },
+              },
+              ...(receiverTaskTtl != null && {
+                task: { ttl: receiverTaskTtl },
+              }),
+            },
+          },
+          (receiverTaskTtl != null
+            ? z.union([CreateMessageResultSchema, CreateTaskResultSchema])
+            : CreateMessageResultSchema) as typeof CreateMessageResultSchema,
+        );
+        // The union result may carry a `task` handle that `CreateMessageResult`
+        // doesn't model. That field is optional, so a single narrowing cast
+        // reaches it.
+        const samplingWithTask = samplingResponse as {
+          task?: { taskId: string };
+        };
+        if (receiverTaskTtl != null && samplingWithTask?.task) {
+          receiverTaskPayload =
+            (await pollReceiverTaskPayload(
+              extra,
+              samplingWithTask.task.taskId,
+              CreateMessageResultSchema,
+              false,
+            )) ?? null;
+        }
+        await extra.taskStore.updateTaskStatus(task.taskId, "working");
+      } catch (error) {
+        console.error("[flexibleTask] Sampling error:", error);
+        await extra.taskStore.updateTaskStatus(
+          task.taskId,
+          "failed",
+          error instanceof Error ? error.message : String(error),
+        );
+        return;
+      }
+    }
+
+    // --- Progress or delay ---
+    if (
+      progressUnits !== undefined &&
+      progressUnits > 0 &&
+      progressToken !== undefined
+    ) {
+      for (let i = 1; i <= progressUnits; i++) {
+        if (getTestServerControl()?.isClosing()) break;
+        await new Promise((resolve) =>
+          setTimeout(resolve, delayMs / progressUnits),
+        );
+        if (getTestServerControl()?.isClosing()) break;
+        try {
+          await extra.sendNotification({
+            method: "notifications/progress",
+            params: {
+              progress: i,
+              total: progressUnits,
+              message: `Processing... ${i}/${progressUnits}`,
+              progressToken,
+              _meta: {
+                [RELATED_TASK_META_KEY]: { taskId: task.taskId },
+              },
+            },
+          });
+        } catch (error) {
+          console.error("[flexibleTask] Progress notification error:", error);
+          break;
+        }
+      }
+    } else {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+
+    // --- Optional fail/cancel ---
+    if (failAfterDelay !== undefined) {
+      await new Promise((resolve) => setTimeout(resolve, failAfterDelay));
+      await extra.taskStore.updateTaskStatus(
+        task.taskId,
+        "failed",
+        "Task failed as configured",
+      );
+      return;
+    }
+    if (cancelAfterDelay !== undefined) {
+      await new Promise((resolve) => setTimeout(resolve, cancelAfterDelay));
+      await extra.taskStore.updateTaskStatus(task.taskId, "cancelled");
+      return;
+    }
+
+    // --- Complete with stored or default result ---
+    const result =
+      receiverTaskPayload?.content != null
+        ? receiverTaskPayload.isElicit
+          ? {
+              content: [
+                {
+                  type: "text" as const,
+                  text: JSON.stringify(receiverTaskPayload.content),
+                },
+              ],
+            }
+          : {
+              content: Array.isArray(receiverTaskPayload.content)
+                ? receiverTaskPayload.content
+                : [receiverTaskPayload.content],
+            }
+        : {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  message: `Task completed: ${message || "no message"}`,
+                  taskId: task.taskId,
+                }),
+              },
+            ],
+          };
+    await extra.taskStore.storeTaskResult(task.taskId, "completed", result);
+    await extra.taskStore.updateTaskStatus(task.taskId, "completed");
+  } catch (error) {
+    try {
+      const currentTask = await extra.taskStore.getTask(task.taskId);
+      if (
+        currentTask &&
+        currentTask.status !== "completed" &&
+        currentTask.status !== "failed" &&
+        currentTask.status !== "cancelled"
+      ) {
+        await extra.taskStore.updateTaskStatus(
+          task.taskId,
+          "failed",
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    } catch (statusError) {
+      console.error(
+        "[flexibleTask] Error checking/updating task status:",
+        statusError,
+      );
+    }
+  }
+}
+
+/** Creates an immediate (non-task) tool that completes after a delay. */
+export function createImmediateTool(
+  options: ImmediateToolOptions = {},
+): ToolDefinition {
+  const { name = "flexibleTask", delayMs = 1000 } = options;
+  return {
+    name,
+    description: "A tool that completes immediately without creating a task",
+    inputSchema: {
+      message: z.string().optional().describe("Optional message parameter"),
+    },
+    handler: async (
+      params: Record<string, unknown>,
+      _context?: TestServerContext,
+    ): Promise<CallToolResult> => {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      return toToolResult(
+        `Task completed immediately: ${params.message ?? "no message"}`,
+      );
+    },
+  };
+}
+
+/** Creates a task tool (createTask + getTask + getTaskResult) with optional progress, elicitation, sampling, etc. */
+export function createTaskTool(
+  options: TaskToolOptions = {},
+): TaskToolDefinition {
+  const { name = "flexibleTask", taskSupport = "required" } = options;
+  return {
+    name,
+    description: `A flexible task tool supporting progress, elicitation, and sampling`,
+    inputSchema: {
+      message: z.string().optional().describe("Optional message parameter"),
+    },
+    execution: {
+      taskSupport: taskSupport as "required" | "optional",
+    },
+    handler: {
+      createTask: async (args, extra) => {
+        const message = (args as Record<string, unknown>)?.message as
+          | string
+          | undefined;
+        const progressToken = extra._meta?.progressToken as
+          | string
+          | number
+          | undefined;
+        const task = await extra.taskStore.createTask({});
+        runTaskExecution({
+          task,
+          extra,
+          message,
+          progressToken,
+          options,
+        }).catch(() => {});
+        return { task };
+      },
+      getTask: async (
+        _args: ShapeOutput<{ message?: z.ZodString }>,
+        extra: TaskRequestHandlerExtra,
+      ): Promise<GetTaskResult> => {
+        const task = await extra.taskStore.getTask(extra.taskId);
+        return task as GetTaskResult;
+      },
+      getTaskResult: async (
+        _args: ShapeOutput<{ message?: z.ZodString }>,
+        extra: TaskRequestHandlerExtra,
+      ): Promise<CallToolResult> => {
+        const result = await extra.taskStore.getTaskResult(extra.taskId);
+        if (!result.content) {
+          throw new Error("Task result does not have content field");
+        }
+        return result as CallToolResult;
+      },
+    },
+  };
+}
+
+/**
+ * Create a simple task tool that completes after a delay
+ */
+export function createSimpleTaskTool(
+  name: string = "simple_task",
+  delayMs: number = 1000,
+): TaskToolDefinition {
+  return createTaskTool({ name, delayMs });
+}
+
+/**
+ * Create a task tool that sends progress notifications
+ */
+export function createProgressTaskTool(
+  name: string = "progress_task",
+  delayMs: number = 2000,
+  progressUnits: number = 5,
+): TaskToolDefinition {
+  return createTaskTool({ name, delayMs, progressUnits });
+}
+
+/**
+ * Create a task tool that requires elicitation input
+ */
+export function createElicitationTaskTool(
+  name: string = "elicitation_task",
+  elicitationSchema?: z.ZodTypeAny,
+): TaskToolDefinition {
+  return createTaskTool({
+    name,
+    elicitationSchema:
+      elicitationSchema ||
+      z.object({
+        input: z.string().describe("User input required for task"),
+      }),
+  });
+}
+
+/**
+ * Create a task tool that requires sampling input
+ */
+export function createSamplingTaskTool(
+  name: string = "sampling_task",
+  samplingText?: string,
+): TaskToolDefinition {
+  return createTaskTool({
+    name,
+    samplingText: samplingText || "Please provide a response for this task",
+  });
+}
+
+/**
+ * Create a task tool with optional task support
+ */
+export function createOptionalTaskTool(
+  name: string = "optional_task",
+  delayMs: number = 500,
+): TaskToolDefinition {
+  return createTaskTool({ name, taskSupport: "optional", delayMs });
+}
+
+/**
+ * Create a tool that does not support tasks (completes immediately without creating a task)
+ */
+export function createForbiddenTaskTool(
+  name: string = "forbidden_task",
+  delayMs: number = 100,
+): ToolDefinition {
+  return createImmediateTool({ name, delayMs });
+}
+
+/**
+ * Create a tool that returns immediately without creating a task
+ * (for testing callTool() with task-supporting server config where the tool itself is immediate)
+ */
+export function createImmediateReturnTaskTool(
+  name: string = "immediate_return_task",
+  delayMs: number = 100,
+): ToolDefinition {
+  return createImmediateTool({ name, delayMs });
+}
+
+/**
+ * Get a server config with task support and task tools for testing
+ */
+export function getTaskServerConfig(): ServerConfig {
+  return {
+    serverInfo: createTestServerInfo("test-task-server", "1.0.0"),
+    tasks: {
+      list: true,
+      cancel: true,
+    },
+    tools: [
+      createSimpleTaskTool(),
+      createProgressTaskTool(),
+      createElicitationTaskTool(),
+      createSamplingTaskTool(),
+      createOptionalTaskTool(),
+      createForbiddenTaskTool(),
+      createImmediateReturnTaskTool(),
+    ],
+    logging: true, // Required for notifications/message and progress
+  };
+}
+
+/**
+ * Get default server config with common test tools, prompts, and resources
+ */
+export function getDefaultServerConfig(): ServerConfig {
+  return {
+    serverInfo: createTestServerInfo("test-mcp-server", "1.0.0"),
+    tools: [
+      createEchoTool(),
+      createGetSumTool(),
+      createGetAnnotatedMessageTool(),
+      createGetTempTool(),
+      createGetTempExtraTool(),
+      createSendNotificationTool(),
+      createWriteToStderrTool(),
+      createMcpAppDemoTool(),
+    ],
+    prompts: [createSimplePrompt(), createArgsPrompt()],
+    resources: [
+      createArchitectureResource(),
+      createTestCwdResource(),
+      createTestEnvResource(),
+      createTestArgvResource(),
+      createMcpAppDemoResource(),
+    ],
+    resourceTemplates: [
+      createFileResourceTemplate(),
+      createUserResourceTemplate(),
+    ],
+    logging: true, // Required for notifications/message
+  };
+}
+
+/**
+ * OAuth Test Fixtures
+ */
+
+/**
+ * Creates a test server configuration with OAuth enabled
+ */
+export function createOAuthTestServerConfig(options: {
+  requireAuth?: boolean;
+  scopesSupported?: string[];
+  staticClients?: Array<{
+    clientId: string;
+    clientSecret?: string;
+    redirectUris?: string[];
+  }>;
+  supportDCR?: boolean;
+  supportCIMD?: boolean;
+  tokenExpirationSeconds?: number;
+  supportRefreshTokens?: boolean;
+}): Partial<ServerConfig> {
+  return {
+    oauth: {
+      enabled: true,
+      mode: "combined",
+      requireAuth: options.requireAuth ?? false,
+      scopesSupported: options.scopesSupported ?? ["mcp"],
+      staticClients: options.staticClients,
+      supportDCR: options.supportDCR ?? false,
+      supportCIMD: options.supportCIMD ?? false,
+      tokenExpirationSeconds: options.tokenExpirationSeconds ?? 3600,
+      supportRefreshTokens: options.supportRefreshTokens ?? true,
+    },
+  };
+}
+
+/**
+ * MCP resource server that delegates authorization to an external AS (EMA / XAA testing).
+ * Access tokens must be JWTs from that AS (signature + iss validated via JWKS).
+ */
+export function createExternalResourceOAuthTestServerConfig(options: {
+  authorizationServers: string[];
+  requireAuth?: boolean;
+  scopesSupported?: string[];
+  resource?: string;
+  accessTokenIssuers?: string[];
+  jwksUri?: string;
+  resourceAudience?: string;
+}): Partial<ServerConfig> {
+  return {
+    oauth: {
+      enabled: true,
+      mode: "protected-resource",
+      authorizationServers: options.authorizationServers,
+      requireAuth: options.requireAuth ?? true,
+      scopesSupported: options.scopesSupported ?? ["mcp"],
+      resource: options.resource,
+      accessTokenIssuers: options.accessTokenIssuers,
+      jwksUri: options.jwksUri,
+      resourceAudience: options.resourceAudience,
+    },
+  };
+}

@@ -1,0 +1,447 @@
+import { useEffect, useMemo, useState, type ChangeEvent } from "react";
+import {
+  Button,
+  Group,
+  Modal,
+  Select,
+  Stack,
+  Text,
+  TextInput,
+  Textarea,
+} from "@mantine/core";
+import { ClearButton } from "../../elements/ClearButton/ClearButton";
+import type {
+  MCPServerConfig,
+  StdioServerConfig,
+} from "@inspector/core/mcp/types.js";
+
+/** Allowed id pattern — mirrors validateStoreId in core/storage/store-io.ts */
+const ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
+
+export type ServerConfigModalMode = "add" | "edit" | "clone";
+
+export interface ServerConfigModalProps {
+  opened: boolean;
+  mode: ServerConfigModalMode;
+  /** When editing, the existing id of the target server. */
+  initialId?: string;
+  /** When editing or cloning, the existing config to pre-populate. */
+  initialConfig?: MCPServerConfig;
+  /** Ids already in use — drives the uniqueness check (caller excludes the
+   *  target id from this list when in 'edit' mode). */
+  existingIds: string[];
+  onClose: () => void;
+  onSubmit: (id: string, config: MCPServerConfig) => Promise<void> | void;
+}
+
+type TransportChoice = "stdio" | "sse" | "streamable-http";
+
+interface FormState {
+  id: string;
+  transport: TransportChoice;
+  // stdio
+  command: string;
+  argsText: string;
+  envText: string;
+  cwd: string;
+  // sse / streamable-http
+  url: string;
+}
+
+// The `string`-valued FormState keys, which all share the same text-input
+// update/clear handlers. Selecting by value type (not by excluding `transport`
+// by name) keeps this in sync with FormState automatically: a new string field
+// is picked up, and a non-string field is excluded — so passing its key to the
+// handler factories is a compile error at the call site rather than a silent
+// string-into-non-string write.
+type PlainStringKeys<T> = {
+  [K in keyof T]-?: string extends T[K] ? K : never;
+}[keyof T];
+type TextField = PlainStringKeys<FormState>;
+
+const SectionStack = Stack.withProps({ gap: "md" });
+const FieldGrid = Stack.withProps({ gap: "sm" });
+const Actions = Group.withProps({ justify: "flex-end", gap: "sm", mt: "md" });
+const ModalTitle = Text.withProps({ fw: 700, span: true });
+const AppModalLg = Modal.withProps({ size: "lg", centered: true });
+const FieldError = Text.withProps({ c: "red", size: "sm", role: "alert" });
+const RequiredTextInput = TextInput.withProps({
+  required: true,
+  rightSectionPointerEvents: "auto",
+});
+// Optional (non-required) clearable field — keeps the ClearButton clickable.
+const ClearableTextInput = TextInput.withProps({
+  rightSectionPointerEvents: "auto",
+});
+const ArgsTextarea = Textarea.withProps({
+  autosize: true,
+  minRows: 3,
+  rightSectionPointerEvents: "auto",
+});
+const EnvTextarea = Textarea.withProps({
+  autosize: true,
+  minRows: 2,
+  rightSectionPointerEvents: "auto",
+});
+
+const MODE_TITLES: Record<ServerConfigModalMode, string> = {
+  add: "Add server",
+  edit: "Edit server",
+  clone: "Clone server",
+};
+
+function configToFormState(
+  initialId: string | undefined,
+  initialConfig: MCPServerConfig | undefined,
+  mode: ServerConfigModalMode,
+): FormState {
+  const id = mode === "edit" ? (initialId ?? "") : "";
+  const transport: TransportChoice =
+    initialConfig?.type === undefined ? "stdio" : initialConfig.type;
+  if (!initialConfig) {
+    return {
+      id,
+      transport: "stdio",
+      command: "",
+      argsText: "",
+      envText: "",
+      cwd: "",
+      url: "",
+    };
+  }
+  if (transport === "stdio") {
+    const c = initialConfig as StdioServerConfig;
+    return {
+      id,
+      transport,
+      command: c.command ?? "",
+      argsText: (c.args ?? []).join("\n"),
+      envText: Object.entries(c.env ?? {})
+        .map(([k, v]) => `${k}=${v}`)
+        .join("\n"),
+      cwd: c.cwd ?? "",
+      url: "",
+    };
+  }
+  // sse / streamable-http — custom headers live in ServerSettingsForm now.
+  const url =
+    initialConfig.type === "sse" || initialConfig.type === "streamable-http"
+      ? initialConfig.url
+      : "";
+  return {
+    id,
+    transport,
+    command: "",
+    argsText: "",
+    envText: "",
+    cwd: "",
+    url: url ?? "",
+  };
+}
+
+function parseArgs(raw: string): string[] {
+  return raw
+    .split("\n")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+function parseEnv(raw: string):
+  | {
+      ok: true;
+      value: Record<string, string>;
+    }
+  | {
+      ok: false;
+      error: string;
+    } {
+  const out: Record<string, string> = {};
+  const lines = raw
+    .split("\n")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  for (const line of lines) {
+    const eq = line.indexOf("=");
+    if (eq <= 0) {
+      return { ok: false, error: `Invalid env line "${line}". Use KEY=VALUE.` };
+    }
+    const key = line.slice(0, eq).trim();
+    // env values preserve trailing whitespace — they're shell-style strings
+    // where spaces / tabs can be load-bearing.
+    const value = line.slice(eq + 1);
+    /* v8 ignore next 2 -- unreachable: the line is already trimmed and eq>0,
+       so the key slice always starts with a non-whitespace char and can never
+       trim to empty; kept as a defensive guard. */
+    if (!key)
+      return { ok: false, error: `Invalid env line "${line}". Empty key.` };
+    out[key] = value;
+  }
+  return { ok: true, value: out };
+}
+
+export function ServerConfigModal({
+  opened,
+  mode,
+  initialId,
+  initialConfig,
+  existingIds,
+  onClose,
+  onSubmit,
+}: ServerConfigModalProps) {
+  const initial = useMemo(
+    () => configToFormState(initialId, initialConfig, mode),
+    [initialId, initialConfig, mode],
+  );
+  const [form, setForm] = useState<FormState>(initial);
+  const [submitError, setSubmitError] = useState<string | undefined>(undefined);
+  const [submitting, setSubmitting] = useState<boolean>(false);
+
+  // The six text fields all update the same way. Capture the value before the
+  // functional updater closes over it — React nulls SyntheticEvent.currentTarget
+  // after the synchronous handler returns, so reading it inside `setForm((f) =>
+  // ...)` would throw "Cannot read properties of null".
+  const setTextField =
+    (field: TextField) =>
+    (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      const next = e.currentTarget.value;
+      setForm((f) => ({ ...f, [field]: next }));
+    };
+  const clearTextField = (field: TextField) => () =>
+    setForm((f) => ({ ...f, [field]: "" }));
+
+  // Reset form whenever the modal opens with new inputs.
+  useEffect(() => {
+    if (opened) {
+      setForm(initial);
+      setSubmitError(undefined);
+      setSubmitting(false);
+    }
+  }, [opened, initial]);
+
+  const trimmedId = form.id.trim();
+  const idIsValid = ID_PATTERN.test(trimmedId);
+  const idIsDuplicate = trimmedId.length > 0 && existingIds.includes(trimmedId);
+  const idError = !trimmedId
+    ? undefined
+    : !idIsValid
+      ? "Use only letters, numbers, hyphens, and underscores."
+      : idIsDuplicate
+        ? "A server with this id already exists."
+        : undefined;
+
+  function buildConfig():
+    | {
+        ok: true;
+        config: MCPServerConfig;
+      }
+    | {
+        ok: false;
+        error: string;
+      } {
+    if (form.transport === "stdio") {
+      if (!form.command.trim()) {
+        return { ok: false, error: "Command is required for stdio." };
+      }
+      const env = parseEnv(form.envText);
+      if (!env.ok) return env;
+      const config: StdioServerConfig = {
+        type: "stdio",
+        command: form.command.trim(),
+      };
+      const args = parseArgs(form.argsText);
+      if (args.length > 0) config.args = args;
+      if (Object.keys(env.value).length > 0) config.env = env.value;
+      const cwd = form.cwd.trim();
+      if (cwd) config.cwd = cwd;
+      return { ok: true, config };
+    }
+    if (!form.url.trim()) {
+      return { ok: false, error: "URL is required for sse / streamable-http." };
+    }
+    const base = { url: form.url.trim() };
+    // Custom headers live in ServerSettingsForm now (persisted under
+    // settings.headers on the entry); the SSE / streamable-http config here
+    // only carries the canonical transport fields.
+    const config: MCPServerConfig =
+      form.transport === "sse"
+        ? { type: "sse", ...base }
+        : { type: "streamable-http", ...base };
+    return { ok: true, config };
+  }
+
+  async function handleSubmit() {
+    setSubmitError(undefined);
+    if (!trimmedId) {
+      setSubmitError("Server id is required.");
+      return;
+    }
+    if (idError) {
+      setSubmitError(idError);
+      return;
+    }
+    const built = buildConfig();
+    if (!built.ok) {
+      setSubmitError(built.error);
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await onSubmit(trimmedId, built.config);
+      onClose();
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  const isStdio = form.transport === "stdio";
+
+  return (
+    <AppModalLg
+      opened={opened}
+      onClose={onClose}
+      title={<ModalTitle>{MODE_TITLES[mode]}</ModalTitle>}
+    >
+      <SectionStack>
+        <FieldGrid>
+          <RequiredTextInput
+            label="Server ID"
+            description="Used as the key in mcp.json. Letters, numbers, hyphens, underscores."
+            placeholder="my-server"
+            value={form.id}
+            onChange={setTextField("id")}
+            error={idError}
+            data-autofocus
+            disabled={submitting}
+            rightSection={
+              form.id ? (
+                <ClearButton
+                  disabled={submitting}
+                  onClick={clearTextField("id")}
+                />
+              ) : null
+            }
+          />
+
+          <Select
+            label="Transport"
+            data={[
+              { value: "stdio", label: "stdio (local process)" },
+              { value: "sse", label: "sse (Server-Sent Events)" },
+              { value: "streamable-http", label: "streamable-http" },
+            ]}
+            value={form.transport}
+            onChange={(value) =>
+              setForm((f) => ({
+                ...f,
+                transport: (value ?? "stdio") as TransportChoice,
+              }))
+            }
+            allowDeselect={false}
+            disabled={submitting}
+          />
+
+          {isStdio ? (
+            <>
+              <RequiredTextInput
+                label="Command"
+                placeholder="npx"
+                value={form.command}
+                onChange={setTextField("command")}
+                disabled={submitting}
+                rightSection={
+                  form.command ? (
+                    <ClearButton
+                      disabled={submitting}
+                      onClick={clearTextField("command")}
+                    />
+                  ) : null
+                }
+              />
+              <ArgsTextarea
+                label="Arguments"
+                description="One argument per line."
+                placeholder={"-y\n@modelcontextprotocol/server-everything"}
+                value={form.argsText}
+                onChange={setTextField("argsText")}
+                disabled={submitting}
+                rightSection={
+                  form.argsText ? (
+                    <ClearButton
+                      disabled={submitting}
+                      onClick={clearTextField("argsText")}
+                    />
+                  ) : null
+                }
+              />
+              <EnvTextarea
+                label="Environment"
+                description="KEY=VALUE per line."
+                placeholder="DEBUG=1"
+                value={form.envText}
+                onChange={setTextField("envText")}
+                disabled={submitting}
+                rightSection={
+                  form.envText ? (
+                    <ClearButton
+                      disabled={submitting}
+                      onClick={clearTextField("envText")}
+                    />
+                  ) : null
+                }
+              />
+              <ClearableTextInput
+                label="Working directory"
+                placeholder="(inherit)"
+                value={form.cwd}
+                onChange={setTextField("cwd")}
+                disabled={submitting}
+                rightSection={
+                  form.cwd ? (
+                    <ClearButton
+                      disabled={submitting}
+                      onClick={clearTextField("cwd")}
+                    />
+                  ) : null
+                }
+              />
+            </>
+          ) : (
+            <RequiredTextInput
+              label="URL"
+              placeholder="https://example.com/mcp"
+              value={form.url}
+              onChange={setTextField("url")}
+              disabled={submitting}
+              rightSection={
+                form.url ? (
+                  <ClearButton
+                    disabled={submitting}
+                    onClick={clearTextField("url")}
+                  />
+                ) : null
+              }
+            />
+          )}
+        </FieldGrid>
+
+        {submitError ? <FieldError>{submitError}</FieldError> : null}
+
+        <Actions>
+          <Button variant="default" onClick={onClose} disabled={submitting}>
+            Cancel
+          </Button>
+          <Button
+            onClick={() => {
+              void handleSubmit();
+            }}
+            loading={submitting}
+          >
+            {mode === "edit" ? "Save" : "Add"}
+          </Button>
+        </Actions>
+      </SectionStack>
+    </AppModalLg>
+  );
+}

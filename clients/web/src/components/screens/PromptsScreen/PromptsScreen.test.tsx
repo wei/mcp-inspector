@@ -1,0 +1,393 @@
+import { useState } from "react";
+import { describe, it, expect, vi } from "vitest";
+import userEvent from "@testing-library/user-event";
+import type { Prompt } from "@modelcontextprotocol/client";
+import { renderWithMantine, screen } from "../../../test/renderWithMantine";
+import { noopPagination } from "../../../test/fixtures/pagination";
+import {
+  PromptsScreen,
+  type PromptsScreenProps,
+  type PromptsUiState,
+} from "./PromptsScreen";
+import { EMPTY_PROMPTS_UI } from "../screenUiState";
+
+const promptsWithArgs: Prompt[] = [
+  {
+    name: "summarize",
+    description: "Summarize text",
+    arguments: [{ name: "topic", required: true }],
+  },
+  {
+    name: "translate",
+    description: "Translate text",
+    arguments: [{ name: "text", required: true }],
+  },
+];
+
+const noArgPrompts: Prompt[] = [
+  { name: "ping", description: "No-arg ping" },
+  { name: "pong", description: "Also no-arg" },
+];
+
+const baseProps = {
+  prompts: promptsWithArgs,
+  listChanged: false,
+  ui: EMPTY_PROMPTS_UI,
+  onUiChange: vi.fn(),
+  onRefreshList: vi.fn(),
+  pagination: noopPagination,
+  onGetPrompt: vi.fn(),
+};
+
+// PromptsScreen is controlled: selection, argument values, the submitted
+// marker, and the sidebar search live in the parent (App) as one `ui` object so
+// they persist across tab navigation (#1417). This host holds that state so
+// clicking a prompt, typing arguments, submitting, and closing drive the panel
+// exactly as App owns it. Props passed in override defaults; the stateful `ui`
+// wiring is applied last so callers can still observe activity via the rendered
+// state.
+function ControlledPromptsScreen(props: Partial<PromptsScreenProps>) {
+  const [ui, setUi] = useState<PromptsUiState>({
+    ...EMPTY_PROMPTS_UI,
+    ...props.ui,
+  });
+  return (
+    <PromptsScreen
+      {...baseProps}
+      {...props}
+      ui={ui}
+      onUiChange={(next) => {
+        setUi(next);
+        props.onUiChange?.(next);
+      }}
+    />
+  );
+}
+
+describe("PromptsScreen", () => {
+  it("renders the empty state when no prompt is selected", () => {
+    renderWithMantine(<PromptsScreen {...baseProps} />);
+    expect(
+      screen.getByText("Select a prompt to view details"),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the argument form when a prompt with arguments is selected", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<ControlledPromptsScreen />);
+    await user.click(screen.getByText("summarize"));
+    expect(
+      screen.getByRole("button", { name: "Get Prompt" }),
+    ).toBeInTheDocument();
+  });
+
+  it("auto-fetches when a no-argument prompt is selected", async () => {
+    const user = userEvent.setup();
+    const onGetPrompt = vi.fn();
+    renderWithMantine(
+      <ControlledPromptsScreen
+        prompts={noArgPrompts}
+        onGetPrompt={onGetPrompt}
+      />,
+    );
+    await user.click(screen.getByText("ping"));
+    expect(onGetPrompt).toHaveBeenCalledWith("ping", {});
+    // The form pane is not rendered for no-argument prompts.
+    expect(
+      screen.queryByRole("button", { name: "Get Prompt" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not re-fire auto-fetch on subsequent renders", async () => {
+    const user = userEvent.setup();
+    const onGetPrompt = vi.fn();
+    const { rerender } = renderWithMantine(
+      <ControlledPromptsScreen
+        prompts={noArgPrompts}
+        onGetPrompt={onGetPrompt}
+      />,
+    );
+    await user.click(screen.getByText("ping"));
+    expect(onGetPrompt).toHaveBeenCalledTimes(1);
+    // Parent re-renders with a fresh pending state — the fetch must not
+    // re-fire just because props changed.
+    rerender(
+      <ControlledPromptsScreen
+        prompts={noArgPrompts}
+        onGetPrompt={onGetPrompt}
+        getPromptState={{ status: "pending", promptName: "ping" }}
+      />,
+    );
+    expect(onGetPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides the argument form once the user clicks Get Prompt", async () => {
+    const user = userEvent.setup();
+    const onGetPrompt = vi.fn();
+    renderWithMantine(
+      <ControlledPromptsScreen
+        onGetPrompt={onGetPrompt}
+        getPromptState={{
+          status: "ok",
+          promptName: "summarize",
+          result: {
+            messages: [{ role: "user", content: { type: "text", text: "hi" } }],
+          },
+        }}
+      />,
+    );
+    await user.click(screen.getByText("summarize"));
+    await user.type(screen.getByPlaceholderText("Enter topic..."), "math");
+    await user.click(screen.getByRole("button", { name: "Get Prompt" }));
+    expect(onGetPrompt).toHaveBeenCalledWith("summarize", { topic: "math" });
+    // After submit, the form is gone and the messages panel is shown.
+    expect(
+      screen.queryByRole("button", { name: "Get Prompt" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("Messages")).toBeInTheDocument();
+  });
+
+  it("shows pending state once the user has submitted", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(
+      <ControlledPromptsScreen
+        getPromptState={{ status: "pending", promptName: "summarize" }}
+      />,
+    );
+    await user.click(screen.getByText("summarize"));
+    await user.type(screen.getByPlaceholderText("Enter topic..."), "x");
+    await user.click(screen.getByRole("button", { name: "Get Prompt" }));
+    expect(screen.getByText("Loading prompt...")).toBeInTheDocument();
+  });
+
+  it("shows error state once the user has submitted", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(
+      <ControlledPromptsScreen
+        getPromptState={{
+          status: "error",
+          promptName: "summarize",
+          error: "Bad prompt",
+        }}
+      />,
+    );
+    await user.click(screen.getByText("summarize"));
+    await user.type(screen.getByPlaceholderText("Enter topic..."), "x");
+    await user.click(screen.getByRole("button", { name: "Get Prompt" }));
+    expect(screen.getByText("Prompt Error")).toBeInTheDocument();
+    expect(screen.getByText("Bad prompt")).toBeInTheDocument();
+  });
+
+  it("falls back to a default error message when none is provided", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(
+      <ControlledPromptsScreen
+        getPromptState={{ status: "error", promptName: "summarize" }}
+      />,
+    );
+    await user.click(screen.getByText("summarize"));
+    await user.type(screen.getByPlaceholderText("Enter topic..."), "x");
+    await user.click(screen.getByRole("button", { name: "Get Prompt" }));
+    expect(screen.getByText("Failed to get prompt")).toBeInTheDocument();
+  });
+
+  it("ignores a stale getPromptState whose name does not match the selection", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(
+      <ControlledPromptsScreen
+        // Stale result for a prompt the user is no longer viewing.
+        getPromptState={{
+          status: "ok",
+          promptName: "translate",
+          result: {
+            messages: [{ role: "user", content: { type: "text", text: "x" } }],
+          },
+        }}
+      />,
+    );
+    await user.click(screen.getByText("summarize"));
+    // Form for the freshly-selected prompt, not the stale "translate" result.
+    expect(
+      screen.getByRole("button", { name: "Get Prompt" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Messages")).not.toBeInTheDocument();
+  });
+
+  it("re-clicking the active prompt preserves form values and does not re-fetch", async () => {
+    const user = userEvent.setup();
+    const onGetPrompt = vi.fn();
+    renderWithMantine(
+      <ControlledPromptsScreen
+        prompts={noArgPrompts}
+        onGetPrompt={onGetPrompt}
+      />,
+    );
+    await user.click(screen.getByText("ping"));
+    expect(onGetPrompt).toHaveBeenCalledTimes(1);
+    // Sidebar re-click on the same prompt should be a no-op — sidebar
+    // is navigation, ✕ is dismiss.
+    await user.click(screen.getByText("ping"));
+    expect(onGetPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it("resets argument values when switching prompts", async () => {
+    const user = userEvent.setup();
+    const arglessTwoStep: Prompt[] = [
+      { name: "alpha", arguments: [{ name: "x" }] },
+      { name: "beta", arguments: [{ name: "y" }] },
+    ];
+    renderWithMantine(<ControlledPromptsScreen prompts={arglessTwoStep} />);
+    await user.click(screen.getByText("alpha"));
+    await user.type(screen.getByPlaceholderText("Enter x..."), "value");
+    await user.click(screen.getByText("beta"));
+    expect(screen.getByPlaceholderText("Enter y...")).toHaveValue("");
+  });
+
+  it("closing the preview from the error state brings the form back", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(
+      <ControlledPromptsScreen
+        getPromptState={{
+          status: "error",
+          promptName: "summarize",
+          error: "Bad input",
+        }}
+      />,
+    );
+    await user.click(screen.getByText("summarize"));
+    await user.type(screen.getByPlaceholderText("Enter topic..."), "x");
+    await user.click(screen.getByRole("button", { name: "Get Prompt" }));
+    expect(screen.getByText("Prompt Error")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Close messages" }));
+    expect(
+      screen.getByRole("button", { name: "Get Prompt" }),
+    ).toBeInTheDocument();
+  });
+
+  it("closing the preview for an arg-bearing prompt brings the form back", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(
+      <ControlledPromptsScreen
+        getPromptState={{
+          status: "ok",
+          promptName: "summarize",
+          result: {
+            messages: [{ role: "user", content: { type: "text", text: "hi" } }],
+          },
+        }}
+      />,
+    );
+    await user.click(screen.getByText("summarize"));
+    await user.type(screen.getByPlaceholderText("Enter topic..."), "math");
+    await user.click(screen.getByRole("button", { name: "Get Prompt" }));
+    // Preview is showing now — close it.
+    await user.click(screen.getByRole("button", { name: "Close messages" }));
+    expect(
+      screen.getByRole("button", { name: "Get Prompt" }),
+    ).toBeInTheDocument();
+    // Argument value is preserved so the user can edit + re-submit.
+    expect(screen.getByPlaceholderText("Enter topic...")).toHaveValue("math");
+  });
+
+  it("closing the preview for a no-arg prompt drops the selection", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(
+      <ControlledPromptsScreen
+        prompts={noArgPrompts}
+        getPromptState={{
+          status: "ok",
+          promptName: "ping",
+          result: {
+            messages: [{ role: "user", content: { type: "text", text: "hi" } }],
+          },
+        }}
+      />,
+    );
+    await user.click(screen.getByText("ping"));
+    await user.click(screen.getByRole("button", { name: "Close messages" }));
+    // No form to fall back to → empty state.
+    expect(
+      screen.getByText("Select a prompt to view details"),
+    ).toBeInTheDocument();
+  });
+
+  it("re-clicking the active arg-bearing prompt is a no-op (early return)", async () => {
+    const user = userEvent.setup();
+    const onUiChange = vi.fn();
+    const onGetPrompt = vi.fn();
+    renderWithMantine(
+      <ControlledPromptsScreen
+        onUiChange={onUiChange}
+        onGetPrompt={onGetPrompt}
+      />,
+    );
+    // First click selects "summarize" (arg-bearing → form, no auto-fetch).
+    await user.click(screen.getByText("summarize"));
+    const callsAfterSelect = onUiChange.mock.calls.length;
+    // Re-clicking the already-selected sidebar entry must early-return:
+    // no further onUiChange (selection unchanged) and no fetch. The form
+    // pane now also shows "summarize", so target the sidebar entry (first).
+    await user.click(screen.getAllByText("summarize")[0]);
+    expect(onUiChange.mock.calls.length).toBe(callsAfterSelect);
+    expect(onGetPrompt).not.toHaveBeenCalled();
+  });
+
+  it("routes sidebar search text through onUiChange", async () => {
+    const user = userEvent.setup();
+    const onUiChange = vi.fn();
+    renderWithMantine(<ControlledPromptsScreen onUiChange={onUiChange} />);
+    await user.type(screen.getByPlaceholderText("Search prompts..."), "sum");
+    expect(onUiChange).toHaveBeenCalled();
+    const last = onUiChange.mock.calls.at(-1)?.[0] as PromptsUiState;
+    expect(last.search).toBe("sum");
+  });
+
+  it("renders nothing in the preview when an ok state carries no result", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(
+      <ControlledPromptsScreen
+        // previewActive but status ok with no messages result — the
+        // renderPreview path falls through to `return null`.
+        getPromptState={{ status: "ok", promptName: "summarize" }}
+      />,
+    );
+    await user.click(screen.getByText("summarize"));
+    await user.type(screen.getByPlaceholderText("Enter topic..."), "x");
+    await user.click(screen.getByRole("button", { name: "Get Prompt" }));
+    // No messages panel and no form (preview branch is active but empty).
+    expect(screen.queryByText("Messages")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Get Prompt" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("threads onCompleteArgument with a ref/prompt envelope", async () => {
+    const user = userEvent.setup();
+    const onCompleteArgument = vi
+      .fn<
+        (
+          ref:
+            | { type: "ref/resource"; uri: string }
+            | { type: "ref/prompt"; name: string },
+          argName: string,
+          value: string,
+          context: Record<string, string>,
+        ) => Promise<string[]>
+      >()
+      .mockResolvedValue([]);
+    renderWithMantine(
+      <ControlledPromptsScreen
+        completionsSupported
+        onCompleteArgument={onCompleteArgument}
+      />,
+    );
+    await user.click(screen.getByText("summarize"));
+    await user.type(screen.getByRole("textbox", { name: /topic/ }), "ab");
+    await new Promise((r) => setTimeout(r, 400));
+    expect(onCompleteArgument).toHaveBeenCalled();
+    expect(onCompleteArgument.mock.calls[0][0]).toEqual({
+      type: "ref/prompt",
+      name: "summarize",
+    });
+  });
+});
