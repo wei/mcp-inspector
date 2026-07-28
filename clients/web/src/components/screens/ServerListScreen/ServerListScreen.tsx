@@ -1,0 +1,328 @@
+import {
+  Alert,
+  Code,
+  Flex,
+  Group,
+  Paper,
+  ScrollArea,
+  SimpleGrid,
+  Stack,
+  Text,
+  Title,
+} from "@mantine/core";
+import {
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  rectSortingStrategy,
+  sortableKeyboardCoordinates,
+} from "@dnd-kit/sortable";
+import type { ServerEntry } from "@inspector/core/mcp/types.js";
+import { ServerCard } from "../../groups/ServerCard/ServerCard";
+import { ServerListControls } from "../../groups/ServerListControls/ServerListControls";
+import { SortableServerCard } from "../../groups/SortableServerCard/SortableServerCard";
+import {
+  buildReorderAnnouncements,
+  makeServerDragEndHandler,
+} from "./serverReorder";
+
+export interface ServerListScreenProps {
+  servers: ServerEntry[];
+  /**
+   * Whether the server list is writable (catalog) or read-only (a `--config`
+   * session file / ad-hoc launch). When false, all catalog mutation controls
+   * (add, edit, clone, remove, reorder, settings) are hidden and a read-only
+   * banner is shown. Defaults to true.
+   */
+  writable?: boolean;
+  /** Id of the server the wiring layer treats as active (drives card dimming). */
+  activeServer?: string;
+  /**
+   * Id of the server whose last connection attempt failed (#1621). Its card
+   * draws a red border until another server is connected or attempted.
+   */
+  erroredServerId?: string;
+  /**
+   * Id of the server that just connected successfully (#1682). Its card draws
+   * the green highlight border and scrolls into view — the success mirror of
+   * `erroredServerId`.
+   */
+  connectedServerId?: string;
+  onAddManually: () => void;
+  onImportConfig: () => void;
+  onImportServerJson: () => void;
+  /** Download the current server list as a canonical `mcp.json` file. */
+  onExport: () => void;
+  onToggleConnection: (id: string) => void;
+  onConnectionInfo: (id: string) => void;
+  onSettings: (id: string) => void;
+  onEdit: (id: string) => void;
+  onClone: (id: string) => void;
+  onRemove: (id: string) => void;
+  /**
+   * Persist a new server ordering. Receives the complete set of server ids in
+   * the desired order. Omit to render the list without reorder affordances.
+   */
+  onReorder?: (orderedIds: string[]) => void;
+  /** Ids of freshly-added servers to highlight (animated border); the first is
+   *  also scrolled into view. */
+  highlightedServerIds?: string[];
+  /** Clears the highlight for a server (called when its card is clicked). */
+  onClearHighlight?: (id: string) => void;
+  compact: boolean;
+  onToggleCompact: () => void;
+}
+
+// Full-height screen wrapper (matches the Protocol/Logs screens): fills the
+// viewport minus the header and footer, clips overflow, and lays the optional
+// read-only banner above the box in a column.
+const ScreenLayout = Flex.withProps({
+  variant: "screen",
+  direction: "column",
+  h: "calc(100dvh - var(--app-shell-header-height, 0px) - var(--app-shell-footer-height, 0px))",
+  gap: "md",
+  p: "xl",
+});
+
+// The bordered box that fills the container (#1682 follow-up), styled like the
+// "Messages" panel: a `panel`-variant Paper (display:flex column) holding the
+// title + controls header and the scrolling card grid.
+const PanelContainer = Paper.withProps({
+  withBorder: true,
+  p: "lg",
+  flex: 1,
+  variant: "panel",
+  // The box takes the same surface as the header and footer (white in light
+  // mode) rather than the grey app background.
+  bg: "var(--mantine-color-body)",
+});
+
+// Header row inside the box: "Servers" title on the left, the Export / Add /
+// collapse controls on the right.
+const PanelHeader = Group.withProps({
+  justify: "space-between",
+  mb: "sm",
+});
+
+// Wraps the scroll region so it fills the box below the header (`flex:1/mih:0`)
+// and the inner ScrollArea can bound against it with `mah:100%`.
+const CardScrollWrap = Stack.withProps({
+  flex: 1,
+  mih: 0,
+  gap: 0,
+});
+
+// Centered in the full-height box so the empty message sits mid-panel rather
+// than clinging to the top (matches the Messages panel's empty state).
+const EmptyCenter = Stack.withProps({
+  flex: 1,
+  align: "center",
+  justify: "center",
+});
+
+const EmptyState = Text.withProps({
+  c: "dimmed",
+  ta: "center",
+});
+
+// Override the card-surface var for the whole grid so every server card (in any
+// state — the theme's default/highlighted/errored/disabled Card variants all
+// read `--inspector-surface-card`) picks up the faintly-grey server tone,
+// without touching the shared token or the variant logic. `alignItems: start`
+// keeps rows top-aligned so a taller card (e.g. one whose action row wrapped)
+// doesn't stretch its shorter row-mates.
+const GRID_SURFACE_STYLES = {
+  root: {
+    "--inspector-surface-card": "var(--inspector-surface-card-server)",
+    alignItems: "start",
+  },
+} as const;
+
+// Read-only banner shown above the panel when the server list isn't writable.
+const ReadOnlyAlert = Alert.withProps({
+  color: "gray",
+  variant: "light",
+  title: "Read-only session",
+});
+
+// Semantic h3 (visually h4) so it doesn't skip a level under the disconnected
+// header's h2 "MCP Inspector" (heading-order a11y). The other panels render h4
+// directly because they only show while connected, when the header carries no
+// heading to skip under.
+const PanelTitle = Title.withProps({
+  order: 3,
+  size: "h4",
+});
+
+// The server card grid. Container queries (not viewport) so column count tracks
+// the actual space the grid occupies. The 2- and 3-column thresholds (1040px /
+// 1560px) keep each card ≥ ~505px wide at the switch point: container =
+// N·card + (N−1)·gap with gap = lg spacing (20px), i.e. 1040 = 2·510+20 and
+// 1560 = 3·507+40. Below ~500px a connected card's action row (Clone/Edit/Remove
+// + Connection Info/Settings, ~440px with padding) wraps and stacks, making that
+// card taller than its neighbours; dropping to fewer, wider columns instead keeps
+// every card the same height. (#1528)
+const ServerGrid = SimpleGrid.withProps({
+  type: "container",
+  cols: { base: 1, "1040px": 2, "1560px": 3 },
+  spacing: "lg",
+  styles: GRID_SURFACE_STYLES,
+});
+
+// Same scrollbar treatment as the Protocol/Network/Logging list panels (#1474):
+// reserve a gutter so the bar never overlays the right edge of the server cards
+// (occluding their action icons / status badges), and only show it while
+// actively scrolling rather than popping in on hover.
+const CardScrollArea = ScrollArea.Autosize.withProps({
+  mah: "100%",
+  type: "scroll",
+  offsetScrollbars: true,
+});
+
+export function ServerListScreen({
+  servers,
+  writable = true,
+  activeServer,
+  erroredServerId,
+  connectedServerId,
+  onAddManually,
+  onImportConfig,
+  onImportServerJson,
+  onExport,
+  onToggleConnection,
+  onConnectionInfo,
+  onSettings,
+  onEdit,
+  onClone,
+  onRemove,
+  onReorder,
+  highlightedServerIds,
+  onClearHighlight,
+  compact,
+  onToggleCompact,
+}: ServerListScreenProps) {
+  const sensors = useSensors(
+    useSensor(PointerSensor),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    }),
+  );
+
+  const ids = servers.map((s) => s.id);
+
+  // `reorderable` only when a persistence callback is wired AND the list is
+  // writable. Without it we render plain `ServerCard`s (no grip, no DndContext)
+  // so the screen stays usable as a pure display — the SortableServerCard's
+  // grip would otherwise be a dead affordance (and reorder is a catalog write
+  // the backend rejects in a read-only session).
+  const reorderable = onReorder !== undefined && writable;
+
+  // Built only when reorderable — the drag-end handler and the fresh
+  // announcements object (four closures) are otherwise allocated every render
+  // for nothing.
+  const handleDragEnd = reorderable
+    ? makeServerDragEndHandler(servers, onReorder)
+    : undefined;
+  const announcements = reorderable
+    ? buildReorderAnnouncements(servers)
+    : undefined;
+
+  // Only the first highlighted card (in display order) scrolls into view so a
+  // batch import jumps to the start of the batch instead of fighting over the
+  // viewport.
+  const firstHighlightedId = servers.find((s) =>
+    highlightedServerIds?.includes(s.id),
+  )?.id;
+
+  const cardProps = (server: ServerEntry) => ({
+    compact,
+    writable,
+    activeServer,
+    onToggleConnection,
+    onConnectionInfo,
+    onSettings,
+    onEdit,
+    onClone,
+    onRemove,
+    highlighted: highlightedServerIds?.includes(server.id) ?? false,
+    errored: server.id === erroredServerId,
+    justConnected: server.id === connectedServerId,
+    scrollOnHighlight: server.id === firstHighlightedId,
+    onClearHighlight: onClearHighlight
+      ? () => onClearHighlight(server.id)
+      : undefined,
+    ...server,
+  });
+
+  const grid = (
+    <ServerGrid>
+      {servers.map((server) =>
+        reorderable ? (
+          <SortableServerCard key={server.id} {...cardProps(server)} />
+        ) : (
+          <ServerCard key={server.id} {...cardProps(server)} />
+        ),
+      )}
+    </ServerGrid>
+  );
+
+  return (
+    <ScreenLayout>
+      {!writable && (
+        <ReadOnlyAlert>
+          This server list was launched with <Code>--config</Code> or an ad-hoc
+          server and can't be edited here. Changes won't be saved. Use{" "}
+          <Code>--catalog</Code> (or no flag) to manage a writable catalog.
+        </ReadOnlyAlert>
+      )}
+      <PanelContainer>
+        <PanelHeader>
+          <PanelTitle>Servers</PanelTitle>
+          <ServerListControls
+            serverCount={servers.length}
+            compact={compact}
+            writable={writable}
+            onToggleList={onToggleCompact}
+            onAddManually={onAddManually}
+            onImportConfig={onImportConfig}
+            onImportServerJson={onImportServerJson}
+            onExport={onExport}
+          />
+        </PanelHeader>
+
+        {servers.length === 0 ? (
+          <EmptyCenter>
+            <EmptyState>
+              No servers configured. Add a server to get started.
+            </EmptyState>
+          </EmptyCenter>
+        ) : (
+          <CardScrollWrap>
+            <CardScrollArea>
+              {reorderable ? (
+                <DndContext
+                  sensors={sensors}
+                  collisionDetection={closestCenter}
+                  onDragEnd={handleDragEnd}
+                  accessibility={{ announcements }}
+                >
+                  <SortableContext items={ids} strategy={rectSortingStrategy}>
+                    {grid}
+                  </SortableContext>
+                </DndContext>
+              ) : (
+                grid
+              )}
+            </CardScrollArea>
+          </CardScrollWrap>
+        )}
+      </PanelContainer>
+    </ScreenLayout>
+  );
+}

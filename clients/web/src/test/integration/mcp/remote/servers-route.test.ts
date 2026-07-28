@@ -1,0 +1,2508 @@
+/**
+ * Integration tests for /api/servers + /api/servers/:id routes.
+ * Spins up createRemoteApp against a per-test tmp mcpConfigPath and
+ * exercises the routes via real HTTP.
+ */
+
+import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import {
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  existsSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { serve } from "@hono/node-server";
+import type { ServerType } from "@hono/node-server";
+import { createRemoteApp } from "@inspector/core/mcp/remote/node/server.js";
+import { DEFAULT_SEED_CONFIG } from "@inspector/core/mcp/serverList.js";
+import {
+  InMemorySecretStore,
+  KeychainUnavailableError,
+  SECRET_FIELD_OAUTH_CLIENT_SECRET,
+  envSecretField,
+  type SecretStore,
+} from "@inspector/core/auth/node/secret-store.js";
+import type { MCPConfig } from "@inspector/core/mcp/types.js";
+
+interface Harness {
+  baseUrl: string;
+  server: ServerType;
+  configPath: string;
+  tempDir: string;
+  secretStore: InMemorySecretStore;
+}
+
+async function startServer(
+  configPath: string,
+  secretStore: InMemorySecretStore,
+): Promise<{
+  baseUrl: string;
+  server: ServerType;
+}> {
+  const { app } = createRemoteApp({
+    dangerouslyOmitAuth: true,
+    mcpConfigPath: configPath,
+    initialConfig: { defaultEnvironment: {} },
+    secretStore,
+  });
+  return new Promise((resolve, reject) => {
+    const server = serve(
+      { fetch: app.fetch, port: 0, hostname: "127.0.0.1" },
+      (info) => {
+        const port =
+          info && typeof info === "object" && "port" in info
+            ? (info as { port: number }).port
+            : 0;
+        resolve({ baseUrl: `http://127.0.0.1:${port}`, server });
+      },
+    );
+    server.on("error", reject);
+  });
+}
+
+async function setup(): Promise<Harness> {
+  const tempDir = mkdtempSync(join(tmpdir(), "inspector-servers-route-"));
+  const configPath = join(tempDir, "mcp.json");
+  const secretStore = new InMemorySecretStore();
+  const { baseUrl, server } = await startServer(configPath, secretStore);
+  return { baseUrl, server, configPath, tempDir, secretStore };
+}
+
+async function teardown(h: Harness): Promise<void> {
+  await new Promise<void>((resolve) => h.server.close(() => resolve()));
+  try {
+    rmSync(h.tempDir, { recursive: true });
+  } catch {
+    /* ignore */
+  }
+}
+
+function readConfig(path: string): MCPConfig {
+  return JSON.parse(readFileSync(path, "utf-8")) as MCPConfig;
+}
+
+describe("/api/servers routes", () => {
+  let h: Harness;
+
+  beforeEach(async () => {
+    h = await setup();
+  });
+
+  afterEach(async () => {
+    await teardown(h);
+  });
+
+  describe("GET /api/import-source", () => {
+    it("rejects an unknown source type with 400", async () => {
+      const res = await fetch(`${h.baseUrl}/api/import-source?type=bogus`);
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toMatch(/Unknown import source/);
+    });
+
+    it("rejects a missing source type with 400", async () => {
+      const res = await fetch(`${h.baseUrl}/api/import-source`);
+      expect(res.status).toBe(400);
+    });
+
+    it("returns a 200 result for a known source type", async () => {
+      // Host-independent: whether the well-known file exists or not, a known
+      // strategy returns 200 with the resolved type + searched paths.
+      const res = await fetch(`${h.baseUrl}/api/import-source?type=cursor`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        type: string;
+        found: boolean;
+        searched: string[];
+      };
+      expect(body.type).toBe("cursor");
+      expect(typeof body.found).toBe("boolean");
+      expect(Array.isArray(body.searched)).toBe(true);
+      expect(body.searched.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe("GET /api/servers", () => {
+    it("writes the seed config and returns it on first read (file absent)", async () => {
+      expect(existsSync(h.configPath)).toBe(false);
+
+      const res = await fetch(`${h.baseUrl}/api/servers`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as MCPConfig;
+      expect(body).toEqual(DEFAULT_SEED_CONFIG);
+
+      // File was created with the same content
+      expect(existsSync(h.configPath)).toBe(true);
+      expect(readConfig(h.configPath)).toEqual(DEFAULT_SEED_CONFIG);
+    });
+
+    it("returns the existing file content when present (no overwrite)", async () => {
+      const custom: MCPConfig = {
+        mcpServers: {
+          custom: { type: "stdio", command: "node", args: ["x.js"] },
+        },
+      };
+      writeFileSync(h.configPath, JSON.stringify(custom, null, 2));
+
+      const res = await fetch(`${h.baseUrl}/api/servers`);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual(custom);
+
+      // Untouched on disk
+      expect(readConfig(h.configPath)).toEqual(custom);
+    });
+
+    it("normalizes legacy 'http' and missing type on read", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            legacy: { command: "node" },
+            httpish: { type: "http", url: "https://x.test" },
+          },
+        }),
+      );
+
+      const res = await fetch(`${h.baseUrl}/api/servers`);
+      const body = (await res.json()) as MCPConfig;
+      expect(body.mcpServers.legacy?.type).toBe("stdio");
+      expect(body.mcpServers.httpish?.type).toBe("streamable-http");
+    });
+
+    it("treats a valid-JSON file without `mcpServers` as empty", async () => {
+      writeFileSync(h.configPath, JSON.stringify({ unrelated: 1 }));
+
+      const res = await fetch(`${h.baseUrl}/api/servers`);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ mcpServers: {} });
+    });
+
+    it("surfaces a 500 (not silent empty) on invalid-JSON contents", async () => {
+      // Surfacing corruption rather than silently presenting "no servers" —
+      // the next POST/PUT/DELETE would otherwise read empty and clobber the
+      // user's broken-but-recoverable file.
+      writeFileSync(h.configPath, "not json {");
+
+      const res = await fetch(`${h.baseUrl}/api/servers`);
+      expect(res.status).toBe(500);
+      const body = (await res.json()) as { error?: string };
+      expect(body.error).toMatch(/Failed to read server list/i);
+    });
+  });
+
+  describe("POST /api/servers", () => {
+    it("adds a new server and persists to disk", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "alpha",
+          config: { type: "stdio", command: "node" },
+        }),
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true });
+
+      expect(readConfig(h.configPath).mcpServers.alpha).toEqual({
+        type: "stdio",
+        command: "node",
+      });
+    });
+
+    it("returns 409 when the id already exists", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: { alpha: { type: "stdio", command: "node" } },
+        }),
+      );
+      const res = await fetch(`${h.baseUrl}/api/servers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "alpha",
+          config: { type: "stdio", command: "other" },
+        }),
+      });
+      expect(res.status).toBe(409);
+    });
+
+    it("rejects an id with path-traversal characters", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "../escape",
+          config: { type: "stdio", command: "node" },
+        }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("rejects a missing or non-object config", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: "alpha" }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("rejects malformed JSON body", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "not json",
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("returns 500 when the existing file is invalid JSON (matches GET semantics)", async () => {
+      writeFileSync(h.configPath, "not json {");
+      const res = await fetch(`${h.baseUrl}/api/servers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "alpha",
+          config: { type: "stdio", command: "node" },
+        }),
+      });
+      expect(res.status).toBe(500);
+    });
+
+    it("normalizes the incoming config (http → streamable-http)", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "httpish",
+          config: { type: "http", url: "https://x.test" },
+        }),
+      });
+      expect(res.status).toBe(200);
+      expect(readConfig(h.configPath).mcpServers.httpish?.type).toBe(
+        "streamable-http",
+      );
+    });
+  });
+
+  describe("PUT /api/servers/:id", () => {
+    beforeEach(() => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            alpha: { type: "stdio", command: "old" },
+            beta: { type: "stdio", command: "beta-cmd" },
+          },
+        }),
+      );
+    });
+
+    it("updates config in place without renaming", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers/alpha`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          config: { type: "stdio", command: "new" },
+        }),
+      });
+      expect(res.status).toBe(200);
+
+      const cfg = readConfig(h.configPath);
+      expect(cfg.mcpServers.alpha).toEqual({ type: "stdio", command: "new" });
+      // Key order preserved
+      expect(Object.keys(cfg.mcpServers)).toEqual(["alpha", "beta"]);
+    });
+
+    it("renames the key when id is supplied and different", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers/alpha`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "alpha-renamed",
+          config: { type: "stdio", command: "new" },
+        }),
+      });
+      expect(res.status).toBe(200);
+
+      const cfg = readConfig(h.configPath);
+      expect(cfg.mcpServers).not.toHaveProperty("alpha");
+      expect(cfg.mcpServers["alpha-renamed"]).toEqual({
+        type: "stdio",
+        command: "new",
+      });
+      // New key replaces the original in its slot, beta stays after
+      expect(Object.keys(cfg.mcpServers)).toEqual(["alpha-renamed", "beta"]);
+    });
+
+    it("returns 404 when the original id does not exist", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers/nonexistent`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          config: { type: "stdio", command: "x" },
+        }),
+      });
+      expect(res.status).toBe(404);
+    });
+
+    it("returns 409 when renaming to a key that already exists", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers/alpha`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "beta",
+          config: { type: "stdio", command: "x" },
+        }),
+      });
+      expect(res.status).toBe(409);
+    });
+
+    it("rejects invalid original id", async () => {
+      // dots fail validateStoreId; using `..` directly would be collapsed by
+      // URL normalization before Hono routes the request.
+      const res = await fetch(`${h.baseUrl}/api/servers/bad.id`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          config: { type: "stdio", command: "x" },
+        }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("rejects an invalid new id", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers/alpha`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "../escape",
+          config: { type: "stdio", command: "x" },
+        }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("accepts a body with neither config nor settings (no-op patch)", async () => {
+      // Both fields are now optional patches. An empty body is a degenerate
+      // but valid request — it preserves both config and settings on disk.
+      const res = await fetch(`${h.baseUrl}/api/servers/alpha`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: "alpha" }),
+      });
+      expect(res.status).toBe(200);
+      expect(readConfig(h.configPath).mcpServers.alpha).toEqual({
+        type: "stdio",
+        command: "old",
+      });
+    });
+
+    it("rejects malformed JSON body", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers/alpha`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: "not json",
+      });
+      expect(res.status).toBe(400);
+    });
+  });
+
+  describe("settings round-trip", () => {
+    it("persists Inspector-extension fields at the top level on POST (post-#1358 flat shape)", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "gamma",
+          config: { type: "streamable-http", url: "https://x.test/mcp" },
+          // Wire envelope unchanged from #1353: pair-array headers, flat
+          // oauth* fields. Backend splats these into the flat disk shape:
+          // object headers, nested oauth, plus the inspector-only fields
+          // at the top level.
+          settings: {
+            headers: [{ key: "Authorization", value: "Bearer xyz" }],
+            metadata: [{ key: "tenant", value: "acme" }],
+            connectionTimeout: 30000,
+            requestTimeout: 60000,
+            oauthClientId: "client-abc",
+            oauthScopes: "read:tools",
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const stored = readConfig(h.configPath).mcpServers
+        .gamma as unknown as Record<string, unknown>;
+      // Disk shape: flat, no `settings` wrapper, object headers, nested oauth.
+      expect(stored).not.toHaveProperty("settings");
+      expect(stored.headers).toEqual({ Authorization: "Bearer xyz" });
+      expect(stored.metadata).toEqual([{ key: "tenant", value: "acme" }]);
+      expect(stored.connectionTimeout).toBe(30000);
+      expect(stored.requestTimeout).toBe(60000);
+      expect(stored.oauth).toEqual({
+        clientId: "client-abc",
+        scopes: "read:tools",
+      });
+    });
+
+    it("updates Inspector-extension fields at the top level on PUT", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            delta: { type: "streamable-http", url: "https://x.test/mcp" },
+          },
+        }),
+      );
+      const res = await fetch(`${h.baseUrl}/api/servers/delta`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          config: { type: "streamable-http", url: "https://x.test/mcp" },
+          settings: {
+            headers: [{ key: "X-Tenant", value: "acme" }],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 45000,
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const stored = readConfig(h.configPath).mcpServers
+        .delta as unknown as Record<string, unknown>;
+      expect(stored).not.toHaveProperty("settings");
+      expect(stored.headers).toEqual({ "X-Tenant": "acme" });
+      expect(stored.requestTimeout).toBe(45000);
+      // Zero/empty values are suppressed on disk to keep the diff minimal.
+      expect(stored).not.toHaveProperty("metadata");
+      expect(stored).not.toHaveProperty("connectionTimeout");
+    });
+
+    it("persists autoRefreshOnListChanged: true through the PUT write path", async () => {
+      // Regression: validateSettings rebuilds the value from named fields, so a
+      // new field is silently dropped unless it's explicitly handled there.
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            delta: { type: "streamable-http", url: "https://x.test/mcp" },
+          },
+        }),
+      );
+      const res = await fetch(`${h.baseUrl}/api/servers/delta`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          settings: {
+            headers: [],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+            autoRefreshOnListChanged: true,
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const stored = readConfig(h.configPath).mcpServers
+        .delta as unknown as Record<string, unknown>;
+      expect(stored.autoRefreshOnListChanged).toBe(true);
+    });
+
+    it("omits autoRefreshOnListChanged from disk when false", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            delta: {
+              type: "streamable-http",
+              url: "https://x.test/mcp",
+              autoRefreshOnListChanged: true,
+            },
+          },
+        }),
+      );
+      const res = await fetch(`${h.baseUrl}/api/servers/delta`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          settings: {
+            headers: [],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+            autoRefreshOnListChanged: false,
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const stored = readConfig(h.configPath).mcpServers
+        .delta as unknown as Record<string, unknown>;
+      expect(stored).not.toHaveProperty("autoRefreshOnListChanged");
+    });
+
+    it("rejects a non-boolean autoRefreshOnListChanged", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "bad-autorefresh",
+          config: { type: "stdio", command: "node" },
+          settings: {
+            headers: [],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+            autoRefreshOnListChanged: "yes",
+          },
+        }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("persists a non-default maxFetchRequests through the PUT write path", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            delta: { type: "streamable-http", url: "https://x.test/mcp" },
+          },
+        }),
+      );
+      const res = await fetch(`${h.baseUrl}/api/servers/delta`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          settings: {
+            headers: [],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+            maxFetchRequests: 5000,
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const stored = readConfig(h.configPath).mcpServers
+        .delta as unknown as Record<string, unknown>;
+      expect(stored.maxFetchRequests).toBe(5000);
+    });
+
+    it("persists maxFetchRequests: 0 (unlimited) — a meaningful non-default value", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            delta: { type: "streamable-http", url: "https://x.test/mcp" },
+          },
+        }),
+      );
+      const res = await fetch(`${h.baseUrl}/api/servers/delta`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          settings: {
+            headers: [],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+            maxFetchRequests: 0,
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const stored = readConfig(h.configPath).mcpServers
+        .delta as unknown as Record<string, unknown>;
+      expect(stored.maxFetchRequests).toBe(0);
+    });
+
+    it("omits maxFetchRequests from disk when it equals the default (1000)", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            delta: {
+              type: "streamable-http",
+              url: "https://x.test/mcp",
+              maxFetchRequests: 5000,
+            },
+          },
+        }),
+      );
+      const res = await fetch(`${h.baseUrl}/api/servers/delta`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          settings: {
+            headers: [],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+            maxFetchRequests: 1000,
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const stored = readConfig(h.configPath).mcpServers
+        .delta as unknown as Record<string, unknown>;
+      expect(stored).not.toHaveProperty("maxFetchRequests");
+    });
+
+    it("rejects a negative maxFetchRequests", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "bad-maxfetch",
+          config: { type: "stdio", command: "node" },
+          settings: {
+            headers: [],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+            maxFetchRequests: -5,
+          },
+        }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("rejects a non-object settings field", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "bad-settings",
+          config: { type: "stdio", command: "node" },
+          settings: "not-an-object",
+        }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("preserves Inspector-extension fields when PUT omits settings (no clobber on config-only save)", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            epsilon: {
+              type: "streamable-http",
+              url: "https://x.test/mcp",
+              // Post-#1358 flat shape on disk.
+              headers: { "X-Keep": "yes" },
+            },
+          },
+        }),
+      );
+      // PUT without a settings field: the existing top-level headers must
+      // survive. A caller updating only the transport config (e.g. the
+      // server config modal) must not silently wipe persisted headers.
+      const res = await fetch(`${h.baseUrl}/api/servers/epsilon`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          config: { type: "streamable-http", url: "https://x.test/other" },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const stored = readConfig(h.configPath).mcpServers
+        .epsilon as unknown as Record<string, unknown>;
+      expect(stored.headers).toEqual({ "X-Keep": "yes" });
+      // URL update must have applied.
+      expect(stored.url).toBe("https://x.test/other");
+    });
+
+    it("clears Inspector-extension fields when PUT sends settings: null (explicit intent)", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            zeta: {
+              type: "streamable-http",
+              url: "https://x.test/mcp",
+              headers: { "X-Tenant": "acme" },
+              metadata: [{ key: "trace", value: "abc" }],
+              connectionTimeout: 5000,
+            },
+          },
+        }),
+      );
+      const res = await fetch(`${h.baseUrl}/api/servers/zeta`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          config: { type: "streamable-http", url: "https://x.test/mcp" },
+          settings: null,
+        }),
+      });
+      expect(res.status).toBe(200);
+      const stored = readConfig(h.configPath).mcpServers
+        .zeta as unknown as Record<string, unknown>;
+      // All Inspector-extension fields gone.
+      expect(stored).not.toHaveProperty("headers");
+      expect(stored).not.toHaveProperty("metadata");
+      expect(stored).not.toHaveProperty("connectionTimeout");
+      expect(stored).not.toHaveProperty("requestTimeout");
+      expect(stored).not.toHaveProperty("oauth");
+    });
+
+    it("rejects a malformed settings shape with 400", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            eta: { type: "stdio", command: "node" },
+          },
+        }),
+      );
+      const res = await fetch(`${h.baseUrl}/api/servers/eta`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          config: { type: "stdio", command: "node" },
+          // headers should be an array of {key, value}; "oops" is a string.
+          settings: {
+            headers: "oops",
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+          },
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error?: string };
+      expect(body.error).toMatch(/settings\.headers/);
+    });
+
+    it("accepts a settings-only PUT and preserves config from disk", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            theta: {
+              type: "streamable-http",
+              url: "https://x.test/mcp",
+            },
+          },
+        }),
+      );
+      const res = await fetch(`${h.baseUrl}/api/servers/theta`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          // No config — server should preserve the existing one inside its
+          // write lock and apply only the settings patch.
+          settings: {
+            headers: [{ key: "X-Tenant", value: "acme" }],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const stored = readConfig(h.configPath).mcpServers
+        .theta as unknown as Record<string, unknown>;
+      expect(stored.type).toBe("streamable-http");
+      expect(stored.url).toBe("https://x.test/mcp");
+      expect(stored.headers).toEqual({ "X-Tenant": "acme" });
+    });
+
+    it("rejects a non-object config on PUT with 400", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            iota: { type: "stdio", command: "node" },
+          },
+        }),
+      );
+      const res = await fetch(`${h.baseUrl}/api/servers/iota`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          config: "not-an-object",
+        }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("validateSettings coerces empty-string OAuth fields to absent (cleared inputs don't produce an oauth node on disk)", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "empty-oauth",
+          config: { type: "streamable-http", url: "https://x.test/mcp" },
+          settings: {
+            headers: [],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+            oauthClientId: "",
+            oauthClientSecret: "",
+            oauthScopes: "",
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const stored = readConfig(h.configPath).mcpServers[
+        "empty-oauth"
+      ] as unknown as Record<string, unknown>;
+      // No `oauth` node on disk — every field was empty.
+      expect(stored).not.toHaveProperty("oauth");
+    });
+
+    it("validateSettings drops unknown keys (explicit pick-and-build, not spread)", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "unknown-keys",
+          config: { type: "stdio", command: "node" },
+          settings: {
+            headers: [{ key: "X-A", value: "1" }],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+            // Unknown stowaway — must not survive the validator.
+            stowaway: { keep: "me" },
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const stored = readConfig(h.configPath).mcpServers[
+        "unknown-keys"
+      ] as unknown as Record<string, unknown>;
+      expect(stored).not.toHaveProperty("stowaway");
+      expect(stored).not.toHaveProperty("settings");
+      // Only the non-empty/non-zero settings field round-tripped to disk.
+      expect(stored.headers).toEqual({ "X-A": "1" });
+    });
+
+    it("strips smuggled Inspector-extension keys from config on POST (envelope is the only write path)", async () => {
+      // `normalizeServerType` spreads unknown keys verbatim. Without the
+      // strip in buildStoredEntry, a body that nests Inspector-extension
+      // keys inside `config` would land them on the stored entry without
+      // ever passing through `validateSettings`. Pin the strip for both
+      // the legacy `settings` key and the new flat keys (`headers`,
+      // `metadata`, `connectionTimeout`, `requestTimeout`, `oauth`).
+      const res = await fetch(`${h.baseUrl}/api/servers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "smuggle-post",
+          config: {
+            type: "stdio",
+            command: "node",
+            settings: { bogus: true },
+            headers: { Smuggled: "yes" },
+            oauth: { clientId: "smuggled" },
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const stored = readConfig(h.configPath).mcpServers[
+        "smuggle-post"
+      ] as unknown as Record<string, unknown>;
+      expect(stored).not.toHaveProperty("settings");
+      expect(stored).not.toHaveProperty("headers");
+      expect(stored).not.toHaveProperty("oauth");
+    });
+
+    it("strips smuggled Inspector-extension keys from config on PUT even when settings:null clears the real fields", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            smuggle: {
+              type: "stdio",
+              command: "node",
+              headers: { "X-Real": "yes" },
+            },
+          },
+        }),
+      );
+      // settings: null clears the real Inspector-extension fields; the bogus
+      // keys nested under config must not re-attach via the spread inside
+      // normalizeServerType.
+      const res = await fetch(`${h.baseUrl}/api/servers/smuggle`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          config: {
+            type: "stdio",
+            command: "node",
+            settings: { bogus: true },
+            headers: { Smuggled: "yes" },
+            connectionTimeout: 9999,
+          },
+          settings: null,
+        }),
+      });
+      expect(res.status).toBe(200);
+      const stored = readConfig(h.configPath).mcpServers
+        .smuggle as unknown as Record<string, unknown>;
+      expect(stored).not.toHaveProperty("settings");
+      expect(stored).not.toHaveProperty("headers");
+      expect(stored).not.toHaveProperty("connectionTimeout");
+    });
+
+    it("rejects a settings array (not an object) with 400", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "arrays-not-allowed",
+          config: { type: "stdio", command: "node" },
+          settings: [],
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error?: string };
+      expect(body.error).toMatch(/object/);
+    });
+
+    it("drops a legacy nested `settings` node on read (hard cutover per #1358 decision 4)", async () => {
+      // A user upgrading from the one-#1352 v2/main build has a file with a
+      // nested `settings` block. Per the hard-cutover decision the persisted
+      // headers / metadata / timeouts / OAuth credentials are intentionally
+      // lost on first read — users re-enter them through the form or hand-
+      // edit the file into the flat shape. GET surfaces the entry with
+      // settings dropped, and a subsequent config-only PUT does not
+      // re-attach the legacy node via the preserve branch.
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            legacy: {
+              type: "streamable-http",
+              url: "https://x.test/mcp",
+              settings: {
+                headers: [{ key: "X-Tenant", value: "acme" }],
+                metadata: [],
+                connectionTimeout: 30000,
+                requestTimeout: 0,
+                oauthClientId: "client-abc",
+              },
+            },
+          },
+        }),
+      );
+
+      // GET surfaces the entry with the legacy settings dropped — no flat
+      // fields lifted in either (this is hard cutover, not migration).
+      const getRes = await fetch(`${h.baseUrl}/api/servers`);
+      expect(getRes.status).toBe(200);
+      const getBody = (await getRes.json()) as {
+        mcpServers: Record<string, Record<string, unknown>>;
+      };
+      const fetched = getBody.mcpServers.legacy!;
+      expect(fetched).toBeDefined();
+      expect(fetched).not.toHaveProperty("settings");
+      expect(fetched).not.toHaveProperty("headers");
+      expect(fetched).not.toHaveProperty("metadata");
+      expect(fetched).not.toHaveProperty("connectionTimeout");
+      expect(fetched).not.toHaveProperty("oauth");
+
+      // PUT without settings preserves the (now-cleared) absence; the next
+      // save persists the flat shape with no `settings` field.
+      const putRes = await fetch(`${h.baseUrl}/api/servers/legacy`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          config: { type: "streamable-http", url: "https://x.test/other" },
+        }),
+      });
+      expect(putRes.status).toBe(200);
+      const stored = readConfig(h.configPath).mcpServers
+        .legacy as unknown as Record<string, unknown>;
+      expect(stored).not.toHaveProperty("settings");
+      expect(stored).not.toHaveProperty("headers");
+    });
+
+    it("drops individually malformed Inspector-extension fields on read (read-path shape validation)", async () => {
+      // A hand-edited mcp.json with a mix of valid and malformed
+      // Inspector-extension fields. `normalizeMcpServers` drops each bad
+      // field independently with a warn — so one wrong key doesn't take
+      // out the whole entry, and garbage values can't reach the form via
+      // the disk → memory converter.
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            bad: {
+              type: "streamable-http",
+              url: "https://x.test/mcp",
+              // Good: should round-trip
+              headers: { "X-Keep": "yes" },
+              // Bad: string instead of pair-array → drop
+              metadata: "oops",
+              // Bad: non-number timeout → drop
+              connectionTimeout: "30s",
+              // Good: valid number
+              requestTimeout: 60000,
+              // Good: valid era literal → round-trips
+              protocolEra: "modern",
+              // Bad: array instead of object → drop
+              oauth: ["not", "an", "object"],
+              // Bad: entry missing a string `uri` → drop the whole roots field
+              roots: [{ name: "no-uri" }],
+            },
+          },
+        }),
+      );
+
+      const getRes = await fetch(`${h.baseUrl}/api/servers`);
+      expect(getRes.status).toBe(200);
+      const getBody = (await getRes.json()) as {
+        mcpServers: Record<string, Record<string, unknown>>;
+      };
+      const fetched = getBody.mcpServers.bad!;
+      // Good fields survive.
+      expect(fetched.headers).toEqual({ "X-Keep": "yes" });
+      expect(fetched.requestTimeout).toBe(60000);
+      expect(fetched.protocolEra).toBe("modern");
+      // Bad fields are dropped.
+      expect(fetched).not.toHaveProperty("metadata");
+      expect(fetched).not.toHaveProperty("connectionTimeout");
+      expect(fetched).not.toHaveProperty("oauth");
+      expect(fetched).not.toHaveProperty("roots");
+    });
+
+    it("round-trips roots (uri + optional name) on PUT and drops empty-uri rows", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            "roots-srv": { type: "stdio", command: "node" },
+          },
+        }),
+      );
+      const res = await fetch(`${h.baseUrl}/api/servers/roots-srv`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          config: { type: "stdio", command: "node" },
+          settings: {
+            headers: [],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+            roots: [
+              { uri: "file:///project", name: "Project" },
+              { uri: "file:///tmp" },
+              // Empty-uri row left mid-edit by the form → dropped on write.
+              { uri: "" },
+            ],
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const stored = readConfig(h.configPath).mcpServers[
+        "roots-srv"
+      ] as unknown as Record<string, unknown>;
+      expect(stored.roots).toEqual([
+        { uri: "file:///project", name: "Project" },
+        { uri: "file:///tmp" },
+      ]);
+
+      // The GET round-trip surfaces the same roots back to the form.
+      const getRes = await fetch(`${h.baseUrl}/api/servers`);
+      const getBody = (await getRes.json()) as {
+        mcpServers: Record<string, Record<string, unknown>>;
+      };
+      expect(getBody.mcpServers["roots-srv"]!.roots).toEqual([
+        { uri: "file:///project", name: "Project" },
+        { uri: "file:///tmp" },
+      ]);
+    });
+
+    it("omits the roots field on disk when all rows are empty", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            "roots-empty": { type: "stdio", command: "node" },
+          },
+        }),
+      );
+      const res = await fetch(`${h.baseUrl}/api/servers/roots-empty`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          config: { type: "stdio", command: "node" },
+          settings: {
+            headers: [],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+            roots: [{ uri: "  " }],
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const stored = readConfig(h.configPath).mcpServers[
+        "roots-empty"
+      ] as unknown as Record<string, unknown>;
+      expect(stored).not.toHaveProperty("roots");
+    });
+
+    it("rejects a malformed roots shape with 400", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            "roots-bad": { type: "stdio", command: "node" },
+          },
+        }),
+      );
+      const res = await fetch(`${h.baseUrl}/api/servers/roots-bad`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          config: { type: "stdio", command: "node" },
+          settings: {
+            headers: [],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+            // uri must be a string.
+            roots: [{ uri: 42 }],
+          },
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error?: string };
+      expect(body.error).toMatch(/settings\.roots/);
+    });
+
+    it("loads a hand-edited file with top-level Claude Code-style `headers` (interop with `.mcp.json`)", async () => {
+      // A user pastes a server entry copied from the Claude Code docs:
+      // top-level `headers: { ... }`, no settings wrapper. GET should
+      // surface the entry verbatim (flat disk shape) and a subsequent
+      // settings-only PUT must preserve the headers when omitted.
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            "api-server": {
+              type: "streamable-http",
+              url: "https://api.example.com/mcp",
+              headers: { Authorization: "Bearer the-token" },
+            },
+          },
+        }),
+      );
+
+      const getRes = await fetch(`${h.baseUrl}/api/servers`);
+      expect(getRes.status).toBe(200);
+      const getBody = (await getRes.json()) as {
+        mcpServers: Record<string, Record<string, unknown>>;
+      };
+      expect(getBody.mcpServers["api-server"]!.headers).toEqual({
+        Authorization: "Bearer the-token",
+      });
+
+      // Settings-only PUT (no `config`) preserves the existing url AND the
+      // existing headers per the preserve-on-omit branch.
+      const putRes = await fetch(`${h.baseUrl}/api/servers/api-server`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          settings: {
+            headers: [
+              { key: "Authorization", value: "Bearer the-token" },
+              { key: "X-Tenant", value: "acme" },
+            ],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+          },
+        }),
+      });
+      expect(putRes.status).toBe(200);
+      const stored = readConfig(h.configPath).mcpServers[
+        "api-server"
+      ] as unknown as Record<string, unknown>;
+      expect(stored.url).toBe("https://api.example.com/mcp");
+      expect(stored.headers).toEqual({
+        Authorization: "Bearer the-token",
+        "X-Tenant": "acme",
+      });
+    });
+  });
+
+  describe("stdio env / cwd write-through (settings modal)", () => {
+    it("writes settings.env / settings.cwd onto a stdio config on a settings-only PUT", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: { srv: { type: "stdio", command: "node" } },
+        }),
+      );
+      const res = await fetch(`${h.baseUrl}/api/servers/srv`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          settings: {
+            headers: [],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+            env: [{ key: "API_KEY", value: "abc-123" }],
+            cwd: "/srv/app",
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const stored = readConfig(h.configPath).mcpServers.srv as {
+        env?: Record<string, string>;
+        cwd?: string;
+      };
+      // env key persisted on the config (value stripped to keychain), cwd set.
+      expect(stored.env).toEqual({ API_KEY: "" });
+      expect(stored.cwd).toBe("/srv/app");
+      expect(await h.secretStore.get("srv", envSecretField("API_KEY"))).toBe(
+        "abc-123",
+      );
+      // env / cwd are NOT persisted as a settings wrapper — they live on config.
+      expect(stored).not.toHaveProperty("settings");
+    });
+
+    it("preserves config.env / cwd and the keychain when a settings-only PUT omits them", async () => {
+      // An env-unaware caller patching just a timeout must not wipe the stored
+      // env/cwd. Absent env/cwd on the wire => preserve, distinct from explicit
+      // empty => clear.
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            srv: {
+              type: "stdio",
+              command: "node",
+              env: { API_KEY: "" },
+              cwd: "/srv/app",
+            },
+          },
+        }),
+      );
+      await h.secretStore.set("srv", envSecretField("API_KEY"), "abc-123");
+      const res = await fetch(`${h.baseUrl}/api/servers/srv`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        // env / cwd intentionally omitted; only a timeout is patched.
+        body: JSON.stringify({
+          settings: {
+            headers: [],
+            metadata: [],
+            connectionTimeout: 5000,
+            requestTimeout: 0,
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const stored = readConfig(h.configPath).mcpServers.srv as {
+        env?: Record<string, string>;
+        cwd?: string;
+      };
+      // Disk keys + cwd preserved (env value blanked, as always — it lives in
+      // the keychain).
+      expect(stored.env).toEqual({ API_KEY: "" });
+      expect(stored.cwd).toBe("/srv/app");
+      // Keychain value survives: the omit path rehydrates it so the reconcile
+      // doesn't sweep the untouched secret.
+      expect(await h.secretStore.get("srv", envSecretField("API_KEY"))).toBe(
+        "abc-123",
+      );
+    });
+
+    it("GET lifts the stored env / cwd back into the wire config (round-trip)", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            srv: {
+              type: "stdio",
+              command: "node",
+              env: { API_KEY: "" },
+              cwd: "/srv/app",
+            },
+          },
+        }),
+      );
+      await h.secretStore.set("srv", envSecretField("API_KEY"), "abc-123");
+      const res = await fetch(`${h.baseUrl}/api/servers`);
+      const body = (await res.json()) as MCPConfig;
+      const srv = body.mcpServers.srv as {
+        env?: Record<string, string>;
+        cwd?: string;
+      };
+      expect(srv.env).toEqual({ API_KEY: "abc-123" });
+      expect(srv.cwd).toBe("/srv/app");
+    });
+
+    it("clears env / cwd from the config when the settings-only PUT sends an empty list / blank cwd", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            srv: {
+              type: "stdio",
+              command: "node",
+              env: { API_KEY: "" },
+              cwd: "/srv/app",
+            },
+          },
+        }),
+      );
+      await h.secretStore.set("srv", envSecretField("API_KEY"), "abc-123");
+      const res = await fetch(`${h.baseUrl}/api/servers/srv`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          settings: {
+            headers: [],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+            env: [],
+            cwd: "",
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const stored = readConfig(h.configPath).mcpServers
+        .srv as unknown as Record<string, unknown>;
+      expect(stored).not.toHaveProperty("env");
+      expect(stored).not.toHaveProperty("cwd");
+      // The removed env key reconciles out of the keychain.
+      expect(await h.secretStore.get("srv", envSecretField("API_KEY"))).toBe(
+        null,
+      );
+    });
+
+    it("drops empty-key env rows on a settings-only PUT", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: { srv: { type: "stdio", command: "node" } },
+        }),
+      );
+      const res = await fetch(`${h.baseUrl}/api/servers/srv`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          settings: {
+            headers: [],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+            env: [
+              { key: "KEEP", value: "1" },
+              { key: "", value: "drop-me" },
+              { key: "  ", value: "drop-me-too" },
+            ],
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const stored = readConfig(h.configPath).mcpServers.srv as {
+        env?: Record<string, string>;
+      };
+      expect(Object.keys(stored.env ?? {})).toEqual(["KEEP"]);
+    });
+
+    it("a config-providing PUT owns env/cwd; the preserved settings mirror does not revert it", async () => {
+      // Pre-seed a stdio server with env A=1 (keychain-backed).
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            srv: {
+              type: "stdio",
+              command: "node",
+              env: { A: "" },
+              cwd: "/old",
+            },
+          },
+        }),
+      );
+      await h.secretStore.set("srv", envSecretField("A"), "1");
+      // Config-only PUT (settings omitted → preserved). The new config's env/cwd
+      // must win even though the preserved settings mirror still carries the old.
+      const res = await fetch(`${h.baseUrl}/api/servers/srv`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          config: {
+            type: "stdio",
+            command: "node",
+            env: { A: "2" },
+            cwd: "/new",
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const stored = readConfig(h.configPath).mcpServers.srv as {
+        env?: Record<string, string>;
+        cwd?: string;
+      };
+      expect(stored.cwd).toBe("/new");
+      expect(stored.env).toEqual({ A: "" });
+      expect(await h.secretStore.get("srv", envSecretField("A"))).toBe("2");
+    });
+
+    it("rejects a non-array settings.env with 400", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: { srv: { type: "stdio", command: "node" } },
+        }),
+      );
+      const res = await fetch(`${h.baseUrl}/api/servers/srv`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          settings: {
+            headers: [],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+            env: "nope",
+          },
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error?: string };
+      expect(body.error).toMatch(/settings\.env/);
+    });
+
+    it("rejects an invalid settings.oauthOnInsufficientScope with 400", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            srv: { type: "streamable-http", url: "https://x.test/mcp" },
+          },
+        }),
+      );
+      const res = await fetch(`${h.baseUrl}/api/servers/srv`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          settings: {
+            headers: [],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+            env: [],
+            oauthOnInsufficientScope: "nope",
+          },
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error?: string };
+      expect(body.error).toMatch(/oauthOnInsufficientScope/);
+    });
+
+    it("persists a valid settings.oauthOnInsufficientScope onto the stored config", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            srv: { type: "streamable-http", url: "https://x.test/mcp" },
+          },
+        }),
+      );
+      const res = await fetch(`${h.baseUrl}/api/servers/srv`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          settings: {
+            headers: [],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+            env: [],
+            oauthOnInsufficientScope: "throw",
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const stored = JSON.parse(readFileSync(h.configPath, "utf-8")) as {
+        mcpServers: Record<
+          string,
+          { oauth?: { onInsufficientScope?: string } }
+        >;
+      };
+      expect(stored.mcpServers.srv?.oauth?.onInsufficientScope).toBe("throw");
+    });
+
+    it("ignores settings env/cwd for a non-stdio server (no leak onto config)", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            srv: { type: "streamable-http", url: "https://x.test/mcp" },
+          },
+        }),
+      );
+      const res = await fetch(`${h.baseUrl}/api/servers/srv`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          settings: {
+            headers: [],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+            env: [{ key: "API_KEY", value: "abc" }],
+            cwd: "/srv/app",
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const stored = readConfig(h.configPath).mcpServers
+        .srv as unknown as Record<string, unknown>;
+      expect(stored).not.toHaveProperty("env");
+      expect(stored).not.toHaveProperty("cwd");
+    });
+  });
+
+  describe("concurrent mutations", () => {
+    it("does not lose updates when many adds fire in parallel (write-lock)", async () => {
+      // Without the in-process mutex, concurrent POSTs would all read the
+      // empty baseline and the last writer would clobber everyone else's
+      // entry. With the mutex, every entry should land on disk.
+      const ids = Array.from({ length: 25 }, (_, i) => `concurrent-${i}`);
+      const responses = await Promise.all(
+        ids.map((id) =>
+          fetch(`${h.baseUrl}/api/servers`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              id,
+              config: { type: "stdio", command: `cmd-${id}` },
+            }),
+          }),
+        ),
+      );
+      for (const res of responses) {
+        expect(res.status).toBe(200);
+      }
+      const cfg = readConfig(h.configPath);
+      expect(Object.keys(cfg.mcpServers).sort()).toEqual([...ids].sort());
+    });
+  });
+
+  describe("DELETE /api/servers/:id", () => {
+    beforeEach(() => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            alpha: { type: "stdio", command: "node" },
+            beta: { type: "stdio", command: "node" },
+          },
+        }),
+      );
+    });
+
+    it("removes the entry and persists", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers/alpha`, {
+        method: "DELETE",
+      });
+      expect(res.status).toBe(200);
+      const cfg = readConfig(h.configPath);
+      expect(cfg.mcpServers).not.toHaveProperty("alpha");
+      expect(cfg.mcpServers).toHaveProperty("beta");
+    });
+
+    it("is idempotent when the id is not present", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers/nonexistent`, {
+        method: "DELETE",
+      });
+      expect(res.status).toBe(200);
+      // beta untouched
+      expect(readConfig(h.configPath).mcpServers).toHaveProperty("beta");
+    });
+
+    it("is a 200 no-op when the file does not exist yet", async () => {
+      rmSync(h.configPath);
+      const res = await fetch(`${h.baseUrl}/api/servers/anything`, {
+        method: "DELETE",
+      });
+      expect(res.status).toBe(200);
+    });
+
+    it("rejects an invalid id", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers/bad.id`, {
+        method: "DELETE",
+      });
+      expect(res.status).toBe(400);
+    });
+  });
+
+  describe("keychain secrets (#1356)", () => {
+    it("POST writes oauthClientSecret to the keychain, not the disk file", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "oauth-srv",
+          config: { type: "streamable-http", url: "https://x.test/mcp" },
+          settings: {
+            headers: [],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+            oauthClientId: "cid",
+            oauthClientSecret: "very-secret",
+            oauthScopes: "read",
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+
+      // Disk: keeps clientId/scopes, no clientSecret.
+      const stored = readConfig(h.configPath).mcpServers["oauth-srv"] as {
+        oauth?: Record<string, string>;
+      };
+      expect(stored.oauth).toEqual({ clientId: "cid", scopes: "read" });
+      // The raw file text must not contain the secret value either — guards
+      // against the secret accidentally landing in a different field.
+      const raw = readFileSync(h.configPath, "utf-8");
+      expect(raw).not.toContain("very-secret");
+
+      // Keychain: holds the secret under the expected (id, field) tuple.
+      expect(
+        await h.secretStore.get("oauth-srv", SECRET_FIELD_OAUTH_CLIENT_SECRET),
+      ).toBe("very-secret");
+    });
+
+    it("POST writes stdio env values to the keychain and leaves empty placeholders on disk", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "stdio-srv",
+          config: {
+            type: "stdio",
+            command: "node",
+            env: { API_KEY: "abc-123", DEBUG: "" },
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+
+      const stored = readConfig(h.configPath).mcpServers["stdio-srv"] as {
+        env?: Record<string, string>;
+      };
+      // Keys preserved, values stripped to "".
+      expect(stored.env).toEqual({ API_KEY: "", DEBUG: "" });
+      expect(readFileSync(h.configPath, "utf-8")).not.toContain("abc-123");
+
+      // Keychain has the non-empty value; empty values aren't written.
+      expect(
+        await h.secretStore.get("stdio-srv", envSecretField("API_KEY")),
+      ).toBe("abc-123");
+      expect(
+        await h.secretStore.get("stdio-srv", envSecretField("DEBUG")),
+      ).toBe(null);
+    });
+
+    it("GET rehydrates secrets from the keychain so the wire shape is unchanged", async () => {
+      // Set up disk + keychain by hand to simulate what POST would have done.
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            "hydrate-srv": {
+              type: "streamable-http",
+              url: "https://x.test/mcp",
+              oauth: { clientId: "cid" },
+            },
+          },
+        }),
+      );
+      await h.secretStore.set(
+        "hydrate-srv",
+        SECRET_FIELD_OAUTH_CLIENT_SECRET,
+        "very-secret",
+      );
+
+      const res = await fetch(`${h.baseUrl}/api/servers`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as MCPConfig;
+      const entry = body.mcpServers["hydrate-srv"] as {
+        oauth?: Record<string, string>;
+      };
+      expect(entry.oauth).toEqual({
+        clientId: "cid",
+        clientSecret: "very-secret",
+      });
+    });
+
+    it("PUT in place reconciles obsolete env keys (removed key drops from keychain)", async () => {
+      // Pre-seed: server with two env keys, both backed by keychain values.
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            srv: {
+              type: "stdio",
+              command: "node",
+              env: { A: "", B: "" },
+            },
+          },
+        }),
+      );
+      await h.secretStore.set("srv", envSecretField("A"), "value-A");
+      await h.secretStore.set("srv", envSecretField("B"), "value-B");
+
+      // PUT keeps only A.
+      const res = await fetch(`${h.baseUrl}/api/servers/srv`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          config: {
+            type: "stdio",
+            command: "node",
+            env: { A: "value-A-updated" },
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+
+      // Disk: only A's key remains, value stripped to "".
+      const stored = readConfig(h.configPath).mcpServers.srv as {
+        env?: Record<string, string>;
+      };
+      expect(stored.env).toEqual({ A: "" });
+
+      // Keychain: A updated, B swept.
+      expect(await h.secretStore.get("srv", envSecretField("A"))).toBe(
+        "value-A-updated",
+      );
+      expect(await h.secretStore.get("srv", envSecretField("B"))).toBe(null);
+    });
+
+    it("PUT clearing oauthClientSecret deletes the keychain entry", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            srv: {
+              type: "streamable-http",
+              url: "https://x.test/mcp",
+              oauth: { clientId: "cid" },
+            },
+          },
+        }),
+      );
+      await h.secretStore.set(
+        "srv",
+        SECRET_FIELD_OAUTH_CLIENT_SECRET,
+        "old-secret",
+      );
+
+      // PUT with settings.oauthClientSecret unset (user cleared the field).
+      const res = await fetch(`${h.baseUrl}/api/servers/srv`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          settings: {
+            headers: [],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+            oauthClientId: "cid",
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+      expect(
+        await h.secretStore.get("srv", SECRET_FIELD_OAUTH_CLIENT_SECRET),
+      ).toBe(null);
+    });
+
+    it("PUT rename moves keychain entries from the old id to the new id", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            "old-name": {
+              type: "stdio",
+              command: "node",
+              env: { K: "" },
+            },
+          },
+        }),
+      );
+      await h.secretStore.set("old-name", envSecretField("K"), "v");
+
+      const res = await fetch(`${h.baseUrl}/api/servers/old-name`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "new-name",
+          config: { type: "stdio", command: "node", env: { K: "v" } },
+        }),
+      });
+      expect(res.status).toBe(200);
+
+      expect(await h.secretStore.get("old-name", envSecretField("K"))).toBe(
+        null,
+      );
+      expect(await h.secretStore.get("new-name", envSecretField("K"))).toBe(
+        "v",
+      );
+    });
+
+    it("PUT rename moves stdio env secret when it exists only in the keychain", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            "old-name": {
+              type: "stdio",
+              command: "node",
+              env: { K: "" },
+            },
+          },
+        }),
+      );
+      await h.secretStore.set("old-name", envSecretField("K"), "v");
+
+      const res = await fetch(`${h.baseUrl}/api/servers/old-name`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "new-name",
+          config: { type: "stdio", command: "node", env: { K: "" } },
+        }),
+      });
+      expect(res.status).toBe(200);
+
+      expect(await h.secretStore.get("old-name", envSecretField("K"))).toBe(
+        null,
+      );
+      expect(await h.secretStore.get("new-name", envSecretField("K"))).toBe(
+        "v",
+      );
+    });
+
+    it("PUT rename moves OAuth client secret when it exists only in the keychain", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            "old-name": {
+              type: "streamable-http",
+              url: "https://x.test/mcp",
+              oauth: { clientId: "cid", scopes: "read" },
+            },
+          },
+        }),
+      );
+      await h.secretStore.set(
+        "old-name",
+        SECRET_FIELD_OAUTH_CLIENT_SECRET,
+        "keychain-only-secret",
+      );
+
+      const res = await fetch(`${h.baseUrl}/api/servers/old-name`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "new-name",
+          config: { type: "streamable-http", url: "https://x.test/mcp" },
+        }),
+      });
+      expect(res.status).toBe(200);
+
+      expect(
+        await h.secretStore.get("old-name", SECRET_FIELD_OAUTH_CLIENT_SECRET),
+      ).toBe(null);
+      expect(
+        await h.secretStore.get("new-name", SECRET_FIELD_OAUTH_CLIENT_SECRET),
+      ).toBe("keychain-only-secret");
+
+      const getRes = await fetch(`${h.baseUrl}/api/servers`);
+      expect(getRes.status).toBe(200);
+      const cfg = (await getRes.json()) as MCPConfig;
+      const srv = cfg.mcpServers["new-name"] as {
+        oauth?: { clientId?: string; clientSecret?: string; scopes?: string };
+      };
+      expect(srv.oauth?.clientId).toBe("cid");
+      expect(srv.oauth?.clientSecret).toBe("keychain-only-secret");
+      expect(srv.oauth?.scopes).toBe("read");
+    });
+
+    it("DELETE sweeps every keychain entry for the deleted server", async () => {
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            srv: {
+              type: "stdio",
+              command: "node",
+              env: { K1: "", K2: "" },
+              oauth: { clientId: "cid" },
+            },
+            untouched: { type: "stdio", command: "node" },
+          },
+        }),
+      );
+      await h.secretStore.set("srv", envSecretField("K1"), "v1");
+      await h.secretStore.set("srv", envSecretField("K2"), "v2");
+      await h.secretStore.set(
+        "srv",
+        SECRET_FIELD_OAUTH_CLIENT_SECRET,
+        "secret",
+      );
+      await h.secretStore.set(
+        "untouched",
+        SECRET_FIELD_OAUTH_CLIENT_SECRET,
+        "untouched-secret",
+      );
+
+      const res = await fetch(`${h.baseUrl}/api/servers/srv`, {
+        method: "DELETE",
+      });
+      expect(res.status).toBe(200);
+
+      expect(await h.secretStore.get("srv", envSecretField("K1"))).toBe(null);
+      expect(await h.secretStore.get("srv", envSecretField("K2"))).toBe(null);
+      expect(
+        await h.secretStore.get("srv", SECRET_FIELD_OAUTH_CLIENT_SECRET),
+      ).toBe(null);
+      // Different server's keychain entries are not touched.
+      expect(
+        await h.secretStore.get("untouched", SECRET_FIELD_OAUTH_CLIENT_SECRET),
+      ).toBe("untouched-secret");
+    });
+
+    it("migrates plaintext secrets on first GET (idempotent)", async () => {
+      // mcp.json from a pre-#1356 build, hand-edited, or from another tool.
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            srv: {
+              type: "streamable-http",
+              url: "https://x.test/mcp",
+              oauth: { clientId: "cid", clientSecret: "leaked-from-disk" },
+            },
+          },
+        }),
+      );
+
+      // First GET migrates and returns the rehydrated shape.
+      const res1 = await fetch(`${h.baseUrl}/api/servers`);
+      expect(res1.status).toBe(200);
+      const body1 = (await res1.json()) as MCPConfig;
+      const wireOauth1 = (
+        body1.mcpServers.srv as { oauth?: Record<string, string> }
+      ).oauth;
+      expect(wireOauth1).toEqual({
+        clientId: "cid",
+        clientSecret: "leaked-from-disk",
+      });
+
+      // Disk: secret has been lifted out.
+      const onDisk = readConfig(h.configPath).mcpServers.srv as {
+        oauth?: Record<string, string>;
+      };
+      expect(onDisk.oauth).toEqual({ clientId: "cid" });
+      expect(readFileSync(h.configPath, "utf-8")).not.toContain(
+        "leaked-from-disk",
+      );
+
+      // Keychain: value present under the canonical field.
+      expect(
+        await h.secretStore.get("srv", SECRET_FIELD_OAUTH_CLIENT_SECRET),
+      ).toBe("leaked-from-disk");
+
+      // Subsequent GET is a no-op (file unchanged, response identical).
+      const beforeSecondGet = readFileSync(h.configPath, "utf-8");
+      const res2 = await fetch(`${h.baseUrl}/api/servers`);
+      expect(res2.status).toBe(200);
+      expect(readFileSync(h.configPath, "utf-8")).toBe(beforeSecondGet);
+    });
+
+    it("migration prefers an existing keychain value over a re-introduced disk plaintext", async () => {
+      // Simulate the user hand-editing the file to put plaintext back in
+      // after migration. The keychain already holds the canonical value;
+      // we must not let the disk plaintext overwrite it.
+      await h.secretStore.set(
+        "srv",
+        SECRET_FIELD_OAUTH_CLIENT_SECRET,
+        "kept-in-keychain",
+      );
+      writeFileSync(
+        h.configPath,
+        JSON.stringify({
+          mcpServers: {
+            srv: {
+              type: "streamable-http",
+              url: "https://x.test/mcp",
+              oauth: { clientId: "cid", clientSecret: "disk-version" },
+            },
+          },
+        }),
+      );
+
+      const res = await fetch(`${h.baseUrl}/api/servers`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as MCPConfig;
+      const wireOauth = (
+        body.mcpServers.srv as { oauth?: Record<string, string> }
+      ).oauth;
+      // Wire reflects the keychain value, not the disk plaintext.
+      expect(wireOauth?.clientSecret).toBe("kept-in-keychain");
+      // Keychain untouched.
+      expect(
+        await h.secretStore.get("srv", SECRET_FIELD_OAUTH_CLIENT_SECRET),
+      ).toBe("kept-in-keychain");
+      // Disk: plaintext has been stripped out regardless.
+      expect(readFileSync(h.configPath, "utf-8")).not.toContain("disk-version");
+    });
+  });
+
+  describe("keychain unavailable (Linux without libsecret)", () => {
+    // A SecretStore impl that simulates keychain unavailability: set is
+    // the hard-fail path; get / delete / deleteAllForServer silently no-op
+    // to match the production `KeyringSecretStore` tolerance contract.
+    class UnavailableSecretStore implements SecretStore {
+      async get(): Promise<string | null> {
+        return null;
+      }
+      async set(): Promise<void> {
+        throw new KeychainUnavailableError(new Error("libsecret missing"));
+      }
+      async delete(): Promise<void> {
+        // no-op
+      }
+      async deleteAllForServer(): Promise<void> {
+        // no-op
+      }
+    }
+
+    async function startUnavailableHarness(): Promise<{
+      baseUrl: string;
+      server: import("@hono/node-server").ServerType;
+      configPath: string;
+      tempDir: string;
+    }> {
+      const tempDir = mkdtempSync(
+        join(tmpdir(), "inspector-keychain-unavailable-"),
+      );
+      const configPath = join(tempDir, "mcp.json");
+      const { app } = createRemoteApp({
+        dangerouslyOmitAuth: true,
+        mcpConfigPath: configPath,
+        initialConfig: { defaultEnvironment: {} },
+        secretStore: new UnavailableSecretStore(),
+      });
+      const { baseUrl, server } = await new Promise<{
+        baseUrl: string;
+        server: import("@hono/node-server").ServerType;
+      }>((resolve, reject) => {
+        const s = serve(
+          { fetch: app.fetch, port: 0, hostname: "127.0.0.1" },
+          (info) => {
+            const port =
+              info && typeof info === "object" && "port" in info
+                ? (info as { port: number }).port
+                : 0;
+            resolve({ baseUrl: `http://127.0.0.1:${port}`, server: s });
+          },
+        );
+        s.on("error", reject);
+      });
+      return { baseUrl, server, configPath, tempDir };
+    }
+
+    it("GET succeeds when there are no plaintext secrets to migrate", async () => {
+      const u = await startUnavailableHarness();
+      try {
+        writeFileSync(
+          u.configPath,
+          JSON.stringify({
+            mcpServers: { plain: { type: "stdio", command: "node" } },
+          }),
+        );
+        const res = await fetch(`${u.baseUrl}/api/servers`);
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as MCPConfig;
+        expect(body.mcpServers.plain).toBeDefined();
+      } finally {
+        await new Promise<void>((r) => u.server.close(() => r()));
+        rmSync(u.tempDir, { recursive: true });
+      }
+    });
+
+    it("GET preserves disk plaintext when migration can't write to the keychain", async () => {
+      const u = await startUnavailableHarness();
+      try {
+        // Pre-#1356 plaintext on disk. With the keychain unavailable,
+        // we must NOT strip it out — the user's secret would be lost.
+        writeFileSync(
+          u.configPath,
+          JSON.stringify({
+            mcpServers: {
+              srv: {
+                type: "streamable-http",
+                url: "https://x.test/mcp",
+                oauth: {
+                  clientId: "cid",
+                  clientSecret: "still-here",
+                },
+              },
+            },
+          }),
+        );
+        const beforeFile = readFileSync(u.configPath, "utf-8");
+
+        const res = await fetch(`${u.baseUrl}/api/servers`);
+        expect(res.status).toBe(200);
+
+        // Disk file unchanged — plaintext stays put.
+        expect(readFileSync(u.configPath, "utf-8")).toBe(beforeFile);
+      } finally {
+        await new Promise<void>((r) => u.server.close(() => r()));
+        rmSync(u.tempDir, { recursive: true });
+      }
+    });
+
+    it("POST without secrets succeeds (defensive sweep is a no-op)", async () => {
+      const u = await startUnavailableHarness();
+      try {
+        const res = await fetch(`${u.baseUrl}/api/servers`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            id: "no-secrets",
+            config: { type: "stdio", command: "node" },
+          }),
+        });
+        expect(res.status).toBe(200);
+      } finally {
+        await new Promise<void>((r) => u.server.close(() => r()));
+        rmSync(u.tempDir, { recursive: true });
+      }
+    });
+
+    it("POST with a secret returns 503 (the moment that matters)", async () => {
+      const u = await startUnavailableHarness();
+      try {
+        const res = await fetch(`${u.baseUrl}/api/servers`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            id: "needs-keychain",
+            config: { type: "streamable-http", url: "https://x.test/mcp" },
+            settings: {
+              headers: [],
+              metadata: [],
+              connectionTimeout: 0,
+              requestTimeout: 0,
+              oauthClientId: "cid",
+              oauthClientSecret: "shh",
+            },
+          }),
+        });
+        expect(res.status).toBe(503);
+        const body = (await res.json()) as { error?: string };
+        expect(body.error).toMatch(/keychain/i);
+        expect(body.error).toMatch(/libsecret/);
+      } finally {
+        await new Promise<void>((r) => u.server.close(() => r()));
+        rmSync(u.tempDir, { recursive: true });
+      }
+    });
+
+    it("POST 503 leaves no disk entry — retry is not trapped at 409", async () => {
+      // Regression for the write-ordering review comment. If keychain
+      // set ran AFTER the disk write, a failed `set` would leave the
+      // entry on disk and the user's retry would hit 409. With the
+      // reversed order, a failed `set` leaves disk untouched and the
+      // retry can proceed.
+      const u = await startUnavailableHarness();
+      try {
+        const first = await fetch(`${u.baseUrl}/api/servers`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            id: "retry-test",
+            config: { type: "streamable-http", url: "https://x.test/mcp" },
+            settings: {
+              headers: [],
+              metadata: [],
+              connectionTimeout: 0,
+              requestTimeout: 0,
+              oauthClientId: "cid",
+              oauthClientSecret: "shh",
+            },
+          }),
+        });
+        expect(first.status).toBe(503);
+
+        // Disk: no entry persisted. A GET should not see "retry-test".
+        const cfg = existsSync(u.configPath)
+          ? (JSON.parse(readFileSync(u.configPath, "utf-8")) as MCPConfig)
+          : { mcpServers: {} };
+        expect(cfg.mcpServers).not.toHaveProperty("retry-test");
+
+        // Retry with no secret should now succeed (no 409).
+        const second = await fetch(`${u.baseUrl}/api/servers`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            id: "retry-test",
+            config: { type: "stdio", command: "node" },
+          }),
+        });
+        expect(second.status).toBe(200);
+      } finally {
+        await new Promise<void>((r) => u.server.close(() => r()));
+        rmSync(u.tempDir, { recursive: true });
+      }
+    });
+
+    it("DELETE succeeds (sweep silently no-ops)", async () => {
+      const u = await startUnavailableHarness();
+      try {
+        writeFileSync(
+          u.configPath,
+          JSON.stringify({
+            mcpServers: { srv: { type: "stdio", command: "node" } },
+          }),
+        );
+        const res = await fetch(`${u.baseUrl}/api/servers/srv`, {
+          method: "DELETE",
+        });
+        expect(res.status).toBe(200);
+      } finally {
+        await new Promise<void>((r) => u.server.close(() => r()));
+        rmSync(u.tempDir, { recursive: true });
+      }
+    });
+  });
+});
+
+describe("/api/servers read-only sessions (#1481/#1483)", () => {
+  interface RoHarness {
+    baseUrl: string;
+    server: ServerType;
+    tempDir: string;
+    configPath: string;
+  }
+
+  async function listen(app: {
+    fetch: (req: Request) => Response | Promise<Response>;
+  }): Promise<{ baseUrl: string; server: ServerType }> {
+    return new Promise((resolve, reject) => {
+      const server = serve(
+        { fetch: app.fetch, port: 0, hostname: "127.0.0.1" },
+        (info) => {
+          const port =
+            info && typeof info === "object" && "port" in info
+              ? (info as { port: number }).port
+              : 0;
+          resolve({ baseUrl: `http://127.0.0.1:${port}`, server });
+        },
+      );
+      server.on("error", reject);
+    });
+  }
+
+  async function close(h: RoHarness): Promise<void> {
+    await new Promise<void>((r) => h.server.close(() => r()));
+    try {
+      rmSync(h.tempDir, { recursive: true });
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /** Read-only session backed by a `--config`-style file. */
+  async function setupReadOnlyFile(contents?: string): Promise<RoHarness> {
+    const tempDir = mkdtempSync(join(tmpdir(), "inspector-ro-file-"));
+    const configPath = join(tempDir, "mcp.json");
+    if (contents !== undefined) writeFileSync(configPath, contents);
+    const { app } = createRemoteApp({
+      dangerouslyOmitAuth: true,
+      mcpConfigPath: configPath,
+      writable: false,
+      initialConfig: { defaultEnvironment: {} },
+      secretStore: new InMemorySecretStore(),
+    });
+    const { baseUrl, server } = await listen(app);
+    return { baseUrl, server, tempDir, configPath };
+  }
+
+  /** Read-only session backed by an in-memory ad-hoc list (no file). */
+  async function setupInMemory(servers: MCPConfig): Promise<RoHarness> {
+    const tempDir = mkdtempSync(join(tmpdir(), "inspector-ro-mem-"));
+    const configPath = join(tempDir, "mcp.json");
+    const { app } = createRemoteApp({
+      dangerouslyOmitAuth: true,
+      // mcpConfigPath points at a path that must NEVER be touched.
+      mcpConfigPath: configPath,
+      writable: false,
+      initialServers: servers,
+      initialConfig: { defaultEnvironment: {} },
+      secretStore: new InMemorySecretStore(),
+    });
+    const { baseUrl, server } = await listen(app);
+    return { baseUrl, server, tempDir, configPath };
+  }
+
+  const jsonHeaders = { "Content-Type": "application/json" };
+
+  it("rejects every mutation with 403 and leaves the file untouched", async () => {
+    const original = JSON.stringify(
+      { mcpServers: { api: { type: "stdio", command: "node" } } },
+      null,
+      2,
+    );
+    const h = await setupReadOnlyFile(original);
+    try {
+      const mutations: Array<{ method: string; path: string; body: unknown }> =
+        [
+          {
+            method: "POST",
+            path: "/api/servers",
+            body: { id: "new", config: { type: "stdio", command: "x" } },
+          },
+          {
+            method: "PUT",
+            path: "/api/servers/api",
+            body: { config: { type: "stdio", command: "y" } },
+          },
+          {
+            method: "PUT",
+            path: "/api/servers/order",
+            body: { order: ["api"] },
+          },
+          { method: "DELETE", path: "/api/servers/api", body: undefined },
+        ];
+      for (const m of mutations) {
+        const res = await fetch(`${h.baseUrl}${m.path}`, {
+          method: m.method,
+          headers: m.body ? jsonHeaders : undefined,
+          body: m.body ? JSON.stringify(m.body) : undefined,
+        });
+        expect(res.status).toBe(403);
+        const body = (await res.json()) as { error?: string };
+        expect(body.error).toMatch(/read-only/i);
+      }
+      // The file is byte-for-byte unchanged.
+      expect(readFileSync(h.configPath, "utf-8")).toBe(original);
+    } finally {
+      await close(h);
+    }
+  });
+
+  it("returns 403 (not 404) for a mutation on a missing id — no existence leak", async () => {
+    const h = await setupReadOnlyFile(
+      JSON.stringify({ mcpServers: {} }, null, 2),
+    );
+    try {
+      const res = await fetch(`${h.baseUrl}/api/servers/ghost`, {
+        method: "DELETE",
+      });
+      expect(res.status).toBe(403);
+    } finally {
+      await close(h);
+    }
+  });
+
+  it("serves a read-only file as-is and never seeds when the file is missing", async () => {
+    const h = await setupReadOnlyFile(); // no file written
+    try {
+      const res = await fetch(`${h.baseUrl}/api/servers`);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ mcpServers: {} });
+      // No seed write happened.
+      expect(existsSync(h.configPath)).toBe(false);
+    } finally {
+      await close(h);
+    }
+  });
+
+  it("does not migrate on-disk plaintext secrets on read (file bytes stable)", async () => {
+    // A foreign config with a plaintext stdio env value that the writable path
+    // would migrate into the keychain (a write). Read-only must leave it be.
+    const original = JSON.stringify(
+      {
+        mcpServers: {
+          api: {
+            type: "stdio",
+            command: "node",
+            env: { API_KEY: "plaintext-secret" },
+          },
+        },
+      },
+      null,
+      2,
+    );
+    const h = await setupReadOnlyFile(original);
+    try {
+      const res = await fetch(`${h.baseUrl}/api/servers`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as MCPConfig;
+      // Plaintext flows straight back (no keychain swap) and disk is untouched.
+      expect(
+        (body.mcpServers.api as { env?: Record<string, string> }).env?.API_KEY,
+      ).toBe("plaintext-secret");
+      expect(readFileSync(h.configPath, "utf-8")).toBe(original);
+    } finally {
+      await close(h);
+    }
+  });
+
+  it("serves an in-memory ad-hoc list (with lifted headers) and writes no file", async () => {
+    const h = await setupInMemory({
+      mcpServers: {
+        "example.com": {
+          type: "streamable-http",
+          url: "https://example.com/mcp",
+          headers: { Authorization: "Bearer x" },
+        },
+      },
+    });
+    try {
+      const res = await fetch(`${h.baseUrl}/api/servers`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as MCPConfig;
+      expect(body.mcpServers["example.com"]).toMatchObject({
+        type: "streamable-http",
+        url: "https://example.com/mcp",
+        headers: { Authorization: "Bearer x" },
+      });
+      // The configPath must never be created for an in-memory session.
+      expect(existsSync(h.configPath)).toBe(false);
+
+      // Mutations are still rejected.
+      const post = await fetch(`${h.baseUrl}/api/servers`, {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify({
+          id: "x",
+          config: { type: "stdio", command: "n" },
+        }),
+      });
+      expect(post.status).toBe(403);
+      expect(existsSync(h.configPath)).toBe(false);
+    } finally {
+      await close(h);
+    }
+  });
+});

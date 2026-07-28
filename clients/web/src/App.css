@@ -1,0 +1,585 @@
+/*
+ * App.css — Global styles that CANNOT be expressed in the Mantine theme.
+ *
+ * Only the following belong here:
+ *   - :root CSS custom properties (--inspector-* design tokens)
+ *   - @keyframes animations
+ *   - Pseudo-selectors (:hover, :focus) that cross component boundaries
+ *   - Nested child-element selectors for third-party HTML output
+ *   - Styles for native HTML elements (img, iframe, etc.)
+ *
+ * Everything else (margin, padding, background, border, color, font-size)
+ * belongs in the Mantine theme via Component.extend() or .withProps().
+ */
+
+:root {
+  /* ── Brand ─────────────────────────────────────────────── */
+  --inspector-brand-primary: var(--mantine-primary-color-filled);
+
+  /* ── Text ──────────────────────────────────────────────── */
+  --inspector-text-primary: var(--mantine-color-text);
+  --inspector-text-secondary: var(--mantine-color-dimmed);
+  --inspector-text-inverse: var(--mantine-color-white);
+  /* Danger action text (Remove / Disconnect subtle buttons). A deep red on
+     light surfaces; a lighter red on the dark card/header (see dark override) —
+     `red-6` fell just under WCAG AA on both. */
+  --inspector-danger-text: var(--mantine-color-red-7);
+
+  /* ── Surfaces ──────────────────────────────────────────── */
+  /* Light-grey app background so the white cards read as raised. Drives
+     Mantine's `--mantine-color-body` (the actual page background), which
+     otherwise defaults to pure white. */
+  --inspector-surface-body: var(--mantine-color-gray-1);
+  --inspector-surface-card: var(--mantine-color-white);
+  /* Server-card fill: a hair lighter than the grey app background (`gray-0` vs
+     the body's `gray-1`) so the cards read as faintly raised on the white
+     Servers box. Light mode only; dark tracks the standard card surface. */
+  --inspector-surface-card-server: var(--mantine-color-gray-0);
+  /* Entry-card surface (Protocol / Network / Task message cards): the faint
+     `gray-0` grey — a hair lighter than the `gray-1` app background and matching
+     the server cards — so the entries read as soft cards on their white panel
+     (their inner Code blocks are raised to white via the `inset` variant). Keeps
+     the standard card tone in dark (overridden below). */
+  --inspector-surface-inset: var(--mantine-color-gray-0);
+  /* Code/content surfaces match the light-grey body so they stay distinct
+     against the white cards (the Code block has no border of its own). Dark
+     mode keeps the darker `dark-9` inset below. */
+  --inspector-surface-code: var(--inspector-surface-body);
+  /* Raised content surface used for content views that sit ON a grey inset
+     message card (Protocol/Network): white in light mode so they read as
+     raised above the grey card — the inverse of the grey-on-white insets
+     elsewhere. Applied via the Card `inset` variant (see theme/Card.ts). */
+  --inspector-surface-code-oncard: var(--mantine-color-white);
+  /* Subtle inset surface for modal call-outs / summary panels. Mantine's
+     `default-hover` already adapts to color scheme, so no dark override. */
+  --inspector-surface-subtle: var(--mantine-color-default-hover);
+
+  /* ── Inputs ────────────────────────────────────────────── */
+  --inspector-input-background: var(--mantine-color-white);
+
+  /* ── Borders ───────────────────────────────────────────── */
+  --inspector-border-default: var(--mantine-color-default-border);
+  --inspector-border-subtle: var(--mantine-color-gray-3);
+
+  /* ── Scrollbar ─────────────────────────────────────────── */
+  /* Matches Mantine ScrollArea's thumb so native scrollbars (used where a
+     ScrollArea would break flex sizing, e.g. the Resources accordion) blend in. */
+  --inspector-scrollbar-thumb: rgba(0, 0, 0, 0.4);
+
+  /* ── Connection status ─────────────────────────────────── */
+  --inspector-status-connected: var(--mantine-color-green-6);
+  --inspector-status-connecting: var(--mantine-color-yellow-6);
+  --inspector-status-disconnected: var(--mantine-color-gray-5);
+  --inspector-status-error: var(--mantine-color-red-6);
+
+  /* Red glow pulsed around a newly appearing tab's label (#1450) */
+  --inspector-glow-red: var(--mantine-color-red-6);
+
+  /* Green border drawn around a freshly-added/highlighted server card (#1535) */
+  --inspector-highlight-border: var(--mantine-color-green-6);
+
+  /* Red border drawn around a server card whose last connection attempt failed,
+     until another server is connected/attempted (#1621) */
+  --inspector-error-border: var(--mantine-color-red-6);
+
+  /* ── Log levels (RFC 5424) ─────────────────────────────── */
+  --inspector-log-debug: var(--mantine-color-gray-6);
+  --inspector-log-info: var(--mantine-color-blue-6);
+  --inspector-log-notice: var(--mantine-color-teal-6);
+  --inspector-log-warning: var(--mantine-color-yellow-6);
+  --inspector-log-error: var(--mantine-color-red-6);
+  --inspector-log-critical: var(--mantine-color-red-8);
+  --inspector-log-alert: var(--mantine-color-red-9);
+  --inspector-log-emergency: var(--mantine-color-red-9);
+
+  /* ── Task status ───────────────────────────────────────── */
+  --inspector-task-waiting: var(--mantine-color-gray-5);
+  --inspector-task-running: var(--mantine-color-blue-6);
+  --inspector-task-completed: var(--mantine-color-green-6);
+  --inspector-task-failed: var(--mantine-color-red-6);
+  --inspector-task-cancelled: var(--mantine-color-yellow-6);
+
+  /* ── History ───────────────────────────────────────────── */
+  --inspector-history-success: var(--mantine-color-green-6);
+  --inspector-history-error: var(--mantine-color-red-6);
+
+  /* ── Protocol / Network badges ─────────────────────────── */
+  /* Direction (client→server / server→client) and method chips. Light mode
+     keeps the tinted "light variant" look via Mantine's *-light tokens. */
+  --inspector-badge-outgoing-bg: var(--mantine-color-green-light);
+  --inspector-badge-outgoing-fg: var(--mantine-color-green-light-color);
+  --inspector-badge-incoming-bg: var(--mantine-color-violet-light);
+  --inspector-badge-incoming-fg: var(--mantine-color-violet-light-color);
+  /* Method: a neutral gray chip that adapts to the scheme — light-gray with
+     dark text in light mode, dark-gray with light text in dark mode (see the
+     dark override below). Matches the surrounding surface family. */
+  --inspector-badge-method-bg: var(--mantine-color-gray-2);
+  --inspector-badge-method-fg: var(--mantine-color-gray-7);
+  /* Network request category chips — `transport` (blue) / `auth` (violet). Same
+     treatment as the direction badges: a tinted light-variant fill here, a deep
+     saturated fill with light text in dark mode (below). */
+  --inspector-badge-transport-bg: var(--mantine-color-blue-light);
+  --inspector-badge-transport-fg: var(--mantine-color-blue-light-color);
+  --inspector-badge-auth-bg: var(--mantine-color-violet-light);
+  --inspector-badge-auth-fg: var(--mantine-color-violet-light-color);
+
+  /* Accent for the modern MCP-mirrored header names (Mcp-Method / Mcp-Name /
+     Mcp-Param-* / MCP-Protocol-Version) in the Network tab's header tables. */
+  --inspector-mcp-header-accent: var(--mantine-color-violet-7);
+}
+
+/* Dark mode overrides — tokens that need adjustment in dark scheme */
+[data-mantine-color-scheme="dark"] {
+  /* Charcoal body matched to the header's segmented tab control (`dark-8`, the
+     Mantine SegmentedControl fill) — mirrors light mode, where the body and the
+     tab bar share `gray-1`. Cards (`gray-9`) still sit a step above it. */
+  --inspector-surface-body: var(--mantine-color-dark-8);
+  --inspector-surface-card: var(--mantine-color-gray-9);
+  /* Dark keeps server cards at the standard card surface (the lighter grey is a
+     light-mode-only treatment). */
+  --inspector-surface-card-server: var(--inspector-surface-card);
+  /* Dark keeps the message cards at the standard card tone (they already
+     contrast against the darker panel/body), so only light mode goes grey. */
+  --inspector-surface-inset: var(--mantine-color-gray-9);
+  /* On a dark message card, content views stay the darker `dark-9` inset (they
+     already contrast against the `gray-9` card) — only light mode inverts to
+     white. */
+  --inspector-surface-code-oncard: var(--mantine-color-dark-9);
+  --inspector-surface-code: var(--mantine-color-dark-9);
+  --inspector-border-subtle: var(--mantine-color-gray-4);
+  --inspector-input-background: var(--mantine-color-dark-9);
+  --inspector-scrollbar-thumb: rgba(255, 255, 255, 0.4);
+
+  /* The semantic status/log/task colors use the same `*-6` shade in both
+     schemes, which sits too dark on charcoal — lift them one to two steps so
+     they stay legible in dark mode. Light-mode `:root` keeps the `*-6` values. */
+
+  /* Status */
+  --inspector-status-connected: var(--mantine-color-green-4);
+  --inspector-status-connecting: var(--mantine-color-yellow-4);
+  --inspector-status-error: var(--mantine-color-red-4);
+
+  /* Log levels (RFC 5424) */
+  --inspector-log-info: var(--mantine-color-blue-4);
+  --inspector-log-notice: var(--mantine-color-teal-4);
+  --inspector-log-warning: var(--mantine-color-yellow-4);
+  --inspector-log-error: var(--mantine-color-red-4);
+  --inspector-log-critical: var(--mantine-color-red-5);
+  --inspector-log-alert: var(--mantine-color-red-6);
+  --inspector-log-emergency: var(--mantine-color-red-7);
+
+  /* Task status */
+  --inspector-task-running: var(--mantine-color-blue-4);
+  --inspector-task-completed: var(--mantine-color-green-4);
+  --inspector-task-failed: var(--mantine-color-red-4);
+  --inspector-task-cancelled: var(--mantine-color-yellow-4);
+
+  /* History */
+  --inspector-history-success: var(--mantine-color-green-4);
+  --inspector-history-error: var(--mantine-color-red-4);
+
+  /* Protocol/Network badges — solid fills with light text on charcoal (the
+     `*-light` tints from `:root` render washed-out here). Direction: a deep
+     green (distinct from the brighter green-6 "OK" status chip) and a saturated
+     violet; method: a dark-slate chip a step above the card. */
+  --inspector-badge-outgoing-bg: var(--mantine-color-green-8);
+  --inspector-badge-outgoing-fg: var(--mantine-color-green-0);
+  --inspector-badge-incoming-bg: var(--mantine-color-violet-6);
+  --inspector-badge-incoming-fg: var(--mantine-color-violet-0);
+  --inspector-badge-method-bg: var(--mantine-color-dark-5);
+  --inspector-badge-method-fg: var(--mantine-color-gray-2);
+  /* Category chips: deep blue (transport) / violet (auth) fills with light
+     text, matching the server→client direction badge. */
+  --inspector-badge-transport-bg: var(--mantine-color-blue-6);
+  --inspector-badge-transport-fg: var(--mantine-color-blue-0);
+  --inspector-badge-auth-bg: var(--mantine-color-violet-6);
+  --inspector-badge-auth-fg: var(--mantine-color-violet-0);
+  --inspector-mcp-header-accent: var(--mantine-color-violet-4);
+
+  /* ── A11y contrast (dark) ──────────────────────────────── */
+  /* Mantine's dark `dimmed` (dark-2) drops below AA on the lighter dark
+     surfaces (selected/hover rows); lift it one step. `!important` because
+     Mantine injects this var at runtime at this same specificity and would
+     otherwise win the cascade tie (see the light-scheme block below). */
+  --mantine-color-dimmed: var(--mantine-color-dark-1) !important;
+  /* Lighter danger red for the dark card/header (deep red would fail AA). */
+  --inspector-danger-text: var(--mantine-color-red-4);
+}
+
+/* A11y contrast (light): Mantine sets these per-scheme on a selector more
+   specific than `:root`, so override them at matching specificity (App.css
+   loads after Mantine, so it wins). Darkens the `dimmed` secondary text and the
+   `*-light` variant text so both clear WCAG AA (4.5:1) on light surfaces —
+   fixes ~600 of the axe color-contrast hits (dimmed text + tinted
+   badges/buttons/alerts). Dark mode keeps Mantine's lighter light-variant text.
+*/
+:root[data-mantine-color-scheme="light"] {
+  /* `!important`: Mantine injects the `*-light-color` variables at runtime at
+     the same specificity as this rule, so it wins the cascade tie without this.
+     A justified override of a third-party variable to meet WCAG AA — not a lint
+     workaround. `dimmed` already wins on specificity but is flagged for parity. */
+  --mantine-color-dimmed: var(--mantine-color-gray-7) !important;
+  --mantine-color-inspector-light-color: var(
+    --mantine-color-inspector-8
+  ) !important;
+  --mantine-color-blue-light-color: var(--mantine-color-blue-8) !important;
+  --mantine-color-green-light-color: var(--mantine-color-green-8) !important;
+  --mantine-color-teal-light-color: var(--mantine-color-teal-8) !important;
+  --mantine-color-red-light-color: var(--mantine-color-red-8) !important;
+  --mantine-color-violet-light-color: var(--mantine-color-violet-8) !important;
+  --mantine-color-orange-light-color: var(--mantine-color-orange-8) !important;
+  --mantine-color-yellow-light-color: var(--mantine-color-yellow-9) !important;
+}
+
+/* The app background. Mantine paints `body` with `--mantine-color-body` (pure
+   white in light mode); override it here — App.css loads after Mantine's
+   styles, so this wins — so the light-grey `--inspector-surface-body` shows and
+   the white cards read as raised. Scheme-aware via the token's dark override. */
+body {
+  background-color: var(--inspector-surface-body);
+}
+
+/* Floor the app at 1280px so the header, split panes, and footer never reflow
+   into a broken layout; below this the whole app scrolls horizontally instead.
+   Scoped to the app mount (#root) rather than `body` so it doesn't leak into
+   Storybook, which shares App.css but renders stories into its own root.
+
+   The `transform` makes #root the containing block for the AppShell's
+   position:fixed header + footer, so they honor the 1280px floor too — spanning
+   the full 1280 and scrolling horizontally with the content — instead of staying
+   pinned to a narrower viewport. Body-portalled overlays (modals, tooltips,
+   dropdowns) render outside #root, so they stay viewport-fixed as intended. */
+#root {
+  min-width: 1280px;
+  transform: translateZ(0);
+}
+
+/* ── Animations ──────────────────────────────────────────── */
+
+@keyframes inspector-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+/* Both motions travel downward: enter descends from above into place, exit
+   descends from place to below — used for the header crossfade (#1450). */
+@keyframes inspector-fade-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(-0.5rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes inspector-fade-slide-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(0.5rem);
+  }
+}
+
+/* A red glow around a tab label's text that starts at full intensity the
+   moment a content-gated tab appears and fades out (#1450). */
+@keyframes inspector-tab-glow {
+  from {
+    text-shadow:
+      0 0 6px var(--inspector-glow-red),
+      0 0 12px var(--inspector-glow-red);
+  }
+  to {
+    text-shadow: none;
+  }
+}
+
+/* ── Status dot animations ───────────────────────────────── */
+
+.inspector-pulse {
+  animation: inspector-pulse 1.5s ease-in-out infinite;
+}
+
+/* Applied (via the `tabGlow` Text variant) to a tab label; the glow starts full
+   and fades, running only while `data-glow="on"` on a freshly-appeared tab. */
+.tab-glow[data-glow="on"] {
+  animation: inspector-tab-glow 325ms ease-in;
+}
+
+/* ── Header connect/disconnect animations (#1450) ────────── */
+/* Any header region that appears on connect / leaves on disconnect — the
+   center title↔tab-bar crossfade, the server name (left), and the status +
+   Disconnect controls (right). The element leaving ([data-anim="out"]) slides
+   down + fades out immediately; the appearing one ([data-anim="in"]) is delayed
+   by half the duration so they're staggered. Keep the 300ms/150ms here in sync
+   with HEADER_ANIM_MS in ViewHeader.tsx. */
+.header-anim[data-anim="in"] {
+  animation: inspector-fade-slide-in 300ms ease 150ms both;
+}
+
+.header-anim[data-anim="out"] {
+  animation: inspector-fade-slide-out 300ms ease both;
+}
+
+/* Honor reduced-motion for the header animations this PR adds (#1450): skip the
+   fade/slide and the new-tab glow, leaving the elements at their resting state.
+   Selectors match the originals' specificity so they win inside the query. */
+@media (prefers-reduced-motion: reduce) {
+  .header-anim[data-anim="in"],
+  .header-anim[data-anim="out"],
+  .tab-glow[data-glow="on"] {
+    animation: none;
+  }
+}
+
+/* ── Accordion disclosure chevron (right when closed, down when open) ──
+ *
+ * Mantine's default chevron rotation flips 180° on open (e.g. down → up). For
+ * the `disclosure` Accordion variant we use a right-pointing chevron and rotate
+ * it only 90° so closed sections point right and open sections point down — the
+ * standard disclosure direction, matching ResourceLink's chevron (issue #1462).
+ * `[data-rotate]` is set by Mantine on the chevron slot when the item is open;
+ * the class+attribute selector outranks Mantine's `:where()`-wrapped default. */
+
+/* Restore a smooth rotation: the accordion sets `transitionDuration={0}` to
+ * disable its panel height animation (which fights the flex layout), and that
+ * zeroes the shared `--accordion-transition-duration` the chevron would use.
+ * The 200ms restates Mantine's default accordion duration — keep it in sync if
+ * accordion timing is ever themed. */
+.disclosure-chevron {
+  transition: transform 200ms ease;
+}
+
+.disclosure-chevron[data-rotate] {
+  transform: rotate(90deg);
+}
+
+/* ── Full-height sectioned accordion (Resources) ─────────────────
+ *
+ * The `disclosure` Accordion fills its full-height card as a flex column. The
+ * section controls (headers) stay pinned while each OPEN section's panel scrolls
+ * within its own share of the remaining height — the per-item `flex` weight
+ * (set in ResourceControls) hands space from long sections to short ones. With
+ * `flex-grow: 0`, nothing expands or scrolls until the combined content
+ * overflows the panel, so sections never scroll while the panel has free space
+ * (issue #1462). Closed sections collapse to their header height.
+ *
+ * The per-section scroll uses a NATIVE scrollbar, styled below to match
+ * Mantine's ScrollArea thumb (#1466). A Mantine `ScrollArea` component can't be
+ * used here: its viewport has no intrinsic height, which would collapse the
+ * panel's content-based `flex-basis` that the per-section sizing above depends
+ * on, so the sections would no longer size to their content. */
+
+.disclosure-sections {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.disclosure-sections > .mantine-Accordion-item[data-active] {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.disclosure-sections .mantine-Accordion-control {
+  flex: 0 0 auto;
+}
+
+.disclosure-sections
+  > .mantine-Accordion-item[data-active]
+  .mantine-Accordion-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--inspector-scrollbar-thumb) transparent;
+}
+
+.disclosure-sections
+  > .mantine-Accordion-item[data-active]
+  .mantine-Accordion-panel::-webkit-scrollbar {
+  width: 8px;
+}
+
+.disclosure-sections
+  > .mantine-Accordion-item[data-active]
+  .mantine-Accordion-panel::-webkit-scrollbar-thumb {
+  background-color: var(--inspector-scrollbar-thumb);
+  border-radius: 8px;
+}
+
+.disclosure-sections
+  > .mantine-Accordion-item[data-active]
+  .mantine-Accordion-panel::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ── List item hover ────────────────────────────────────── */
+
+.list-item:hover {
+  background-color: var(--mantine-primary-color-light);
+}
+
+[data-mantine-color-scheme="dark"] .list-item:hover {
+  background-color: var(--mantine-primary-color-light);
+}
+
+/* ── Filter toggle buttons (Logging / History / Network) ─────────
+ *
+ * Shared by the FilterToggleButton element, the History list's collapsible
+ * section headers (the `sectionHeader` Group variant), and the Resources
+ * disclosure accordion controls (the `disclosure` Accordion variant). The
+ * active (on / open) state is keyed off `aria-pressed` for the toggle buttons
+ * and `aria-expanded` for the accordion controls. Unlike `.list-item`,
+ * hover is a thin border rather than a background fill, and the active (on)
+ * state is the filled background. Keeping the two states distinct means
+ * toggling a button off while the cursor is still over it is immediately
+ * visible, instead of the hover background masking the removal of the active
+ * background (issue #1460). The 1px transparent border is reserved here (not as
+ * an inline style in the theme variant — inline styles outrank stylesheet
+ * `:hover` rules) so the hover border doesn't shift layout. */
+
+.filter-toggle {
+  border: 1px solid transparent;
+  border-radius: var(--mantine-radius-md);
+}
+
+.filter-toggle:hover {
+  border-color: var(--inspector-brand-primary);
+}
+
+.filter-toggle[aria-pressed="true"],
+.filter-toggle[aria-expanded="true"] {
+  background-color: var(--mantine-primary-color-light);
+}
+
+/* ── Select / Autocomplete dropdown / option (dark mode) ─────────
+ *
+ * Select and Autocomplete each render with their own static selector
+ * (`mantine-Select-*` / `mantine-Autocomplete-*`) — they share the
+ * Combobox primitive but don't emit a shared `mantine-Combobox-*`
+ * class on the dropdown root. List both so the argument-completion
+ * Autocompletes get the same gray surface + primary-light hover as
+ * the filter dropdowns. */
+
+[data-mantine-color-scheme="dark"] .mantine-Select-dropdown,
+[data-mantine-color-scheme="dark"] .mantine-Autocomplete-dropdown {
+  background-color: var(--mantine-color-gray-8);
+}
+
+[data-mantine-color-scheme="dark"] .mantine-Select-option:hover,
+[data-mantine-color-scheme="dark"] .mantine-Autocomplete-option:hover {
+  background-color: var(--mantine-primary-color-light);
+}
+
+/* ── Menu dropdown / option (dark mode) ──────────────────────── */
+
+[data-mantine-color-scheme="dark"] .mantine-Menu-dropdown {
+  background-color: var(--mantine-color-gray-8);
+}
+
+[data-mantine-color-scheme="dark"] .mantine-Menu-item:hover {
+  background-color: var(--mantine-primary-color-light);
+}
+
+/* ── Segmented control label (dark mode) ──────────────────────── */
+
+[data-mantine-color-scheme="dark"] .mantine-SegmentedControl-indicator {
+  background-color: var(--mantine-primary-color-light);
+}
+
+/* ── Accordion button hover ─────────────────────────────── */
+
+/* Default accordions (e.g. Server Settings) keep the background-fill hover.
+ * The Resources `disclosure` accordion opts out via `.filter-toggle` (added to
+ * its control slot in theme/Accordion.ts) so it gets the outline-on-hover
+ * treatment instead — see the `.filter-toggle` rules above. */
+.mantine-Accordion-control:not(.filter-toggle):hover {
+  background-color: var(--mantine-primary-color-light-hover);
+}
+
+/* ── Markdown content (third-party HTML from react-markdown) ───── */
+
+.markdown-content {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.markdown-content > :first-child {
+  margin-top: 0;
+}
+
+.markdown-content > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-content pre {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.markdown-content code {
+  word-break: break-word;
+}
+
+.markdown-content table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.markdown-content img {
+  max-width: 100%;
+  height: auto;
+}
+
+/*
+ * Reorder grip on ServerCard. The grab/grabbing cursor is a draggability
+ * affordance that can't be expressed as a Mantine prop (and the active-press
+ * state is a pseudo-selector), so the whole grab-cursor unit lives here rather
+ * than split across the theme.
+ */
+.server-drag-handle {
+  cursor: grab;
+}
+
+.server-drag-handle:active {
+  cursor: grabbing;
+}
+
+/*
+ * Draggable vertical divider between the primary screen area and the pinned
+ * monitoring column (#1616). The col-resize cursor, the hover/active accent,
+ * and the drag-time user-select suppression are all pseudo-selector / cursor /
+ * cross-element concerns that can't be expressed as Mantine props, so the whole
+ * unit lives here rather than split across the theme.
+ */
+.resize-handle {
+  flex: 0 0 auto;
+  width: 6px;
+  cursor: col-resize;
+  background-color: var(--inspector-border-default);
+  transition: background-color 120ms ease;
+  touch-action: none;
+}
+
+.resize-handle:hover,
+.resize-handle:focus-visible {
+  background-color: var(--mantine-primary-color-filled);
+}
+
+/* Suppress text selection anywhere on the page while a drag is in progress. */
+body.resizing-col {
+  user-select: none;
+  cursor: col-resize;
+}

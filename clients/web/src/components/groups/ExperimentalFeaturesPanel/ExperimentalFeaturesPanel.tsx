@@ -1,0 +1,366 @@
+import {
+  ActionIcon,
+  Alert,
+  Badge,
+  Button,
+  Card,
+  Checkbox,
+  Divider,
+  Group,
+  Stack,
+  Table,
+  Text,
+  TextInput,
+  Textarea,
+  Title,
+} from "@mantine/core";
+import { ClearButton } from "../../elements/ClearButton/ClearButton";
+import type {
+  ClientCapabilities,
+  JSONRPCErrorResponse,
+  JSONRPCResponse,
+  ServerCapabilities,
+} from "@modelcontextprotocol/client";
+
+export interface HeaderPair {
+  key: string;
+  value: string;
+}
+
+export interface RequestHistoryItem {
+  timestamp: Date;
+  method: string;
+  status: string;
+  durationMs: number;
+}
+
+export interface ExperimentalFeaturesPanelProps {
+  serverExperimental: ServerCapabilities["experimental"];
+  clientExperimental: ClientCapabilities["experimental"];
+  requestDraft: string;
+  response?: JSONRPCResponse | JSONRPCErrorResponse;
+  customHeaders: HeaderPair[];
+  requestHistory: RequestHistoryItem[];
+  onToggleClientCapability: (name: string, enabled: boolean) => void;
+  onRequestChange: (json: string) => void;
+  onSendRequest: () => void;
+  onAddHeader: () => void;
+  onRemoveHeader: (index: number) => void;
+  onHeaderChange: (index: number, key: string, value: string) => void;
+  onCopyResponse: () => void;
+  onTestCapability: (name: string) => void;
+}
+
+interface ClientToggleMetadata {
+  label: string;
+  description: string;
+}
+
+const CLIENT_EXPERIMENTAL_TOGGLE_METADATA: Record<
+  string,
+  ClientToggleMetadata
+> = {
+  "experimental/customSampling": {
+    label: "Custom sampling",
+    description:
+      "Allow servers to invoke client-defined sampling strategies via experimental/sampling.* methods.",
+  },
+  "experimental/batchRequests": {
+    label: "Batch requests",
+    description:
+      "Send multiple JSON-RPC requests in a single call and receive a batched response.",
+  },
+};
+
+const HintText = Text.withProps({
+  size: "sm",
+  c: "dimmed",
+});
+
+const MetaText = Text.withProps({
+  size: "xs",
+  c: "dimmed",
+});
+
+const CapCard = Card.withProps({
+  withBorder: true,
+  p: "sm",
+});
+
+const CompactButton = Button.withProps({
+  size: "xs",
+  variant: "light",
+});
+
+const RemoveIcon = ActionIcon.withProps({
+  variant: "light",
+  color: "red",
+});
+
+const HeaderNameInput = TextInput.withProps({
+  placeholder: "Header name",
+  rightSectionPointerEvents: "auto",
+});
+
+const HeaderValueInput = TextInput.withProps({
+  placeholder: "Header value",
+  rightSectionPointerEvents: "auto",
+});
+
+const RequestTextarea = Textarea.withProps({
+  label: "Request",
+  ff: "monospace",
+  autosize: true,
+  minRows: 6,
+  rightSectionPointerEvents: "auto",
+});
+
+const ResponseTextarea = Textarea.withProps({
+  "aria-label": "Response",
+  ff: "monospace",
+  readOnly: true,
+  autosize: true,
+  minRows: 4,
+});
+
+const ResponseLabel = Text.withProps({
+  fw: 500,
+  size: "sm",
+});
+
+const ErrorBadge = Badge.withProps({
+  color: "red",
+  size: "sm",
+});
+
+function formatDuration(ms: number): string {
+  return `${ms}ms`;
+}
+
+function formatTimestamp(date: Date): string {
+  return date.toLocaleString();
+}
+
+function formatResponse(
+  response: JSONRPCResponse | JSONRPCErrorResponse,
+): string {
+  return JSON.stringify(response, null, 2);
+}
+
+function isErrorResponse(
+  response: JSONRPCResponse | JSONRPCErrorResponse,
+): response is JSONRPCErrorResponse {
+  return "error" in response;
+}
+
+function getCapabilityEntries(
+  experimental: ServerCapabilities["experimental"],
+): [string, object][] {
+  if (!experimental) return [];
+  return Object.entries(experimental);
+}
+
+function getCapabilityDescription(value: object): string | undefined {
+  if ("description" in value && typeof value.description === "string") {
+    return value.description;
+  }
+  return undefined;
+}
+
+function getCapabilityMethods(value: object): string[] | undefined {
+  if (
+    "methods" in value &&
+    Array.isArray(value.methods) &&
+    value.methods.every((m: unknown) => typeof m === "string")
+  ) {
+    return value.methods as string[];
+  }
+  return undefined;
+}
+
+function formatMethods(methods: string[]): string {
+  return `Methods: ${methods.join(", ")}`;
+}
+
+function getClientToggleNames(
+  clientExperimental: ClientCapabilities["experimental"],
+): string[] {
+  const known = Object.keys(CLIENT_EXPERIMENTAL_TOGGLE_METADATA);
+  const recordKeys = Object.keys(clientExperimental ?? {});
+  const unknown = recordKeys.filter(
+    (name) => !(name in CLIENT_EXPERIMENTAL_TOGGLE_METADATA),
+  );
+  return [...known, ...unknown];
+}
+
+export function ExperimentalFeaturesPanel({
+  serverExperimental,
+  clientExperimental,
+  requestDraft,
+  response,
+  customHeaders,
+  requestHistory,
+  onToggleClientCapability,
+  onRequestChange,
+  onSendRequest,
+  onAddHeader,
+  onRemoveHeader,
+  onHeaderChange,
+  onCopyResponse,
+  onTestCapability,
+}: ExperimentalFeaturesPanelProps) {
+  const serverEntries = getCapabilityEntries(serverExperimental);
+
+  return (
+    <Stack gap="md">
+      <Alert variant="warning">
+        These features are non-standard and may change or be removed.
+      </Alert>
+
+      <Title order={5}>Server Experimental Capabilities:</Title>
+
+      {serverEntries.length === 0 ? (
+        <Text c="dimmed">No experimental capabilities</Text>
+      ) : (
+        serverEntries.map(([name, value]) => {
+          const description = getCapabilityDescription(value);
+          const methods = getCapabilityMethods(value);
+          return (
+            <CapCard key={name}>
+              <Stack gap="xs">
+                <Text fw={600}>{name}</Text>
+                {description && <HintText>{description}</HintText>}
+                {methods && methods.length > 0 && (
+                  <MetaText>{formatMethods(methods)}</MetaText>
+                )}
+                <Group>
+                  <CompactButton onClick={() => onTestCapability(name)}>
+                    Test →
+                  </CompactButton>
+                </Group>
+              </Stack>
+            </CapCard>
+          );
+        })
+      )}
+
+      <Divider />
+
+      <Title order={5}>Client Experimental Capabilities:</Title>
+
+      {getClientToggleNames(clientExperimental).map((name) => {
+        const metadata = CLIENT_EXPERIMENTAL_TOGGLE_METADATA[name];
+        const enabled = clientExperimental?.[name] !== undefined;
+        return (
+          <Stack key={name} gap={4}>
+            <Checkbox
+              label={metadata?.label ?? name}
+              checked={enabled}
+              onChange={(e) =>
+                onToggleClientCapability(name, e.currentTarget.checked)
+              }
+            />
+            {metadata?.description && (
+              <HintText pl="xl">{metadata.description}</HintText>
+            )}
+          </Stack>
+        );
+      })}
+
+      <Divider />
+
+      <Title order={5}>Advanced JSON-RPC Tester</Title>
+
+      <HintText>Send raw JSON-RPC requests to test ANY method</HintText>
+
+      {customHeaders.map((header, index) => (
+        <Group key={index}>
+          <HeaderNameInput
+            value={header.key}
+            onChange={(e) =>
+              onHeaderChange(index, e.currentTarget.value, header.value)
+            }
+            rightSection={
+              header.key ? (
+                <ClearButton
+                  onClick={() => onHeaderChange(index, "", header.value)}
+                />
+              ) : null
+            }
+          />
+          <HeaderValueInput
+            value={header.value}
+            onChange={(e) =>
+              onHeaderChange(index, header.key, e.currentTarget.value)
+            }
+            rightSection={
+              header.value ? (
+                <ClearButton
+                  onClick={() => onHeaderChange(index, header.key, "")}
+                />
+              ) : null
+            }
+          />
+          <RemoveIcon onClick={() => onRemoveHeader(index)}>
+            <Text size="xs">✕</Text>
+          </RemoveIcon>
+        </Group>
+      ))}
+
+      <Group>
+        <CompactButton onClick={onAddHeader}>+ Add Header</CompactButton>
+      </Group>
+
+      <RequestTextarea
+        value={requestDraft}
+        onChange={(e) => onRequestChange(e.currentTarget.value)}
+        rightSection={
+          requestDraft ? (
+            <ClearButton onClick={() => onRequestChange("")} />
+          ) : null
+        }
+      />
+
+      <Button onClick={onSendRequest}>Send Request</Button>
+
+      {response && (
+        <>
+          <Group gap="xs">
+            <ResponseLabel>Response</ResponseLabel>
+            {isErrorResponse(response) && <ErrorBadge>Error</ErrorBadge>}
+          </Group>
+          <ResponseTextarea value={formatResponse(response)} />
+          <Group>
+            <CompactButton onClick={onCopyResponse}>Copy</CompactButton>
+          </Group>
+        </>
+      )}
+
+      {requestHistory.length > 0 && (
+        <>
+          <Title order={5}>Request History:</Title>
+          <Table>
+            <Table.Thead>
+              <Table.Tr>
+                <Table.Th>Timestamp</Table.Th>
+                <Table.Th>Method</Table.Th>
+                <Table.Th>Status</Table.Th>
+                <Table.Th>Duration</Table.Th>
+              </Table.Tr>
+            </Table.Thead>
+            <Table.Tbody>
+              {requestHistory.map((item, index) => (
+                <Table.Tr key={index}>
+                  <Table.Td>{formatTimestamp(item.timestamp)}</Table.Td>
+                  <Table.Td>{item.method}</Table.Td>
+                  <Table.Td>{item.status}</Table.Td>
+                  <Table.Td>{formatDuration(item.durationMs)}</Table.Td>
+                </Table.Tr>
+              ))}
+            </Table.Tbody>
+          </Table>
+        </>
+      )}
+    </Stack>
+  );
+}

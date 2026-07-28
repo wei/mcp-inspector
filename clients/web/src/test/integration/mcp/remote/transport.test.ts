@@ -1,0 +1,1619 @@
+/**
+ * E2E tests for remote transport (stdio, SSE, streamable-http).
+ * Verifies connection, tools, fetch tracking, stderr logging, and remote logging over the remote.
+ */
+
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  beforeAll,
+  afterAll,
+} from "vitest";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { serve } from "@hono/node-server";
+import type { ServerType } from "@hono/node-server";
+import pino from "pino";
+import { InspectorClient } from "@inspector/core/mcp/inspectorClient.js";
+import {
+  FetchRequestLogState,
+  StderrLogState,
+} from "@inspector/core/mcp/state/index.js";
+import { createRemoteTransport } from "@inspector/core/mcp/remote/createRemoteTransport.js";
+import { createRemoteLogger } from "@inspector/core/mcp/remote/createRemoteLogger.js";
+import { createRemoteApp } from "@inspector/core/mcp/remote/node/server.js";
+import {
+  createTestServerHttp,
+  getTestMcpServerCommand,
+  createEchoTool,
+  createTestServerInfo,
+} from "@modelcontextprotocol/inspector-test-server";
+import type { MCPServerConfig } from "@inspector/core/mcp/types.js";
+
+interface StartRemoteServerOptions {
+  logger?: pino.Logger;
+  storageDir?: string;
+  allowedOrigins?: string[];
+  /** When true, API routes do not require x-mcp-remote-auth (token is still returned as empty string) */
+  dangerouslyOmitAuth?: boolean;
+}
+
+async function startRemoteServer(
+  port: number,
+  options: StartRemoteServerOptions = {},
+): Promise<{
+  baseUrl: string;
+  server: ServerType;
+  authToken: string;
+}> {
+  const { app, authToken } = createRemoteApp({
+    logger: options.logger,
+    storageDir: options.storageDir,
+    allowedOrigins: options.allowedOrigins,
+    dangerouslyOmitAuth: options.dangerouslyOmitAuth,
+    initialConfig: { defaultEnvironment: {} },
+  });
+  return new Promise((resolve, reject) => {
+    const server = serve(
+      { fetch: app.fetch, port, hostname: "127.0.0.1" },
+      (info) => {
+        const actualPort =
+          info && typeof info === "object" && "port" in info
+            ? (info as { port: number }).port
+            : port;
+        resolve({
+          baseUrl: `http://127.0.0.1:${actualPort}`,
+          server,
+          authToken,
+        });
+      },
+    );
+    server.on("error", reject);
+  });
+}
+
+describe("Remote transport e2e", () => {
+  let remoteServer: ServerType | null;
+  let mcpHttpServer: Awaited<ReturnType<typeof createTestServerHttp>> | null;
+
+  beforeEach(() => {
+    remoteServer = null;
+    mcpHttpServer = null;
+  });
+
+  afterEach(async () => {
+    if (remoteServer) {
+      await new Promise<void>((resolve, reject) => {
+        remoteServer!.close((err) => (err ? reject(err) : resolve()));
+      });
+      remoteServer = null;
+    }
+    if (mcpHttpServer) {
+      try {
+        await mcpHttpServer.stop();
+      } catch {
+        // Ignore stop errors
+      }
+      mcpHttpServer = null;
+    }
+  });
+
+  async function setupRemoteAndConnect(config: MCPServerConfig): Promise<{
+    client: InspectorClient;
+    fetchRequestLogState: FetchRequestLogState;
+    stderrLogState: StderrLogState;
+  }> {
+    const { baseUrl, server, authToken } = await startRemoteServer(0);
+    remoteServer = server;
+
+    const createTransport = createRemoteTransport({ baseUrl, authToken });
+    const client = new InspectorClient(config, {
+      environment: {
+        transport: createTransport,
+      },
+      pipeStderr: true,
+    });
+    const fetchRequestLogState = new FetchRequestLogState(client);
+    const stderrLogState = new StderrLogState(client);
+
+    await client.connect();
+
+    return { client, fetchRequestLogState, stderrLogState };
+  }
+
+  it("smoke: remote server accepts connect and returns sessionId for SSE", async () => {
+    mcpHttpServer = createTestServerHttp({
+      serverInfo: createTestServerInfo(),
+      tools: [createEchoTool()],
+      serverType: "sse",
+    });
+    await mcpHttpServer.start();
+
+    const { baseUrl, server, authToken } = await startRemoteServer(0);
+    remoteServer = server;
+
+    const res = await fetch(`${baseUrl}/api/mcp/connect`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-mcp-remote-auth": `Bearer ${authToken}`,
+      },
+      body: JSON.stringify({
+        config: { type: "sse" as const, url: mcpHttpServer!.url },
+      }),
+    });
+
+    const json = (await res.json()) as { sessionId?: string; error?: string };
+    if (!res.ok) {
+      throw new Error(
+        `Connect failed: ${res.status} ${json.error ?? (await res.text())}`,
+      );
+    }
+    expect(json.sessionId).toBeDefined();
+    expect(typeof json.sessionId).toBe("string");
+  });
+
+  describe("stdio", () => {
+    it("connects, lists tools, and forwards stderr over remote", async () => {
+      const serverCommand = getTestMcpServerCommand();
+      const config: MCPServerConfig = {
+        type: "stdio",
+        command: serverCommand.command,
+        args: serverCommand.args,
+      };
+
+      const { client, stderrLogState } = await setupRemoteAndConnect(config);
+
+      try {
+        expect(client.getStatus()).toBe("connected");
+
+        const tools = await client.listTools();
+        expect(tools.tools.length).toBeGreaterThan(0);
+        expect(tools.tools.some((t) => t.name === "echo")).toBe(true);
+
+        const stderrLogs = stderrLogState.getStderrLogs();
+        expect(Array.isArray(stderrLogs)).toBe(true);
+      } finally {
+        await client.disconnect();
+      }
+    });
+
+    it("validates stderr content over remote stdio", async () => {
+      const serverCommand = getTestMcpServerCommand();
+      const config: MCPServerConfig = {
+        type: "stdio",
+        command: serverCommand.command,
+        args: serverCommand.args,
+      };
+
+      const { client, stderrLogState } = await setupRemoteAndConnect(config);
+
+      try {
+        const { tools } = await client.listTools();
+        const tool = tools.find((t) => t.name === "write_to_stderr");
+        expect(tool).toBeDefined();
+        const testMessage = `stderr-remote-${Date.now()}`;
+        await client.callTool(tool!, { message: testMessage });
+
+        const stderrLogs = stderrLogState.getStderrLogs();
+        expect(Array.isArray(stderrLogs)).toBe(true);
+        const matching = stderrLogs.filter((l) =>
+          l.message.includes(testMessage),
+        );
+        expect(matching.length).toBeGreaterThan(0);
+        expect(matching[0]!.message).toContain(testMessage);
+      } finally {
+        await client.disconnect();
+      }
+    });
+
+    it("calls a tool over remote stdio", async () => {
+      const serverCommand = getTestMcpServerCommand();
+      const config: MCPServerConfig = {
+        type: "stdio",
+        command: serverCommand.command,
+        args: serverCommand.args,
+      };
+
+      const { client } = await setupRemoteAndConnect(config);
+
+      try {
+        const { tools } = await client.listTools();
+        const tool = tools.find((t) => t.name === "echo");
+        expect(tool).toBeDefined();
+        const invocation = await client.callTool(tool!, {
+          message: "hello-remote",
+        });
+        expect(invocation.result?.content).toBeDefined();
+        const textContent = invocation.result?.content?.find(
+          (c: { type: string }) => c.type === "text",
+        );
+        expect(textContent).toBeDefined();
+        expect((textContent as { type: "text"; text: string }).text).toContain(
+          "Echo: hello-remote",
+        );
+      } finally {
+        await client.disconnect();
+      }
+    });
+  });
+
+  describe("SSE", () => {
+    it("connects, lists tools, and receives fetch_request events over remote", async () => {
+      mcpHttpServer = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createEchoTool()],
+        serverType: "sse",
+      });
+      await mcpHttpServer.start();
+
+      const config: MCPServerConfig = {
+        type: "sse",
+        url: mcpHttpServer.url,
+      };
+
+      const { client, fetchRequestLogState } =
+        await setupRemoteAndConnect(config);
+
+      try {
+        expect(client.getStatus()).toBe("connected");
+
+        await client.listTools();
+
+        // Fetch tracking: remote server applies createFetchTracker when creating
+        // the transport; it emits fetch_request events over SSE to the client.
+        const fetchRequests = fetchRequestLogState.getFetchRequests();
+        expect(fetchRequests.length).toBeGreaterThan(0);
+        const getRequest = fetchRequests.find((r) => r.method === "GET");
+        expect(getRequest).toBeDefined();
+        if (getRequest) {
+          expect(getRequest.url).toContain("/sse");
+          expect(getRequest.requestHeaders).toBeDefined();
+          expect(getRequest.responseStatus).toBeDefined();
+        }
+      } finally {
+        await client.disconnect();
+      }
+    });
+
+    it("calls a tool over remote SSE", async () => {
+      mcpHttpServer = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createEchoTool()],
+        serverType: "sse",
+      });
+      await mcpHttpServer.start();
+
+      const config: MCPServerConfig = {
+        type: "sse",
+        url: mcpHttpServer.url,
+      };
+
+      const { client } = await setupRemoteAndConnect(config);
+
+      try {
+        const { tools } = await client.listTools();
+        const tool = tools.find((t) => t.name === "echo");
+        expect(tool).toBeDefined();
+        const invocation = await client.callTool(tool!, {
+          message: "sse-test",
+        });
+        expect(invocation.result?.content).toBeDefined();
+        const textContent = invocation.result?.content?.find(
+          (c: { type: string }) => c.type === "text",
+        );
+        expect((textContent as { type: "text"; text: string }).text).toContain(
+          "Echo: sse-test",
+        );
+      } finally {
+        await client.disconnect();
+      }
+    });
+  });
+
+  describe("streamable-http", () => {
+    it("connects, lists tools, and receives fetch_request events over remote", async () => {
+      mcpHttpServer = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createEchoTool()],
+        serverType: "streamable-http",
+      });
+      await mcpHttpServer.start();
+
+      const config: MCPServerConfig = {
+        type: "streamable-http",
+        url: mcpHttpServer.url,
+      };
+
+      const { client, fetchRequestLogState } =
+        await setupRemoteAndConnect(config);
+
+      try {
+        expect(client.getStatus()).toBe("connected");
+
+        await client.listTools();
+
+        const fetchRequests = fetchRequestLogState.getFetchRequests();
+        expect(fetchRequests.length).toBeGreaterThan(0);
+        const postRequest = fetchRequests.find((r) => r.method === "POST");
+        expect(postRequest).toBeDefined();
+        if (postRequest) {
+          expect(postRequest.url).toContain("/mcp");
+          expect(postRequest.requestHeaders).toBeDefined();
+          expect(postRequest.responseStatus).toBeDefined();
+          expect(postRequest.responseHeaders).toBeDefined();
+          expect(postRequest.duration).toBeDefined();
+        }
+      } finally {
+        await client.disconnect();
+      }
+    });
+
+    it("calls a tool over remote streamable-http", async () => {
+      mcpHttpServer = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createEchoTool()],
+        serverType: "streamable-http",
+      });
+      await mcpHttpServer.start();
+
+      const config: MCPServerConfig = {
+        type: "streamable-http",
+        url: mcpHttpServer.url,
+      };
+
+      const { client } = await setupRemoteAndConnect(config);
+
+      try {
+        const { tools } = await client.listTools();
+        const tool = tools.find((t) => t.name === "echo");
+        expect(tool).toBeDefined();
+        const invocation = await client.callTool(tool!, {
+          message: "streamable-http-test",
+        });
+        expect(invocation.result?.content).toBeDefined();
+        const textContent = invocation.result?.content?.find(
+          (c: { type: string }) => c.type === "text",
+        );
+        expect((textContent as { type: "text"; text: string }).text).toContain(
+          "Echo: streamable-http-test",
+        );
+      } finally {
+        await client.disconnect();
+      }
+    });
+
+    it("end-to-end: settings.headers reach the upstream MCP server (browser → backend → upstream)", async () => {
+      mcpHttpServer = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createEchoTool()],
+        serverType: "streamable-http",
+      });
+      await mcpHttpServer.start();
+
+      const { baseUrl, server, authToken } = await startRemoteServer(0);
+      remoteServer = server;
+
+      const config: MCPServerConfig = {
+        type: "streamable-http",
+        url: mcpHttpServer.url,
+      };
+      const serverSettings = {
+        headers: [
+          { key: "X-Tenant", value: "acme" },
+          { key: "X-Trace", value: "abc123" },
+        ],
+        env: [],
+        metadata: [],
+        connectionTimeout: 0,
+        requestTimeout: 0,
+        taskTtl: 0,
+        maxFetchRequests: 1000,
+        roots: [],
+      };
+
+      const createTransport = createRemoteTransport({ baseUrl, authToken });
+      const client = new InspectorClient(config, {
+        environment: { transport: createTransport },
+        serverSettings,
+      });
+      const fetchRequestLogState = new FetchRequestLogState(client);
+
+      try {
+        await client.connect();
+        await client.listTools();
+
+        // Backend-side fetch tracking sees the upstream HTTP request with the
+        // settings.headers applied — this is the e2e contract from
+        // `ServerSettingsForm` → on-disk `settings.headers` → backend
+        // `createTransportNode` → SDK `requestInit.headers` → upstream wire.
+        const fetchRequests = fetchRequestLogState.getFetchRequests();
+        expect(fetchRequests.length).toBeGreaterThan(0);
+        const postRequest = fetchRequests.find((r) => r.method === "POST");
+        expect(postRequest).toBeDefined();
+        const lowered: Record<string, string> = {};
+        for (const [k, v] of Object.entries(
+          postRequest?.requestHeaders ?? {},
+        )) {
+          lowered[k.toLowerCase()] = v;
+        }
+        expect(lowered["x-tenant"]).toBe("acme");
+        expect(lowered["x-trace"]).toBe("abc123");
+      } finally {
+        await client.disconnect();
+      }
+    });
+  });
+
+  describe("authentication", () => {
+    // Each it() in this block only fires an unauthenticated request and asserts
+    // 401 — no server state mutation — so one server is shared across the whole
+    // describe via beforeAll/afterAll. Cleanup is local; the outer afterEach's
+    // `if (remoteServer)` skips this server because we don't assign to it.
+    let sharedServer: ServerType;
+    let baseUrl: string;
+    let authToken: string;
+
+    beforeAll(async () => {
+      const started = await startRemoteServer(0);
+      sharedServer = started.server;
+      baseUrl = started.baseUrl;
+      authToken = started.authToken;
+    });
+
+    afterAll(async () => {
+      await new Promise<void>((resolve, reject) => {
+        sharedServer.close((err) => (err ? reject(err) : resolve()));
+      });
+    });
+
+    it("rejects requests without auth token", async () => {
+      const res = await fetch(`${baseUrl}/api/mcp/connect`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          config: { type: "sse" as const, url: "http://localhost:3000" },
+        }),
+      });
+
+      expect(res.status).toBe(401);
+      const json = (await res.json()) as { error?: string; message?: string };
+      expect(json.error).toBe("Unauthorized");
+      expect(json.message).toContain("x-mcp-remote-auth");
+    });
+
+    it("rejects requests with incorrect auth token", async () => {
+      const res = await fetch(`${baseUrl}/api/mcp/connect`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-mcp-remote-auth": `Bearer wrong-token-${authToken}`,
+        },
+        body: JSON.stringify({
+          config: { type: "sse" as const, url: "http://localhost:3000" },
+        }),
+      });
+
+      expect(res.status).toBe(401);
+      const json = (await res.json()) as { error?: string; message?: string };
+      expect(json.error).toBe("Unauthorized");
+    });
+
+    it("rejects requests without Bearer prefix", async () => {
+      const res = await fetch(`${baseUrl}/api/mcp/connect`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-mcp-remote-auth": authToken, // Missing "Bearer " prefix
+        },
+        body: JSON.stringify({
+          config: { type: "sse" as const, url: "http://localhost:3000" },
+        }),
+      });
+
+      expect(res.status).toBe(401);
+      const json = (await res.json()) as { error?: string; message?: string };
+      expect(json.error).toBe("Unauthorized");
+    });
+
+    it("rejects requests to /api/fetch without auth token", async () => {
+      const res = await fetch(`${baseUrl}/api/fetch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: "http://example.com" }),
+      });
+
+      expect(res.status).toBe(401);
+      const json = (await res.json()) as { error?: string; message?: string };
+      expect(json.error).toBe("Unauthorized");
+    });
+
+    it("rejects requests to /api/log without auth token", async () => {
+      const res = await fetch(`${baseUrl}/api/log`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ level: { label: "info" }, messages: ["test"] }),
+      });
+
+      expect(res.status).toBe(401);
+      const json = (await res.json()) as { error?: string; message?: string };
+      expect(json.error).toBe("Unauthorized");
+    });
+
+    it("rejects requests to /api/mcp/send without auth token", async () => {
+      const res = await fetch(`${baseUrl}/api/mcp/send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId: "test-session",
+          message: { jsonrpc: "2.0", method: "test", id: 1 },
+        }),
+      });
+
+      expect(res.status).toBe(401);
+      const json = (await res.json()) as { error?: string; message?: string };
+      expect(json.error).toBe("Unauthorized");
+    });
+
+    it("rejects requests to /api/mcp/events without auth token", async () => {
+      const res = await fetch(`${baseUrl}/api/mcp/events?sessionId=test`, {
+        method: "GET",
+      });
+
+      expect(res.status).toBe(401);
+      const json = (await res.json()) as { error?: string; message?: string };
+      expect(json.error).toBe("Unauthorized");
+    });
+
+    it("rejects requests to /api/mcp/disconnect without auth token", async () => {
+      const res = await fetch(`${baseUrl}/api/mcp/disconnect`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: "test-session" }),
+      });
+
+      expect(res.status).toBe(401);
+      const json = (await res.json()) as { error?: string; message?: string };
+      expect(json.error).toBe("Unauthorized");
+    });
+  });
+
+  describe("when dangerouslyOmitAuth is true", () => {
+    let sharedServer: ServerType;
+    let baseUrl: string;
+
+    beforeAll(async () => {
+      const started = await startRemoteServer(0, {
+        dangerouslyOmitAuth: true,
+      });
+      sharedServer = started.server;
+      baseUrl = started.baseUrl;
+    });
+
+    afterAll(async () => {
+      await new Promise<void>((resolve, reject) => {
+        sharedServer.close((err) => (err ? reject(err) : resolve()));
+      });
+    });
+
+    it("accepts /api/mcp/connect without auth token", async () => {
+      const res = await fetch(`${baseUrl}/api/mcp/connect`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          config: { type: "sse" as const, url: "http://localhost:3000" },
+        }),
+      });
+
+      expect(res.status).not.toBe(401);
+      const json = (await res.json()) as { error?: string };
+      expect(json.error).not.toBe("Unauthorized");
+    });
+
+    it("accepts /api/log without auth token", async () => {
+      const res = await fetch(`${baseUrl}/api/log`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ level: { label: "info" }, messages: ["test"] }),
+      });
+
+      expect(res.status).not.toBe(401);
+      const json = (await res.json()) as { error?: string };
+      expect(json.error).not.toBe("Unauthorized");
+    });
+
+    it("accepts /api/storage GET without auth token", async () => {
+      const res = await fetch(`${baseUrl}/api/storage/test-store`, {
+        method: "GET",
+      });
+
+      expect(res.status).not.toBe(401);
+      const json = (await res.json()) as { error?: string };
+      expect(json.error).not.toBe("Unauthorized");
+    });
+  });
+
+  describe("remote logging", () => {
+    let tempDir: string | null = null;
+
+    afterEach(() => {
+      if (tempDir) {
+        try {
+          rmSync(tempDir, { recursive: true });
+        } catch {
+          // Ignore cleanup errors
+        }
+        tempDir = null;
+      }
+    });
+
+    it("writes InspectorClient logs to file via createRemoteLogger over remote transport", async () => {
+      tempDir = mkdtempSync(join(tmpdir(), "inspector-log-test-"));
+      const logPath = join(tempDir!, "remote.log");
+      // sync: true so writes land before the afterEach rmSync, avoiding a
+      // background sonic-boom flush into a removed temp dir (uncaught ENOENT).
+      const fileLogger = pino(
+        { level: "info" },
+        pino.destination({
+          dest: logPath,
+          append: true,
+          mkdir: true,
+          sync: true,
+        }),
+      );
+
+      mcpHttpServer = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createEchoTool()],
+        serverType: "sse",
+      });
+      await mcpHttpServer.start();
+
+      const { baseUrl, server, authToken } = await startRemoteServer(0, {
+        logger: fileLogger,
+      });
+      remoteServer = server;
+
+      const createTransport = createRemoteTransport({
+        baseUrl,
+        authToken,
+      });
+      const remoteLogger = createRemoteLogger({
+        baseUrl,
+        authToken,
+        fetchFn: fetch,
+      });
+      const client = new InspectorClient(
+        { type: "sse", url: mcpHttpServer!.url },
+        {
+          environment: {
+            transport: createTransport,
+            logger: remoteLogger,
+          },
+          pipeStderr: true,
+        },
+      );
+
+      await client.connect();
+      await client.listTools();
+
+      // Wait for async log POSTs to complete and file logger to flush
+      await new Promise<void>((resolve) => {
+        fileLogger.flush(() => resolve());
+      });
+      await new Promise((r) => setTimeout(r, 300));
+
+      const logContent = readFileSync(logPath, "utf-8");
+      expect(logContent).toContain("transport fetch");
+      expect(logContent).toContain("InspectorClient");
+      expect(logContent).toContain("component");
+      expect(logContent).toContain("category");
+
+      await client.disconnect();
+    });
+  });
+
+  describe("storage", () => {
+    let tempDir: string | null = null;
+
+    beforeEach(() => {
+      tempDir = null;
+    });
+
+    afterEach(async () => {
+      if (tempDir) {
+        try {
+          rmSync(tempDir, { recursive: true });
+        } catch {
+          // Ignore cleanup errors
+        }
+        tempDir = null;
+      }
+    });
+
+    it("returns empty object for non-existent store", async () => {
+      tempDir = mkdtempSync(join(tmpdir(), "inspector-storage-test-"));
+      const { baseUrl, server, authToken } = await startRemoteServer(0, {
+        storageDir: tempDir,
+      });
+      remoteServer = server;
+
+      const res = await fetch(`${baseUrl}/api/storage/test-store`, {
+        method: "GET",
+        headers: {
+          "x-mcp-remote-auth": `Bearer ${authToken}`,
+        },
+      });
+
+      expect(res.status).toBe(200);
+      const json = await res.json();
+      expect(json).toEqual({});
+    });
+
+    it("reads and writes store data", async () => {
+      tempDir = mkdtempSync(join(tmpdir(), "inspector-storage-test-"));
+      const { baseUrl, server, authToken } = await startRemoteServer(0, {
+        storageDir: tempDir,
+      });
+      remoteServer = server;
+
+      const testData = { key1: "value1", key2: { nested: "value" } };
+
+      // Write store
+      const writeRes = await fetch(`${baseUrl}/api/storage/test-store`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-mcp-remote-auth": `Bearer ${authToken}`,
+        },
+        body: JSON.stringify(testData),
+      });
+
+      expect(writeRes.status).toBe(200);
+      const writeJson = await writeRes.json();
+      expect(writeJson).toEqual({ ok: true });
+
+      // Read store
+      const readRes = await fetch(`${baseUrl}/api/storage/test-store`, {
+        method: "GET",
+        headers: {
+          "x-mcp-remote-auth": `Bearer ${authToken}`,
+        },
+      });
+
+      expect(readRes.status).toBe(200);
+      const readJson = await readRes.json();
+      expect(readJson).toEqual(testData);
+    });
+
+    it("overwrites store on POST", async () => {
+      tempDir = mkdtempSync(join(tmpdir(), "inspector-storage-test-"));
+      const { baseUrl, server, authToken } = await startRemoteServer(0, {
+        storageDir: tempDir,
+      });
+      remoteServer = server;
+
+      const initialData = { key1: "value1" };
+      const updatedData = { key2: "value2" };
+
+      // Write initial data
+      await fetch(`${baseUrl}/api/storage/test-store`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-mcp-remote-auth": `Bearer ${authToken}`,
+        },
+        body: JSON.stringify(initialData),
+      });
+
+      // Overwrite with new data
+      await fetch(`${baseUrl}/api/storage/test-store`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-mcp-remote-auth": `Bearer ${authToken}`,
+        },
+        body: JSON.stringify(updatedData),
+      });
+
+      // Read and verify overwrite
+      const readRes = await fetch(`${baseUrl}/api/storage/test-store`, {
+        method: "GET",
+        headers: {
+          "x-mcp-remote-auth": `Bearer ${authToken}`,
+        },
+      });
+
+      expect(readRes.status).toBe(200);
+      const readJson = await readRes.json();
+      expect(readJson).toEqual(updatedData);
+      expect(readJson).not.toEqual(initialData);
+    });
+
+    it("rejects invalid storeId", async () => {
+      tempDir = mkdtempSync(join(tmpdir(), "inspector-storage-test-"));
+      const { baseUrl, server, authToken } = await startRemoteServer(0, {
+        storageDir: tempDir,
+      });
+      remoteServer = server;
+
+      // Test invalid characters (not alphanumeric, hyphen, underscore)
+      const res = await fetch(`${baseUrl}/api/storage/invalid.store.id`, {
+        method: "GET",
+        headers: {
+          "x-mcp-remote-auth": `Bearer ${authToken}`,
+        },
+      });
+
+      expect(res.status).toBe(400);
+      const json = await res.json();
+      expect(json.error).toBe("Invalid storeId");
+    });
+
+    it("rejects requests without auth token", async () => {
+      tempDir = mkdtempSync(join(tmpdir(), "inspector-storage-test-"));
+      const { baseUrl, server } = await startRemoteServer(0, {
+        storageDir: tempDir,
+      });
+      remoteServer = server;
+
+      const res = await fetch(`${baseUrl}/api/storage/test-store`, {
+        method: "GET",
+      });
+
+      expect(res.status).toBe(401);
+      const json = await res.json();
+      expect(json.error).toBe("Unauthorized");
+    });
+
+    it("deletes store with DELETE endpoint", async () => {
+      tempDir = mkdtempSync(join(tmpdir(), "inspector-storage-test-"));
+      const { baseUrl, server, authToken } = await startRemoteServer(0, {
+        storageDir: tempDir,
+      });
+      remoteServer = server;
+
+      const testData = { key1: "value1" };
+
+      // Write store
+      await fetch(`${baseUrl}/api/storage/test-store`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-mcp-remote-auth": `Bearer ${authToken}`,
+        },
+        body: JSON.stringify(testData),
+      });
+
+      // Verify it exists
+      const readRes = await fetch(`${baseUrl}/api/storage/test-store`, {
+        method: "GET",
+        headers: {
+          "x-mcp-remote-auth": `Bearer ${authToken}`,
+        },
+      });
+      expect(readRes.status).toBe(200);
+      const readJson = await readRes.json();
+      expect(readJson).toEqual(testData);
+
+      // Delete store
+      const deleteRes = await fetch(`${baseUrl}/api/storage/test-store`, {
+        method: "DELETE",
+        headers: {
+          "x-mcp-remote-auth": `Bearer ${authToken}`,
+        },
+      });
+      expect(deleteRes.status).toBe(200);
+      const deleteJson = await deleteRes.json();
+      expect(deleteJson).toEqual({ ok: true });
+
+      // Verify it's gone (returns empty object)
+      const readAfterDelete = await fetch(`${baseUrl}/api/storage/test-store`, {
+        method: "GET",
+        headers: {
+          "x-mcp-remote-auth": `Bearer ${authToken}`,
+        },
+      });
+      expect(readAfterDelete.status).toBe(200);
+      const readAfterDeleteJson = await readAfterDelete.json();
+      expect(readAfterDeleteJson).toEqual({});
+    });
+
+    it("rejects same-length tokens with mismatched content (timing-safe path)", async () => {
+      const { baseUrl, server, authToken } = await startRemoteServer(0);
+      remoteServer = server;
+      // Build a wrong token of the same length so the timing-safe compare
+      // (server.ts ~L174) is exercised instead of the early length check.
+      const wrong = authToken.split("").reverse().join("");
+      const fakeSameLength =
+        wrong === authToken ? `${"X".repeat(authToken.length - 1)}!` : wrong;
+      const res = await fetch(`${baseUrl}/api/mcp/connect`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-mcp-remote-auth": `Bearer ${fakeSameLength}`,
+        },
+        body: JSON.stringify({
+          config: { type: "sse" as const, url: "http://localhost:3000" },
+        }),
+      });
+      expect(res.status).toBe(401);
+    });
+
+    it("DELETE rejects an invalid storeId", async () => {
+      tempDir = mkdtempSync(join(tmpdir(), "inspector-storage-test-"));
+      const { baseUrl, server, authToken } = await startRemoteServer(0, {
+        storageDir: tempDir,
+      });
+      remoteServer = server;
+      const res = await fetch(`${baseUrl}/api/storage/bad..id`, {
+        method: "DELETE",
+        headers: { "x-mcp-remote-auth": `Bearer ${authToken}` },
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe("Invalid storeId");
+    });
+
+    it("POST returns 500 when the file write fails", async () => {
+      tempDir = mkdtempSync(join(tmpdir(), "inspector-storage-test-"));
+      const { baseUrl, server, authToken } = await startRemoteServer(0, {
+        storageDir: tempDir,
+      });
+      remoteServer = server;
+      // Pre-create a *directory* at the would-be storage path so write fails.
+      const writeRes = await fetch(`${baseUrl}/api/storage/test-store`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-mcp-remote-auth": `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({ ok: 1 }),
+      });
+      // First write succeeds.
+      expect(writeRes.status).toBe(200);
+      // Replace the file with a directory of the same name, so subsequent writes
+      // fail at writeStoreFile.
+      const filePath = join(tempDir!, "test-store.json");
+      rmSync(filePath);
+      // mkdtempSync needs a parent dir; we already have tempDir. Create a dir
+      // at the would-be file path.
+      const { mkdirSync } = await import("node:fs");
+      mkdirSync(filePath);
+
+      const failRes = await fetch(`${baseUrl}/api/storage/test-store`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-mcp-remote-auth": `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({ ok: 2 }),
+      });
+      expect(failRes.status).toBe(500);
+      expect((await failRes.json()).error).toMatch(/Failed to write store/);
+    });
+
+    it("DELETE returns 500 when the file delete fails", async () => {
+      tempDir = mkdtempSync(join(tmpdir(), "inspector-storage-test-"));
+      const { baseUrl, server, authToken } = await startRemoteServer(0, {
+        storageDir: tempDir,
+      });
+      remoteServer = server;
+      // Replace the would-be file path with a non-empty directory so
+      // deleteStoreFile cannot remove it cleanly.
+      const filePath = join(tempDir!, "test-store.json");
+      const { mkdirSync, writeFileSync } = await import("node:fs");
+      mkdirSync(filePath);
+      writeFileSync(join(filePath, "sentinel.txt"), "data");
+
+      const res = await fetch(`${baseUrl}/api/storage/test-store`, {
+        method: "DELETE",
+        headers: { "x-mcp-remote-auth": `Bearer ${authToken}` },
+      });
+      expect(res.status).toBe(500);
+      expect((await res.json()).error).toMatch(/Failed to delete store/);
+    });
+
+    it("DELETE returns success for non-existent store", async () => {
+      tempDir = mkdtempSync(join(tmpdir(), "inspector-storage-test-"));
+      const { baseUrl, server, authToken } = await startRemoteServer(0, {
+        storageDir: tempDir,
+      });
+      remoteServer = server;
+
+      const deleteRes = await fetch(`${baseUrl}/api/storage/non-existent`, {
+        method: "DELETE",
+        headers: {
+          "x-mcp-remote-auth": `Bearer ${authToken}`,
+        },
+      });
+      expect(deleteRes.status).toBe(200);
+      const deleteJson = await deleteRes.json();
+      expect(deleteJson).toEqual({ ok: true });
+    });
+  });
+
+  describe("endpoint error paths", () => {
+    let sharedServer: ServerType;
+    let baseUrl: string;
+    let authToken: string;
+
+    beforeAll(async () => {
+      const started = await startRemoteServer(0);
+      sharedServer = started.server;
+      baseUrl = started.baseUrl;
+      authToken = started.authToken;
+    });
+
+    afterAll(async () => {
+      await new Promise<void>((resolve, reject) => {
+        sharedServer.close((err) => (err ? reject(err) : resolve()));
+      });
+    });
+
+    it("/api/mcp/connect returns 400 on invalid JSON body", async () => {
+      const res = await fetch(`${baseUrl}/api/mcp/connect`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-mcp-remote-auth": `Bearer ${authToken}`,
+        },
+        body: "not json",
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe("Invalid JSON body");
+    });
+
+    it("/api/mcp/connect returns 400 when config is missing", async () => {
+      const res = await fetch(`${baseUrl}/api/mcp/connect`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-mcp-remote-auth": `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe("Missing config");
+    });
+
+    it("/api/mcp/send returns 400 on invalid JSON body", async () => {
+      const res = await fetch(`${baseUrl}/api/mcp/send`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-mcp-remote-auth": `Bearer ${authToken}`,
+        },
+        body: "not json",
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("/api/mcp/send returns 400 when sessionId or message is missing", async () => {
+      const res = await fetch(`${baseUrl}/api/mcp/send`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-mcp-remote-auth": `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({ sessionId: "x" }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("/api/mcp/send returns 404 for unknown sessionId", async () => {
+      const res = await fetch(`${baseUrl}/api/mcp/send`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-mcp-remote-auth": `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({
+          sessionId: "no-such-session",
+          message: { jsonrpc: "2.0", id: 1, method: "ping" },
+        }),
+      });
+      expect(res.status).toBe(404);
+    });
+
+    it("/api/mcp/events returns 400 when sessionId is missing", async () => {
+      const res = await fetch(`${baseUrl}/api/mcp/events`, {
+        headers: { "x-mcp-remote-auth": `Bearer ${authToken}` },
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("/api/mcp/events returns 404 for unknown sessionId", async () => {
+      const res = await fetch(`${baseUrl}/api/mcp/events?sessionId=missing`, {
+        headers: { "x-mcp-remote-auth": `Bearer ${authToken}` },
+      });
+      expect(res.status).toBe(404);
+    });
+
+    it("/api/mcp/disconnect returns 400 on invalid JSON body", async () => {
+      const res = await fetch(`${baseUrl}/api/mcp/disconnect`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-mcp-remote-auth": `Bearer ${authToken}`,
+        },
+        body: "not json",
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("/api/mcp/disconnect returns 400 when sessionId is missing", async () => {
+      const res = await fetch(`${baseUrl}/api/mcp/disconnect`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-mcp-remote-auth": `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("/api/fetch returns 400 on invalid JSON body", async () => {
+      const res = await fetch(`${baseUrl}/api/fetch`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-mcp-remote-auth": `Bearer ${authToken}`,
+        },
+        body: "not json",
+      });
+      expect(res.status).toBe(400);
+    });
+  });
+
+  describe("Origin validation", () => {
+    // Split by server config: 5 tests use { allowedOrigins } and share one
+    // server; the "not configured" case needs its own server and is split into
+    // its own describe so each block has symmetric beforeAll/afterAll cleanup.
+    describe("with allowedOrigins configured", () => {
+      let sharedServer: ServerType;
+      let baseUrl: string;
+      let authToken: string;
+
+      beforeAll(async () => {
+        const started = await startRemoteServer(0, {
+          allowedOrigins: ["http://localhost:3000"],
+        });
+        sharedServer = started.server;
+        baseUrl = started.baseUrl;
+        authToken = started.authToken;
+      });
+
+      afterAll(async () => {
+        await new Promise<void>((resolve, reject) => {
+          sharedServer.close((err) => (err ? reject(err) : resolve()));
+        });
+      });
+
+      it("allows requests with valid origin", async () => {
+        const res = await fetch(`${baseUrl}/api/mcp/connect`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-mcp-remote-auth": `Bearer ${authToken}`,
+            Origin: "http://localhost:3000",
+          },
+          body: JSON.stringify({
+            config: { type: "sse" as const, url: "http://localhost:3000" },
+          }),
+        });
+
+        // Should not be blocked by origin validation (may fail for other reasons)
+        expect(res.status).not.toBe(403);
+        const json = (await res.json()) as { error?: string };
+        // Should not be "Forbidden" due to origin
+        expect(json.error).not.toBe("Forbidden");
+      });
+
+      it("blocks requests with invalid origin", async () => {
+        const res = await fetch(`${baseUrl}/api/mcp/connect`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-mcp-remote-auth": `Bearer ${authToken}`,
+            Origin: "http://evil.com",
+          },
+          body: JSON.stringify({
+            config: { type: "sse" as const, url: "http://localhost:3000" },
+          }),
+        });
+
+        expect(res.status).toBe(403);
+        const json = (await res.json()) as { error?: string; message?: string };
+        expect(json.error).toBe("Forbidden");
+        expect(json.message).toContain("Invalid origin");
+      });
+
+      it("allows requests without origin header (same-origin or non-browser)", async () => {
+        const res = await fetch(`${baseUrl}/api/mcp/connect`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-mcp-remote-auth": `Bearer ${authToken}`,
+            // No Origin header
+          },
+          body: JSON.stringify({
+            config: { type: "sse" as const, url: "http://localhost:3000" },
+          }),
+        });
+
+        // Should not be blocked by origin validation
+        expect(res.status).not.toBe(403);
+      });
+
+      it("handles CORS preflight requests with valid origin", async () => {
+        const res = await fetch(`${baseUrl}/api/mcp/connect`, {
+          method: "OPTIONS",
+          headers: {
+            Origin: "http://localhost:3000",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type,x-mcp-remote-auth",
+          },
+        });
+
+        expect(res.status).toBe(204);
+        expect(res.headers.get("Access-Control-Allow-Origin")).toBe(
+          "http://localhost:3000",
+        );
+        expect(res.headers.get("Access-Control-Allow-Methods")).toContain(
+          "POST",
+        );
+      });
+
+      it("blocks CORS preflight requests with invalid origin", async () => {
+        const res = await fetch(`${baseUrl}/api/mcp/connect`, {
+          method: "OPTIONS",
+          headers: {
+            Origin: "http://evil.com",
+            "Access-Control-Request-Method": "POST",
+          },
+        });
+
+        expect(res.status).toBe(403);
+        const json = (await res.json()) as { error?: string };
+        expect(json.error).toBe("Forbidden");
+      });
+    });
+
+    describe("without allowedOrigins configured", () => {
+      let sharedServer: ServerType;
+      let baseUrl: string;
+      let authToken: string;
+
+      beforeAll(async () => {
+        const started = await startRemoteServer(0);
+        sharedServer = started.server;
+        baseUrl = started.baseUrl;
+        authToken = started.authToken;
+      });
+
+      afterAll(async () => {
+        await new Promise<void>((resolve, reject) => {
+          sharedServer.close((err) => (err ? reject(err) : resolve()));
+        });
+      });
+
+      it("allows all origins when allowedOrigins is not configured", async () => {
+        const res = await fetch(`${baseUrl}/api/mcp/connect`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-mcp-remote-auth": `Bearer ${authToken}`,
+            Origin: "http://any-origin.com",
+          },
+          body: JSON.stringify({
+            config: { type: "sse" as const, url: "http://localhost:3000" },
+          }),
+        });
+
+        // Should not be blocked by origin validation
+        expect(res.status).not.toBe(403);
+      });
+    });
+  });
+
+  describe("additional coverage paths", () => {
+    it("/api/mcp/connect returns 500 when createTransportNode throws", async () => {
+      const { baseUrl, server, authToken } = await startRemoteServer(0);
+      remoteServer = server;
+      // Invalid URL causes new URL() in createTransportNode to throw synchronously
+      const res = await fetch(`${baseUrl}/api/mcp/connect`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-mcp-remote-auth": `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({
+          config: { type: "sse" as const, url: "not a url" },
+        }),
+      });
+      expect(res.status).toBe(500);
+      expect((await res.json()).error).toMatch(/Failed to create transport:/);
+    });
+
+    it("/api/mcp/send returns transport_error when transport is dead", async () => {
+      mcpHttpServer = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createEchoTool()],
+        serverType: "sse",
+      });
+      await mcpHttpServer.start();
+
+      const { baseUrl, server, authToken } = await startRemoteServer(0);
+      remoteServer = server;
+
+      // Connect to a live MCP server so we get a valid sessionId
+      const connectRes = await fetch(`${baseUrl}/api/mcp/connect`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-mcp-remote-auth": `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({
+          config: { type: "sse" as const, url: mcpHttpServer.url },
+        }),
+      });
+      expect(connectRes.status).toBe(200);
+      const { sessionId } = (await connectRes.json()) as { sessionId: string };
+
+      // Kill the upstream so the transport closes/errors and is marked dead
+      await mcpHttpServer.stop();
+      mcpHttpServer = null;
+
+      // Give the transport a moment to notice the closed upstream. The
+      // assertion below is intentionally permissive (status >= 500) so the
+      // test passes whether the SDK transport marks itself dead (short-
+      // circuit at /api/mcp/send) or the send call surfaces the failure
+      // directly. Either path covers a 5xx branch in send().
+      await new Promise<void>((r) => setTimeout(r, 250));
+
+      const sendRes = await fetch(`${baseUrl}/api/mcp/send`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-mcp-remote-auth": `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({
+          sessionId,
+          message: { jsonrpc: "2.0", id: 99, method: "ping" },
+        }),
+      });
+      expect(sendRes.status).toBe(200);
+      expect(await sendRes.json()).toMatchObject({
+        ok: false,
+        kind: "transport_error",
+      });
+    });
+
+    it("/api/log accepts non-JSON body silently via the catch fallback", async () => {
+      const { baseUrl, server, authToken } = await startRemoteServer(0);
+      remoteServer = server;
+      const res = await fetch(`${baseUrl}/api/log`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-mcp-remote-auth": `Bearer ${authToken}`,
+        },
+        body: "not json at all",
+      });
+      // The catch arrow swallows the parse error and uses {} — handler still 200s.
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true });
+    });
+
+    it("/api/log ignores events whose level label is not a logger method", async () => {
+      const tmp = mkdtempSync(join(tmpdir(), "inspector-log-unknown-level-"));
+      const logFile = join(tmp, "app.log");
+      try {
+        // sync: true so the file write completes during the request rather
+        // than on a background sonic-boom flush — otherwise the flush can fire
+        // after this test's `finally` rmSync removes the dir, throwing an
+        // uncaught ENOENT that fails an unrelated later test.
+        const logger = pino(
+          { level: "info" },
+          pino.destination({ dest: logFile, sync: true }),
+        );
+        const { baseUrl, server, authToken } = await startRemoteServer(0, {
+          logger,
+        });
+        remoteServer = server;
+        const res = await fetch(`${baseUrl}/api/log`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-mcp-remote-auth": `Bearer ${authToken}`,
+          },
+          body: JSON.stringify({
+            level: { label: "totally-not-a-real-level" },
+            messages: ["should be discarded"],
+          }),
+        });
+        expect(res.status).toBe(200);
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it("/api/log forwards events that have no messages", async () => {
+      const tmp = mkdtempSync(join(tmpdir(), "inspector-log-no-messages-"));
+      const logFile = join(tmp, "app.log");
+      try {
+        // sync: true so the file write completes during the request rather
+        // than on a background sonic-boom flush — otherwise the flush can fire
+        // after this test's `finally` rmSync removes the dir, throwing an
+        // uncaught ENOENT that fails an unrelated later test.
+        const logger = pino(
+          { level: "info" },
+          pino.destination({ dest: logFile, sync: true }),
+        );
+        const { baseUrl, server, authToken } = await startRemoteServer(0, {
+          logger,
+        });
+        remoteServer = server;
+        const res = await fetch(`${baseUrl}/api/log`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-mcp-remote-auth": `Bearer ${authToken}`,
+          },
+          body: JSON.stringify({
+            level: { label: "info" },
+            bindings: [{ source: "test" }],
+            messages: [],
+          }),
+        });
+        expect(res.status).toBe(200);
+        // Flush + read back to confirm the bindings were forwarded
+        await new Promise<void>((r) => setTimeout(r, 100));
+        const contents = readFileSync(logFile, "utf-8");
+        expect(contents).toContain('"source":"test"');
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it("/api/log forwards events whose first message is a string", async () => {
+      const tmp = mkdtempSync(join(tmpdir(), "inspector-log-string-first-"));
+      const logFile = join(tmp, "app.log");
+      try {
+        // sync: true so the file write completes during the request rather
+        // than on a background sonic-boom flush — otherwise the flush can fire
+        // after this test's `finally` rmSync removes the dir, throwing an
+        // uncaught ENOENT that fails an unrelated later test.
+        const logger = pino(
+          { level: "info" },
+          pino.destination({ dest: logFile, sync: true }),
+        );
+        const { baseUrl, server, authToken } = await startRemoteServer(0, {
+          logger,
+        });
+        remoteServer = server;
+        const res = await fetch(`${baseUrl}/api/log`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-mcp-remote-auth": `Bearer ${authToken}`,
+          },
+          body: JSON.stringify({
+            level: { label: "info" },
+            bindings: [{ tag: "string-first" }],
+            messages: ["hello world"],
+          }),
+        });
+        expect(res.status).toBe(200);
+        await new Promise<void>((r) => setTimeout(r, 100));
+        const contents = readFileSync(logFile, "utf-8");
+        expect(contents).toContain('"msg":"hello world"');
+        expect(contents).toContain('"tag":"string-first"');
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it("/api/fetch returns 400 when url is missing", async () => {
+      const { baseUrl, server, authToken } = await startRemoteServer(0);
+      remoteServer = server;
+      const res = await fetch(`${baseUrl}/api/fetch`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-mcp-remote-auth": `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe("Missing url");
+    });
+
+    it("/api/fetch returns 500 when the upstream fetch throws", async () => {
+      const { baseUrl, server, authToken } = await startRemoteServer(0);
+      remoteServer = server;
+      // Use a clearly-unroutable URL so global fetch rejects synchronously-ish
+      const res = await fetch(`${baseUrl}/api/fetch`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-mcp-remote-auth": `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({
+          url: "http://127.0.0.1:1/does-not-exist",
+        }),
+      });
+      expect(res.status).toBe(500);
+      expect((await res.json()).error).toBeDefined();
+    });
+
+    it("/api/storage POST returns 400 for invalid storeId", async () => {
+      const tmp = mkdtempSync(join(tmpdir(), "inspector-storage-bad-id-"));
+      try {
+        const { baseUrl, server, authToken } = await startRemoteServer(0, {
+          storageDir: tmp,
+        });
+        remoteServer = server;
+        const res = await fetch(`${baseUrl}/api/storage/has.dots`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-mcp-remote-auth": `Bearer ${authToken}`,
+          },
+          body: JSON.stringify({ k: "v" }),
+        });
+        expect(res.status).toBe(400);
+        expect((await res.json()).error).toBe("Invalid storeId");
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it("/api/storage POST returns 400 for invalid JSON body", async () => {
+      const tmp = mkdtempSync(join(tmpdir(), "inspector-storage-bad-json-"));
+      try {
+        const { baseUrl, server, authToken } = await startRemoteServer(0, {
+          storageDir: tmp,
+        });
+        remoteServer = server;
+        const res = await fetch(`${baseUrl}/api/storage/teststore`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-mcp-remote-auth": `Bearer ${authToken}`,
+          },
+          body: "not json",
+        });
+        expect(res.status).toBe(400);
+        expect((await res.json()).error).toBe("Invalid JSON body");
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it("/api/storage GET returns 500 when the on-disk store is unparseable", async () => {
+      const tmp = mkdtempSync(join(tmpdir(), "inspector-storage-corrupt-"));
+      try {
+        // Write a corrupted file at the storeId path so parseStore() throws
+        writeFileSync(join(tmp, "teststore.json"), "{ not json");
+        const { baseUrl, server, authToken } = await startRemoteServer(0, {
+          storageDir: tmp,
+        });
+        remoteServer = server;
+        const res = await fetch(`${baseUrl}/api/storage/teststore`, {
+          method: "GET",
+          headers: { "x-mcp-remote-auth": `Bearer ${authToken}` },
+        });
+        expect(res.status).toBe(500);
+        expect((await res.json()).error).toMatch(/Failed to read store:/);
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+  });
+});

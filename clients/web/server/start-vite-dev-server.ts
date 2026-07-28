@@ -1,0 +1,83 @@
+/**
+ * Start Vite dev server in-process via the Node API. Config is passed into the plugin; no shared state.
+ *
+ * Uses the shared base config so Node-only callers don't need to load
+ * `vite.config.ts` (which Node can't import directly).
+ */
+
+import { join, dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createServer, type InlineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import type { WebServerConfig } from "./web-server-config.js";
+import { honoMiddlewarePlugin } from "./vite-hono-plugin.js";
+import {
+  clearViteDepsCache,
+  getViteDevOptimizeDeps,
+} from "./vite-base-config.js";
+import { vitestSharedPaths } from "../../../vitest.shared.mts";
+import type { WebServerHandle } from "./types.js";
+
+export type { WebServerHandle };
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Start the Vite dev server in-process. Passes config into the plugin. Caller owns SIGINT/SIGTERM.
+ */
+export async function startViteDevServer(
+  config: WebServerConfig,
+): Promise<WebServerHandle> {
+  // Canonicalize paths under clients/web.
+  const root = resolve(join(__dirname, ".."));
+  clearViteDepsCache(root);
+  // `configFile: false` means this in-process server never loads
+  // `vite.config.ts`, so it must reproduce that file's `resolve` block and
+  // `server.fs.allow` here. Without them, App.tsx's `@inspector/core/*`
+  // imports fail to resolve and the page 500s (#1452 smoke test). The aliases
+  // and dedupe are factored into `vitest.shared.mts` so both paths stay in
+  // sync — pass the client dir (`root`) so bare-module pins resolve against
+  // `clients/web/node_modules`.
+  const { repoRoot, sharedAliases, sharedDedupe, nodeModulesAliases } =
+    vitestSharedPaths(root);
+  const inlineConfig: InlineConfig = {
+    optimizeDeps: getViteDevOptimizeDeps(),
+    configFile: false,
+    root,
+    resolve: {
+      alias: [
+        ...Object.entries(sharedAliases).map(([find, replacement]) => ({
+          find,
+          replacement,
+        })),
+        ...nodeModulesAliases,
+      ],
+      dedupe: sharedDedupe,
+    },
+    server: {
+      port: config.port,
+      host: config.hostname,
+      // `strictPort: true` (matching `vite.config.ts`) so a busy port fails
+      // loudly instead of silently binding a different one — the origin
+      // allow-list and the sandbox `frame-ancestors` are derived from
+      // `config.port`, so a drifted bind would 403 every connect and CSP-block
+      // the MCP Apps iframe while the banner advertises the unusable port.
+      strictPort: true,
+      // Allow Vite to serve source files from the repo root (core/ lives
+      // outside clients/web), matching `vite.config.ts`'s `server.fs.allow`.
+      fs: {
+        allow: [repoRoot],
+      },
+    },
+    plugins: [react(), honoMiddlewarePlugin(config)],
+  };
+  const server = await createServer(inlineConfig);
+
+  await server.listen();
+
+  return {
+    async close(): Promise<void> {
+      await server.close();
+    },
+  };
+}

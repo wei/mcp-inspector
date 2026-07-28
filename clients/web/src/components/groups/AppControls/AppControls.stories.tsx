@@ -1,0 +1,106 @@
+import { useState } from "react";
+import type { ComponentProps } from "react";
+import type { Meta, StoryObj } from "@storybook/react-vite";
+import type { Tool } from "@modelcontextprotocol/client";
+import { fn, userEvent, within } from "storybook/test";
+import { AppControls } from "./AppControls";
+import { SUN_ICON_SVG } from "../../../test/fixtures/storyIcons";
+
+// AppControls' search text is controlled by the parent (App, via AppsScreen —
+// see #1417). This wrapper holds that state so the play-driven typing updates
+// the controlled input.
+function StatefulAppControls(args: ComponentProps<typeof AppControls>) {
+  const [searchText, setSearchText] = useState(args.searchText ?? "");
+  return (
+    <AppControls
+      {...args}
+      searchText={searchText}
+      onSearchChange={setSearchText}
+    />
+  );
+}
+
+const sampleApps: Tool[] = [
+  {
+    name: "get-cohort-data",
+    title: "Cohort Data",
+    description: "Returns cohort retention heatmap data.",
+    inputSchema: { type: "object" },
+    _meta: { ui: { resourceUri: "ui://apps/cohort" } },
+  },
+  {
+    name: "weather-widget",
+    title: "Weather Widget",
+    description: "Live weather and a five-day forecast for any city.",
+    icons: [{ src: SUN_ICON_SVG, mimeType: "image/svg+xml" }],
+    inputSchema: { type: "object" },
+    _meta: { ui: { resourceUri: "ui://apps/weather" } },
+  },
+  {
+    name: "ops-dashboard",
+    title: "Ops Dashboard",
+    description: "Current operational status across services.",
+    inputSchema: { type: "object" },
+    _meta: { ui: { resourceUri: "ui://apps/ops" } },
+  },
+  {
+    name: "git_log",
+    description: "Recent commits on the current branch.",
+    inputSchema: { type: "object" },
+    _meta: { ui: { resourceUri: "ui://apps/git-log" } },
+  },
+];
+
+const meta: Meta<typeof AppControls> = {
+  title: "Groups/AppControls",
+  component: AppControls,
+  args: {
+    onRefreshList: fn(),
+    onSelectApp: fn(),
+    onSearchChange: fn(),
+    listChanged: false,
+  },
+  render: (args) => <StatefulAppControls {...args} />,
+};
+
+export default meta;
+type Story = StoryObj<typeof AppControls>;
+
+export const Default: Story = {
+  args: {
+    tools: sampleApps,
+  },
+};
+
+export const WithSelection: Story = {
+  args: {
+    tools: sampleApps,
+    selectedName: "weather-widget",
+  },
+};
+
+export const WithSearch: Story = {
+  args: {
+    tools: sampleApps,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.type(
+      await canvas.findByPlaceholderText("Search apps..."),
+      "git",
+    );
+  },
+};
+
+export const ListChanged: Story = {
+  args: {
+    tools: sampleApps,
+    listChanged: true,
+  },
+};
+
+export const Empty: Story = {
+  args: {
+    tools: [],
+  },
+};

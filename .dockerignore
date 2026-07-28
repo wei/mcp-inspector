@@ -1,35 +1,38 @@
-# Version control
+# Keep the build context small and force a clean, in-container install/build.
+# Host node_modules and build outputs are excluded so nothing stale or
+# wrong-architecture is copied in — the builder stage runs its own
+# `npm install && npm pack`.
+
 .git
-.gitignore
+.github
 
-# Node.js
+# Installed deps (root + every client) — reinstalled in the image
 node_modules
-npm-debug.log
+clients/*/node_modules
+test-servers/node_modules
 
-# Build artifacts
-client/dist
-client/build
-server/dist
-server/build
-
-# Environment variables
-.env
-.env.local
-.env.development
-.env.test
-.env.production
-
-# Editor files
-.vscode
-.idea
-
-# Logs
-logs
-*.log
-
-# Testing
+# Build outputs — rebuilt in the image
+clients/*/build
+clients/web/dist
+test-servers/build
+storybook-static
 coverage
 
-# Docker
-Dockerfile
-.dockerignore
+# Docs/specs aren't referenced by the build — trim them from the context.
+# (test-servers/ stays: `tsc -b` typechecks the integration tests that import
+# the `@modelcontextprotocol/inspector-test-server` alias.)
+specification
+docs
+
+# Packed tarballs (the image makes its own)
+*.tgz
+
+# Local / editor / env
+.env
+.env.*
+.DS_Store
+.vscode
+.idea
+.claude
+.playwright-mcp
+*.log
