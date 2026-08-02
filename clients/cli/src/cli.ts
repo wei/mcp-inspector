@@ -535,7 +535,7 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
   const scriptArgs = rawArgs.slice(2);
   const dashDashIndex = scriptArgs.indexOf("--");
   let targetArgs: string[] = [];
-  let optionArgs: string[] = [];
+  let optionArgs: string[];
   if (dashDashIndex >= 0) {
     targetArgs = scriptArgs.slice(0, dashDashIndex);
     optionArgs = scriptArgs.slice(dashDashIndex + 1);
@@ -977,7 +977,8 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
       parsed = JSON.parse(options.toolArgsJson);
     } catch (e) {
       throw new Error(
-        `--tool-args-json is not valid JSON: ${(e as Error).message}`,
+        `--tool-args-json is not valid JSON: ${e instanceof Error ? e.message : String(e)}`,
+        { cause: e },
       );
     }
     if (
