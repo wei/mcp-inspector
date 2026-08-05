@@ -148,7 +148,9 @@ If you've already built a change locally, share the **prompt** you used and scre
 
 All work should be driven by items on the project board.
 
-> **A v2 issue is not "created" until it is labeled `v2`, given a milestone, AND on board #28 with a Status *and* a Priority set.** Labeling alone is not enough — a label is a repo tag, the milestone is a release bucket, and the board is a separate org project. Applying `--label v2` does **not** add the item to the board, and adding it to the board does **not** set a Status or a Priority. All five are distinct steps; do all five (see the recipes below). **Only issues go on the board — never PRs.** A PR still gets the `v2` label, but it is tracked through its linked issue's card (via `Closes #N`), not its own board item.
+> **A v2 issue *you* create is not "created" until it is labeled `v2`, given a milestone, AND on board #28 with a Status *and* a Priority set.** Labeling alone is not enough — a label is a repo tag, the milestone is a release bucket, and the board is a separate org project. Applying `--label v2` does **not** add the item to the board, and adding it to the board does **not** set a Status or a Priority. All five are distinct steps; do all five (see the recipes below). **Only issues go on the board — never PRs.** A PR still gets the `v2` label, but it is tracked through its linked issue's card (via `Closes #N`), not its own board item.
+>
+> **This describes an issue a maintainer files, not one an outside reporter files.** An external reporter can't set a label, a milestone, or a board field, so their issue arrives with none of them — that is normal and not a defect to fix at the moment it lands. It is brought into the system by [triage](#triaging-externally-filed-issues) instead. The two paths differ in exactly one thing: filing an issue yourself *is* approving it, so it starts in **Todo** with a milestone; an external report has not been approved by anyone yet, so it starts in **Incoming** with no milestone.
 
 - Before starting work, check the board for the relevant item.
 - **Every board item is a real GitHub issue.** Do not create draft items (board cards with no issue number). If you find work that needs tracking, create an actual issue and add that to the board. Before creating a new issue, check the board for a matching item to avoid duplicates — **never create a duplicate**.
@@ -156,11 +158,12 @@ All work should be driven by items on the project board.
   - `v1` — work targeting `v1/main` (the deprecated line: security fixes only)
   - `v2` — work targeting `v2/main` (active development; the default for anything new)
   Set the label at **create time** — `gh issue create --label v2 ...`, `gh pr create --label v2 ...` — never by backfilling later, since unlabeled items are exactly the ones missed when filtering by version. **If the target version isn't obvious, it's `v2`**: v2 is where all new work goes, and `v1` is reserved for the narrow case of patching the deprecated line. Only ask when the issue is specifically a fix *for released v1 behavior* and it's unclear whether v2 still has the bug. Note the label is a repo tag and is **not** the board — see the callout above; a `v2` issue also needs a board card with a Status **and** a Priority (a `v1` one needs a Status; board #11 has no Priority field).
-- **Prioritize every new issue.** Every new issue must have a Priority (Urgent, High, Medium, or Low) set at creation time. Priority is a **board field**, not a label, so it lives on the card and an unboarded issue has nowhere to store it. Derive it with the rubric in [Setting issue priority](#setting-issue-priority) rather than asserting it — an unscored "this feels urgent" is exactly what the rubric exists to replace.
+- **Prioritize every board item.** Every issue must have a Priority (Urgent, High, Medium, or Low) on its card — set when the card is created, whether that's at issue-creation time (yours) or at triage (an external report). Priority is a **board field**, not a label, so it lives on the card and an unboarded issue has nowhere to store it. Derive it with the rubric in [Setting issue priority](#setting-issue-priority) rather than asserting it — an unscored "this feels urgent" is exactly what the rubric exists to replace.
 - **Add the issue to the board and set Status and Priority.** After creating an issue, add it to the board for its version — **`v2` → board #28**, **`v1` → board #11** — and set the fields. (PRs are never added to either board — they're tracked through their linked issue's card.) This is the step most easily forgotten because it needs several IDs — copy the recipes below verbatim, and take them from the section for the right board; the two projects' ids are not interchangeable.
-  - **New and untriaged → `Incoming`.** This is the **default status for a new item on either board.** An issue nobody has evaluated yet belongs in **Incoming**, not Todo. Todo means a maintainer approved it and it is ready to be picked up; using Todo as the inbox erases that distinction and quietly promotes unreviewed work into the queue. Anything filed by an outside reporter starts in Incoming. Work you are starting immediately goes straight to In Progress.
+  - **An issue you create → `Todo`.** You only file an issue for work you intend to happen, so filing it is approving it. It gets a milestone and lands in Todo, ready to be picked up. Work you are starting immediately goes straight to **In Progress** instead.
+  - **An externally-filed issue → `Incoming`, no milestone.** Nobody has evaluated it yet, so it is not approved and gets no release bucket. See [Triaging externally-filed issues](#triaging-externally-filed-issues). Never park an unreviewed report in Todo — Todo asserts a maintainer signed off, and using it as the inbox erases that distinction and quietly promotes unreviewed work into the queue.
   - **Priority is v2-only.** Board #28 has a Priority field; board #11 does not. A v1 issue gets a Status and nothing else.
-- **Every new issue gets a milestone — no exceptions.** Set it at create time with `gh issue create --milestone <title> ...`. **If the user didn't specify one, default to the current milestone**: the open milestone with the nearest due date. Never leave an issue unmilestoned pending a decision — an unmilestoned issue drops out of release planning silently, the same way an unlabeled one drops out of version filtering. Moving it later is one command; noticing it was never set is the hard part. Get the current milestone with:
+- **Every issue you create gets a milestone — no exceptions.** Set it at create time with `gh issue create --milestone <title> ...`, and place it in **Todo**. **If the user didn't specify one, default to the current milestone**: the open milestone with the nearest due date. Never leave an issue you filed unmilestoned pending a decision — an unmilestoned issue drops out of release planning silently, the same way an unlabeled one drops out of version filtering. Moving it later is one command; noticing it was never set is the hard part. (An **externally-filed** issue is the deliberate exception: it stays unmilestoned in Incoming until a maintainer approves it — there, the *absence* of a milestone is the signal that nobody has scheduled it yet.) Get the current milestone with:
 
   ```sh
   # Open milestones, soonest due date first — the first row is the current one.
@@ -178,6 +181,32 @@ All work should be driven by items on the project board.
   - **Link the PR to its issue — mandatory for every PR, from anyone.** No PR is opened without an issue to reference; if one doesn't exist yet, create it first (labeled and on the board) rather than opening the PR and backfilling. Note also that only the **repo maintainers** open PRs at all (see [Contributing](#contributing)) — everyone else files a detailed issue. The PR body's **first line must be `Closes #<ISSUE_NUMBER>`**. ⚠️ Note: closing keywords only auto-link/auto-close for PRs targeting the repo's **default branch** (`main`). Because v2 PRs target `v2/main` (a non-default branch), `Closes #N` there is only a cross-reference — it will **not** create a hard link or close the issue on merge. (There is no `gh` flag for manual linking — `gh pr edit` has no `--add-issue`; closing keywords are the only mechanism GitHub exposes, and they're gated to the default branch.)
   - **On merge of a v2 PR, manually close its issue and move the board item to Done** (option id `259d6aab`), since auto-close won't fire on `v2/main`. Keep the `Closes #N` line anyway so the issues close automatically if/when `v2/main` is eventually merged to `main`.
 - If new tasks are discovered or requested during development, create issues and add them to the board.
+
+### Triaging externally-filed issues
+
+An outside reporter has no board access, so their issue lands with **no label, no milestone, and no card**. That is the expected arrival state, not a backlog of defects — the issue enters the system through triage, in two distinct passes.
+
+**Pass 1 — sweep them onto the board (no approval implied).** Find the open issues with no card and bring each one in:
+
+1. Apply the version label (`v2` unless it's a fix for released v1 behavior — see [Label by version](#issue-driven-work-style)).
+2. Add it to the board for that version.
+3. Set Status to **`Incoming`**.
+4. Set Priority with the [rubric](#setting-issue-priority) (v2 only). This is an *assessment*, not an approval — it's how the queue gets ordered for the maintainer who reviews it next.
+5. **Leave the milestone unset.** Nobody has committed to shipping it yet, and an empty milestone is precisely what marks it as awaiting review.
+
+Find the unboarded ones by diffing the open issues against the board:
+
+```sh
+gh issue list --repo modelcontextprotocol/inspector --state open --limit 1000 --json number > /tmp/open.json
+gh project item-list 28 --owner modelcontextprotocol --format json --limit 700 \
+  | jq -r --slurpfile o /tmp/open.json \
+      '[.items[]|select(.content.type=="Issue")|.content.number] as $B
+       | [$o[0][].number] - $B | "unboarded: \(.)"'
+```
+
+**Pass 2 — approve what should ship.** A maintainer reads the Incoming column and, for each issue worth doing, **assigns a milestone** and moves the card to **Todo** (or **In Progress** if picking it up now). That is the whole approval gesture; see the [Status recipe](#v2-board-28-gh-recipes).
+
+Issues that shouldn't ship stay in Incoming (or get closed). **Incoming is the review queue, and "milestoned" is the line between reviewed and not** — which is why the milestone stays off in pass 1 and why the rubric can treat a milestone as a real signal rather than a formality every issue carries.
 
 ## Setting issue priority
 
@@ -219,7 +248,7 @@ Every issue gets a **Priority on its board card**, set when you add the issue to
 **Signal indicators (bonuses, +1 each — not an axis of their own).** These are corroborating evidence that the two axes may have undercounted, so they adjust the total rather than standing alone:
 
 - Carries a `bug` or security-related label
-- Linked to a milestone
+- Linked to a milestone — i.e. **already approved** by a maintainer. Note this is the *re-scoring* case: an externally-filed issue being scored in triage has no milestone yet by rule, so it never earns this one. If you find yourself applying it to every issue in a batch, the milestone is being used as a formality rather than as approval, and the bonus has become a constant that discriminates nothing.
 - High engagement (many comments or reactions)
 - Assigned to someone
 - A sub-issue of a larger epic
@@ -270,7 +299,7 @@ Don't lean on GitHub's permission gate to enforce this. Whether an outside repor
   - v2 - https://github.com/orgs/modelcontextprotocol/projects/28 (active board — all new work goes here)
   - v1 - https://github.com/orgs/modelcontextprotocol/projects/11 (legacy inspector version, no new activity except security fixes)
 
-  **Both boards start new items in `Incoming`.** A card only leaves Incoming when a maintainer has looked at it and approved the work — that is what Todo means on either board. The two boards are otherwise separate projects with their own field and option ids; never reuse one board's ids against the other (they are rejected with "option Id does not belong to the field", so the mistake is at least loud).
+  **On both boards, `Incoming` is the review queue for externally-filed issues** — swept in at triage with a Priority but deliberately **no milestone** (see [Triaging externally-filed issues](#triaging-externally-filed-issues)). A card only leaves Incoming when a maintainer has looked at it and approved the work by assigning a milestone, at which time it should move to **Todo** — unless the maintainer has chosen to work on it, in which case it should move to **In Progress**. Assigning the milestone *is* the approval act, so the two always go together: a milestoned card sitting in Incoming is a card whose approval was never recorded, and a Todo card with no milestone claims an approval nobody made. An issue **you** file skips Incoming entirely — filing it is approving it, so it starts milestoned in Todo. The two boards are otherwise separate projects with their own field and option ids; never reuse one board's ids against the other (they are rejected with "option Id does not belong to the field", so the mistake is at least loud).
 
 #### V2 board (#28) `gh` recipes
 
@@ -298,7 +327,7 @@ Status option IDs (`--single-select-option-id`) — **last verified 2026-08-01**
 | In Review | `159c8a02` |
 | Done | `259d6aab` |
 
-Use **Incoming** for newly filed, untriaged work, **Todo** once a maintainer has approved it and it's ready to pick up, **In Progress** for general active work (regardless of surface), **In Review** once a PR is open, and **Done** on merge. The Incoming/Todo line is the one that matters: Todo asserts approval, so an unreviewed issue parked there is a false claim that someone signed off on it.
+Use **Incoming** for an externally-filed issue awaiting review (no milestone yet), **Todo** once a maintainer has approved it by assigning a milestone — including an issue you filed yourself, which starts here — **In Progress** for general active work (regardless of surface), **In Review** once a PR is open, and **Done** on merge. The Incoming/Todo line is the one that matters: Todo asserts approval, so an unreviewed issue parked there is a false claim that someone signed off on it. The milestone is the machine-checkable form of that claim — Incoming ⇔ no milestone, everything past it ⇔ milestoned.
 
 Priority option IDs (`--single-select-option-id`) — **last verified 2026-08-01**. Derive the level with the rubric in [Setting issue priority](#setting-issue-priority); don't eyeball it.
 
@@ -364,13 +393,23 @@ gh project item-edit \
   --single-select-option-id 195df262
 ```
 
-The full one-liner for a **new** issue — add it, then set Status and Priority (both are required; here Incoming + Medium):
+The full one-liner for an issue **you just created** — add it, then set Status and Priority (both required). It goes to **Todo**, because filing it was the approval, and it already carries the milestone you passed to `gh issue create`:
 
 ```sh
 ITEM_ID=$(gh project item-add 28 --owner modelcontextprotocol --url <issue-url> --format json --jq '.id')
-# Status → Incoming
-gh project item-edit --project-id PVT_kwDOCt2Azc4BJVxt --id "$ITEM_ID" --field-id PVTSSF_lADOCt2Azc4BJVxtzg5iI8c --single-select-option-id 721a3d4c
+# Status → Todo (an issue you filed is approved by definition)
+gh project item-edit --project-id PVT_kwDOCt2Azc4BJVxt --id "$ITEM_ID" --field-id PVTSSF_lADOCt2Azc4BJVxtzg5iI8c --single-select-option-id fbdaf21e
 # Priority → Medium
+gh project item-edit --project-id PVT_kwDOCt2Azc4BJVxt --id "$ITEM_ID" --field-id PVTSSF_lADOCt2Azc4BJVxtzg5iJE4 --single-select-option-id da944a9c
+```
+
+For an **externally-filed** issue being swept in at triage, the only difference is the Status option — **Incoming** (`721a3d4c`) instead of Todo — and that you do **not** set a milestone:
+
+```sh
+ITEM_ID=$(gh project item-add 28 --owner modelcontextprotocol --url <issue-url> --format json --jq '.id')
+# Status → Incoming (awaiting maintainer review; no milestone yet)
+gh project item-edit --project-id PVT_kwDOCt2Azc4BJVxt --id "$ITEM_ID" --field-id PVTSSF_lADOCt2Azc4BJVxtzg5iI8c --single-select-option-id 721a3d4c
+# Priority → Medium (an assessment for queue ordering, not an approval)
 gh project item-edit --project-id PVT_kwDOCt2Azc4BJVxt --id "$ITEM_ID" --field-id PVTSSF_lADOCt2Azc4BJVxtzg5iJE4 --single-select-option-id da944a9c
 ```
 
@@ -388,7 +427,7 @@ gh project item-edit --project-id PVT_kwDOCt2Azc4BJVxt --id "$ITEM_ID" --field-i
 
 #### V1 board (#11) `gh` recipes
 
-The v1 line takes **security fixes only**, so this board sees little traffic — but a v1 issue still gets a card, and it starts in **Incoming** like a v2 one. Board #11 is a separate org project with **its own ids**; none of the #28 ids above work here.
+The v1 line takes **security fixes only**, so this board sees little traffic — but a v1 issue still gets a card, and the same Incoming/Todo split applies: one **you** file starts in **Todo**, an **externally-filed** one starts in **Incoming** awaiting review. Board #11 is a separate org project with **its own ids**; none of the #28 ids above work here.
 
 | Thing | ID |
 | --- | --- |
@@ -408,9 +447,11 @@ Status option IDs — **last verified 2026-08-01**.
 There is **no Priority field on this board** — the priority rubric applies to v2 only. Don't try to set one here; the field id doesn't exist.
 
 ```sh
-# Add a v1 issue to board #11 and put it in Incoming.
+# Add a v1 issue to board #11. Swap the option id for the case you're in:
+#   831820cf = Incoming — an externally-filed issue awaiting review (no milestone)
+#   f75ad846 = Todo     — an issue you filed yourself (milestoned at create time)
 ITEM_ID=$(gh project item-add 11 --owner modelcontextprotocol --url <issue-url> --format json --jq '.id')
-gh project item-edit --project-id PVT_kwDOCt2Azc4BA5sz --id "$ITEM_ID" --field-id PVTSSF_lADOCt2Azc4BA5szzgzkS-g --single-select-option-id 831820cf
+gh project item-edit --project-id PVT_kwDOCt2Azc4BA5sz --id "$ITEM_ID" --field-id PVTSSF_lADOCt2Azc4BA5szzgzkS-g --single-select-option-id f75ad846
 ```
 
 The ⚠️ option-deletion hazard, the snapshot rule, and the recovery recipe above apply to **this board too** — same mutation, same failure mode, different ids. Note that three cards on #11 already carry no Status; that predates the `Incoming` addition (verified by before/after diff on 2026-08-01) and is not evidence of an orphaning event.
