@@ -148,7 +148,7 @@ If you've already built a change locally, share the **prompt** you used and scre
 
 All work should be driven by items on the project board.
 
-> **A v2 issue *you* create is not "created" until it is labeled `v2`, given a milestone, AND on board #28 with a Status *and* a Priority set.** Labeling alone is not enough — a label is a repo tag, the milestone is a release bucket, and the board is a separate org project. Applying `--label v2` does **not** add the item to the board, and adding it to the board does **not** set a Status or a Priority. All five are distinct steps; do all five (see the recipes below). **Only issues go on the board — never PRs.** A PR still gets the `v2` label, but it is tracked through its linked issue's card (via `Closes #N`), not its own board item.
+> **A v2 issue *you* create is not "created" until it is labeled `v2` **and** typed (`bug`/`enhancement`/`documentation`/`chore`/`question`), given a milestone, AND on board #28 with a Status *and* a Priority set.** Labeling alone is not enough — a label is a repo tag, the milestone is a release bucket, and the board is a separate org project. Applying `--label v2` does **not** add the item to the board, and adding it to the board does **not** set a Status or a Priority. All five are distinct steps; do all five (see the recipes below). **Only issues go on the board — never PRs.** A PR still gets the `v2` label, but it is tracked through its linked issue's card (via `Closes #N`), not its own board item.
 >
 > **This describes an issue created through the flow below — not every issue that appears in the repo.** An issue opened by hand, in the GitHub UI, arrives with no label, no milestone, and no card. That is true of an outside reporter's (they have no board access) *and* of a maintainer's (write access makes the board reachable, not automatic). Either way it is normal on arrival, not a defect to fix the moment it lands; it comes into the system through [triage](#triaging-unboarded-issues) instead. The two paths differ in exactly one thing: doing the create flow *is* the approval, so the issue starts in **Todo** with a milestone; an issue that arrives unboarded and unmilestoned has been approved by nobody, so it starts in **Incoming** with no milestone.
 
@@ -158,6 +158,19 @@ All work should be driven by items on the project board.
   - `v1` — work targeting `v1/main` (the deprecated line: security fixes only)
   - `v2` — work targeting `v2/main` (active development; the default for anything new)
   Set the label at **create time** — `gh issue create --label v2 ...`, `gh pr create --label v2 ...` — never by backfilling later, since unlabeled items are exactly the ones missed when filtering by version. **If the target version isn't obvious, it's `v2`**: v2 is where all new work goes, and `v1` is reserved for the narrow case of patching the deprecated line. Only ask when the issue is specifically a fix *for released v1 behavior* and it's unclear whether v2 still has the bug. Note the label is a repo tag and is **not** the board — see the callout above; a `v2` issue also needs a board card with a Status **and** a Priority (a `v1` one needs a Status; board #11 has no Priority field).
+- **Label by type — every issue you create or triage carries exactly one of `bug` / `enhancement` / `documentation` / `chore` / `question`.** The version label says *which line* the work belongs to; the type label says *what kind of work it is*, and the two are independent — every issue needs both. Set it at create time (`gh issue create --label v2 --label bug ...`) or, for one arriving through [triage](#triaging-unboarded-issues), in the same pass that applies the version label.
+
+  | Type | Use for | Not for |
+  | --- | --- | --- |
+  | `bug` | Something is broken, wrong, or regressed against its intended behavior | A missing capability that was never built |
+  | `enhancement` | A new capability, or extending an existing one — features, spec support, tracking issues for either | A cleanup with no behavior change |
+  | `documentation` | Prose deliverables — READMEs, guides, `specification/` docs, `AGENTS.md` rules | Code that happens to need a doc update |
+  | `chore` | Maintenance with no user-facing behavior change — dependency work, build/CI tooling, refactors, cleanup | Anything a user would notice |
+  | `question` | An open question or discussion with no agreed deliverable yet | Work someone has already decided to do |
+
+  **Don't force the binary.** `bug` and `enhancement` are the two most reached for, and pressing a docs task or a dependency pin into `enhancement` degrades it to "not a bug" — at which point filtering by it stops telling you anything. If an issue is really a migration guide, say `documentation`; if it is a `tsup` → `tsdown` migration, say `chore`.
+
+  A **PR** does not need a type label — it is classified through the issue it closes, the same way it is tracked through that issue's board card.
 - **Prioritize every board item.** Every issue must have a Priority (Urgent, High, Medium, or Low) on its card — set when the card is created, whether that's at issue-creation time (yours) or at triage (an unboarded one). Priority is a **board field**, not a label, so it lives on the card and an unboarded issue has nowhere to store it. Derive it with the rubric in [Setting issue priority](#setting-issue-priority) rather than asserting it — an unscored "this feels urgent" is exactly what the rubric exists to replace.
 - **Add the issue to the board and set Status and Priority.** After creating an issue, add it to the board for its version — **`v2` → board #28**, **`v1` → board #11** — and set the fields. (PRs are never added to either board — they're tracked through their linked issue's card.) This is the step most easily forgotten because it needs several IDs — copy the recipes below verbatim, and take them from the section for the right board; the two projects' ids are not interchangeable.
   - **An issue you create → `Todo`.** You only file an issue for work you intend to happen, so filing it is approving it. It gets a milestone and lands in Todo, ready to be picked up. Work you are starting immediately goes straight to **In Progress** instead.
@@ -211,7 +224,7 @@ So don't check the author's permissions; check whether the work was done. Arrivi
 
 For each open issue with no card:
 
-1. Apply the version label (`v2` unless it's a fix for released v1 behavior — see [Label by version](#issue-driven-work-style)).
+1. Apply the version label (`v2` unless it's a fix for released v1 behavior — see [Label by version](#issue-driven-work-style)) **and the type label** (`bug` / `enhancement` / `documentation` / `chore` / `question` — see [Label by type](#issue-driven-work-style)). An outside reporter cannot set either, so both are applied here.
 2. Add it to the board for that version — **`v2` → #28, `v1` → #11**.
 3. Set Status to **`Incoming`**.
 4. Set Priority with the [rubric](#setting-issue-priority) (v2 only), and **record the score in a comment** (see [Recording the score](#recording-the-score)). This is an *assessment*, not an approval — it's how the queue gets ordered for the maintainer who reviews it next.
@@ -260,6 +273,7 @@ Sweeping in the unboarded issues is only the most visible defect class. A board 
 | Past Incoming **without** a milestone | Everything past Incoming ⇔ milestoned | Claims an approval nobody made: milestone it, or move back to Incoming |
 | Wrong board for label | `v1` → #11, `v2` → #28 | Move the card to the right board |
 | No version label | Every issue carries exactly one of `v1`/`v2` | Apply it (`v2` unless it's a fix for released v1 behavior) |
+| No type label | Every issue carries one of `bug`/`enhancement`/`documentation`/`chore`/`question` | Classify it per [Label by type](#issue-driven-work-style) |
 | No Priority (#28) | Every board item is prioritized | Score it with the [rubric](#setting-issue-priority) |
 | Closed, not shipped, still carded | **Done means the work shipped** — a card closed as duplicate/not-planned is deleted, not parked | Delete the card (`gh project item-delete`) |
 
@@ -293,6 +307,10 @@ jq -nr --slurpfile o "$D/i.json" --slurpfile a "$D/b28.json" --slurpfile b "$D/b
     "v2 label on #11":       [$B11[] | select(isopen(.n) and (lab(.n)|index("v2"))) | .n],
     "open, no version label":[$o[0][] | select(.state=="OPEN")
                               | select(([.labels[].name]|index("v1") or index("v2"))|not) | .number],
+    "open, no type label":   [$o[0][] | select(.state=="OPEN")
+                              | select(([.labels[].name] | index("bug") or index("enhancement")
+                                        or index("documentation") or index("chore")
+                                        or index("question"))|not) | .number],
     "#28 open, no Priority": [$B28[] | select(.p==null and isopen(.n)) | .n],
     "closed unshipped, still carded":
                              [($B28[], $B11[]) | select(I(.n)!=null and (isopen(.n)|not)
