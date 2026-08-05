@@ -132,6 +132,7 @@ Each config below is a ready-made server for exercising one feature by hand. Loa
 
 | Config                                    | Demonstrates                                       | Issue                                                                  |
 | ----------------------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------- |
+| `mcp-app-http.json`                       | An MCP App (UI resource + app tool) in the Apps tab | [#1859](https://github.com/modelcontextprotocol/inspector/issues/1859) |
 | `modern-mrtr-http.json`                   | A single MRTR round-trip                           | —                                                                      |
 | `mrtr-showcase-http.json`                 | Every MRTR preset in one server                    | —                                                                      |
 | `modern-network-http.json`                | Network tab: `Mcp-*` headers + error taxonomy      | [#1628](https://github.com/modelcontextprotocol/inspector/issues/1628) |
@@ -141,6 +142,14 @@ Each config below is a ready-made server for exercising one feature by hand. Loa
 | `logging-{legacy,modern}-http.json`       | Logging, both eras                                 | [#1629](https://github.com/modelcontextprotocol/inspector/issues/1629) |
 | `subscriptions-{legacy,modern}-http.json` | Resource subscriptions, both eras                  | [#1630](https://github.com/modelcontextprotocol/inspector/issues/1630) |
 | `tasks-{legacy,modern}-http.json`         | Tasks, both eras                                   | [#1631](https://github.com/modelcontextprotocol/inspector/issues/1631) |
+
+#### MCP Apps
+
+`mcp-app-http.json` serves the `mcp_app_demo` tool (`_meta.ui.resourceUri`) alongside its `mcp_app_demo_widget` UI resource, so the **Apps** tab has a real App to render. It is a plain streamable-HTTP server — connect with the **default (legacy)** protocol era, not Modern.
+
+Open the Apps tab, select `mcp_app_demo`, give it a title and click **Open App**: the widget renders inside the sandbox iframe and exercises the host-side UI protocol surface — host-context render, `size-changed`, `ui/message`, and a log line into the **App logs** panel. Because the widget is served through the sandbox proxy page, this config is also what reproduces [#1859](https://github.com/modelcontextprotocol/inspector/issues/1859) (a missing `clients/web/static/sandbox_proxy.html` surfaces here as a "Sandbox not loaded" message in place of the widget) — a failure that only ever appeared in an installed package, never in the repo.
+
+For the scripted version of the same flow (`--app-info` probe → deep link → rendered widget), see [Reviewing an MCP App](./docs/mcp-app-review.md).
 
 #### MRTR
 
