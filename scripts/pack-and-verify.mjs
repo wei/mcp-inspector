@@ -22,8 +22,8 @@
  *
  *   1. builds every client (`npm run build`);
  *   2. packs the publishable tarball (`npm pack`) and inspects its file list —
- *      asserting NO source maps ship and that `clients/web/{build,dist}` are
- *      both present (the two packaging fixes this work landed);
+ *      asserting NO source maps ship and that `clients/web/{build,dist,static}`
+ *      are all present (the packaging fixes this work landed);
  *   3. installs that tarball into a fresh temp dir (real `npm install <tgz>`,
  *      which runs the package's `postinstall`);
  *   4. runs the installed `mcp-inspector` bin: `--help`, `--cli`/`--tui` help
@@ -164,26 +164,31 @@ if (maps.length > 0) {
 }
 
 // 2b. Runtime files that are easy to omit from the packlist and only fail once
-//     installed: both web artifacts — the prod server runner (build) AND the SPA
-//     (dist). `clients/web/build` was previously dropped by the nested
-//     .gitignore. (The version the CLI/TUI report is read from the root
-//     package.json — always shipped — via readInspectorVersion(), so no client
-//     package.json needs to ship; that read is exercised by driving the bin in
-//     step 4.)
+//     installed: the web artifacts — the prod server runner (build), the SPA
+//     (dist), and the MCP Apps sandbox proxy page (static). `clients/web/build`
+//     was previously dropped by the nested .gitignore; `clients/web/static` was
+//     never listed in the root "files" allowlist at all, so the Apps tab failed
+//     with "Sandbox not loaded" on every published build (#1859). None of these
+//     are checked-in-tree failures — only an installed tarball reveals them.
+//     (The version the CLI/TUI report is read from the root package.json —
+//     always shipped — via readInspectorVersion(), so no client package.json
+//     needs to ship; that read is exercised by driving the bin in step 4.)
 for (const required of [
   "clients/web/build/index.js",
   "clients/web/dist/index.html",
+  "clients/web/static/sandbox_proxy.html",
 ]) {
   if (!tarredPaths.includes(required)) {
     fail(
       `expected \`${required}\` in the published tarball but it is missing — ` +
-        `check the "files" field in clients/web/package.json`,
+        `check the "files" field in the root package.json (and that ` +
+        `clients/web/.npmignore does not exclude it)`,
     );
   }
 }
 console.log(
   `pack:verify — tarball OK: ${tarredPaths.length} files, no source maps, ` +
-    `clients/web/{build,dist} present (${(packInfo.unpackedSize / 1048576).toFixed(2)} MB unpacked)`,
+    `clients/web/{build,dist,static} present (${(packInfo.unpackedSize / 1048576).toFixed(2)} MB unpacked)`,
 );
 
 // ---------------------------------------------------------------------------
@@ -229,10 +234,14 @@ try {
   if (!existsSync(bin)) {
     fail(`installed \`mcp-inspector\` bin not found at ${bin}`);
   }
-  // Confirm the two packaging fixes survived install onto disk.
+  // Confirm the packaging fixes survived install onto disk. The sandbox proxy
+  // is resolved at runtime as `<build>/../static/sandbox_proxy.html`, so its
+  // position *relative to* clients/web/build is what matters, not just presence
+  // in the tarball (#1859).
   for (const required of [
     join(installedPkg, "clients", "web", "build", "index.js"),
     join(installedPkg, "clients", "web", "dist", "index.html"),
+    join(installedPkg, "clients", "web", "static", "sandbox_proxy.html"),
     join(installedPkg, "clients", "launcher", "build", "index.js"),
   ]) {
     if (!existsSync(required)) {
