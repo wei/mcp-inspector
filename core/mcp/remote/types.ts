@@ -120,6 +120,11 @@ export interface RemoteSendRequest {
   message: JSONRPCMessage;
   /** Optional, for associating response with request (e.g. streamable-http) */
   relatedRequestId?: string | number;
+  /**
+   * Per-send `Mcp-Param-*` headers (SEP-2243 mirroring). The backend applies
+   * them to the upstream `transport.send`, filtered to the `Mcp-Param-` prefix.
+   */
+  headers?: Record<string, string>;
 }
 
 export type RemoteEventType =

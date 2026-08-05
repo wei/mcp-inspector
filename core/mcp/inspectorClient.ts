@@ -18,7 +18,10 @@ import type {
   ResourceSubscriptionStreamState,
   ExcludedTool,
 } from "./types.js";
-import { scanXMcpHeaderDeclarations } from "../json/xMcpHeader.js";
+import {
+  scanXMcpHeaderDeclarations,
+  mcpParamHeadersForTool,
+} from "../json/xMcpHeader.js";
 // Re-export so v1.5 tests that do `import { InspectorClientOptions } from
 // "@inspector/core/mcp/inspectorClient.js"` keep resolving.
 export type {
@@ -3305,6 +3308,52 @@ export class InspectorClient extends InspectorClientEventTarget {
   }
 
   /**
+   * Coerce the string-valued entries of a tool's arguments to the types its
+   * `inputSchema` declares (the Tools form hands everything over as text).
+   * Shared by the two `tools/call` entry points — {@link attemptToolCall} and
+   * {@link callToolStream} — so both put the SAME arguments on the wire.
+   */
+  private convertStringToolArgs(
+    tool: Tool,
+    args: Record<string, JsonValue>,
+  ): Record<string, JsonValue> {
+    const stringArgs: Record<string, string> = {};
+    for (const [key, value] of Object.entries(args)) {
+      if (typeof value === "string") {
+        stringArgs[key] = value;
+      }
+    }
+    if (Object.keys(stringArgs).length === 0) return args;
+    return { ...args, ...convertToolParameters(tool, stringArgs) };
+  }
+
+  /**
+   * SEP-2243: mirror `x-mcp-header`-annotated arguments into `Mcp-Param-*`
+   * headers on a modern connection. The SDK only does this inside
+   * `client.callTool()` (and skips it in the browser), but we route
+   * `tools/call` through `client.request()` for manual MRTR driving (#1704), so
+   * we mirror ourselves. `Protocol.request` forwards `headers` (preserved
+   * across MRTR retry legs) to the transport, and the remote transport relays
+   * them to the backend's upstream send — issued server-side, where the browser
+   * skip doesn't apply. No-op on legacy/stdio (no annotations).
+   *
+   * Applied by BOTH `tools/call` entry points: a plain call
+   * ({@link attemptToolCall}) and a task-augmented one
+   * ({@link callToolStream}) — a strict modern server rejects either with
+   * `-32020` when the mirrored header is missing.
+   */
+  private applyMirroredParamHeaders(
+    tool: Tool,
+    convertedArgs: Record<string, JsonValue>,
+    requestOptions: RequestOptions,
+  ): void {
+    if (this.protocolEra !== "modern") return;
+    const paramHeaders = mcpParamHeadersForTool(tool, convertedArgs);
+    if (Object.keys(paramHeaders).length === 0) return;
+    requestOptions.headers = { ...requestOptions.headers, ...paramHeaders };
+  }
+
+  /**
    * Run a single tools/call attempt: convert args, issue the request, validate,
    * and return a successful {@link ToolCallInvocation}. Throws on any error
    * (including a `-32042` UrlElicitationRequired response); {@link callTool}'s
@@ -3326,17 +3375,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     if (!client) {
       throw new Error("Client is not connected");
     }
-    let convertedArgs: Record<string, JsonValue> = args;
-    const stringArgs: Record<string, string> = {};
-    for (const [key, value] of Object.entries(args)) {
-      if (typeof value === "string") {
-        stringArgs[key] = value;
-      }
-    }
-    if (Object.keys(stringArgs).length > 0) {
-      const convertedStringArgs = convertToolParameters(tool, stringArgs);
-      convertedArgs = { ...args, ...convertedStringArgs };
-    }
+    const convertedArgs = this.convertStringToolArgs(tool, args);
 
     // Merge general metadata with tool-specific metadata; tool-specific wins.
     const callMetadata: Record<string, string> | undefined =
@@ -3367,6 +3406,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       metadata?.progressToken,
       signal,
     );
+    this.applyMirroredParamHeaders(tool, convertedArgs, requestOptions);
     // Route through the MRTR driver (`requestWithInputRequired`) so a modern
     // `input_required` result pauses at the pending-request UI and retries with
     // the user's answer (#1704). Both eras use `client.request` with
@@ -3949,17 +3989,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       throw new Error("Client is not connected");
     }
     try {
-      let convertedArgs: Record<string, JsonValue> = args;
-      const stringArgs: Record<string, string> = {};
-      for (const [key, value] of Object.entries(args)) {
-        if (typeof value === "string") {
-          stringArgs[key] = value;
-        }
-      }
-      if (Object.keys(stringArgs).length > 0) {
-        const convertedStringArgs = convertToolParameters(tool, stringArgs);
-        convertedArgs = { ...args, ...convertedStringArgs };
-      }
+      const convertedArgs = this.convertStringToolArgs(tool, args);
 
       // Merge general metadata with tool-specific metadata; tool-specific wins.
       const callMetadata: Record<string, string> | undefined =
@@ -3999,6 +4029,9 @@ export class InspectorClient extends InspectorClientEventTarget {
       // emit requestorTaskProgress) for task calls only, bypassing the toggle
       // that governs every other call path.
       const requestOptions = this.getRequestOptions(metadata?.progressToken);
+      // The task-augmented `tools/call` needs the same SEP-2243 mirroring as the
+      // plain one — a strict modern server rejects it with -32020 otherwise.
+      this.applyMirroredParamHeaders(tool, convertedArgs, requestOptions);
       if (this.progress) {
         const innerOnProgress = requestOptions.onprogress;
         requestOptions.onprogress = (progress: Progress) => {
@@ -4127,6 +4160,7 @@ export class InspectorClient extends InspectorClientEventTarget {
         } catch (resultError) {
           throw new Error(
             `Tool call did not return a result: ${resultError instanceof Error ? resultError.message : String(resultError)}`,
+            { cause: resultError },
           );
         }
       }
@@ -4304,6 +4338,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     } catch (error) {
       throw new Error(
         `Failed to expand URI template "${uriTemplate}": ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
       );
     }
 
@@ -4564,6 +4599,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       // Re-throw other errors
       throw new Error(
         `Failed to get completions: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
       );
     }
   }
@@ -5113,6 +5149,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     } catch (error) {
       throw new Error(
         `Failed to subscribe to resource: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
       );
     }
   }
@@ -5173,6 +5210,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     } catch (error) {
       throw new Error(
         `Failed to unsubscribe from resource: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
       );
     }
   }
