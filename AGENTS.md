@@ -180,6 +180,21 @@ All work should be driven by items on the project board.
   - **Attach screenshots as proof of functionality.** Any change to the web UI or the TUI must show its result: capture before/after screenshots (or a short GIF for an interaction) and put them in a **`pr-screenshots/` folder off the repo root**, creating it if it doesn't exist. That folder is **gitignored** — the images are working artifacts staged for upload, never committed to the source tree — so attach them to the PR body from there rather than referencing an in-repo path. Name them for what they show (`tools-tab-before.png`, `tools-tab-after.png`), not `Screenshot 2026-07-31 at 14.02.11.png`.
   - **Link the PR to its issue — mandatory for every PR, from anyone.** No PR is opened without an issue to reference; if one doesn't exist yet, create it first (labeled and on the board) rather than opening the PR and backfilling. Note also that only the **repo maintainers** open PRs at all (see [Contributing](#contributing)) — everyone else files a detailed issue. The PR body's **first line must be `Closes #<ISSUE_NUMBER>`**. ⚠️ Note: closing keywords only auto-link/auto-close for PRs targeting the repo's **default branch** (`main`). Because v2 PRs target `v2/main` (a non-default branch), `Closes #N` there is only a cross-reference — it will **not** create a hard link or close the issue on merge. (There is no `gh` flag for manual linking — `gh pr edit` has no `--add-issue`; closing keywords are the only mechanism GitHub exposes, and they're gated to the default branch.)
   - **On merge of a v2 PR, manually close its issue and move the board item to Done** (option id `259d6aab`), since auto-close won't fire on `v2/main`. Keep the `Closes #N` line anyway so the issues close automatically if/when `v2/main` is eventually merged to `main`.
+- **`Done` means the work shipped. An issue closed for any other reason is REMOVED from the board, not moved to Done.** Exactly two things earn a card a place in Done:
+  1. Its **PR merged**, or
+  2. it is a **parent whose last sub-issue closed** — the work shipped across its children rather than through one PR of its own.
+
+  Anything else — duplicate, won't fix, not planned, obsolete, superseded — means nothing shipped, so **delete the card**:
+
+  ```sh
+  ITEM_ID=$(gh project item-list 28 --owner modelcontextprotocol --format json --limit 500 \
+    --jq '.items[] | select(.content.number==<ISSUE_NUMBER>) | .id')
+  gh project item-delete 28 --owner modelcontextprotocol --id "$ITEM_ID"
+  ```
+
+  Deleting the card removes it from the board only — **the issue itself is untouched**, keeps its labels and comments, and stays searchable and linkable forever. Nothing is lost; the board simply stops claiming the work was delivered.
+
+  Done is read as the record of what a milestone actually delivered, so a card parked there asserts something shipped. A duplicate sitting in Done makes that record wrong in a way nobody can detect later — counting Done cards can no longer distinguish a shipped fix from a report closed as a duplicate of one. Board columns are a workflow signal; GitHub's issue list is the archive. The close **reason** is the machine-readable form of the same distinction: `gh issue close --reason` accepts only `completed` and `not planned`, so **`duplicate` must be set through the API** — `gh api repos/OWNER/REPO/issues/N -X PATCH -f state=closed -f state_reason=duplicate` — or via "Mark as duplicate" in the web UI, which additionally records a duplicate-of link.
 - If new tasks are discovered or requested during development, create issues and add them to the board.
 
 ### Triaging unboarded issues
@@ -246,32 +261,42 @@ Sweeping in the unboarded issues is only the most visible defect class. A board 
 | Wrong board for label | `v1` → #11, `v2` → #28 | Move the card to the right board |
 | No version label | Every issue carries exactly one of `v1`/`v2` | Apply it (`v2` unless it's a fix for released v1 behavior) |
 | No Priority (#28) | Every board item is prioritized | Score it with the [rubric](#setting-issue-priority) |
+| Closed, not shipped, still carded | **Done means the work shipped** — a card closed as duplicate/not-planned is deleted, not parked | Delete the card (`gh project item-delete`) |
 
 ```sh
 D=$(mktemp -d); R=modelcontextprotocol/inspector
-gh issue list --repo $R --state open --limit 1000 --json number,labels,milestone > "$D/i.json"
+# --limit must exceed the repo's TOTAL issue count (884 as of 2026-08-05), not just the open ones —
+# the last check below reads closed issues' state reasons.
+gh issue list --repo $R --state all --limit 2000 \
+  --json number,state,stateReason,labels,milestone > "$D/i.json"
 for P in 28 11; do gh project item-list $P --owner modelcontextprotocol \
   --format json --limit 700 > "$D/b$P.json"; done
 jq -nr --slurpfile o "$D/i.json" --slurpfile a "$D/b28.json" --slurpfile b "$D/b11.json" --arg R "$R" '
-  ($o[0] | map({key:(.number|tostring),
-                value:{lab:[.labels[].name], ms:(.milestone.title // null)}}) | from_entries) as $I
+  ($o[0] | map({key:(.number|tostring), value:{st:.state, sr:(.stateReason // ""),
+                lab:[.labels[].name], ms:(.milestone.title // null)}}) | from_entries) as $M
   | def own($s): [$s[].items[] | select(.content.repository==$R)];
+    def I($n): ($M[($n|tostring)] // null);
+    def ms($n): (I($n).ms // null);
+    def lab($n): (I($n).lab // []);
+    def isopen($n): (I($n).st == "OPEN");
+    def shipped($n): (I($n).sr == "COMPLETED");
     [own($a)[] | select(.content.type=="Issue") | {n:.content.number, s:.status, p:.priority}] as $B28
   | [own($b)[] | select(.content.type=="Issue") | {n:.content.number, s:.status}] as $B11
-  | def ms($n): ($I[($n|tostring)].ms // null);
-    def lab($n): ($I[($n|tostring)].lab // []);
-    def open($n): ($I[($n|tostring)] != null);
-  {
+  | {
     "double-boarded":        [$B28[].n | select(. as $n | [$B11[].n]|index($n))],
     "non-Issue on a board":  [(own($a)[], own($b)[]) | select(.content.type!="Issue") | .content.number],
     "no Status":             [($B28[], $B11[]) | select(.s==null) | .n],
     "Incoming w/ milestone": [($B28[], $B11[]) | select(.s=="Incoming" and ms(.n)!=null) | .n],
     "past Incoming, no ms":  [($B28[], $B11[]) | select(.s!=null and .s!="Incoming" and .s!="Done"
-                                                        and open(.n) and ms(.n)==null) | .n],
-    "v1 label on #28":       [$B28[] | select(lab(.n)|index("v1")) | .n],
-    "v2 label on #11":       [$B11[] | select(lab(.n)|index("v2")) | .n],
-    "open, no version label":[$o[0][] | select(([.labels[].name]|index("v1") or index("v2"))|not) | .number],
-    "#28 open, no Priority": [$B28[] | select(.p==null and open(.n)) | .n]
+                                                        and isopen(.n) and ms(.n)==null) | .n],
+    "v1 label on #28":       [$B28[] | select(isopen(.n) and (lab(.n)|index("v1"))) | .n],
+    "v2 label on #11":       [$B11[] | select(isopen(.n) and (lab(.n)|index("v2"))) | .n],
+    "open, no version label":[$o[0][] | select(.state=="OPEN")
+                              | select(([.labels[].name]|index("v1") or index("v2"))|not) | .number],
+    "#28 open, no Priority": [$B28[] | select(.p==null and isopen(.n)) | .n],
+    "closed unshipped, still carded":
+                             [($B28[], $B11[]) | select(I(.n)!=null and (isopen(.n)|not)
+                                                        and (shipped(.n)|not)) | .n]
   } | to_entries[] | "\(.value|length)\t\(.key)\t\(.value[0:10])"'
 ```
 
@@ -420,7 +445,7 @@ Status option IDs (`--single-select-option-id`) — **last verified 2026-08-01**
 | In Review | `159c8a02` |
 | Done | `259d6aab` |
 
-Use **Incoming** for an issue that arrived unboarded and is awaiting review (no milestone yet), **Todo** once a maintainer has approved it by assigning a milestone — including an issue you created through the documented flow, which starts here — **In Progress** for general active work (regardless of surface), **In Review** once a PR is open, and **Done** on merge. The Incoming/Todo line is the one that matters: Todo asserts approval, so an unreviewed issue parked there is a false claim that someone signed off on it. The milestone is the machine-checkable form of that claim — Incoming ⇔ no milestone, everything past it ⇔ milestoned.
+Use **Incoming** for an issue that arrived unboarded and is awaiting review (no milestone yet), **Todo** once a maintainer has approved it by assigning a milestone — including an issue you created through the documented flow, which starts here — **In Progress** for general active work (regardless of surface), **In Review** once a PR is open, and **Done** on merge — and *only* on merge (or a parent's last sub-issue closing). An issue closed for any other reason has its **card deleted**, because [Done asserts the work shipped](#issue-driven-work-style). The Incoming/Todo line is the one that matters: Todo asserts approval, so an unreviewed issue parked there is a false claim that someone signed off on it. The milestone is the machine-checkable form of that claim — Incoming ⇔ no milestone, everything past it ⇔ milestoned.
 
 Priority option IDs (`--single-select-option-id`) — **last verified 2026-08-01**. Derive the level with the rubric in [Setting issue priority](#setting-issue-priority); don't eyeball it.
 
