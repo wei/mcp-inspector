@@ -132,7 +132,7 @@ Each config below is a ready-made server for exercising one feature by hand. Loa
 
 | Config                                    | Demonstrates                                       | Issue                                                                  |
 | ----------------------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------- |
-| `mcp-app-http.json`                       | An MCP App (UI resource + app tool) in the Apps tab | [#1859](https://github.com/modelcontextprotocol/inspector/issues/1859) |
+| `mcp-app-http.json` **(legacy era)**      | An MCP App (UI resource + app tool) in the Apps tab | [#1859](https://github.com/modelcontextprotocol/inspector/issues/1859) |
 | `modern-mrtr-http.json`                   | A single MRTR round-trip                           | —                                                                      |
 | `mrtr-showcase-http.json`                 | Every MRTR preset in one server                    | —                                                                      |
 | `modern-network-http.json`                | Network tab: `Mcp-*` headers + error taxonomy      | [#1628](https://github.com/modelcontextprotocol/inspector/issues/1628) |

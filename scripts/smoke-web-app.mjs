@@ -83,8 +83,10 @@ const sandboxProxyPage = join(
 );
 
 const HOST = "127.0.0.1";
-// Distinct from the other web smokes' ports so back-to-back runs can't collide.
-const PORT = process.env.SMOKE_WEB_APP_PORT ?? "6299";
+// Distinct from smoke:web (6299) and smoke:web:browser (6298) so a prior smoke
+// whose port is still bound — slow teardown, TIME_WAIT, or a parallel run —
+// can't EADDRINUSE this one. The three run back-to-back in `npm run smoke`.
+const PORT = process.env.SMOKE_WEB_APP_PORT ?? "6297";
 const TOKEN = "smoke-web-app-token";
 const APP_TOOL = "mcp_app_demo";
 // The URL the test server announces on startup. NOT derived from the config's
