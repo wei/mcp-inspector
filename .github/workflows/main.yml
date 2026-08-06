@@ -93,9 +93,11 @@ jobs:
         # CLI/web). Not part of any client's `validate`: it needs the
         # cli/tui/launcher bundles, which `validate` above already built
         # (smoke:web builds clients/web/dist on demand — #1486). smoke:web:browser
-        # boots the prod web bundle in headless chromium (#1615). smoke:tui
-        # self-skips here — the Ink TUI needs a real TTY (raw mode) that headless
-        # CI lacks, so its boot/render check is local-only.
+        # boots the prod web bundle in headless chromium (#1615); smoke:web:app
+        # goes further and drives connect → open app → widget ready against a
+        # composable MCP App server (#1859). Both reuse the chromium installed
+        # above. smoke:tui self-skips here — the Ink TUI needs a real TTY (raw
+        # mode) that headless CI lacks, so its boot/render check is local-only.
         run: npm run smoke
 
       - name: Run Storybook play-function tests
