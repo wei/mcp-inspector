@@ -166,12 +166,25 @@ async function startMcpServer() {
   child.stdout.on("data", (d) => (out += d));
   child.stderr.on("data", (d) => (out += d));
   let exited = false;
+  let spawnError = null;
+  // A spawn failure (e.g. an unbuilt/renamed entry) emits `error`, NOT `exit` —
+  // and with no `error` listener Node throws it uncaught, replacing this smoke's
+  // diagnostic with a raw stack. `close` is listened to alongside `exit` for the
+  // same reason: it fires in cases `exit` does not, so a child that dies without
+  // an exit event can't leave the poll below spinning for the full 30s.
+  child.on("error", (err) => (spawnError = err));
   child.on("exit", () => (exited = true));
+  child.on("close", () => (exited = true));
 
   for (let attempt = 0; attempt < 120; attempt++) {
     // Take the port the server actually bound, not the one we asked for.
     const announced = out.match(/listening at (http:\/\/\S+)/i);
     if (announced) return { child, url: announced[1] };
+    if (spawnError) {
+      throw new Error(
+        `could not spawn the MCP test server (${composableServer}): ${spawnError.message}`,
+      );
+    }
     if (exited) throw new Error(`MCP test server exited early:\n${out}`);
     await delay(250);
   }
