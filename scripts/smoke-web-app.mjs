@@ -89,6 +89,12 @@ const HOST = "127.0.0.1";
 const PORT = process.env.SMOKE_WEB_APP_PORT ?? "6297";
 const TOKEN = "smoke-web-app-token";
 const APP_TOOL = "mcp_app_demo";
+// Console messages that are the async half of the uncaught-crash class (an
+// unhandled rejection or a failed dynamic import). Hard failures; every other
+// console error is a diagnostic, so benign font-CDN / React-warning noise can't
+// flake CI. Kept identical to smoke-web-browser.mjs, which documents the
+// reasoning at length.
+const FATAL_CONSOLE = /^Uncaught\b|Failed to fetch dynamically imported module/;
 // The URL the test server announces on startup. NOT derived from the config's
 // port: createTestServerHttp resolves its port with findAvailablePort(), which
 // walks UPWARD from the configured value when it's taken — so the config port is
@@ -219,10 +225,19 @@ try {
   browser = await loadChromium();
   const page = await browser.newPage();
 
+  // Uncaught *synchronous* page errors. Their *async* twin — an unhandled
+  // rejection or a failed dynamic import — is not a `pageerror`; Chromium
+  // reports it on the console channel instead, so both are captured and both
+  // are hard failures. Same split as smoke:web:browser; see FATAL_CONSOLE there.
   const pageErrors = [];
+  const consoleErrors = [];
   page.on("pageerror", (err) =>
     pageErrors.push(err instanceof Error ? err.message : String(err)),
   );
+  page.on("console", (msg) => {
+    if (msg.type() === "error") consoleErrors.push(msg.text());
+  });
+  const fatalConsole = () => consoleErrors.filter((m) => FATAL_CONSOLE.test(m));
 
   // Deep link: connect, switch to the Apps tab, pre-select the app tool, and
   // fire "Open App". autoConnect/autoOpen must equal the session token (CSRF
@@ -285,15 +300,33 @@ try {
   try {
     await Promise.race([server.whenChildExits(), drive()]);
   } catch (err) {
+    const diagnostics = [
+      ...pageErrors,
+      ...fatalConsole().map((m) => `console: ${m}`),
+    ];
     await fail(
       `${err instanceof Error ? err.message : String(err)}${
-        pageErrors.length ? ` — page errors: ${pageErrors.join("; ")}` : ""
+        diagnostics.length
+          ? ` — page diagnostics: ${diagnostics.join("; ")}`
+          : ""
       }`,
     );
   }
 
-  if (pageErrors.length > 0) {
-    await fail(`app logged uncaught error(s): ${pageErrors.join("; ")}`);
+  // Hard failures: any uncaught sync page error, plus the console errors that
+  // are the async half of the same class.
+  const fatal = [...pageErrors, ...fatalConsole()];
+  if (fatal.length > 0) {
+    await fail(`app logged uncaught error(s): ${fatal.join("; ")}`);
+  }
+
+  // Non-fatal console errors: surface them so a real problem isn't invisible,
+  // without failing on benign subresource/warning noise.
+  const benignConsole = consoleErrors.filter((m) => !FATAL_CONSOLE.test(m));
+  if (benignConsole.length > 0) {
+    console.log(
+      `smoke:web:app note — ${benignConsole.length} non-fatal console error(s): ${benignConsole.join("; ")}`,
+    );
   }
 
   console.log(
