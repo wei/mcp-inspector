@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
+import { SdkError, SdkErrorCode } from "@modelcontextprotocol/client";
 import type { Tool } from "@modelcontextprotocol/client";
 import type { InspectorServerSettings } from "@inspector/core/mcp/types.js";
 import { ManagedToolsState } from "@inspector/core/mcp/state/managedToolsState";
@@ -453,14 +454,76 @@ describe("ManagedToolsState", () => {
       expect(state.getError()?.message).toBe("just a string");
     });
 
-    it("attributes the failure to its Protocol entry", async () => {
-      client.setStatus("connected");
-      client.listAllTools.mockRejectedValueOnce(boom);
-      await expect(state.refresh()).rejects.toThrow(boom);
-      expect(client.markResponseRejected).toHaveBeenCalledWith(
-        "tools/list",
-        boom.message,
+    // Only a decode rejection may be attributed to a Protocol entry. The id is
+    // recovered as "the last response for this method", which is the failing
+    // exchange ONLY when a response actually arrived and was refused — see
+    // isClientDecodeRejection.
+    describe("Protocol-entry attribution", () => {
+      const decodeRejection = new SdkError(
+        SdkErrorCode.InvalidResult,
+        "Invalid result for tools/list: ttlMs required",
       );
+
+      it("attributes a decode rejection to its Protocol entry", async () => {
+        client.setStatus("connected");
+        client.listAllTools.mockRejectedValueOnce(decodeRejection);
+        await expect(state.refresh()).rejects.toThrow(decodeRejection);
+        expect(client.markResponseRejected).toHaveBeenCalledWith(
+          "tools/list",
+          decodeRejection.message,
+        );
+      });
+
+      it("attributes an unsupported resultType too", async () => {
+        client.setStatus("connected");
+        client.listAllTools.mockRejectedValueOnce(
+          new SdkError(SdkErrorCode.UnsupportedResultType, "unknown type"),
+        );
+        await expect(state.refresh()).rejects.toThrow();
+        expect(client.markResponseRejected).toHaveBeenCalledWith(
+          "tools/list",
+          "unknown type",
+        );
+      });
+
+      // The regression this guard exists for: no response frame arrived, so the
+      // last-answered id still points at an EARLIER successful call. Marking it
+      // would stamp "Rejected by the Inspector" onto an exchange that worked.
+      it("does NOT attribute a transport failure", async () => {
+        client.setStatus("connected");
+        client.listAllTools.mockRejectedValueOnce(
+          new SdkError(SdkErrorCode.ConnectionClosed, "Connection closed"),
+        );
+        await expect(state.refresh()).rejects.toThrow();
+        expect(client.markResponseRejected).not.toHaveBeenCalled();
+      });
+
+      it("does NOT attribute a request timeout", async () => {
+        client.setStatus("connected");
+        client.listAllTools.mockRejectedValueOnce(
+          new SdkError(SdkErrorCode.RequestTimeout, "Request timed out"),
+        );
+        await expect(state.refresh()).rejects.toThrow();
+        expect(client.markResponseRejected).not.toHaveBeenCalled();
+      });
+
+      // A real response, so the id would be right — but the failure is the
+      // server's, and its entry already renders as an error from the error
+      // frame. Blaming the Inspector would misattribute the cause.
+      it("does NOT attribute a plain (non-SDK) error", async () => {
+        client.setStatus("connected");
+        client.listAllTools.mockRejectedValueOnce(boom);
+        await expect(state.refresh()).rejects.toThrow(boom);
+        expect(client.markResponseRejected).not.toHaveBeenCalled();
+      });
+
+      it("still records every failure as state, attributed or not", async () => {
+        client.setStatus("connected");
+        client.listAllTools.mockRejectedValueOnce(boom);
+        await expect(state.refresh()).rejects.toThrow(boom);
+        expect(state.getError()).toBe(boom);
+        expect(client.markResponseRejected).not.toHaveBeenCalled();
+      });
     });
 
     it("clears the error once a refresh succeeds", async () => {

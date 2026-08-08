@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
+import { SdkError, SdkErrorCode } from "@modelcontextprotocol/client";
 import type { Prompt } from "@modelcontextprotocol/client";
 import type { InspectorServerSettings } from "@inspector/core/mcp/types.js";
 import { ManagedPromptsState } from "@inspector/core/mcp/state/managedPromptsState";
@@ -289,7 +290,7 @@ describe("ManagedPromptsState", () => {
   // pins THIS list's method string, which is what attributes a failure to the
   // right Protocol entry (#1953).
   it("records a failed load and attributes it to prompts/list", async () => {
-    const boom = new Error("nope");
+    const boom = new SdkError(SdkErrorCode.InvalidResult, "nope");
     client.setStatus("connected");
     client.listAllPrompts.mockRejectedValueOnce(boom);
 
