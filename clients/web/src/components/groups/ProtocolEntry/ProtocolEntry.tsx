@@ -220,12 +220,16 @@ function extractResourceUri(entry: MessageEntry): string | undefined {
 function extractStatus(
   entry: MessageEntry,
 ): "success" | "error" | "pending" | "none" {
+  // A response the CLIENT refused is an error whichever entry carries it, so
+  // this is checked BEFORE the request-only lifecycle below (#1953).
+  // messageLogState annotates the request entry when the response was folded
+  // into one, but falls back to the standalone response frame when there was
+  // no matching request (a trimmed log, or a reconnect boundary) — and that
+  // entry would otherwise fall straight through to "none" and render no badge.
+  if (entry.clientError) return "error";
   if (entry.direction !== "request") return "none";
   if (!entry.response) return "pending";
   if ("error" in entry.response) return "error";
-  // The server answered with a valid result the CLIENT then refused (#1953).
-  // The call failed, so the entry must not read as a success.
-  if (entry.clientError) return "error";
   return "success";
 }
 

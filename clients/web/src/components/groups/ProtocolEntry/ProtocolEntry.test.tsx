@@ -756,6 +756,41 @@ describe("ProtocolEntry — client-rejected response", () => {
     expect(screen.getByText(REASON)).toBeInTheDocument();
   });
 
+  // messageLogState falls back to the standalone response frame when no request
+  // entry was there to fold into (a trimmed log, or a reconnect boundary). That
+  // entry is not `direction: "request"`, so the request-only status lifecycle
+  // would have rendered it without any badge at all.
+  const rejectedStandaloneResponse: MessageEntry = {
+    id: "rej-standalone",
+    timestamp: new Date("2026-07-28T10:00:00Z"),
+    direction: "response",
+    origin: "server",
+    message: {
+      jsonrpc: "2.0",
+      id: 11,
+      result: { resultType: "complete", tools: [] },
+    },
+    clientError: REASON,
+  };
+
+  it("renders Error on a rejected standalone response entry", () => {
+    renderWithMantine(
+      <ProtocolEntry {...baseProps} entry={rejectedStandaloneResponse} />,
+    );
+    expect(screen.getByText("Error")).toBeInTheDocument();
+  });
+
+  it("still renders no status badge on an unrejected standalone response", () => {
+    const clean: MessageEntry = {
+      ...rejectedStandaloneResponse,
+      clientError: undefined,
+    };
+    renderWithMantine(<ProtocolEntry {...baseProps} entry={clean} />);
+    expect(screen.queryByText("Error")).not.toBeInTheDocument();
+    expect(screen.queryByText("OK")).not.toBeInTheDocument();
+    expect(screen.queryByText("Pending")).not.toBeInTheDocument();
+  });
+
   it("shows no rejection alert on an ordinary success", () => {
     renderWithMantine(
       <ProtocolEntry {...baseProps} entry={successEntry} isListExpanded />,
