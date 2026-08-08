@@ -1581,6 +1581,17 @@ export class InspectorClient extends InspectorClientEventTarget {
     this.clearReceiverTasks();
     this.resetSubscriptionStream();
     this.cancelledTaskIds.clear();
+    // Correlation data is per-session: JSON-RPC ids don't survive it, and
+    // MessageLogState drops its entries on disconnect, so anything left here
+    // could only point at an entry that no longer exists. Clearing also
+    // releases the ids of requests that never got a response (a timeout, a
+    // dropped connection) — the only entries `trackResponse` can't remove, so
+    // without this they accumulate across reconnects. Cleared here on the
+    // start-clean path rather than in `disconnect()` for the reason documented
+    // above: one route out (`onerror` with no `onclose`) tears down nothing
+    // (#1953).
+    this.outboundRequestMethods.clear();
+    this.lastAnsweredRequestByMethod.clear();
     for (const [, controller] of this.taskInputAbortControllers) {
       controller.abort(new Error("Connection ended"));
     }

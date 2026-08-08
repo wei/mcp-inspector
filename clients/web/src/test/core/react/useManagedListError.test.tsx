@@ -84,4 +84,29 @@ describe("useManagedListError", () => {
     await expect(state.refresh()).rejects.toThrow(boom);
     expect(state.getError()).toBe(boom);
   });
+
+  // The useState+useEffect subscribe pattern would render one frame carrying
+  // the PREVIOUS store's error here, before the effect re-synced. With
+  // useSyncExternalStore the snapshot is read during render, so the swap lands
+  // in the same frame — asserted immediately after rerender, with no waitFor
+  // and no act() flush, which is what makes it a regression test rather than a
+  // restatement of eventual consistency.
+  it("reflects a store swap in the same frame", async () => {
+    client.listAllTools.mockRejectedValueOnce(boom);
+    await expect(state.refresh()).rejects.toThrow(boom);
+
+    const other = new ManagedToolsState(client, 0);
+
+    const { result, rerender } = renderHook(
+      ({ s }: { s: ManagedToolsState }) => useManagedListError(s),
+      { initialProps: { s: state } },
+    );
+    expect(result.current).toBe(boom);
+
+    rerender({ s: other });
+    expect(result.current).toBeNull();
+
+    rerender({ s: state });
+    expect(result.current).toBe(boom);
+  });
 });
