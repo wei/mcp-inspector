@@ -201,5 +201,6 @@ The CLI and TUI do not perform catalog CRUD yet — they are read consumers — 
 
 ## Related
 
+- [Migrating from v1 to v2](./v1-to-v2-migration.md) — why `--config` means something narrower than it did in v1, and what `--catalog` replaced.
 - [Launcher and config consolidation](./launcher-config-consolidation-plan.md) — how the launcher and the shared config processor fit together.
 - [Reviewing an MCP App](./mcp-app-review.md) — the CLI-first App review recipe.
