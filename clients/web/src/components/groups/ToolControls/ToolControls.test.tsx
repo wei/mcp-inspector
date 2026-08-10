@@ -204,6 +204,91 @@ describe("ToolControls", () => {
     expect(onRefreshList).toHaveBeenCalledTimes(1);
   });
 
+  // A server may legitimately return the same tool name twice; keying rows by
+  // name alone collides, and React then reuses the stale row instead of
+  // unmounting it when the filter narrows (#1957).
+  const duplicateNameTools: Tool[] = [
+    {
+      name: "get_record",
+      title: "Get Record First",
+      inputSchema: { type: "object" },
+    },
+    {
+      name: "duplicate_tool",
+      title: "First Duplicate",
+      inputSchema: { type: "object" },
+    },
+    {
+      name: "unrelated_tool",
+      title: "Unrelated Tool First",
+      inputSchema: { type: "object" },
+    },
+    {
+      name: "duplicate_tool",
+      title: "Second Duplicate",
+      inputSchema: { type: "object" },
+    },
+    {
+      name: "get_record",
+      title: "Get Record Second",
+      inputSchema: { type: "object" },
+    },
+    {
+      name: "unrelated_tool",
+      title: "Unrelated Tool Second",
+      inputSchema: { type: "object" },
+    },
+  ];
+
+  it("removes every non-matching row when tool names repeat (#1957)", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<ControlledToolControls tools={duplicateNameTools} />);
+
+    await user.type(screen.getByPlaceholderText("Search tools..."), "get");
+
+    expect(screen.getByText("Get Record First")).toBeInTheDocument();
+    expect(screen.getByText("Get Record Second")).toBeInTheDocument();
+    for (const stale of [
+      "First Duplicate",
+      "Second Duplicate",
+      "Unrelated Tool First",
+      "Unrelated Tool Second",
+    ]) {
+      expect(screen.queryByText(stale)).not.toBeInTheDocument();
+    }
+  });
+
+  it("removes every non-matching excluded row when names repeat (#1957)", async () => {
+    const user = userEvent.setup();
+    const duplicateExcluded = [
+      {
+        tool: { name: "get_thing", inputSchema: { type: "object" as const } },
+        reason: "a",
+      },
+      {
+        tool: { name: "dupe", inputSchema: { type: "object" as const } },
+        reason: "b",
+      },
+      {
+        tool: { name: "dupe", inputSchema: { type: "object" as const } },
+        reason: "c",
+      },
+      {
+        tool: { name: "get_other", inputSchema: { type: "object" as const } },
+        reason: "d",
+      },
+    ];
+    renderWithMantine(
+      <ControlledToolControls tools={[]} excludedTools={duplicateExcluded} />,
+    );
+
+    await user.type(screen.getByPlaceholderText("Search tools..."), "get");
+
+    expect(screen.getByText("get_thing")).toBeInTheDocument();
+    expect(screen.getByText("get_other")).toBeInTheDocument();
+    expect(screen.queryByText("dupe")).not.toBeInTheDocument();
+  });
+
   it("renders no load error by default", () => {
     renderWithMantine(<ToolControls {...baseProps} />);
     expect(screen.queryByText(/Couldn't load/)).not.toBeInTheDocument();
