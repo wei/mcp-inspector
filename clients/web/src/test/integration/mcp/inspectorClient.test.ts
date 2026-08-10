@@ -95,6 +95,29 @@ async function getTool(client: InspectorClient, name: string): Promise<Tool> {
   throw new Error(`Tool ${name} not found`);
 }
 
+/**
+ * Hold a deliberately un-awaited in-flight call so its rejection is handled.
+ *
+ * A few tests start a tool call, assert on the notifications it streams, and
+ * then tear the connection down while the call is still in flight. That is a
+ * legitimate thing to exercise, but `disconnect()` closes the SDK client, which
+ * rejects every pending request with "Connection closed" — and a floating
+ * promise makes that an *unhandled* rejection, which vitest counts as a run
+ * error and fails `npm run ci` even though every test passes (#1947).
+ *
+ * Attach the handler at call time (not after the assertions) so there is no
+ * window in which the rejection can escape, and `await` the returned promise
+ * after `disconnect()` so teardown stays ordered. The call may legitimately
+ * either settle before the teardown or reject with it, so neither outcome is
+ * asserted here.
+ */
+function settleInFlight(call: Promise<unknown>): Promise<void> {
+  return call.then(
+    () => undefined,
+    () => undefined,
+  );
+}
+
 /** Get all resources from the client via listResources() (paginates if needed). */
 async function getAllResources(
   client: InspectorClient,
@@ -2221,16 +2244,18 @@ describe("InspectorClient", () => {
       const progressToken = 12345;
 
       const sendProgressTool = await getTool(client, "send_progress");
-      client.callTool(
-        sendProgressTool,
-        {
-          units: 3,
-          delayMs: 50,
-          total: 3,
-          message: "Test progress",
-        },
-        undefined, // generalMetadata
-        { progressToken: progressToken.toString() }, // toolSpecificMetadata
+      const inFlight = settleInFlight(
+        client.callTool(
+          sendProgressTool,
+          {
+            units: 3,
+            delayMs: 50,
+            total: 3,
+            message: "Test progress",
+          },
+          undefined, // generalMetadata
+          { progressToken: progressToken.toString() }, // toolSpecificMetadata
+        ),
       );
 
       const progressEvents = await waitForProgressCount(client, 3, {
@@ -2262,6 +2287,7 @@ describe("InspectorClient", () => {
       });
 
       await client!.disconnect();
+      await inFlight;
       await server.stop();
     });
 
@@ -2349,15 +2375,17 @@ describe("InspectorClient", () => {
       const progressToken = 67890;
 
       const sendProgressTool2 = await getTool(client, "send_progress");
-      client.callTool(
-        sendProgressTool2,
-        {
-          units: 2,
-          delayMs: 50,
-          message: "Indeterminate progress",
-        },
-        undefined, // generalMetadata
-        { progressToken: progressToken.toString() }, // toolSpecificMetadata
+      const inFlight = settleInFlight(
+        client.callTool(
+          sendProgressTool2,
+          {
+            units: 2,
+            delayMs: 50,
+            message: "Indeterminate progress",
+          },
+          undefined, // generalMetadata
+          { progressToken: progressToken.toString() }, // toolSpecificMetadata
+        ),
       );
 
       const progressEvents = await waitForProgressCount(client, 2, {
@@ -2380,6 +2408,7 @@ describe("InspectorClient", () => {
       expect((progressEvents[1] as { total?: number }).total).toBeUndefined();
 
       await client!.disconnect();
+      await inFlight;
       await server.stop();
     });
 
