@@ -107,14 +107,27 @@ async function getTool(client: InspectorClient, name: string): Promise<Tool> {
  *
  * Attach the handler at call time (not after the assertions) so there is no
  * window in which the rejection can escape, and `await` the returned promise
- * after `disconnect()` so teardown stays ordered. The call may legitimately
- * either settle before the teardown or reject with it, so neither outcome is
- * asserted here.
+ * after `disconnect()` so teardown stays ordered.
+ *
+ * Only the teardown's own `CONNECTION_CLOSED` rejection is absorbed. Plain
+ * fulfillment is fine too — whether the call beats the teardown is a race, so
+ * asserting either outcome would turn this straight back into a flake. Any
+ * *other* rejection is re-thrown, so a call that fails for a real reason still
+ * fails the test instead of passing on the strength of the progress
+ * notifications it managed to emit first.
  */
 function settleInFlight(call: Promise<unknown>): Promise<void> {
   return call.then(
     () => undefined,
-    () => undefined,
+    (error: unknown) => {
+      if (
+        error instanceof SdkError &&
+        error.code === SdkErrorCode.ConnectionClosed
+      ) {
+        return;
+      }
+      throw error;
+    },
   );
 }
 
