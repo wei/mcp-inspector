@@ -106,21 +106,33 @@ async function getTool(client: InspectorClient, name: string): Promise<Tool> {
  * error and fails `npm run ci` even though every test passes (#1947).
  *
  * Attach the handler at call time (not after the assertions) so there is no
- * window in which the rejection can escape, and `await` the returned promise
- * after `disconnect()` so teardown stays ordered.
+ * window in which the rejection can escape, then finish through
+ * `disconnectAndSettle()`, which tears down and awaits the call in one step.
  *
- * Only the teardown's own `CONNECTION_CLOSED` rejection is absorbed. Plain
+ * Only a `CONNECTION_CLOSED` raised *by that teardown* is absorbed. Plain
  * fulfillment is fine too — whether the call beats the teardown is a race, so
- * asserting either outcome would turn this straight back into a flake. Any
- * *other* rejection is re-thrown, so a call that fails for a real reason still
- * fails the test instead of passing on the strength of the progress
- * notifications it managed to emit first.
+ * asserting either outcome would turn this straight back into a flake. Every
+ * other rejection is re-thrown, including a `CONNECTION_CLOSED` that arrives
+ * before teardown begins: a transport that drops on its own after emitting the
+ * progress notifications is a real regression, and absorbing it would let these
+ * tests pass on the strength of the notifications alone.
+ *
+ * The teardown flag is owned by the helper and set inside `disconnectAndSettle`
+ * rather than by the caller, so the flag cannot be raised too early (which would
+ * reopen the hole) and the await cannot be forgotten.
  */
-function settleInFlight(call: Promise<unknown>): Promise<void> {
+interface InFlightCall {
+  /** Disconnect, then await the call — absorbing only this teardown's close. */
+  disconnectAndSettle(client: InspectorClient): Promise<void>;
+}
+
+function settleInFlight(call: Promise<unknown>): InFlightCall {
+  let tearingDown = false;
   const settled = call.then(
     () => undefined,
     (error: unknown) => {
       if (
+        tearingDown &&
         error instanceof SdkError &&
         error.code === SdkErrorCode.ConnectionClosed
       ) {
@@ -135,9 +147,15 @@ function settleInFlight(call: Promise<unknown>): Promise<void> {
   // notifications would sit unobserved for seconds and be reported as an
   // unhandled rejection: precisely the failure this helper exists to prevent.
   // Observe it the moment it exists. This does not swallow anything — `settled`
-  // stays rejected, so the caller's `await` still fails the test.
+  // stays rejected, so the caller's `await` below still fails the test.
   settled.catch(() => undefined);
-  return settled;
+  return {
+    async disconnectAndSettle(client: InspectorClient): Promise<void> {
+      tearingDown = true;
+      await client.disconnect();
+      await settled;
+    },
+  };
 }
 
 /** Get all resources from the client via listResources() (paginates if needed). */
@@ -2308,8 +2326,7 @@ describe("InspectorClient", () => {
         progressToken: progressToken.toString(),
       });
 
-      await client!.disconnect();
-      await inFlight;
+      await inFlight.disconnectAndSettle(client!);
       await server.stop();
     });
 
@@ -2429,8 +2446,7 @@ describe("InspectorClient", () => {
       });
       expect((progressEvents[1] as { total?: number }).total).toBeUndefined();
 
-      await client!.disconnect();
-      await inFlight;
+      await inFlight.disconnectAndSettle(client!);
       await server.stop();
     });
 
