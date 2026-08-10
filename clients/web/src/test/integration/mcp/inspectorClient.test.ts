@@ -117,7 +117,7 @@ async function getTool(client: InspectorClient, name: string): Promise<Tool> {
  * notifications it managed to emit first.
  */
 function settleInFlight(call: Promise<unknown>): Promise<void> {
-  return call.then(
+  const settled = call.then(
     () => undefined,
     (error: unknown) => {
       if (
@@ -129,6 +129,15 @@ function settleInFlight(call: Promise<unknown>): Promise<void> {
       throw error;
     },
   );
+  // `then` returns a *derived* promise, and the re-throw above rejects that one
+  // — not `call`. The caller does not await it until after `disconnect()`, so an
+  // unexpected rejection arriving while the test is still waiting on progress
+  // notifications would sit unobserved for seconds and be reported as an
+  // unhandled rejection: precisely the failure this helper exists to prevent.
+  // Observe it the moment it exists. This does not swallow anything — `settled`
+  // stays rejected, so the caller's `await` still fails the test.
+  settled.catch(() => undefined);
+  return settled;
 }
 
 /** Get all resources from the client via listResources() (paginates if needed). */
