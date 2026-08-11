@@ -149,4 +149,28 @@ describe("AppDetailPanel", () => {
     await user.click(screen.getByRole("button", { name: /open app/i }));
     expect(onOpenApp).toHaveBeenCalledTimes(1);
   });
+
+  it("drops a previous app's in-progress number text when the app changes", async () => {
+    const user = userEvent.setup();
+    // AppsScreen swaps selectedAppName + formValues in place rather than
+    // remounting this panel, so two apps exposing a same-named number field
+    // share the field component. Both values here are undefined, which the
+    // draft/value re-sync cannot distinguish — only the resetKey identity can.
+    const numberFieldTool = (name: string): Tool => ({
+      name,
+      title: name,
+      inputSchema: {
+        type: "object",
+        properties: { scale: { type: "number", title: "Scale" } },
+      },
+    });
+    const { rerender } = renderWithMantine(
+      <AppDetailPanel {...baseProps} tool={numberFieldTool("app_a")} />,
+    );
+    const input = () => screen.getByLabelText(/Scale/) as HTMLInputElement;
+    await user.type(input(), "-");
+    expect(input().value).toBe("-");
+    rerender(<AppDetailPanel {...baseProps} tool={numberFieldTool("app_b")} />);
+    expect(input().value).toBe("");
+  });
 });

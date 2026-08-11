@@ -76,6 +76,12 @@ export function AppDetailPanel({
           values={formValues}
           onChange={onFormChange}
           disabled={isOpening}
+          // Like ToolDetailPanel, this panel is reused across app selections
+          // rather than remounted (AppsScreen.handleSelect swaps
+          // selectedAppName + formValues in place), so the form needs the app
+          // tool's name to drop another app's in-progress field text. See
+          // SchemaFormProps.resetKey.
+          resetKey={tool.name}
         />
 
         <OpenAppButton
