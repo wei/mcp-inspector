@@ -43,8 +43,9 @@
     "verify:build-gate": "node scripts/verify-build-gate.mjs",
     "verify:typecheck-coverage": "node scripts/verify-typecheck-coverage.mjs",
     "test:scripts": "node --test \"scripts/**/*.test.mjs\"",
-    "validate": "npm run verify:format-coverage && npm run verify:typecheck-coverage && npm run test:scripts && npm run validate:core && npm run validate:web && npm run validate:cli && npm run validate:tui && npm run validate:launcher",
+    "validate": "npm run verify:format-coverage && npm run verify:typecheck-coverage && npm run verify:dep-lockstep && npm run test:scripts && npm run validate:core && npm run validate:web && npm run validate:cli && npm run validate:tui && npm run validate:launcher",
     "verify:format-coverage": "node scripts/verify-format-coverage.mjs",
+    "verify:dep-lockstep": "node scripts/verify-dep-lockstep.mjs",
     "validate:core": "npm run format:check:core && npm run format:check:scripts && npm run format:check:shared && npm run lint:core && npm run lint:shared",
     "lint:core": "eslint \"core/**/*.{ts,tsx}\"",
     "lint:shared": "eslint \"test-servers/src/**/*.{ts,tsx,mts,cts}\" vitest.shared.mts eslint.config.js",
@@ -98,7 +99,7 @@
     "undici": "^8.5.0",
     "vite": "^8.1.5",
     "yaml": "^2.9.0",
-    "zod": "^4.3.6"
+    "zod": "^4.4.3"
   },
   "overrides": {
     "ink-select-input": "^6.2.0"

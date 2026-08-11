@@ -166,15 +166,16 @@ function trackedSourceFiles() {
   return out.split("\n").filter(Boolean);
 }
 
-// Vouch for the sibling guard: a guard can't detect being unrun itself, but the
-// two coverage guards can each assert the other is still wired into `validate`,
-// so dropping either is caught here. Only deleting both slips through.
+// Vouch for the sibling guards: a guard can't detect being unrun itself, but the
+// three can each assert the others are still wired into `validate`, so dropping
+// any one is caught here. Only deleting all of them slips through.
 const rootScripts = JSON.parse(
   readFileSync(path.join(repoRoot, "package.json"), "utf8"),
 ).scripts;
-if (!rootReachesScript(rootScripts, "verify:typecheck-coverage")) {
+for (const sibling of ["verify:typecheck-coverage", "verify:dep-lockstep"]) {
+  if (rootReachesScript(rootScripts, sibling)) continue;
   console.error(
-    "verify:format-coverage — the root `validate` no longer runs `verify:typecheck-coverage` (its sibling guard). Restore it.",
+    `verify:format-coverage — the root \`validate\` no longer runs \`${sibling}\` (its sibling guard). Restore it.`,
   );
   process.exit(1);
 }
