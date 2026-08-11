@@ -2,7 +2,11 @@ import { useState } from "react";
 import { describe, it, expect, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import type { InspectorFormSchema } from "../../../utils/jsonUtils";
-import { renderWithMantine, screen } from "../../../test/renderWithMantine";
+import {
+  fireEvent,
+  renderWithMantine,
+  screen,
+} from "../../../test/renderWithMantine";
 import { SchemaForm } from "./SchemaForm";
 
 describe("SchemaForm", () => {
@@ -330,6 +334,76 @@ describe("SchemaForm", () => {
       await user.type(input, "1.5");
       expect(input.value).toBe("15");
       expect(onChange).toHaveBeenLastCalledWith({ count: 15 });
+    });
+
+    it("drops in-progress text when resetKey moves the form to another entity", async () => {
+      const user = userEvent.setup();
+      // Both "tools" expose the same-named number field with no default, so the
+      // value is `undefined` before and after the switch. The value comparison
+      // sees no divergence, and only resetKey can tell the field to start over.
+      const schema: InspectorFormSchema = {
+        type: "object",
+        properties: { divisor: { type: "number", title: "Divisor" } },
+      };
+      function Harness() {
+        const [tool, setTool] = useState("tool-a");
+        const [values, setValues] = useState<Record<string, unknown>>({});
+        return (
+          <>
+            <button
+              type="button"
+              onClick={() => {
+                setTool("tool-b");
+                // What ToolsScreen does on select: replace the form values.
+                setValues({});
+              }}
+            >
+              Switch tool
+            </button>
+            <SchemaForm
+              schema={schema}
+              values={values}
+              onChange={setValues}
+              resetKey={tool}
+            />
+          </>
+        );
+      }
+      renderWithMantine(<Harness />);
+      const input = () => screen.getByLabelText(/Divisor/) as HTMLInputElement;
+      await user.type(input(), "-");
+      expect(input().value).toBe("-");
+      // fireEvent, not user.click: a real click also blurs the input, and
+      // Mantine sanitizes an incomplete value on blur — which would mask
+      // whether the switch itself cleared the draft. This drives the state
+      // change without the blur, isolating the reset to resetKey.
+      fireEvent.click(screen.getByRole("button", { name: "Switch tool" }));
+      expect(input().value).toBe("");
+    });
+
+    it("keeps in-progress text across re-renders of the same entity", async () => {
+      const user = userEvent.setup();
+      // The counterpart to the test above: a stable resetKey must NOT remount
+      // the field, or every keystroke would wipe the draft and reinstate #1888.
+      const schema: InspectorFormSchema = {
+        type: "object",
+        properties: { divisor: { type: "number", title: "Divisor" } },
+      };
+      function Harness() {
+        const [values, setValues] = useState<Record<string, unknown>>({});
+        return (
+          <SchemaForm
+            schema={schema}
+            values={values}
+            onChange={setValues}
+            resetKey="tool-a"
+          />
+        );
+      }
+      renderWithMantine(<Harness />);
+      const input = screen.getByLabelText(/Divisor/) as HTMLInputElement;
+      await user.type(input, "1.5");
+      expect(input.value).toBe("1.5");
     });
 
     it("re-syncs the displayed text when the value changes externally", async () => {

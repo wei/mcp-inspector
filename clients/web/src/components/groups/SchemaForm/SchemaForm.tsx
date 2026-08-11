@@ -98,6 +98,11 @@ interface SchemaNumberInputProps {
  * parses to, which leaves an external reset (a cleared form, a loaded example)
  * working while an in-progress `"1."` — whose parse is `1`, matching the value we
  * just emitted — is left alone.
+ *
+ * That value comparison cannot see a reset to an *equal* value, so the caller is
+ * additionally expected to vary this component's React key via `SchemaForm`'s
+ * `resetKey` when it switches which entity the form edits. See the note on that
+ * prop for the case it covers.
  */
 function SchemaNumberInput({
   value,
@@ -129,6 +134,25 @@ export interface SchemaFormProps {
   values: Record<string, unknown>;
   onChange: (values: Record<string, unknown>) => void;
   disabled?: boolean;
+  /**
+   * Stable identity of whatever this form is editing — a tool name, a request
+   * id. Pass it whenever the same mounted form is reused for a *different*
+   * entity, which is the case for the Tools tab: `ToolDetailPanel` is not keyed
+   * by tool, so selecting another tool re-renders the same field components.
+   *
+   * It exists because the number field's draft/value re-sync compares parsed
+   * numbers, and so cannot detect a reset to an equal value. Type `-` (draft
+   * `"-"`, value `undefined`), then switch to a tool with a same-named number
+   * field and no default: the value is `undefined` on both sides, no divergence
+   * is seen, and the stale `-` would otherwise be left in the box for the new
+   * tool to continue from. Varying `resetKey` remounts the field instead, so no
+   * in-progress text can outlive the entity it was typed into.
+   *
+   * Omit it when the form is mounted fresh per entity (the elicitation panels),
+   * where unmounting already discards the draft. The schema object itself is no
+   * substitute — callers rebuild it every render, so its identity is unstable.
+   */
+  resetKey?: string;
 }
 
 function getDefaultValue(fieldSchema: InspectorFormSchema): unknown {
@@ -153,6 +177,7 @@ export function SchemaForm({
   values,
   onChange,
   disabled = false,
+  resetKey,
 }: SchemaFormProps) {
   const properties = schema.properties ?? {};
   const requiredFields = schema.required ?? [];
@@ -232,7 +257,9 @@ export function SchemaForm({
     if (fieldSchema.type === "number" || fieldSchema.type === "integer") {
       return (
         <SchemaNumberInput
-          key={fieldName}
+          // The only field holding local state, so the only one that has to be
+          // remounted when `resetKey` says the form moved to another entity.
+          key={resetKey === undefined ? fieldName : `${resetKey}:${fieldName}`}
           label={label}
           description={description}
           withAsterisk={isRequired}
@@ -318,6 +345,8 @@ export function SchemaForm({
                 handleFieldChange(fieldName, nestedValues)
               }
               disabled={disabled}
+              // Sub-fields belong to the same entity, so they reset with it.
+              resetKey={resetKey}
             />
           </IndentedStack>
         </Stack>
