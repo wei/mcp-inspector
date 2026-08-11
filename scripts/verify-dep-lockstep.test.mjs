@@ -16,6 +16,7 @@ import {
   partitionSkew,
   sourcesWithNoFiles,
   topLevelLockVersions,
+  typeReferencePackageNames,
 } from "./verify-dep-lockstep.mjs";
 
 test("isSharedSourceFile: all four TS extensions, not just .ts/.tsx", () => {
@@ -194,6 +195,41 @@ test("importedPackageNames: static, side-effect, and dynamic forms; builtins and
     "pino",
     "zod",
   ]);
+});
+
+test("importedPackageNames: triple-slash type references count (Copilot, #1962)", () => {
+  // A `/// <reference types="x" />` pulls in declarations exactly like an
+  // import, but TypeScript reports it in `typeReferenceDirectives`, not
+  // `importedFiles` — so reading only the latter let a referenced package skew
+  // unseen. `path` references name a file, not a package, and are ignored.
+  const source = [
+    '/// <reference types="node" />',
+    '/// <reference types="express" />',
+    '/// <reference path="./local.d.ts" />',
+    'import { z } from "zod";',
+  ].join("\n");
+  assert.deepEqual([...importedPackageNames(source)].sort(), [
+    "@types/express",
+    "@types/node",
+    "express",
+    "node",
+    "zod",
+  ]);
+});
+
+test("typeReferencePackageNames: both the bare and the @types form (Copilot, #1962)", () => {
+  // The directive names a *type*, not a package: `node` resolves to
+  // `@types/node`, while a package shipping its own declarations resolves to
+  // itself. Returning both over-approximates, the safe direction — whichever
+  // isn't installed drops out downstream.
+  assert.deepEqual(typeReferencePackageNames("node"), ["node", "@types/node"]);
+  // Scoped names mangle with a double underscore, TypeScript's convention.
+  assert.deepEqual(typeReferencePackageNames("@scope/pkg"), [
+    "@scope/pkg",
+    "@types/scope__pkg",
+  ]);
+  assert.deepEqual(typeReferencePackageNames("./relative"), []);
+  assert.deepEqual(typeReferencePackageNames(""), []);
 });
 
 test("importedPackageNames: prose in comments never becomes a package (Copilot, #1962)", () => {

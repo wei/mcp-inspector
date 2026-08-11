@@ -175,7 +175,30 @@ function typescript() {
 }
 
 /**
- * Every third-party package name imported by a blob of TypeScript source.
+ * The package(s) a `/// <reference types="x" />` directive can resolve to
+ * (Copilot, #1962). Such a directive pulls in declarations exactly like an
+ * import does, but TypeScript reports it separately from `importedFiles`, so
+ * reading only the latter would let a referenced package skew unseen.
+ *
+ * Both candidates are returned because the directive name is the *type* name,
+ * not the package: `node` resolves to `@types/node`, while a package shipping
+ * its own declarations resolves to itself. Returning both over-approximates,
+ * which is the safe direction — whichever isn't installed drops out. A scoped
+ * name mangles as `@scope/pkg` → `@types/scope__pkg`, TypeScript's convention.
+ */
+export function typeReferencePackageNames(directive) {
+  const name = packageNameOf(directive);
+  if (!name) return [];
+  const scoped = /^@([^/]+)\/(.+)$/.exec(name);
+  const typesName = scoped
+    ? `@types/${scoped[1]}__${scoped[2]}`
+    : `@types/${name}`;
+  return [name, typesName];
+}
+
+/**
+ * Every third-party package name whose declarations a blob of TypeScript source
+ * pulls in — via an import of any form, or a triple-slash type reference.
  * Over-approximating is safe (a name absent from every lockfile contributes
  * nothing downstream — `@inspector/core` is a build-time alias, not a package,
  * and drops out that way); under-approximating is not, since a missed package
@@ -185,11 +208,14 @@ export function importedPackageNames(source) {
   const names = new Set();
   // (source, readImportFiles, detectJavaScriptImports) — the latter two make it
   // report `require(…)` and dynamic imports as well as static ones.
-  const { importedFiles } = typescript().preProcessFile(source, true, true);
+  const { importedFiles, typeReferenceDirectives } =
+    typescript().preProcessFile(source, true, true);
   for (const { fileName } of importedFiles) {
     const name = packageNameOf(fileName);
     if (name) names.add(name);
   }
+  for (const { fileName } of typeReferenceDirectives ?? [])
+    for (const name of typeReferencePackageNames(fileName)) names.add(name);
   return names;
 }
 
