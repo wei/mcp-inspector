@@ -30,7 +30,12 @@ const TOKEN = "smoke-web-token";
 // literal because this plain .mjs script can't import the TS source.
 const TOKEN_GLOBAL = "__INSPECTOR_API_TOKEN__";
 
-const server = startProdWebServer({ host: HOST, port: PORT, token: TOKEN });
+const server = startProdWebServer({
+  host: HOST,
+  port: PORT,
+  token: TOKEN,
+  label: "smoke:web",
+});
 
 function fail(message) {
   console.error(`smoke:web FAILED — ${message}`);

@@ -78,7 +78,12 @@ const TOKEN = "smoke-web-browser-token";
 // the font/CDN flake.
 const FATAL_CONSOLE = /^Uncaught\b|Failed to fetch dynamically imported module/;
 
-const server = startProdWebServer({ host: HOST, port: PORT, token: TOKEN });
+const server = startProdWebServer({
+  host: HOST,
+  port: PORT,
+  token: TOKEN,
+  label: "smoke:web:browser",
+});
 let browser = null;
 
 async function shutdown() {
