@@ -138,6 +138,7 @@ Each config below is a ready-made server for exercising one feature by hand. Loa
 | `modern-network-http.json`                | Network tab: `Mcp-*` headers + error taxonomy      | [#1628](https://github.com/modelcontextprotocol/inspector/issues/1628) |
 | `xmcpheader-modern-http.json`             | Tools tab: `x-mcp-header` mirroring and exclusions | [#1632](https://github.com/modelcontextprotocol/inspector/issues/1632) |
 | `pagination-http.json`                    | Page-by-page list fetching                         | [#1721](https://github.com/modelcontextprotocol/inspector/issues/1721) |
+| `structured-output-http.json`             | Tools tab: a result's `structuredContent` section  | [#1908](https://github.com/modelcontextprotocol/inspector/issues/1908) |
 | `advertised-extensions-http.json`         | Tool registration gated on advertised extensions   | [#1739](https://github.com/modelcontextprotocol/inspector/issues/1739) |
 | `logging-{legacy,modern}-http.json`       | Logging, both eras                                 | [#1629](https://github.com/modelcontextprotocol/inspector/issues/1629) |
 | `subscriptions-{legacy,modern}-http.json` | Resource subscriptions, both eras                  | [#1630](https://github.com/modelcontextprotocol/inspector/issues/1630) |
@@ -205,6 +206,12 @@ Under SDK v2 a `tools/call` rejecting with `-32602` renders as a distinct error 
 `pagination-http.json` serves 12 tools, 12 resources, and 12 prompts (presets `numbered_tools` / `numbered_resources` / `numbered_prompts`, `count: 12`) with a `maxPageSize` of 4 each, so every list paginates into three pages.
 
 Turn on **"Fetch Lists One Page at a Time"** (Server Settings — the `paginatedLists` setting, or the **Paginated** switch in a list sidebar) and the lists load page 1 only (4 items) with a **Load next page** control and an _N pages loaded_ status. Each click fetches the next 4 and appends them; Refresh resets to page 1. With the switch off (the default), the same lists auto-aggregate all three pages on connect.
+
+#### Structured output
+
+`structured-output-http.json` serves `list_items` (nested `structuredContent` — objects inside arrays inside an object, the shape from [#1908](https://github.com/modelcontextprotocol/inspector/issues/1908)), `get_temp` (a flat three-key payload), and `echo` (no `outputSchema` at all). It is a plain streamable-HTTP server — connect with the **default (legacy)** protocol era.
+
+Run `list_items` from the Tools tab: the result panel shows the `content[]` text summary ("Found 2 items.") **and** a collapsible **Structured Output** section rendering the schema-validated payload as pretty-printed, copyable JSON. That section is what v2 was dropping — a tool declaring an `outputSchema` returns its real data there, and the text block usually only summarizes it. Run `echo` to confirm the section is absent when a result carries no `structuredContent`.
 
 #### Advertised extensions
 

@@ -1048,6 +1048,48 @@ export function createGetTempTool(): ToolDefinition {
   };
 }
 
+/** Output schema for list_items: a nested list of items plus a total. */
+const ListItemsOutputSchema = z.object({
+  items: z
+    .array(
+      z.object({
+        id: z.number().describe("Item id"),
+        name: z.string().describe("Item name"),
+        tags: z.array(z.string()).describe("Item tags"),
+      }),
+    )
+    .describe("The items"),
+  total: z.number().describe("Number of items"),
+});
+
+/**
+ * Create a "list_items" tool returning a short `content` summary alongside a
+ * DEEPLY NESTED `structuredContent` (objects inside arrays inside an object) —
+ * the shape from #1908, where the structured payload carries everything the
+ * text block only summarizes. Exercises the Structured Output section of the
+ * Tools screen result panel, which `get_temp`'s flat three-key object does not.
+ */
+export function createListItemsTool(): ToolDefinition {
+  return {
+    name: "list_items",
+    description: "Returns a list of items with nested structured output",
+    inputSchema: {},
+    outputSchema: ListItemsOutputSchema,
+    handler: async () => {
+      const items = [
+        { id: 1, name: "Item A", tags: ["foo", "bar"] },
+        { id: 2, name: "Item B", tags: ["baz"] },
+      ];
+      return {
+        content: [
+          { type: "text" as const, text: `Found ${items.length} items.` },
+        ],
+        structuredContent: { items, total: items.length },
+      };
+    },
+  };
+}
+
 /**
  * Create a "get_temp_extra" tool that declares the same output schema as
  * get_temp but returns an EXTRA, undeclared property in structuredContent.

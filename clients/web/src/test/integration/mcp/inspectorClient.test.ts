@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { resolve } from "node:path";
 import * as z from "zod/v4";
 import { InspectorClient } from "@inspector/core/mcp/inspectorClient.js";
 import {
@@ -45,6 +46,8 @@ import {
   createAddResourceTool,
   createAddToolTool,
   createAddPromptTool,
+  loadConfig,
+  resolveConfig,
 } from "@modelcontextprotocol/inspector-test-server";
 import type {
   MessageEntry,
@@ -1211,6 +1214,52 @@ describe("InspectorClient", () => {
       expect(Array.isArray(resources.resources)).toBe(true);
       expect(Array.isArray(prompts.prompts)).toBe(true);
       expect(Array.isArray(templates.resourceTemplates)).toBe(true);
+    });
+  });
+
+  describe("Structured output showcase config (#1908)", () => {
+    // Drives the shipped `structured-output-http.json` end to end — the file
+    // itself, the `list_items` preset registration, and the fixture's nested
+    // payload. A typo in any of the three fails here rather than leaving the
+    // documented showcase quietly broken.
+    const showcaseConfigPath = resolve(
+      import.meta.dirname,
+      "../../../../../../test-servers/configs/structured-output-http.json",
+    );
+
+    it("serves list_items with a summary block and a nested structuredContent", async () => {
+      server = createTestServerHttp(
+        resolveConfig(loadConfig(showcaseConfigPath)),
+      );
+      await server.start();
+
+      client = new InspectorClient(
+        { type: "streamable-http", url: server.url },
+        { environment: { transport: createTransportNode } },
+      );
+      await client.connect();
+
+      const tool = await getTool(client, "list_items");
+      expect(tool.outputSchema).toBeDefined();
+
+      const result = await client.callTool(tool, {});
+      expect(result.success).toBe(true);
+
+      // The text block only summarizes — the payload is the structured half.
+      const content = result.result!.content as Array<{
+        type: string;
+        text?: string;
+      }>;
+      expect(content[0].type).toBe("text");
+      expect(content[0].text).toBe("Found 2 items.");
+
+      expect(result.result!.structuredContent).toEqual({
+        items: [
+          { id: 1, name: "Item A", tags: ["foo", "bar"] },
+          { id: 2, name: "Item B", tags: ["baz"] },
+        ],
+        total: 2,
+      });
     });
   });
 
