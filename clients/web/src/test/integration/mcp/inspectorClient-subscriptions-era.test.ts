@@ -431,11 +431,15 @@ describe("resource subscriptions era fork (#1630)", () => {
     });
 
     it("leaves a superseded connect-time failure to the refresh that owns the stream", async () => {
-      // `connect` is dispatched before the stream is opened, so a listener can
-      // start and acknowledge a newer refresh while this one is still awaiting
-      // its `listen()`. Reconciling anyway would arm a reconnect against a
-      // healthy stream and tear it down — the same ownership test the
-      // subscribe/unsubscribe paths make.
+      // Nothing about the ordering above makes this call the only refresh that
+      // can be in flight: `statusChange` has already fired, and a concurrent
+      // `subscribeToResource` — or a `disconnect()`, whose
+      // `resetSubscriptionStream` bumps the generation too — can supersede this
+      // one while its `listen()` is pending. Reconciling anyway would arm a
+      // reconnect against a stream that is healthy (or a session that is gone),
+      // so this makes the same ownership test the subscribe/unsubscribe paths
+      // make. Driven here by a stub that bumps twice, standing in for "someone
+      // else advanced it".
       const started = await startToolsOnlyServer({ tools: true });
       const connected = new InspectorClient(
         { type: "streamable-http", url: started.url },

@@ -4990,11 +4990,14 @@ export class InspectorClient extends InspectorClientEventTarget {
    * with backoff and settles on `"ended"` past the cap.
    *
    * Gated on the same generation test as `subscribeToResource` — see the long
-   * comment there. This call is *not* the only refresh that can be in flight:
-   * the `connect` event has already been dispatched, so a listener subscribing
-   * to a resource can start and acknowledge a newer refresh while this one is
-   * still awaiting its `listen()`. Reconciling unconditionally would then arm a
-   * reconnect that tears down a stream that is up and healthy.
+   * comment there. The `connect` event has deliberately *not* been dispatched
+   * yet (that is the point of running here), so a list-state consumer is not the
+   * risk; what is, is anything else that bumps the generation while this
+   * `listen()` is in flight. `statusChange` has already fired, and any
+   * concurrent call on this instance qualifies: a `subscribeToResource` from a
+   * caller restoring subscriptions, or a `disconnect()` — whose
+   * `resetSubscriptionStream` bumps the generation too, making a reconcile here
+   * arm a reconnect for a session that is already gone.
    */
   private async openModernListenStreamOnConnect(): Promise<void> {
     if (!this.isModernEra() || !this.wantsModernStream()) return;
@@ -5148,10 +5151,11 @@ export class InspectorClient extends InspectorClientEventTarget {
    * refresh owns the state as well as the filter — so both call sites gate on
    * the generation first.
    *
-   * The empty case is the ordinary one: nothing subscribed, no stream, inactive.
-   * The non-empty one exists because a failed re-listen leaves
-   * `modernSubscription` null with URIs still subscribed, and nothing else will
-   * notice: the reconnect machinery is reachable only from a stream that closed
+   * The two branches are the empty and non-empty *filter* (#1920) — which is
+   * "nothing subscribed" only when no list-change opt-in is live. The empty case
+   * is the ordinary one: nothing to listen for, no stream, inactive. The
+   * non-empty one exists because a failed re-listen leaves `modernSubscription`
+   * null with the filter still wanting a stream, and nothing else will notice: the reconnect machinery is reachable only from a stream that closed
    * or a reconnect that failed, and neither happened here. Left alone, the state
    * keeps whatever the last success (or the optimistic `"connecting"`) wrote — a
    * badge that will never change over subscriptions the server may never have
@@ -5159,11 +5163,11 @@ export class InspectorClient extends InspectorClientEventTarget {
    * Subscribe early-returns on the URI already being in the set).
    *
    * So it reconnects rather than settling for an honest-but-dead `"ended"`:
-   * every other route to "stream gone, URIs live" either expects the close or
+   * every other route to "stream gone, filter live" either expects the close or
    * has exhausted the retry cap, and this is the one that has made no attempt
    * at all. `scheduleModernReconnect` fits as-is — a user-initiated refresh
    * already reset `modernReconnectAttempts`, so it starts at the base delay; the
-   * timer bails on a terminal status or an emptied set; and past the cap
+   * timer bails on a terminal status or an emptied filter; and past the cap
    * `onModernReconnectFailed` lands on the same `"ended"` badge. The state
    * therefore becomes true or ends after a real attempt. The caller still sees
    * its error either way — the retry is about the subscriptions, not the call.
