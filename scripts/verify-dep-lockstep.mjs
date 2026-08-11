@@ -156,7 +156,20 @@ function typescript() {
     const require_ = createRequire(
       path.join(repoRoot, "clients", "web", "package.json"),
     );
-    tsCache = require_("typescript");
+    try {
+      tsCache = require_("typescript");
+    } catch (cause) {
+      // Fail with the cause, not a bare MODULE_NOT_FOUND: the realistic way to
+      // get here is a root install run with INSPECTOR_SKIP_CLIENT_INSTALL=1,
+      // which leaves `clients/web/node_modules` empty. Silently skipping the
+      // check instead would be worse — an unrun guard guards nothing.
+      throw new Error(
+        "verify:dep-lockstep — could not resolve `typescript` from clients/web. " +
+          "Run `npm install` at the repo root (the postinstall cascade installs each client); " +
+          "if you set INSPECTOR_SKIP_CLIENT_INSTALL=1, this guard cannot run.",
+        { cause },
+      );
+    }
   }
   return tsCache;
 }
