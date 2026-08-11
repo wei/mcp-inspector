@@ -10,6 +10,7 @@ import {
   findSkew,
   importedPackageNames,
   isSharedSourceFile,
+  majorOf,
   packageNameOf,
   partitionSkew,
   topLevelLockVersions,
@@ -240,8 +241,20 @@ test("partitionSkew: the allowlist is by name, not by version pair", () => {
   // So an ordinary patch float within a tolerated package does not churn the
   // allowlist, while any *unlisted* package that starts skewing still fails.
   const skewed = [
-    { name: "react", holders: [] },
-    { name: "zod", holders: [] },
+    {
+      name: "react",
+      holders: [
+        { dir: ".", version: "19.2.7" },
+        { dir: "clients/web", version: "19.2.8" },
+      ],
+    },
+    {
+      name: "zod",
+      holders: [
+        { dir: ".", version: "4.3.6" },
+        { dir: "clients/web", version: "4.4.3" },
+      ],
+    },
   ];
   const tolerated = new Map([["react", "shallow interfaces"]]);
   const { failures, ignored } = partitionSkew(skewed, tolerated);
@@ -256,6 +269,72 @@ test("partitionSkew: the allowlist is by name, not by version pair", () => {
 });
 
 test("partitionSkew: deny by default — nothing tolerated fails everything", () => {
-  const skewed = [{ name: "zod", holders: [] }];
+  const skewed = [{ name: "zod", holders: [{ dir: ".", version: "1.0.0" }] }];
   assert.equal(partitionSkew(skewed, new Map()).failures.length, 1);
+});
+
+test("partitionSkew: the allowlist tolerates skew only within a major (Copilot, #1962)", () => {
+  // Each rationale establishes that a patch/minor difference is benign; that is
+  // not evidence a React 18-vs-19 split is, so a listed package still fails
+  // across a major boundary.
+  const tolerated = new Map([["react", "shallow interfaces"]]);
+  const withinMajor = [
+    {
+      name: "react",
+      holders: [
+        { dir: ".", version: "19.2.7" },
+        { dir: "clients/web", version: "19.2.8" },
+      ],
+    },
+  ];
+  const acrossMajor = [
+    {
+      name: "react",
+      holders: [
+        { dir: ".", version: "18.3.1" },
+        { dir: "clients/web", version: "19.2.8" },
+      ],
+    },
+  ];
+  assert.equal(partitionSkew(withinMajor, tolerated).failures.length, 0);
+  assert.equal(partitionSkew(withinMajor, tolerated).ignored.length, 1);
+  assert.equal(partitionSkew(acrossMajor, tolerated).failures.length, 1);
+  assert.equal(partitionSkew(acrossMajor, tolerated).ignored.length, 0);
+});
+
+test("partitionSkew: an unparseable version can't be proven same-major, so it fails", () => {
+  const tolerated = new Map([["react", "shallow interfaces"]]);
+  const skewed = [
+    {
+      name: "react",
+      holders: [
+        { dir: ".", version: "19.2.7" },
+        { dir: "clients/web", version: "next" },
+      ],
+    },
+  ];
+  assert.equal(partitionSkew(skewed, tolerated).failures.length, 1);
+});
+
+test("majorOf: prerelease and build metadata are irrelevant", () => {
+  const cases = [
+    ["4.4.3", "4"],
+    ["2.0.0-beta.5", "2"],
+    ["19.2.8", "19"],
+    ["1.10.3+build.7", "1"],
+  ];
+  for (const [input, expected] of cases)
+    assert.equal(majorOf(input), expected, input);
+  for (const bad of ["next", "", undefined, null, "v4.4.3"])
+    assert.equal(majorOf(bad), null, JSON.stringify(bad));
+});
+
+test("isSharedSourceFile: individually-named shared files are included (Copilot, #1962)", () => {
+  // `vitest.shared.mts` is root-owned, imported by every client's vitest
+  // config, and already treated as shared by `verify:typecheck-coverage`. It
+  // imports only Node built-ins today, which is why omitting it would go
+  // unnoticed until a third-party import appeared there and skewed.
+  assert.equal(isSharedSourceFile("vitest.shared.mts"), true);
+  // Still anchored: a same-named file nested elsewhere is not the shared one.
+  assert.equal(isSharedSourceFile("clients/web/vitest.shared.mts"), false);
 });

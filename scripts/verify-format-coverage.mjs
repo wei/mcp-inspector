@@ -166,9 +166,11 @@ function trackedSourceFiles() {
   return out.split("\n").filter(Boolean);
 }
 
-// Vouch for the sibling guards: a guard can't detect being unrun itself, but the
-// three can each assert the others are still wired into `validate`, so dropping
-// any one is caught here. Only deleting all of them slips through.
+// Vouch for the sibling guards: a guard can't detect being unrun itself, so the
+// three form a cycle instead. This one checks BOTH others; each of them checks
+// only this one. So dropping `verify:typecheck-coverage` or
+// `verify:dep-lockstep` is caught here, and dropping *this* guard is caught by
+// either of them. Only removing all three at once slips through.
 const rootScripts = JSON.parse(
   readFileSync(path.join(repoRoot, "package.json"), "utf8"),
 ).scripts;

@@ -21,8 +21,9 @@
 // two copies — changing nothing else — returned the build to its baseline cost.
 //
 // The candidate set is DERIVED, not hand-listed: it is the packages imported by
-// `core/` and `test-servers/src`, the two first-party surfaces compiled into
-// more than one client's program. Skew is then denied by default, with a small
+// the shared first-party TypeScript — `core/`, `test-servers/src`, and the
+// root-owned `vitest.shared.mts` — the surfaces compiled into more than one
+// client's program. Skew is then denied by default, with a small
 // allowlist of packages verified to tolerate it (below). A dependency that
 // starts skewing therefore fails `validate` and forces a decision, rather than
 // surfacing months later as an unexplained OOM.
@@ -45,10 +46,24 @@ const repoRoot = path.resolve(
 // `test-servers/src` is pulled into the web and cli test projects.
 const SHARED_SOURCE_DIRS = ["core", "test-servers/src"];
 
+// Individual root-owned TypeScript files that are shared the same way but sit
+// outside those trees. `vitest.shared.mts` is imported by every client's vitest
+// config, and `verify:typecheck-coverage` already treats it as shared
+// non-client source. It imports only Node built-ins today — which is precisely
+// why omitting it would go unnoticed until a third-party import appeared there,
+// resolved from the root, and skewed (Copilot, #1962).
+const SHARED_SOURCE_FILES = ["vitest.shared.mts"];
+
 // Packages whose cross-install skew is verified benign, each with the reason.
 // This is an allowlist of *names*, not of version pairs, so an ordinary patch
 // float within one of these does not churn the file — while any package NOT
 // listed here failing the check is a genuine, unreviewed new skew.
+//
+// Being listed is NOT a blanket exemption: it tolerates skew only *within a
+// major version*. Each rationale below establishes that a patch/minor
+// difference is harmless, which is not evidence that a React 18-vs-19 or Hono
+// 4-vs-5 split across installs would be — that is a different type surface, and
+// it fails like anything else (Copilot, #1962).
 //
 // The admission test is the one the zod incident established: does the
 // package's public type surface consist of deeply recursive generics that
@@ -175,11 +190,34 @@ export function findSkew(candidates, installs) {
   return skewed;
 }
 
-/** Split skewed packages into the tolerated ones and the failures. */
+/**
+ * The major-version component of a lockfile version string. Prerelease and
+ * build metadata are irrelevant here (`2.0.0-beta.5` → `2`). Returns null for
+ * anything not starting with an integer, which is treated as "cannot prove same
+ * major" and therefore fails rather than passes.
+ */
+export function majorOf(version) {
+  const m = /^(\d+)\./.exec(String(version ?? ""));
+  return m ? m[1] : null;
+}
+
+/**
+ * Split skewed packages into the tolerated ones and the failures.
+ *
+ * Being on the allowlist tolerates skew only *within a major version*: each
+ * entry's rationale establishes that a patch/minor difference is benign, which
+ * says nothing about a major split, where the type surface itself changes. So a
+ * listed package whose holders disagree on major is still a failure.
+ */
 export function partitionSkew(skewed, tolerated = TOLERATED_SKEW) {
+  const isTolerated = (s) => {
+    if (!tolerated.has(s.name)) return false;
+    const majors = new Set(s.holders.map((h) => majorOf(h.version)));
+    return majors.size === 1 && !majors.has(null);
+  };
   return {
-    failures: skewed.filter((s) => !tolerated.has(s.name)),
-    ignored: skewed.filter((s) => tolerated.has(s.name)),
+    failures: skewed.filter((s) => !isTolerated(s)),
+    ignored: skewed.filter(isTolerated),
   };
 }
 
@@ -191,8 +229,12 @@ export function partitionSkew(skewed, tolerated = TOLERATED_SKEW) {
 // unnoticed until a new shared dependency arrived through one and skewed.
 const SOURCE_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts"];
 
-/** Whether a repo-relative path is a TypeScript source of a shared tree. */
+/**
+ * Whether a repo-relative path is shared first-party TypeScript — under one of
+ * the shared trees, or one of the individually-named shared files.
+ */
 export function isSharedSourceFile(file) {
+  if (SHARED_SOURCE_FILES.includes(file)) return true;
   if (!SOURCE_EXTENSIONS.some((ext) => file.endsWith(ext))) return false;
   // Anchored on a path boundary so a sibling whose name merely starts with a
   // shared dir (`core-internal/`, `test-servers/src-legacy/`) isn't swept in.
@@ -203,7 +245,12 @@ export function isSharedSourceFile(file) {
 function sharedSourceFiles() {
   const out = execFileSync(
     "git",
-    ["ls-files", "--", ...SHARED_SOURCE_DIRS.map((d) => `${d}/**`)],
+    [
+      "ls-files",
+      "--",
+      ...SHARED_SOURCE_DIRS.map((d) => `${d}/**`),
+      ...SHARED_SOURCE_FILES,
+    ],
     { cwd: repoRoot, encoding: "utf8" },
   );
   return out.split("\n").filter(isSharedSourceFile);
@@ -278,22 +325,36 @@ export function main() {
     console.error(
       `verify:dep-lockstep — ${failures.length} ${failures.length === 1 ? "dependency resolves" : "dependencies resolve"} to different versions across installs:\n`,
     );
+    let anyListed = false;
     for (const { name, holders } of failures) {
-      console.error(`  ${name}`);
+      // A package already on the allowlist reached here only by skewing across
+      // a MAJOR boundary, so say that rather than advising an entry that exists.
+      const listed = TOLERATED_SKEW.has(name);
+      anyListed ||= listed;
+      console.error(
+        `  ${name}${listed ? "  (allowlisted — but this is a MAJOR skew)" : ""}`,
+      );
       for (const { dir, version } of holders)
         console.error(`    ${version}  (${dir})`);
     }
+    const shared = [...SHARED_SOURCE_DIRS, ...SHARED_SOURCE_FILES].join(", ");
     console.error(
       "\nThese packages' types are compiled into a single `tsc` program from two installs" +
-        `\n(${SHARED_SOURCE_DIRS.join(" and ")} resolve from the root, a client's own sources from the client),` +
+        `\n(${shared} resolve from the root, a client's own sources from the client),` +
         "\nso a version skew makes TypeScript relate two structurally-distinct copies of the same" +
         "\ntype. For a recursive-generic surface like zod that is what exhausted the tsc heap in #1896.",
     );
     console.error(
-      "\nAlign them — `npm install <pkg>@<version>` in each install so all lockfiles agree — or, if this" +
-        "\npackage's types genuinely cannot blow up, add it to TOLERATED_SKEW in scripts/verify-dep-lockstep.mjs" +
-        "\nwith the reason. See AGENTS.md.",
+      "\nAlign them — `npm install <pkg>@<version>` in each install that declares the package, so all" +
+        "\nlockfiles agree. (Don't add it to an install that doesn't declare it: a package absent from an" +
+        "\ninstall can't skew.) If instead its types genuinely cannot blow up, add it to TOLERATED_SKEW in" +
+        "\nscripts/verify-dep-lockstep.mjs with the reason. See AGENTS.md.",
     );
+    if (anyListed)
+      console.error(
+        "\nNote: an allowlisted package is tolerated only WITHIN a major version — the rationale for one" +
+          "\nestablishes that a patch/minor difference is benign, not that a major split is. Align the major.",
+      );
     process.exit(1);
   }
 
