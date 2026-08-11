@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { describe, it, expect, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import type { InspectorFormSchema } from "../../../utils/jsonUtils";
@@ -226,6 +227,140 @@ describe("SchemaForm", () => {
     expect(onChange).toHaveBeenCalled();
     const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1][0];
     expect(lastCall.count).toBeUndefined();
+  });
+
+  describe("number fields (#1888)", () => {
+    // The real callers keep the form values in state and feed them back in, so
+    // the bug only reproduces against a genuinely controlled SchemaForm: an
+    // uncontrolled render never rewrites the box and would pass either way.
+    function ControlledSchemaForm({
+      schema,
+      initialValues = {},
+      onChange,
+    }: {
+      schema: InspectorFormSchema;
+      initialValues?: Record<string, unknown>;
+      onChange: (values: Record<string, unknown>) => void;
+    }) {
+      const [values, setValues] =
+        useState<Record<string, unknown>>(initialValues);
+      return (
+        <SchemaForm
+          schema={schema}
+          values={values}
+          onChange={(next) => {
+            setValues(next);
+            onChange(next);
+          }}
+        />
+      );
+    }
+
+    const numberSchema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        divisor: { type: "number", title: "Divisor" },
+      },
+    };
+
+    it("lets a decimal be typed all the way through", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      renderWithMantine(
+        <ControlledSchemaForm schema={numberSchema} onChange={onChange} />,
+      );
+      const input = screen.getByLabelText(/Divisor/) as HTMLInputElement;
+      await user.type(input, "1.5");
+      expect(input.value).toBe("1.5");
+      expect(onChange).toHaveBeenLastCalledWith({ divisor: 1.5 });
+    });
+
+    it("keeps the trailing decimal point visible mid-entry", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      renderWithMantine(
+        <ControlledSchemaForm schema={numberSchema} onChange={onChange} />,
+      );
+      const input = screen.getByLabelText(/Divisor/) as HTMLInputElement;
+      await user.type(input, "1.");
+      // The point survives on screen even though "1." parses to plain 1.
+      expect(input.value).toBe("1.");
+      expect(onChange).toHaveBeenLastCalledWith({ divisor: 1 });
+    });
+
+    it("keeps a trailing zero after the decimal point", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      renderWithMantine(
+        <ControlledSchemaForm schema={numberSchema} onChange={onChange} />,
+      );
+      const input = screen.getByLabelText(/Divisor/) as HTMLInputElement;
+      await user.type(input, "1.50");
+      expect(input.value).toBe("1.50");
+      expect(onChange).toHaveBeenLastCalledWith({ divisor: 1.5 });
+    });
+
+    it("reports a lone minus sign as no value while leaving it typed", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      renderWithMantine(
+        <ControlledSchemaForm schema={numberSchema} onChange={onChange} />,
+      );
+      const input = screen.getByLabelText(/Divisor/) as HTMLInputElement;
+      await user.type(input, "-");
+      expect(input.value).toBe("-");
+      expect(onChange).toHaveBeenLastCalledWith({ divisor: undefined });
+      await user.type(input, "2.5");
+      expect(onChange).toHaveBeenLastCalledWith({ divisor: -2.5 });
+    });
+
+    it("rejects a decimal point in an integer field", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      const schema: InspectorFormSchema = {
+        type: "object",
+        properties: {
+          count: { type: "integer", title: "Count" },
+        },
+      };
+      renderWithMantine(
+        <ControlledSchemaForm schema={schema} onChange={onChange} />,
+      );
+      const input = screen.getByLabelText(/Count/) as HTMLInputElement;
+      await user.type(input, "1.5");
+      expect(input.value).toBe("15");
+      expect(onChange).toHaveBeenLastCalledWith({ count: 15 });
+    });
+
+    it("re-syncs the displayed text when the value changes externally", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      function Harness() {
+        const [values, setValues] = useState<Record<string, unknown>>({
+          divisor: 1.5,
+        });
+        return (
+          <>
+            <button type="button" onClick={() => setValues({ divisor: 42 })}>
+              Load example
+            </button>
+            <SchemaForm
+              schema={numberSchema}
+              values={values}
+              onChange={(next) => {
+                setValues(next);
+                onChange(next);
+              }}
+            />
+          </>
+        );
+      }
+      renderWithMantine(<Harness />);
+      const input = screen.getByLabelText(/Divisor/) as HTMLInputElement;
+      expect(input.value).toBe("1.5");
+      await user.click(screen.getByRole("button", { name: "Load example" }));
+      expect(input.value).toBe("42");
+    });
   });
 
   it("falls back to empty/const labels for oneOf items missing const and title", () => {
