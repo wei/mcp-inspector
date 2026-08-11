@@ -30,7 +30,7 @@ The three changes most likely to bite an existing setup:
 
 ## Requirements
 
-v2 requires **Node `>=22.19.0`** (v1 required `>=22.7.5`). The floor comes from `undici@^8`, used for HTTP proxy support. `npx` will refuse to run on an older Node rather than fail obscurely later.
+v2 requires **Node `>=22.19.0`** (v1 required `>=22.7.5`). The floor comes from `undici@^8`, used for HTTP proxy support. npm only _warns_ about an `engines` mismatch (`EBADENGINE`) unless you have `engine-strict=true` set, so an older Node won't stop you at install time — it fails later, obscurely. Check `node -v` first.
 
 ## What no longer ships
 
@@ -58,13 +58,15 @@ If you depend on one of them directly, drop it and use the root package's `mcp-i
 
 v1 ran **two** processes: a React client on `6274` and an "MCP Proxy" on `6277` that held the actual MCP connections. The browser talked to the proxy over HTTP, authenticating with `MCP_PROXY_AUTH_TOKEN`.
 
-v2 runs **one** web server on `6274`. It serves the SPA and exposes `/api/*`, which the browser calls with `x-mcp-remote-auth: Bearer <MCP_INSPECTOR_API_TOKEN>`. There is no second port to expose, forward, or allow through a firewall.
+v2 runs **one** web server on `6274`. It serves the SPA and exposes `/api/*`, which the browser calls with `x-mcp-remote-auth: Bearer <MCP_INSPECTOR_API_TOKEN>`. The proxy port is gone: nothing needs `6277` exposed, forwarded, or allowed through a firewall.
 
 Consequences:
 
 - `SERVER_PORT` no longer selects a port you browse. (It is read as a fallback for the MCP Apps sandbox server's port — see `MCP_SANDBOX_PORT` below.)
 - `MCP_PROXY_FULL_ADDRESS` has no v2 equivalent and is ignored. It existed to tell the browser where a non-default proxy lived; there is no proxy.
-- Docker only needs `-p 6274:6274`. The v1 recipe published `6277` as well.
+- Docker needs `-p 6274:6274` for the UI, where the v1 recipe published `6277` as well.
+
+⚠️ **`6274` is not the only listener.** The web backend also starts a **separate MCP Apps sandbox server**, on a dynamic port by default. It is only used by the Apps tab, and on plain loopback it needs no attention — but the browser reaches it directly, so anywhere the Inspector is _not_ served from the browser's own machine (Docker, a remote host, an SSH tunnel) you must pin it with `MCP_SANDBOX_PORT` and expose/forward that port too, or the Apps tab won't load. This is a different port from v1's proxy — it carries no MCP traffic — but it is still a second port. See [MCP Apps caveats](../clients/web/README.md#hosting-on-a-network).
 
 ## Launching
 
@@ -102,7 +104,7 @@ So:
 
 - **`--config` in v2 is the read-only role.** Point it at a file you didn't write — a coworker's, a client application's, one checked into a repo — and the Inspector guarantees it won't touch the bytes, including any plaintext secrets in them. This is close to v1's behavior, minus the write-back that never existed anyway.
 - **`--catalog` is new** and is what you want if you'd like the web UI to add, edit, and remove servers.
-- **Neither is required.** With no source flag, v2 uses the default catalog `~/.mcp-inspector/mcp.json`, creating it if absent. v1 had no such default — it started empty every time.
+- **Neither is required.** With no source flag, v2 uses the default catalog `~/.mcp-inspector/mcp.json`, creating it if absent. v1 had no default file: the CLI started with nothing unless you passed `--config`, and the web UI's list lived in the browser's `localStorage` — per-browser, and invisible to the CLI.
 
 ### Before / after
 
@@ -112,11 +114,11 @@ So:
 # v1 — one entry out of a file
 npx @modelcontextprotocol/inspector --config ./mcp.json --server everything
 
-# v2 — same thing, same read-only guarantee
-npx @modelcontextprotocol/inspector --config ./mcp.json --server everything
+# v2 — same file, same read-only guarantee; --server selects under --cli
+npx @modelcontextprotocol/inspector --cli --config ./mcp.json --server everything --method tools/list
 ```
 
-⚠️ One caveat on that last line: **`--server` only selects under `--cli`.** On the web client it is a no-op that logs a warning, and the TUI rejects it as an unknown option. In the web UI you pick the server from the list after it loads.
+⚠️ **`--server` only selects under `--cli`**, which is why the v2 line above gains the mode flag (and, being a CLI invocation, a `--method`). On the web client `--server` is a no-op that logs a warning and the UI loads **every** entry in the file; the TUI rejects it as an unknown option. There is no web equivalent of "open just this one entry" — you pick the server from the list after it loads.
 
 ```bash
 # v2 — let the Inspector manage the file (web UI can edit it)
@@ -153,7 +155,7 @@ Every v1 CLI flag still exists in v2 and means the same thing. Nothing was renam
 | `-e KEY=VALUE`                   | same                            |                                                                                                   |
 | `--config <path>`                | same flag, **narrower meaning** | see [above](#--config-vs---catalog)                                                               |
 | `--server <name>`                | same                            | now `--cli`-only                                                                                  |
-| `[target...]`                    | same                            | but see the target-ordering rule below                                                            |
+| `[target...]`                    | same                            | but see the target-ordering **and** URL-transport rules below                                     |
 
 New in v2, with no v1 equivalent:
 
@@ -175,7 +177,7 @@ See the [CLI README](../clients/cli/README.md) for the full surface.
 
 ## CLI behavior changes
 
-The flags survived; three behaviors did not.
+The flags survived; four behaviors did not.
 
 ### 1. Exit codes and the error envelope
 
@@ -233,6 +235,24 @@ mcp-inspector --cli node build/index.js -- --method tools/list
 ```
 
 So the web example above, run under `--cli`, would have `--config /etc/myserver.conf` consumed as the Inspector's read-only-session flag (and then rejected as a catalog/ad-hoc conflict). There is currently no way to pass a leading-dash argument through to a stdio server on the `--cli` command line — put it in the server entry's `args` in a catalog or config file instead.
+
+### 4. An ambiguous URL path no longer guesses a transport
+
+With no `--transport`, v2 infers it from the URL's path suffix — and **only** from that:
+
+| URL path       | v2                                 |
+| -------------- | ---------------------------------- |
+| ends in `/mcp` | `streamable-http`                  |
+| ends in `/sse` | `sse`                              |
+| anything else  | **error — `--transport` required** |
+
+```
+Transport type not specified and could not be determined from URL: <url>.
+```
+
+v1 fell back to SSE for an unrecognized path, so a server at e.g. `https://example.com/api` connected without a flag. In v2 the same command stops with the error above; pass `--transport http` (or `sse`) explicitly. The suffix match is exact, so a trailing slash (`…/mcp/`) is ambiguous too.
+
+This applies to every client's command line — CLI, TUI, and `--web` (which prints the message and exits `1`). The **browser deep link** is the one exception: `?serverUrl=…` with no `transport` param defaults to `http`.
 
 Stdout is otherwise compatible: the default `text` format still pretty-prints the result as `JSON.stringify(result, null, 2)`, exactly as v1 did.
 
@@ -293,11 +313,18 @@ docker run --rm -p 127.0.0.1:6274:6274 -p 127.0.0.1:6277:6277 \
   -e HOST=0.0.0.0 -e MCP_AUTO_OPEN_ENABLED=false \
   ghcr.io/modelcontextprotocol/inspector:1.0.1
 
-# v2 — one port; the image already sets the wildcard-bind opt-in
+# v2 — no proxy port; the image already sets the wildcard-bind opt-in
 docker run --rm -p 6274:6274 ghcr.io/modelcontextprotocol/inspector:latest
 ```
 
 Notes:
+
+- **The Apps tab needs one more published port.** The sandbox server is dynamic by default and the `Dockerfile` `EXPOSE`s only `6274`, so the recipe above covers everything _except_ MCP Apps. To use them, pin and publish the sandbox port as well:
+
+  ```bash
+  docker run --rm -p 6274:6274 -p 6280:6280 -e MCP_SANDBOX_PORT=6280 \
+    ghcr.io/modelcontextprotocol/inspector:latest
+  ```
 
 - The v2 image sets `DANGEROUSLY_BIND_ALL_INTERFACES=true` internally (a container must bind `0.0.0.0` to be reachable through `-p`). Setting a bare `HOST=0.0.0.0` **outside** a container now exits with an error.
 - **If you remap the published port** (`-p 8080:6274`), the browser's origin no longer matches the in-container port, so set `ALLOWED_ORIGINS=http://localhost:8080,http://127.0.0.1:8080` (or run `-e CLIENT_PORT=8080 -p 8080:8080`) or connects will 403.
@@ -313,6 +340,10 @@ Notes:
 **"My CI step started failing after upgrading."** Most likely exit code `5`: a `tools/call` returning `isError: true` now exits non-zero. Check `2>&1 | tail -1 | jq .error`.
 
 **"The Inspector connects to a different server than I named."** Check flag order — under `--cli` the target must precede all flags, or it is silently dropped in favor of the catalog.
+
+**"`Transport type not specified and could not be determined from URL`."** The path ends in neither `/mcp` nor `/sse`, so v2 refuses to guess where v1 fell back to SSE. Pass `--transport http` or `--transport sse`.
+
+**"The Apps tab is blank in Docker / over SSH."** The MCP Apps sandbox is a second, dynamic port. Pin it with `MCP_SANDBOX_PORT` and publish/forward it too — see [MCP Apps caveats](../clients/web/README.md#hosting-on-a-network).
 
 **"`HOST=0.0.0.0` exits with an error."** That's the wildcard-bind guard. Bind a specific address instead, or set `DANGEROUSLY_BIND_ALL_INTERFACES=true` if you genuinely need all interfaces. See [Host binding & the origin allow-list](../clients/web/README.md#host-binding--the-origin-allow-list).
 
