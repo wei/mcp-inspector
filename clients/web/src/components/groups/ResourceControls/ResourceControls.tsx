@@ -52,7 +52,9 @@ export interface ResourceControlsProps {
    * Modern-era `subscriptions/listen` stream state (#1630). When `active`
    * (modern era with at least one subscription) the Subscriptions section shows
    * a stream-status badge in its panel and a status dot in its header. Legacy
-   * connections pass `active: false` (or omit it) and see neither.
+   * connections pass `active: false` (or omit it) and see neither — and so does
+   * a stream open purely for list-change notifications, which this section has
+   * nothing to say about (#1920).
    */
   subscriptionStreamState?: ResourceSubscriptionStreamState;
   /** Negotiated protocol era; gates the modern subscription stream chrome. */

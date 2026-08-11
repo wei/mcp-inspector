@@ -436,9 +436,14 @@ export type ResourceSubscriptionStreamStatus =
  * persistent stream, so `active` is `false` and the UI surfaces no stream chrome.
  * On the modern era all subscriptions are a filter over one long-lived
  * `subscriptions/listen` stream; `active` is `true` whenever that stream is being
- * managed (i.e. at least one URI is subscribed), and `honoredUris` is the subset
- * of requested URIs the server acknowledged in its `honoredFilter` (may be a
- * strict subset — a server is allowed to decline some).
+ * managed *for resource subscriptions* (i.e. at least one URI is subscribed), and
+ * `honoredUris` is the subset of requested URIs the server acknowledged in its
+ * `honoredFilter` (may be a strict subset — a server is allowed to decline some).
+ *
+ * `active: false` does not imply no stream: the same stream also carries the
+ * list-change opt-ins, so it can be open with no subscribed URI at all (#1920).
+ * This state describes the Subscriptions section, which has nothing to show for
+ * such a stream.
  */
 export interface ResourceSubscriptionStreamState {
   active: boolean;
