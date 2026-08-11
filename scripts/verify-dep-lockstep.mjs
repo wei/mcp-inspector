@@ -279,6 +279,23 @@ export function isSharedSourceFile(file) {
   return SHARED_SOURCE_DIRS.some((dir) => file.startsWith(`${dir}/`));
 }
 
+/**
+ * Which configured shared sources contributed no file to `files`. Each dir and
+ * each individually-named file must be represented; an aggregate count can't
+ * see one of them going missing, because the others keep the total nonzero.
+ */
+export function sourcesWithNoFiles(
+  files,
+  dirs = SHARED_SOURCE_DIRS,
+  named = SHARED_SOURCE_FILES,
+) {
+  const missingDirs = dirs.filter(
+    (dir) => !files.some((f) => f.startsWith(`${dir}/`)),
+  );
+  const missingNamed = named.filter((name) => !files.includes(name));
+  return [...missingDirs, ...missingNamed];
+}
+
 /** Tracked TypeScript files under the shared first-party source trees. */
 function sharedSourceFiles() {
   const out = execFileSync(
@@ -334,9 +351,19 @@ export function main() {
   }
 
   const files = sharedSourceFiles();
-  if (files.length === 0) {
+  // Per-source, not an aggregate count (Copilot, #1962): `vitest.shared.mts`
+  // alone keeps the total nonzero, so a moved or renamed `core/` would leave
+  // the guard checking a near-empty candidate set and passing. Every configured
+  // source must contribute, or the enumeration is broken.
+  const empty = sourcesWithNoFiles(files);
+  if (empty.length > 0) {
     console.error(
-      `verify:dep-lockstep — found no tracked sources under ${SHARED_SOURCE_DIRS.join(", ")}. The guard would check nothing; fix the enumeration.`,
+      `verify:dep-lockstep — ${empty.length} configured shared source(s) matched no tracked file:\n`,
+    );
+    for (const source of empty) console.error(`  ${source}`);
+    console.error(
+      "\nThe guard would derive its candidates from an incomplete set and pass on skew it should catch." +
+        "\nA path was moved or renamed — fix SHARED_SOURCE_DIRS / SHARED_SOURCE_FILES in this file.",
     );
     process.exit(1);
   }

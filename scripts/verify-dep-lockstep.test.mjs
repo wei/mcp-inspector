@@ -13,6 +13,7 @@ import {
   majorOf,
   packageNameOf,
   partitionSkew,
+  sourcesWithNoFiles,
   topLevelLockVersions,
 } from "./verify-dep-lockstep.mjs";
 
@@ -45,6 +46,46 @@ test("isSharedSourceFile: non-TS files and other trees are excluded", () => {
   ];
   for (const file of rejected)
     assert.equal(isSharedSourceFile(file), false, file);
+});
+
+test("sourcesWithNoFiles: each configured source must contribute (Copilot, #1962)", () => {
+  const dirs = ["core", "test-servers/src"];
+  const named = ["vitest.shared.mts"];
+  const complete = [
+    "core/mcp/a.ts",
+    "test-servers/src/b.ts",
+    "vitest.shared.mts",
+  ];
+  assert.deepEqual(sourcesWithNoFiles(complete, dirs, named), []);
+
+  // The failure an aggregate count can't see: `core/` moved, but the other two
+  // sources keep `files.length` nonzero, so the guard would derive candidates
+  // from an incomplete set and pass on skew it should catch.
+  assert.deepEqual(
+    sourcesWithNoFiles(
+      ["test-servers/src/b.ts", "vitest.shared.mts"],
+      dirs,
+      named,
+    ),
+    ["core"],
+  );
+  assert.deepEqual(
+    sourcesWithNoFiles(["core/mcp/a.ts", "test-servers/src/b.ts"], dirs, named),
+    ["vitest.shared.mts"],
+  );
+  assert.deepEqual(sourcesWithNoFiles([], dirs, named), [
+    "core",
+    "test-servers/src",
+    "vitest.shared.mts",
+  ]);
+});
+
+test("sourcesWithNoFiles: a prefix sibling does not vouch for a dir", () => {
+  // `core-internal/` starts with `core` but is not it — the boundary check has
+  // to be on a path separator, or a renamed dir would look present.
+  assert.deepEqual(sourcesWithNoFiles(["core-internal/a.ts"], ["core"], []), [
+    "core",
+  ]);
 });
 
 test("packageNameOf: bare names, scopes, and subpaths", () => {
@@ -120,8 +161,7 @@ test("importedPackageNames: comment trivia between tokens (Copilot, #1962)", () 
 
 test("importedPackageNames: line-comment trivia, not just block (Copilot, #1962)", () => {
   // `//` runs to end-of-line and is legal in every position a block comment is,
-  // so these are valid imports too. The newline is matched by TRIVIA's `\\s`
-  // branch rather than by the line-comment branch.
+  // so a specifier can sit on the next line and these are still valid imports.
   const source = [
     "import { a } from // reason",
     '  "express";',
@@ -137,7 +177,7 @@ test("importedPackageNames: line-comment trivia, not just block (Copilot, #1962)
   ]);
 });
 
-test("importedPackageNames: the three specifier forms that introduce types", () => {
+test("importedPackageNames: static, side-effect, and dynamic forms; builtins and relatives dropped", () => {
   const source = `
     import { z } from "zod/v4";
     export type { Foo } from '@modelcontextprotocol/core';
