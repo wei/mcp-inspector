@@ -79,6 +79,36 @@ export function buildWebServerEnv({
 }
 
 /**
+ * Terminate a spawned web server, then remove its catalog dir.
+ *
+ * The two halves are the documented pair in `child-cleanup.mjs`, and both are
+ * needed. `stopChild` closes the #1801 race on the normal path (a bare `kill()`
+ * only *delivers* the signal, so a synchronous remove can hit ENOTEMPTY when the
+ * server writes the catalog on its way out); `removeSafe` then makes the
+ * residual case harmless, warning instead of throwing so a leftover temp dir can
+ * never turn a passing smoke red.
+ *
+ * Exported separately from `startProdWebServer` so the teardown *contract* is
+ * testable against a stand-in child, without booting a real launcher. Testing it
+ * matters more than it looks: deleting the `removeSafe` call would leave both the
+ * unit suite and all three smokes green (the smokes exit immediately after
+ * teardown), which is precisely the regression the tests exist to catch.
+ *
+ * @param {object} opts
+ * @param {import("node:child_process").ChildProcess} opts.child
+ * @param {string} opts.catalogDir
+ * @param {string} [opts.label]
+ */
+export async function teardownWebServer({
+  child,
+  catalogDir,
+  label = "smoke:web",
+}) {
+  await stopChild(child, { label, what: "prod web server" });
+  removeSafe(catalogDir, { label });
+}
+
+/**
  * Spawn `mcp-inspector --web` (prod, no `--dev`) against the built
  * `clients/web/dist` and return handles for readiness + teardown.
  *
@@ -194,18 +224,7 @@ export function startProdWebServer({ host, port, token, label = "smoke:web" }) {
     catalogPath,
     waitForReady,
     whenChildExits,
-    /**
-     * Terminate the server, then remove its catalog dir. **Await this** — the
-     * two halves are the documented pair in `child-cleanup.mjs`, and both are
-     * needed. `stopChild` closes the #1801 race on the normal path (a bare
-     * `kill()` only *delivers* the signal, so a synchronous remove can hit
-     * ENOTEMPTY when the server writes the catalog on its way out); `removeSafe`
-     * then makes the residual case harmless, warning instead of throwing so a
-     * leftover temp dir can never turn a passing smoke red.
-     */
-    stop: async () => {
-      await stopChild(child, { label, what: "prod web server" });
-      removeSafe(catalogDir, { label });
-    },
+    /** Terminate the server, then remove its catalog dir. **Await this.** */
+    stop: () => teardownWebServer({ child, catalogDir, label }),
   };
 }

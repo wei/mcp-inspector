@@ -15,11 +15,17 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { existsSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
-import { buildWebServerEnv, createTempCatalog } from "./prod-web-server.mjs";
-import { removeSafe } from "./child-cleanup.mjs";
+import {
+  buildWebServerEnv,
+  createTempCatalog,
+  teardownWebServer,
+} from "./prod-web-server.mjs";
+import { hasExited, removeSafe } from "./child-cleanup.mjs";
 
 const BASE = {
   host: "127.0.0.1",
@@ -53,11 +59,55 @@ test("createTempCatalog: does not create the catalog file itself", () => {
   }
 });
 
-test("createTempCatalog: its dir is removable by removeSafe", () => {
+/**
+ * A stand-in for the web server: a real child process that ignores nothing and
+ * simply stays alive until signalled, so `teardownWebServer` exercises its true
+ * SIGTERM→exit path rather than a mock's idea of one.
+ */
+function spawnIdleChild() {
+  return spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    stdio: "ignore",
+  });
+}
+
+test("teardownWebServer: removes the catalog dir it was given", async () => {
+  // The regression this guards: dropping the `removeSafe` call from the teardown
+  // would leave every smoke green, since they exit right after teardown and so
+  // never observe the leak. Assert on the dir itself, not on a spy.
+  const child = spawnIdleChild();
   const { dir, path } = createTempCatalog();
-  mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, "{}");
-  assert.equal(removeSafe(dir), true);
+  assert.ok(existsSync(dir));
+
+  await teardownWebServer({ child, catalogDir: dir, label: "test" });
+
+  assert.equal(existsSync(dir), false, "teardown must remove the catalog dir");
+});
+
+test("teardownWebServer: waits for the child to exit before removing", async () => {
+  // The #1801 race in one assertion: a bare kill() only *delivers* SIGTERM, so a
+  // teardown that removed synchronously could unlink the dir while the server was
+  // still writing to it. If teardown resolves with the child still alive, the
+  // await on stopChild has been lost.
+  const child = spawnIdleChild();
+  const { dir } = createTempCatalog();
+  assert.equal(hasExited(child), false, "child should start alive");
+
+  await teardownWebServer({ child, catalogDir: dir, label: "test" });
+
+  assert.ok(hasExited(child), "teardown must await the child's exit");
+});
+
+test("teardownWebServer: an already-dead child is not an error", async () => {
+  // The failure path: a smoke calls fail() after the launcher already crashed.
+  // Teardown still has to clean up rather than hang on an exit that never comes.
+  const child = spawnIdleChild();
+  child.kill("SIGKILL");
+  await once(child, "exit");
+  const { dir } = createTempCatalog();
+
+  await teardownWebServer({ child, catalogDir: dir, label: "test" });
+
   assert.equal(existsSync(dir), false);
 });
 
