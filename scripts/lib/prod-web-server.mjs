@@ -20,11 +20,63 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 
-import { removeSafe } from "./child-cleanup.mjs";
+import { removeSafe, stopChild } from "./child-cleanup.mjs";
 
 const libDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(libDir, "..", "..");
 const launcherEntry = resolve(repoRoot, "clients/launcher/build/index.js");
+
+/**
+ * Mint a fresh throwaway catalog for one server run.
+ *
+ * `mkdtemp` (not a fixed name) is what makes concurrent runs safe: the three web
+ * smokes run back-to-back today, but a fixed path would have them share — and
+ * silently reintroduce the cross-run bleed this whole change removes.
+ *
+ * The catalog *file* is deliberately not created. The backend seeds an empty
+ * catalog on first use, which is exactly the first-run state we want every run
+ * to start from.
+ *
+ * @returns {{ dir: string, path: string }}
+ */
+export function createTempCatalog() {
+  const dir = mkdtempSync(join(tmpdir(), "smoke-web-catalog-"));
+  return { dir, path: join(dir, "catalog.json") };
+}
+
+/**
+ * Build the child env for the prod web server.
+ *
+ * Split out from the spawn so the isolation contract is unit-testable without
+ * starting a server (#1977). The ordering is load-bearing: `MCP_CATALOG_PATH`
+ * is assigned *after* the `process.env` spread, so an inherited value from the
+ * developer's shell is overridden rather than silently winning — which would
+ * put the smoke straight back on whatever catalog that variable names.
+ *
+ * @param {object} opts
+ * @param {string} opts.host
+ * @param {string} opts.port
+ * @param {string} opts.token
+ * @param {string} opts.catalogPath
+ * @param {NodeJS.ProcessEnv} [opts.baseEnv]
+ */
+export function buildWebServerEnv({
+  host,
+  port,
+  token,
+  catalogPath,
+  baseEnv = process.env,
+}) {
+  return {
+    ...baseEnv,
+    CLIENT_PORT: port,
+    HOST: host,
+    MCP_INSPECTOR_API_TOKEN: token,
+    MCP_CATALOG_PATH: catalogPath,
+    // Don't pop a browser in CI.
+    MCP_AUTO_OPEN_ENABLED: "false",
+  };
+}
 
 /**
  * Spawn `mcp-inspector --web` (prod, no `--dev`) against the built
@@ -56,20 +108,10 @@ const launcherEntry = resolve(repoRoot, "clients/launcher/build/index.js");
 export function startProdWebServer({ host, port, token, label = "smoke:web" }) {
   const baseUrl = `http://${host}:${port}`;
 
-  // The file need not exist — the backend seeds an empty catalog on first run.
-  const catalogDir = mkdtempSync(join(tmpdir(), "smoke-web-catalog-"));
-  const catalogPath = join(catalogDir, "catalog.json");
+  const { dir: catalogDir, path: catalogPath } = createTempCatalog();
 
   const child = spawn(process.execPath, [launcherEntry, "--web"], {
-    env: {
-      ...process.env,
-      CLIENT_PORT: port,
-      HOST: host,
-      MCP_INSPECTOR_API_TOKEN: token,
-      MCP_CATALOG_PATH: catalogPath,
-      // Don't pop a browser in CI.
-      MCP_AUTO_OPEN_ENABLED: "false",
-    },
+    env: buildWebServerEnv({ host, port, token, catalogPath }),
     stdio: ["ignore", "inherit", "inherit"],
   });
 
@@ -151,11 +193,17 @@ export function startProdWebServer({ host, port, token, label = "smoke:web" }) {
     catalogPath,
     waitForReady,
     whenChildExits,
-    stop: () => {
-      if (!exited) child.kill("SIGTERM");
-      // SIGTERM is not awaited, so the server may still hold the catalog for a
-      // moment. `removeSafe` warns rather than throws, so the worst case is a
-      // leaked temp dir the OS reclaims — never a red smoke over cleanup.
+    /**
+     * Terminate the server, then remove its catalog dir. **Await this** — the
+     * two halves are the documented pair in `child-cleanup.mjs`, and both are
+     * needed. `stopChild` closes the #1801 race on the normal path (a bare
+     * `kill()` only *delivers* the signal, so a synchronous remove can hit
+     * ENOTEMPTY when the server writes the catalog on its way out); `removeSafe`
+     * then makes the residual case harmless, warning instead of throwing so a
+     * leftover temp dir can never turn a passing smoke red.
+     */
+    stop: async () => {
+      await stopChild(child, { label, what: "prod web server" });
       removeSafe(catalogDir, { label });
     },
   };

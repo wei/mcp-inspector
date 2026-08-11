@@ -95,7 +95,7 @@ async function shutdown() {
     }
     browser = null;
   }
-  server.stop();
+  await server.stop();
 }
 
 async function fail(message) {

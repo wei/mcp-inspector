@@ -120,7 +120,7 @@ async function shutdown() {
     }
     browser = null;
   }
-  server.stop();
+  await server.stop();
   if (mcpServer) {
     const child = mcpServer;
     mcpServer = null;
