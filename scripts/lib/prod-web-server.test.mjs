@@ -84,18 +84,32 @@ test("teardownWebServer: removes the catalog dir it was given", async () => {
   assert.equal(existsSync(dir), false, "teardown must remove the catalog dir");
 });
 
-test("teardownWebServer: waits for the child to exit before removing", async () => {
-  // The #1801 race in one assertion: a bare kill() only *delivers* SIGTERM, so a
-  // teardown that removed synchronously could unlink the dir while the server was
-  // still writing to it. If teardown resolves with the child still alive, the
-  // await on stopChild has been lost.
+test("teardownWebServer: the catalog outlives the child", async () => {
+  // The #1801 ordering, pinned at the one instant that distinguishes it. Simply
+  // asserting `hasExited` after the await is too weak — that also passes if the
+  // dir were removed *first*, or while an un-awaited stopChild was still pending.
+  // So sample the dir from the child's own `exit` handler: registering it before
+  // teardown puts it ahead of stopChild's listener, so it observes the world at
+  // the moment the child dies. removeSafe cannot have run yet — it is sequenced
+  // after the promise stopChild resolves from this very event.
   const child = spawnIdleChild();
   const { dir } = createTempCatalog();
   assert.equal(hasExited(child), false, "child should start alive");
 
+  let dirAtChildExit = null;
+  child.once("exit", () => {
+    dirAtChildExit = existsSync(dir);
+  });
+
   await teardownWebServer({ child, catalogDir: dir, label: "test" });
 
+  assert.equal(
+    dirAtChildExit,
+    true,
+    "catalog must still exist when the child exits — removing earlier is the #1801 race",
+  );
   assert.ok(hasExited(child), "teardown must await the child's exit");
+  assert.equal(existsSync(dir), false, "and must remove it afterwards");
 });
 
 test("teardownWebServer: an already-dead child is not an error", async () => {

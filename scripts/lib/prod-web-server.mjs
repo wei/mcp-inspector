@@ -89,10 +89,11 @@ export function buildWebServerEnv({
  * never turn a passing smoke red.
  *
  * Exported separately from `startProdWebServer` so the teardown *contract* is
- * testable against a stand-in child, without booting a real launcher. Testing it
- * matters more than it looks: deleting the `removeSafe` call would leave both the
- * unit suite and all three smokes green (the smokes exit immediately after
- * teardown), which is precisely the regression the tests exist to catch.
+ * testable against a stand-in child, without booting a real launcher. That split
+ * is what makes the leak detectable at all: the smokes exit immediately after
+ * teardown, so deleting the `removeSafe` call below would leave all three of them
+ * green. The focused unit tests in `prod-web-server.test.mjs` are the only thing
+ * that fails on it.
  *
  * @param {object} opts
  * @param {import("node:child_process").ChildProcess} opts.child
