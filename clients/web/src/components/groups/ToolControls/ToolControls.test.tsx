@@ -258,6 +258,44 @@ describe("ToolControls", () => {
     }
   });
 
+  // The shape `test-servers/configs/duplicate-tool-names-http.json` serves: the
+  // repeats are appended after the whole list rather than sitting beside their
+  // twin. Distinct from the fixture above and worth its own case — React
+  // matches a leading run of same-key children first, so where the duplicates
+  // sit decides which row gets orphaned (#1957).
+  const appendedDuplicateTools: Tool[] = [
+    { name: "get_weather", inputSchema: { type: "object" } },
+    { name: "get_temp", inputSchema: { type: "object" } },
+    { name: "echo", inputSchema: { type: "object" } },
+    { name: "add", inputSchema: { type: "object" } },
+    {
+      name: "get_weather",
+      title: "get_weather (duplicate)",
+      inputSchema: { type: "object" },
+    },
+    {
+      name: "echo",
+      title: "echo (duplicate)",
+      inputSchema: { type: "object" },
+    },
+  ];
+
+  it("removes every non-matching row when repeats are appended (#1957)", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(
+      <ControlledToolControls tools={appendedDuplicateTools} />,
+    );
+
+    await user.type(screen.getByPlaceholderText("Search tools..."), "get");
+
+    expect(screen.getByText("get_temp")).toBeInTheDocument();
+    expect(screen.getByText("get_weather (duplicate)")).toBeInTheDocument();
+    expect(screen.queryByText("add")).not.toBeInTheDocument();
+    // The row the collision orphaned on the broken build.
+    expect(screen.queryByText("echo")).not.toBeInTheDocument();
+    expect(screen.queryByText("echo (duplicate)")).not.toBeInTheDocument();
+  });
+
   it("removes every non-matching excluded row when names repeat (#1957)", async () => {
     const user = userEvent.setup();
     const duplicateExcluded = [
