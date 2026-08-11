@@ -37,14 +37,18 @@ const typescriptDir = path.dirname(
   ),
 );
 
+/** A lockfileVersion 3 lockfile, including the `""` root entry npm always writes. */
 const lock = (deps) => ({
   lockfileVersion: 3,
-  packages: Object.fromEntries(
-    Object.entries(deps).map(([name, version]) => [
-      `node_modules/${name}`,
-      { version },
-    ]),
-  ),
+  packages: {
+    "": { name: "fixture" },
+    ...Object.fromEntries(
+      Object.entries(deps).map(([name, version]) => [
+        `node_modules/${name}`,
+        { version },
+      ]),
+    ),
+  },
 });
 
 /**
@@ -52,7 +56,7 @@ const lock = (deps) => ({
  * install and one client install, and the guard itself. `rootDeps`/`webDeps`
  * decide whether the two installs agree.
  */
-function makeFixture({ rootDeps, webDeps, scripts }) {
+function makeFixture({ rootDeps, webDeps, scripts, rawWebLock }) {
   // realpath matters: on macOS `tmpdir()` is `/var/...`, a symlink to
   // `/private/var/...`. The guard only runs `main()` when `import.meta.url`
   // (always the resolved path) matches `process.argv[1]`, so launching it via
@@ -88,7 +92,7 @@ function makeFixture({ rootDeps, webDeps, scripts }) {
   );
   write("package-lock.json", lock(rootDeps));
   write("clients/web/package.json", { name: "web" });
-  write("clients/web/package-lock.json", lock(webDeps));
+  write("clients/web/package-lock.json", rawWebLock ?? lock(webDeps));
 
   // The guard resolves its repo root from its own location, so it has to live
   // inside the fixture; `lib/npm-scripts.mjs` comes along as its import.
@@ -180,6 +184,48 @@ test("main: exits 1 when a configured shared source matches no file", () => {
     assert.match(out, /matched no tracked file/);
     assert.match(out, /^\s+core$/m);
   });
+});
+
+test("main: exits 1 on a lockfile it cannot read, rather than failing open (Copilot, #1962)", () => {
+  // A v1 lockfile has `dependencies` and no `packages` table. Treating it as an
+  // install that simply holds nothing would leave the *root's* zod unopposed
+  // and the skew below reported as aligned — the gate failing open.
+  withFixture(
+    {
+      rootDeps: { ...ALIGNED, zod: "4.3.6" },
+      webDeps: ALIGNED,
+      rawWebLock: {
+        lockfileVersion: 1,
+        dependencies: { zod: { version: "4.4.3" } },
+      },
+    },
+    (dir) => {
+      const { status, out } = runGuard(dir);
+      assert.equal(status, 1, out);
+      assert.match(out, /not in a readable format/);
+      assert.match(out, /clients\/web\/package-lock\.json/);
+    },
+  );
+});
+
+test("main: exits 1 on a lockfile with a `packages` table but no root entry", () => {
+  // The shape check is not just "has a packages key" — a table without the
+  // `""` root npm always writes is not a lockfile this guard can trust.
+  withFixture(
+    {
+      rootDeps: ALIGNED,
+      webDeps: ALIGNED,
+      rawWebLock: {
+        lockfileVersion: 3,
+        packages: { "node_modules/zod": { version: "4.4.3" } },
+      },
+    },
+    (dir) => {
+      const { status, out } = runGuard(dir);
+      assert.equal(status, 1, out);
+      assert.match(out, /not in a readable format/);
+    },
+  );
 });
 
 test("main: exits 1 when the root validate no longer runs the sibling guard", () => {

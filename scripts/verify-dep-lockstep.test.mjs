@@ -8,6 +8,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   findSkew,
+  hasReadableLockShape,
   importedPackageNames,
   isSharedSourceFile,
   majorOf,
@@ -243,8 +244,36 @@ test("topLevelLockVersions: nested duplicates are ignored", () => {
 });
 
 test("topLevelLockVersions: a malformed or empty lockfile yields nothing", () => {
+  // Safe as a pure helper *because* `hasReadableLockShape` rejects these before
+  // any comparison — an empty map reaching `findSkew` is the fail-open path.
   for (const lock of [undefined, null, {}, { packages: {} }])
     assert.equal(topLevelLockVersions(lock).size, 0);
+});
+
+test("hasReadableLockShape: only a v2+ packages table with a root entry (Copilot, #1962)", () => {
+  assert.equal(
+    hasReadableLockShape({ lockfileVersion: 3, packages: { "": {} } }),
+    true,
+  );
+  assert.equal(
+    hasReadableLockShape({
+      lockfileVersion: 2,
+      packages: { "": {}, "node_modules/zod": { version: "4.4.3" } },
+    }),
+    true,
+  );
+  const rejected = [
+    undefined,
+    null,
+    {},
+    { packages: null },
+    { packages: [] }, // an array has no `""` key
+    { packages: {} }, // no root entry
+    { packages: { "node_modules/zod": { version: "4.4.3" } } },
+    { lockfileVersion: 1, dependencies: { zod: { version: "4.4.3" } } },
+  ];
+  for (const lock of rejected)
+    assert.equal(hasReadableLockShape(lock), false, JSON.stringify(lock));
 });
 
 test("findSkew: reports a package held at two versions", () => {

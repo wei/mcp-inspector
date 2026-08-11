@@ -210,6 +210,25 @@ export function topLevelLockVersions(lock) {
 }
 
 /**
+ * Whether a parsed lockfile has the shape this guard can read: a
+ * `lockfileVersion` 2+ `packages` table, keyed by install path with `""` for
+ * the root project.
+ *
+ * This is checked rather than tolerated because the gate is deny-by-default and
+ * `topLevelLockVersions` returns an empty map for anything else. An unreadable
+ * lockfile would otherwise contribute no holders, and a real skew among the
+ * remaining installs would be reported as aligned — the gate failing *open*,
+ * which is the one way it must never fail (Copilot, #1962). A v1 lockfile
+ * (`dependencies` only, no `packages`) lands here too, correctly: this guard
+ * cannot read it, so it must say so rather than skip the install.
+ */
+export function hasReadableLockShape(lock) {
+  const packages = lock?.packages;
+  if (typeof packages !== "object" || packages === null) return false;
+  return Object.prototype.hasOwnProperty.call(packages, "");
+}
+
+/**
  * Find candidate packages that resolve to more than one version across the
  * installs. `installs` is an array of `{ dir, versions }`. Returns one entry per
  * skewed package, sorted by name, each listing the version each install holds.
@@ -375,13 +394,42 @@ export function main() {
   }
 
   const dirs = installDirs();
-  const installs = dirs.map((dir) => ({
+  const locks = dirs.map((dir) => {
+    const file = path.join(repoRoot, dir, "package-lock.json");
+    let lock;
+    try {
+      lock = JSON.parse(readFileSync(file, "utf8"));
+    } catch (cause) {
+      // Unparseable is the same failure as unreadable — say which file, rather
+      // than dying on a raw SyntaxError with no path in it.
+      throw new Error(
+        `verify:dep-lockstep — could not parse ${dir}/package-lock.json.`,
+        { cause },
+      );
+    }
+    return { dir, lock };
+  });
+
+  // Refuse to compare against a lockfile whose shape we can't read, instead of
+  // treating it as an install that holds nothing — see `hasReadableLockShape`.
+  const unreadable = locks.filter(({ lock }) => !hasReadableLockShape(lock));
+  if (unreadable.length > 0) {
+    console.error(
+      `verify:dep-lockstep — ${unreadable.length} lockfile(s) are not in a readable format:\n`,
+    );
+    for (const { dir } of unreadable)
+      console.error(`  ${dir}/package-lock.json`);
+    console.error(
+      "\nThis guard reads the `packages` table of a lockfileVersion 2+ lockfile. Without it the install" +
+        "\ncontributes no versions, so a real skew among the others would be reported as aligned — the gate" +
+        "\nfailing open. Regenerate the lockfile with a current npm (`npm install`).",
+    );
+    process.exit(1);
+  }
+
+  const installs = locks.map(({ dir, lock }) => ({
     dir,
-    versions: topLevelLockVersions(
-      JSON.parse(
-        readFileSync(path.join(repoRoot, dir, "package-lock.json"), "utf8"),
-      ),
-    ),
+    versions: topLevelLockVersions(lock),
   }));
 
   const { failures, ignored } = partitionSkew(findSkew(candidates, installs));
