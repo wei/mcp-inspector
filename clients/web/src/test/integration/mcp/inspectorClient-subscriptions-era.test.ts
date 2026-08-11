@@ -373,6 +373,30 @@ describe("resource subscriptions era fork (#1630)", () => {
       );
     });
 
+    it("has the stream up before the connect event fires", async () => {
+      // The managed list states start their initial `refresh()` from the
+      // `connect` event, so the stream has to be established (or its retry
+      // armed) first: dispatching earlier would let `tools/list` go out ahead of
+      // `subscriptions/listen`, and a list the server changed in that window
+      // would notify nobody.
+      const started = await startToolsOnlyServer({ tools: true });
+      const connected = new InspectorClient(
+        { type: "streamable-http", url: started.url },
+        {
+          environment: { transport: createTransportNode },
+          versionNegotiation: eraToVersionNegotiation("modern"),
+        },
+      );
+      let streamAtConnectEvent: boolean | undefined;
+      connected.addEventListener("connect", () => {
+        streamAtConnectEvent = internals(connected).modernSubscription !== null;
+      });
+      await connected.connect();
+      client = connected;
+
+      expect(streamAtConnectEvent).toBe(true);
+    });
+
     it("connects anyway when the connect-time listen fails, and retries", async () => {
       // The handshake succeeded; every request-scoped feature works without the
       // stream, so the failure is handed to the reconnect machinery instead of

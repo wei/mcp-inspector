@@ -1936,8 +1936,6 @@ export class InspectorClient extends InspectorClientEventTarget {
       // capabilities and wipe tools/prompts/resources to empty on every connect.
       await this.fetchServerInfo();
 
-      this.dispatchTypedEvent("connect");
-
       // Set initial logging level if configured and server supports it
       if (this.initialLoggingLevel && this.capabilities?.logging) {
         await this.client.setLoggingLevel(
@@ -2067,6 +2065,15 @@ export class InspectorClient extends InspectorClientEventTarget {
       // server with no resources would have no way in, since a subscribe click
       // was the only thing that ever opened the stream (#1920).
       await this.openModernListenStreamOnConnect();
+
+      // Last, so the notification channel is established (or its retry armed)
+      // before any consumer acts on the connection. The managed list states
+      // start their initial `refresh()` from this event, so dispatching earlier
+      // would let `tools/list` go out ahead of `subscriptions/listen` — and a
+      // list the server changes in that window would notify nobody, leaving the
+      // UI stale with no way to notice (#1920). The cost is one listen
+      // round-trip added to connect on the modern era.
+      this.dispatchTypedEvent("connect");
     } catch (error) {
       if (!isConnectAuthRecoveryError(error)) {
         this.status = "error";
