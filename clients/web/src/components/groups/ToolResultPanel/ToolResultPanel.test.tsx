@@ -109,6 +109,78 @@ describe("ToolResultPanel", () => {
     expect(screen.getByText("divider")).toBeInTheDocument();
   });
 
+  describe("structuredContent (#1908)", () => {
+    const structured = { items: [{ id: 1, name: "Item A" }], total: 1 };
+
+    it("renders a Structured Output section alongside the content blocks", () => {
+      renderWithMantine(
+        <ToolResultPanel
+          result={{ ...okResult, structuredContent: structured }}
+          onClear={() => {}}
+        />,
+      );
+      expect(screen.getByText("ok")).toBeInTheDocument();
+      expect(
+        screen.getByRole("heading", { name: "Structured Output" }),
+      ).toBeInTheDocument();
+    });
+
+    it("omits the section when the result has no structuredContent", () => {
+      renderWithMantine(
+        <ToolResultPanel result={okResult} onClear={() => {}} />,
+      );
+      expect(
+        screen.queryByRole("heading", { name: "Structured Output" }),
+      ).not.toBeInTheDocument();
+    });
+
+    it("renders the section instead of the empty state when content is empty", () => {
+      renderWithMantine(
+        <ToolResultPanel
+          result={{ content: [], structuredContent: structured }}
+          onClear={() => {}}
+        />,
+      );
+      expect(screen.queryByText("No results yet")).not.toBeInTheDocument();
+      expect(
+        screen.getByRole("heading", { name: "Structured Output" }),
+      ).toBeInTheDocument();
+    });
+
+    it("renders the section below the alert on an error result", () => {
+      renderWithMantine(
+        <ToolResultPanel
+          result={{ ...errorResult, structuredContent: structured }}
+          onClear={() => {}}
+        />,
+      );
+      expect(screen.getByText("Tool Error")).toBeInTheDocument();
+      expect(
+        screen.getByRole("heading", { name: "Structured Output" }),
+      ).toBeInTheDocument();
+    });
+
+    it("renders the section alongside a Resource Links box", () => {
+      renderWithMantine(
+        <ToolResultPanel
+          result={{
+            content: [
+              { type: "resource_link", uri: "demo://r/1", name: "One" },
+            ],
+            structuredContent: structured,
+          }}
+          onClear={() => {}}
+        />,
+      );
+      expect(
+        screen.getByRole("heading", { name: "Resource Links" }),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("heading", { name: "Structured Output" }),
+      ).toBeInTheDocument();
+    });
+  });
+
   it("invokes onClear when the close button is clicked", async () => {
     const user = userEvent.setup();
     const onClear = vi.fn();
