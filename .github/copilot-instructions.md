@@ -72,6 +72,13 @@ Both exist and do different jobs. Theme files (`src/theme/<Component>.ts`) custo
 - `src/types/` is only for ambient `.d.ts` module stubs — not a home for new domain types.
 - ⚠️ The coverage `include` is a **whitelist** naming `components` / `hooks` / `theme` / `lib` / `utils` / `server` (plus the `core/*` runtime). A module placed outside those directories silently falls out of the ≥90% gate. Flag new top-level files or new grab-bag directories.
 
+## Dependency placement
+
+- **The MCP SDK packages (`@modelcontextprotocol/client`, `core`, `server`, `server-legacy`, `ext-apps`) belong in the root `package.json` only.** Adding one to a `clients/*/package.json` is a review finding: Node resolution walks up, so the root install already serves every client, and a per-client entry installs a second copy that drifts (it produced two versions of `ext-apps`, and of the transitive v1 SDK, at once — #1970) and reintroduces the duplicate-copy failure `vitest.shared.mts` has a `dedupe` workaround for.
+- **The v1 `@modelcontextprotocol/sdk` is not a dependency of this repo** and must not become one. It is a peer of `ext-apps`, present in lock files only.
+- Dependencies reached only through **root-owned code with no manifest** (`test-servers/src`, `core/`) are declared at the root and aliased to the **repo root** in `vitest.shared.mts` — as `express` and `yaml` are — not to `<client>/node_modules` like the other pins there.
+- **Which section is a separate question from which manifest.** A package `core/` imports at runtime must be in root **`dependencies`**: client builds externalize npm packages, so a published install resolves them from the root manifest and devDependencies are absent there. Only test/build-only packages (`express`) belong in `devDependencies`. Flag a runtime `core/` import added to `devDependencies` — it passes every local check and breaks the published package.
+
 ## Tests and the coverage gate
 
 - **All new or modified code needs tests.** The per-file gate is **≥ 90% on all four dimensions** — lines, statements, functions, **and branches** — enforced in CI for `clients/{web,cli,tui,launcher}` and the gated `core/` runtime.
