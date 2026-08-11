@@ -132,10 +132,12 @@ export function packageNameOf(specifier) {
 // name would silently widen the set.
 //
 // Whitespace between tokens is really *trivia*: TypeScript allows a comment
-// anywhere whitespace is legal, so `import(/* webpackIgnore: true */ "pkg")`
-// and `from /* why */ "pkg"` are valid and must still be seen (Copilot,
-// #1962). `TRIVIA` stands in for `\s*` at every such position.
-const TRIVIA = String.raw`(?:\s|/\*[\s\S]*?\*/)*`;
+// anywhere whitespace is legal, so `import(/* webpackIgnore: true */ "pkg")`,
+// `from /* why */ "pkg"`, and the line-comment forms (`import(// lazy\n"pkg")`)
+// are all valid and must still be seen (Copilot, #1962). `TRIVIA` stands in for
+// `\s*` at every such position and covers both comment syntaxes. A line comment
+// runs to end-of-line only — the newline itself is matched by the `\s` branch.
+const TRIVIA = String.raw`(?:\s|/\*[\s\S]*?\*/|//[^\n]*)*`;
 const SPECIFIER_FORMS = [
   // import … from "x" / export … from "x"
   new RegExp(String.raw`\bfrom${TRIVIA}["']([^"']+)["']`, "g"),

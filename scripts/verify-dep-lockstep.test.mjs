@@ -118,6 +118,25 @@ test("importedPackageNames: comment trivia between tokens (Copilot, #1962)", () 
   ]);
 });
 
+test("importedPackageNames: line-comment trivia, not just block (Copilot, #1962)", () => {
+  // `//` runs to end-of-line and is legal in every position a block comment is,
+  // so these are valid imports too. The newline is matched by TRIVIA's `\\s`
+  // branch rather than by the line-comment branch.
+  const source = [
+    "import { a } from // reason",
+    '  "express";',
+    "const b = await import(// lazy",
+    '  "undici");',
+    "const c = require(// lazy",
+    '  "yaml");',
+  ].join("\n");
+  assert.deepEqual([...importedPackageNames(source)].sort(), [
+    "express",
+    "undici",
+    "yaml",
+  ]);
+});
+
 test("importedPackageNames: the three specifier forms that introduce types", () => {
   const source = `
     import { z } from "zod/v4";
