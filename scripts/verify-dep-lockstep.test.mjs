@@ -9,10 +9,42 @@ import assert from "node:assert/strict";
 import {
   findSkew,
   importedPackageNames,
+  isSharedSourceFile,
   packageNameOf,
   partitionSkew,
   topLevelLockVersions,
 } from "./verify-dep-lockstep.mjs";
+
+test("isSharedSourceFile: all four TS extensions, not just .ts/.tsx", () => {
+  // `.mts`/`.cts` are gated by `verify:format-coverage` and
+  // `verify:typecheck-coverage` too. None exist under the shared trees today,
+  // so dropping them here would go unnoticed until a new shared dependency
+  // arrived through one — the skew this guard exists to catch (Copilot, #1962).
+  for (const ext of [".ts", ".tsx", ".mts", ".cts"]) {
+    assert.equal(isSharedSourceFile(`core/mcp/thing${ext}`), true, ext);
+    assert.equal(
+      isSharedSourceFile(`test-servers/src/thing${ext}`),
+      true,
+      `test-servers ${ext}`,
+    );
+  }
+});
+
+test("isSharedSourceFile: non-TS files and other trees are excluded", () => {
+  const rejected = [
+    "core/README.md", // not TypeScript
+    "core/mcp/data.json",
+    "clients/web/src/App.tsx", // a client's own sources resolve from the client
+    "scripts/verify-dep-lockstep.mjs",
+    "test-servers/configs/modern-http.json",
+    // Path-boundary anchoring: a sibling dir whose name merely starts with a
+    // shared dir's name must not be swept in.
+    "core-internal/thing.ts",
+    "test-servers/src-legacy/thing.ts",
+  ];
+  for (const file of rejected)
+    assert.equal(isSharedSourceFile(file), false, file);
+});
 
 test("packageNameOf: bare names, scopes, and subpaths", () => {
   const cases = [

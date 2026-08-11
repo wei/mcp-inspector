@@ -170,14 +170,30 @@ export function partitionSkew(skewed, tolerated = TOLERATED_SKEW) {
   };
 }
 
-/** Tracked `.ts`/`.tsx` files under the shared first-party source trees. */
+// The TypeScript extensions the shared trees can hold. Deliberately the same
+// four `verify:format-coverage` and `verify:typecheck-coverage` gate on: a
+// `.mts`/`.cts` under `core/` or `test-servers/src` is typechecked like any
+// other source, so its imports must reach the candidate set too. None exist
+// under those trees today, which is exactly why omitting them would go
+// unnoticed until a new shared dependency arrived through one and skewed.
+const SOURCE_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts"];
+
+/** Whether a repo-relative path is a TypeScript source of a shared tree. */
+export function isSharedSourceFile(file) {
+  if (!SOURCE_EXTENSIONS.some((ext) => file.endsWith(ext))) return false;
+  // Anchored on a path boundary so a sibling whose name merely starts with a
+  // shared dir (`core-internal/`, `test-servers/src-legacy/`) isn't swept in.
+  return SHARED_SOURCE_DIRS.some((dir) => file.startsWith(`${dir}/`));
+}
+
+/** Tracked TypeScript files under the shared first-party source trees. */
 function sharedSourceFiles() {
   const out = execFileSync(
     "git",
     ["ls-files", "--", ...SHARED_SOURCE_DIRS.map((d) => `${d}/**`)],
     { cwd: repoRoot, encoding: "utf8" },
   );
-  return out.split("\n").filter((f) => f.endsWith(".ts") || f.endsWith(".tsx"));
+  return out.split("\n").filter(isSharedSourceFile);
 }
 
 /**
