@@ -92,6 +92,7 @@ Both exist and do different jobs. Theme files (`src/theme/<Component>.ts`) custo
 ## Gates and PR hygiene
 
 - `npm run format` before committing; **`npm run ci` before pushing** (`validate` → `coverage` → `verify:build-gate` → `smoke` → Storybook). `npm run validate` is the fast inner-loop check and is **not** a substitute — it runs `test`, not `test:coverage`, so it does zero coverage gating.
+- **A dependency bump must land in every install that declares it.** v2 is not a workspace — the root and each `clients/*` have their own `node_modules`, and a client's test project compiles `core/` and `test-servers/src` (which resolve from the **root**) alongside the client's own sources. Bumping a shared dependency in one manifest only puts two versions of it in one `tsc` program; for a recursive-generic surface like zod that exhausts the tsc heap (#1896). `verify:dep-lockstep` fails the build on this, so a PR bumping a package that the shared sources import should update the root **and every client that already lists it** — not every client unconditionally, since a package absent from an install can't skew and adding it there would be a spurious dependency.
 - **Every PR references an issue**, first body line `Closes #<ISSUE_NUMBER>`.
 - **Every PR carries exactly one version label**, `v1` or `v2`, matching its base branch.
 - Update the relevant `README.md` / `AGENTS.md` when a change adds, removes, renames, or repurposes a file or folder, changes the structure or tech stack, or introduces a command, dependency, or architectural pattern.
