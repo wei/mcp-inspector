@@ -69,11 +69,14 @@ export class RemoteSession {
    *
    * Ignores anything that isn't a plausible version token so a client can't
    * push arbitrary bytes into an upstream header, and re-applies only on
-   * change (the value rides every `/api/mcp/send`).
+   * change (the value rides every `/api/mcp/send`). The value arrives from an
+   * unvalidated JSON body, so the type is checked rather than assumed —
+   * `RegExp.test` would otherwise coerce a `123` or `true` into a "matching"
+   * string and hand the wrong type to the transport.
    */
-  applyProtocolVersion(version: string | undefined): void {
+  applyProtocolVersion(version: unknown): void {
     if (
-      version === undefined ||
+      typeof version !== "string" ||
       version === this.appliedProtocolVersion ||
       !RemoteSession.PROTOCOL_VERSION_PATTERN.test(version)
     ) {

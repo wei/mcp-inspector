@@ -25,6 +25,16 @@ function makeFetchEntry(
   };
 }
 
+/** A structurally valid `Transport`, so a fixture needs no cast. */
+function makeTransport(overrides: Partial<Transport> = {}): Transport {
+  return {
+    start: async () => {},
+    send: async () => {},
+    close: async () => {},
+    ...overrides,
+  };
+}
+
 describe("RemoteSession", () => {
   it("queues events before a consumer attaches and drains them on attach", () => {
     const session = new RemoteSession("s1");
@@ -125,7 +135,7 @@ describe("RemoteSession", () => {
   it("applyProtocolVersion forwards a new version to the transport once", () => {
     const session = new RemoteSession("s8a");
     const setProtocolVersion = vi.fn();
-    session.setTransport({ setProtocolVersion } as unknown as Transport);
+    session.setTransport(makeTransport({ setProtocolVersion }));
 
     session.applyProtocolVersion("2025-11-25");
     session.applyProtocolVersion("2025-11-25");
@@ -136,21 +146,26 @@ describe("RemoteSession", () => {
     expect(setProtocolVersion).toHaveBeenLastCalledWith("2026-07-28");
   });
 
-  it("applyProtocolVersion ignores an absent or non-token version", () => {
+  it("applyProtocolVersion ignores an absent, non-token, or non-string version", () => {
     const session = new RemoteSession("s8b");
     const setProtocolVersion = vi.fn();
-    session.setTransport({ setProtocolVersion } as unknown as Transport);
+    session.setTransport(makeTransport({ setProtocolVersion }));
 
     session.applyProtocolVersion(undefined);
     // Header injection attempt — must never reach the upstream transport.
     session.applyProtocolVersion("2025-11-25\r\nX-Evil: 1");
     session.applyProtocolVersion("");
+    // The value arrives from an unvalidated JSON body, so a non-string must be
+    // rejected on its type — `RegExp.test` would coerce these into a match.
+    session.applyProtocolVersion(123);
+    session.applyProtocolVersion(true);
+    session.applyProtocolVersion(null);
     expect(setProtocolVersion).not.toHaveBeenCalled();
   });
 
   it("applyProtocolVersion is a no-op on a transport without setProtocolVersion (stdio)", () => {
     const session = new RemoteSession("s8c");
-    session.setTransport({} as unknown as Transport);
+    session.setTransport(makeTransport());
     expect(() => session.applyProtocolVersion("2025-11-25")).not.toThrow();
   });
 

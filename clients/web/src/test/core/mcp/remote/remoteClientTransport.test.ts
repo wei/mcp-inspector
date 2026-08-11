@@ -542,10 +542,7 @@ describe("RemoteClientTransport", () => {
         return new Response("not found", { status: 404 });
       });
 
-    const transport = new RemoteClientTransport(
-      { baseUrl, fetchFn: fetchFn as unknown as typeof fetch },
-      config,
-    );
+    const transport = new RemoteClientTransport({ baseUrl, fetchFn }, config);
     await transport.start();
 
     // Pre-initialize sends carry no version (none negotiated yet).
