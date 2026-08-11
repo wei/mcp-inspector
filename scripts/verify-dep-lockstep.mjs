@@ -101,12 +101,25 @@ export function packageNameOf(specifier) {
   return name;
 }
 
-// `from "x"` (import and re-export), a side-effect `import "x"`, and a dynamic
-// `import("x")`. Only these three forms introduce a dependency's *types*.
+// Every form that can introduce a dependency's *types* (Copilot, #1962).
+// `import x = require("pkg")` and a bare `require("pkg")` matter because the
+// shared trees may hold `.cts` sources, where that is the ordinary import
+// syntax; and neither call form requires the closing paren, so an import
+// attributes argument (`import("pkg", { with: … })`) can't hide the specifier.
+//
+// Backticks are accepted ONLY in the call forms, where a static template
+// literal is legal. A `from` clause requires a string literal, so allowing
+// backticks there would buy nothing while reopening the prose hazard the
+// anchored specifier pattern exists to close — inline code in a comment is
+// written with backticks throughout this codebase, and "…derived from
+// `tools`…" would otherwise enter the candidate set as a package named
+// `tools`. Inert today, but a prose word that collides with a real package
+// name would silently widen the set.
 const SPECIFIER_FORMS = [
-  /\bfrom\s*["']([^"']+)["']/g,
-  /\bimport\s+["']([^"']+)["']/g,
-  /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,
+  /\bfrom\s*["']([^"']+)["']/g, // import … from "x" / export … from "x"
+  /\bimport\s+["']([^"']+)["']/g, // side-effect import "x"
+  /\bimport\s*\(\s*["'`]([^"'`]+)["'`]/g, // dynamic import("x"[, opts])
+  /\brequire\s*\(\s*["'`]([^"'`]+)["'`]/g, // import x = require("x"), require("x")
 ];
 
 /**

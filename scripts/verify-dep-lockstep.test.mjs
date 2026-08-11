@@ -79,6 +79,26 @@ test("packageNameOf: non-packages are rejected", () => {
   assert.equal(packageNameOf(undefined), null);
 });
 
+test("importedPackageNames: CommonJS and awkward dynamic-import forms (Copilot, #1962)", () => {
+  // Under-approximating is the dangerous direction: a package the scan misses
+  // never enters the candidate set, so its skew passes the guard silently.
+  // `.cts` sources in the shared trees use `import x = require(…)` as ordinary
+  // syntax, and a dynamic import may carry import attributes or a static
+  // template literal — none of which the original three patterns matched.
+  const source = `
+    import express = require("express");
+    const yaml = require("yaml");
+    const a = await import("undici", { with: { type: "json" } });
+    const b = await import(\`jose\`);
+  `;
+  assert.deepEqual([...importedPackageNames(source)].sort(), [
+    "express",
+    "jose",
+    "undici",
+    "yaml",
+  ]);
+});
+
 test("importedPackageNames: the three specifier forms that introduce types", () => {
   const source = `
     import { z } from "zod/v4";
@@ -104,6 +124,19 @@ test("importedPackageNames: prose after `from` is not an import", () => {
   const source = `
     // Resolved relative to the runner dir, not from "cwd omitted" by the caller.
     /** Reads the manifest from "file:" URLs. */
+    import { z } from "zod";
+  `;
+  assert.deepEqual([...importedPackageNames(source)], ["zod"]);
+});
+
+test("importedPackageNames: a backticked `from` in prose is not an import", () => {
+  // Backticks are legal in the *call* forms (a static template literal) but
+  // never after `from`, which requires a string literal. Accepting them there
+  // would sweep in inline code from comments — this codebase writes it with
+  // backticks throughout — and a prose word colliding with a real package name
+  // would silently widen the candidate set.
+  const source = `
+    /** The excluded set derived from \\\`tools\\\`, keyed off \\\`express\\\`-style paths. */
     import { z } from "zod";
   `;
   assert.deepEqual([...importedPackageNames(source)], ["zod"]);
