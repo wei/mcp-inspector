@@ -377,9 +377,18 @@ function installDirs() {
         .map((e) => `clients/${e.name}`)
         .sort()
     : [];
-  return ["."]
-    .concat(clients)
-    .filter((dir) => existsSync(path.join(repoRoot, dir, "package-lock.json")));
+  // Enrolment is by `package.json` — an install we are meant to compare —
+  // NOT by the presence of a lockfile (Copilot, #1962). Filtering on the
+  // lockfile made a missing one silently drop that install from the
+  // comparison; for the root, the install every shared source resolves from,
+  // that meant the guard could report success from client locks alone. A
+  // missing lockfile is now a loud failure in `main`, not an absent row. The
+  // root is always enrolled: it is this repo, so its manifest is a given.
+  return ["."].concat(
+    clients.filter((dir) =>
+      existsSync(path.join(repoRoot, dir, "package.json")),
+    ),
+  );
 }
 
 /**
@@ -427,6 +436,25 @@ export function main() {
   }
 
   const dirs = installDirs();
+
+  // A missing lockfile is a failure, not a skipped install: dropping one would
+  // remove its versions from the comparison and could report a real skew as
+  // aligned.
+  const missing = dirs.filter(
+    (dir) => !existsSync(path.join(repoRoot, dir, "package-lock.json")),
+  );
+  if (missing.length > 0) {
+    console.error(
+      `verify:dep-lockstep — ${missing.length} install(s) have a package.json but no lockfile:\n`,
+    );
+    for (const dir of missing) console.error(`  ${dir}/package-lock.json`);
+    console.error(
+      "\nEvery install must be compared; skipping one could report a real skew as aligned." +
+        "\nRun `npm install` there, or remove the install if it is no longer part of the repo.",
+    );
+    process.exit(1);
+  }
+
   const locks = dirs.map((dir) => {
     const file = path.join(repoRoot, dir, "package-lock.json");
     let lock;

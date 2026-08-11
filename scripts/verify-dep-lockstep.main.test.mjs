@@ -228,6 +228,47 @@ test("main: exits 1 on a lockfile with a `packages` table but no root entry", ()
   );
 });
 
+test("main: exits 1 on an install whose lockfile is missing (Copilot, #1962)", () => {
+  // Enrolment is by `package.json`, so a missing lockfile is loud rather than a
+  // silently absent row. The fixture IS skewed, so dropping the install instead
+  // would leave the remaining holder unopposed and report aligned.
+  withFixture(
+    { rootDeps: { ...ALIGNED, zod: "4.3.6" }, webDeps: ALIGNED },
+    (dir) => {
+      rmSync(path.join(dir, "clients", "web", "package-lock.json"));
+      const { status, out } = runGuard(dir);
+      assert.equal(status, 1, out);
+      assert.match(out, /no lockfile/);
+      assert.match(out, /clients\/web\/package-lock\.json/);
+    },
+  );
+});
+
+test("main: exits 1 when the ROOT lockfile is missing", () => {
+  // The worst variant: the root is the install every shared source resolves
+  // from, so omitting it could let the guard pass on client locks alone.
+  withFixture({ rootDeps: ALIGNED, webDeps: ALIGNED }, (dir) => {
+    rmSync(path.join(dir, "package-lock.json"));
+    const { status, out } = runGuard(dir);
+    assert.equal(status, 1, out);
+    assert.match(out, /no lockfile/);
+    assert.match(out, /^\s+\.\/package-lock\.json$/m);
+  });
+});
+
+test("main: a clients/ dir with no package.json is not an install", () => {
+  // Enrolling a stray directory would demand a lockfile it should never have.
+  withFixture({ rootDeps: ALIGNED, webDeps: ALIGNED }, (dir) => {
+    mkdirSync(path.join(dir, "clients", "scratch"), { recursive: true });
+    writeFileSync(
+      path.join(dir, "clients", "scratch", "notes.md"),
+      "scratch\n",
+    );
+    const { status, out } = runGuard(dir);
+    assert.equal(status, 0, out);
+  });
+});
+
 test("main: exits 1 when the root validate no longer runs the sibling guard", () => {
   withFixture(
     {
