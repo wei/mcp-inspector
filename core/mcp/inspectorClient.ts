@@ -4981,9 +4981,17 @@ export class InspectorClient extends InspectorClientEventTarget {
    * every request-scoped feature works without this stream. It is reported the
    * way a lost stream is — hand it to the reconnect machinery, which retries
    * with backoff and settles on `"ended"` past the cap.
+   *
+   * Gated on the same generation test as `subscribeToResource` — see the long
+   * comment there. This call is *not* the only refresh that can be in flight:
+   * the `connect` event has already been dispatched, so a listener subscribing
+   * to a resource can start and acknowledge a newer refresh while this one is
+   * still awaiting its `listen()`. Reconciling unconditionally would then arm a
+   * reconnect that tears down a stream that is up and healthy.
    */
   private async openModernListenStreamOnConnect(): Promise<void> {
     if (!this.isModernEra() || !this.wantsModernStream()) return;
+    const generationBefore = this.modernListenGeneration;
     try {
       await this.refreshModernSubscription();
     } catch (error) {
@@ -4991,7 +4999,9 @@ export class InspectorClient extends InspectorClientEventTarget {
         { error },
         "Failed to open the modern subscriptions/listen stream on connect",
       );
-      this.reconcileModernStreamStateAfterFailedRefresh();
+      if (this.modernListenGeneration === generationBefore + 1) {
+        this.reconcileModernStreamStateAfterFailedRefresh();
+      }
     }
   }
 

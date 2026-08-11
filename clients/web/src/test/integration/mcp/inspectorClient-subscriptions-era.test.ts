@@ -124,6 +124,34 @@ describe("resource subscriptions era fork (#1630)", () => {
     return params.notifications as Record<string, unknown> | undefined;
   }
 
+  /**
+   * The private members these tests drive directly. `InspectorClient` declares
+   * every one of them, so the shape below is a faithful mirror rather than a
+   * reinterpretation — the double cast is only to reach past `private`, which no
+   * single `as` can do (the two types share no public overlap). It is confined to
+   * `internals()` so there is one such cast in the file, and it is unavoidable:
+   * these are lifecycle branches no public API can reach against a healthy server
+   * (there is no way to ask for a *remote* stream close, or for a `listen()` that
+   * fails).
+   */
+  interface StreamInternals {
+    client: { listen: (...args: unknown[]) => Promise<McpSubscription> };
+    modernSubscription: McpSubscription | null;
+    modernListenGeneration: number;
+    modernReconnectAttempts: number;
+    subscribedResources: Set<string>;
+    refreshModernSubscription(fromReconnect?: boolean): Promise<void>;
+    onModernSubscriptionClosed(
+      subscription: McpSubscription,
+      reason: "local" | "graceful" | "remote",
+      generation: number,
+    ): void;
+  }
+
+  function internals(c: InspectorClient): StreamInternals {
+    return c as unknown as StreamInternals;
+  }
+
   describe("modern era", () => {
     it("opens an acknowledged listen stream on subscribe (no resources/subscribe)", async () => {
       const started = await startServer({});
@@ -322,15 +350,7 @@ describe("resource subscriptions era fork (#1630)", () => {
       const started = await startToolsOnlyServer({ tools: true });
       const { connected } = await connect(started.url, "modern");
 
-      const int = connected as unknown as {
-        modernSubscription: McpSubscription | null;
-        modernListenGeneration: number;
-        onModernSubscriptionClosed(
-          subscription: McpSubscription,
-          reason: "local" | "graceful" | "remote",
-          generation: number,
-        ): void;
-      };
+      const int = internals(connected);
       const dropped = int.modernSubscription;
       expect(dropped).not.toBeNull();
       if (!dropped) return;
@@ -367,19 +387,52 @@ describe("resource subscriptions era fork (#1630)", () => {
       );
       // Shadow the private refresh on the instance so the connect-time open
       // fails without a live client to reach into (there is none until
-      // `connect()` builds one).
-      (
-        connected as unknown as {
-          refreshModernSubscription: () => Promise<void>;
-        }
-      ).refreshModernSubscription = () =>
-        Promise.reject(new Error("listen boom"));
+      // `connect()` builds one). The bump mirrors the real method's contract —
+      // it claims the generation synchronously before it can fail — which is
+      // what the caller's guard reads to tell "our refresh failed" from "a newer
+      // one took over".
+      const int = internals(connected);
+      int.refreshModernSubscription = () => {
+        int.modernListenGeneration++;
+        return Promise.reject(new Error("listen boom"));
+      };
 
       await expect(connected.connect()).resolves.toBeUndefined();
       client = connected;
 
       expect(connected.getStatus()).toBe("connected");
       expect(connected.getResourceSubscriptionStreamState().status).toBe(
+        "reconnecting",
+      );
+    });
+
+    it("leaves a superseded connect-time failure to the refresh that owns the stream", async () => {
+      // `connect` is dispatched before the stream is opened, so a listener can
+      // start and acknowledge a newer refresh while this one is still awaiting
+      // its `listen()`. Reconciling anyway would arm a reconnect against a
+      // healthy stream and tear it down — the same ownership test the
+      // subscribe/unsubscribe paths make.
+      const started = await startToolsOnlyServer({ tools: true });
+      const connected = new InspectorClient(
+        { type: "streamable-http", url: started.url },
+        {
+          environment: { transport: createTransportNode },
+          versionNegotiation: eraToVersionNegotiation("modern"),
+        },
+      );
+      const int = internals(connected);
+      // Two bumps: this call's own, plus the newer refresh that superseded it
+      // before its failure landed.
+      int.refreshModernSubscription = () => {
+        int.modernListenGeneration += 2;
+        return Promise.reject(new Error("listen boom"));
+      };
+
+      await expect(connected.connect()).resolves.toBeUndefined();
+      client = connected;
+
+      // No reconnect armed: the state is the newer refresh's to write.
+      expect(connected.getResourceSubscriptionStreamState().status).not.toBe(
         "reconnecting",
       );
     });
@@ -433,23 +486,6 @@ describe("resource subscriptions era fork (#1630)", () => {
   // the client's private state — the pattern used across the InspectorClient
   // coverage-backfill suite — to drive them deterministically.
   describe("modern stream internals", () => {
-    interface StreamInternals {
-      client: { listen: (...args: unknown[]) => Promise<McpSubscription> };
-      modernSubscription: McpSubscription | null;
-      modernListenGeneration: number;
-      modernReconnectAttempts: number;
-      subscribedResources: Set<string>;
-      onModernSubscriptionClosed(
-        subscription: McpSubscription,
-        reason: "local" | "graceful" | "remote",
-        generation: number,
-      ): void;
-    }
-
-    function internals(c: InspectorClient): StreamInternals {
-      return c as unknown as StreamInternals;
-    }
-
     /** A controllable fake `McpSubscription` whose `closed` we resolve on demand. */
     function makeFakeSub(): {
       sub: McpSubscription;
