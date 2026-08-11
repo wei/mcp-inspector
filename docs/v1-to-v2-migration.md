@@ -234,7 +234,17 @@ Under **`--cli`** it is reversed: everything _before_ `--` is the target, everyt
 mcp-inspector --cli node build/index.js -- --method tools/list
 ```
 
-So the web example above, run under `--cli`, would have `--config /etc/myserver.conf` consumed as the Inspector's read-only-session flag (and then rejected as a catalog/ad-hoc conflict). There is currently no way to pass a leading-dash argument through to a stdio server on the `--cli` command line — put it in the server entry's `args` in a catalog or config file instead.
+So the web example above, run verbatim under `--cli`, would have `--config /etc/myserver.conf` consumed as the Inspector's read-only-session flag (and then rejected as a catalog/ad-hoc conflict). To pass a leading-dash argument through to a stdio server, put it **before** the `--` instead — everything on that side is forwarded to the target untouched, flags included:
+
+```bash
+# v1
+mcp-inspector node build/index.js -- --config /etc/myserver.conf --verbose
+
+# v2, same thing under --cli — target and its flags first, Inspector options after
+mcp-inspector --cli node build/index.js --config /etc/myserver.conf --verbose -- --method tools/list
+```
+
+(Without a `--` on the line, the target is only the leading run of non-dash tokens — so `--` is required whenever the server itself takes flags.)
 
 ### 4. An ambiguous URL path no longer guesses a transport
 
@@ -254,7 +264,7 @@ v1 fell back to SSE for an unrecognized path, so a server at e.g. `https://examp
 
 This applies to every client's command line — CLI, TUI, and `--web` (which prints the message and exits `1`). The **browser deep link** is the one exception: `?serverUrl=…` with no `transport` param defaults to `http`.
 
-Stdout is otherwise compatible: the default `text` format still pretty-prints the result as `JSON.stringify(result, null, 2)`, exactly as v1 did.
+Stdout is otherwise compatible: the default `text` format still pretty-prints the result as `JSON.stringify(result, null, 2)`. One byte differs — v2 appends a trailing newline where v1 wrote none — so a script diffing raw stdout against a stored v1 fixture needs the fixture re-captured (or the comparison trimmed).
 
 ## Environment variables
 
