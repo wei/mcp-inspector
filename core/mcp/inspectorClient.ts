@@ -479,7 +479,10 @@ export class InspectorClient extends InspectorClientEventTarget {
   // `McpSubscription` whose filter's `resourceSubscriptions` mirrors
   // `subscribedResources`; mutating the set re-lists (close old, open new), and
   // an unexpected `"remote"` close re-lists (reconnect-by-re-listen — the stream
-  // is not resumable). `null` when no URI is subscribed or on the legacy era.
+  // is not resumable). `null` on the legacy era, and on the modern era whenever
+  // the filter is empty — which is *not* the same as "no URI subscribed": the
+  // stream also carries the list-change opt-ins, so a tools-only server opens it
+  // with no subscriptions at all (#1920).
   private modernSubscription: McpSubscription | null = null;
   // Monotonic guard so a stale re-list/reconnect (whose `listen()` or `closed`
   // resolves after a newer refresh already started) can detect it lost the race
@@ -2056,6 +2059,14 @@ export class InspectorClient extends InspectorClientEventTarget {
         // a progress notification handler so the Protocol's _onprogress stays; timeout reset
         // and routing work, and we inject the caller's progressToken into dispatched events.
       }
+
+      // Modern era: the handlers registered above only fire for notifications
+      // that reach us, and on this era every server→client notification rides
+      // the `subscriptions/listen` stream. Open it now when the filter says
+      // there is something to listen for — otherwise a list-change opt-in on a
+      // server with no resources would have no way in, since a subscribe click
+      // was the only thing that ever opened the stream (#1920).
+      await this.openModernListenStreamOnConnect();
     } catch (error) {
       if (!isConnectAuthRecoveryError(error)) {
         this.status = "error";
@@ -4893,9 +4904,13 @@ export class InspectorClient extends InspectorClientEventTarget {
    * opted-in notification type (SEP §7.4).
    */
   private buildSubscriptionFilter(): SubscriptionFilter {
-    const filter: SubscriptionFilter = {
-      resourceSubscriptions: Array.from(this.subscribedResources),
-    };
+    const filter: SubscriptionFilter = {};
+    // Omitted rather than sent empty: a listChanged-only stream (#1920) is not
+    // subscribing to any resource, and `[]` would say it asked for none of a set
+    // it is participating in.
+    if (this.subscribedResources.size > 0) {
+      filter.resourceSubscriptions = Array.from(this.subscribedResources);
+    }
     if (
       this.listChangedNotifications.tools &&
       this.capabilities?.tools?.listChanged
@@ -4917,6 +4932,69 @@ export class InspectorClient extends InspectorClientEventTarget {
     return filter;
   }
 
+  /**
+   * Whether the modern listen stream should be open: the built filter carries
+   * something to listen for (#1920). Before #1920 this was "at least one URI is
+   * subscribed", which made the stream unreachable on a server with no resources
+   * — a tools-only server advertising `tools.listChanged` had no way to open it,
+   * so `notifications/tools/list_changed` could never arrive. The filter already
+   * modelled the list-change opt-ins; only the trigger was narrower than the
+   * filter it built. This matches the SDK's own `ClientOptions.listChanged`
+   * auto-open, which opens whenever the effective (config ∩ capability)
+   * intersection is non-empty.
+   *
+   * Note this is deliberately *not* the same predicate as the stream state's
+   * `active` — see `modernStreamActive()`.
+   */
+  private wantsModernStream(): boolean {
+    const filter = this.buildSubscriptionFilter();
+    return (
+      (filter.resourceSubscriptions?.length ?? 0) > 0 ||
+      filter.toolsListChanged === true ||
+      filter.resourcesListChanged === true ||
+      filter.promptsListChanged === true
+    );
+  }
+
+  /**
+   * Whether the stream state reports `active` — i.e. whether the *Subscriptions*
+   * UI has a stream to describe. That is a narrower question than
+   * `wantsModernStream()`: `ResourceSubscriptionStreamState` drives the
+   * Subscriptions section's badge, so a stream open purely for list-change
+   * notifications (no subscribed URI) has nothing to report there and stays
+   * `active: false` (#1920). Keeping the two apart also preserves the invariant
+   * the rest of this file is written against — an empty subscribed set is never
+   * announced alongside an `active` stream.
+   */
+  private modernStreamActive(): boolean {
+    return this.subscribedResources.size > 0;
+  }
+
+  /**
+   * Open the modern listen stream at the end of a successful connect, when the
+   * filter is non-empty (#1920). Only the list-change opt-ins can make it
+   * non-empty here — the subscribed set is emptied by `resetSessionState()` on
+   * the way in — so this is exactly the "server advertises a listChanged the
+   * Inspector wants" case that had no trigger before.
+   *
+   * A failure is not allowed to fail the connect: the handshake succeeded and
+   * every request-scoped feature works without this stream. It is reported the
+   * way a lost stream is — hand it to the reconnect machinery, which retries
+   * with backoff and settles on `"ended"` past the cap.
+   */
+  private async openModernListenStreamOnConnect(): Promise<void> {
+    if (!this.isModernEra() || !this.wantsModernStream()) return;
+    try {
+      await this.refreshModernSubscription();
+    } catch (error) {
+      this.logger.error(
+        { error },
+        "Failed to open the modern subscriptions/listen stream on connect",
+      );
+      this.reconcileModernStreamStateAfterFailedRefresh();
+    }
+  }
+
   /** Cancel a pending reconnect re-listen, if any (#1630). */
   private clearModernReconnectTimer(): void {
     if (this.modernReconnectTimer !== undefined) {
@@ -4927,9 +5005,10 @@ export class InspectorClient extends InspectorClientEventTarget {
 
   /**
    * (Re-)establish the modern `subscriptions/listen` stream to match the current
-   * `subscribedResources` set (#1630). Because the stream is not resumable,
-   * every filter change re-lists: the existing stream is closed and a fresh
-   * `listen()` opened. With no subscribed URIs the stream is left closed.
+   * filter (#1630). Because the stream is not resumable, every filter change
+   * re-lists: the existing stream is closed and a fresh `listen()` opened. With
+   * an empty filter — no subscribed URIs *and* no enabled list-change opt-in the
+   * server advertises — the stream is left closed (#1920).
    *
    * `modernListenGeneration` guards against races — if a newer refresh starts
    * while this one awaits its acknowledgement, the just-opened stream is
@@ -4955,8 +5034,8 @@ export class InspectorClient extends InspectorClientEventTarget {
       await closeSubscriptionBestEffort(previous);
     }
 
-    // Nothing subscribed → keep the stream closed.
-    if (this.subscribedResources.size === 0) {
+    // Nothing to listen for → keep the stream closed.
+    if (!this.wantsModernStream()) {
       this.setModernStreamState(INACTIVE_SUBSCRIPTION_STREAM_STATE);
       return;
     }
@@ -4978,7 +5057,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     // starts fresh next time (#1630).
     this.modernReconnectAttempts = 0;
     this.setModernStreamState({
-      active: true,
+      active: this.modernStreamActive(),
       status: "acknowledged",
       honoredUris: subscription.honoredFilter.resourceSubscriptions ?? [],
     });
@@ -5024,7 +5103,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     const shouldReconnect =
       reason === "remote" &&
       !isTerminalStatus(this.status) &&
-      this.subscribedResources.size > 0;
+      this.wantsModernStream();
     if (!shouldReconnect) {
       // "stream gone but subscriptions remain" renders the same whether we gave
       // up after failed reconnects or the server closed it gracefully: keep the
@@ -5033,7 +5112,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       // until the next `connect()` calls `resetSubscriptionStream`, which moves
       // them together — so "active with an empty set" is never observable.)
       this.setModernStreamState({
-        active: this.subscribedResources.size > 0,
+        active: this.modernStreamActive(),
         status: "ended",
         honoredUris: [],
       });
@@ -5073,7 +5152,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    * its error either way — the retry is about the subscriptions, not the call.
    */
   private reconcileModernStreamStateAfterFailedRefresh(): void {
-    if (this.subscribedResources.size === 0) {
+    if (!this.wantsModernStream()) {
       this.setModernStreamState(INACTIVE_SUBSCRIPTION_STREAM_STATE);
       return;
     }
@@ -5088,7 +5167,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   private scheduleModernReconnect(): void {
     this.setModernStreamState({
-      active: true,
+      active: this.modernStreamActive(),
       status: "reconnecting",
       honoredUris: [],
     });
@@ -5101,10 +5180,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       this.modernReconnectTimer = undefined;
       // Disconnect/unsubscribe may have raced the timer — bail if the reconnect
       // is no longer wanted.
-      if (
-        isTerminalStatus(this.status) ||
-        this.subscribedResources.size === 0
-      ) {
+      if (isTerminalStatus(this.status) || !this.wantsModernStream()) {
         return;
       }
       this.refreshModernSubscription(true).catch(() =>
@@ -5123,10 +5199,10 @@ export class InspectorClient extends InspectorClientEventTarget {
     if (
       this.modernReconnectAttempts > MODERN_RECONNECT_MAX_ATTEMPTS ||
       isTerminalStatus(this.status) ||
-      this.subscribedResources.size === 0
+      !this.wantsModernStream()
     ) {
       this.setModernStreamState({
-        active: this.subscribedResources.size > 0,
+        active: this.modernStreamActive(),
         status: "ended",
         honoredUris: [],
       });
