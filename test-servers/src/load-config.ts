@@ -67,6 +67,12 @@ export interface ConfigFile {
     prompts?: number;
   };
   /**
+   * Names of registered tools to emit **twice** in `tools/list` (same `name`,
+   * the second's title marked "(duplicate)") — the nonconforming-but-real shape
+   * no preset can produce. See {@link ServerConfig.duplicateToolNames} (#1957).
+   */
+  duplicateToolNames?: string[];
+  /**
    * Gate a tool's `tools/list` visibility on a client-declared extension. Maps
    * extension id → tool name; the tool appears only when the connected client
    * advertised that extension (#1739 / #1633). Legacy stateful leg only. See

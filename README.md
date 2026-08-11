@@ -139,6 +139,7 @@ Each config below is a ready-made server for exercising one feature by hand. Loa
 | `xmcpheader-modern-http.json`             | Tools tab: `x-mcp-header` mirroring and exclusions | [#1632](https://github.com/modelcontextprotocol/inspector/issues/1632) |
 | `pagination-http.json`                    | Page-by-page list fetching                         | [#1721](https://github.com/modelcontextprotocol/inspector/issues/1721) |
 | `structured-output-http.json`             | Tools tab: a result's `structuredContent` section  | [#1908](https://github.com/modelcontextprotocol/inspector/issues/1908) |
+| `duplicate-tool-names-http.json`          | A `tools/list` that repeats a tool name            | [#1957](https://github.com/modelcontextprotocol/inspector/issues/1957) |
 | `advertised-extensions-http.json`         | Tool registration gated on advertised extensions   | [#1739](https://github.com/modelcontextprotocol/inspector/issues/1739) |
 | `logging-{legacy,modern}-http.json`       | Logging, both eras                                 | [#1629](https://github.com/modelcontextprotocol/inspector/issues/1629) |
 | `subscriptions-{legacy,modern}-http.json` | Resource subscriptions, both eras                  | [#1630](https://github.com/modelcontextprotocol/inspector/issues/1630) |
@@ -212,6 +213,14 @@ Turn on **"Fetch Lists One Page at a Time"** (Server Settings — the `paginated
 `structured-output-http.json` serves `list_items` (nested `structuredContent` — objects inside arrays inside an object, the shape from [#1908](https://github.com/modelcontextprotocol/inspector/issues/1908)), `get_temp` (a flat three-key payload), and `echo` (no `outputSchema` at all). It is a plain streamable-HTTP server — connect with the **default (legacy)** protocol era.
 
 Run `list_items` from the Tools tab: the result panel shows the `content[]` text summary ("Found 2 items.") **and** a collapsible **Structured Output** section rendering the schema-validated payload as pretty-printed, copyable JSON. That section is what v2 was dropping — a tool declaring an `outputSchema` returns its real data there, and the text block usually only summarizes it. Run `echo` to confirm the section is absent when a result carries no `structuredContent`.
+
+#### Duplicate tool names
+
+`duplicate-tool-names-http.json` serves `get_weather`, `get_temp`, `echo`, and `add`, then repeats `get_weather` and `echo` at the end of `tools/list` with the same `name` and a `(duplicate)` title (`duplicateToolNames`). No preset can produce this shape — the SDK's `registerTool` rejects a repeated name — but a real server can and does, and the Inspector has to render it faithfully.
+
+Connect (default legacy era), open the Tools tab, and type `get` into **Search tools**: the list must narrow to exactly the three `get_*` rows. On the broken build it kept a stale `echo` row, because the sidebar keyed rows by `tool.name` alone and the colliding keys orphaned a child during reconciliation ([#1957](https://github.com/modelcontextprotocol/inspector/issues/1957)).
+
+The duplicated copies are appended rather than placed beside their twin on purpose. React matches a leading run of same-key children first, so a head-adjacent duplicate happens to line up and the defect hides; separating the pair is what makes it observable — and it is also the realistic shape, two tool sources concatenated.
 
 #### Advertised extensions
 
