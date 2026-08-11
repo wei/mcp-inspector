@@ -30,14 +30,29 @@ import { theme } from "../theme/theme";
 // function; it was verified out-of-band by temporarily giving a story a real
 // violation and confirming the suite went red (see the PR for #1898).
 
-// The primary shade the theme pins for the light scheme — the value Mantine
-// derives `--mantine-primary-color-filled` from. Read from the theme rather
-// than hard-coded so a palette change can't silently invalidate the guard.
-const LIGHT_PRIMARY_SHADE = 7;
+// Mantine's own default when a theme pins no `primaryShade` — the value it
+// falls back to when deriving `--mantine-primary-color-filled`.
+const MANTINE_DEFAULT_LIGHT_PRIMARY_SHADE = 6;
+
+// The shade Mantine derives `--mantine-primary-color-filled` from. Everything
+// here is read from the theme rather than restated, so re-pinning
+// `primaryShade` or repainting the palette moves the expectation with it — a
+// guard that had to be edited alongside a legitimate theme change would just
+// train people to edit it, which is the opposite of what it's for.
+//
+// The light branch is the one that matters: `./preview` renders every story
+// with `defaultColorScheme="light"` and an `initialGlobals.colorScheme` of
+// `"light"`. `primaryShade` is `number | { light, dark }` in Mantine's types,
+// so both forms are handled.
+function lightPrimaryShade(): number {
+  const shade = theme.primaryShade;
+  if (typeof shade === "number") return shade;
+  return shade?.light ?? MANTINE_DEFAULT_LIGHT_PRIMARY_SHADE;
+}
 
 function expectedPrimaryColor(): string {
   const palette = theme.colors?.[theme.primaryColor ?? ""];
-  const color = palette?.[LIGHT_PRIMARY_SHADE];
+  const color = palette?.[lightPrimaryShade()];
   if (!color) throw new Error("theme is missing its primary color palette");
   return color;
 }
