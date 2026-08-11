@@ -336,6 +336,34 @@ describe("SchemaForm", () => {
       expect(onChange).toHaveBeenLastCalledWith({ count: 15 });
     });
 
+    it("reports no value for a magnitude JS cannot hold exactly", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      renderWithMantine(
+        <ControlledSchemaForm schema={numberSchema} onChange={onChange} />,
+      );
+      const input = screen.getByLabelText(/Divisor/) as HTMLInputElement;
+      // Past Number.MAX_SAFE_INTEGER, Mantine stops emitting a number and hands
+      // back the raw string to avoid destroying precision. Number() would round
+      // this to ...904, so parsing it would send a value the user never typed.
+      await user.type(input, "90071992547409910");
+      expect(input.value).toBe("90071992547409910");
+      expect(onChange).toHaveBeenLastCalledWith({ divisor: undefined });
+    });
+
+    it("still parses a long decimal, which stays exactly representable", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      renderWithMantine(
+        <ControlledSchemaForm schema={numberSchema} onChange={onChange} />,
+      );
+      const input = screen.getByLabelText(/Divisor/) as HTMLInputElement;
+      // Guards the safe-integer check against over-rejecting: the fractional
+      // digits are not what overflows, so this must not be dropped.
+      await user.type(input, "3.14159265358979");
+      expect(onChange).toHaveBeenLastCalledWith({ divisor: 3.14159265358979 });
+    });
+
     it("drops in-progress text when resetKey moves the form to another entity", async () => {
       const user = userEvent.setup();
       // Both "tools" expose the same-named number field with no default, so the

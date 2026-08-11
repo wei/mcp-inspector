@@ -53,10 +53,26 @@ function toEnumData(
 
 /**
  * Interpret whatever Mantine's `NumberInput` reported as the JSON value for the
- * field. It emits a `number` once the text parses cleanly, and the **raw string**
- * while it does not — `""` when cleared, but also the in-progress `"1."`, `"-"`,
- * and `"1e"`. Anything that is not a finite number becomes `undefined`, which is
- * how an absent optional argument is represented everywhere else in this form.
+ * field. Anything that is not a finite number becomes `undefined`, which is how
+ * an absent optional argument is represented everywhere else in this form.
+ *
+ * `NumberInput` emits a `number` only when the text both parses *and* is exactly
+ * representable; otherwise it hands back the **raw string** (see its
+ * `isValidNumber` guard). Two quite different situations produce a string, and
+ * they are treated differently here:
+ *
+ * 1. **Mid-entry text** — `""` when cleared, plus `"1."`, `"1.50"`, and a lone
+ *    `"-"`. These are parsed: `"1."` really does mean `1`. (Note that an
+ *    exponent is *not* in this set — `NumberInput` masks input through
+ *    `NumericFormat`, which rejects `e` outright, so `"1e"` can never be typed.)
+ * 2. **Values JS cannot hold exactly** — anything at or beyond
+ *    `Number.MAX_SAFE_INTEGER`. `Number("90071992547409910")` silently yields
+ *    `90071992547409904`, so parsing here would send the server a number the
+ *    user never entered. An inspector must not misreport what it transmits, so
+ *    these report no value instead — which is also what this field did with such
+ *    input before #1888, making it no regression. Preserving them properly needs
+ *    an exact-serialization path down the whole `tools/call` chain, which is a
+ *    separate concern from being able to type a decimal.
  */
 function toNumericValue(raw: string | number): number | undefined {
   if (typeof raw === "number") {
@@ -66,7 +82,12 @@ function toNumericValue(raw: string | number): number | undefined {
     return undefined;
   }
   const parsed = Number(raw);
-  return Number.isFinite(parsed) ? parsed : undefined;
+  if (!Number.isFinite(parsed)) {
+    return undefined;
+  }
+  // Case 2 above. The integer part is what overflows exact representation; the
+  // fractional digits are bounded by the same guard and stay lossless.
+  return Number.isSafeInteger(Math.trunc(parsed)) ? parsed : undefined;
 }
 
 interface SchemaNumberInputProps {
