@@ -37,6 +37,9 @@ export class RemoteSession {
   static readonly AUTH_HTTP_ECHO_SUPPRESS_MS = 30_000;
   private readonly requestWaits = new Map<string | number, RequestWait>();
   private authProviderHandle: RemoteAuthProviderHandle | null = null;
+  private appliedProtocolVersion: string | undefined;
+  /** A protocol version is a dated token (`2025-11-25`, `2026-07-28`, …). */
+  private static readonly PROTOCOL_VERSION_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 
   constructor(sessionId: string) {
     this.sessionId = sessionId;
@@ -55,6 +58,29 @@ export class RemoteSession {
 
   setTransport(transport: Transport): void {
     this.transport = transport;
+  }
+
+  /**
+   * Apply the client's negotiated protocol version to the upstream transport
+   * (#1935). The browser's SDK Client owns the `initialize` handshake, so the
+   * `setProtocolVersion` call it makes lands on the *remote* transport; without
+   * this the backend's real HTTP transport never learns the version and drops
+   * `Mcp-Protocol-Version` from every subsequent request.
+   *
+   * Ignores anything that isn't a plausible version token so a client can't
+   * push arbitrary bytes into an upstream header, and re-applies only on
+   * change (the value rides every `/api/mcp/send`).
+   */
+  applyProtocolVersion(version: string | undefined): void {
+    if (
+      version === undefined ||
+      version === this.appliedProtocolVersion ||
+      !RemoteSession.PROTOCOL_VERSION_PATTERN.test(version)
+    ) {
+      return;
+    }
+    this.appliedProtocolVersion = version;
+    this.transport.setProtocolVersion?.(version);
   }
 
   setEventConsumer(consumer: (event: SessionEvent) => void): void {

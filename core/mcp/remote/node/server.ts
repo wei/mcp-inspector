@@ -728,7 +728,8 @@ export function createRemoteApp(
       return c.json({ error: "Invalid JSON body" }, 400);
     }
 
-    const { sessionId, message, relatedRequestId, headers } = body;
+    const { sessionId, message, relatedRequestId, headers, protocolVersion } =
+      body;
     if (!sessionId || !message) {
       return c.json({ error: "Missing sessionId or message" }, 400);
     }
@@ -743,6 +744,11 @@ export function createRemoteApp(
       const errorMsg = session.getTransportError() || "Transport closed";
       return c.json({ ok: false, kind: "transport_error", error: errorMsg });
     }
+
+    // The browser's SDK Client negotiated the version; hand it to the real
+    // upstream transport before the send so `Mcp-Protocol-Version` is stamped
+    // on this request and everything after it (#1935).
+    session.applyProtocolVersion(protocolVersion);
 
     session.beginSend();
     const requestId = requestIdForSendWait(message);

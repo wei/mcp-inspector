@@ -120,6 +120,40 @@ describe("RemoteSession", () => {
     expect(session.transport).toBe(transport);
   });
 
+  // #1935: the browser's Client negotiates the version, so the backend has to
+  // be told before it can stamp `Mcp-Protocol-Version` on upstream requests.
+  it("applyProtocolVersion forwards a new version to the transport once", () => {
+    const session = new RemoteSession("s8a");
+    const setProtocolVersion = vi.fn();
+    session.setTransport({ setProtocolVersion } as unknown as Transport);
+
+    session.applyProtocolVersion("2025-11-25");
+    session.applyProtocolVersion("2025-11-25");
+    expect(setProtocolVersion.mock.calls).toEqual([["2025-11-25"]]);
+
+    // A renegotiated version (e.g. after a reconnect) is re-applied.
+    session.applyProtocolVersion("2026-07-28");
+    expect(setProtocolVersion).toHaveBeenLastCalledWith("2026-07-28");
+  });
+
+  it("applyProtocolVersion ignores an absent or non-token version", () => {
+    const session = new RemoteSession("s8b");
+    const setProtocolVersion = vi.fn();
+    session.setTransport({ setProtocolVersion } as unknown as Transport);
+
+    session.applyProtocolVersion(undefined);
+    // Header injection attempt — must never reach the upstream transport.
+    session.applyProtocolVersion("2025-11-25\r\nX-Evil: 1");
+    session.applyProtocolVersion("");
+    expect(setProtocolVersion).not.toHaveBeenCalled();
+  });
+
+  it("applyProtocolVersion is a no-op on a transport without setProtocolVersion (stdio)", () => {
+    const session = new RemoteSession("s8c");
+    session.setTransport({} as unknown as Transport);
+    expect(() => session.applyProtocolVersion("2025-11-25")).not.toThrow();
+  });
+
   it("hasEventConsumer reflects whether a consumer is attached", () => {
     const session = new RemoteSession("s9");
     expect(session.hasEventConsumer()).toBe(false);
