@@ -66,6 +66,8 @@ npm install     # root install; postinstall cascades into every client
 
 The cascade (`scripts/install-clients.mjs`) is dev-only — it exits early when the package is installed as a dependency, and the published tarball ships only each client's `build/`, so end users are unaffected. Set `INSPECTOR_SKIP_CLIENT_INSTALL=1` to skip it.
 
+**Where a dependency is declared.** The MCP SDK packages (`@modelcontextprotocol/client`, `core`, `server`, `server-legacy`, `ext-apps`) live in the **root** `package.json` only — never in a client's. Node resolution walks up, so the root install is on every client's chain, and the root manifest is already what the published tarball resolves against. Declaring them per client installs a second copy that can drift from the root's, which is how two versions of `ext-apps` (and of the transitive v1 `@modelcontextprotocol/sdk`) ended up in the tree before [#1970](https://github.com/modelcontextprotocol/inspector/issues/1970) — and a second copy of `client`/`core` is the failure `vitest.shared.mts` carries a `dedupe` workaround for. The same holds for anything used only by root-owned code with no manifest of its own: `express` (imported by `test-servers/src`) and `yaml` are root devDependencies, resolved from the root by `vitest.shared.mts`.
+
 ## Running during development
 
 For day-to-day web iteration, run Vite directly from the web client (fast HMR, no launcher build needed):

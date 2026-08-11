@@ -113,6 +113,14 @@ v2 is **not** an npm workspace — each client under `clients/*` keeps its own `
 
 After installing, `npm run build` builds all clients. The launcher scripts (`npm run web` / `web:dev`) run the built launcher, so build first; for day-to-day web iteration use `cd clients/web && npm run dev`.
 
+## Dependency placement
+
+**The MCP SDK packages — `@modelcontextprotocol/client`, `core`, `server`, `server-legacy`, `ext-apps` — are declared in the repo-root `package.json` and nowhere else.** Do not add them to a `clients/*/package.json`: Node resolution walks up, so the root install already serves every client, and a per-client declaration installs a *second copy* that drifts from the root's. That drift is not theoretical — it put two versions of `ext-apps` (1.7.4 / 1.7.5), and of the transitive v1 `@modelcontextprotocol/sdk` (1.29.0 / 1.30.0), in the tree at once (#1970), and a second copy of `client`/`core` is exactly the failure the `dedupe` + `server.deps.inline` workaround in `vitest.shared.mts` exists for.
+
+The same rule covers anything reached only through **root-owned code that has no manifest of its own**: `express` (imported by `test-servers/src`) and `yaml` are root devDependencies, and `vitest.shared.mts` aliases both to the **repo root** rather than to `<client>/node_modules` like its other pins. If you add a dependency to `test-servers/src` or `core/`, declare it at the root and alias it there too.
+
+The v1 SDK (`@modelcontextprotocol/sdk`) is **not** a dependency of this repo and must not become one — v2 uses the packages above. It appears in the lock files only as a `"peer": true` entry pulled in by `ext-apps`.
+
 ## Contributing
 
 External contributions are accepted as **issues, not pull requests** — maintainers handle design and implementation through a prompt-driven workflow.
