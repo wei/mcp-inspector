@@ -100,6 +100,24 @@ test("importedPackageNames: CommonJS and awkward dynamic-import forms (Copilot, 
   ]);
 });
 
+test("importedPackageNames: comment trivia between tokens (Copilot, #1962)", () => {
+  // TypeScript allows a comment anywhere whitespace is legal, so all of these
+  // are valid imports. Missing one is the dangerous direction: the package
+  // never enters the candidate set and its skew passes the guard silently.
+  const source = `
+    import { a } from /* explanation */ "express";
+    const b = await import(/* webpackIgnore: true */ "undici");
+    const c = require(/* lazy */ "yaml");
+    import /* side effect */ "pino";
+  `;
+  assert.deepEqual([...importedPackageNames(source)].sort(), [
+    "express",
+    "pino",
+    "undici",
+    "yaml",
+  ]);
+});
+
 test("importedPackageNames: the three specifier forms that introduce types", () => {
   const source = `
     import { z } from "zod/v4";

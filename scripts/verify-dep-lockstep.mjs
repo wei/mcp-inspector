@@ -130,11 +130,27 @@ export function packageNameOf(specifier) {
 // `tools`…" would otherwise enter the candidate set as a package named
 // `tools`. Inert today, but a prose word that collides with a real package
 // name would silently widen the set.
+//
+// Whitespace between tokens is really *trivia*: TypeScript allows a comment
+// anywhere whitespace is legal, so `import(/* webpackIgnore: true */ "pkg")`
+// and `from /* why */ "pkg"` are valid and must still be seen (Copilot,
+// #1962). `TRIVIA` stands in for `\s*` at every such position.
+const TRIVIA = String.raw`(?:\s|/\*[\s\S]*?\*/)*`;
 const SPECIFIER_FORMS = [
-  /\bfrom\s*["']([^"']+)["']/g, // import … from "x" / export … from "x"
-  /\bimport\s+["']([^"']+)["']/g, // side-effect import "x"
-  /\bimport\s*\(\s*["'`]([^"'`]+)["'`]/g, // dynamic import("x"[, opts])
-  /\brequire\s*\(\s*["'`]([^"'`]+)["'`]/g, // import x = require("x"), require("x")
+  // import … from "x" / export … from "x"
+  new RegExp(String.raw`\bfrom${TRIVIA}["']([^"']+)["']`, "g"),
+  // side-effect import "x"
+  new RegExp(String.raw`\bimport${TRIVIA}["']([^"']+)["']`, "g"),
+  // dynamic import("x"[, opts])
+  new RegExp(
+    String.raw`\bimport${TRIVIA}\(${TRIVIA}["'\`]([^"'\`]+)["'\`]`,
+    "g",
+  ),
+  // import x = require("x"), require("x")
+  new RegExp(
+    String.raw`\brequire${TRIVIA}\(${TRIVIA}["'\`]([^"'\`]+)["'\`]`,
+    "g",
+  ),
 ];
 
 /**
