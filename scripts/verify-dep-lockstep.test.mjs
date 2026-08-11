@@ -302,11 +302,20 @@ test("hasReadableLockShape: only a v2+ packages table with a root entry (Copilot
     undefined,
     null,
     {},
-    { packages: null },
-    { packages: [] }, // an array has no `""` key
-    { packages: {} }, // no root entry
-    { packages: { "node_modules/zod": { version: "4.4.3" } } },
+    { lockfileVersion: 3, packages: null },
+    { lockfileVersion: 3, packages: [] }, // an array has no `""` key
+    { lockfileVersion: 3, packages: {} }, // no root entry
+    {
+      lockfileVersion: 3,
+      packages: { "node_modules/zod": { version: "4.4.3" } },
+    },
     { lockfileVersion: 1, dependencies: { zod: { version: "4.4.3" } } },
+    // A declared v1 carrying a `packages` table: the version is checked, not
+    // inferred from the key's presence, so this is rejected rather than
+    // half-trusted into an empty (fail-open) version map.
+    { lockfileVersion: 1, packages: { "": {} } },
+    { packages: { "": {} } }, // no declared version at all
+    { lockfileVersion: "3", packages: { "": {} } }, // not a number
   ];
   for (const lock of rejected)
     assert.equal(hasReadableLockShape(lock), false, JSON.stringify(lock));

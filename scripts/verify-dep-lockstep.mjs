@@ -249,7 +249,14 @@ export function topLevelLockVersions(lock) {
  * cannot read it, so it must say so rather than skip the install.
  */
 export function hasReadableLockShape(lock) {
-  const packages = lock?.packages;
+  // The declared version is checked, not just inferred from the presence of a
+  // `packages` key: this function and the diagnostic it drives both promise
+  // "lockfileVersion 2+", so a file claiming v1 while carrying a `packages`
+  // table must be rejected rather than half-trusted (Copilot, #1962).
+  const version = lock?.lockfileVersion;
+  if (typeof version !== "number" || !Number.isFinite(version) || version < 2)
+    return false;
+  const packages = lock.packages;
   if (typeof packages !== "object" || packages === null) return false;
   return Object.prototype.hasOwnProperty.call(packages, "");
 }
