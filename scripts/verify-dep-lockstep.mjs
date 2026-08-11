@@ -27,10 +27,25 @@
 // allowlist of packages verified to tolerate it (below). A dependency that
 // starts skewing therefore fails `validate` and forces a decision, rather than
 // surfacing months later as an unexplained OOM.
+//
+// KNOWN BOUNDARY (#1965): the candidate set covers packages the shared sources
+// name *directly*. A package whose declarations reach the program only through
+// another package's `.d.ts` is invisible here — `@modelcontextprotocol/sdk` is
+// the live example, skewed root 1.29.0 vs `clients/web` 1.30.0 and present in
+// web's program from both installs, yet never written in first-party code
+// (the shared sources import the split `@modelcontextprotocol/client|core|…`).
+// Two derivations were measured for closing this. A lockfile dependency
+// closure is unusable — 155 packages, 25 of them skewed, nearly all irrelevant
+// tooling (`chai`, `qs`, `iconv-lite`) — and it misses the SDK anyway. Reading
+// what actually lands in each program (`tsc --listFilesOnly`, keeping packages
+// present under two install roots) is both correct and small: 15 for
+// `clients/web`, ~10 once nested duplicates are dropped. That is the right
+// derivation and is tracked separately, since it changes what the guard
+// measures and surfaces skews needing their own decisions.
 
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { builtinModules } from "node:module";
+import { builtinModules, createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { rootReachesScript } from "./lib/npm-scripts.mjs";
@@ -116,59 +131,51 @@ export function packageNameOf(specifier) {
   return name;
 }
 
-// Every form that can introduce a dependency's *types* (Copilot, #1962).
-// `import x = require("pkg")` and a bare `require("pkg")` matter because the
-// shared trees may hold `.cts` sources, where that is the ordinary import
-// syntax; and neither call form requires the closing paren, so an import
-// attributes argument (`import("pkg", { with: … })`) can't hide the specifier.
+// Specifiers are extracted with TypeScript's own `preProcessFile` rather than
+// by regex (Copilot, #1962 — raised across three review rounds, and correctly).
+// A regex scan gets both directions wrong: it *misses* valid syntax (an
+// `import x = require(…)` in a `.cts`, an import-attributes argument, a comment
+// between tokens — each a silent miss, so the package never enters the
+// candidate set and its skew passes), and it *invents* names from prose, since
+// `// adapted from "react"` is indistinguishable from an import to a pattern
+// that can't tell code from a comment. Every widening of the regex traded one
+// of those failures for the other.
 //
-// Backticks are accepted ONLY in the call forms, where a static template
-// literal is legal. A `from` clause requires a string literal, so allowing
-// backticks there would buy nothing while reopening the prose hazard the
-// anchored specifier pattern exists to close — inline code in a comment is
-// written with backticks throughout this codebase, and "…derived from
-// `tools`…" would otherwise enter the candidate set as a package named
-// `tools`. Inert today, but a prose word that collides with a real package
-// name would silently widen the set.
+// `preProcessFile` is TypeScript's lightweight pre-parse scanner — not a full
+// parse and no type checking — and it is exactly built for this: it returns
+// every module specifier, handling all import forms, trivia, strings, and
+// regex literals correctly, and it never sees a comment as code.
 //
-// Whitespace between tokens is really *trivia*: TypeScript allows a comment
-// anywhere whitespace is legal, so `import(/* webpackIgnore: true */ "pkg")`,
-// `from /* why */ "pkg"`, and the line-comment forms (`import(// lazy\n"pkg")`)
-// are all valid and must still be seen (Copilot, #1962). `TRIVIA` stands in for
-// `\s*` at every such position and covers both comment syntaxes. A line comment
-// runs to end-of-line only — the newline itself is matched by the `\s` branch.
-const TRIVIA = String.raw`(?:\s|/\*[\s\S]*?\*/|//[^\n]*)*`;
-const SPECIFIER_FORMS = [
-  // import … from "x" / export … from "x"
-  new RegExp(String.raw`\bfrom${TRIVIA}["']([^"']+)["']`, "g"),
-  // side-effect import "x"
-  new RegExp(String.raw`\bimport${TRIVIA}["']([^"']+)["']`, "g"),
-  // dynamic import("x"[, opts])
-  new RegExp(
-    String.raw`\bimport${TRIVIA}\(${TRIVIA}["'\`]([^"'\`]+)["'\`]`,
-    "g",
-  ),
-  // import x = require("x"), require("x")
-  new RegExp(
-    String.raw`\brequire${TRIVIA}\(${TRIVIA}["'\`]([^"'\`]+)["'\`]`,
-    "g",
-  ),
-];
+// typescript is resolved from `clients/web`, which already carries it; the root
+// has no TS dependency of its own. The `createRequire` base is load-bearing —
+// a bare `import("typescript")` would resolve relative to `scripts/`, not the
+// cwd (the same reason `smoke-web-browser.mjs` resolves playwright this way).
+let tsCache;
+function typescript() {
+  if (!tsCache) {
+    const require_ = createRequire(
+      path.join(repoRoot, "clients", "web", "package.json"),
+    );
+    tsCache = require_("typescript");
+  }
+  return tsCache;
+}
 
 /**
  * Every third-party package name imported by a blob of TypeScript source.
- * Deliberately a regex scan rather than a parse: it only needs to over- rather
- * than under-approximate, since a name absent from every lockfile contributes
- * nothing downstream (`@inspector/core` is a build-time alias, not a package,
- * and drops out that way).
+ * Over-approximating is safe (a name absent from every lockfile contributes
+ * nothing downstream — `@inspector/core` is a build-time alias, not a package,
+ * and drops out that way); under-approximating is not, since a missed package
+ * never enters the candidate set and its skew would pass silently.
  */
 export function importedPackageNames(source) {
   const names = new Set();
-  for (const re of SPECIFIER_FORMS) {
-    for (const m of source.matchAll(re)) {
-      const name = packageNameOf(m[1]);
-      if (name) names.add(name);
-    }
+  // (source, readImportFiles, detectJavaScriptImports) — the latter two make it
+  // report `require(…)` and dynamic imports as well as static ones.
+  const { importedFiles } = typescript().preProcessFile(source, true, true);
+  for (const { fileName } of importedFiles) {
+    const name = packageNameOf(fileName);
+    if (name) names.add(name);
   }
   return names;
 }

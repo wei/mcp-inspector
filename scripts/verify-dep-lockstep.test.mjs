@@ -155,26 +155,26 @@ test("importedPackageNames: the three specifier forms that introduce types", () 
   ]);
 });
 
-test("importedPackageNames: prose after `from` is not an import", () => {
-  // The scan over-approximates on purpose, but must not invent package names
-  // out of comment text — a bogus name absent from every lockfile is inert,
-  // yet a *plausible* one would silently widen the candidate set.
+test("importedPackageNames: prose in comments never becomes a package (Copilot, #1962)", () => {
+  // The regex scan this replaced could not tell code from a comment, so
+  // `// adapted from "react"` added `react` to the candidate set — and if that
+  // installed package were skewed, an unrelated comment would fail `validate`.
+  // These use REAL package names, which is the case the old prose test missed:
+  // it only passed because `cwd omitted` isn't a valid package name.
   const source = `
-    // Resolved relative to the runner dir, not from "cwd omitted" by the caller.
-    /** Reads the manifest from "file:" URLs. */
+    // adapted from "react"
+    /** Mirrors the behavior of "express", see require("yaml") below. */
+    /** The excluded set derived from \\\`hono\\\`-style paths. */
+    // const disabled = await import("undici");
     import { z } from "zod";
   `;
   assert.deepEqual([...importedPackageNames(source)], ["zod"]);
 });
 
-test("importedPackageNames: a backticked `from` in prose is not an import", () => {
-  // Backticks are legal in the *call* forms (a static template literal) but
-  // never after `from`, which requires a string literal. Accepting them there
-  // would sweep in inline code from comments — this codebase writes it with
-  // backticks throughout — and a prose word colliding with a real package name
-  // would silently widen the candidate set.
+test("importedPackageNames: a specifier inside a string literal is not an import", () => {
   const source = `
-    /** The excluded set derived from \\\`tools\\\`, keyed off \\\`express\\\`-style paths. */
+    const msg = 'run require("chokidar") to load it';
+    const re = /"jose"/;
     import { z } from "zod";
   `;
   assert.deepEqual([...importedPackageNames(source)], ["zod"]);
