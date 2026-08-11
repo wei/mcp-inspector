@@ -99,7 +99,13 @@ They differ on **when you need it**, though. Web sets `allowUnknownOption()` + `
 mcp-inspector --cli node build/index.js -- --method tools/list
 ```
 
-So under `--cli` the separator does **not** protect an argument from the Inspector — it does the opposite, and the web example above would have `--config /etc/myserver.conf` consumed as a read-only-session flag (then rejected as a catalog/ad-hoc conflict). There is currently no way to pass a leading-dash argument through to a stdio server on the `--cli` command line; put it in the server entry's `args` in a catalog or config file instead.
+So under `--cli` the separator does **not** protect an argument from the Inspector — it does the opposite, and the web example above, run verbatim, would have `--config /etc/myserver.conf` consumed as a read-only-session flag (then rejected as a catalog/ad-hoc conflict). Leading-dash arguments for the server still get through; they just go on the other side of the separator, where the whole pre-`--` run is taken as the target verbatim:
+
+```bash
+mcp-inspector --cli node build/index.js --config /etc/myserver.conf --verbose -- --method tools/list
+```
+
+Without a `--` on the line the target is only the leading run of **non-dash** tokens, so the separator is required whenever the server itself takes flags.
 
 ## The shared flags
 

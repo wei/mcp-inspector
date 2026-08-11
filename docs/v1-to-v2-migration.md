@@ -128,7 +128,7 @@ npx @modelcontextprotocol/inspector --catalog ./mcp.json
 npx @modelcontextprotocol/inspector
 ```
 
-**Rules:** `--catalog` and `--config` are mutually exclusive, and neither combines with an ad-hoc target (a positional command, `--server-url`, or `--transport`). v1 silently preferred the config file; v2 tells you.
+**Rules:** `--catalog` and `--config` are mutually exclusive, and neither combines with an ad-hoc target (a positional command, `--server-url`, or `--transport`). v1 silently preferred the config file; v2 tells you. One exception: the **web** client exempts `--transport stdio` from that check, so it survives alongside `--catalog`/`--config` (ignored rather than rejected) — the CLI and TUI reject every `--transport`.
 
 If you export `MCP_CATALOG_PATH` in your shell, note that **web and TUI read it unconditionally** — so an ad-hoc invocation such as `mcp-inspector --tui node build/index.js` is rejected as a catalog/ad-hoc conflict. Unset it for that invocation. The CLI ignores the variable whenever an ad-hoc target is present.
 
