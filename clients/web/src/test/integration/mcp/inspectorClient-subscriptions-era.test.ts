@@ -397,6 +397,52 @@ describe("resource subscriptions era fork (#1630)", () => {
       expect(streamAtConnectEvent).toBe(true);
     });
 
+    it("does not announce the connection when a disconnect overtakes the stream open", async () => {
+      // The listen round-trip widened the window between the handshake and the
+      // `connect` announcement, so a `disconnect()` can land inside it.
+      // Announcing anyway would restart every managed list refresh against a
+      // session being torn down.
+      const started = await startToolsOnlyServer({ tools: true });
+      const connected = new InspectorClient(
+        { type: "streamable-http", url: started.url },
+        {
+          environment: { transport: createTransportNode },
+          versionNegotiation: eraToVersionNegotiation("modern"),
+        },
+      );
+      client = connected;
+      let connectAnnounced = false;
+      connected.addEventListener("connect", () => {
+        connectAnnounced = true;
+      });
+
+      // Hold the stream open so the disconnect lands while it is in flight.
+      // `openStarted` is what makes the race deterministic: the stub is only
+      // reached after the handshake, so disconnecting before it runs would leave
+      // `releaseOpen` unset and hang the connect.
+      const int = internals(connected);
+      let releaseOpen: () => void = () => {};
+      let markOpenStarted: () => void = () => {};
+      const openStarted = new Promise<void>((resolve) => {
+        markOpenStarted = resolve;
+      });
+      int.refreshModernSubscription = () => {
+        markOpenStarted();
+        return new Promise<void>((resolve) => {
+          releaseOpen = resolve;
+        });
+      };
+
+      const connecting = connected.connect();
+      await openStarted;
+      const disconnecting = connected.disconnect();
+      releaseOpen();
+      await connecting;
+      await disconnecting;
+
+      expect(connectAnnounced).toBe(false);
+    });
+
     it("connects anyway when the connect-time listen fails, and retries", async () => {
       // The handshake succeeded; every request-scoped feature works without the
       // stream, so the failure is handed to the reconnect machinery instead of

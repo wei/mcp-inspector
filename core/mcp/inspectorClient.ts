@@ -2073,7 +2073,17 @@ export class InspectorClient extends InspectorClientEventTarget {
       // list the server changes in that window would notify nobody, leaving the
       // UI stale with no way to notice (#1920). The cost is one listen
       // round-trip added to connect on the modern era.
-      this.dispatchTypedEvent("connect");
+      //
+      // …which is also why the announcement is conditional. Every await above
+      // is a window for a `disconnect()` or a transport `onclose`/`onerror` to
+      // overtake this connect, and the listen round-trip widened it. Announcing
+      // then would restart every managed list refresh against a session being
+      // torn down or already dead. `disconnecting` covers the teardown that has
+      // claimed ownership but is still awaiting `client.close()` — the status is
+      // whatever it was until that block finishes.
+      if (this.status === "connected" && !this.disconnecting) {
+        this.dispatchTypedEvent("connect");
+      }
     } catch (error) {
       if (!isConnectAuthRecoveryError(error)) {
         this.status = "error";
