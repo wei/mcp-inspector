@@ -103,7 +103,8 @@ export function buildWebServerEnv({
  * @param {string} opts.host
  * @param {string} opts.port
  * @param {string} opts.token  value injected as MCP_INSPECTOR_API_TOKEN
- * @param {string} [opts.label]  prefix for the temp dir + cleanup warnings
+ * @param {string} [opts.label]  prefix for teardown warnings (the temp dir's own
+ *   prefix is fixed, so every run's dir is greppable as `smoke-web-catalog-*`)
  */
 export function startProdWebServer({ host, port, token, label = "smoke:web" }) {
   const baseUrl = `http://${host}:${port}`;
