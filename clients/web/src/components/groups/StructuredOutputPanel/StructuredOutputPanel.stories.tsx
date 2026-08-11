@@ -59,9 +59,28 @@ export const Flat: Story = {
   },
 };
 
+// A payload taller than the section's cap scrolls inside it rather than
+// pushing the rest of the result panel down. Asserted on the real geometry,
+// so dropping `mah` (or moving it to the wrong element) fails here.
 export const Large: Story = {
   args: {
     structuredContent: large,
+  },
+  play: async ({ canvasElement }) => {
+    await waitFor(() =>
+      expect(canvasElement.textContent).toContain('"Row 60"'),
+    );
+    const viewport = canvasElement.querySelector(
+      ".mantine-ScrollArea-viewport",
+    );
+    if (!(viewport instanceof HTMLElement)) {
+      throw new Error("scroll viewport not found");
+    }
+    // Capped: the visible height stays at the section's `mah`, well under the
+    // payload's natural height…
+    expect(viewport.clientHeight).toBeLessThanOrEqual(400);
+    // …and the overflow is reachable by scrolling rather than clipped away.
+    expect(viewport.scrollHeight).toBeGreaterThan(viewport.clientHeight);
   },
 };
 
