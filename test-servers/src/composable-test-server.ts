@@ -473,6 +473,22 @@ export interface ServerConfig {
     prompts?: number;
   };
   /**
+   * Emit the named registered tools **twice** in `tools/list`, with the same
+   * `name` on both entries and " (duplicate)" appended to the second's title.
+   *
+   * Nothing else in this repo can produce this shape: every preset registers a
+   * unique name, and the SDK's `registerTool` rejects a repeat. But a real
+   * server can and does return duplicates, and the Inspector has to render that
+   * faithfully rather than break on it (#1957 — duplicate names collided in the
+   * Tools sidebar's React keys, so filtering left unrelated rows on screen).
+   *
+   * Deliberately a list of names rather than a blanket flag, so a config can
+   * duplicate part of its tool set and leave the rest alone — that mix is what
+   * makes a search filter's behavior legible. A name that isn't registered is
+   * ignored.
+   */
+  duplicateToolNames?: string[];
+  /**
    * Gate a tool's visibility in `tools/list` on a client-declared extension
    * (SEP-2133 `capabilities.extensions`). Maps extension id → tool name (the
    * tool must be among the registered presets). The named tool is registered
@@ -1107,16 +1123,45 @@ export function createMcpServer(config: ServerConfig): McpServer {
   // Set up pagination handlers if maxPageSize is configured
   const maxPageSize = config.maxPageSize || {};
 
-  // Tools pagination
-  if (capabilities.tools && maxPageSize.tools !== undefined) {
+  // Emit each named tool a second time, same `name`, title marked so the two
+  // rows are told apart on screen. See ServerConfig.duplicateToolNames (#1957).
+  //
+  // The second copies go **after** the whole list rather than beside their
+  // twin, which is both how a real server produces duplicates (two tool sources
+  // concatenated) and what makes the defect observable: React's child
+  // reconciliation walks a matching prefix first, so head-adjacent duplicates
+  // happen to line up and survive. It is the *separated* pair that collides in
+  // the keyed map and orphans a row.
+  const duplicateToolNames = new Set(config.duplicateToolNames ?? []);
+  const withDuplicates = (tools: Tool[]): Tool[] =>
+    duplicateToolNames.size === 0
+      ? tools
+      : [
+          ...tools,
+          ...tools
+            .filter((tool) => duplicateToolNames.has(tool.name))
+            .map((tool) => ({
+              ...tool,
+              title: `${tool.title ?? tool.name} (duplicate)`,
+            })),
+        ];
+
+  // Tools pagination, and/or the duplicate-name override — both need the same
+  // hand-built list, so the handler is installed when either is configured.
+  if (
+    capabilities.tools &&
+    (maxPageSize.tools !== undefined || duplicateToolNames.size > 0)
+  ) {
     mcpServer.server.setRequestHandler("tools/list", async (request) => {
       const cursor = request.params?.cursor;
-      const pageSize = maxPageSize.tools!;
+      // No pagination configured: one page holding everything, so the duplicate
+      // override can share this handler without inventing a page size.
+      const pageSize = maxPageSize.tools ?? Number.MAX_SAFE_INTEGER;
 
       // Convert registered tools to Tool format, mirroring the SDK's tools/list.
       // The input-schema JSON comes from the SDK's memoised converter; the
       // output-schema JSON is the value the SDK cached at registration.
-      const allTools: Tool[] = [];
+      const registeredTools: Tool[] = [];
       for (const [name, registered] of state.registeredTools.entries()) {
         if (registered.enabled) {
           const toolDefinition: Record<string, unknown> = {
@@ -1134,9 +1179,12 @@ export function createMcpServer(config: ServerConfig): McpServer {
             toolDefinition.outputSchema = registered.outputSchemaJson;
           }
 
-          allTools.push(toolDefinition as Tool);
+          registeredTools.push(toolDefinition as Tool);
         }
       }
+      // Duplicate before paginating, so a duplicated pair can straddle a page
+      // boundary exactly as a real server's would.
+      const allTools = withDuplicates(registeredTools);
 
       const startIndex = cursor ? parseInt(cursor, 10) : 0;
       const endIndex = startIndex + pageSize;

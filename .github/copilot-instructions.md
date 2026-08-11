@@ -72,6 +72,13 @@ Both exist and do different jobs. Theme files (`src/theme/<Component>.ts`) custo
 - `src/types/` is only for ambient `.d.ts` module stubs — not a home for new domain types.
 - ⚠️ The coverage `include` is a **whitelist** naming `components` / `hooks` / `theme` / `lib` / `utils` / `server` (plus the `core/*` runtime). A module placed outside those directories silently falls out of the ≥90% gate. Flag new top-level files or new grab-bag directories.
 
+## Dependency placement
+
+- **The MCP SDK packages (`@modelcontextprotocol/client`, `core`, `server`, `server-legacy`, `ext-apps`) belong in the root `package.json` only.** Adding one to a `clients/*/package.json` is a review finding: Node resolution walks up, so the root install already serves every client, and a per-client entry installs a second copy that drifts (it produced two versions of `ext-apps`, and of the transitive v1 SDK, at once — #1970) and reintroduces the duplicate-copy failure `vitest.shared.mts` has a `dedupe` workaround for.
+- **The v1 `@modelcontextprotocol/sdk` is not a dependency of this repo** and must not become one. It is a peer of `ext-apps`, present in lock files only.
+- Dependencies reached only through **root-owned code with no manifest** (`test-servers/src`, `core/`) are declared at the root and aliased to the **repo root** in `vitest.shared.mts` — as `express` and `yaml` are — not to `<client>/node_modules` like the other pins there.
+- **Which section is a separate question from which manifest.** A package `core/` imports at runtime must be in root **`dependencies`**: client builds externalize npm packages, so a published install resolves them from the root manifest and devDependencies are absent there. Only test/build-only packages (`express`) belong in `devDependencies`. Flag a runtime `core/` import added to `devDependencies` — it passes every local check and breaks the published package.
+
 ## Tests and the coverage gate
 
 - **All new or modified code needs tests.** The per-file gate is **≥ 90% on all four dimensions** — lines, statements, functions, **and branches** — enforced in CI for `clients/{web,cli,tui,launcher}` and the gated `core/` runtime.
@@ -92,6 +99,7 @@ Both exist and do different jobs. Theme files (`src/theme/<Component>.ts`) custo
 ## Gates and PR hygiene
 
 - `npm run format` before committing; **`npm run ci` before pushing** (`validate` → `coverage` → `verify:build-gate` → `smoke` → Storybook). `npm run validate` is the fast inner-loop check and is **not** a substitute — it runs `test`, not `test:coverage`, so it does zero coverage gating.
+- **A dependency bump must land in every install that declares it.** v2 is not a workspace — the root and each `clients/*` have their own `node_modules`, and a client's test project compiles `core/` and `test-servers/src` (which resolve from the **root**) alongside the client's own sources. Bumping a shared dependency in one manifest only puts two versions of it in one `tsc` program; for a recursive-generic surface like zod that exhausts the tsc heap (#1896). `verify:dep-lockstep` fails the build on this, so a PR bumping a package that the shared sources import should update the root **and every client that already lists it** — not every client unconditionally, since a package absent from an install can't skew and adding it there would be a spurious dependency.
 - **Every PR references an issue**, first body line `Closes #<ISSUE_NUMBER>`.
 - **Every PR carries exactly one version label**, `v1` or `v2`, matching its base branch.
 - Update the relevant `README.md` / `AGENTS.md` when a change adds, removes, renames, or repurposes a file or folder, changes the structure or tech stack, or introduces a command, dependency, or architectural pattern.

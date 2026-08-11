@@ -82,9 +82,20 @@ export function vitestSharedPaths(clientDir: string) {
       find: /^@napi-rs\/keyring$/,
       replacement: path.resolve(dirname, "node_modules/@napi-rs/keyring"),
     },
+    // `express` and `yaml` resolve from the **repo root**, unlike every pin
+    // above. Both are reached only through `test-servers/src` — express by the
+    // http/oauth servers, yaml by `load-config.ts` — which is root-owned code
+    // with no manifest of its own, so the root is where they are declared and
+    // the only place a client's resolution chain is guaranteed to find them.
+    // Pointing these at `<client>/node_modules` is what broke when the MCP
+    // packages moved to the root (#1970): express was never declared by a client
+    // at all, it arrived in `clients/cli` as a peer of `express-rate-limit`
+    // under `@modelcontextprotocol/server-legacy`, so removing that manifest
+    // entry took express with it and every cli test that spawns a test server
+    // failed to resolve it.
     {
       find: /^express$/,
-      replacement: path.resolve(dirname, "node_modules/express"),
+      replacement: path.resolve(repoRoot, "node_modules/express"),
     },
     {
       find: /^yaml$/,

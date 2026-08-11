@@ -125,6 +125,12 @@ export interface RemoteSendRequest {
    * them to the upstream `transport.send`, filtered to the `Mcp-Param-` prefix.
    */
   headers?: Record<string, string>;
+  /**
+   * MCP protocol version negotiated by the client's `initialize`. The backend
+   * applies it to the upstream transport before the send so HTTP transports
+   * stamp `Mcp-Protocol-Version` on this and every later request (#1935).
+   */
+  protocolVersion?: string;
 }
 
 export type RemoteEventType =
