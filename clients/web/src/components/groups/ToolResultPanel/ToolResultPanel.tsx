@@ -14,6 +14,7 @@ import type {
 } from "@modelcontextprotocol/client";
 import { ContentViewer } from "../../elements/ContentViewer/ContentViewer";
 import { ResourceLink } from "../ResourceLink/ResourceLink";
+import { StructuredOutputPanel } from "../StructuredOutputPanel/StructuredOutputPanel";
 import { resultHasResourceLinks } from "./toolResultUtils";
 
 export interface ToolResultPanelProps {
@@ -217,6 +218,16 @@ export function ToolResultPanel({
   // available height (and scrolls inside). Plain text/image results keep the
   // scroll-within-card body so a short result doesn't reserve empty height.
   const hasLinks = resultHasResourceLinks(result);
+  // A tool with an `outputSchema` returns its real payload in
+  // `structuredContent`, which the `content[]` blocks typically only summarize
+  // (#1908). Render it as its own section — including alongside an error or an
+  // empty `content` array, so it is never silently dropped.
+  const structuredNode = result.structuredContent ? (
+    <StructuredOutputPanel
+      key="structured-output"
+      structuredContent={result.structuredContent}
+    />
+  ) : null;
 
   const segmentNodes = segments.map((segment) => {
     if (segment.kind === "links") {
@@ -254,22 +265,31 @@ export function ToolResultPanel({
       </HeaderRow>
       {result.isError ? (
         <ResultScroll>
-          <ErrorAlert>
-            {result.content
-              .filter((b) => b.type === "text")
-              .map((b) => b.text)
-              .join("\n")}
-          </ErrorAlert>
+          <ResultStack>
+            <ErrorAlert>
+              {result.content
+                .filter((b) => b.type === "text")
+                .map((b) => b.text)
+                .join("\n")}
+            </ErrorAlert>
+            {structuredNode}
+          </ResultStack>
         </ResultScroll>
-      ) : result.content.length === 0 ? (
+      ) : result.content.length === 0 && !structuredNode ? (
         <ResultScroll>
           <Text c="dimmed">No results yet</Text>
         </ResultScroll>
       ) : hasLinks ? (
-        <FillStack>{segmentNodes}</FillStack>
+        <FillStack>
+          {segmentNodes}
+          {structuredNode}
+        </FillStack>
       ) : (
         <ResultScroll>
-          <ResultStack>{segmentNodes}</ResultStack>
+          <ResultStack>
+            {segmentNodes}
+            {structuredNode}
+          </ResultStack>
         </ResultScroll>
       )}
     </PanelStack>

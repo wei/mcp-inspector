@@ -34,6 +34,7 @@ import {
   createGetAnnotatedMessageTool,
   createGetTempTool,
   createGetTempExtraTool,
+  createListItemsTool,
   createAddResourceTool,
   createRemoveResourceTool,
   createAddToolTool,
@@ -158,6 +159,8 @@ function resolveToolPreset(
       return createGetTempTool();
     case "get_temp_extra":
       return createGetTempExtraTool();
+    case "list_items":
+      return createListItemsTool();
     case "add_resource":
       return createAddResourceTool();
     case "remove_resource":

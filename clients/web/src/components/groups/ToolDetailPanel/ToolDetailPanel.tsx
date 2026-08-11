@@ -317,6 +317,10 @@ export function ToolDetailPanel({
             values={formValues}
             onChange={onFormChange}
             disabled={isExecuting}
+            // This panel is reused across tool selections rather than remounted,
+            // so the form needs the tool name to drop another tool's
+            // in-progress field text. See SchemaFormProps.resetKey.
+            resetKey={name}
           />
 
           {progress && <ProgressDisplay params={progress} />}
