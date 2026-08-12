@@ -208,8 +208,20 @@ All work should be driven by items on the project board.
 - When work is complete:
   - Run `npm run ci` from the root — the mandatory pre-push gate (see [Mandatory pre-push gate](#mandatory-pre-push-gate)). `npm run validate` is the fast inner-loop check and is **not** a substitute: it runs no coverage gate, no smokes, and no Storybook tests.
   - **Sign off every commit — the DCO check is a hard merge gate.** The repo runs the [probot DCO app](https://probot.github.io/apps/dco/), which fails the PR unless **every** commit in it carries a `Signed-off-by: Author Name <author@example.com>` trailer matching its author. There is no per-PR override and no partial credit: one unsigned commit out of six fails the whole check.
-    - **Prevent it, don't remember it.** Commit with `git commit -s`, or — better — run `git config format.signOff true` once per clone so the trailer is added automatically and the rule stops depending on memory. This matters more than the rule itself, because the failure is invisible until after you have pushed.
-    - **Repairing already-pushed commits** means rewriting them: `git rebase HEAD~<n> --signoff`, then `git push --force-with-lease`. Use `--force-with-lease` rather than `--force` so a concurrent push can't be silently clobbered, and only rewrite when you are the sole author and nobody else has based work on the branch — the usual [perils of rebasing](https://git-scm.com/book/en/v2/Git-Branching-Rebasing). If others are on the branch, add an empty remediation commit instead.
+    - **Prevent it, don't remember it** — the failure is invisible until after you have pushed. Commit with **`git commit -s`**. To stop relying on memory, add a `prepare-commit-msg` hook, which is the only mechanism that actually signs an ordinary `git commit`:
+
+      ```sh
+      cat > .git/hooks/prepare-commit-msg <<'HOOK'
+      #!/bin/sh
+      grep -q '^Signed-off-by:' "$1" || git interpret-trailers --in-place \
+        --trailer "Signed-off-by: $(git config user.name) <$(git config user.email)>" "$1"
+      HOOK
+      chmod +x .git/hooks/prepare-commit-msg
+      ```
+
+      ⚠️ **`git config format.signOff true` does NOT do this** — despite the name, it only defaults the `-s` flag for `git format-patch`; `git commit` never reads it, and there is no `commit.signoff` equivalent. Setting it looks like a fix and silently changes nothing, so it is a trap worth naming rather than omitting.
+
+    - **Repairing already-pushed commits** means rewriting them: `git rebase HEAD~<n> --signoff`, then `git push --force-with-lease`. Use `--force-with-lease` rather than `--force` so a concurrent push can't be silently clobbered, and only rewrite when you are the sole author and nobody else has based work on the branch — the usual [perils of rebasing](https://git-scm.com/book/en/v2/Git-Branching-Rebasing). **There is no non-rewrite escape hatch:** the DCO app's empty "remediation commit" flow requires `allowRemediationCommits.individual`, and this repo ships no DCO config, so it runs with that disabled and the original unsigned commits keep failing. If others are working on the branch, coordinate with them before rewriting rather than reaching for a remediation commit.
     - The signoff is a **Developer Certificate of Origin** assertion in the author's own name, so it must be that author's identity — never sign off someone else's commit.
   - Open a PR against the matching base branch (`v1/main` for v1, `v2/main` for v2) and set the item's Status to **In Review**
   - **Attach screenshots as proof of functionality.** Any change to the web UI or the TUI must show its result: capture before/after screenshots (or a short GIF for an interaction) and put them in a **`pr-screenshots/` folder off the repo root**, creating it if it doesn't exist. That folder is **gitignored** — the images are working artifacts staged for upload, never committed to the source tree — so attach them to the PR body from there rather than referencing an in-repo path. Name them for what they show (`tools-tab-before.png`, `tools-tab-after.png`), not `Screenshot 2026-07-31 at 14.02.11.png`.
