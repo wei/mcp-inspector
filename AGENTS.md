@@ -213,8 +213,12 @@ All work should be driven by items on the project board.
       ```sh
       cat > .git/hooks/prepare-commit-msg <<'HOOK'
       #!/bin/sh
-      grep -q '^Signed-off-by:' "$1" || git interpret-trailers --in-place \
-        --trailer "Signed-off-by: $(git config user.name) <$(git config user.email)>" "$1"
+      # Match THIS identity's exact trailer, not any Signed-off-by: a message
+      # reused from another commit (cherry-pick, `git commit -c`) already carries
+      # someone else's, and the DCO check requires one matching the author — so a
+      # bare `grep '^Signed-off-by:'` would skip and leave the commit failing.
+      SOB="Signed-off-by: $(git config user.name) <$(git config user.email)>"
+      grep -qF "$SOB" "$1" || git interpret-trailers --in-place --trailer "$SOB" "$1"
       HOOK
       chmod +x .git/hooks/prepare-commit-msg
       ```
