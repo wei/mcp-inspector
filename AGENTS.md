@@ -208,22 +208,12 @@ All work should be driven by items on the project board.
 - When work is complete:
   - Run `npm run ci` from the root — the mandatory pre-push gate (see [Mandatory pre-push gate](#mandatory-pre-push-gate)). `npm run validate` is the fast inner-loop check and is **not** a substitute: it runs no coverage gate, no smokes, and no Storybook tests.
   - **Sign off every commit — the DCO check is a hard merge gate.** The repo runs the [probot DCO app](https://probot.github.io/apps/dco/), which fails the PR unless **every** commit in it carries a `Signed-off-by: Author Name <author@example.com>` trailer matching its author. There is no partial credit: one unsigned commit out of six fails the whole check. The app *does* expose an override button to anyone with write access, but treat it as unavailable — see the repair bullet below for why.
-    - **Prevent it, don't remember it** — the failure is invisible until after you have pushed. Commit with **`git commit -s`**. To stop relying on memory, add a `prepare-commit-msg` hook, which is the only mechanism that actually signs an ordinary `git commit`:
+    - **Prevent it with `git commit -s`** — the failure is invisible until after you have pushed, so make the flag habitual. Two things that look like automation and are not:
 
-      ```sh
-      cat > .git/hooks/prepare-commit-msg <<'HOOK'
-      #!/bin/sh
-      # Match THIS identity's exact trailer, not any Signed-off-by: a message
-      # reused from another commit (cherry-pick, `git commit -c`) already carries
-      # someone else's, and the DCO check requires one matching the author — so a
-      # bare `grep '^Signed-off-by:'` would skip and leave the commit failing.
-      SOB="Signed-off-by: $(git config user.name) <$(git config user.email)>"
-      grep -qF "$SOB" "$1" || git interpret-trailers --in-place --trailer "$SOB" "$1"
-      HOOK
-      chmod +x .git/hooks/prepare-commit-msg
-      ```
+      - ⚠️ **`git config format.signOff true` does nothing here.** Despite the name it only defaults the `-s` flag for `git format-patch`; `git commit` never reads it, and there is no `commit.signoff` equivalent. Setting it looks like a fix and silently changes nothing.
+      - ⚠️ **Don't reach for a `prepare-commit-msg` hook either**, however tempting. A hook can only sign with your *configured* identity, while the DCO check requires a trailer matching the commit **author** — and the two diverge exactly when you least want a wrong answer. Verified: on `git cherry-pick`, the resulting commit keeps the original author but the hook signs as you, producing a commit that both still fails the gate and certifies someone else's work. `git var GIT_AUTHOR_IDENT` does **not** resolve the true author inside that hook, so an author-aware guard doesn't rescue it.
 
-      ⚠️ **`git config format.signOff true` does NOT do this** — despite the name, it only defaults the `-s` flag for `git format-patch`; `git commit` never reads it, and there is no `commit.signoff` equivalent. Setting it looks like a fix and silently changes nothing, so it is a trap worth naming rather than omitting.
+      If you want automation anyway, put it somewhere that knows the author — a CI pre-merge check, or a shell alias you invoke deliberately — not a blanket commit hook.
 
     - **Repairing already-pushed commits** means rewriting them: `git rebase HEAD~<n> --signoff`, then `git push --force-with-lease`. Use `--force-with-lease` rather than `--force` so a concurrent push can't be silently clobbered, and only rewrite when you are the sole author and nobody else has based work on the branch — the usual [perils of rebasing](https://git-scm.com/book/en/v2/Git-Branching-Rebasing). **Rewriting is the only legitimate repair, and the two apparent alternatives are not.** The app's empty "remediation commit" flow requires `allowRemediationCommits.individual`; this repo ships no `.github/dco.yml`, so it runs with that disabled and the original unsigned commits keep failing. The app *does* also give anyone with write access an override button that forces the check green — but it only silences the check, it does not make the author certify anything, and the signoff is the certification (see below). Using it on your own unsigned commits asserts nothing while looking like compliance, so don't: sign the commits instead. If others are working on the branch, coordinate with them before rewriting.
     - The signoff is a **Developer Certificate of Origin** assertion in the author's own name, so it must be that author's identity — never sign off someone else's commit.
