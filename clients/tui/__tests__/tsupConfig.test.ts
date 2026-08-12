@@ -25,7 +25,10 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Options } from "tsup";
-import tsupConfig from "../tsup.config.js";
+import tsupConfig, {
+  INK_FORM_INCOMPLETE_HINT,
+  fixInkFormIncompleteHint,
+} from "../tsup.config.js";
 
 const clientDir = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -118,6 +121,40 @@ describe("tui tsup config", () => {
     for (const name of EXTERNAL_BY_DESIGN) {
       expect(external, `${name} is external by design`).toContain(name);
     }
+  });
+
+  it("corrects ink-form's misspelled incomplete-form hint", () => {
+    // Read the real dependency, so an `ink-form` upgrade that fixes or rewords
+    // the label fails here — the patch must then be removed, not left silently
+    // matching nothing.
+    const submitButton = readFileSync(
+      path.join(
+        clientDir,
+        "node_modules",
+        "ink-form",
+        "lib",
+        "SubmitButton.js",
+      ),
+      "utf8",
+    );
+
+    const patched = fixInkFormIncompleteHint(submitButton, "SubmitButton.js");
+    expect(patched).toContain(INK_FORM_INCOMPLETE_HINT.fixed);
+    expect(patched).not.toContain(INK_FORM_INCOMPLETE_HINT.typo);
+  });
+
+  it("fails loudly rather than silently skipping a label it cannot find", () => {
+    expect(() =>
+      fixInkFormIncompleteHint("no such label here", "SubmitButton.js"),
+    ).toThrow(/no longer contains the ink-form label/);
+  });
+
+  it("only rewrites the misspelling", () => {
+    // The two strings must differ by exactly the fix, or the patch is silently
+    // changing copy nobody reviewed.
+    expect(INK_FORM_INCOMPLETE_HINT.fixed).toBe(
+      INK_FORM_INCOMPLETE_HINT.typo.replace("competed", "completed"),
+    );
   });
 
   it("verifies the deps it exempts are still declared", () => {

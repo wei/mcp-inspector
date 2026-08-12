@@ -138,3 +138,19 @@ keeps npm from hoisting it next to a React the Inspector couldn't also use.
 `__tests__/tsupConfig.test.ts` enforces this: every dependency declaring a
 `react` peer must be in `noExternal` unless it is listed as external by design.
 Add a React-rendering dependency, and that test tells you to bundle it.
+
+### The `ink-form` label patch
+
+Bundling `ink-form` also makes it patchable, which one label needs: the hint
+under an incomplete form reads "you have not **competed** yet". It is upstream's
+string, hardcoded in `ink-form/lib/SubmitButton.js` with no prop to override,
+and `ink-form` was last published in 2024 — so `tsup.config.ts` corrects it with
+an esbuild `onLoad` hook as the file enters the bundle. It is reported upstream
+as [lukasbach/ink-form#14](https://github.com/lukasbach/ink-form/issues/14); if
+a release ever carries the fix, drop the patch.
+
+The hook **throws** when the string isn't found rather than passing the source
+through. A silent no-op would let an `ink-form` upgrade retire the patch without
+anyone noticing it had stopped applying — or leave a patch aimed at a string
+that no longer exists. If the build fails there, check whether upstream fixed
+the typo and delete the patch instead of re-targeting it.
