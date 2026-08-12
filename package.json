@@ -91,18 +91,13 @@
     "commander": "^13.1.0",
     "hono": "^4.12.18",
     "ink": "^6.0.0",
-    "ink-form": "^2.0.1",
-    "ink-scroll-view": "^0.3.6",
     "open": "^10.2.0",
     "pino": "^9.14.0",
-    "react": "^19.2.4",
+    "react": "^19.0.0",
     "undici": "^8.5.0",
     "vite": "^8.1.5",
     "yaml": "^2.9.0",
     "zod": "^4.4.3"
-  },
-  "overrides": {
-    "ink-select-input": "^6.2.0"
   },
   "engines": {
     "node": ">=22.19.0"
