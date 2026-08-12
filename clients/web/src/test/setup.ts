@@ -113,17 +113,23 @@ Object.defineProperty(window, "matchMedia", {
 // `setTimeout` after cleanup has already run. Nothing owns that timer. It needs
 // a loaded machine to hit, which is why it only ever appears in CI.
 //
-// Rather than chase each component, track every timer and clear whatever is
-// still outstanding once the test's own teardown has had its turn. Ordering is
-// load-bearing: this runs *after* `cleanup()` below, so legitimate unmount
-// cleanups clear their own timers and only true leaks are left.
+// Rather than chase each component, track every timer *and every animation
+// frame*, and clear whatever is still outstanding once the test's own teardown
+// has had its turn. Ordering is load-bearing twice over: this runs *after*
+// `cleanup()` below, so legitimate unmount cleanups clear their own timers and
+// only true leaks are left; and frames are cancelled *before* timers are swept,
+// because a queued frame callback would otherwise run after the sweep and
+// register a fresh timer. See the ordering note on the `afterEach` itself.
 //
 // Under `vi.useFakeTimers()` the wrapper is swapped out for vitest's fake
 // implementation, so nothing is tracked while fake timers are installed — which
 // is correct, since a fake timer cannot outlive the environment.
 const pendingTimers = new Set<number>();
+const pendingFrames = new Set<number>();
 const realSetTimeout = window.setTimeout.bind(window);
 const realClearTimeout = window.clearTimeout.bind(window);
+const realRequestAnimationFrame = window.requestAnimationFrame.bind(window);
+const realCancelAnimationFrame = window.cancelAnimationFrame.bind(window);
 
 window.setTimeout = ((
   handler: TimerHandler,
@@ -156,11 +162,43 @@ window.clearTimeout = ((id?: number): void => {
   // Same DOM-vs-Node overload mismatch as `setTimeout` above.
 }) as unknown as typeof window.clearTimeout;
 
+window.requestAnimationFrame = ((callback: FrameRequestCallback): number => {
+  const handle: number = realRequestAnimationFrame((time: number) => {
+    pendingFrames.delete(handle);
+    callback(time);
+  });
+  pendingFrames.add(handle);
+  return handle;
+  // Same DOM-vs-happy-dom declaration mismatch as `setTimeout` above.
+}) as unknown as typeof window.requestAnimationFrame;
+
+window.cancelAnimationFrame = ((handle: number): void => {
+  pendingFrames.delete(handle);
+  realCancelAnimationFrame(handle);
+  // Same DOM-vs-happy-dom declaration mismatch as `setTimeout` above.
+}) as unknown as typeof window.cancelAnimationFrame;
+
 afterEach(() => {
   cleanup();
   window.localStorage.clear();
-  // After cleanup(), anything still pending is a leak — drop it so it cannot
-  // fire past this file's environment teardown.
+
+  // Order is the whole point, and it is not interchangeable.
+  //
+  // Cancel queued animation frames FIRST. This `afterEach` is synchronous, so a
+  // frame callback already queued cannot run until it returns — at which point
+  // it would register a fresh `setTimeout` *after* the sweep below had already
+  // drained, and on the file's last test that timer would survive teardown.
+  // That is precisely the rAF race this net exists for, so sweeping timers
+  // without cancelling frames first would leave the original hole open.
+  //
+  // Cancelling first closes it deterministically: JS is single-threaded and
+  // nothing here yields, so no frame callback can run between these two loops.
+  for (const handle of pendingFrames) {
+    realCancelAnimationFrame(handle);
+  }
+  pendingFrames.clear();
+
+  // Then drop the timers. After cleanup(), anything still pending is a leak.
   for (const id of pendingTimers) {
     realClearTimeout(id);
   }

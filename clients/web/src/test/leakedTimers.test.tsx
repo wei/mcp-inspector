@@ -17,9 +17,10 @@ import { describe, it, expect, vi } from "vitest";
 import { Modal } from "@mantine/core";
 import { renderWithMantine } from "./renderWithMantine";
 
-/** Ids the net is tracking, read back through the wrapper it installed. */
-function scheduleTracked(ms: number): number {
-  return window.setTimeout(() => {}, ms) as unknown as number;
+/** Schedule through the wrapper the net installed, keeping its inferred handle
+ *  type so it stays directly acceptable to `window.clearTimeout`. */
+function scheduleTracked(ms: number) {
+  return window.setTimeout(() => {}, ms);
 }
 
 describe("leaked-timer safety net", () => {
@@ -52,6 +53,27 @@ describe("leaked-timer safety net", () => {
     expect(() => window.clearTimeout(id)).not.toThrow();
   });
 
+  it("queues a frame that would schedule a timer after the sweep", () => {
+    // The rAF race in miniature, and the ordering the net depends on. This
+    // synchronous test cannot let the frame callback run — it fires only after
+    // the test (and the whole afterEach) returns. If frames were not cancelled
+    // *before* the timer sweep, this callback would register `rafScheduled`
+    // after the drain and survive teardown. The next test proves it does not.
+    requestAnimationFrame(() => {
+      rafRace.ranFrame = true;
+      window.setTimeout(() => {
+        rafRace.ranTimer = true;
+      }, 5);
+    });
+    expect(rafRace.ranFrame).toBe(false);
+  });
+
+  it("neither the queued frame nor its timer ever ran", async () => {
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(rafRace.ranFrame).toBe(false);
+    expect(rafRace.ranTimer).toBe(false);
+  });
+
   it("a Modal's own transition timers do not survive the test that opened it", () => {
     // The real-world shape of #1984: ServerRemoveConfirmModal-style tests toggle
     // `opened`, and Mantine schedules real timers for the transition and the
@@ -70,3 +92,6 @@ describe("leaked-timer safety net", () => {
 const leaked: { callback: ReturnType<typeof vi.fn> | null } = {
   callback: null,
 };
+
+/** Records whether a queued frame — or the timer it would register — ever ran. */
+const rafRace = { ranFrame: false, ranTimer: false };
