@@ -552,9 +552,29 @@ async function press(r: RenderResult, keys: string[]) {
  */
 const POLL_TRIES = 100;
 
+/**
+ * One check-phase turn, queued BEHIND React's already-scheduled passive-effect
+ * flush. A frame observed by a poll predicate is written during React's
+ * COMMIT, but ink re-arms its useInput listeners in the passive-effect flush
+ * React schedules (via setImmediate in Node) during that same commit. Node's
+ * event loop runs the timers phase before the check phase, so a 25ms poll
+ * tick can observe the new frame and let the test write the next keypress
+ * BEFORE that flush has run — the key is then dispatched to the previous
+ * commit's stale useInput closures (where e.g. pendingStepUp is still null)
+ * and silently swallowed (#1942). Yielding one setImmediate turn after the
+ * predicate passes sequences the next stdin write after the flush (FIFO
+ * within the check queue), so "frame visible" once again implies "input
+ * handlers armed".
+ */
+const settleInputHandlers = () =>
+  new Promise((resolve) => setImmediate(resolve));
+
 async function waitUntil(predicate: () => boolean, tries = POLL_TRIES) {
   for (let i = 0; i < tries; i++) {
-    if (predicate()) return;
+    if (predicate()) {
+      await settleInputHandlers();
+      return;
+    }
     await tick();
   }
 }
