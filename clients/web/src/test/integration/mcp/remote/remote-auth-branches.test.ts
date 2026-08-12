@@ -76,8 +76,63 @@ async function startUnauthorizedUpstream(): Promise<{
   return { url: `http://127.0.0.1:${port}/mcp`, server };
 }
 
-/** Connect a stdio session whose process crashes almost immediately, then
- * give the onclose handler time to mark the session's transport dead. */
+/**
+ * Poll until the server reports the session's transport as dead (#1985).
+ *
+ * The probe is a **notification** — a `method` with no `id` — which matters:
+ * `requestIdForSendWait` returns `undefined` for it, so `/api/mcp/send` never
+ * awaits a response and cannot hang. Probing with a *request* would reproduce
+ * the very failure this guards against, since a request sent before the
+ * transport is marked dead waits forever for a reply the dead child will never
+ * send.
+ *
+ * Either terminal branch of the route answers `kind: "transport_error"` — the
+ * `isTransportDead()` short-circuit, and the `catch` around a `send()` that
+ * threw on the dead pipe. Both are fine as a stop condition: each one proves the
+ * subsequent real send also cannot reach the hanging path.
+ *
+ * Deliberately not `/api/mcp/events`: opening that stream on a dead transport
+ * calls `sessions.delete(sessionId)`, so the send under test would then answer
+ * 404 instead of the `transport_error` it is asserting.
+ */
+async function waitForDeadTransport(
+  h: Harness,
+  sessionId: string,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let last = "(no response)";
+  while (Date.now() < deadline) {
+    const res = await fetch(`${h.baseUrl}/api/mcp/send`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId,
+        message: { jsonrpc: "2.0", method: "notifications/initialized" },
+      }),
+    });
+    const body = (await res.json()) as { kind?: string };
+    if (body.kind === "transport_error") return;
+    last = `HTTP ${res.status} ${JSON.stringify(body)}`;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(
+    `transport was never reported dead within ${timeoutMs}ms; last probe: ${last}`,
+  );
+}
+
+/**
+ * Connect a stdio session whose process crashes almost immediately, then wait
+ * until the transport is actually marked dead.
+ *
+ * This used to sleep a flat 300ms, which had to cover a cold `spawn()`, node's
+ * startup, its exit, the parent observing the close, and `onclose` marking the
+ * session dead. Comfortable on an idle machine; not under CI contention. When
+ * the budget was missed the session was still live, so the send under test was
+ * dispatched to a transport whose child was gone and hung for the project's full
+ * 30s timeout (#1985). Waiting on the observable condition costs latency on a
+ * slow machine instead of a false failure.
+ */
 async function connectDeadSession(h: Harness): Promise<string> {
   const config: MCPServerConfig = {
     type: "stdio",
@@ -87,9 +142,7 @@ async function connectDeadSession(h: Harness): Promise<string> {
   const res = await connect(h, config);
   expect(res.status).toBe(200);
   const { sessionId } = (await res.json()) as { sessionId: string };
-  // Give the subprocess time to exit and the transport's onclose handler
-  // to mark the session dead (mirrors connect-crash.test.ts's technique).
-  await new Promise((resolve) => setTimeout(resolve, 300));
+  await waitForDeadTransport(h, sessionId);
   return sessionId;
 }
 
