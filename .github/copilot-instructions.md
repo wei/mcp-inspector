@@ -104,6 +104,7 @@ Both exist and do different jobs. Theme files (`src/theme/<Component>.ts`) custo
 - **A test or smoke must not touch real user state.** The web smokes run against a throwaway catalog via the shared `scripts/lib/prod-web-server.mjs` helper, never the developer's `~/.mcp-inspector/mcp.json` (#1977); the cli/tui smokes drive a temp `--catalog`. A new smoke spawning its own server, or teardown that removes a work dir without first awaiting `stopChild` (the #1801 race — `child-cleanup.mjs` exports both halves and both are required), should be flagged.
 - **Every PR references an issue**, first body line `Closes #<ISSUE_NUMBER>`.
 - **Every PR carries exactly one version label**, `v1` or `v2`, matching its base branch.
+- **Commits carry a `Signed-off-by:` trailer.** The DCO check is a hard merge gate and fails on a single unsigned commit; it matches the trailer against the author *or* committer, and skips only merge and bot commits. Use `git commit -s` — note `format.signOff` does *not* sign `git commit` (only `format-patch`). Repairing pushed commits means `git rebase HEAD~<n> --signoff` + `git push --force-with-lease`; remediation commits are not enabled on this repo.
 - Update the relevant `README.md` / `AGENTS.md` when a change adds, removes, renames, or repurposes a file or folder, changes the structure or tech stack, or introduces a command, dependency, or architectural pattern.
 
 ## What to prioritize in review
