@@ -47,6 +47,7 @@ import {
   rootRunsClientValidate,
   tokenize,
 } from "./lib/npm-scripts.mjs";
+import { resolveNodeBin } from "./lib/resolve-node-bin.mjs";
 
 const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -456,8 +457,8 @@ export function typecheckProjects(scripts) {
 function projectDisablesChecking(clientDir, project) {
   try {
     const out = execFileSync(
-      "npx",
-      ["--no-install", "tsc", "-p", project, "--showConfig"],
+      process.execPath,
+      [tscEntry(clientDir), "-p", project, "--showConfig"],
       { cwd: path.join(repoRoot, clientDir), encoding: "utf8" },
     );
     return JSON.parse(out)?.compilerOptions?.noCheck === true;
@@ -473,6 +474,30 @@ function projectDisablesChecking(clientDir, project) {
  * in the set but are harmless — the set is only ever queried with client-relative
  * paths. Cached: `resolveLeafProjects` and `projectFiles` both list a project.
  */
+// The tsc JS entry each client's projects are measured with, resolved from the
+// client dir up the node_modules tree exactly as `npx --no-install tsc` walked
+// — but spawnable shell-free on Windows, where `npx` is a `.cmd` shim that
+// `execFileSync` can't start (ENOENT — #1939). A resolution failure is a hard
+// "cannot measure" error rather than an empty file set: the old ENOENT was
+// doubly silent, echoing "(no diagnostic captured)" per project and then
+// reporting every tracked file in the repo as uncovered.
+const tscEntryCache = new Map();
+function tscEntry(clientDir) {
+  const cached = tscEntryCache.get(clientDir);
+  if (cached) return cached;
+  let entry;
+  try {
+    entry = resolveNodeBin("typescript", "tsc", path.join(repoRoot, clientDir));
+  } catch (err) {
+    console.error(
+      `verify:typecheck-coverage — cannot resolve \`typescript\` from ${clientDir} (${err.message}): this guard cannot measure anything. Run \`npm install\` at the repo root first.`,
+    );
+    process.exit(1);
+  }
+  tscEntryCache.set(clientDir, entry);
+  return entry;
+}
+
 const rawFilesCache = new Map();
 function rawProjectFiles(clientDir, project) {
   const key = `${clientDir}|${project}`;
@@ -482,8 +507,8 @@ function rawProjectFiles(clientDir, project) {
   let stdout;
   try {
     stdout = execFileSync(
-      "npx",
-      ["--no-install", "tsc", "-p", project, "--listFilesOnly"],
+      process.execPath,
+      [tscEntry(clientDir), "-p", project, "--listFilesOnly"],
       { cwd: absClient, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
     );
   } catch (err) {

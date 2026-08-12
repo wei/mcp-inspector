@@ -137,7 +137,9 @@ step("packing the publishable tarball (npm pack)...");
 const pack = spawnSync(
   "npm",
   ["pack", "--json", "--ignore-scripts", "--pack-destination", tmpdir()],
-  { cwd: repoRoot, encoding: "utf8" },
+  // npm is npm.cmd on Windows, which needs a shell to resolve (#1939) — the
+  // same idiom as runInherit/runBin below.
+  { cwd: repoRoot, encoding: "utf8", shell: process.platform === "win32" },
 );
 if (pack.status !== 0) {
   fail(`\`npm pack\` failed:\n${pack.stderr || pack.stdout}`);

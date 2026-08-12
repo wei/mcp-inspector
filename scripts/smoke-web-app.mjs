@@ -53,6 +53,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { join, resolve } from "node:path";
 import { startProdWebServer } from "./lib/prod-web-server.mjs";
 import { stopChild } from "./lib/child-cleanup.mjs";
+import { resolveNodeBin } from "./lib/resolve-node-bin.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const requireFromWeb = createRequire(
@@ -140,10 +141,18 @@ function ensureTestServer() {
   console.log(
     "smoke:web:app — building test-servers (missing build output)...",
   );
-  const r = spawnSync("npx", ["tsc", "-p", "test-servers", "--noCheck"], {
-    cwd: repoRoot,
-    stdio: "inherit",
-  });
+  // The root-installed tsc, run via this Node — `npx` is a `.cmd` shim on
+  // Windows that a shell-free spawnSync can't start (ENOENT — #1939).
+  const r = spawnSync(
+    process.execPath,
+    [
+      resolveNodeBin("typescript", "tsc", repoRoot),
+      "-p",
+      "test-servers",
+      "--noCheck",
+    ],
+    { cwd: repoRoot, stdio: "inherit" },
+  );
   if (r.status !== 0 || !existsSync(composableServer)) {
     throw new Error(
       "could not build the test servers (test-servers/build/server-composable.js). " +
