@@ -124,19 +124,48 @@ Object.defineProperty(window, "matchMedia", {
 // Under `vi.useFakeTimers()` the wrapper is swapped out for vitest's fake
 // implementation, so nothing is tracked while fake timers are installed — which
 // is correct, since a fake timer cannot outlive the environment.
-const pendingTimers = new Set<number>();
-const pendingFrames = new Set<number>();
+// Handles are held as `unknown`, deliberately. The DOM lib declares these as
+// `number`, but happy-dom returns objects at runtime — verified here:
+// `setTimeout` yields a `Timeout` and `requestAnimationFrame` an `Immediate`.
+// An earlier revision typed the sets `Set<number>` and guarded removal with
+// `typeof id === "number"`; that guard never matched, so explicitly-cleared
+// timers were never untracked. Harmless in effect (the teardown sweep clears
+// them again and `clearTimeout` is idempotent) but the bookkeeping was a
+// fiction, and the test asserting it passed vacuously. Treat the handle as
+// opaque and pass it straight back to the matching canceller.
+const pendingTimers = new Set<unknown>();
+const pendingFrames = new Set<unknown>();
 const realSetTimeout = window.setTimeout.bind(window);
 const realClearTimeout = window.clearTimeout.bind(window);
 const realRequestAnimationFrame = window.requestAnimationFrame.bind(window);
 const realCancelAnimationFrame = window.cancelAnimationFrame.bind(window);
 
+/** Cancel an opaque handle through the real canceller it came from. */
+function cancelTimer(id: unknown): void {
+  // The handle came from `realSetTimeout`, so it is exactly what
+  // `realClearTimeout` expects; only the *declared* type disagrees.
+  realClearTimeout(id as Parameters<typeof realClearTimeout>[0]);
+}
+
+function cancelFrame(handle: unknown): void {
+  // As above, for the rAF pair.
+  realCancelAnimationFrame(
+    handle as Parameters<typeof realCancelAnimationFrame>[0],
+  );
+}
+
+/** Test-only introspection, so the regression tests can assert on the
+ *  bookkeeping itself rather than on behavior that would hold anyway. */
+export function pendingTimerCount(): number {
+  return pendingTimers.size;
+}
+
 window.setTimeout = ((
   handler: TimerHandler,
   timeout?: number,
   ...args: unknown[]
-): number => {
-  const id: number = realSetTimeout(
+): unknown => {
+  const id: unknown = realSetTimeout(
     (...cbArgs: unknown[]) => {
       pendingTimers.delete(id);
       if (typeof handler === "function") {
@@ -148,34 +177,37 @@ window.setTimeout = ((
   );
   pendingTimers.add(id);
   return id;
-  // happy-dom types `setTimeout` with Node's overloads (returning `Timeout`),
-  // while the DOM lib types it as `number`. The implementation above honors the
-  // DOM shape the app codes against; this cast bridges the two declarations,
-  // which TS cannot relate structurally.
+  // The wrapper's public signature must match the DOM declaration the app codes
+  // against, while its body traffics in the runtime handle described above. TS
+  // cannot relate the two, hence the cast.
 }) as unknown as typeof window.setTimeout;
 
-window.clearTimeout = ((id?: number): void => {
-  if (typeof id === "number") {
+window.clearTimeout = ((id?: unknown): void => {
+  // No `typeof` guard: the handle is an object here, so a numeric test would
+  // reject every real one. Anything defined is worth untracking.
+  if (id !== undefined && id !== null) {
     pendingTimers.delete(id);
   }
-  realClearTimeout(id);
-  // Same DOM-vs-Node overload mismatch as `setTimeout` above.
+  cancelTimer(id);
+  // Same declaration-vs-runtime mismatch as `setTimeout` above.
 }) as unknown as typeof window.clearTimeout;
 
-window.requestAnimationFrame = ((callback: FrameRequestCallback): number => {
-  const handle: number = realRequestAnimationFrame((time: number) => {
+window.requestAnimationFrame = ((callback: FrameRequestCallback): unknown => {
+  const handle: unknown = realRequestAnimationFrame((time: number) => {
     pendingFrames.delete(handle);
     callback(time);
   });
   pendingFrames.add(handle);
   return handle;
-  // Same DOM-vs-happy-dom declaration mismatch as `setTimeout` above.
+  // Same declaration-vs-runtime mismatch as `setTimeout` above.
 }) as unknown as typeof window.requestAnimationFrame;
 
-window.cancelAnimationFrame = ((handle: number): void => {
-  pendingFrames.delete(handle);
-  realCancelAnimationFrame(handle);
-  // Same DOM-vs-happy-dom declaration mismatch as `setTimeout` above.
+window.cancelAnimationFrame = ((handle?: unknown): void => {
+  if (handle !== undefined && handle !== null) {
+    pendingFrames.delete(handle);
+  }
+  cancelFrame(handle);
+  // Same declaration-vs-runtime mismatch as `setTimeout` above.
 }) as unknown as typeof window.cancelAnimationFrame;
 
 afterEach(() => {
@@ -194,13 +226,13 @@ afterEach(() => {
   // Cancelling first closes it deterministically: JS is single-threaded and
   // nothing here yields, so no frame callback can run between these two loops.
   for (const handle of pendingFrames) {
-    realCancelAnimationFrame(handle);
+    cancelFrame(handle);
   }
   pendingFrames.clear();
 
   // Then drop the timers. After cleanup(), anything still pending is a leak.
   for (const id of pendingTimers) {
-    realClearTimeout(id);
+    cancelTimer(id);
   }
   pendingTimers.clear();
 });

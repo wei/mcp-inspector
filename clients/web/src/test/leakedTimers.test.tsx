@@ -16,6 +16,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { Modal } from "@mantine/core";
 import { renderWithMantine } from "./renderWithMantine";
+import { pendingTimerCount } from "./setup";
 
 /** Schedule through the wrapper the net installed, keeping its inferred handle
  *  type so it stays directly acceptable to `window.clearTimeout`. */
@@ -46,11 +47,17 @@ describe("leaked-timer safety net", () => {
     expect(leaked.callback).not.toHaveBeenCalled();
   });
 
-  it("clearTimeout stops tracking, so an explicitly-cleared timer is not double-cleared", () => {
+  it("clearTimeout untracks the timer", () => {
+    // Asserted against the net's own bookkeeping, not against "clearTimeout
+    // doesn't throw" — the latter holds whether or not tracking works, since
+    // clearTimeout is idempotent, so it proved nothing. That vacuity hid a real
+    // bug: happy-dom's handle is a `Timeout` object, so the original
+    // `typeof id === "number"` guard never matched and nothing was untracked.
+    const before = pendingTimerCount();
     const id = scheduleTracked(1000);
-    expect(() => window.clearTimeout(id)).not.toThrow();
-    // Clearing twice must stay a no-op — the net also clears at teardown.
-    expect(() => window.clearTimeout(id)).not.toThrow();
+    expect(pendingTimerCount()).toBe(before + 1);
+    window.clearTimeout(id);
+    expect(pendingTimerCount()).toBe(before);
   });
 
   it("queues a frame that would schedule a timer after the sweep", () => {
