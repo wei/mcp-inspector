@@ -1,5 +1,4 @@
-import { defineConfig } from "tsup";
-import type { Plugin } from "esbuild";
+import { defineConfig, type Options } from "tsup";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -45,11 +44,25 @@ export function fixInkFormIncompleteHint(source: string, file: string): string {
   );
 }
 
-const inkFormLabelPatch: Plugin = {
+/**
+ * Which module the patch above is applied to.
+ *
+ * Exported so the tests can check it against the *resolved* path of the real
+ * `ink-form` module — a filter that stops matching is the one way this patch
+ * can silently no-op, since `fixInkFormIncompleteHint` would then never run.
+ */
+export const INK_FORM_SUBMIT_BUTTON = /ink-form[\\/]lib[\\/]SubmitButton\.js$/;
+
+// The plugin type is derived from tsup rather than imported from `esbuild`:
+// `esbuild` is tsup's transitive dependency, not a declared one of this client,
+// so a direct import typechecks only while npm happens to hoist it.
+type EsbuildPlugin = NonNullable<Options["esbuildPlugins"]>[number];
+
+export const inkFormLabelPatch: EsbuildPlugin = {
   name: "ink-form-label-patch",
   setup(build) {
     build.onLoad(
-      { filter: /ink-form[\\/]lib[\\/]SubmitButton\.js$/ },
+      { filter: INK_FORM_SUBMIT_BUTTON },
       async ({ path: file }) => ({
         contents: fixInkFormIncompleteHint(await readFile(file, "utf8"), file),
         loader: "js",
