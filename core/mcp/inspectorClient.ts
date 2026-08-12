@@ -358,6 +358,13 @@ export class InspectorClient extends InspectorClientEventTarget {
   private outputValidator: AjvJsonSchemaValidator | null = null;
   private transport: Transport | MessageTrackingTransport | null = null;
   private baseTransport: Transport | null = null;
+  // Correlation for `markResponseRejected` (#1953): the method of each
+  // outbound request still awaiting a response, and — once one is answered —
+  // the id of the most recently answered request per method. Entries are
+  // dropped as responses arrive, so this holds at most one id per method
+  // rather than growing with the session.
+  private outboundRequestMethods = new Map<string | number, string>();
+  private lastAnsweredRequestByMethod = new Map<string, string | number>();
   /** True when the cached transport was built with an OAuth authProvider attached. */
   private transportHasAuthProvider = false;
   /** Dedupes concurrent ambient auth challenges (reason + scopes). */
@@ -472,7 +479,10 @@ export class InspectorClient extends InspectorClientEventTarget {
   // `McpSubscription` whose filter's `resourceSubscriptions` mirrors
   // `subscribedResources`; mutating the set re-lists (close old, open new), and
   // an unexpected `"remote"` close re-lists (reconnect-by-re-listen — the stream
-  // is not resumable). `null` when no URI is subscribed or on the legacy era.
+  // is not resumable). `null` on the legacy era, and on the modern era whenever
+  // the filter is empty — which is *not* the same as "no URI subscribed": the
+  // stream also carries the list-change opt-ins, so a tools-only server opens it
+  // with no subscriptions at all (#1920).
   private modernSubscription: McpSubscription | null = null;
   // Monotonic guard so a stale re-list/reconnect (whose `listen()` or `closed`
   // resolves after a newer refresh already started) can detect it lost the race
@@ -786,6 +796,9 @@ export class InspectorClient extends InspectorClientEventTarget {
   private createMessageTrackingCallbacks(): MessageTrackingCallbacks {
     return {
       trackRequest: (message: JSONRPCRequest, origin: MessageOrigin) => {
+        if (origin === "client") {
+          this.outboundRequestMethods.set(message.id, message.method);
+        }
         const entry: MessageEntry = {
           id: crypto.randomUUID(),
           timestamp: new Date(),
@@ -799,6 +812,19 @@ export class InspectorClient extends InspectorClientEventTarget {
         message: JSONRPCResultResponse | JSONRPCErrorResponse,
         origin: MessageOrigin,
       ) => {
+        // A response to one of OUR requests closes that id's correlation entry
+        // and becomes the method's most recent answer (#1953). The transport
+        // only tracks responses that carry an id, but the JSON-RPC types leave
+        // it optional for an error frame the server couldn't attribute — such a
+        // frame answers no specific request, so it is skipped.
+        const responseId = message.id;
+        if (origin === "server" && responseId !== undefined) {
+          const method = this.outboundRequestMethods.get(responseId);
+          this.outboundRequestMethods.delete(responseId);
+          if (method !== undefined) {
+            this.lastAnsweredRequestByMethod.set(method, responseId);
+          }
+        }
         const entry: MessageEntry = {
           id: crypto.randomUUID(),
           timestamp: new Date(),
@@ -1558,6 +1584,17 @@ export class InspectorClient extends InspectorClientEventTarget {
     this.clearReceiverTasks();
     this.resetSubscriptionStream();
     this.cancelledTaskIds.clear();
+    // Correlation data is per-session: JSON-RPC ids don't survive it, and
+    // MessageLogState drops its entries on disconnect, so anything left here
+    // could only point at an entry that no longer exists. Clearing also
+    // releases the ids of requests that never got a response (a timeout, a
+    // dropped connection) — the only entries `trackResponse` can't remove, so
+    // without this they accumulate across reconnects. Cleared here on the
+    // start-clean path rather than in `disconnect()` for the reason documented
+    // above: one route out (`onerror` with no `onclose`) tears down nothing
+    // (#1953).
+    this.outboundRequestMethods.clear();
+    this.lastAnsweredRequestByMethod.clear();
     for (const [, controller] of this.taskInputAbortControllers) {
       controller.abort(new Error("Connection ended"));
     }
@@ -1899,8 +1936,6 @@ export class InspectorClient extends InspectorClientEventTarget {
       // capabilities and wipe tools/prompts/resources to empty on every connect.
       await this.fetchServerInfo();
 
-      this.dispatchTypedEvent("connect");
-
       // Set initial logging level if configured and server supports it
       if (this.initialLoggingLevel && this.capabilities?.logging) {
         await this.client.setLoggingLevel(
@@ -2021,6 +2056,33 @@ export class InspectorClient extends InspectorClientEventTarget {
         // Progress: we use per-request onprogress (see getRequestOptions). We do not register
         // a progress notification handler so the Protocol's _onprogress stays; timeout reset
         // and routing work, and we inject the caller's progressToken into dispatched events.
+      }
+
+      // Modern era: the handlers registered above only fire for notifications
+      // that reach us, and on this era every server→client notification rides
+      // the `subscriptions/listen` stream. Open it now when the filter says
+      // there is something to listen for — otherwise a list-change opt-in on a
+      // server with no resources would have no way in, since a subscribe click
+      // was the only thing that ever opened the stream (#1920).
+      await this.openModernListenStreamOnConnect();
+
+      // Last, so the notification channel is established (or its retry armed)
+      // before any consumer acts on the connection. The managed list states
+      // start their initial `refresh()` from this event, so dispatching earlier
+      // would let `tools/list` go out ahead of `subscriptions/listen` — and a
+      // list the server changes in that window would notify nobody, leaving the
+      // UI stale with no way to notice (#1920). The cost is one listen
+      // round-trip added to connect on the modern era.
+      //
+      // …which is also why the announcement is conditional. Every await above
+      // is a window for a `disconnect()` or a transport `onclose`/`onerror` to
+      // overtake this connect, and the listen round-trip widened it. Announcing
+      // then would restart every managed list refresh against a session being
+      // torn down or already dead. `disconnecting` covers the teardown that has
+      // claimed ownership but is still awaiting `client.close()` — the status is
+      // whatever it was until that block finishes.
+      if (this.status === "connected" && !this.disconnecting) {
+        this.dispatchTypedEvent("connect");
       }
     } catch (error) {
       if (!isConnectAuthRecoveryError(error)) {
@@ -3080,8 +3142,17 @@ export class InspectorClient extends InspectorClientEventTarget {
     // reflect the current wire truth. Accepted for a debugging tool where the
     // list is small and correctness of "why did this tool vanish" matters more
     // than the extra request; it's a no-op (no round trip) on legacy/stdio.
-    // Kept best-effort: an error here must never fail the tools list itself.
-    await this.refreshExcludedTools(options?.metadata).catch(() => {});
+    // Kept best-effort: an error here must never fail the tools list itself —
+    // but it is logged rather than dropped on the floor, so a failing
+    // excluded-tools walk is diagnosable instead of silently leaving the
+    // "Excluded (SEP-2243)" section empty and looking like a clean server
+    // (#1953).
+    await this.refreshExcludedTools(options?.metadata).catch((err: unknown) => {
+      this.logger.warn(
+        { err },
+        "Excluded-tools walk failed; the SEP-2243 excluded list may be incomplete",
+      );
+    });
     return { tools: [...response.tools] };
   }
 
@@ -3093,6 +3164,27 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   private excludesInvalidXMcpHeaderTools(): boolean {
     return this.isModernEra() && this.getServerType() !== "stdio";
+  }
+
+  /**
+   * Mark the response that most recently answered `method` as rejected by the
+   * client, so its Protocol entry shows why instead of rendering as a clean
+   * success (#1953).
+   *
+   * The SDK gives no request id with a decode failure — `SdkError` carries the
+   * method and nothing else — so the id is recovered by correlation: the last
+   * response received for that method. That is exact rather than approximate,
+   * because the SDK rejects synchronously while decoding the response (inside
+   * the transport's `onmessage`) and the caller's `catch` runs in the very next
+   * microtask. Delivering another response for the same method in that window
+   * would take a macrotask (a socket read), which cannot interleave there.
+   *
+   * A no-op when nothing has answered `method` this session.
+   */
+  markResponseRejected(method: string, reason: string): void {
+    const id = this.lastAnsweredRequestByMethod.get(method);
+    if (id === undefined) return;
+    this.dispatchTypedEvent("responseRejected", { id, reason });
   }
 
   /** The current SEP-2243 excluded-tools set (empty on legacy/stdio). */
@@ -4829,9 +4921,13 @@ export class InspectorClient extends InspectorClientEventTarget {
    * opted-in notification type (SEP §7.4).
    */
   private buildSubscriptionFilter(): SubscriptionFilter {
-    const filter: SubscriptionFilter = {
-      resourceSubscriptions: Array.from(this.subscribedResources),
-    };
+    const filter: SubscriptionFilter = {};
+    // Omitted rather than sent empty: a listChanged-only stream (#1920) is not
+    // subscribing to any resource, and `[]` would say it asked for none of a set
+    // it is participating in.
+    if (this.subscribedResources.size > 0) {
+      filter.resourceSubscriptions = Array.from(this.subscribedResources);
+    }
     if (
       this.listChangedNotifications.tools &&
       this.capabilities?.tools?.listChanged
@@ -4853,6 +4949,82 @@ export class InspectorClient extends InspectorClientEventTarget {
     return filter;
   }
 
+  /**
+   * Whether the modern listen stream should be open: the built filter carries
+   * something to listen for (#1920). Before #1920 this was "at least one URI is
+   * subscribed", which made the stream unreachable on a server with no resources
+   * — a tools-only server advertising `tools.listChanged` had no way to open it,
+   * so `notifications/tools/list_changed` could never arrive. The filter already
+   * modelled the list-change opt-ins; only the trigger was narrower than the
+   * filter it built. This matches the SDK's own `ClientOptions.listChanged`
+   * auto-open, which opens whenever the effective (config ∩ capability)
+   * intersection is non-empty.
+   *
+   * Note this is deliberately *not* the same predicate as the stream state's
+   * `active` — see `modernStreamActive()`.
+   */
+  private wantsModernStream(): boolean {
+    const filter = this.buildSubscriptionFilter();
+    return (
+      (filter.resourceSubscriptions?.length ?? 0) > 0 ||
+      filter.toolsListChanged === true ||
+      filter.resourcesListChanged === true ||
+      filter.promptsListChanged === true
+    );
+  }
+
+  /**
+   * Whether the stream state reports `active` — i.e. whether the *Subscriptions*
+   * UI has a stream to describe. That is a narrower question than
+   * `wantsModernStream()`: `ResourceSubscriptionStreamState` drives the
+   * Subscriptions section's badge, so a stream open purely for list-change
+   * notifications (no subscribed URI) has nothing to report there and stays
+   * `active: false` (#1920). Keeping the two apart also preserves the invariant
+   * the rest of this file is written against — an empty subscribed set is never
+   * announced alongside an `active` stream.
+   */
+  private modernStreamActive(): boolean {
+    return this.subscribedResources.size > 0;
+  }
+
+  /**
+   * Open the modern listen stream at the end of a successful connect, when the
+   * filter is non-empty (#1920). Only the list-change opt-ins can make it
+   * non-empty here — the subscribed set is emptied by `resetSessionState()` on
+   * the way in — so this is exactly the "server advertises a listChanged the
+   * Inspector wants" case that had no trigger before.
+   *
+   * A failure is not allowed to fail the connect: the handshake succeeded and
+   * every request-scoped feature works without this stream. It is reported the
+   * way a lost stream is — hand it to the reconnect machinery, which retries
+   * with backoff and settles on `"ended"` past the cap.
+   *
+   * Gated on the same generation test as `subscribeToResource` — see the long
+   * comment there. The `connect` event has deliberately *not* been dispatched
+   * yet (that is the point of running here), so a list-state consumer is not the
+   * risk; what is, is anything else that bumps the generation while this
+   * `listen()` is in flight. `statusChange` has already fired, and any
+   * concurrent call on this instance qualifies: a `subscribeToResource` from a
+   * caller restoring subscriptions, or a `disconnect()` — whose
+   * `resetSubscriptionStream` bumps the generation too, making a reconcile here
+   * arm a reconnect for a session that is already gone.
+   */
+  private async openModernListenStreamOnConnect(): Promise<void> {
+    if (!this.isModernEra() || !this.wantsModernStream()) return;
+    const generationBefore = this.modernListenGeneration;
+    try {
+      await this.refreshModernSubscription();
+    } catch (error) {
+      this.logger.error(
+        { error },
+        "Failed to open the modern subscriptions/listen stream on connect",
+      );
+      if (this.modernListenGeneration === generationBefore + 1) {
+        this.reconcileModernStreamStateAfterFailedRefresh();
+      }
+    }
+  }
+
   /** Cancel a pending reconnect re-listen, if any (#1630). */
   private clearModernReconnectTimer(): void {
     if (this.modernReconnectTimer !== undefined) {
@@ -4863,9 +5035,10 @@ export class InspectorClient extends InspectorClientEventTarget {
 
   /**
    * (Re-)establish the modern `subscriptions/listen` stream to match the current
-   * `subscribedResources` set (#1630). Because the stream is not resumable,
-   * every filter change re-lists: the existing stream is closed and a fresh
-   * `listen()` opened. With no subscribed URIs the stream is left closed.
+   * filter (#1630). Because the stream is not resumable, every filter change
+   * re-lists: the existing stream is closed and a fresh `listen()` opened. With
+   * an empty filter — no subscribed URIs *and* no enabled list-change opt-in the
+   * server advertises — the stream is left closed (#1920).
    *
    * `modernListenGeneration` guards against races — if a newer refresh starts
    * while this one awaits its acknowledgement, the just-opened stream is
@@ -4891,8 +5064,8 @@ export class InspectorClient extends InspectorClientEventTarget {
       await closeSubscriptionBestEffort(previous);
     }
 
-    // Nothing subscribed → keep the stream closed.
-    if (this.subscribedResources.size === 0) {
+    // Nothing to listen for → keep the stream closed.
+    if (!this.wantsModernStream()) {
       this.setModernStreamState(INACTIVE_SUBSCRIPTION_STREAM_STATE);
       return;
     }
@@ -4914,7 +5087,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     // starts fresh next time (#1630).
     this.modernReconnectAttempts = 0;
     this.setModernStreamState({
-      active: true,
+      active: this.modernStreamActive(),
       status: "acknowledged",
       honoredUris: subscription.honoredFilter.resourceSubscriptions ?? [],
     });
@@ -4960,7 +5133,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     const shouldReconnect =
       reason === "remote" &&
       !isTerminalStatus(this.status) &&
-      this.subscribedResources.size > 0;
+      this.wantsModernStream();
     if (!shouldReconnect) {
       // "stream gone but subscriptions remain" renders the same whether we gave
       // up after failed reconnects or the server closed it gracefully: keep the
@@ -4969,7 +5142,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       // until the next `connect()` calls `resetSubscriptionStream`, which moves
       // them together — so "active with an empty set" is never observable.)
       this.setModernStreamState({
-        active: this.subscribedResources.size > 0,
+        active: this.modernStreamActive(),
         status: "ended",
         honoredUris: [],
       });
@@ -4988,10 +5161,11 @@ export class InspectorClient extends InspectorClientEventTarget {
    * refresh owns the state as well as the filter — so both call sites gate on
    * the generation first.
    *
-   * The empty case is the ordinary one: nothing subscribed, no stream, inactive.
-   * The non-empty one exists because a failed re-listen leaves
-   * `modernSubscription` null with URIs still subscribed, and nothing else will
-   * notice: the reconnect machinery is reachable only from a stream that closed
+   * The two branches are the empty and non-empty *filter* (#1920) — which is
+   * "nothing subscribed" only when no list-change opt-in is live. The empty case
+   * is the ordinary one: nothing to listen for, no stream, inactive. The
+   * non-empty one exists because a failed re-listen leaves `modernSubscription`
+   * null with the filter still wanting a stream, and nothing else will notice: the reconnect machinery is reachable only from a stream that closed
    * or a reconnect that failed, and neither happened here. Left alone, the state
    * keeps whatever the last success (or the optimistic `"connecting"`) wrote — a
    * badge that will never change over subscriptions the server may never have
@@ -4999,17 +5173,17 @@ export class InspectorClient extends InspectorClientEventTarget {
    * Subscribe early-returns on the URI already being in the set).
    *
    * So it reconnects rather than settling for an honest-but-dead `"ended"`:
-   * every other route to "stream gone, URIs live" either expects the close or
+   * every other route to "stream gone, filter live" either expects the close or
    * has exhausted the retry cap, and this is the one that has made no attempt
    * at all. `scheduleModernReconnect` fits as-is — a user-initiated refresh
    * already reset `modernReconnectAttempts`, so it starts at the base delay; the
-   * timer bails on a terminal status or an emptied set; and past the cap
+   * timer bails on a terminal status or an emptied filter; and past the cap
    * `onModernReconnectFailed` lands on the same `"ended"` badge. The state
    * therefore becomes true or ends after a real attempt. The caller still sees
    * its error either way — the retry is about the subscriptions, not the call.
    */
   private reconcileModernStreamStateAfterFailedRefresh(): void {
-    if (this.subscribedResources.size === 0) {
+    if (!this.wantsModernStream()) {
       this.setModernStreamState(INACTIVE_SUBSCRIPTION_STREAM_STATE);
       return;
     }
@@ -5024,7 +5198,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   private scheduleModernReconnect(): void {
     this.setModernStreamState({
-      active: true,
+      active: this.modernStreamActive(),
       status: "reconnecting",
       honoredUris: [],
     });
@@ -5037,10 +5211,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       this.modernReconnectTimer = undefined;
       // Disconnect/unsubscribe may have raced the timer — bail if the reconnect
       // is no longer wanted.
-      if (
-        isTerminalStatus(this.status) ||
-        this.subscribedResources.size === 0
-      ) {
+      if (isTerminalStatus(this.status) || !this.wantsModernStream()) {
         return;
       }
       this.refreshModernSubscription(true).catch(() =>
@@ -5059,10 +5230,10 @@ export class InspectorClient extends InspectorClientEventTarget {
     if (
       this.modernReconnectAttempts > MODERN_RECONNECT_MAX_ATTEMPTS ||
       isTerminalStatus(this.status) ||
-      this.subscribedResources.size === 0
+      !this.wantsModernStream()
     ) {
       this.setModernStreamState({
-        active: this.subscribedResources.size > 0,
+        active: this.modernStreamActive(),
         status: "ended",
         honoredUris: [],
       });

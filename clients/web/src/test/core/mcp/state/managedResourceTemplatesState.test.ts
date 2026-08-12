@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
+import { SdkError, SdkErrorCode } from "@modelcontextprotocol/client";
 import type { ResourceTemplateType as ResourceTemplate } from "@modelcontextprotocol/client";
 import type { InspectorServerSettings } from "@inspector/core/mcp/types.js";
 import { ManagedResourceTemplatesState } from "@inspector/core/mcp/state/managedResourceTemplatesState";
@@ -264,6 +265,22 @@ describe("ManagedResourceTemplatesState", () => {
     client.dispatchTypedEvent("resourceTemplatesListChanged");
     await Promise.resolve();
     expect(state.getResourceTemplates()).toEqual([]);
+  });
+
+  // The base class owns the error plumbing (covered in managedToolsState); this
+  // pins THIS list's method string, which is what attributes a failure to the
+  // right Protocol entry (#1953).
+  it("records a failed load and attributes it to resources/templates/list", async () => {
+    const boom = new SdkError(SdkErrorCode.InvalidResult, "nope");
+    client.setStatus("connected");
+    client.listAllResourceTemplates.mockRejectedValueOnce(boom);
+
+    await expect(state.refresh()).rejects.toThrow(boom);
+    expect(state.getError()).toBe(boom);
+    expect(client.markResponseRejected).toHaveBeenCalledWith(
+      "resources/templates/list",
+      "nope",
+    );
   });
 
   it("destroy is idempotent", () => {

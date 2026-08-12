@@ -14,6 +14,7 @@ import { ClearButton } from "../../elements/ClearButton/ClearButton";
 import type { Tool } from "@modelcontextprotocol/client";
 import type { ExcludedTool } from "@inspector/core/mcp/types.js";
 import { ListChangedIndicator } from "../../elements/ListChangedIndicator/ListChangedIndicator";
+import { ListLoadError } from "../../elements/ListLoadError/ListLoadError";
 import {
   ListPaginationControls,
   type ListPaginationControlsProps,
@@ -32,6 +33,11 @@ export interface ToolControlsProps {
   searchText?: string;
   listChanged: boolean;
   onRefreshList: () => void;
+  /**
+   * A failed list load, surfaced above the list instead of leaving the panel
+   * empty (which reads as "this server has none") (#1953).
+   */
+  loadError?: Error | null;
   /** Pagination controls (#1721). */
   pagination: ListPaginationControlsProps;
   onSearchChange: (value: string) => void;
@@ -102,6 +108,18 @@ const ExcludedTooltip = Tooltip.withProps({
   position: "right",
 });
 
+// A server may return the same tool name more than once, so the name alone is
+// not a unique React key — colliding keys let a filtered-out row survive
+// reconciliation instead of unmounting (#1957). The tool's position in the
+// unfiltered list disambiguates duplicates and stays stable while the search
+// narrows, since it is captured before filtering.
+const rowKey = (name: string, sourceIndex: number) => `${sourceIndex}:${name}`;
+
+/** Matches a tool against the (already lower-cased) search query by name or title. */
+const matchesQuery = (tool: Tool, query: string) =>
+  tool.name.toLowerCase().includes(query) ||
+  (tool.title?.toLowerCase().includes(query) ?? false);
+
 export function ToolControls({
   tools,
   excludedTools = [],
@@ -109,28 +127,26 @@ export function ToolControls({
   searchText = "",
   listChanged,
   onRefreshList,
+  loadError,
   pagination,
   onSearchChange,
   onSelectTool,
 }: ToolControlsProps) {
   const viewportRef = useScrollMemory("tools-sidebar");
   const query = searchText.toLowerCase();
-  const filteredTools = searchText
-    ? tools.filter(
-        (tool) =>
-          tool.name.toLowerCase().includes(query) ||
-          (tool.title?.toLowerCase().includes(query) ?? false),
-      )
-    : tools;
+  // Stamp each row's source position before filtering, so the key survives the
+  // list narrowing (#1957).
+  const filteredTools = tools
+    .map((tool, sourceIndex) => ({ tool, key: rowKey(tool.name, sourceIndex) }))
+    .filter(({ tool }) => !searchText || matchesQuery(tool, query));
   // Excluded tools are searchable too, matching name AND title like the main
   // list above, so a filtered view stays consistent.
-  const filteredExcluded = searchText
-    ? excludedTools.filter(
-        ({ tool }) =>
-          tool.name.toLowerCase().includes(query) ||
-          (tool.title?.toLowerCase().includes(query) ?? false),
-      )
-    : excludedTools;
+  const filteredExcluded = excludedTools
+    .map((excluded, sourceIndex) => ({
+      ...excluded,
+      key: rowKey(excluded.tool.name, sourceIndex),
+    }))
+    .filter(({ tool }) => !searchText || matchesQuery(tool, query));
 
   return (
     <SidebarStack>
@@ -146,11 +162,12 @@ export function ToolControls({
         }
       />
       <ListPaginationControls {...pagination} />
+      <ListLoadError error={loadError} what="tools" onRetry={onRefreshList} />
       <SidebarScroll viewportRef={viewportRef}>
         <Stack gap="xs">
-          {filteredTools.map((tool) => (
+          {filteredTools.map(({ tool, key }) => (
             <ToolListItem
-              key={tool.name}
+              key={key}
               tool={tool}
               selected={tool.name === selectedName}
               onClick={() => {
@@ -161,8 +178,8 @@ export function ToolControls({
           {filteredExcluded.length > 0 && (
             <>
               <ExcludedDivider />
-              {filteredExcluded.map(({ tool, reason }) => (
-                <ExcludedTooltip key={tool.name} label={reason}>
+              {filteredExcluded.map(({ tool, reason, key }) => (
+                <ExcludedTooltip key={key} label={reason}>
                   <ExcludedRow>
                     <ExcludedWarningIcon>
                       <RiErrorWarningLine />

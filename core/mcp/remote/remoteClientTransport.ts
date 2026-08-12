@@ -221,6 +221,7 @@ async function* parseSSE(
  */
 export class RemoteClientTransport implements Transport {
   private _sessionId: string | undefined = undefined;
+  private _protocolVersion: string | undefined = undefined;
   private eventStreamReader: ReadableStreamDefaultReader<Uint8Array> | null =
     null;
   private eventStreamAbort: AbortController | null = null;
@@ -248,6 +249,22 @@ export class RemoteClientTransport implements Transport {
   /** Remote Hono session id (distinct from MCP protocol session). */
   getRemoteBackendSessionId(): string | undefined {
     return this._sessionId;
+  }
+
+  /**
+   * The SDK Client calls this with the negotiated protocol version as soon as
+   * `initialize` resolves — before it sends `notifications/initialized` — so an
+   * HTTP transport can stamp `Mcp-Protocol-Version` on every later request.
+   *
+   * Here the real upstream transport lives on the backend, so we can only
+   * record the version and forward it on the next `/api/mcp/send`, which
+   * applies it to the upstream transport *before* sending. Because
+   * `notifications/initialized` is that next send, it and everything after it
+   * (including the standalone SSE GET and the session DELETE, both issued by
+   * the upstream transport itself) carry the header (#1935).
+   */
+  setProtocolVersion(version: string): void {
+    this._protocolVersion = version;
   }
 
   /**
@@ -707,6 +724,11 @@ export class RemoteClientTransport implements Transport {
       // Forward per-send `Mcp-Param-*` headers (SEP-2243) for the backend to
       // apply to the upstream send; the browser can't set them cross-origin.
       ...(options?.headers != null && { headers: options.headers }),
+      // Forward the negotiated protocol version so the backend's transport can
+      // stamp `Mcp-Protocol-Version` on this and every later request (#1935).
+      ...(this._protocolVersion !== undefined && {
+        protocolVersion: this._protocolVersion,
+      }),
     };
 
     const res = await this.fetchFn(`${this.baseUrl}/api/mcp/send`, {

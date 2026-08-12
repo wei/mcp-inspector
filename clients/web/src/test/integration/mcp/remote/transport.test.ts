@@ -452,6 +452,58 @@ describe("Remote transport e2e", () => {
       }
     });
 
+    it("end-to-end: the negotiated Mcp-Protocol-Version reaches the upstream server after initialize (#1935)", async () => {
+      // The browser's SDK Client owns the initialize handshake, so its
+      // setProtocolVersion() lands on the *remote* transport. Without the
+      // forward to the backend, the backend's real streamable-HTTP transport
+      // never learns the version and every post-initialize request — starting
+      // with `notifications/initialized` — goes out without the header, which
+      // a stateful server may reject outright.
+      mcpHttpServer = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createEchoTool()],
+        serverType: "streamable-http",
+      });
+      await mcpHttpServer.start();
+
+      const config: MCPServerConfig = {
+        type: "streamable-http",
+        url: mcpHttpServer.url,
+      };
+
+      const { client, fetchRequestLogState } =
+        await setupRemoteAndConnect(config);
+
+      try {
+        await client.listTools();
+
+        const protocolVersion = client.getProtocolVersion();
+        expect(protocolVersion).toBeDefined();
+
+        const posts = fetchRequestLogState
+          .getFetchRequests()
+          .filter((r) => r.method === "POST");
+        const headerFor = (body: string): string | undefined => {
+          const entry = posts.find((r) => (r.requestBody ?? "").includes(body));
+          expect(entry).toBeDefined();
+          for (const [k, v] of Object.entries(entry?.requestHeaders ?? {})) {
+            if (k.toLowerCase() === "mcp-protocol-version") return v;
+          }
+          return undefined;
+        };
+
+        // The initialize POST itself predates negotiation and carries none.
+        expect(headerFor('"method":"initialize"')).toBeUndefined();
+        // Everything after it does.
+        expect(headerFor('"method":"notifications/initialized"')).toBe(
+          protocolVersion,
+        );
+        expect(headerFor('"method":"tools/list"')).toBe(protocolVersion);
+      } finally {
+        await client.disconnect();
+      }
+    });
+
     it("end-to-end: SEP-2243 Mcp-Param-* mirroring reaches the upstream modern server (#1846)", async () => {
       // A modern (2026-07-28) server whose `get_weather` tool annotates `city`
       // with `x-mcp-header: "City"`. The SDK's modern handler validates the

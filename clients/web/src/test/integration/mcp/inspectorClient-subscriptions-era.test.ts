@@ -8,6 +8,7 @@ import {
   type TestServerHttp,
   createTestServerInfo,
   createNumberedResources,
+  createEchoTool,
 } from "@modelcontextprotocol/inspector-test-server";
 import type { ServerConfig } from "@modelcontextprotocol/inspector-test-server";
 import type { MessageEntry } from "@inspector/core/mcp/types.js";
@@ -23,6 +24,13 @@ describe("resource subscriptions era fork (#1630)", () => {
   let server: TestServerHttp | null = null;
 
   const RESOURCE_URI = "test://resource_0";
+  /**
+   * Every list-change opt-in off. The listen filter is config ∩ capability and
+   * the SDK server advertises `listChanged` for every list it registers, so this
+   * is what leaves the filter empty when nothing is subscribed — i.e. the
+   * pre-#1920 world these lifecycle tests were written against.
+   */
+  const NO_LIST_CHANGED = { tools: false, resources: false, prompts: false };
   const RESOURCE_URI_2 = "test://resource_1";
 
   afterEach(async () => {
@@ -59,15 +67,28 @@ describe("resource subscriptions era fork (#1630)", () => {
     return started;
   }
 
+  /**
+   * @param listChangedNotifications the Inspector-side opt-ins. The SDK server
+   *   advertises `listChanged` for every list it registers, so this — not the
+   *   server config — is how a test gets an *empty* listen filter: the filter is
+   *   config ∩ capability, and with every opt-in off only a subscribed URI can
+   *   open the stream (#1920).
+   */
   async function connect(
     url: string,
     era: "legacy" | "modern",
+    listChangedNotifications?: {
+      tools?: boolean;
+      resources?: boolean;
+      prompts?: boolean;
+    },
   ): Promise<{ connected: InspectorClient; messages: MessageEntry[] }> {
     const connected = new InspectorClient(
       { type: "streamable-http", url },
       {
         environment: { transport: createTransportNode },
         versionNegotiation: eraToVersionNegotiation(era),
+        ...(listChangedNotifications ? { listChangedNotifications } : {}),
       },
     );
     const messages: MessageEntry[] = [];
@@ -103,6 +124,34 @@ describe("resource subscriptions era fork (#1630)", () => {
     return params.notifications as Record<string, unknown> | undefined;
   }
 
+  /**
+   * The private members these tests drive directly. `InspectorClient` declares
+   * every one of them, so the shape below is a faithful mirror rather than a
+   * reinterpretation — the double cast is only to reach past `private`, which no
+   * single `as` can do (the two types share no public overlap). It is confined to
+   * `internals()` so there is one such cast in the file, and it is unavoidable:
+   * these are lifecycle branches no public API can reach against a healthy server
+   * (there is no way to ask for a *remote* stream close, or for a `listen()` that
+   * fails).
+   */
+  interface StreamInternals {
+    client: { listen: (...args: unknown[]) => Promise<McpSubscription> };
+    modernSubscription: McpSubscription | null;
+    modernListenGeneration: number;
+    modernReconnectAttempts: number;
+    subscribedResources: Set<string>;
+    refreshModernSubscription(fromReconnect?: boolean): Promise<void>;
+    onModernSubscriptionClosed(
+      subscription: McpSubscription,
+      reason: "local" | "graceful" | "remote",
+      generation: number,
+    ): void;
+  }
+
+  function internals(c: InspectorClient): StreamInternals {
+    return c as unknown as StreamInternals;
+  }
+
   describe("modern era", () => {
     it("opens an acknowledged listen stream on subscribe (no resources/subscribe)", async () => {
       const started = await startServer({});
@@ -125,15 +174,43 @@ describe("resource subscriptions era fork (#1630)", () => {
     });
 
     it("closes the stream when the last subscription is removed", async () => {
+      // Nothing else in the filter (no list-change opt-ins), so the last URI
+      // leaving empties it and the stream closes (#1920).
       const started = await startServer({});
-      const { connected } = await connect(started.url, "modern");
+      const { connected, messages } = await connect(
+        started.url,
+        "modern",
+        NO_LIST_CHANGED,
+      );
       await connected.subscribeToResource(RESOURCE_URI);
       expect(connected.getResourceSubscriptionStreamState().active).toBe(true);
 
+      messages.length = 0;
       await connected.unsubscribeFromResource(RESOURCE_URI);
       const streamState = connected.getResourceSubscriptionStreamState();
       expect(streamState.active).toBe(false);
       expect(connected.getSubscribedResources()).toEqual([]);
+      // No re-listen: there is nothing left to listen for.
+      expect(methodsSent(messages)).not.toContain("subscriptions/listen");
+    });
+
+    it("keeps the stream open past the last subscription when a listChanged opt-in remains", async () => {
+      // The other half of the above: with an advertised listChanged the filter
+      // is still non-empty, so the last unsubscribe re-lists rather than
+      // closing — and the state goes inactive because the *Subscriptions*
+      // section has nothing to report, not because the stream is gone (#1920).
+      const started = await startServer({});
+      const { connected, messages } = await connect(started.url, "modern");
+      await connected.subscribeToResource(RESOURCE_URI);
+
+      messages.length = 0;
+      await connected.unsubscribeFromResource(RESOURCE_URI);
+
+      expect(connected.getSubscribedResources()).toEqual([]);
+      expect(connected.getResourceSubscriptionStreamState().active).toBe(false);
+      const filter = lastListenFilter(messages);
+      expect(filter?.resourcesListChanged).toBe(true);
+      expect(filter?.resourceSubscriptions).toBeUndefined();
     });
 
     it("re-lists (stream stays open) when one of several URIs is removed", async () => {
@@ -197,6 +274,244 @@ describe("resource subscriptions era fork (#1630)", () => {
     });
   });
 
+  // The stream used to be reachable only by subscribing to a resource, so a
+  // server with no resources could never open it — and its `tools.listChanged`
+  // notifications, which ride the same stream, could never arrive (#1920).
+  describe("modern era: opening the stream for listChanged alone (#1920)", () => {
+    async function startToolsOnlyServer(
+      listChanged: ServerConfig["listChanged"],
+    ): Promise<TestServerHttp> {
+      const started = createTestServerHttp({
+        serverInfo: createTestServerInfo("tools-only-test", "1.0.0"),
+        tools: [createEchoTool()],
+        listChanged,
+        modern: {},
+      });
+      await started.start();
+      server = started;
+      return started;
+    }
+
+    it("opens the stream on connect against a tools-only server", async () => {
+      const started = await startToolsOnlyServer({ tools: true });
+      const { connected, messages } = await connect(started.url, "modern");
+
+      expect(connected.getCapabilities()?.resources).toBeUndefined();
+      expect(methodsSent(messages)).toContain("subscriptions/listen");
+      const filter = lastListenFilter(messages);
+      expect(filter?.toolsListChanged).toBe(true);
+      // Nothing is subscribed, so the filter carries no URIs at all.
+      expect(filter?.resourceSubscriptions).toBeUndefined();
+      // …and the Subscriptions section still has nothing to report.
+      expect(connected.getSubscribedResources()).toEqual([]);
+      expect(connected.getResourceSubscriptionStreamState().active).toBe(false);
+    });
+
+    it("leaves the stream closed when the opt-in is disabled in config", async () => {
+      // The filter is config ∩ capability, so turning the handler off in the
+      // Inspector's own options is enough to keep the stream closed.
+      const started = await startToolsOnlyServer({ tools: true });
+      const connected = new InspectorClient(
+        { type: "streamable-http", url: started.url },
+        {
+          environment: { transport: createTransportNode },
+          versionNegotiation: eraToVersionNegotiation("modern"),
+          listChangedNotifications: { tools: false },
+        },
+      );
+      const messages: MessageEntry[] = [];
+      connected.addEventListener("message", (event) => {
+        messages.push(event.detail);
+      });
+      await connected.connect();
+      client = connected;
+
+      expect(methodsSent(messages)).not.toContain("subscriptions/listen");
+    });
+
+    it("opens no stream on the legacy era", async () => {
+      // Legacy has no `subscriptions/listen` at all — list-change notifications
+      // arrive on the session's own channel.
+      const started = createTestServerHttp({
+        serverInfo: createTestServerInfo("tools-only-legacy-test", "1.0.0"),
+        tools: [createEchoTool()],
+        listChanged: { tools: true },
+      });
+      await started.start();
+      server = started;
+      const { connected, messages } = await connect(started.url, "legacy");
+
+      expect(connected.getProtocolEra()).toBe("legacy");
+      expect(methodsSent(messages)).not.toContain("subscriptions/listen");
+      expect(connected.getResourceSubscriptionStreamState().active).toBe(false);
+    });
+
+    it("reconnects a dropped listChanged-only stream (no subscriptions to keep it alive)", async () => {
+      const started = await startToolsOnlyServer({ tools: true });
+      const { connected } = await connect(started.url, "modern");
+
+      const int = internals(connected);
+      const dropped = int.modernSubscription;
+      expect(dropped).not.toBeNull();
+      if (!dropped) return;
+
+      int.onModernSubscriptionClosed(
+        dropped,
+        "remote",
+        int.modernListenGeneration,
+      );
+      // Reconnect-by-re-listen runs on the filter, not on the subscribed set —
+      // which is empty here, and used to be the reason to give up.
+      expect(connected.getResourceSubscriptionStreamState().status).toBe(
+        "reconnecting",
+      );
+      await vi.waitFor(() => {
+        expect(int.modernSubscription).not.toBeNull();
+      });
+      expect(connected.getResourceSubscriptionStreamState().status).toBe(
+        "acknowledged",
+      );
+    });
+
+    it("has the stream up before the connect event fires", async () => {
+      // The managed list states start their initial `refresh()` from the
+      // `connect` event, so the stream has to be established (or its retry
+      // armed) first: dispatching earlier would let `tools/list` go out ahead of
+      // `subscriptions/listen`, and a list the server changed in that window
+      // would notify nobody.
+      const started = await startToolsOnlyServer({ tools: true });
+      const connected = new InspectorClient(
+        { type: "streamable-http", url: started.url },
+        {
+          environment: { transport: createTransportNode },
+          versionNegotiation: eraToVersionNegotiation("modern"),
+        },
+      );
+      let streamAtConnectEvent: boolean | undefined;
+      connected.addEventListener("connect", () => {
+        streamAtConnectEvent = internals(connected).modernSubscription !== null;
+      });
+      await connected.connect();
+      client = connected;
+
+      expect(streamAtConnectEvent).toBe(true);
+    });
+
+    it("does not announce the connection when a disconnect overtakes the stream open", async () => {
+      // The listen round-trip widened the window between the handshake and the
+      // `connect` announcement, so a `disconnect()` can land inside it.
+      // Announcing anyway would restart every managed list refresh against a
+      // session being torn down.
+      const started = await startToolsOnlyServer({ tools: true });
+      const connected = new InspectorClient(
+        { type: "streamable-http", url: started.url },
+        {
+          environment: { transport: createTransportNode },
+          versionNegotiation: eraToVersionNegotiation("modern"),
+        },
+      );
+      client = connected;
+      let connectAnnounced = false;
+      connected.addEventListener("connect", () => {
+        connectAnnounced = true;
+      });
+
+      // Hold the stream open so the disconnect lands while it is in flight.
+      // `openStarted` is what makes the race deterministic: the stub is only
+      // reached after the handshake, so disconnecting before it runs would leave
+      // `releaseOpen` unset and hang the connect.
+      const int = internals(connected);
+      let releaseOpen: () => void = () => {};
+      let markOpenStarted: () => void = () => {};
+      const openStarted = new Promise<void>((resolve) => {
+        markOpenStarted = resolve;
+      });
+      int.refreshModernSubscription = () => {
+        markOpenStarted();
+        return new Promise<void>((resolve) => {
+          releaseOpen = resolve;
+        });
+      };
+
+      const connecting = connected.connect();
+      await openStarted;
+      const disconnecting = connected.disconnect();
+      releaseOpen();
+      await connecting;
+      await disconnecting;
+
+      expect(connectAnnounced).toBe(false);
+    });
+
+    it("connects anyway when the connect-time listen fails, and retries", async () => {
+      // The handshake succeeded; every request-scoped feature works without the
+      // stream, so the failure is handed to the reconnect machinery instead of
+      // failing `connect()`.
+      const started = await startToolsOnlyServer({ tools: true });
+      const connected = new InspectorClient(
+        { type: "streamable-http", url: started.url },
+        {
+          environment: { transport: createTransportNode },
+          versionNegotiation: eraToVersionNegotiation("modern"),
+        },
+      );
+      // Shadow the private refresh on the instance so the connect-time open
+      // fails without a live client to reach into (there is none until
+      // `connect()` builds one). The bump mirrors the real method's contract —
+      // it claims the generation synchronously before it can fail — which is
+      // what the caller's guard reads to tell "our refresh failed" from "a newer
+      // one took over".
+      const int = internals(connected);
+      int.refreshModernSubscription = () => {
+        int.modernListenGeneration++;
+        return Promise.reject(new Error("listen boom"));
+      };
+
+      await expect(connected.connect()).resolves.toBeUndefined();
+      client = connected;
+
+      expect(connected.getStatus()).toBe("connected");
+      expect(connected.getResourceSubscriptionStreamState().status).toBe(
+        "reconnecting",
+      );
+    });
+
+    it("leaves a superseded connect-time failure to the refresh that owns the stream", async () => {
+      // Nothing about the ordering above makes this call the only refresh that
+      // can be in flight: `statusChange` has already fired, and a concurrent
+      // `subscribeToResource` — or a `disconnect()`, whose
+      // `resetSubscriptionStream` bumps the generation too — can supersede this
+      // one while its `listen()` is pending. Reconciling anyway would arm a
+      // reconnect against a stream that is healthy (or a session that is gone),
+      // so this makes the same ownership test the subscribe/unsubscribe paths
+      // make. Driven here by a stub that bumps twice, standing in for "someone
+      // else advanced it".
+      const started = await startToolsOnlyServer({ tools: true });
+      const connected = new InspectorClient(
+        { type: "streamable-http", url: started.url },
+        {
+          environment: { transport: createTransportNode },
+          versionNegotiation: eraToVersionNegotiation("modern"),
+        },
+      );
+      const int = internals(connected);
+      // Two bumps: this call's own, plus the newer refresh that superseded it
+      // before its failure landed.
+      int.refreshModernSubscription = () => {
+        int.modernListenGeneration += 2;
+        return Promise.reject(new Error("listen boom"));
+      };
+
+      await expect(connected.connect()).resolves.toBeUndefined();
+      client = connected;
+
+      // No reconnect armed: the state is the newer refresh's to write.
+      expect(connected.getResourceSubscriptionStreamState().status).not.toBe(
+        "reconnecting",
+      );
+    });
+  });
+
   describe("legacy era", () => {
     it("subscribes via resources/subscribe with no listen stream", async () => {
       const started = await startServer(undefined);
@@ -245,23 +560,6 @@ describe("resource subscriptions era fork (#1630)", () => {
   // the client's private state — the pattern used across the InspectorClient
   // coverage-backfill suite — to drive them deterministically.
   describe("modern stream internals", () => {
-    interface StreamInternals {
-      client: { listen: (...args: unknown[]) => Promise<McpSubscription> };
-      modernSubscription: McpSubscription | null;
-      modernListenGeneration: number;
-      modernReconnectAttempts: number;
-      subscribedResources: Set<string>;
-      onModernSubscriptionClosed(
-        subscription: McpSubscription,
-        reason: "local" | "graceful" | "remote",
-        generation: number,
-      ): void;
-    }
-
-    function internals(c: InspectorClient): StreamInternals {
-      return c as unknown as StreamInternals;
-    }
-
     /** A controllable fake `McpSubscription` whose `closed` we resolve on demand. */
     function makeFakeSub(): {
       sub: McpSubscription;
@@ -355,8 +653,17 @@ describe("resource subscriptions era fork (#1630)", () => {
       // Reachable without any close() failure: a rejecting `listen()` does it,
       // which is what a user subscribing while the reconnect timer re-lists
       // (i.e. exactly when the server is flaky) can produce.
+      //
+      // No list-change opt-ins, so connect leaves the stream closed (#1920) and
+      // the first subscribe's `listen()` is reached synchronously — with a
+      // stream to tear down first, the swap below would land after this call
+      // already read `client.listen`.
       const started = await startServer({});
-      const { connected } = await connect(started.url, "modern");
+      const { connected } = await connect(
+        started.url,
+        "modern",
+        NO_LIST_CHANGED,
+      );
       const int = internals(connected);
 
       const real = int.client.listen;
@@ -504,8 +811,15 @@ describe("resource subscriptions era fork (#1630)", () => {
     });
 
     it("reflects the subscription optimistically as 'connecting' before the ack", async () => {
+      // No list-change opt-ins → no connect-time stream, so the subscribe's
+      // `listen()` is the first one and this test's held ack is the one it waits
+      // on (#1920).
       const started = await startServer({});
-      const { connected } = await connect(started.url, "modern");
+      const { connected } = await connect(
+        started.url,
+        "modern",
+        NO_LIST_CHANGED,
+      );
       const int = internals(connected);
 
       // Hold the listen ack so we can observe the pre-ack (optimistic) state.
@@ -632,8 +946,14 @@ describe("resource subscriptions era fork (#1630)", () => {
     });
 
     it("does not reconnect when the subscription set empties before the timer fires", async () => {
+      // No list-change opt-ins, so emptying the set empties the *filter* —
+      // which is what the timer's bail now tests (#1920).
       const started = await startServer({});
-      const { connected } = await connect(started.url, "modern");
+      const { connected } = await connect(
+        started.url,
+        "modern",
+        NO_LIST_CHANGED,
+      );
       await connected.subscribeToResource(RESOURCE_URI);
       const int = internals(connected);
       const fake = await installFakeSubscription(int);
