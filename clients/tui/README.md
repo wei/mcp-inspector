@@ -106,3 +106,35 @@ Tests live in `__tests__/`. The coverage gate currently covers the TUI's
 non-React logic (server resolution, logger, tab metadata, and the `utils/`
 form/URL helpers); the Ink components and `App.tsx` are an interim exclusion in
 `vitest.config.ts` pending a renderer-based follow-up.
+
+### Bundling: React-rendering dependencies must be inlined (#1952)
+
+`tsup.config.ts` splits the TUI's dependencies into bundled (`noExternal`) and
+externalized (`external`). For anything that **renders React components**, that
+choice decides which React instance it gets at runtime, and getting it wrong
+crashes the TUI in a way nothing in this repo can see.
+
+An external package's `import "react"` resolves from wherever npm placed **that
+package** — and npm places it next to a React satisfying its own peer range.
+`ink-form` and `ink-scroll-view` both accept `react: ">=18"`, so a project that
+installs the Inspector alongside its own React 18 satisfies them: they hoist to
+that project's root while the Inspector's React 19 nests underneath. The bundle
+then renders through React 19 while those two call hooks on React 18, whose
+dispatcher is null — so opening a tool test form (or any scroll view) dies with
+`TypeError: Cannot read properties of null (reading 'useState')`.
+
+Bundling them removes npm from the decision: their `import "react"` is emitted
+into `build/index.js`, so it resolves from the build directory exactly like the
+bundle's own. It also pins their transitive deps to what *this* install
+resolved — notably `ink-select-input@6` via the `overrides` entry, since npm
+ignores a dependency's `overrides` and a consumer install would otherwise pull
+the React-18-era v5 that `ink-form` asks for.
+
+`ink` itself stays external: it can't be bundled (its CJS `signal-exit@3`
+dependency fails ESM interop with `Dynamic require of "assert" is not
+supported`), and it doesn't need to be — its `react` peer is `">=19"`, which
+keeps npm from hoisting it next to a React the Inspector couldn't also use.
+
+`__tests__/tsupConfig.test.ts` enforces this: every dependency declaring a
+`react` peer must be in `noExternal` unless it is listed as external by design.
+Add a React-rendering dependency, and that test tells you to bundle it.
