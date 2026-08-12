@@ -92,7 +92,7 @@ Both exist and do different jobs. Theme files (`src/theme/<Component>.ts`) custo
 
 ### Rendering components in tests
 
-- **Always render through `renderWithMantine`** from `src/test/renderWithMantine.tsx`. Never hand-roll a bare `MantineProvider` — that reintroduces a real failure class where a `Transition`/`Modal` timer fires after happy-dom tears down `window` and fails the entire run.
+- **Always render through `renderWithMantine`** from `src/test/renderWithMantine.tsx`. A hand-rolled bare `MantineProvider` skips the project theme and the helper's options, and drifts from every other test. (It does *not* reintroduce the timer-leak class — an older version of this rule said so; the leaked-timer net in `setup.ts` is global and covers every unit test regardless of how it renders.)
 - For a forced color scheme, pass the option — `renderWithMantine(ui, { colorScheme: "dark" })` — rather than a hand-rolled `defaultColorScheme` provider.
 - Only when asserting _mid-flight_ transition state, use `renderWithMantineTransitions`, passing `settleMs` derived from the component's real animation duration. Do **not** combine it with `vi.useFakeTimers()`, and use the `unmount()` it returns if the test unmounts the tree itself.
 
