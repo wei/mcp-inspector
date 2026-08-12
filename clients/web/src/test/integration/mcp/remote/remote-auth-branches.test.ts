@@ -79,17 +79,31 @@ async function startUnauthorizedUpstream(): Promise<{
 /**
  * Poll until the server reports the session's transport as dead (#1985).
  *
- * The probe is a **notification** — a `method` with no `id` — which matters:
- * `requestIdForSendWait` returns `undefined` for it, so `/api/mcp/send` never
- * awaits a response and cannot hang. Probing with a *request* would reproduce
- * the very failure this guards against, since a request sent before the
- * transport is marked dead waits forever for a reply the dead child will never
- * send.
+ * The probe is `/api/mcp/auth-state`, chosen because for a session connected
+ * *without* an authState it answers `kind: "transport_error"` from exactly one
+ * place — the `isTransportDead()` short-circuit. Every other outcome is a 400
+ * from `setAuthState` ("Session has no OAuth auth provider"), so a
+ * `transport_error` here is proof that `onclose` has already run
+ * `markTransportDead()`, not merely that some write failed.
  *
- * Either terminal branch of the route answers `kind: "transport_error"` — the
- * `isTransportDead()` short-circuit, and the `catch` around a `send()` that
- * threw on the dead pipe. Both are fine as a stop condition: each one proves the
- * subsequent real send also cannot reach the hanging path.
+ * That single source is the point. `/api/mcp/send` looks like the obvious probe
+ * but answers `transport_error` from *two* branches: the dead-transport
+ * short-circuit, and the `catch` around a `send()` that rejected. Only the first
+ * implies the transport is marked dead, so a stop condition keyed on the
+ * response cannot tell them apart. It happens to be safe today —
+ * `StdioClientTransport.send` rejects only when `_process` is undefined, and the
+ * transport clears `_process` and calls `onclose` in one synchronous block, so
+ * the `catch` branch cannot be observed before `markTransportDead()` has run —
+ * but that is an SDK-internal ordering detail, not something this test states or
+ * controls. If it ever changed, an early return here would hand each call site a
+ * live session: the send test would quietly exercise the `catch` branch instead
+ * of the short-circuit it names, and the auth-state test would fall through to
+ * `setAuthState` and fail on a 400. Probing a single-source route costs nothing
+ * and does not depend on the ordering holding.
+ *
+ * The route also cannot hang: it never awaits a response from the transport, so
+ * unlike a *request* through `/api/mcp/send` there is nothing here to wait
+ * forever on a reply the dead child will never send.
  *
  * Deliberately not `/api/mcp/events`: opening that stream on a dead transport
  * calls `sessions.delete(sessionId)`, so the send under test would then answer
@@ -103,12 +117,14 @@ async function waitForDeadTransport(
   const deadline = Date.now() + timeoutMs;
   let last = "(no response)";
   while (Date.now() < deadline) {
-    const res = await fetch(`${h.baseUrl}/api/mcp/send`, {
+    const res = await fetch(`${h.baseUrl}/api/mcp/auth-state`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         sessionId,
-        message: { jsonrpc: "2.0", method: "notifications/initialized" },
+        authState: {
+          oauthTokens: { access_token: "probe", token_type: "Bearer" },
+        },
       }),
     });
     const body = (await res.json()) as { kind?: string };
