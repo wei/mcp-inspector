@@ -58,12 +58,18 @@ function stringEntries(list: (string | RegExp)[] | undefined): string[] {
 }
 
 /**
- * The one React-rendering dependency deliberately left external.
+ * React-rendering dependencies left external by an explicit trade-off.
  *
- * `ink` cannot be bundled — its CJS `signal-exit@3` dependency fails ESM
- * interop ("Dynamic require of \"assert\" is not supported") — and does not
- * need to be: its `react` peer is ">=19", so npm cannot hoist it next to a
- * React the Inspector itself could not use.
+ * `ink` is here for its **cost**, not because its peer range makes it safe.
+ * Bundling it works (verified against both consumer repros) but adds ~1.4MB —
+ * react-reconciler and yoga-layout come with it — plus a `createRequire` banner
+ * for the inlined CJS. The smaller tarball won.
+ *
+ * The exemption is only tolerable because the root manifest keeps `react` open
+ * to the whole major (`^19.0.0`), which lets npm dedupe our React with whatever
+ * React 19 a consumer pins — so an external `ink` resolves the same copy the
+ * bundle does. The test below pins that relationship: narrowing the root range
+ * silently reopens #1952 for the renderer itself.
  */
 const EXTERNAL_BY_DESIGN = new Set(["ink"]);
 
@@ -108,7 +114,7 @@ describe("tui tsup config", () => {
     expect(reactRenderingDependencies().length).toBeGreaterThan(0);
   });
 
-  it("bundles every React-rendering dependency that can be bundled", () => {
+  it("bundles every React-rendering dependency that is not exempt", () => {
     const shouldInline = reactRenderingDependencies().filter(
       (name) => !EXTERNAL_BY_DESIGN.has(name),
     );
@@ -123,15 +129,51 @@ describe("tui tsup config", () => {
     }
   });
 
+  it("keeps the root react range open to the whole major, so npm can dedupe", () => {
+    // This is what keeps the one exemption tolerable. `ink` is external, so it
+    // resolves whatever React npm placed beside it — and npm can only place it
+    // beside *ours* if our range admits the consumer's React too. Pinning the
+    // root range above the major floor (say `^19.2.4`) means a consumer holding
+    // React 19.0 gets a second copy: `ink` renders through theirs, the bundle
+    // through ours, and the TUI dies at startup on a null dispatcher.
+    //
+    // So the root range must start at the same floor `ink`'s own peer does.
+    const rootReact = (
+      JSON.parse(
+        readFileSync(path.join(clientDir, "..", "..", "package.json"), "utf8"),
+      ) as { dependencies: Record<string, string> }
+    ).dependencies.react;
+    const inkPeerReact = readPackageJson("ink").peerDependencies?.react ?? "";
+
+    const floor = /^>=(\d+)\.0\.0$/.exec(inkPeerReact)?.[1];
+    expect(floor, `unexpected ink peer range: ${inkPeerReact}`).toBeDefined();
+    expect(
+      rootReact,
+      `root react must be ^${floor}.0.0 so npm can dedupe with any React ${floor} a consumer pins`,
+    ).toBe(`^${floor}.0.0`);
+  });
+
+  it("keeps each exempt package external, and declared for consumers", () => {
+    // An external package is not shipped in the bundle, so the root manifest
+    // has to install it — the mirror image of the inlined ones, which must NOT
+    // be root dependencies. Getting this backwards breaks the published TUI at
+    // startup with an unresolved import.
+    const rootDependencies = JSON.parse(
+      readFileSync(path.join(clientDir, "..", "..", "package.json"), "utf8"),
+    ) as { dependencies: Record<string, string> };
+
+    for (const name of EXTERNAL_BY_DESIGN) {
+      expect(external, `${name} is external by design`).toContain(name);
+      expect(
+        Object.keys(rootDependencies.dependencies),
+        `${name} is external, so consumers must install it`,
+      ).toContain(name);
+    }
+  });
+
   it("keeps react itself external, as the single shared instance", () => {
     expect(external).toContain("react");
     expect(noExternal).not.toContain("react");
-  });
-
-  it("documents each React-rendering package left external", () => {
-    for (const name of EXTERNAL_BY_DESIGN) {
-      expect(external, `${name} is external by design`).toContain(name);
-    }
   });
 
   it("corrects ink-form's misspelled incomplete-form hint", () => {

@@ -81,27 +81,38 @@ export default defineConfig({
   sourcemap: false,
   target: "node22",
   platform: "node",
-  // Every package here renders React components, so it MUST share the one
-  // React instance the bundle imports. Bundling them is what guarantees that:
-  // an inlined package's `import "react"` is emitted into build/index.js and so
-  // resolves from *this* directory, exactly like the bundle's own — no consumer
-  // install layout can point it somewhere else (#1952). Left external, npm is
-  // free to hoist them next to a *different* React: `ink-form` and
-  // `ink-scroll-view` declare a loose `react` peer (">=18"), so a consumer
-  // project holding React 18 satisfies it and gets them hoisted to its own root
-  // while the Inspector's React 19 nests under it — two React copies, and the
+  // Every package here renders React components, so it MUST share the one React
+  // instance the bundle imports. Bundling is what guarantees that: an inlined
+  // package's `import "react"` is emitted into build/index.js, so it resolves
+  // from *this* directory exactly like the bundle's own, and no consumer install
+  // layout can point it elsewhere (#1952).
+  //
+  // Left external, npm is free to place a package beside a *different* React,
+  // because it places one beside a version satisfying that package's own peer
+  // range — looser than ours in every case here. `ink-form` and
+  // `ink-scroll-view` accept ">=18", so a consumer's React 18 satisfies them
+  // while the Inspector's React 19 nests underneath: two React copies, and the
   // first hook they call reads a null dispatcher ("Cannot read properties of
   // null (reading 'useState')") the moment a tool test form or a scroll view
-  // mounts. `__tests__/tsupConfig.test.ts` guards this list.
+  // mounts. That is the reported crash, and inlining them is its fix.
+  //
+  // `__tests__/tsupConfig.test.ts` guards this list.
   noExternal: [/^@inspector\/core/, "ink-form", "ink-scroll-view"],
   external: [
-    // `react` is deliberately external — it is the single instance everything
-    // above resolves to, from this build directory.
+    // `react` is deliberately external — the single instance every inlined
+    // package above resolves to, from this build directory.
     "react",
-    // `ink` stays external too: it cannot be bundled (its CJS `signal-exit@3`
-    // dependency fails ESM interop with "Dynamic require of \"assert\""), and
-    // it does not need to be — its `react` peer is ">=19", which keeps npm
-    // from hoisting it next to a React the Inspector could not also use.
+    // `ink` is external by a deliberate trade-off, NOT because a ">=19" peer
+    // makes it safe — it does not, and that claim was wrong here once already.
+    // Bundling it works (verified) but costs ~1.4MB, since react-reconciler and
+    // yoga-layout come with it, plus a `createRequire` banner for the inlined
+    // CJS. The smaller tarball won.
+    //
+    // What makes that tolerable is the root manifest's `react: ^19.0.0`: being
+    // open to the whole major lets npm satisfy our React and a consumer's
+    // pinned one with a single copy, so an external `ink` resolves *ours*. Narrow
+    // that range and this exemption turns back into the #1952 crash, one level
+    // up — `__tests__/tsupConfig.test.ts` guards it.
     "ink",
     "open",
     "commander",

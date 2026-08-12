@@ -121,28 +121,60 @@ choice decides which React instance it gets at runtime, and getting it wrong
 crashes the TUI in a way nothing in this repo can see.
 
 An external package's `import "react"` resolves from wherever npm placed **that
-package** — and npm places it next to a React satisfying its own peer range.
-`ink-form` and `ink-scroll-view` both accept `react: ">=18"`, so a project that
-installs the Inspector alongside its own React 18 satisfies them: they hoist to
-that project's root while the Inspector's React 19 nests underneath. The bundle
-then renders through React 19 while those two call hooks on React 18, whose
-dispatcher is null — so opening a tool test form (or any scroll view) dies with
+package** — and npm places it beside a React satisfying *its* peer range, which
+is looser than ours in every case here:
+
+| Package | Its `react` peer | Placed beside a different React when… |
+| --- | --- | --- |
+| `ink-form`, `ink-scroll-view` | `">=18"` | the consumer has React 18 |
+| `ink` | `">=19"` | the consumer pins React 19.0 (our `^19.2.4` then nests) |
+
+Either way the bundle renders through one React while the external package calls
+hooks on another, whose dispatcher is null — so opening a tool test form (or any
+scroll view, or in `ink`'s case simply starting the TUI) dies with
 `TypeError: Cannot read properties of null (reading 'useState')`.
 
-Bundling them removes npm from the decision: their `import "react"` is emitted
-into `build/index.js`, so it resolves from the build directory exactly like the
-bundle's own. It also pins their transitive deps to what *this* install
-resolved — notably `ink-select-input@6` via the `overrides` entry, since npm
-ignores a dependency's `overrides` and a consumer install would otherwise pull
-the React-18-era v5 that `ink-form` asks for.
+`ink-form` and `ink-scroll-view` are therefore **inlined**, which removes npm
+from the decision: an inlined package's `import "react"` is emitted into
+`build/index.js`, so it resolves from the build directory exactly like the
+bundle's own. Inlining also pins transitive deps to what *this* install
+resolved, notably `ink-select-input@6` via the `overrides` entry — npm ignores a
+dependency's `overrides`, so a consumer install would otherwise pull the
+React-18-era v5 that `ink-form` asks for.
 
-`ink` itself stays external: it can't be bundled (its CJS `signal-exit@3`
-dependency fails ESM interop with `Dynamic require of "assert" is not
-supported`), and it doesn't need to be — its `react` peer is `">=19"`, which
-keeps npm from hoisting it next to a React the Inspector couldn't also use.
+#### Why `ink` itself is the exception
 
-`__tests__/tsupConfig.test.ts` enforces this: every dependency declaring a
-`react` peer must be in `noExternal` unless it is listed as external by design.
+`ink` is external for **cost**, not because its `">=19"` peer makes it safe — it
+does not, and an earlier revision of this section wrongly claimed it did.
+Bundling `ink` works (it was built and verified against both consumer repros)
+but adds ~1.4 MB, since `react-reconciler` and `yoga-layout` come with it, plus
+a `createRequire` banner: inlined CJS calls `require` at runtime
+(`react-reconciler` for `"react"`, `signal-exit@3` for `"assert"`) and esbuild's
+interop shim throws `Dynamic require of "x" is not supported` without a real
+`require` in scope. A 602 KB bundle beat a 2 MB one.
+
+What makes the exemption tolerable is a **separate lever**: the root manifest
+declares `react: "^19.0.0"` — open to the whole major, rather than pinned at the
+version we happen to develop against. That lets npm satisfy our React and a
+consumer's pinned React 19.x with a single copy, so an external `ink` resolves
+*ours*. Verified against a consumer pinning `react@19.0.0` alongside `ink@6.8.0`
+— the case that splits under a narrower range:
+
+```
+bundle react   node_modules/react/index.js
+ink -> react   node_modules/react/index.js   # same copy
+```
+
+Narrow that range and the exemption turns straight back into #1952, one level
+up — breaking TUI startup rather than just its forms. `tsupConfig.test.ts` pins
+the root range to `ink`'s own peer floor so it can't drift silently. The
+residual after all this is a React **20**-era consumer that also depends on
+`ink`; that gets revisited when the Inspector moves to React 20.
+
+`__tests__/tsupConfig.test.ts` enforces the whole split: every dependency
+declaring a `react` peer must be in `noExternal` unless it is listed as external
+by design, each exempt package must also be a root dependency (external means
+consumers install it), and the root `react` range must stay open to the major.
 Add a React-rendering dependency, and that test tells you to bundle it.
 
 ### The `ink-form` label patch
