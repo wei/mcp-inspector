@@ -99,9 +99,6 @@
     "yaml": "^2.9.0",
     "zod": "^4.4.3"
   },
-  "overrides": {
-    "ink-select-input": "^6.2.0"
-  },
   "engines": {
     "node": ">=22.19.0"
   },

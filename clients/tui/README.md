@@ -102,10 +102,16 @@ The repo-root `validate:tui` just delegates here. `eslint.config.js` registers
 stricter react-hooks@7 rules are not enforced on the interim component surface
 (#1501).
 
-Tests live in `__tests__/`. The coverage gate currently covers the TUI's
-non-React logic (server resolution, logger, tab metadata, and the `utils/`
-form/URL helpers); the Ink components and `App.tsx` are an interim exclusion in
-`vitest.config.ts` pending a renderer-based follow-up.
+Tests live in `__tests__/`. The coverage gate covers **all of `src/**`**, React
+surface included — the Ink components mount through `ink-testing-library` (with
+the `ink-scroll-view` / `ink-form` passthrough doubles in `__tests__/helpers/`),
+`App.tsx` mounts against a mock of the `@inspector/core` surface, and keypresses
+are driven through stdin. The former interim exclusion of the components and
+`App.tsx` was lifted in #1501; the only exclusion left in `vitest.config.ts` is
+`src/tui-servers.ts`, a pure re-export of core's server resolver with no runtime
+statements of its own (its logic is measured in `core/` via the web suite, and
+`tui-servers.test.ts` still exercises it behaviorally — it is excluded only so it
+doesn't surface as a misleading 0/0 row).
 
 ### Bundling: React-rendering dependencies must be inlined (#1952)
 
