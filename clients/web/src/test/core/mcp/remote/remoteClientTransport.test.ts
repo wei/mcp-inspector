@@ -515,4 +515,58 @@ describe("RemoteClientTransport", () => {
       reason: "token_expired",
     });
   });
+
+  // #1935: the SDK Client calls setProtocolVersion() on this transport, but the
+  // real HTTP transport lives on the backend — so the version has to ride the
+  // send envelope or the backend drops `Mcp-Protocol-Version` upstream.
+  it("forwards the negotiated protocol version on every send after setProtocolVersion", async () => {
+    const seenBodies: string[] = [];
+    let sse = createPushableSseStream();
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/api/mcp/connect")) {
+          return new Response(JSON.stringify({ sessionId: "abc" }), {
+            status: 200,
+          });
+        }
+        if (url.includes("/api/mcp/events")) {
+          sse = createPushableSseStream();
+          return sse.response;
+        }
+        if (url.endsWith("/api/mcp/send")) {
+          seenBodies.push(String(init?.body));
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        return new Response("not found", { status: 404 });
+      });
+
+    const transport = new RemoteClientTransport({ baseUrl, fetchFn }, config);
+    await transport.start();
+
+    // Pre-initialize sends carry no version (none negotiated yet).
+    await transport.send({ jsonrpc: "2.0", method: "notifications/cancelled" });
+    expect(JSON.parse(seenBodies[0]!)).not.toHaveProperty("protocolVersion");
+
+    transport.setProtocolVersion("2025-11-25");
+
+    // The first post-initialize send is `notifications/initialized` — the one
+    // the reporting server rejected for a missing header.
+    await transport.send({
+      jsonrpc: "2.0",
+      method: "notifications/initialized",
+    });
+    await transport.send({ jsonrpc: "2.0", method: "notifications/cancelled" });
+
+    expect(JSON.parse(seenBodies[1]!)).toMatchObject({
+      protocolVersion: "2025-11-25",
+      message: { method: "notifications/initialized" },
+    });
+    expect(JSON.parse(seenBodies[2]!)).toMatchObject({
+      protocolVersion: "2025-11-25",
+    });
+
+    await transport.close();
+  });
 });

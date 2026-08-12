@@ -24,6 +24,7 @@
     "clients/launcher/build",
     "clients/web/build",
     "clients/web/dist",
+    "clients/web/static",
     "clients/cli/build",
     "clients/tui/build",
     "scripts/install-clients.mjs"
@@ -42,8 +43,9 @@
     "verify:build-gate": "node scripts/verify-build-gate.mjs",
     "verify:typecheck-coverage": "node scripts/verify-typecheck-coverage.mjs",
     "test:scripts": "node --test \"scripts/**/*.test.mjs\"",
-    "validate": "npm run verify:format-coverage && npm run verify:typecheck-coverage && npm run test:scripts && npm run validate:core && npm run validate:web && npm run validate:cli && npm run validate:tui && npm run validate:launcher",
+    "validate": "npm run verify:format-coverage && npm run verify:typecheck-coverage && npm run verify:dep-lockstep && npm run test:scripts && npm run validate:core && npm run validate:web && npm run validate:cli && npm run validate:tui && npm run validate:launcher",
     "verify:format-coverage": "node scripts/verify-format-coverage.mjs",
+    "verify:dep-lockstep": "node scripts/verify-dep-lockstep.mjs",
     "validate:core": "npm run format:check:core && npm run format:check:scripts && npm run format:check:shared && npm run lint:core && npm run lint:shared",
     "lint:core": "eslint \"core/**/*.{ts,tsx}\"",
     "lint:shared": "eslint \"test-servers/src/**/*.{ts,tsx,mts,cts}\" vitest.shared.mts eslint.config.js",
@@ -63,11 +65,12 @@
     "coverage:tui": "cd clients/tui && npm run test:coverage",
     "coverage:web": "cd clients/web && npm run test:coverage",
     "coverage:launcher": "cd clients/launcher && npm run test:coverage",
-    "smoke": "npm run smoke:launcher && npm run smoke:cli && npm run smoke:tui && npm run smoke:web && npm run smoke:web:browser",
+    "smoke": "npm run smoke:launcher && npm run smoke:cli && npm run smoke:tui && npm run smoke:web && npm run smoke:web:browser && npm run smoke:web:app",
     "smoke:cli": "node scripts/smoke-cli.mjs",
     "smoke:tui": "node scripts/smoke-tui.mjs",
     "smoke:web": "node scripts/smoke-web.mjs",
     "smoke:web:browser": "cd clients/web && npx playwright install chromium && node ../../scripts/smoke-web-browser.mjs",
+    "smoke:web:app": "cd clients/web && npx playwright install chromium && node ../../scripts/smoke-web-app.mjs",
     "smoke:launcher": "node scripts/smoke-launcher.mjs",
     "pack:verify": "node scripts/pack-and-verify.mjs",
     "prepack": "npm run build",
@@ -75,11 +78,11 @@
   },
   "dependencies": {
     "@hono/node-server": "^2.0.12",
-    "@modelcontextprotocol/client": "2.0.0-beta.5",
-    "@modelcontextprotocol/core": "2.0.0-beta.5",
+    "@modelcontextprotocol/client": "2.0.0",
+    "@modelcontextprotocol/core": "2.0.0",
     "@modelcontextprotocol/ext-apps": "^1.7.4",
-    "@modelcontextprotocol/server": "2.0.0-beta.5",
-    "@modelcontextprotocol/server-legacy": "2.0.0-beta.5",
+    "@modelcontextprotocol/server": "2.0.0",
+    "@modelcontextprotocol/server-legacy": "2.0.0",
     "@napi-rs/keyring": "^1.3.0",
     "@vitejs/plugin-react": "^6.0.0",
     "ajv": "^8.17.1",
@@ -88,18 +91,13 @@
     "commander": "^13.1.0",
     "hono": "^4.12.18",
     "ink": "^6.0.0",
-    "ink-form": "^2.0.1",
-    "ink-scroll-view": "^0.3.6",
     "open": "^10.2.0",
     "pino": "^9.14.0",
-    "react": "^19.2.4",
+    "react": "^19.0.0",
     "undici": "^8.5.0",
     "vite": "^8.1.5",
     "yaml": "^2.9.0",
-    "zod": "^4.3.6"
-  },
-  "overrides": {
-    "ink-select-input": "^6.2.0"
+    "zod": "^4.4.3"
   },
   "engines": {
     "node": ">=22.19.0"
@@ -107,6 +105,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "eslint": "^10.8.0",
+    "express": "^5.2.1",
     "globals": "^17.7.0",
     "prettier": "3.8.4",
     "typescript": "~5.9.3",

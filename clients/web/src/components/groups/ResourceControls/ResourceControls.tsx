@@ -13,6 +13,7 @@ import type {
 import { isModernEra } from "../../elements/EraBadge/eraUtils";
 import { SubscriptionStreamBadge } from "../../elements/SubscriptionStreamBadge/SubscriptionStreamBadge";
 import { ListChangedIndicator } from "../../elements/ListChangedIndicator/ListChangedIndicator";
+import { ListLoadError } from "../../elements/ListLoadError/ListLoadError";
 import {
   ListPaginationControls,
   type ListPaginationControlsProps,
@@ -51,7 +52,9 @@ export interface ResourceControlsProps {
    * Modern-era `subscriptions/listen` stream state (#1630). When `active`
    * (modern era with at least one subscription) the Subscriptions section shows
    * a stream-status badge in its panel and a status dot in its header. Legacy
-   * connections pass `active: false` (or omit it) and see neither.
+   * connections pass `active: false` (or omit it) and see neither — and so does
+   * a stream open purely for list-change notifications, which this section has
+   * nothing to say about (#1920).
    */
   subscriptionStreamState?: ResourceSubscriptionStreamState;
   /** Negotiated protocol era; gates the modern subscription stream chrome. */
@@ -66,6 +69,11 @@ export interface ResourceControlsProps {
   openSections?: string[];
   listChanged: boolean;
   onRefreshList: () => void;
+  /**
+   * A failed list load, surfaced above the list instead of leaving the panel
+   * empty (which reads as "this server has none") (#1953).
+   */
+  loadError?: Error | null;
   /** Pagination controls for the Resources list (#1721). */
   pagination: ListPaginationControlsProps;
   onSearchChange: (value: string) => void;
@@ -109,6 +117,7 @@ export function ResourceControls({
   openSections: controlledOpenSections,
   listChanged,
   onRefreshList,
+  loadError,
   pagination,
   onSearchChange,
   onOpenSectionsChange,
@@ -234,6 +243,11 @@ export function ResourceControls({
         <ListToggle compact={!allExpanded} onToggle={handleToggleList} />
       </TightRow>
       <ListPaginationControls {...pagination} />
+      <ListLoadError
+        error={loadError}
+        what="resources"
+        onRetry={onRefreshList}
+      />
       {/* Stays inline: Accordion is a compound, `multiple`-discriminated generic,
           so `.withProps({ multiple: true, ... })` loses its JSX call signature
           (same tooling limit as Box). */}

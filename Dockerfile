@@ -39,6 +39,15 @@ EXPOSE 6274
 # (core/storage/store-io.ts), so set it explicitly to the node user's writable
 # home and work from there.
 ENV HOME=/home/node
+
+# Create the runtime-state dir up front, owned by `node`. Docker seeds a named
+# volume's ownership from the image's directory at the mount point — and when
+# that directory does not exist it creates it `root:root`, which the non-root
+# `node` user then cannot write. Without this, `-v inspector-data:/home/node/.mcp-inspector`
+# (the recipe for keeping your saved servers across `docker run --rm`) makes
+# every "add server" fail with `EACCES ... open '/home/node/.mcp-inspector/mcp.json.tmp-*'`.
+RUN mkdir -p /home/node/.mcp-inspector && chown -R node:node /home/node/.mcp-inspector
+
 USER node
 WORKDIR /home/node
 

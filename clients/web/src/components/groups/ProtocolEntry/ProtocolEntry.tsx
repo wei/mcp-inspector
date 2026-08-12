@@ -135,6 +135,16 @@ const SpecErrorAlert = Alert.withProps({
   icon: <RiErrorWarningLine />,
 });
 
+// The client rejected an otherwise well-formed response (#1953). Distinct from
+// SpecErrorAlert: nothing is wrong with the server's JSON-RPC frame — the
+// Inspector's own decoding refused the result — so the title says who rejected it.
+const ClientErrorAlert = Alert.withProps({
+  variant: "light",
+  color: "red",
+  icon: <RiErrorWarningLine />,
+  title: "Rejected by the Inspector",
+});
+
 // Link (button-styled) that jumps to the correlated HTTP entry in the Network tab.
 const RevealLink = Anchor.withProps({
   component: "button",
@@ -210,6 +220,13 @@ function extractResourceUri(entry: MessageEntry): string | undefined {
 function extractStatus(
   entry: MessageEntry,
 ): "success" | "error" | "pending" | "none" {
+  // A response the CLIENT refused is an error whichever entry carries it, so
+  // this is checked BEFORE the request-only lifecycle below (#1953).
+  // messageLogState annotates the request entry when the response was folded
+  // into one, but falls back to the standalone response frame when there was
+  // no matching request (a trimmed log, or a reconnect boundary) — and that
+  // entry would otherwise fall straight through to "none" and render no badge.
+  if (entry.clientError) return "error";
   if (entry.direction !== "request") return "none";
   if (!entry.response) return "pending";
   if ("error" in entry.response) return "error";
@@ -330,11 +347,12 @@ export function ProtocolEntry({
   // Suppress the redundant green "OK" when a `resultType` badge already conveys
   // the outcome (a modern success is `complete`/`input required`); errors and
   // pending have no `resultType`, so their status badge still shows.
-  const statusBadge = status !== "none" && !resultType && (
-    <Badge color={statusColor(status)} variant="status">
-      {statusLabel(status)}
-    </Badge>
-  );
+  const statusBadge = status !== "none" &&
+    (!resultType || entry.clientError) && (
+      <Badge color={statusColor(status)} variant="status">
+        {statusLabel(status)}
+      </Badge>
+    );
   const subscriptionBadge = subscriptionId && (
     <SubscriptionCluster>
       <SubscriptionLabel>sub</SubscriptionLabel>
@@ -431,6 +449,11 @@ export function ProtocolEntry({
         <Collapse in={isExpanded}>
           <Stack gap="sm">
             <Divider />
+            {entry.clientError && (
+              <ClientErrorAlert>
+                <Text size="xs">{entry.clientError}</Text>
+              </ClientErrorAlert>
+            )}
             {specError && (
               <McpSpecErrorAlert
                 error={specError}

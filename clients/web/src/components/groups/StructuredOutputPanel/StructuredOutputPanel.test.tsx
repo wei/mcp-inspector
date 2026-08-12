@@ -1,0 +1,87 @@
+import { describe, it, expect, vi } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { renderWithMantine, screen } from "../../../test/renderWithMantine";
+import { StructuredOutputPanel } from "./StructuredOutputPanel";
+
+// The real CodeHighlight dynamic-imports the Prism runtime and each grammar
+// (its own behavior is covered in CodeHighlight.test.tsx). Stub it so these
+// tests assert on the JSON handed to it, synchronously.
+vi.mock("../../elements/CodeHighlight/CodeHighlight", () => ({
+  CodeHighlight: ({ language, code }: { language: string; code: string }) => (
+    <pre data-testid="code-highlight" data-language={language}>
+      {code}
+    </pre>
+  ),
+}));
+
+const structuredContent = {
+  items: [
+    { id: 1, name: "Item A", tags: ["foo", "bar"] },
+    { id: 2, name: "Item B", tags: ["baz"] },
+  ],
+  total: 2,
+};
+
+describe("StructuredOutputPanel", () => {
+  it("renders a labeled section with the payload as pretty-printed JSON", () => {
+    renderWithMantine(
+      <StructuredOutputPanel structuredContent={structuredContent} />,
+    );
+    expect(
+      screen.getByRole("heading", { name: "Structured Output" }),
+    ).toBeInTheDocument();
+    const code = screen.getByTestId("code-highlight");
+    expect(code).toHaveAttribute("data-language", "json");
+    expect(code).toHaveTextContent(/"total": 2/);
+    // Nested values are inspectable field by field, not summarized away.
+    expect(code).toHaveTextContent(/"name": "Item A"/);
+    expect(code).toHaveTextContent(/"tags"/);
+  });
+
+  it("starts expanded by default", () => {
+    renderWithMantine(
+      <StructuredOutputPanel structuredContent={structuredContent} />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Collapse structured output" }),
+    ).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("starts collapsed when defaultExpanded is false", () => {
+    renderWithMantine(
+      <StructuredOutputPanel
+        structuredContent={structuredContent}
+        defaultExpanded={false}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Expand structured output" }),
+    ).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("toggles between expanded and collapsed", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(
+      <StructuredOutputPanel structuredContent={structuredContent} />,
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Collapse structured output" }),
+    );
+    const toggle = screen.getByRole("button", {
+      name: "Expand structured output",
+    });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await user.click(toggle);
+    expect(
+      screen.getByRole("button", { name: "Collapse structured output" }),
+    ).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("renders an empty structured payload rather than nothing", () => {
+    renderWithMantine(<StructuredOutputPanel structuredContent={{}} />);
+    expect(
+      screen.getByRole("heading", { name: "Structured Output" }),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("code-highlight")).toHaveTextContent("{}");
+  });
+});

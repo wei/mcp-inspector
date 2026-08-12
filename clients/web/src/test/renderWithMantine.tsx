@@ -37,13 +37,20 @@ function makeWrapper(env: "test" | "default", colorScheme: MantineColorScheme) {
   };
 }
 
-// Default render helper. `env="test"` makes Mantine render transitions
-// synchronously (no internal `setTimeout`). Without it, a `Transition`/`Modal`
-// open/close timer can fire after happy-dom tears down `window` at the end of
-// the run, throwing an uncaught `ReferenceError: window is not defined` that
-// fails the whole run even when every assertion passed (#1760). This is the
-// right default for the vast majority of tests, which don't assert on
-// mid-transition state.
+// Default render helper. `env="test"` makes Mantine skip the *animated render*
+// of a transition, which is the right default for the vast majority of tests —
+// they don't assert on mid-transition state.
+//
+// It does NOT stop the timers, contrary to what this comment used to claim
+// (#1984). `env` is read only by `Transition.mjs`, at its render branch
+// (`transitionDuration === 0 || env === "test"`), while `useTransition()` runs
+// before that check — hooks cannot be conditional — and still schedules real
+// `window.setTimeout`s on every `mounted` change. Measured: opening a `<Modal>`
+// through this helper schedules three 200ms timers. A timer that outlives its
+// file fires after happy-dom disposes that file's `window` and throws an
+// uncaught `ReferenceError: window is not defined`, failing the whole run from
+// an arbitrary innocent file (#1760). What actually prevents that is the
+// leaked-timer safety net in `setup.ts`.
 export function renderWithMantine(
   ui: ReactElement,
   options?: MantineRenderOptions,

@@ -379,7 +379,15 @@ export default defineConfig(({ command }) => {
                 },
               ],
             },
-            setupFiles: [".storybook/vitest.setup.ts"],
+            // No `setupFiles`: since Storybook 10.3 `@storybook/addon-vitest`
+            // provisions the preview annotations (`.storybook/preview.tsx` plus
+            // `@storybook/addon-a11y/preview`) itself, and *skips* doing so when
+            // it finds a setup file calling `setProjectAnnotations` — so the old
+            // `.storybook/vitest.setup.ts` was both redundant and actively
+            // opting out of the automatic path (#1898). A green suite doesn't
+            // prove the automatic provisioning works (stories rendered without
+            // the Mantine decorator would very likely still pass), so
+            // `src/test/PreviewAnnotations.stories.tsx` asserts it directly.
           },
         },
       ],

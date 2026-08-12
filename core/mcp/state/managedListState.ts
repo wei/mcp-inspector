@@ -17,6 +17,7 @@ import type {
   CacheMode,
   ServerCapabilities,
 } from "@modelcontextprotocol/client";
+import { SdkError, SdkErrorCode } from "@modelcontextprotocol/client";
 import { isTerminalStatus } from "../types.js";
 import { TypedEventTarget } from "../typedEventTarget.js";
 
@@ -29,12 +30,61 @@ import { TypedEventTarget } from "../typedEventTarget.js";
  */
 export const DEFAULT_LIST_CHANGED_DEBOUNCE_MS = 250;
 
-/** Every managed-list event map carries the list-changed indicator event. */
+/**
+ * Whether a failed fetch is the CLIENT refusing a response it received, rather
+ * than the request never producing one.
+ *
+ * This gates `markResponseRejected`, and the distinction is load-bearing. That
+ * correlation recovers the request id as "the last response received for this
+ * method", which is only the failing exchange when a response actually just
+ * arrived and was refused while decoding. A transport drop, a timeout, or an
+ * aborted request produces no response frame at all — the last-answered id then
+ * still points at some EARLIER, successful call, and marking it would stamp
+ * "Rejected by the Inspector" onto an exchange that succeeded. That is the very
+ * class of lie this issue exists to remove, so it must not be traded for
+ * another one.
+ *
+ * A server-sent JSON-RPC error is excluded for a different reason: it is a real
+ * response, so the id would be right, but the failure is the server's. Its
+ * entry already renders as an error from the error frame itself, and blaming
+ * the Inspector for it would misattribute the cause.
+ *
+ * `SdkErrorCode.InvalidResult` is exactly "a result arrived and failed
+ * validation for the negotiated era"; `UnsupportedResultType` is its sibling
+ * for a `resultType` the codec has no handling for. Both are decisions the
+ * client made about a frame in hand.
+ */
+function isClientDecodeRejection(err: unknown): boolean {
+  return (
+    SdkError.isInstance(err) &&
+    (err.code === SdkErrorCode.InvalidResult ||
+      err.code === SdkErrorCode.UnsupportedResultType)
+  );
+}
+
+/**
+ * Every managed-list event map carries the list-changed indicator event and the
+ * last-fetch error (#1953).
+ */
 export interface ManagedListEventMap {
+  /**
+   * Fires when the "list changed since last refresh" flag flips. True when
+   * this list's `list_changed` notification arrives (auto-refresh off), false
+   * once the user refreshes or the connection drops. Drives the sidebar
+   * list-changed indicator (#1402).
+   */
   listChangedChange: boolean;
+  /** The last fetch's failure, or `null` once a fetch succeeds. */
+  errorChange: Error | null;
 }
 
 export interface ManagedListConfig<T, M extends ManagedListEventMap> {
+  /**
+   * The JSON-RPC method this list pages (e.g. "tools/list"). Used to attribute
+   * a failed load back to its Protocol entry — see
+   * `InspectorClientProtocol.markResponseRejected` (#1953).
+   */
+  listMethod: string;
   /** The `*Change` event this manager dispatches (e.g. "toolsChange"). */
   changeEvent: keyof M;
   /** The client notification that signals the list changed. */
@@ -81,6 +131,11 @@ export abstract class ManagedListState<
   private unsubscribe: (() => void) | null = null;
   private _metadata: Record<string, string> | undefined = undefined;
   private listChanged = false;
+  // The last fetch's failure, kept as observable state so a load that fails
+  // (a transport error, or a result the SDK codec rejects as invalid) is
+  // rendered by the list panel instead of vanishing into an unhandled
+  // rejection — which read as "this server has no tools" (#1953).
+  private error: Error | null = null;
   private readonly config: ManagedListConfig<T, M>;
   // Debounce a burst of `list_changed` notifications into a single
   // refresh (or one indicator light) once it settles.
@@ -112,7 +167,11 @@ export abstract class ManagedListState<
       ) {
         return;
       }
-      void this.refresh();
+      // The connect-time load has no caller to await it, so its rejection is
+      // caught here rather than left to become an unhandled rejection. This is
+      // not a swallow: `refresh` has already recorded the failure via
+      // `setError`, and the list panel renders it (#1953).
+      void this.refresh().catch(() => {});
     };
     const onListChanged = (): void => {
       // Debounce: collapse a burst of notifications into one settled action
@@ -133,6 +192,9 @@ export abstract class ManagedListState<
         this.items = [];
         this.dispatchChange();
         this.setListChanged(false);
+        // A disconnect ends the session the error belonged to — a stale
+        // "couldn't load tools" must not outlive it into the next connect.
+        this.setError(null);
       }
     };
     this.client.addEventListener("connect", onConnect);
@@ -187,8 +249,10 @@ export abstract class ManagedListState<
         if (!skipAggregate && settings?.autoRefreshOnListChanged) {
           // A `list_changed` means the prior list is stale, so bypass any
           // cached entry (`cacheMode: "refresh"`) and re-store the fresh
-          // aggregate.
-          await this.refresh(undefined, "refresh");
+          // aggregate. Like the connect-time load this has no caller to await
+          // it, so a failure is caught here — already recorded by `setError`
+          // and rendered by the panel (#1953).
+          await this.refresh(undefined, "refresh").catch(() => {});
         } else if (this.config.supportsIndicator) {
           this.setListChanged(true);
         }
@@ -236,6 +300,20 @@ export abstract class ManagedListState<
     this.emit("listChangedChange", value);
   }
 
+  /** The last fetch's failure, or `null` when the last fetch succeeded. */
+  getError(): Error | null {
+    return this.error;
+  }
+
+  // Compared by identity rather than message: two distinct failures with the
+  // same text are still two events, and a re-render on a repeat failure is
+  // cheap next to silently coalescing them.
+  private setError(value: Error | null): void {
+    if (this.error === value) return;
+    this.error = value;
+    this.emit("errorChange", value);
+  }
+
   setMetadata(metadata?: Record<string, string>): void {
     this._metadata = metadata;
   }
@@ -245,12 +323,37 @@ export abstract class ManagedListState<
    * this fetch: `undefined` (the connect-time load) uses the default `'use'`;
    * a user-initiated or auto refresh passes `'refresh'` to force a
    * cache-bypassing round trip and re-store the fresh aggregate.
+   *
+   * A failure is recorded as observable state (`getError`) AND re-thrown: the
+   * state drives the panel's error rendering, while the rejection is what the
+   * caller's auth-recovery wrapper keys off to detect a 401 and start a
+   * re-authorization. Callers with nobody to await them (the connect-time load,
+   * the `list_changed` auto-refresh) catch it explicitly (#1953).
    */
   async refresh(
     metadata?: Record<string, string>,
     cacheMode?: CacheMode,
   ): Promise<T[]> {
-    const next = await this.fetchItems(metadata, cacheMode);
+    let next: T[] | null;
+    try {
+      next = await this.fetchItems(metadata, cacheMode);
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.setError(error);
+      // Attribute the failure to the response it came from, so the Protocol
+      // entry stops rendering a rejected result as a clean success (#1953).
+      // Must happen in this catch, while the correlation window the client
+      // documents is still valid — and ONLY for a decode rejection, see
+      // `isClientDecodeRejection`.
+      if (isClientDecodeRejection(err)) {
+        this.client?.markResponseRejected?.(
+          this.config.listMethod,
+          error.message,
+        );
+      }
+      throw err;
+    }
+    this.setError(null);
     // `null` means not connected — leave the current list untouched.
     if (next === null) return this.getItems();
     this.applyItems(next);
