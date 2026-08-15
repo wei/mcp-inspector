@@ -189,6 +189,23 @@ function typeNamesNull(type: unknown): boolean {
 }
 
 /**
+ * Applicators this module does not evaluate, and which are **conjunctive** with
+ * everything beside them — so any of them can rule `null` out, or constrain a
+ * value in a way no widget here would honor.
+ *
+ * `anyOf` is excluded because it is the keyword being *recognized*: a caller
+ * that has already identified the nullable-union shape checks it directly. Every
+ * other position treats a stray `anyOf` as opaque too.
+ */
+function hasOpaqueApplicator(schema: NullableUnionSchema): boolean {
+  return (
+    schema.not !== undefined ||
+    schema.allOf !== undefined ||
+    schema.oneOf !== undefined
+  );
+}
+
+/**
  * What {@link stripNullEnumMembers} concluded about an `enum`.
  *
  * `"only-null"` is a distinct outcome rather than "an empty list" because it
@@ -301,9 +318,24 @@ function collapsed<T extends NullableUnionSchema>(
  * other would make a form reject a value its own schema accepts, which is why
  * these are two functions rather than a `.nullable` flag read off the collapse.
  *
- * Recognizes every encoding the collapse does, plus the ones it declines:
- * `nullable: true`, `type: "null"`, `type: [..., "null"]`, and a `"null"`
- * branch anywhere in an `anyOf` or `oneOf` of any size.
+ * **Answers `false` for anything it cannot fully evaluate**, which is a larger
+ * set than it may look. Recognized: `nullable: true`, `type: "null"`,
+ * `type: [..., "null"]`, and a `"null"` branch in an `anyOf` of any size.
+ * Deliberately *not* recognized, despite naming null:
+ *
+ * - **`oneOf`** — it requires *exactly one* branch to match, so a `null` branch
+ *   does not mean `null` validates; two matching branches make it fail.
+ * - **`not` / `allOf`**, at this level or on the branch, which can rule null out.
+ * - **A sibling `anyOf` beside an explicit `type`**, since the two are
+ *   conjunctive and the union is not evaluated here.
+ * - **A branch that names null but is unsatisfiable**, whether by its own
+ *   `enum`/`const` or its own nested applicators.
+ *
+ * The asymmetry is what settles the direction: under-claiming costs a clear
+ * button and treats a valid `null` as missing, while over-claiming lets the
+ * form emit a value the schema rejects. So callers get a firm "no" rather than
+ * an optimistic guess, and a schema this module cannot read renders through the
+ * JSON editor with its constraints intact.
  */
 export function admitsNull(schema: NullableUnionSchema): boolean {
   if (nullExcludedBySiblings(schema)) {
@@ -315,11 +347,7 @@ export function admitsNull(schema: NullableUnionSchema): boolean {
   // `null` validates — two matching branches make it fail. Rather than answer
   // these half-correctly, say no: under-claiming nullability costs a clear
   // button, while over-claiming lets the form emit a value the schema rejects.
-  if (
-    schema.not !== undefined ||
-    schema.allOf !== undefined ||
-    schema.oneOf !== undefined
-  ) {
+  if (hasOpaqueApplicator(schema)) {
     return false;
   }
   if (schema.nullable === true) {
@@ -331,6 +359,13 @@ export function admitsNull(schema: NullableUnionSchema): boolean {
   // as the union. Falling through to the branch scan here would let the union
   // override a constraint that outranks it.
   if (schema.type !== undefined) {
+    // A sibling `anyOf` is conjunctive with the `type`, so it can reject null
+    // even when the type list names it — `{ type: ["string", "null"], anyOf:
+    // [{ type: "string" }] }` admits no null at all. Not evaluated here, so
+    // its mere presence withholds the claim.
+    if (schema.anyOf !== undefined) {
+      return false;
+    }
     return typeNamesNull(schema.type);
   }
   return (
@@ -345,9 +380,10 @@ export function admitsNull(schema: NullableUnionSchema): boolean {
       const branchSchema = branch as NullableUnionSchema;
       return (
         !nullExcludedBySiblings(branchSchema) &&
-        branchSchema.not === undefined &&
-        branchSchema.allOf === undefined &&
-        branchSchema.oneOf === undefined
+        !hasOpaqueApplicator(branchSchema) &&
+        // A nested union inside the branch is as opaque as the others: `{ type:
+        // "null", anyOf: [{ type: "string" }] }` names null and admits nothing.
+        branchSchema.anyOf === undefined
       );
     }) ?? false
   );
@@ -408,7 +444,13 @@ export function normalizeNullableUnion<T extends NullableUnionSchema>(
   if (
     Array.isArray(schema.type) &&
     schema.type.length === 2 &&
-    schema.type.includes("null")
+    schema.type.includes("null") &&
+    // This path keeps the schema's own keywords, but `collapsed` clears `anyOf`
+    // and the renderers ignore the other applicators — so a compound schema
+    // like `{ type: ["string", "null"], anyOf: [{ const: "a" }] }` would be
+    // widened into an unconstrained string field. Leave it for the JSON editor.
+    schema.anyOf === undefined &&
+    !hasOpaqueApplicator(schema)
   ) {
     const type = schema.type.find((member) => member !== "null");
     if (isRenderableType(type)) {

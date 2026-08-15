@@ -357,6 +357,26 @@ describe("normalizeNullableUnion", () => {
     });
   });
 
+  // The type-array path keeps the schema's own keywords, but `collapsed` clears
+  // `anyOf` and the renderers ignore the other applicators — so a compound
+  // schema would be widened into an unconstrained field rather than collapsed.
+  it("declines a type-array nullable that also carries a sibling anyOf", () => {
+    const schema = {
+      type: ["string", "null"],
+      anyOf: [{ const: "a" }],
+    };
+    expect(normalizeNullableUnion(schema)).toBe(schema);
+  });
+
+  it("declines a type-array nullable that carries an opaque applicator", () => {
+    const withNot = { type: ["string", "null"], not: { const: "a" } };
+    expect(normalizeNullableUnion(withNot)).toBe(withNot);
+    const withOneOf = { type: ["string", "null"], oneOf: [{ const: "a" }] };
+    expect(normalizeNullableUnion(withOneOf)).toBe(withOneOf);
+    const withAllOf = { type: ["string", "null"], allOf: [{ minLength: 2 }] };
+    expect(normalizeNullableUnion(withAllOf)).toBe(withAllOf);
+  });
+
   it("normalizes type array array|null", () => {
     expect(normalizeNullableUnion({ type: ["array", "null"] })).toEqual({
       type: "array",
@@ -524,6 +544,17 @@ describe("admitsNull", () => {
     ).toBe(false);
   });
 
+  it("ignores a null branch made unsatisfiable by its own nested anyOf", () => {
+    expect(
+      admitsNull({
+        anyOf: [
+          { type: "string" },
+          { type: "null", anyOf: [{ type: "string" }] },
+        ],
+      }),
+    ).toBe(false);
+  });
+
   it("still accepts a plain null branch alongside an unsatisfiable one", () => {
     expect(
       admitsNull({
@@ -588,14 +619,20 @@ describe("admitsNull", () => {
   });
 
   it("still honors an explicit type that does admit null", () => {
+    expect(admitsNull({ type: ["string", "null"] })).toBe(true);
+    expect(admitsNull({ type: "null" })).toBe(true);
+  });
+
+  // A sibling union is conjunctive with the `type`, so it can reject null even
+  // when the type list names it. It is not evaluated here, so its mere presence
+  // withholds the claim.
+  it("withholds the claim when a sibling anyOf sits beside an explicit type", () => {
     expect(
-      admitsNull({
-        type: ["string", "null"],
-        anyOf: [{ type: "string" }, { type: "null" }],
-      }),
-    ).toBe(true);
+      admitsNull({ type: ["string", "null"], anyOf: [{ type: "string" }] }),
+    ).toBe(false);
+    // Unsatisfiable: names null, admits nothing.
     expect(admitsNull({ type: "null", anyOf: [{ type: "string" }] })).toBe(
-      true,
+      false,
     );
   });
 
