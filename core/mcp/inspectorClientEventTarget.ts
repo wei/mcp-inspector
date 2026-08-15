@@ -26,6 +26,7 @@ import type {
   ResourceSubscriptionStreamState,
   ExcludedTool,
 } from "./types.js";
+import type { MalformedListItem } from "./listSalvage.js";
 import type {
   Tool,
   ServerCapabilities,
@@ -62,6 +63,12 @@ export interface InspectorClientEventMap {
    * connections (which don't exclude) and before connect (#1632).
    */
   excludedToolsChange: ExcludedTool[];
+  /**
+   * Entries dropped from a list result because they failed the spec schema for
+   * their primitive, across every list method. Empty against a conforming
+   * server; a non-empty set means the list rendered without them (#1909).
+   */
+  malformedListItemsChange: MalformedListItem[];
   capabilitiesChange: ServerCapabilities | undefined;
   serverInfoChange: Implementation | undefined;
   instructionsChange: string | undefined;

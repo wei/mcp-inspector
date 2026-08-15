@@ -159,10 +159,26 @@ import {
   ListResourcesResultSchema,
   ListResourceTemplatesResultSchema,
   ListPromptsResultSchema,
+  // Per-primitive item schemas — the salvage fallback validates a list's
+  // entries one at a time with these when the whole-result parse rejects
+  // (#1909, see `listAllSalvaging`).
+  ToolSchema,
+  ResourceSchema,
+  ResourceTemplateSchema,
+  PromptSchema,
 } from "@modelcontextprotocol/core";
 import type { ClientResult } from "@modelcontextprotocol/client";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/client/validators/ajv";
+import { z } from "zod/v4";
 import { validateToolOutput } from "./toolOutputValidation.js";
+import {
+  LenientListPageSchema,
+  isClientDecodeRejection,
+  rawItemsOf,
+  salvageListItems,
+  summarizeMalformed,
+  type MalformedListItem,
+} from "./listSalvage.js";
 import { TasksListChangedNotificationSchema } from "./taskNotificationSchemas.js";
 import {
   type JsonValue,
@@ -407,6 +423,11 @@ export class InspectorClient extends InspectorClientEventTarget {
   // annotations (SEP-2243), recomputed on every aggregate tools refresh and
   // surfaced so the Tools tab can show why a tool vanished (#1632).
   private excludedTools: ExcludedTool[] = [];
+  // Entries the Inspector dropped from a list result because they failed the
+  // spec schema for that primitive, keyed by list method. Populated only by the
+  // salvage fallback in `listAllSalvaging` — empty against a conforming server
+  // (#1909).
+  private malformedListItems = new Map<string, MalformedListItem[]>();
   // The capabilities this Inspector client advertises to the server during the
   // initialize handshake. Built once in setupClient() and snapshotted here so
   // UI surfaces (Server Info modal) can display them without poking at the
@@ -2211,6 +2232,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     this.protocolEra = undefined;
     this.discoverResult = undefined;
     this.excludedTools = [];
+    this.malformedListItems.clear();
     // Read as "not opted in" while disconnected. This is no longer what stops
     // it leaking into the next connection — `resetSessionState()` re-derives it
     // at connect, so removing this would leak nothing (#1629). Note the web
@@ -2230,6 +2252,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     this.dispatchTypedEvent("protocolEraChange", this.protocolEra);
     this.dispatchTypedEvent("discoverResultChange", this.discoverResult);
     this.dispatchTypedEvent("excludedToolsChange", this.excludedTools);
+    this.dispatchTypedEvent("malformedListItemsChange", []);
   }
 
   /**
@@ -3126,12 +3149,20 @@ export class InspectorClient extends InspectorClientEventTarget {
     if (!this.client) {
       throw new Error("Client is not connected");
     }
-    const response = await this.invokeMcpClient(() =>
-      this.client!.listTools(
-        this.aggregateListParams(options?.metadata),
-        this.getCacheableRequestOptions(options?.cacheMode),
-      ),
-    );
+    const tools = await this.listAllSalvaging({
+      method: "tools/list",
+      itemsKey: "tools",
+      itemSchema: ToolSchema,
+      metadata: options?.metadata,
+      aggregate: async () => [
+        ...(
+          await this.client!.listTools(
+            this.aggregateListParams(options?.metadata),
+            this.getCacheableRequestOptions(options?.cacheMode),
+          )
+        ).tools,
+      ],
+    });
     // Recompute the SEP-2243 excluded-tools set alongside the aggregate. The
     // SDK already filtered `response.tools`, so it can't tell us what it
     // dropped — {@link refreshExcludedTools} re-lists the RAW `tools/list` to
@@ -3153,7 +3184,7 @@ export class InspectorClient extends InspectorClientEventTarget {
         "Excluded-tools walk failed; the SEP-2243 excluded list may be incomplete",
       );
     });
-    return { tools: [...response.tools] };
+    return { tools };
   }
 
   /**
@@ -3185,6 +3216,146 @@ export class InspectorClient extends InspectorClientEventTarget {
     const id = this.lastAnsweredRequestByMethod.get(method);
     if (id === undefined) return;
     this.dispatchTypedEvent("responseRejected", { id, reason });
+  }
+
+  /** Every entry dropped from a list result as malformed, across methods (#1909). */
+  getMalformedListItems(): MalformedListItem[] {
+    return [...this.malformedListItems.values()].flat();
+  }
+
+  /**
+   * Record (or clear) the malformed entries for one list method and notify.
+   *
+   * A no-op when the method had none and still has none, so the common case —
+   * every conforming refresh, of which there are many — costs no event and no
+   * re-render.
+   */
+  private setMalformedListItems(
+    method: string,
+    malformed: MalformedListItem[],
+  ): void {
+    const previous = this.malformedListItems.get(method) ?? [];
+    if (previous.length === 0 && malformed.length === 0) return;
+    if (malformed.length === 0) this.malformedListItems.delete(method);
+    else this.malformedListItems.set(method, malformed);
+    this.dispatchTypedEvent(
+      "malformedListItemsChange",
+      this.getMalformedListItems(),
+    );
+  }
+
+  /**
+   * Run a list aggregate, falling back to a per-item salvage when the SDK
+   * rejects the result it received (#1909).
+   *
+   * The strict aggregate runs first and unchanged, so a conforming server pays
+   * nothing: no extra request, no extra parse, and the SDK's response cache
+   * still serves it. Only an `InvalidResult` rejection — a response in hand
+   * that failed validation — reaches {@link salvageList}; every other failure
+   * (transport drop, timeout, server-sent error) rethrows untouched, because
+   * re-listing would not produce anything to salvage.
+   */
+  private async listAllSalvaging<T>({
+    method,
+    itemsKey,
+    itemSchema,
+    aggregate,
+    metadata,
+  }: {
+    method: string;
+    itemsKey: string;
+    itemSchema: z.ZodType<T>;
+    aggregate: () => Promise<T[]>;
+    metadata?: Record<string, string>;
+  }): Promise<T[]> {
+    try {
+      const items = await this.invokeMcpClient(aggregate, { method });
+      this.setMalformedListItems(method, []);
+      return items;
+    } catch (err) {
+      if (!isClientDecodeRejection(err)) throw err;
+      return this.salvageList({ method, itemsKey, itemSchema, metadata, err });
+    }
+  }
+
+  /**
+   * Re-walk a list method with pagination validated but entries left raw, then
+   * validate each entry on its own — keeping the good ones and reporting the
+   * rest (#1909).
+   *
+   * Two deliberate properties:
+   *
+   * - **The original error wins when nothing is salvageable.** If every entry
+   *   validates here, the strict rejection was about something else (a
+   *   top-level field, an era codec decision), so there is no per-item story to
+   *   tell and swallowing it would hide a real failure. Rethrow the original.
+   * - **A salvaged response is still a rejected response.** The Protocol entry
+   *   is marked (#1953) with what was dropped, so the wire truth survives even
+   *   though the list now renders.
+   *
+   * This walk is deliberately un-cached (it uses the raw per-page path), which
+   * is fine: it only runs against a server that just returned a non-conforming
+   * result.
+   */
+  private async salvageList<T>({
+    method,
+    itemsKey,
+    itemSchema,
+    metadata,
+    err,
+  }: {
+    method: string;
+    itemsKey: string;
+    itemSchema: z.ZodType<T>;
+    metadata?: Record<string, string>;
+    err: unknown;
+  }): Promise<T[]> {
+    const valid: T[] = [];
+    const malformed: MalformedListItem[] = [];
+    const seenCursors = new Set<string>();
+    let cursor: string | undefined;
+    do {
+      const effectiveMeta = this.mergeMeta(metadata);
+      const params = {
+        ...(effectiveMeta ? { _meta: effectiveMeta } : {}),
+        ...(cursor ? { cursor } : {}),
+      };
+      const page = await this.invokeMcpClient(
+        () =>
+          this.client!.request(
+            { method, params },
+            LenientListPageSchema,
+            this.getRequestOptions(metadata?.progressToken),
+          ),
+        { method },
+      );
+      const salvaged = salvageListItems({
+        method,
+        items: rawItemsOf(page, itemsKey),
+        schema: itemSchema,
+        startIndex: valid.length + malformed.length,
+      });
+      valid.push(...salvaged.valid);
+      malformed.push(...salvaged.malformed);
+      cursor = page.nextCursor;
+      if (cursor !== undefined) {
+        /* v8 ignore next -- defensive: a spec-compliant server never repeats a cursor; this guards a non-converging server from an infinite walk (mirrors the SDK's drainList guard) */
+        if (seenCursors.has(cursor)) break;
+        seenCursors.add(cursor);
+      }
+    } while (cursor !== undefined);
+
+    // Nothing per-item was wrong, so the strict rejection was about something
+    // this fallback cannot explain — surface it rather than hide it.
+    if (malformed.length === 0) throw err;
+
+    this.markResponseRejected(method, summarizeMalformed(malformed));
+    this.setMalformedListItems(method, malformed);
+    this.logger.warn(
+      { method, malformed },
+      "Dropped malformed entries from a list result; the rest of the list was kept",
+    );
+    return valid;
   }
 
   /** The current SEP-2243 excluded-tools set (empty on legacy/stdio). */
@@ -4347,13 +4518,21 @@ export class InspectorClient extends InspectorClientEventTarget {
     if (!this.client) {
       throw new Error("Client is not connected");
     }
-    const response = await this.invokeMcpClient(() =>
-      this.client!.listResources(
-        this.aggregateListParams(options?.metadata),
-        this.getCacheableRequestOptions(options?.cacheMode),
-      ),
-    );
-    return { resources: [...response.resources] };
+    const resources = await this.listAllSalvaging({
+      method: "resources/list",
+      itemsKey: "resources",
+      itemSchema: ResourceSchema,
+      metadata: options?.metadata,
+      aggregate: async () => [
+        ...(
+          await this.client!.listResources(
+            this.aggregateListParams(options?.metadata),
+            this.getCacheableRequestOptions(options?.cacheMode),
+          )
+        ).resources,
+      ],
+    });
+    return { resources };
   }
 
   /**
@@ -4504,15 +4683,21 @@ export class InspectorClient extends InspectorClientEventTarget {
     if (!this.client) {
       throw new Error("Client is not connected");
     }
-    const response = await this.invokeMcpClient(
-      () =>
-        this.client!.listResourceTemplates(
-          this.aggregateListParams(options?.metadata),
-          this.getCacheableRequestOptions(options?.cacheMode),
-        ),
-      { method: "resources/templates/list" },
-    );
-    return { resourceTemplates: [...response.resourceTemplates] };
+    const resourceTemplates = await this.listAllSalvaging({
+      method: "resources/templates/list",
+      itemsKey: "resourceTemplates",
+      itemSchema: ResourceTemplateSchema,
+      metadata: options?.metadata,
+      aggregate: async () => [
+        ...(
+          await this.client!.listResourceTemplates(
+            this.aggregateListParams(options?.metadata),
+            this.getCacheableRequestOptions(options?.cacheMode),
+          )
+        ).resourceTemplates,
+      ],
+    });
+    return { resourceTemplates };
   }
 
   /**
@@ -4559,13 +4744,21 @@ export class InspectorClient extends InspectorClientEventTarget {
     if (!this.client) {
       throw new Error("Client is not connected");
     }
-    const response = await this.invokeMcpClient(() =>
-      this.client!.listPrompts(
-        this.aggregateListParams(options?.metadata),
-        this.getCacheableRequestOptions(options?.cacheMode),
-      ),
-    );
-    return { prompts: [...response.prompts] };
+    const prompts = await this.listAllSalvaging({
+      method: "prompts/list",
+      itemsKey: "prompts",
+      itemSchema: PromptSchema,
+      metadata: options?.metadata,
+      aggregate: async () => [
+        ...(
+          await this.client!.listPrompts(
+            this.aggregateListParams(options?.metadata),
+            this.getCacheableRequestOptions(options?.cacheMode),
+          )
+        ).prompts,
+      ],
+    });
+    return { prompts };
   }
 
   /**

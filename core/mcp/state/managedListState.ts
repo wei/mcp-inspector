@@ -17,7 +17,7 @@ import type {
   CacheMode,
   ServerCapabilities,
 } from "@modelcontextprotocol/client";
-import { SdkError, SdkErrorCode } from "@modelcontextprotocol/client";
+import { isClientDecodeRejection } from "../listSalvage.js";
 import { isTerminalStatus } from "../types.js";
 import { TypedEventTarget } from "../typedEventTarget.js";
 
@@ -29,38 +29,6 @@ import { TypedEventTarget } from "../typedEventTarget.js";
  * (#1444).
  */
 export const DEFAULT_LIST_CHANGED_DEBOUNCE_MS = 250;
-
-/**
- * Whether a failed fetch is the CLIENT refusing a response it received, rather
- * than the request never producing one.
- *
- * This gates `markResponseRejected`, and the distinction is load-bearing. That
- * correlation recovers the request id as "the last response received for this
- * method", which is only the failing exchange when a response actually just
- * arrived and was refused while decoding. A transport drop, a timeout, or an
- * aborted request produces no response frame at all — the last-answered id then
- * still points at some EARLIER, successful call, and marking it would stamp
- * "Rejected by the Inspector" onto an exchange that succeeded. That is the very
- * class of lie this issue exists to remove, so it must not be traded for
- * another one.
- *
- * A server-sent JSON-RPC error is excluded for a different reason: it is a real
- * response, so the id would be right, but the failure is the server's. Its
- * entry already renders as an error from the error frame itself, and blaming
- * the Inspector for it would misattribute the cause.
- *
- * `SdkErrorCode.InvalidResult` is exactly "a result arrived and failed
- * validation for the negotiated era"; `UnsupportedResultType` is its sibling
- * for a `resultType` the codec has no handling for. Both are decisions the
- * client made about a frame in hand.
- */
-function isClientDecodeRejection(err: unknown): boolean {
-  return (
-    SdkError.isInstance(err) &&
-    (err.code === SdkErrorCode.InvalidResult ||
-      err.code === SdkErrorCode.UnsupportedResultType)
-  );
-}
 
 /**
  * Every managed-list event map carries the list-changed indicator event and the

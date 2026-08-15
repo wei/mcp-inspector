@@ -15,6 +15,8 @@ import type { Tool } from "@modelcontextprotocol/client";
 import type { ExcludedTool } from "@inspector/core/mcp/types.js";
 import { ListChangedIndicator } from "../../elements/ListChangedIndicator/ListChangedIndicator";
 import { ListLoadError } from "../../elements/ListLoadError/ListLoadError";
+import { MalformedItemsWarning } from "../../elements/MalformedItemsWarning/MalformedItemsWarning";
+import type { MalformedListItem } from "@inspector/core/mcp";
 import {
   ListPaginationControls,
   type ListPaginationControlsProps,
@@ -37,6 +39,12 @@ export interface ToolControlsProps {
    * A failed list load, surfaced above the list instead of leaving the panel
    * empty (which reads as "this server has none") (#1953).
    */
+  /**
+   * Entries the client dropped from this list because they failed the MCP
+   * schema. Rendered as a warning above the list, which still shows the rest
+   * (#1909).
+   */
+  malformedListItems?: MalformedListItem[];
   loadError?: Error | null;
   /** Pagination controls (#1721). */
   pagination: ListPaginationControlsProps;
@@ -127,6 +135,7 @@ export function ToolControls({
   searchText = "",
   listChanged,
   onRefreshList,
+  malformedListItems = [],
   loadError,
   pagination,
   onSearchChange,
@@ -163,6 +172,11 @@ export function ToolControls({
       />
       <ListPaginationControls {...pagination} />
       <ListLoadError error={loadError} what="tools" onRetry={onRefreshList} />
+      <MalformedItemsWarning
+        items={malformedListItems}
+        method="tools/list"
+        what="tools"
+      />
       <SidebarScroll viewportRef={viewportRef}>
         <Stack gap="xs">
           {filteredTools.map(({ tool, key }) => (

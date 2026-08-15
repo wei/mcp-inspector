@@ -60,7 +60,11 @@ v2/main/
 │   ├── mcp/                            # InspectorClient runtime + state stores
 │   │                                   #   (modernTaskSchemas.ts: SEP-2663 modern Tasks
 │   │                                   #   extension wire schemas + normalize/handle helpers,
-│   │                                   #   used by the raw-wire tasks/* channel — #1631)
+│   │                                   #   used by the raw-wire tasks/* channel — #1631;
+│   │                                   #   listSalvage.ts: per-item salvage for list results —
+│   │                                   #   keeps the valid entries when one is non-conforming
+│   │                                   #   instead of losing the whole list, and owns the
+│   │                                   #   shared isClientDecodeRejection predicate — #1909)
 │   │   ├── import/                     # Config import strategies (#1348): client-config parsers
 │   │   │                               #   (Claude Desktop/Cursor/Cline/VS Code), registry
 │   │   │                               #   server.json parser, strategy registry + well-known

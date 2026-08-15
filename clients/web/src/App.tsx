@@ -990,6 +990,7 @@ function App() {
     protocolEra,
     discoverResult,
     excludedTools,
+    malformedListItems,
     lastError,
   } = useInspectorClient(inspectorClient);
   const {
@@ -4376,6 +4377,7 @@ function App() {
           latencyMs={latencyMs}
           tools={tools}
           excludedTools={excludedTools}
+          malformedListItems={malformedListItems}
           prompts={prompts}
           resources={resources}
           resourceTemplates={resourceTemplates}
