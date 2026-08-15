@@ -418,21 +418,24 @@ describe("normalizeNullableUnion", () => {
     expect(normalizeNullableUnion(schema)).toBe(schema);
   });
 
-  // Identical values are no conflict, so the ordinary redundant-type shape
-  // still collapses rather than being punished for being explicit.
-  it("collapses when wrapper and branch agree on a shared keyword", () => {
-    expect(
-      normalizeNullableUnion({
-        type: "string",
-        anyOf: [{ type: "string", enum: ["a"] }, { type: "null" }],
-      }),
-    ).toEqual({
+  // Deliberately stricter than value-equality: a wrapper restating its branch's
+  // `type` also declines. That costs a dropdown on a rare redundant shape and
+  // buys a rule with no gap, which is the better trade for a module that cannot
+  // evaluate JSON Schema.
+  it("declines even when wrapper and branch agree on a shared keyword", () => {
+    const schema = {
       type: "string",
-      enum: ["a"],
-      anyOf: undefined,
-      // The explicit non-null `type` rules null out, conjunctively.
-      nullable: false,
-    });
+      anyOf: [{ type: "string", enum: ["a"] }, { type: "null" as const }],
+    };
+    expect(normalizeNullableUnion(schema)).toBe(schema);
+  });
+
+  it("declines when the wrapper carries an applicator the module cannot read", () => {
+    const schema = {
+      allOf: [{ minLength: 2 }],
+      anyOf: [{ type: "string" }, { type: "null" as const }],
+    };
+    expect(normalizeNullableUnion(schema)).toBe(schema);
   });
 
   it("treats wrapper metadata as safe to keep alongside branch constraints", () => {
@@ -484,11 +487,49 @@ describe("admitsNull", () => {
     expect(admitsNull(wide)).toBe(true);
   });
 
-  it("recognizes a null branch in a oneOf, and a nested type array", () => {
-    expect(admitsNull({ oneOf: [{ type: "string" }, { type: "null" }] })).toBe(
-      true,
-    );
+  it("recognizes a null branch declared as a nested type array", () => {
     expect(admitsNull({ anyOf: [{ type: ["string", "null"] }] })).toBe(true);
+  });
+
+  // Applicators this module does not evaluate. `oneOf` requires *exactly one*
+  // branch to match, so a null branch does not by itself mean null validates;
+  // `not` and `allOf` can rule it out outright. Under-claiming costs a clear
+  // button, over-claiming lets the form emit a value the schema rejects.
+  it("declines to claim nullability for applicators it cannot evaluate", () => {
+    expect(admitsNull({ oneOf: [{ type: "string" }, { type: "null" }] })).toBe(
+      false,
+    );
+    expect(
+      admitsNull({ not: { type: "null" }, anyOf: [{ type: "null" }] }),
+    ).toBe(false);
+    expect(
+      admitsNull({ allOf: [{ type: "string" }], anyOf: [{ type: "null" }] }),
+    ).toBe(false);
+  });
+
+  // A branch can name null and still admit nothing.
+  it("ignores an unsatisfiable null branch", () => {
+    expect(
+      admitsNull({ anyOf: [{ type: "string" }, { type: "null", const: "x" }] }),
+    ).toBe(false);
+    expect(
+      admitsNull({
+        anyOf: [{ type: "string" }, { type: "null", enum: ["x"] }],
+      }),
+    ).toBe(false);
+    expect(
+      admitsNull({
+        anyOf: [{ type: "string" }, { type: "null", not: { type: "null" } }],
+      }),
+    ).toBe(false);
+  });
+
+  it("still accepts a plain null branch alongside an unsatisfiable one", () => {
+    expect(
+      admitsNull({
+        anyOf: [{ type: "null", const: "x" }, { type: "null" }],
+      }),
+    ).toBe(true);
   });
 
   it("is false for a schema that does not permit null", () => {

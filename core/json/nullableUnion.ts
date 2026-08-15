@@ -45,6 +45,8 @@ export interface NullableUnionSchema {
   // Read only by `admitsNull`, which considers encodings the collapse itself
   // declines to flatten, and the sibling constraints that can rule null out.
   oneOf?: readonly unknown[];
+  allOf?: readonly unknown[];
+  not?: unknown;
   nullable?: boolean;
   const?: unknown;
 }
@@ -127,69 +129,63 @@ function nullExcludedBySiblings(schema: NullableUnionSchema): boolean {
 }
 
 /**
- * Keywords that *constrain what values are valid*, as opposed to describing the
- * field (`title`, `description`, `default`, `enumNames`).
+ * Keywords that only *describe* a field. Everything else constrains what values
+ * are valid.
  *
- * Only these can conflict in a way that matters: a wrapper and its branch each
- * carrying one means the value must satisfy **both**, which the hoist cannot
- * express. Metadata is safe to merge because nothing validates against it.
+ * This is an **allowlist on purpose**, and the direction matters. The previous
+ * version enumerated the *validation* keywords and declined on a conflict among
+ * them, which meant any keyword nobody thought of — `oneOf`, `allOf`, `not`,
+ * `$ref`, a future vocabulary — was silently treated as safe to drop. A missing
+ * entry there fails open, and open means rendering a widget for a constraint
+ * that is not the schema's. Listing the harmless keys instead fails closed: an
+ * unrecognized keyword sends the field to the JSON editor, which is the correct
+ * answer for a schema this module does not understand.
  */
-const VALIDATION_KEYWORDS = [
-  "type",
-  "enum",
-  "const",
-  "items",
-  "properties",
-  "required",
-  "additionalProperties",
-  "minimum",
-  "maximum",
-  "exclusiveMinimum",
-  "exclusiveMaximum",
-  "multipleOf",
-  "minLength",
-  "maxLength",
-  "pattern",
-  "format",
-  "minItems",
-  "maxItems",
-  "uniqueItems",
-] as const;
+const ANNOTATION_KEYWORDS = new Set([
+  "title",
+  "description",
+  "default",
+  "enumNames",
+  "examples",
+  "deprecated",
+  "readOnly",
+  "writeOnly",
+  "$comment",
+  "$schema",
+  "$id",
+]);
 
 /**
- * Whether hoisting this branch would *drop* one of the wrapper's constraints.
+ * Whether hoisting a branch would *drop* something the wrapper constrains.
  *
  * The hoist is a spread, so a branch key replaces the wrapper's — but JSON
  * Schema applies sibling keywords **conjunctively**, and a replacement is not a
  * conjunction. A wrapper `enum: ["a"]` around a branch `enum: ["a", "b"]` means
  * `"a"` (both must hold), yet the spread yields `["a", "b"]` and the rendered
  * dropdown would offer — and submit — a `"b"` the schema rejects. `type`,
- * bounds, and the object keywords fail the same way.
+ * bounds, the object keywords, and the applicators (`oneOf`, `allOf`, `not`)
+ * all fail the same way.
  *
- * Rather than implement intersection for every keyword (a much larger surface,
- * and one where a subtly wrong intersection is worse than none), the collapse
- * **declines** when wrapper and branch disagree, and the field renders through
- * the JSON editor with its full schema intact. Identical values are not a
- * conflict, so the common `{ type: "string", anyOf: [{ type: "string", … }] }`
- * still collapses.
+ * Rather than intersect them — a much larger surface, and one where a subtly
+ * wrong intersection is worse than none because it renders a *plausible* widget
+ * for the wrong constraint — the collapse **declines** whenever the wrapper
+ * carries anything beyond annotations and the union itself. The field then
+ * renders through the JSON editor with its full schema intact.
  *
- * Comparison is by canonical JSON, so two structurally equal objects written
- * with different key order read as a conflict. That is conservative in the safe
- * direction: the field falls back rather than mis-renders.
+ * This is stricter than comparing values for equality: a wrapper that merely
+ * restates its branch's `type` now also declines. That costs a dropdown on a
+ * rare redundant shape and buys a rule with no gap in it, which is the better
+ * trade for a module that cannot evaluate JSON Schema.
  */
-function branchDropsWrapperConstraint(
-  schema: NullableUnionSchema,
-  branch: Record<string, unknown>,
-): boolean {
-  const wrapper = schema as Record<string, unknown>;
-  return VALIDATION_KEYWORDS.some((keyword) => {
-    const wrapperValue = wrapper[keyword];
-    const branchValue = branch[keyword];
-    if (wrapperValue === undefined || branchValue === undefined) {
-      return false;
-    }
-    return JSON.stringify(wrapperValue) !== JSON.stringify(branchValue);
-  });
+function wrapperCarriesConstraints(schema: NullableUnionSchema): boolean {
+  return Object.keys(schema).some(
+    (key) => key !== "anyOf" && !ANNOTATION_KEYWORDS.has(key),
+  );
+}
+
+/** Whether a schema's `type` names `"null"` at all. */
+function typeNamesNull(type: unknown): boolean {
+  return Array.isArray(type) ? type.includes("null") : type === "null";
 }
 
 /**
@@ -313,6 +309,19 @@ export function admitsNull(schema: NullableUnionSchema): boolean {
   if (nullExcludedBySiblings(schema)) {
     return false;
   }
+  // Applicators this module does not evaluate. `not: { type: "null" }` rules
+  // null out; `allOf` can add a member that does; and `oneOf` requires
+  // **exactly one** branch to match, so a null branch does not by itself mean
+  // `null` validates — two matching branches make it fail. Rather than answer
+  // these half-correctly, say no: under-claiming nullability costs a clear
+  // button, while over-claiming lets the form emit a value the schema rejects.
+  if (
+    schema.not !== undefined ||
+    schema.allOf !== undefined ||
+    schema.oneOf !== undefined
+  ) {
+    return false;
+  }
   if (schema.nullable === true) {
     return true;
   }
@@ -322,21 +331,25 @@ export function admitsNull(schema: NullableUnionSchema): boolean {
   // as the union. Falling through to the branch scan here would let the union
   // override a constraint that outranks it.
   if (schema.type !== undefined) {
-    return Array.isArray(schema.type)
-      ? schema.type.includes("null")
-      : schema.type === "null";
+    return typeNamesNull(schema.type);
   }
-  return [schema.anyOf, schema.oneOf].some((branches) =>
-    branches?.some((entry) => {
+  return (
+    schema.anyOf?.some((entry) => {
       const branch = toBranch(entry);
-      if (branch === null) {
+      if (branch === null || !typeNamesNull(branch.type)) {
         return false;
       }
+      // A branch that names null can still admit nothing: `{ type: "null",
+      // const: "x" }` is unsatisfiable, and its own applicators are as opaque
+      // here as the wrapper's.
+      const branchSchema = branch as NullableUnionSchema;
       return (
-        branch.type === "null" ||
-        (Array.isArray(branch.type) && branch.type.includes("null"))
+        !nullExcludedBySiblings(branchSchema) &&
+        branchSchema.not === undefined &&
+        branchSchema.allOf === undefined &&
+        branchSchema.oneOf === undefined
       );
-    }),
+    }) ?? false
   );
 }
 
@@ -375,7 +388,7 @@ export function normalizeNullableUnion<T extends NullableUnionSchema>(
 
     // Hoisting would silently drop a wrapper constraint the branch also
     // carries, so decline instead; see `branchDropsWrapperConstraint`.
-    if (nullBranch && branch && !branchDropsWrapperConstraint(schema, branch)) {
+    if (nullBranch && branch && !wrapperCarriesConstraints(schema)) {
       // A branch may carry an `enum` and no `type`; JSON Schema allows that, and
       // an all-string enum is unambiguously a string field. See isStringEnum for
       // why a non-string enum deliberately does not get the same treatment.
