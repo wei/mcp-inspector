@@ -229,9 +229,21 @@ export function describeIssues(error: z.ZodError): string {
   /* v8 ignore next -- zod never produces a failed parse with zero issues; guards against an empty message if it ever did */
   if (!issue) return "did not match the expected shape";
   const path = issue.path.join(".");
-  const detail = expectedDetail(issue);
-  const message = detail ? `${issue.message} (${detail})` : issue.message;
+  const message = describeIssue(issue);
   return path.length > 0 ? `${path}: ${message}` : message;
+}
+
+/**
+ * One issue's message, with the expected type folded in when it adds something.
+ *
+ * Split out from {@link describeIssues} because {@link eraToolItemSchema} has to
+ * apply it EARLY: forwarding another schema's issues re-emits them as `custom`
+ * ones, which carry a message and a path but no `expected` field, so the detail
+ * has to be baked into the message while the original issue is still in hand.
+ */
+function describeIssue(issue: z.core.$ZodIssue): string {
+  const detail = expectedDetail(issue);
+  return detail ? `${issue.message} (${detail})` : issue.message;
 }
 
 /**
@@ -305,36 +317,121 @@ export function summarizeMalformed(malformed: MalformedListItem[]): string {
 /**
  * The item contract for `tools/list` on a given era.
  *
- * The public `ToolSchema` is era-NEUTRAL, and the negotiated era's wire schema
- * is stricter in ways the SDK does not export. Validating candidates against
- * the neutral schema alone would let the fallback keep an entry the strict path
- * refused — an entry the user would then see, and could call, on a connection
- * whose era says it isn't valid. The two known divergences (verified against
- * SDK 2.0.0 by `listSalvage-era.test.ts`, which fails if either changes):
+ * The public `ToolSchema` is era-NEUTRAL, and each negotiated era's wire schema
+ * differs from it — in BOTH directions, which is the thing to keep in mind
+ * here. The obvious failure is a fallback that is more permissive than the
+ * strict path, readmitting an entry the era refused. The equally real one is a
+ * fallback that is more STRICT: it drops a tool the strict path would have
+ * kept, and this module then reports it as malformed — accusing a conforming
+ * server of an error it did not make, on a screen whose whole job is to say
+ * which entry is wrong.
  *
- * - **legacy (2025)** requires `outputSchema.type === "object"`; the neutral
- *   schema accepts any object, so a tool with `outputSchema: { type: "array" }`
- *   would survive salvage while the strict parse rejects the whole page.
- * - **modern (2026)** deletes `execution`, and the strict path STRIPS it. Left
- *   in place, a salvaged tool would carry a field the era doesn't have, and the
- *   UI would render capability the connection can't honor.
+ * Every rule below was measured against SDK 2.0.0 on a real connection rather
+ * than read off the (unexported) era schemas, and each is pinned by
+ * `listSalvage-era.test.ts` so a divergence that closes or widens fails loudly
+ * instead of rotting:
+ *
+ * | case                        | 2025 (legacy) | 2026 (modern) |
+ * | --------------------------- | ------------- | ------------- |
+ * | `inputSchema.type: "array"` | reject        | reject        |
+ * | `inputSchema.properties: 5` | reject        | **accept**    |
+ * | `inputSchema.required: [1]` | reject        | **accept**    |
+ * | `inputSchema.$schema: 5`    | **accept**    | reject        |
+ * | `outputSchema.type: "array"`| reject        | **accept**    |
+ * | `outputSchema.properties: 5`| reject        | **accept**    |
+ * | `outputSchema.required: [1]`| reject        | **accept**    |
+ * | `outputSchema.$schema: 5`   | **accept**    | reject        |
+ * | `execution`                 | kept          | **stripped**  |
+ *
+ * Which reduces to two overrides on the neutral schema, one per era, plus the
+ * modern `execution` strip — see {@link LegacyToolWireSchema} and
+ * {@link ModernToolWireSchema}.
  *
  * Replicating rules that live in the SDK's internals is a real cost, taken
- * deliberately: the alternative is a fallback that is quietly more permissive
- * than the path it stands in for. The tests pin each rule to observed SDK
- * behavior, so a divergence that closes (or widens) fails loudly rather than
- * rotting.
+ * deliberately: the alternative is a fallback that quietly disagrees with the
+ * path it stands in for, in whichever direction the neutral schema happens to
+ * differ.
  */
 export function toolItemSchemaForEra(isModern: boolean): z.ZodType<Tool> {
-  if (isModern) {
-    // `execution` is not part of the 2026 wire shape; drop it as the codec does.
-    return ToolSchema.transform((tool) => {
-      if (tool.execution === undefined) return tool;
-      const { execution: _execution, ...rest } = tool;
-      return rest;
-    });
-  }
-  return ToolSchema.extend({
-    outputSchema: z.looseObject({ type: z.literal("object") }).optional(),
-  });
+  return isModern
+    ? eraToolItemSchema(ModernToolWireSchema, stripExecution)
+    : eraToolItemSchema(LegacyToolWireSchema, (tool) => tool);
+}
+
+/**
+ * The 2025 wire shape for a tool.
+ *
+ * The only divergence from the neutral schema is `outputSchema`, which the
+ * legacy codec validates with the SAME shape it uses for `inputSchema` — a
+ * required `type: "object"`, `properties` as a JSON record, `required` as
+ * strings — where the neutral schema checks only `$schema`. Reusing
+ * `ToolSchema.shape.inputSchema` states that relationship instead of
+ * re-deriving it, so the two cannot drift apart by hand.
+ */
+const LegacyToolWireSchema = ToolSchema.extend({
+  outputSchema: ToolSchema.shape.inputSchema.optional(),
+});
+
+/**
+ * The 2026-07-28 wire shape for a tool.
+ *
+ * Its `inputSchema` is the mirror image of the legacy divergence: the modern
+ * codec constrains only `type` and `$schema` and leaves the remaining JSON
+ * Schema keywords open, where the neutral schema additionally validates
+ * `properties` and `required`. `outputSchema` needs no override — the neutral
+ * `$schema`-only check is already what the modern codec applies.
+ */
+const ModernToolWireSchema = ToolSchema.extend({
+  inputSchema: z.looseObject({
+    type: z.literal("object"),
+    $schema: z.string().optional(),
+  }),
+});
+
+/** `execution` is not part of the 2026 wire shape; drop it as the codec does. */
+function stripExecution(tool: Tool): Tool {
+  if (tool.execution === undefined) return tool;
+  const { execution: _execution, ...rest } = tool;
+  return rest;
+}
+
+/**
+ * Bridge a per-era WIRE schema to the `Tool` the rest of the client works with.
+ *
+ * The two are deliberately separate, because on BOTH eras the wire schema
+ * accepts values the exported `Tool` type cannot describe — `properties: 5` is
+ * a valid modern `inputSchema` keyword set, and the SDK hands exactly that back
+ * typed as a `Tool`. So the era rules are expressed as an ordinary schema whose
+ * output type is irrelevant (it is only ever consulted for a verdict), and
+ * `z.custom<Tool>` supplies the type the caller needs. That is what avoids the
+ * `as unknown as` this would otherwise require — and it is the same assertion
+ * the SDK itself makes, in the same place.
+ *
+ * The wire schema's issues are copied across one by one, each keeping its PATH,
+ * rather than collapsed into a single "invalid tool" — so `describeIssues` can
+ * still name the offending field (`inputSchema.type`) instead of reporting a
+ * bare "Invalid input", which is the whole point of the report this module
+ * produces. They are re-emitted as `custom` issues (the only code that can
+ * carry an arbitrary forwarded message), which is why the expected-type detail
+ * is folded into the message here by {@link describeIssue} rather than left for
+ * `describeIssues` to recover from a field the new issue will not have.
+ */
+function eraToolItemSchema(
+  wire: z.ZodType,
+  normalize: (tool: Tool) => Tool,
+): z.ZodType<Tool> {
+  return z
+    .custom<Tool>()
+    .superRefine((value, ctx) => {
+      const parsed = wire.safeParse(value);
+      if (parsed.success) return;
+      for (const issue of parsed.error.issues) {
+        ctx.addIssue({
+          code: "custom",
+          path: issue.path,
+          message: describeIssue(issue),
+        });
+      }
+    })
+    .transform(normalize);
 }

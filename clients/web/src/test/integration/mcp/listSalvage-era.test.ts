@@ -9,7 +9,10 @@ import { InspectorClient } from "@inspector/core/mcp/inspectorClient.js";
 import { createTransportNode } from "@inspector/core/mcp/node/transport.js";
 import { eraToVersionNegotiation } from "@inspector/core/mcp/types.js";
 import { ToolSchema } from "@modelcontextprotocol/core";
-import { toolItemSchemaForEra } from "@inspector/core/mcp/listSalvage.js";
+import {
+  describeIssues,
+  toolItemSchemaForEra,
+} from "@inspector/core/mcp/listSalvage.js";
 
 /**
  * The era item contract the salvage fallback validates tools against (#1909).
@@ -179,6 +182,21 @@ describe("salvage era item contract (#1909)", () => {
     expect(neutral.success && neutral.data).toHaveProperty("execution");
   });
 
+  it("names the offending field, not just 'invalid tool'", () => {
+    // The era contract validates through a wire schema and forwards its issues,
+    // so the PATH has to survive that hop — it is the whole diagnostic value of
+    // the report, and a collapsed "Invalid input" would still pass every
+    // accept/reject assertion above.
+    const parsed = toolItemSchemaForEra(false).safeParse({
+      name: "t",
+      inputSchema: { type: "array" },
+    });
+    expect(parsed.success).toBe(false);
+    expect(parsed.success || describeIssues(parsed.error)).toMatch(
+      /^inputSchema\.type: .*object/,
+    );
+  });
+
   it("the era contract matches the strict path on both divergences", () => {
     // Legacy: rejected, exactly as the strict parse above rejected it.
     expect(
@@ -189,6 +207,117 @@ describe("salvage era item contract (#1909)", () => {
     expect(modern.success).toBe(true);
     expect(modern.success && modern.data).not.toHaveProperty("execution");
   });
+
+  /**
+   * What the STRICT path did with a tool, decided without consulting our own
+   * contract: the SDK accepted it only if the tool came back and nothing was
+   * reported malformed. (If the SDK rejects and our contract accepts, salvage
+   * finds nothing per-item wrong and rethrows — also a "reject" observation.)
+   */
+  async function strictVerdict(
+    tool: unknown,
+    era: "legacy" | "modern",
+  ): Promise<"accept" | "reject"> {
+    const server = await startToolsServer([tool], era === "modern");
+    stop = server.stop;
+    const connected = await connect(server.url, era);
+    try {
+      const { tools } = await connected.listAllTools();
+      return tools.length === 1 &&
+        connected.getMalformedListItems().length === 0
+        ? "accept"
+        : "reject";
+    } catch {
+      return "reject";
+    }
+  }
+
+  const withInput = (inputSchema: unknown) => ({ name: "t", inputSchema });
+  const withOutput = (outputSchema: unknown) => ({
+    name: "t",
+    inputSchema: { type: "object" },
+    outputSchema,
+  });
+
+  /**
+   * Every measured divergence between the two eras and the neutral schema.
+   *
+   * Each row is checked twice: that the SDK still behaves this way, and that
+   * our replicated contract agrees with it. The two directions both matter —
+   * an `accept` we reject means salvage would drop a tool the strict path kept
+   * and report a conforming server as malformed; a `reject` we accept means
+   * salvage readmits an entry the era refused.
+   */
+  const ERA_CASES: {
+    label: string;
+    tool: unknown;
+    legacy: "accept" | "reject";
+    modern: "accept" | "reject";
+  }[] = [
+    {
+      label: "inputSchema.type: array",
+      tool: withInput({ type: "array" }),
+      legacy: "reject",
+      modern: "reject",
+    },
+    {
+      label: "inputSchema.properties: 5",
+      tool: withInput({ type: "object", properties: 5 }),
+      legacy: "reject",
+      modern: "accept",
+    },
+    {
+      label: "inputSchema.required: [1]",
+      tool: withInput({ type: "object", required: [1] }),
+      legacy: "reject",
+      modern: "accept",
+    },
+    {
+      label: "inputSchema.$schema: 5",
+      tool: withInput({ type: "object", $schema: 5 }),
+      legacy: "accept",
+      modern: "reject",
+    },
+    {
+      label: "outputSchema.type: array",
+      tool: withOutput({ type: "array" }),
+      legacy: "reject",
+      modern: "accept",
+    },
+    {
+      label: "outputSchema.properties: 5",
+      tool: withOutput({ type: "object", properties: 5 }),
+      legacy: "reject",
+      modern: "accept",
+    },
+    {
+      label: "outputSchema.required: [1]",
+      tool: withOutput({ type: "object", required: [1] }),
+      legacy: "reject",
+      modern: "accept",
+    },
+    {
+      label: "outputSchema.$schema: 5",
+      tool: withOutput({ type: "object", $schema: 5 }),
+      legacy: "accept",
+      modern: "reject",
+    },
+  ];
+
+  for (const era of ["legacy", "modern"] as const) {
+    for (const { label, tool, ...expected } of ERA_CASES) {
+      it(`${era}: ${label} — contract agrees with the strict path`, async () => {
+        const observed = await strictVerdict(tool, era);
+        // Pins the SDK: if this fails, the era rule changed and the replicated
+        // contract below needs revisiting rather than the test relaxing.
+        expect(observed).toBe(expected[era]);
+        // Pins our agreement with it, in whichever direction it differs.
+        expect(
+          toolItemSchemaForEra(era === "modern").safeParse(tool).success,
+        ).toBe(expected[era] === "accept");
+      });
+    }
+  }
 
   it("keeps only era-valid tools when salvaging beside a malformed one", async () => {
     // The end-to-end shape of the defect: a malformed entry trips the
