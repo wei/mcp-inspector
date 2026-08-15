@@ -8,6 +8,7 @@ import {
 import { InspectorClient } from "@inspector/core/mcp/inspectorClient.js";
 import { MessageLogState } from "@inspector/core/mcp/state/index.js";
 import { createTransportNode } from "@inspector/core/mcp/node/transport.js";
+import { eraToVersionNegotiation } from "@inspector/core/mcp/types.js";
 
 /**
  * Per-item list salvage against a real connection (#1909).
@@ -23,6 +24,8 @@ import { createTransportNode } from "@inspector/core/mcp/node/transport.js";
  * real.
  */
 
+const MODERN_VERSION = "2026-07-28";
+
 interface ListPage {
   items: unknown[];
   nextCursor?: string;
@@ -37,10 +40,14 @@ function jsonRpcResult(id: unknown, result: unknown) {
  * methods it was configured with, returning entries verbatim (malformed ones
  * included).
  */
-function startMalformedServer(initialPages: {
-  resourceTemplates?: ListPage[];
-  tools?: ListPage[];
-}): Promise<{
+function startMalformedServer(
+  initialPages: {
+    resourceTemplates?: ListPage[];
+    tools?: ListPage[];
+  },
+  /** Negotiate the modern era, which is what turns the SEP-2243 gate on. */
+  modern = false,
+): Promise<{
   url: string;
   stop: () => Promise<void>;
   calls: string[];
@@ -82,14 +89,41 @@ function startMalformedServer(initialPages: {
       return;
     }
 
-    const send = (result: unknown) => {
+    const send = (result: Record<string, unknown>) => {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(jsonRpcResult(body.id, result)));
+      // The 2026-07-28 codec requires `resultType` on every result; the legacy
+      // leg ignores it.
+      res.end(
+        JSON.stringify(
+          jsonRpcResult(
+            body.id,
+            modern
+              ? {
+                  resultType: "complete",
+                  // The modern leg also requires the cache hints on a list
+                  // result; `ttlMs: 0` means "don't cache", which keeps each
+                  // call in these tests a real round trip.
+                  ttlMs: 0,
+                  cacheScope: "public",
+                  ...result,
+                }
+              : result,
+          ),
+        ),
+      );
     };
 
     if (body.method === "initialize") {
       send({
-        protocolVersion: "2025-06-18",
+        protocolVersion: modern ? MODERN_VERSION : "2025-06-18",
+        capabilities: { resources: {}, tools: {} },
+        serverInfo: { name: "malformed-list-server", version: "1.0.0" },
+      });
+      return;
+    }
+    if (body.method === "server/discover") {
+      send({
+        supportedVersions: [MODERN_VERSION],
         capabilities: { resources: {}, tools: {} },
         serverInfo: { name: "malformed-list-server", version: "1.0.0" },
       });
@@ -159,10 +193,13 @@ describe("InspectorClient list salvage (#1909)", () => {
   let client: InspectorClient | null = null;
   let stopServer: (() => Promise<void>) | null = null;
 
-  async function connectTo(url: string) {
+  async function connectTo(url: string, era?: "legacy" | "modern") {
     client = new InspectorClient(
       { type: "streamable-http", url },
-      { environment: { transport: createTransportNode } },
+      {
+        environment: { transport: createTransportNode },
+        ...(era ? { versionNegotiation: eraToVersionNegotiation(era) } : {}),
+      },
     );
     await client.connect();
     return client;
@@ -247,6 +284,37 @@ describe("InspectorClient list salvage (#1909)", () => {
     expect(seen[0]).toMatchObject([{ label: "array_annotations" }]);
   });
 
+  it("marks the ORIGINAL rejected response, not a salvage page", async () => {
+    // The re-walk answers the same method again, so a mark taken afterwards
+    // would land on a page that succeeded and leave the invalid response
+    // rendering clean — the exact lie #1953 exists to remove.
+    const server = await startMalformedServer({
+      resourceTemplates: [{ items: [PHP_EMPTY_ANNOTATIONS, VALID_TEMPLATE] }],
+    });
+    stopServer = server.stop;
+    const connected = await connectTo(server.url);
+    const log = new MessageLogState(connected);
+
+    await connected.listAllResourceTemplates();
+
+    const templateCalls = log
+      .getMessages()
+      .filter(
+        (entry) =>
+          "method" in entry.message &&
+          entry.message.method === "resources/templates/list",
+      );
+    // Two exchanges: the strict aggregate that was rejected, then the re-walk.
+    expect(templateCalls.length).toBeGreaterThanOrEqual(2);
+    expect(templateCalls[0]?.clientError).toContain(
+      "Dropped 1 malformed entry",
+    );
+    for (const later of templateCalls.slice(1)) {
+      expect(later.clientError).toBeUndefined();
+    }
+    log.destroy();
+  });
+
   it("marks the Protocol entry rejected even though the list rendered", async () => {
     const server = await startMalformedServer({
       resourceTemplates: [{ items: [PHP_EMPTY_ANNOTATIONS, VALID_TEMPLATE] }],
@@ -300,6 +368,50 @@ describe("InspectorClient list salvage (#1909)", () => {
     server.setPages({ resourceTemplates: [{ items: [VALID_TEMPLATE] }] });
     await connected.listAllResourceTemplates({ cacheMode: "bypass" });
     expect(connected.getMalformedListItems()).toEqual([]);
+  });
+
+  it("does not readmit a SEP-2243-excluded tool while salvaging", async () => {
+    // The strict aggregate is filtered by the SDK, so the salvage path has to
+    // reapply the rule: otherwise one ordinary malformed tool anywhere in the
+    // list quietly readmits every invalid-header tool beside it, turning a
+    // rendering fix into a spec violation (#1632 + #1909).
+    const server = await startMalformedServer(
+      {
+        tools: [
+          {
+            items: [
+              { name: "ok_tool", inputSchema: { type: "object" } },
+              // Malformed: trips the salvage fallback.
+              { name: "broken", inputSchema: "not-a-schema" },
+              // Schema-valid, but its x-mcp-header is not an RFC 9110 token.
+              {
+                name: "invalid_header_tool",
+                inputSchema: {
+                  type: "object",
+                  properties: {
+                    value: {
+                      type: "string",
+                      "x-mcp-header": "Bad Header",
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      },
+      true,
+    );
+    stopServer = server.stop;
+    const connected = await connectTo(server.url, "modern");
+    expect(connected.getProtocolEra()).toBe("modern");
+
+    const { tools } = await connected.listAllTools();
+    expect(tools.map((t) => t.name)).toEqual(["ok_tool"]);
+    // Still reported as excluded rather than silently gone.
+    expect(connected.getExcludedTools().map((x) => x.tool.name)).toEqual([
+      "invalid_header_tool",
+    ]);
   });
 
   it("rethrows when the rejection is not about any single entry", async () => {

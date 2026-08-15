@@ -1616,6 +1616,15 @@ export class InspectorClient extends InspectorClientEventTarget {
     // (#1953).
     this.outboundRequestMethods.clear();
     this.lastAnsweredRequestByMethod.clear();
+    // Per-session for the same reason: a report names entries of the PREVIOUS
+    // server's list. Cleared here as well as in `disconnect()` because the
+    // route out that tears down nothing (`onerror` with no `onclose`) would
+    // otherwise carry it into the next connection — indefinitely, if that
+    // server never lists the method again (#1909).
+    if (this.malformedListItems.size > 0) {
+      this.malformedListItems.clear();
+      this.dispatchTypedEvent("malformedListItemsChange", []);
+    }
     for (const [, controller] of this.taskInputAbortControllers) {
       controller.abort(new Error("Connection ended"));
     }
@@ -2372,8 +2381,6 @@ export class InspectorClient extends InspectorClientEventTarget {
   private withModernTaskEnvelope(
     params: Record<string, unknown>,
   ): Record<string, unknown> {
-    const existingMeta =
-      (params._meta as Record<string, unknown> | undefined) ?? {};
     const clientCapabilities = {
       ...this.clientCapabilities,
       // Force-stamp the tasks extension regardless of what the client
@@ -2385,11 +2392,31 @@ export class InspectorClient extends InspectorClientEventTarget {
         [TASKS_EXTENSION_KEY]: {},
       },
     };
-    // Use the NEGOTIATED protocol version so the envelope agrees with the
-    // `MCP-Protocol-Version` header the transport stamps from the same source —
-    // a future modern-family revision would negotiate a different string, and
-    // the two must not disagree. The raw channel only runs on a connected modern
-    // session, so this is always set; the constant is a defensive fallback.
+    return this.withModernEnvelope(params, clientCapabilities);
+  }
+
+  /**
+   * Stamp the `_meta` envelope every raw-wire request needs on the modern leg:
+   * the negotiated protocol version, the client identity, and the client
+   * capabilities.
+   *
+   * Split out of {@link withModernTaskEnvelope} so the list-salvage re-walk
+   * (#1909) can reuse it WITHOUT that method's force-stamped tasks extension —
+   * a `tools/list` has no business claiming an extension the user may have
+   * deliberately turned off (#1738).
+   *
+   * The NEGOTIATED protocol version is used so the envelope agrees with the
+   * `MCP-Protocol-Version` header the transport stamps from the same source — a
+   * future modern-family revision would negotiate a different string, and the
+   * two must not disagree. The raw channel only runs on a connected modern
+   * session, so this is always set; the constant is a defensive fallback.
+   */
+  private withModernEnvelope(
+    params: Record<string, unknown>,
+    clientCapabilities: ClientCapabilities = this.clientCapabilities,
+  ): Record<string, unknown> {
+    const existingMeta =
+      (params._meta as Record<string, unknown> | undefined) ?? {};
     /* v8 ignore start -- fallback only if getProtocolVersion() is unset, which
        can't happen on the connected modern session this runs on. Bracketed so
        the ignore is reflow-proof however prettier splits the statement. */
@@ -3154,6 +3181,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       itemsKey: "tools",
       itemSchema: ToolSchema,
       metadata: options?.metadata,
+      finalize: (salvaged) => this.excludeInvalidXMcpHeaderTools(salvaged),
       aggregate: async () => [
         ...(
           await this.client!.listTools(
@@ -3261,12 +3289,19 @@ export class InspectorClient extends InspectorClientEventTarget {
     itemSchema,
     aggregate,
     metadata,
+    finalize,
   }: {
     method: string;
     itemsKey: string;
     itemSchema: z.ZodType<T>;
     aggregate: () => Promise<T[]>;
     metadata?: Record<string, string>;
+    /**
+     * Filter applied to SALVAGED entries only, to reproduce a filter the SDK's
+     * strict aggregate applies for us. Without it the fallback would return a
+     * longer list than the strict path — see the `tools/list` caller.
+     */
+    finalize?: (items: T[]) => T[];
   }): Promise<T[]> {
     try {
       const items = await this.invokeMcpClient(aggregate, { method });
@@ -3274,8 +3309,33 @@ export class InspectorClient extends InspectorClientEventTarget {
       return items;
     } catch (err) {
       if (!isClientDecodeRejection(err)) throw err;
-      return this.salvageList({ method, itemsKey, itemSchema, metadata, err });
+      const salvaged = await this.salvageList({
+        method,
+        itemsKey,
+        itemSchema,
+        metadata,
+        err,
+      });
+      return finalize ? finalize(salvaged) : salvaged;
     }
+  }
+
+  /**
+   * Drop the tools the SDK would have excluded from `tools/list` for invalid
+   * `x-mcp-header` annotations (SEP-2243).
+   *
+   * The strict aggregate is filtered by the SDK before we see it, so the
+   * salvage path has to reapply the same rule itself: otherwise one ordinary
+   * malformed tool anywhere in the list would trip the fallback and quietly
+   * readmit every invalid-header tool alongside it — turning a rendering fix
+   * into a spec violation. The dropped tools are still reported through
+   * `refreshExcludedTools`, which lists them with their reason.
+   */
+  private excludeInvalidXMcpHeaderTools(tools: Tool[]): Tool[] {
+    if (!this.excludesInvalidXMcpHeaderTools()) return tools;
+    return tools.filter(
+      (tool) => scanXMcpHeaderDeclarations(tool.inputSchema).valid,
+    );
   }
 
   /**
@@ -3310,6 +3370,13 @@ export class InspectorClient extends InspectorClientEventTarget {
     metadata?: Record<string, string>;
     err: unknown;
   }): Promise<T[]> {
+    // Capture the correlation id BEFORE re-walking. `markResponseRejected`
+    // resolves "the last response received for this method", and the re-walk
+    // below answers that same method one or more times — so marking afterwards
+    // would stamp the rejection onto a salvage page that succeeded and leave
+    // the actually-invalid response rendering as a clean success, which is the
+    // precise lie #1953 exists to remove.
+    const rejectedResponseId = this.lastAnsweredRequestByMethod.get(method);
     const valid: T[] = [];
     const malformed: MalformedListItem[] = [];
     const seenCursors = new Set<string>();
@@ -3320,13 +3387,27 @@ export class InspectorClient extends InspectorClientEventTarget {
         ...(effectiveMeta ? { _meta: effectiveMeta } : {}),
         ...(cursor ? { cursor } : {}),
       };
+      // The modern (2026-07-28) codec validates a result against the SPEC
+      // schema for the method before the caller's schema is consulted, so a
+      // lenient `client.request` is rejected exactly as the strict one was —
+      // there is no salvage without going around it. The raw-wire channel that
+      // exists for the modern `tasks/*` methods does precisely that: the frame
+      // goes straight through the transport (still logged for the Protocol /
+      // Network tabs) and only the caller's schema is applied. Legacy keeps the
+      // ordinary SDK path, which honors request options and `_meta` for us.
       const page = await this.invokeMcpClient(
         () =>
-          this.client!.request(
-            { method, params },
-            LenientListPageSchema,
-            this.getRequestOptions(metadata?.progressToken),
-          ),
+          this.isModernEra()
+            ? this.rawWireRequest(
+                method,
+                this.withModernEnvelope(params),
+                LenientListPageSchema,
+              )
+            : this.client!.request(
+                { method, params },
+                LenientListPageSchema,
+                this.getRequestOptions(metadata?.progressToken),
+              ),
         { method },
       );
       const salvaged = salvageListItems({
@@ -3349,7 +3430,12 @@ export class InspectorClient extends InspectorClientEventTarget {
     // this fallback cannot explain — surface it rather than hide it.
     if (malformed.length === 0) throw err;
 
-    this.markResponseRejected(method, summarizeMalformed(malformed));
+    if (rejectedResponseId !== undefined) {
+      this.dispatchTypedEvent("responseRejected", {
+        id: rejectedResponseId,
+        reason: summarizeMalformed(malformed),
+      });
+    }
     this.setMalformedListItems(method, malformed);
     this.logger.warn(
       { method, malformed },
@@ -3382,7 +3468,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       const seenCursors = new Set<string>();
       let cursor: string | undefined;
       do {
-        const page = await this.listTools(cursor, metadata);
+        const page = await this.listToolsForScan(cursor, metadata);
         for (const tool of page.tools) {
           const scan = scanXMcpHeaderDeclarations(tool.inputSchema);
           if (!scan.valid) excluded.push({ tool, reason: scan.reason });
@@ -3398,6 +3484,54 @@ export class InspectorClient extends InspectorClientEventTarget {
     this.excludedTools = excluded;
     this.dispatchTypedEvent("excludedToolsChange", excluded);
     return excluded;
+  }
+
+  /**
+   * One page of the RAW `tools/list` for the SEP-2243 scan, tolerating a
+   * malformed sibling entry (#1632 + #1909).
+   *
+   * The scan needs the unfiltered list, so it uses the strict single-page call
+   * — but that call rejects the whole page when any entry is non-conforming,
+   * which would blank the excluded set and leave a tool that vanished for an
+   * invalid header with no explanation at all. That is the same failure #1909
+   * is about, one level down. So on a decode rejection the page is re-fetched
+   * leniently and scanned entry by entry; the malformed ones are not "excluded
+   * tools" and are reported through the salvage channel instead.
+   */
+  private async listToolsForScan(
+    cursor: string | undefined,
+    metadata: Record<string, string> | undefined,
+  ): Promise<{ tools: Tool[]; nextCursor?: string }> {
+    try {
+      return await this.listTools(cursor, metadata);
+    } catch (err) {
+      if (!isClientDecodeRejection(err)) throw err;
+      const effectiveMeta = this.mergeMeta(metadata);
+      const params = {
+        ...(effectiveMeta ? { _meta: effectiveMeta } : {}),
+        ...(cursor ? { cursor } : {}),
+      };
+      const page = this.isModernEra()
+        ? await this.rawWireRequest(
+            "tools/list",
+            this.withModernEnvelope(params),
+            LenientListPageSchema,
+          )
+        : await this.client!.request(
+            { method: "tools/list", params },
+            LenientListPageSchema,
+            this.getRequestOptions(metadata?.progressToken),
+          );
+      const { valid } = salvageListItems({
+        method: "tools/list",
+        items: rawItemsOf(page, "tools"),
+        schema: ToolSchema,
+      });
+      return {
+        tools: valid,
+        ...(page.nextCursor !== undefined && { nextCursor: page.nextCursor }),
+      };
+    }
   }
 
   /**
