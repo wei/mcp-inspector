@@ -12,6 +12,7 @@ import { useState } from "react";
 import { ClearButton } from "../../elements/ClearButton/ClearButton";
 import { useValueChange } from "../../../hooks/useValueChange";
 import type { InspectorFormSchema } from "../../../utils/jsonUtils";
+import { normalizeUnionType } from "../../../utils/schemaUtils";
 
 const FieldLabel = Text.withProps({
   fw: 500,
@@ -49,6 +50,16 @@ function toEnumData(
     return values.map((value, index) => ({ value, label: names[index] }));
   }
   return values;
+}
+
+/**
+ * Whether an enum `Select` should offer a clear affordance. Only a schema that
+ * admits `null` does: clearing emits `null`, and an enum without a null branch
+ * would reject it. Without this a nullable enum is a one-way door — once a
+ * value is picked there is no way back to "no answer".
+ */
+function isClearable(fieldSchema: InspectorFormSchema): boolean {
+  return fieldSchema.nullable === true;
 }
 
 /**
@@ -207,7 +218,13 @@ export function SchemaForm({
     onChange({ ...values, [fieldName]: fieldValue });
   }
 
-  function renderField(fieldName: string, fieldSchema: InspectorFormSchema) {
+  function renderField(fieldName: string, rawSchema: InspectorFormSchema) {
+    // Flatten a nullable union (`anyOf: [X, {type:"null"}]`, `type: [X,"null"]`)
+    // before dispatching. Every branch below tests a single `type` string, so
+    // without this an "optional and explicitly nullable" field — what Zod's
+    // `.nullish()` emits — matches nothing and falls through to the raw-JSON
+    // fallback, which is unusable for a value the user has to type (#1928).
+    const fieldSchema = normalizeUnionType(rawSchema);
     const isRequired = requiredFields.includes(fieldName);
     const label = fieldSchema.title ?? fieldName;
     const description = fieldSchema.description;
@@ -223,6 +240,7 @@ export function SchemaForm({
           withAsterisk={isRequired}
           disabled={disabled}
           data={toEnumData(fieldSchema.enum, fieldSchema.enumNames)}
+          clearable={isClearable(fieldSchema)}
           value={(rawValue as string) ?? null}
           onChange={(val) => handleFieldChange(fieldName, val)}
         />
@@ -243,6 +261,7 @@ export function SchemaForm({
           withAsterisk={isRequired}
           disabled={disabled}
           data={data}
+          clearable={isClearable(fieldSchema)}
           value={(rawValue as string) ?? null}
           onChange={(val) => handleFieldChange(fieldName, val)}
         />

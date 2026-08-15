@@ -347,6 +347,120 @@ describe("normalizeUnionType", () => {
     };
     expect(normalizeUnionType(schema)).toBe(schema);
   });
+
+  it("ignores a two-member anyOf with no null branch", () => {
+    const schema = {
+      anyOf: [{ type: "string" as const }, { type: "number" as const }],
+    };
+    expect(normalizeUnionType(schema)).toBe(schema);
+  });
+
+  it("ignores an anyOf whose non-null branch has no renderable type (#1928)", () => {
+    const schema = {
+      anyOf: [{ const: "only" }, { type: "null" as const }],
+    };
+    expect(normalizeUnionType(schema)).toBe(schema);
+  });
+
+  // #1928: the enum lives on the surviving branch, and hoisting it is what makes
+  // the field render as a Select instead of the raw-JSON fallback.
+  it("hoists enum out of an anyOf string-enum|null branch", () => {
+    expect(
+      normalizeUnionType({
+        description: "Direction",
+        anyOf: [
+          { type: "string", enum: ["envio", "recebimento"] },
+          { type: "null" },
+        ],
+      }),
+    ).toEqual({
+      type: "string",
+      description: "Direction",
+      enum: ["envio", "recebimento"],
+      anyOf: undefined,
+      nullable: true,
+    });
+  });
+
+  it("infers string for a typeless enum branch", () => {
+    expect(
+      normalizeUnionType({
+        anyOf: [{ enum: ["a", "b"] }, { type: "null" }],
+      }),
+    ).toEqual({
+      type: "string",
+      enum: ["a", "b"],
+      anyOf: undefined,
+      nullable: true,
+    });
+  });
+
+  it("hoists items out of an anyOf array|null branch", () => {
+    expect(
+      normalizeUnionType({
+        anyOf: [
+          { type: "array", items: { type: "string", enum: ["a", "b"] } },
+          { type: "null" },
+        ],
+      }),
+    ).toEqual({
+      type: "array",
+      items: { type: "string", enum: ["a", "b"] },
+      anyOf: undefined,
+      nullable: true,
+    });
+  });
+
+  it("hoists properties out of an anyOf object|null branch", () => {
+    expect(
+      normalizeUnionType({
+        anyOf: [
+          { type: "object", properties: { a: { type: "string" } } },
+          { type: "null" },
+        ],
+      }),
+    ).toEqual({
+      type: "object",
+      properties: { a: { type: "string" } },
+      anyOf: undefined,
+      nullable: true,
+    });
+  });
+
+  it("normalizes anyOf object|null regardless of branch order", () => {
+    expect(
+      normalizeUnionType({
+        anyOf: [{ type: "null" }, { type: "object" }],
+      }),
+    ).toEqual({ type: "object", anyOf: undefined, nullable: true });
+  });
+
+  it("normalizes type array object|null", () => {
+    expect(
+      normalizeUnionType({
+        type: ["object", "null"],
+        properties: { a: { type: "string" } },
+      }),
+    ).toEqual({
+      type: "object",
+      properties: { a: { type: "string" } },
+      nullable: true,
+    });
+  });
+
+  it("normalizes type array array|null", () => {
+    expect(normalizeUnionType({ type: ["array", "null"] })).toEqual({
+      type: "array",
+      nullable: true,
+    });
+  });
+
+  it("keeps a type array of two non-null members unchanged", () => {
+    const schema = { type: ["string", "number"] as const };
+    expect(normalizeUnionType({ ...schema, type: [...schema.type] })).toEqual({
+      type: ["string", "number"],
+    });
+  });
 });
 
 describe("formatFieldLabel", () => {

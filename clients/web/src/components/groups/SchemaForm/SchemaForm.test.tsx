@@ -811,3 +811,179 @@ describe("SchemaForm", () => {
     expect(container.firstChild).not.toBeNull();
   });
 });
+
+// #1928: "optional AND explicitly nullable" (Zod's `.nullish()`) compiles to a
+// nullable union rather than a plain type. Before the normalization step these
+// matched no branch and fell through to the raw-JSON fallback, where every
+// keystroke re-escaped the value.
+describe("SchemaForm nullable unions", () => {
+  it("renders a Select for an anyOf string-enum|null field", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        type: {
+          title: "Type",
+          anyOf: [
+            { type: "string", enum: ["envio", "recebimento"] },
+            { type: "null" },
+          ],
+        },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={onChange} />,
+    );
+    await user.click(screen.getByRole("textbox", { name: "Type" }));
+    await user.click(
+      await screen.findByRole("option", { name: "envio", hidden: true }),
+    );
+    expect(onChange).toHaveBeenCalledWith({ type: "envio" });
+  });
+
+  it("clears a nullable enum back to null", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        type: {
+          title: "Type",
+          anyOf: [{ type: "string", enum: ["envio"] }, { type: "null" }],
+        },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm
+        schema={schema}
+        values={{ type: "envio" }}
+        onChange={onChange}
+      />,
+    );
+    // Mantine marks its combobox clear button `aria-hidden` (it is mouse-only,
+    // `tabIndex={-1}`), so it is only reachable with `hidden: true`.
+    await user.click(screen.getByRole("button", { hidden: true }));
+    expect(onChange).toHaveBeenCalledWith({ type: null });
+  });
+
+  it("offers no clear affordance on a non-nullable enum", () => {
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        format: { type: "string", title: "Format", enum: ["json"] },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm
+        schema={schema}
+        values={{ format: "json" }}
+        onChange={vi.fn()}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { hidden: true }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders a TextInput for a type: [string, null] field", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        note: { type: ["string", "null"], title: "Note" },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={onChange} />,
+    );
+    await user.type(screen.getByLabelText(/Note/), "a");
+    expect(onChange).toHaveBeenCalledWith({ note: "a" });
+  });
+
+  it("renders a checkbox for an anyOf boolean|null field", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        enabled: {
+          title: "Enabled",
+          anyOf: [{ type: "boolean" }, { type: "null" }],
+        },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={onChange} />,
+    );
+    await user.click(screen.getByLabelText("Enabled"));
+    expect(onChange).toHaveBeenCalledWith({ enabled: true });
+  });
+
+  it("renders a MultiSelect for an anyOf array-of-enum|null field", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        tags: {
+          title: "Tags",
+          anyOf: [
+            { type: "array", items: { type: "string", enum: ["a", "b"] } },
+            { type: "null" },
+          ],
+        },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={onChange} />,
+    );
+    await user.click(screen.getByRole("textbox", { name: "Tags" }));
+    await user.click(
+      await screen.findByRole("option", { name: "a", hidden: true }),
+    );
+    expect(onChange).toHaveBeenCalledWith({ tags: ["a"] });
+  });
+
+  it("renders nested fields for an anyOf object|null field", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        profile: {
+          title: "Profile",
+          anyOf: [
+            {
+              type: "object",
+              properties: { nick: { type: "string", title: "Nick" } },
+            },
+            { type: "null" },
+          ],
+        },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={onChange} />,
+    );
+    await user.type(screen.getByLabelText(/Nick/), "z");
+    expect(onChange).toHaveBeenCalledWith({ profile: { nick: "z" } });
+  });
+
+  it("still falls back to the JSON input for a union of two real types", () => {
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        mixed: {
+          title: "Mixed",
+          anyOf: [{ type: "string" }, { type: "number" }],
+        },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={vi.fn()} />,
+    );
+    expect(screen.getByLabelText(/Mixed/).tagName).toBe("TEXTAREA");
+  });
+});
