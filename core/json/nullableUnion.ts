@@ -43,9 +43,10 @@ export interface NullableUnionSchema {
   enum?: unknown[];
   anyOf?: readonly unknown[];
   // Read only by `admitsNull`, which considers encodings the collapse itself
-  // declines to flatten.
+  // declines to flatten, and the sibling constraints that can rule null out.
   oneOf?: readonly unknown[];
   nullable?: boolean;
+  const?: unknown;
 }
 
 /** Narrow an `anyOf` member to a readable object, or `null` if it isn't one. */
@@ -71,7 +72,7 @@ function toBranch(value: unknown): Record<string, unknown> | null {
  * an enum to a select at all. The TUI's does, and its options are stringified,
  * so an unguarded numeric enum there submits `"1"` where the server wants `1`.
  */
-export function isStringEnum(value: unknown): boolean {
+export function isStringEnum(value: unknown): value is string[] {
   return (
     Array.isArray(value) &&
     value.length > 0 &&
@@ -100,6 +101,30 @@ export type NormalizedNullableUnion<T extends NullableUnionSchema> = Omit<
   anyOf?: undefined;
   nullable?: boolean;
 };
+
+/**
+ * Whether a schema's **own** `enum`/`const` rules `null` out, regardless of what
+ * its `type` or union branches say.
+ *
+ * JSON Schema keywords at one level are **conjunctive** — a value must satisfy
+ * all of them — so a syntactic null does not by itself mean the schema accepts
+ * null. `{ type: ["string", "null"], enum: ["envio"] }` names `"null"` in its
+ * type list and still rejects `null`, because the `enum` does not offer it.
+ * Marking that field nullable would give it a clear button that emits a value
+ * the schema forbids, and would make required-field gating accept it.
+ *
+ * Evaluated against the schema's own level only. A branch's `enum` is *not* a
+ * sibling — in `anyOf: [{ type: "string", enum: [...] }, { type: "null" }]` the
+ * enum constrains that branch alone, and the union still permits null. Reading
+ * it as a sibling would break exactly the shape #1928 is about, so callers must
+ * pass the original schema here, never the hoisted merge.
+ */
+function nullExcludedBySiblings(schema: NullableUnionSchema): boolean {
+  if (Array.isArray(schema.enum) && !schema.enum.includes(null)) {
+    return true;
+  }
+  return schema.const !== undefined && schema.const !== null;
+}
 
 /**
  * What {@link stripNullEnumMembers} concluded about an `enum`.
@@ -192,7 +217,10 @@ function collapsed<T extends NullableUnionSchema>(
     ...merged,
     type,
     anyOf: undefined,
-    nullable: true,
+    // Read off the ORIGINAL schema, not the merge: a hoisted branch `enum` is
+    // not a sibling constraint, and treating it as one would mark the very
+    // shape #1928 is about as non-nullable. See `nullExcludedBySiblings`.
+    nullable: admitsNull(schema),
     ...(strip.kind === "filtered"
       ? { enum: strip.members, enumNames: strip.names }
       : {}),
@@ -216,6 +244,9 @@ function collapsed<T extends NullableUnionSchema>(
  * branch anywhere in an `anyOf` or `oneOf` of any size.
  */
 export function admitsNull(schema: NullableUnionSchema): boolean {
+  if (nullExcludedBySiblings(schema)) {
+    return false;
+  }
   if (schema.nullable === true) {
     return true;
   }

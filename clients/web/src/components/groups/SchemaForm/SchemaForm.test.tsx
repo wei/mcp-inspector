@@ -744,6 +744,45 @@ describe("SchemaForm", () => {
   // original symptom, and it lived here rather than in the dispatch. It matters
   // more since #2007, whose fix deliberately routes object unions to this
   // editor: a fallback nobody can type into is not a fallback.
+  it("shows an error while the JSON draft does not parse", async () => {
+    const user = userEvent.setup();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        config: { type: "array", title: "Config" },
+      },
+    };
+    function Harness() {
+      const [values, setValues] = useState<Record<string, unknown>>({});
+      return (
+        <SchemaForm schema={schema} values={values} onChange={setValues} />
+      );
+    }
+    renderWithMantine(<Harness />);
+
+    const jsonInput = screen.getByLabelText(/Config/) as HTMLTextAreaElement;
+    await user.type(jsonInput, "[[1,");
+    // Invalid text yields no value, so without this the field would submit as
+    // absent while the user is still looking at what they typed.
+    expect(screen.getByText(/Not valid JSON/)).toBeInTheDocument();
+
+    await user.type(jsonInput, "2]");
+    expect(screen.queryByText(/Not valid JSON/)).not.toBeInTheDocument();
+  });
+
+  it("shows no error for an empty optional field", () => {
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        config: { type: "array", title: "Config" },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={vi.fn()} />,
+    );
+    expect(screen.queryByText(/Not valid JSON/)).not.toBeInTheDocument();
+  });
+
   it("reports no value, not raw text, while the JSON is mid-edit", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
@@ -1181,6 +1220,52 @@ describe("SchemaForm nullable unions", () => {
       <SchemaForm schema={schema} values={{}} onChange={vi.fn()} />,
     );
     expect(screen.getByRole("textbox", { name: "Items" })).toBeInTheDocument();
+  });
+
+  // Reachable only since the collapse landed: the nullable wrapper had no
+  // top-level `type` before, so it fell to the JSON editor rather than into a
+  // string-valued MultiSelect that would submit ["1"] for [1].
+  it("falls back to the JSON input for a nullable array of numeric item enums", () => {
+    // Wire data again — a numeric `enum` is valid JSON Schema but outside
+    // `InspectorFormSchema`'s `string[]`, so it comes in through the narrow.
+    const schema = toFormSchema({
+      type: "object",
+      properties: {
+        levels: {
+          title: "Levels",
+          anyOf: [{ type: "array", items: { enum: [1, 2] } }, { type: "null" }],
+        },
+      },
+    });
+    renderWithMantine(
+      <SchemaForm schema={schema!} values={{}} onChange={vi.fn()} />,
+    );
+    expect(screen.getByLabelText(/Levels/).tagName).toBe("TEXTAREA");
+  });
+
+  // The sibling enum rules null out even though the type list names it, so the
+  // field must not get a clear button that emits a value the schema rejects.
+  it("offers no clear button when a sibling enum excludes null", () => {
+    const schema = toFormSchema({
+      type: "object",
+      properties: {
+        direction: {
+          title: "Direction",
+          type: ["string", "null"],
+          enum: ["envio", "recebimento"],
+        },
+      },
+    });
+    renderWithMantine(
+      <SchemaForm
+        schema={schema!}
+        values={{ direction: "envio" }}
+        onChange={vi.fn()}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { hidden: true }),
+    ).not.toBeInTheDocument();
   });
 
   it("still falls back to the JSON input for a union of two real types", () => {

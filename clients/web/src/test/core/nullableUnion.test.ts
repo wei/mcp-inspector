@@ -312,6 +312,35 @@ describe("normalizeNullableUnion", () => {
     });
   });
 
+  // Flattening still happens — only the nullability claim is withheld, because
+  // the sibling enum rules null out even though the type list names it.
+  it("flattens but does not mark nullable when a sibling enum excludes null", () => {
+    expect(
+      normalizeNullableUnion({
+        type: ["string", "null"],
+        enum: ["envio", "recebimento"],
+      }),
+    ).toEqual({
+      type: "string",
+      enum: ["envio", "recebimento"],
+      anyOf: undefined,
+      nullable: false,
+    });
+  });
+
+  it("still marks nullable when the enum lives on an anyOf branch", () => {
+    expect(
+      normalizeNullableUnion({
+        anyOf: [{ type: "string", enum: ["envio"] }, { type: "null" }],
+      }),
+    ).toEqual({
+      type: "string",
+      enum: ["envio"],
+      anyOf: undefined,
+      nullable: true,
+    });
+  });
+
   it("leaves a mismatched enumNames alone rather than inventing an alignment", () => {
     expect(
       normalizeNullableUnion({
@@ -323,20 +352,6 @@ describe("normalizeNullableUnion", () => {
       type: "string",
       enum: ["a"],
       enumNames: ["Alpha"],
-      anyOf: undefined,
-      nullable: true,
-    });
-  });
-
-  it("leaves a null-free enum untouched", () => {
-    expect(
-      normalizeNullableUnion({
-        type: ["string", "null"],
-        enum: ["a", "b"],
-      }),
-    ).toEqual({
-      type: "string",
-      enum: ["a", "b"],
       anyOf: undefined,
       nullable: true,
     });
@@ -423,5 +438,43 @@ describe("admitsNull", () => {
 
   it("ignores non-object anyOf members instead of throwing", () => {
     expect(admitsNull({ anyOf: ["null", ["null"], 7] })).toBe(false);
+  });
+
+  // JSON Schema keywords at one level are conjunctive, so a syntactic null does
+  // not by itself mean the schema accepts null. `{ type: ["string","null"],
+  // enum: ["envio"] }` names "null" and still rejects it.
+  it("is false when a sibling enum excludes null", () => {
+    expect(admitsNull({ type: ["string", "null"], enum: ["envio"] })).toBe(
+      false,
+    );
+    expect(
+      admitsNull({
+        anyOf: [{ type: "string" }, { type: "null" }],
+        enum: ["a"],
+      }),
+    ).toBe(false);
+  });
+
+  it("is true when a sibling enum offers null", () => {
+    expect(
+      admitsNull({ type: ["string", "null"], enum: ["envio", null] }),
+    ).toBe(true);
+  });
+
+  it("is false when a sibling const pins a non-null value", () => {
+    expect(admitsNull({ type: ["string", "null"], const: "envio" })).toBe(
+      false,
+    );
+    expect(admitsNull({ type: ["string", "null"], const: null })).toBe(true);
+  });
+
+  // A branch's enum is scoped to that branch, not a sibling of the union — this
+  // is the #1928 shape, and reading it as a sibling would call it non-nullable.
+  it("is unaffected by an enum that lives inside an anyOf branch", () => {
+    expect(
+      admitsNull({
+        anyOf: [{ type: "string", enum: ["envio"] }, { type: "null" }],
+      }),
+    ).toBe(true);
   });
 });

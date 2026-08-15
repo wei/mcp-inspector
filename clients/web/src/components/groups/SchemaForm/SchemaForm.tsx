@@ -15,7 +15,10 @@ import type {
   InspectorFormSchema,
   JsonSchemaConst,
 } from "../../../utils/jsonUtils";
-import { normalizeNullableUnion } from "@inspector/core/json/nullableUnion.js";
+import {
+  isStringEnum,
+  normalizeNullableUnion,
+} from "@inspector/core/json/nullableUnion.js";
 
 const FieldLabel = Text.withProps({
   fw: 500,
@@ -196,6 +199,15 @@ interface SchemaJsonFieldProps {
  * `undefined` rather than handed the text. An inspector must not report a value
  * it cannot send, and `undefined` is how "no value supplied" is spelled
  * everywhere else in this form.
+ *
+ * That leaves invalid text and an empty field indistinguishable *to the
+ * parent*, so the field says so itself via `error`. A **required** field is
+ * already gated — its value is `undefined`, which `hasMissingRequiredFields`
+ * treats as missing — but an **optional** one would otherwise be dropped from
+ * the submission with no indication. Disabling Execute/Open/Submit on an
+ * invalid optional draft needs a validity channel out of this component and
+ * into all four callers, which is a wider change than this fix; tracked
+ * separately.
  */
 function SchemaJsonField({
   value,
@@ -216,10 +228,23 @@ function SchemaJsonField({
     }
   });
 
+  // Text that is present but does not parse yields no value, so the field would
+  // otherwise submit as absent while the user is still looking at what they
+  // typed. Saying so on the field is what keeps that from being silent; see the
+  // note on `SchemaJsonField` for the submit-gating half, which is not local to
+  // this component.
+  const hasInvalidDraft =
+    draft.trim() !== "" && parseJsonDraft(draft) === undefined;
+
   return (
     <SchemaJsonInput
       {...inputProps}
       value={draft}
+      error={
+        hasInvalidDraft
+          ? "Not valid JSON — this field will be omitted"
+          : undefined
+      }
       onChange={(text) => {
         setDraft(text);
         onChange(parseJsonDraft(text));
@@ -458,12 +483,14 @@ export function SchemaForm({
       );
     }
 
-    // array of enum values (multi-select)
-    if (fieldSchema.type === "array" && fieldSchema.items?.enum) {
-      const data = toEnumData(
-        fieldSchema.items.enum,
-        fieldSchema.items.enumNames,
-      );
+    // array of enum values (multi-select). Gated on the members being strings
+    // for the same reason `toConstOptions` is: `MultiSelect` is string-valued,
+    // so `items: { enum: [1, 2] }` would submit `["1"]` where the schema says
+    // `[1]`. Reachable from a nullable array since the collapse landed, which
+    // is what makes the guard load-bearing rather than theoretical.
+    const itemsEnum = fieldSchema.items?.enum;
+    if (fieldSchema.type === "array" && isStringEnum(itemsEnum)) {
+      const data = toEnumData(itemsEnum, fieldSchema.items?.enumNames);
       return (
         <MultiSelect
           key={fieldName}
