@@ -311,6 +311,39 @@ describe("schemaToForm", () => {
       ]);
     });
 
+    // ink-form hands a select's stringified value straight back, so a numeric
+    // enum routed to a select would submit "1" for 1. The typed field loses the
+    // enum constraint but keeps the value's type — the safer loss.
+    it("routes a nullable numeric enum to its typed field, not a select", () => {
+      const form = schemaToForm(
+        {
+          properties: {
+            level: {
+              anyOf: [{ type: "integer", enum: [1, 2] }, { type: "null" }],
+            },
+            ratio: {
+              anyOf: [{ type: "number", enum: [0.5, 1.5] }, { type: "null" }],
+            },
+          },
+        },
+        "numericEnum",
+      );
+      expect(
+        form.sections[0]!.fields.map((f) => ({ name: f.name, type: f.type })),
+      ).toEqual([
+        { name: "level", type: "integer" },
+        { name: "ratio", type: "float" },
+      ]);
+    });
+
+    it("routes a plain numeric enum to its typed field too", () => {
+      const form = schemaToForm(
+        { properties: { level: { type: "integer", enum: [1, 2] } } },
+        "plainNumericEnum",
+      );
+      expect(form.sections[0]!.fields[0]).toMatchObject({ type: "integer" });
+    });
+
     it("leaves a union of two real types as a plain string field", () => {
       const form = schemaToForm(
         {

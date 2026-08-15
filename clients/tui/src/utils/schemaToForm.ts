@@ -3,7 +3,10 @@
  */
 
 import type { FormStructure, FormSection, FormField } from "ink-form";
-import { normalizeNullableUnion } from "@inspector/core/json/nullableUnion.js";
+import {
+  isStringEnum,
+  normalizeNullableUnion,
+} from "@inspector/core/json/nullableUnion.js";
 
 /** Minimal JSON Schema property shape used when building tool parameter forms */
 interface JsonSchemaProperty {
@@ -105,12 +108,17 @@ export function schemaToForm(
         ...baseField,
         options: toSelectOptions(property.items.enum, property.items.enumNames),
       } as FormField;
-    } else if (property.enum) {
-      // Single select
+    } else if (isStringEnum(property.enum)) {
+      // Single select. Gated on the members being strings because
+      // `toSelectOptions` stringifies them and ink-form hands the string
+      // straight back: a numeric `enum: [1, 2]` would submit `"1"` and violate
+      // the schema. A typed non-string enum falls through to its typed field
+      // below, which loses the enum constraint but keeps the value's type —
+      // the safer of the two losses.
       field = {
         type: "select",
         ...baseField,
-        options: toSelectOptions(property.enum, property.enumNames),
+        options: toSelectOptions(property.enum ?? [], property.enumNames),
       } as FormField;
     } else {
       // Map JSON Schema types to ink-form types

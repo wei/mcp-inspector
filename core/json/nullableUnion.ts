@@ -53,8 +53,7 @@ function toBranch(value: unknown): Record<string, unknown> | null {
 }
 
 /**
- * Whether a branch's `enum` is one a *typeless* branch can be read as a string
- * enum.
+ * Whether an `enum` is one that can be rendered as a string-valued dropdown.
  *
  * JSON Schema's `enum` is untyped — `[1, 2]`, `[true, false]`, and `[null]` are
  * all legal — so a bare `{ enum: [...] }` does **not** imply strings. Guessing
@@ -63,8 +62,12 @@ function toBranch(value: unknown): Record<string, unknown> | null {
  * would `String(...)` them and submit `"1"` where the server expects `1`. So
  * only an all-string enum earns the inference; anything else stays on the
  * fallback path, which renders the value honestly as JSON.
+ *
+ * Exported because the same question decides whether a *dispatcher* may route
+ * an enum to a select at all. The TUI's does, and its options are stringified,
+ * so an unguarded numeric enum there submits `"1"` where the server wants `1`.
  */
-function isStringEnum(value: unknown): boolean {
+export function isStringEnum(value: unknown): boolean {
   return (
     Array.isArray(value) &&
     value.length > 0 &&

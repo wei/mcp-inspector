@@ -971,6 +971,108 @@ describe("SchemaForm nullable unions", () => {
     expect(onChange).toHaveBeenCalledWith({ profile: { nick: "z" } });
   });
 
+  // #2007: `z.array(z.union([z.object(…), z.object(…)]))` gives an `items.anyOf`
+  // whose branches carry no top-level `const`, so every MultiSelect option was
+  // the empty string — and Mantine *throws* on duplicate option values, greying
+  // out the whole tool panel. The nullable form below is reachable only because
+  // this PR now collapses it into `type: "array"`, so it has to be safe too.
+  it("falls back to the JSON input for an array of object-union items", () => {
+    const objectBranch = (name: string): InspectorFormSchema => ({
+      type: "object",
+      properties: { type: { type: "string", const: name } },
+      required: ["type"],
+    });
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        items: {
+          title: "Items",
+          type: "array",
+          items: { anyOf: [objectBranch("A"), objectBranch("B")] },
+        },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={vi.fn()} />,
+    );
+    expect(screen.getByLabelText(/Items/).tagName).toBe("TEXTAREA");
+  });
+
+  it("falls back to the JSON input for a nullable array of object-union items", () => {
+    const objectBranch = (name: string): InspectorFormSchema => ({
+      type: "object",
+      properties: { type: { type: "string", const: name } },
+      required: ["type"],
+    });
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        items: {
+          title: "Items",
+          anyOf: [
+            { type: "array", items: { anyOf: [objectBranch("A")] } },
+            { type: "null" },
+          ],
+        },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={vi.fn()} />,
+    );
+    expect(screen.getByLabelText(/Items/).tagName).toBe("TEXTAREA");
+  });
+
+  it("falls back to the JSON input when two anyOf branches share a const", () => {
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        items: {
+          title: "Items",
+          type: "array",
+          items: { anyOf: [{ const: "dup" }, { const: "dup" }] },
+        },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={vi.fn()} />,
+    );
+    expect(screen.getByLabelText(/Items/).tagName).toBe("TEXTAREA");
+  });
+
+  it("falls back to a text input for a string oneOf with no consts", () => {
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        mode: {
+          title: "Mode",
+          type: "string",
+          oneOf: [{ type: "string" }, { type: "string" }],
+        },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={vi.fn()} />,
+    );
+    expect(screen.getByLabelText(/Mode/).tagName).toBe("INPUT");
+  });
+
+  it("still renders a MultiSelect when every anyOf branch has a distinct const", () => {
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        items: {
+          title: "Items",
+          type: "array",
+          items: { anyOf: [{ const: "a", title: "Alpha" }, { const: "b" }] },
+        },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={vi.fn()} />,
+    );
+    expect(screen.getByRole("textbox", { name: "Items" })).toBeInTheDocument();
+  });
+
   it("still falls back to the JSON input for a union of two real types", () => {
     const schema: InspectorFormSchema = {
       type: "object",

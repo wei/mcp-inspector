@@ -11,7 +11,10 @@ import {
 import { useState } from "react";
 import { ClearButton } from "../../elements/ClearButton/ClearButton";
 import { useValueChange } from "../../../hooks/useValueChange";
-import type { InspectorFormSchema } from "../../../utils/jsonUtils";
+import type {
+  InspectorFormSchema,
+  JsonSchemaConst,
+} from "../../../utils/jsonUtils";
 import { normalizeNullableUnion } from "@inspector/core/json/nullableUnion.js";
 
 const FieldLabel = Text.withProps({
@@ -50,6 +53,44 @@ function toEnumData(
     return values.map((value, index) => ({ value, label: names[index] }));
   }
   return values;
+}
+
+/**
+ * Build `Select`/`MultiSelect` option data from a list of `oneOf`/`anyOf`
+ * branches that are expected to be constants.
+ *
+ * Returns `null` when the branches are not usable as options, which sends the
+ * field to the JSON fallback instead. Three ways that happens, all of which
+ * Mantine reacts to badly:
+ *
+ * - **No `const`.** An `anyOf` of *object* schemas — what
+ *   `z.array(z.union([z.object(…), z.object(…)]))` compiles to — has no
+ *   top-level `const` on any branch, so every option would be the empty
+ *   string. Mantine **throws** on duplicate option values, which greys out the
+ *   whole tool panel rather than degrading (#2007).
+ * - **Duplicate values.** Two branches sharing a `const` throw the same way.
+ * - **An empty option value**, which Mantine cannot render as selectable.
+ *
+ * A union of object shapes has no faithful dropdown anyway, so the JSON editor
+ * is the honest widget for it rather than a lossy or crashing one.
+ */
+function toConstOptions(
+  branches: (InspectorFormSchema | JsonSchemaConst)[],
+): { value: string; label: string }[] | null {
+  const options: { value: string; label: string }[] = [];
+  const seen = new Set<string>();
+  for (const branch of branches) {
+    if (branch.const === undefined || branch.const === null) {
+      return null;
+    }
+    const value = String(branch.const);
+    if (value === "" || seen.has(value)) {
+      return null;
+    }
+    seen.add(value);
+    options.push({ value, label: branch.title ?? value });
+  }
+  return options.length > 0 ? options : null;
 }
 
 /**
@@ -248,11 +289,11 @@ export function SchemaForm({
     }
 
     // string with oneOf
-    if (fieldSchema.type === "string" && fieldSchema.oneOf) {
-      const data = fieldSchema.oneOf.map((item) => ({
-        value: String(item.const ?? ""),
-        label: item.title ?? String(item.const ?? ""),
-      }));
+    const oneOfData = fieldSchema.oneOf
+      ? toConstOptions(fieldSchema.oneOf)
+      : null;
+    if (fieldSchema.type === "string" && oneOfData) {
+      const data = oneOfData;
       return (
         <Select
           key={fieldName}
@@ -352,11 +393,11 @@ export function SchemaForm({
     }
 
     // array with items having anyOf
-    if (fieldSchema.type === "array" && fieldSchema.items?.anyOf) {
-      const data = fieldSchema.items.anyOf.map((item) => ({
-        value: String(item.const ?? ""),
-        label: item.title ?? String(item.const ?? ""),
-      }));
+    const itemsAnyOfData = fieldSchema.items?.anyOf
+      ? toConstOptions(fieldSchema.items.anyOf)
+      : null;
+    if (fieldSchema.type === "array" && itemsAnyOfData) {
+      const data = itemsAnyOfData;
       return (
         <MultiSelect
           key={fieldName}
