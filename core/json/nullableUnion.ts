@@ -102,27 +102,64 @@ export type NormalizedNullableUnion<T extends NullableUnionSchema> = Omit<
 };
 
 /**
- * Drop a `null` sentinel from an `enum`, since the collapse has already moved
- * that fact onto `nullable`.
+ * What {@link stripNullEnumMembers} concluded about an `enum`.
+ *
+ * `"only-null"` is a distinct outcome rather than "an empty list" because it
+ * has to **stop the collapse**, not just empty a field. See below.
+ */
+type EnumStrip =
+  | { kind: "unchanged" }
+  | { kind: "filtered"; members: unknown[]; names?: unknown }
+  | { kind: "only-null" };
+
+/**
+ * Drop `null` members from an `enum`, keeping the parallel `enumNames` aligned.
  *
  * The `type: [T, "null"]` encoding keeps its keywords at the top level, so a
  * nullable enum written that way carries the null *inside* the list:
- * `{ type: ["string", "null"], enum: ["envio", "recebimento", null] }`. Leaving
- * it there breaks both renderers in different ways — the web dispatcher would
- * hand `null` to Mantine as option data, and the TUI's all-strings check would
- * reject the whole enum and fall back to a plain text field. Neither is the
- * dropdown the schema is asking for.
+ * `{ type: ["string", "null"], enum: ["envio", "recebimento", null] }`. The
+ * collapse has already moved that fact onto `nullable`, so leaving the sentinel
+ * in the list breaks both renderers in different ways — the web dispatcher
+ * would hand `null` to Mantine as option data, and the TUI's all-strings check
+ * would reject the whole enum and fall back to a plain text field.
  *
- * Returns `undefined` when nothing but `null` was in the list: an enum of only
- * `null` permits no value a dropdown could offer, so the field is better served
- * by its plain widget than by an empty select.
+ * **`enumNames` is filtered by the same indices, not left alone.** It is a
+ * positional parallel array, and both renderers discard labels outright when
+ * the two lengths disagree — so stripping one without the other silently loses
+ * every label rather than just the dropped one's.
+ *
+ * **An enum of nothing but `null` reports `"only-null"` so the caller declines
+ * to collapse at all.** Emitting `enum: undefined` instead would turn a schema
+ * permitting *only* `null` into a plain string field that accepts arbitrary
+ * text — trading a cosmetic problem for a correctness one, since the form would
+ * then invite values the schema forbids. Left uncollapsed it renders through
+ * the JSON editor, which represents it honestly.
  */
-function stripNullFromEnum(value: unknown): unknown[] | undefined {
-  if (!Array.isArray(value)) {
-    return undefined;
+function stripNullEnumMembers(members: unknown, names: unknown): EnumStrip {
+  if (!Array.isArray(members)) {
+    return { kind: "unchanged" };
   }
-  const members = value.filter((member) => member !== null);
-  return members.length > 0 ? members : undefined;
+  const kept = members
+    .map((member, index) => ({ member, index }))
+    .filter((entry) => entry.member !== null);
+  if (kept.length === members.length) {
+    return { kind: "unchanged" };
+  }
+  if (kept.length === 0) {
+    return { kind: "only-null" };
+  }
+  // Only realign names that were positionally parallel to begin with; a
+  // mismatched list is already ignored by both renderers, so re-indexing it
+  // would invent an alignment the server never declared.
+  const aligned =
+    Array.isArray(names) && names.length === members.length
+      ? kept.map((entry) => names[entry.index])
+      : names;
+  return {
+    kind: "filtered",
+    members: kept.map((entry) => entry.member),
+    names: aligned,
+  };
 }
 
 /**
@@ -133,23 +170,32 @@ function stripNullFromEnum(value: unknown): unknown[] | undefined {
  * deferred while `T` is open — so TS cannot verify the two line up even though
  * every field is set right here. Isolated in this one function so the exported
  * signature carries the contract and nothing else has to assert it.
+ *
+ * Returns `null` when the merged schema turns out to permit only `null`, which
+ * is not collapsible; see {@link stripNullEnumMembers}.
  */
 function collapsed<T extends NullableUnionSchema>(
   schema: T,
   branch: Record<string, unknown> | undefined,
   type: RenderableType,
-): NormalizedNullableUnion<T> {
+): NormalizedNullableUnion<T> | null {
   const merged = { ...schema, ...branch };
+  // Read after the merge so the branch's list wins when it has one.
+  const strip = stripNullEnumMembers(
+    merged.enum,
+    (merged as { enumNames?: unknown }).enumNames,
+  );
+  if (strip.kind === "only-null") {
+    return null;
+  }
   return {
     ...merged,
     type,
     anyOf: undefined,
     nullable: true,
-    // `enum` is read after the spread so the branch's list wins when it has
-    // one, and the null sentinel is stripped either way.
-    ...(merged.enum === undefined
-      ? {}
-      : { enum: stripNullFromEnum(merged.enum) }),
+    ...(strip.kind === "filtered"
+      ? { enum: strip.members, enumNames: strip.names }
+      : {}),
   } as NormalizedNullableUnion<T>;
 }
 
@@ -233,7 +279,12 @@ export function normalizeNullableUnion<T extends NullableUnionSchema>(
       const type =
         branch.type ?? (isStringEnum(branch.enum) ? "string" : undefined);
       if (isRenderableType(type)) {
-        return collapsed(schema, branch, type);
+        // `null` when the merged enum permits only `null`, which is not
+        // collapsible — fall through and return the schema by identity.
+        const result = collapsed(schema, branch, type);
+        if (result !== null) {
+          return result;
+        }
       }
     }
   }
@@ -245,7 +296,10 @@ export function normalizeNullableUnion<T extends NullableUnionSchema>(
   ) {
     const type = schema.type.find((member) => member !== "null");
     if (isRenderableType(type)) {
-      return collapsed(schema, undefined, type);
+      const result = collapsed(schema, undefined, type);
+      if (result !== null) {
+        return result;
+      }
     }
   }
 

@@ -277,14 +277,52 @@ describe("normalizeNullableUnion", () => {
     });
   });
 
-  it("drops an enum that held nothing but null", () => {
-    // No value a dropdown could offer, so the field is better served by its
-    // plain widget than by an empty select.
+  // Declining is the point: emitting `enum: undefined` would turn a schema that
+  // permits *only* `null` into a plain string field accepting arbitrary text,
+  // inviting values the schema forbids. Left uncollapsed it renders through the
+  // JSON editor, which represents it honestly.
+  it("declines to collapse an enum that held nothing but null", () => {
+    const schema = { type: ["string", "null"], enum: [null] };
+    expect(normalizeNullableUnion(schema)).toBe(schema);
+  });
+
+  it("declines the same way on the anyOf encoding", () => {
+    const schema = {
+      anyOf: [{ type: "string", enum: [null] }, { type: "null" as const }],
+    };
+    expect(normalizeNullableUnion(schema)).toBe(schema);
+  });
+
+  // The parallel `enumNames` is filtered by the same indices. Both renderers
+  // discard labels outright on a length mismatch, so stripping one without the
+  // other would silently lose every label, not just the dropped one's.
+  it("keeps enumNames aligned when stripping the null member", () => {
     expect(
-      normalizeNullableUnion({ type: ["string", "null"], enum: [null] }),
+      normalizeNullableUnion({
+        type: ["string", "null"],
+        enum: ["a", null, "b"],
+        enumNames: ["Alpha", "None", "Beta"],
+      }),
     ).toEqual({
       type: "string",
-      enum: undefined,
+      enum: ["a", "b"],
+      enumNames: ["Alpha", "Beta"],
+      anyOf: undefined,
+      nullable: true,
+    });
+  });
+
+  it("leaves a mismatched enumNames alone rather than inventing an alignment", () => {
+    expect(
+      normalizeNullableUnion({
+        type: ["string", "null"],
+        enum: ["a", null],
+        enumNames: ["Alpha"],
+      }),
+    ).toEqual({
+      type: "string",
+      enum: ["a"],
+      enumNames: ["Alpha"],
       anyOf: undefined,
       nullable: true,
     });

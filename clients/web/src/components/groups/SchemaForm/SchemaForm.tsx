@@ -146,6 +146,88 @@ function toNumericValue(raw: string | number): number | undefined {
   return Number.isSafeInteger(Math.trunc(parsed)) ? parsed : undefined;
 }
 
+/** Parse editor text, reporting `undefined` for anything that is not JSON yet. */
+function parseJsonDraft(text: string): unknown {
+  if (text.trim() === "") {
+    return undefined;
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Structural equality for the draft/value re-sync, via canonical JSON. */
+function isSameJson(a: unknown, b: unknown): boolean {
+  if (a === undefined || b === undefined) {
+    return a === b;
+  }
+  return serializeJson(a) === serializeJson(b);
+}
+
+interface SchemaJsonFieldProps {
+  label: string;
+  description?: string;
+  withAsterisk: boolean;
+  disabled: boolean;
+  value: unknown;
+  onChange: (value: unknown) => void;
+}
+
+/**
+ * A `JsonInput` that keeps the text the user is typing, not just the value it
+ * currently parses to.
+ *
+ * This field used to drive the box straight off the parent's value and, when
+ * the text failed `JSON.parse`, store the **raw text** back as the value — which
+ * the next render re-`JSON.stringify`d, adding a layer of escaping per
+ * keystroke. Typing `[` gave `"["`, then `"\"[\""`, and the field was unusable
+ * within a few characters. That compounding escape is the original #1928
+ * symptom, and it lived in this fallback rather than in the dispatch.
+ *
+ * Routing nullable fields to real widgets removed the common way of *landing*
+ * here, but it did not fix the editor — and #2007's fix deliberately sends a
+ * union of object shapes to it, so the editor itself has to be typeable. Hence
+ * the same split `SchemaNumberInput` uses: the raw text is the source of truth
+ * for what is *displayed*, while the parent only ever sees parsed JSON.
+ *
+ * While the text is mid-edit and does not parse, the parent is told
+ * `undefined` rather than handed the text. An inspector must not report a value
+ * it cannot send, and `undefined` is how "no value supplied" is spelled
+ * everywhere else in this form.
+ */
+function SchemaJsonField({
+  value,
+  onChange,
+  ...inputProps
+}: SchemaJsonFieldProps) {
+  const [draft, setDraft] = useState(() =>
+    value === undefined ? "" : serializeJson(value),
+  );
+
+  // Re-sync only when the parent's value genuinely diverges from what the draft
+  // parses to, which leaves an external reset (a cleared form, a loaded
+  // example) working while an in-progress `[` — whose parse is `undefined`,
+  // matching the `undefined` we just emitted — is left alone.
+  useValueChange(value, (next) => {
+    if (!isSameJson(parseJsonDraft(draft), next)) {
+      setDraft(next === undefined ? "" : serializeJson(next));
+    }
+  });
+
+  return (
+    <SchemaJsonInput
+      {...inputProps}
+      value={draft}
+      onChange={(text) => {
+        setDraft(text);
+        onChange(parseJsonDraft(text));
+      }}
+    />
+  );
+}
+
 interface SchemaNumberInputProps {
   label: string;
   description?: string;
@@ -440,20 +522,16 @@ export function SchemaForm({
 
     // fallback: JsonInput for complex schemas
     return (
-      <SchemaJsonInput
-        key={fieldName}
+      <SchemaJsonField
+        // Holds local draft state, so — like the number field — it has to be
+        // remounted when `resetKey` says the form moved to another entity.
+        key={resetKey === undefined ? fieldName : `${resetKey}:${fieldName}`}
         label={label}
         description={description}
         withAsterisk={isRequired}
         disabled={disabled}
-        value={rawValue !== undefined ? serializeJson(rawValue) : ""}
-        onChange={(val) => {
-          try {
-            handleFieldChange(fieldName, JSON.parse(val));
-          } catch {
-            handleFieldChange(fieldName, val);
-          }
-        }}
+        value={rawValue}
+        onChange={(val) => handleFieldChange(fieldName, val)}
       />
     );
   }

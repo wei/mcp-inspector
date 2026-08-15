@@ -2,6 +2,7 @@ import { useState } from "react";
 import { describe, it, expect, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import type { InspectorFormSchema } from "../../../utils/jsonUtils";
+import { toFormSchema } from "../../../utils/jsonUtils";
 import {
   fireEvent,
   renderWithMantine,
@@ -737,7 +738,13 @@ describe("SchemaForm", () => {
     expect(lastCall.config).toEqual([1, 2]);
   });
 
-  it("falls back to passing raw string to onChange when JSON is invalid in JsonInput", async () => {
+  // The JSON field used to store unparseable text back as the *value*, which
+  // the next render re-stringified — so each keystroke added a layer of
+  // escaping (`[` → `"["` → `"\"[\""`). That compounding escape is #1928's
+  // original symptom, and it lived here rather than in the dispatch. It matters
+  // more since #2007, whose fix deliberately routes object unions to this
+  // editor: a fallback nobody can type into is not a fallback.
+  it("reports no value, not raw text, while the JSON is mid-edit", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
     const schema: InspectorFormSchema = {
@@ -751,9 +758,59 @@ describe("SchemaForm", () => {
     );
     const jsonInput = screen.getByLabelText(/Config/) as HTMLTextAreaElement;
     await user.type(jsonInput, "x");
-    expect(onChange).toHaveBeenCalled();
-    const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1][0];
-    expect(typeof lastCall.config).toBe("string");
+    expect(onChange).toHaveBeenLastCalledWith({ config: undefined });
+  });
+
+  it("lets an array literal be typed one character at a time", async () => {
+    const user = userEvent.setup();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        config: { type: "array", title: "Config" },
+      },
+    };
+    // Drive the real controlled loop: each onChange feeds straight back in as
+    // `values`, which is what turned the old handler's raw-text write into a
+    // compounding re-escape.
+    function Harness() {
+      const [values, setValues] = useState<Record<string, unknown>>({});
+      return (
+        <SchemaForm schema={schema} values={values} onChange={setValues} />
+      );
+    }
+    renderWithMantine(<Harness />);
+
+    const jsonInput = screen.getByLabelText(/Config/) as HTMLTextAreaElement;
+    // `[` is a userEvent keyboard descriptor, so it is escaped as `[[`.
+    await user.type(jsonInput, '[[1,"a"]');
+
+    // The box shows exactly what was typed — no injected quotes or backslashes.
+    expect(jsonInput.value).toBe('[1,"a"]');
+  });
+
+  it("keeps an in-progress draft visible instead of rewriting it", async () => {
+    const user = userEvent.setup();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        config: { type: "array", title: "Config" },
+      },
+    };
+    function Harness() {
+      const [values, setValues] = useState<Record<string, unknown>>({});
+      return (
+        <SchemaForm schema={schema} values={values} onChange={setValues} />
+      );
+    }
+    renderWithMantine(<Harness />);
+
+    const jsonInput = screen.getByLabelText(/Config/) as HTMLTextAreaElement;
+    await user.type(jsonInput, "[[1,");
+    // Unparseable so far, and it must survive the re-render untouched.
+    expect(jsonInput.value).toBe("[1,");
+
+    await user.type(jsonInput, "2]");
+    expect(jsonInput.value).toBe("[1,2]");
   });
 
   it("uses default values when value is undefined", () => {
@@ -891,18 +948,23 @@ describe("SchemaForm nullable unions", () => {
   it("renders a Select for a type: [string, null] enum, without a null option", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
-    const schema: InspectorFormSchema = {
+    // Built through `toFormSchema`, the same narrowing boundary every
+    // production call site uses, rather than cast into `InspectorFormSchema`.
+    // A `null` member is valid JSON Schema but outside that type's `string[]`
+    // `enum`, and this fixture *is* wire data — so the honest way to introduce
+    // it is the wire→form narrow, not a double cast that erases the mismatch.
+    const schema = toFormSchema({
       type: "object",
       properties: {
         direction: {
           title: "Direction",
           type: ["string", "null"],
-          enum: ["envio", "recebimento", null] as unknown as string[],
+          enum: ["envio", "recebimento", null],
         },
       },
-    };
+    });
     renderWithMantine(
-      <SchemaForm schema={schema} values={{}} onChange={onChange} />,
+      <SchemaForm schema={schema!} values={{}} onChange={onChange} />,
     );
     await user.click(screen.getByRole("textbox", { name: "Direction" }));
     const options = await screen.findAllByRole("option", { hidden: true });
