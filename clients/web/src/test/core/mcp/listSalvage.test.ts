@@ -132,6 +132,20 @@ describe("ModernResultEnvelopeSchema", () => {
     ).toBe(true);
   });
 
+  it("requires ttlMs to be a non-negative integer, as the codec does", () => {
+    // A looser `z.number()` would accept `-1` / `0.5`, so a response with a bad
+    // envelope AND one bad entry would salvage and hide the envelope violation.
+    for (const ttlMs of [-1, 0.5]) {
+      expect(
+        ModernResultEnvelopeSchema.safeParse({
+          resultType: "complete",
+          ttlMs,
+          cacheScope: "public",
+        }).success,
+      ).toBe(false);
+    }
+  });
+
   it("rejects a modern result missing the envelope the codec would enforce", () => {
     // The raw-wire salvage path goes around that codec, so a response missing
     // its cache hints AND carrying a bad entry must not salvage.

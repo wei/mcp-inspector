@@ -25,6 +25,8 @@
 
 import { z } from "zod/v4";
 import { SdkError, SdkErrorCode } from "@modelcontextprotocol/client";
+import { ToolSchema } from "@modelcontextprotocol/core";
+import type { Tool } from "@modelcontextprotocol/client";
 
 /**
  * One entry the Inspector dropped from a list result because it failed the
@@ -140,7 +142,10 @@ export function nextCursorOf(page: unknown): string | undefined {
  */
 export const ModernResultEnvelopeSchema = z.looseObject({
   resultType: z.literal("complete"),
-  ttlMs: z.number(),
+  // A non-negative INTEGER, matching the codec: `ttlMs: -1` or `0.5` is an
+  // envelope violation the strict path rejects, and accepting it here on the
+  // strength of an unrelated bad entry would hide it.
+  ttlMs: z.int().min(0),
   cacheScope: z.enum(["public", "private"]),
 });
 
@@ -260,4 +265,41 @@ export function summarizeMalformed(malformed: MalformedListItem[]): string {
   return `Dropped ${malformed.length} malformed ${
     malformed.length === 1 ? "entry" : "entries"
   } — ${where}: ${first.reason}${rest}`;
+}
+
+/**
+ * The item contract for `tools/list` on a given era.
+ *
+ * The public `ToolSchema` is era-NEUTRAL, and the negotiated era's wire schema
+ * is stricter in ways the SDK does not export. Validating candidates against
+ * the neutral schema alone would let the fallback keep an entry the strict path
+ * refused — an entry the user would then see, and could call, on a connection
+ * whose era says it isn't valid. The two known divergences (verified against
+ * SDK 2.0.0 by `listSalvage-era.test.ts`, which fails if either changes):
+ *
+ * - **legacy (2025)** requires `outputSchema.type === "object"`; the neutral
+ *   schema accepts any object, so a tool with `outputSchema: { type: "array" }`
+ *   would survive salvage while the strict parse rejects the whole page.
+ * - **modern (2026)** deletes `execution`, and the strict path STRIPS it. Left
+ *   in place, a salvaged tool would carry a field the era doesn't have, and the
+ *   UI would render capability the connection can't honor.
+ *
+ * Replicating rules that live in the SDK's internals is a real cost, taken
+ * deliberately: the alternative is a fallback that is quietly more permissive
+ * than the path it stands in for. The tests pin each rule to observed SDK
+ * behavior, so a divergence that closes (or widens) fails loudly rather than
+ * rotting.
+ */
+export function toolItemSchemaForEra(isModern: boolean): z.ZodType<Tool> {
+  if (isModern) {
+    // `execution` is not part of the 2026 wire shape; drop it as the codec does.
+    return ToolSchema.transform((tool) => {
+      if (tool.execution === undefined) return tool;
+      const { execution: _execution, ...rest } = tool;
+      return rest;
+    });
+  }
+  return ToolSchema.extend({
+    outputSchema: z.looseObject({ type: z.literal("object") }).optional(),
+  });
 }

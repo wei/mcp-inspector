@@ -161,8 +161,8 @@ import {
   ListPromptsResultSchema,
   // Per-primitive item schemas — the salvage fallback validates a list's
   // entries one at a time with these when the whole-result parse rejects
-  // (#1909, see `listAllSalvaging`).
-  ToolSchema,
+  // (#1909, see `listAllSalvaging`). Tools go through `toolItemSchemaForEra`
+  // instead, since the neutral schema is looser than the negotiated era's.
   ResourceSchema,
   ResourceTemplateSchema,
   PromptSchema,
@@ -174,6 +174,7 @@ import { validateToolOutput } from "./toolOutputValidation.js";
 import {
   ModernResultEnvelopeSchema,
   isSalvageableRejection,
+  toolItemSchemaForEra,
   nextCursorOf,
   lenientListPageSchema,
   rawItemsOf,
@@ -3190,7 +3191,9 @@ export class InspectorClient extends InspectorClientEventTarget {
       method: "tools/list",
       itemsKey: "tools",
       resultSchema: ListToolsResultSchema,
-      itemSchema: ToolSchema,
+      // Era-aware: the neutral `ToolSchema` is more permissive than the
+      // negotiated era's wire schema — see `toolItemSchemaForEra`.
+      itemSchema: toolItemSchemaForEra(this.isModernEra()),
       metadata: options?.metadata,
       finalize: (salvaged) => this.excludeInvalidXMcpHeaderTools(salvaged),
       aggregate: async () => [
@@ -3656,7 +3659,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       const { valid, malformed } = salvageListItems({
         method: "tools/list",
         items,
-        schema: ToolSchema,
+        schema: toolItemSchemaForEra(this.isModernEra()),
       });
       if (rejectedResponseId !== undefined && malformed.length > 0) {
         this.dispatchTypedEvent("responseRejected", {
