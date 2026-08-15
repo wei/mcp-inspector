@@ -344,9 +344,11 @@ npm version <major|minor|patch> --no-git-tag-version   # bump only, no tag
 
 ```bash
 git checkout main && git pull
-git tag v<x.y.z> && git push origin v<x.y.z>
+git tag <x.y.z> && git push origin <x.y.z>
 # then draft & publish a GitHub Release for that tag → triggers `publish`
 ```
+
+⚠️ **No `v` prefix.** This repo's release tags are bare `x.y.z` — `2.2.0`, `2.1.0`, `2.0.0` — so tag `2.3.0`, not `v2.3.0`. Note npm's own `tag-version-prefix` defaults to `v` and the repo sets no `.npmrc`, so a bare `npm version` would have produced a `v`-prefixed tag that does not match the convention. Tagging by hand (step 3) is what keeps it right. The workflow's assert step strips a leading `v` before comparing, so a `v`-prefixed tag would still publish — it would just be inconsistent with every previous release.
 
 The release's target commit selects which workflow runs, so this only publishes when a release is cut from a commit carrying this (v2) workflow.
 
