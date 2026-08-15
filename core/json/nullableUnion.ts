@@ -102,6 +102,30 @@ export type NormalizedNullableUnion<T extends NullableUnionSchema> = Omit<
 };
 
 /**
+ * Drop a `null` sentinel from an `enum`, since the collapse has already moved
+ * that fact onto `nullable`.
+ *
+ * The `type: [T, "null"]` encoding keeps its keywords at the top level, so a
+ * nullable enum written that way carries the null *inside* the list:
+ * `{ type: ["string", "null"], enum: ["envio", "recebimento", null] }`. Leaving
+ * it there breaks both renderers in different ways — the web dispatcher would
+ * hand `null` to Mantine as option data, and the TUI's all-strings check would
+ * reject the whole enum and fall back to a plain text field. Neither is the
+ * dropdown the schema is asking for.
+ *
+ * Returns `undefined` when nothing but `null` was in the list: an enum of only
+ * `null` permits no value a dropdown could offer, so the field is better served
+ * by its plain widget than by an empty select.
+ */
+function stripNullFromEnum(value: unknown): unknown[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const members = value.filter((member) => member !== null);
+  return members.length > 0 ? members : undefined;
+}
+
+/**
  * Build the collapsed schema.
  *
  * The assertion is needed because the spread merges an unresolved generic `T`
@@ -115,12 +139,17 @@ function collapsed<T extends NullableUnionSchema>(
   branch: Record<string, unknown> | undefined,
   type: RenderableType,
 ): NormalizedNullableUnion<T> {
+  const merged = { ...schema, ...branch };
   return {
-    ...schema,
-    ...branch,
+    ...merged,
     type,
     anyOf: undefined,
     nullable: true,
+    // `enum` is read after the spread so the branch's list wins when it has
+    // one, and the null sentinel is stripped either way.
+    ...(merged.enum === undefined
+      ? {}
+      : { enum: stripNullFromEnum(merged.enum) }),
   } as NormalizedNullableUnion<T>;
 }
 

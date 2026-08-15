@@ -246,6 +246,64 @@ describe("normalizeNullableUnion", () => {
     });
   });
 
+  // The `type: [T, "null"]` encoding keeps its keywords at the top level, so a
+  // nullable enum written that way carries the null *inside* the list. Leaving
+  // it there hands `null` to Mantine as option data, and makes the TUI's
+  // all-strings check reject the enum and fall back to a text field.
+  it("strips the null sentinel from a type-array nullable enum", () => {
+    expect(
+      normalizeNullableUnion({
+        type: ["string", "null"],
+        enum: ["envio", "recebimento", null],
+      }),
+    ).toEqual({
+      type: "string",
+      enum: ["envio", "recebimento"],
+      anyOf: undefined,
+      nullable: true,
+    });
+  });
+
+  it("strips a null sentinel hoisted off an anyOf branch too", () => {
+    expect(
+      normalizeNullableUnion({
+        anyOf: [{ type: "string", enum: ["a", null] }, { type: "null" }],
+      }),
+    ).toEqual({
+      type: "string",
+      enum: ["a"],
+      anyOf: undefined,
+      nullable: true,
+    });
+  });
+
+  it("drops an enum that held nothing but null", () => {
+    // No value a dropdown could offer, so the field is better served by its
+    // plain widget than by an empty select.
+    expect(
+      normalizeNullableUnion({ type: ["string", "null"], enum: [null] }),
+    ).toEqual({
+      type: "string",
+      enum: undefined,
+      anyOf: undefined,
+      nullable: true,
+    });
+  });
+
+  it("leaves a null-free enum untouched", () => {
+    expect(
+      normalizeNullableUnion({
+        type: ["string", "null"],
+        enum: ["a", "b"],
+      }),
+    ).toEqual({
+      type: "string",
+      enum: ["a", "b"],
+      anyOf: undefined,
+      nullable: true,
+    });
+  });
+
   it("normalizes type array array|null", () => {
     expect(normalizeNullableUnion({ type: ["array", "null"] })).toEqual({
       type: "array",

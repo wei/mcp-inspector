@@ -293,6 +293,29 @@ describe("schemaToForm", () => {
       });
     });
 
+    // With the null left in the list, the all-strings check would reject the
+    // enum and this would degrade to a plain text field.
+    it("renders a select for a type: [string, null] enum, null stripped", () => {
+      const form = schemaToForm(
+        {
+          properties: {
+            direction: {
+              type: ["string", "null"],
+              enum: ["envio", "recebimento", null],
+            },
+          },
+        },
+        "typeArrayNullableEnum",
+      );
+      expect(form.sections[0]!.fields[0]).toMatchObject({
+        type: "select",
+        options: [
+          { label: "envio", value: "envio" },
+          { label: "recebimento", value: "recebimento" },
+        ],
+      });
+    });
+
     it("collapses the type: [T, null] encoding too", () => {
       const form = schemaToForm(
         {

@@ -886,6 +886,34 @@ describe("SchemaForm nullable unions", () => {
     ).not.toBeInTheDocument();
   });
 
+  // The other supported nullable encoding: keywords stay at the top level, so
+  // the null sentinel sits inside the enum list rather than on a branch.
+  it("renders a Select for a type: [string, null] enum, without a null option", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        direction: {
+          title: "Direction",
+          type: ["string", "null"],
+          enum: ["envio", "recebimento", null] as unknown as string[],
+        },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={onChange} />,
+    );
+    await user.click(screen.getByRole("textbox", { name: "Direction" }));
+    const options = await screen.findAllByRole("option", { hidden: true });
+    expect(options.map((option) => option.textContent)).toEqual([
+      "envio",
+      "recebimento",
+    ]);
+    await user.click(options[0]);
+    expect(onChange).toHaveBeenCalledWith({ direction: "envio" });
+  });
+
   it("renders a TextInput for a type: [string, null] field", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
