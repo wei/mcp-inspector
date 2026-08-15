@@ -221,6 +221,42 @@ describe("collectSchemaDefaults", () => {
   it("returns an empty object when the schema has no properties", () => {
     expect(collectSchemaDefaults({ type: "object" })).toEqual({});
   });
+
+  // The form normalizes a nullable union before rendering, so this has to as
+  // well: a nested object's `properties` live on the union's surviving branch,
+  // and a default only visible there would be displayed but never submitted.
+  it("collects defaults hoisted out of a nullable object union", () => {
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        profile: {
+          anyOf: [
+            {
+              type: "object",
+              properties: { nick: { type: "string", default: "ada" } },
+            },
+            { type: "null" },
+          ],
+        },
+      },
+    };
+    expect(collectSchemaDefaults(schema)).toEqual({
+      profile: { nick: "ada" },
+    });
+  });
+
+  it("keeps a default declared on the union wrapper itself", () => {
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        direction: {
+          default: "envio",
+          anyOf: [{ type: "string", enum: ["envio"] }, { type: "null" }],
+        },
+      },
+    };
+    expect(collectSchemaDefaults(schema)).toEqual({ direction: "envio" });
+  });
 });
 
 describe("hasMissingRequiredFields", () => {
@@ -246,5 +282,45 @@ describe("hasMissingRequiredFields", () => {
     expect(hasMissingRequiredFields(schema, { name: "Ada", age: "" })).toBe(
       false,
     );
+  });
+
+  // JSON Schema `required` constrains presence, not content — so an explicit
+  // `null` satisfies a required field whose schema admits null. Since #1928 the
+  // user can produce exactly that by clearing a nullable enum, and treating it
+  // as missing would disable submit on a value the schema calls valid.
+  it("accepts an explicit null for a required field that admits null", () => {
+    const nullable: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        direction: {
+          anyOf: [{ type: "string", enum: ["envio"] }, { type: "null" }],
+        },
+      },
+      required: ["direction"],
+    };
+    expect(hasMissingRequiredFields(nullable, { direction: null })).toBe(false);
+    expect(hasMissingRequiredFields(nullable, {})).toBe(true);
+  });
+
+  it("accepts an explicit null for a required type: [T, null] field", () => {
+    const nullable: InspectorFormSchema = {
+      type: "object",
+      properties: { note: { type: ["string", "null"] } },
+      required: ["note"],
+    };
+    expect(hasMissingRequiredFields(nullable, { note: null })).toBe(false);
+  });
+
+  it("still rejects null for a required field whose schema is not nullable", () => {
+    expect(hasMissingRequiredFields(schema, { name: null })).toBe(true);
+  });
+
+  it("rejects null for a required field the schema does not describe", () => {
+    const undescribed: InspectorFormSchema = {
+      type: "object",
+      properties: {},
+      required: ["ghost"],
+    };
+    expect(hasMissingRequiredFields(undescribed, { ghost: null })).toBe(true);
   });
 });

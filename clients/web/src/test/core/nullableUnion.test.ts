@@ -144,6 +144,39 @@ describe("normalizeNullableUnion", () => {
     });
   });
 
+  // JSON Schema's `enum` is untyped, so a typeless branch only implies strings
+  // when every member is one. Guessing otherwise would hand a number to a
+  // renderer that declared the option list `string[]`.
+  it("does not infer string for a typeless non-string enum branch", () => {
+    const schema = { anyOf: [{ enum: [1, 2] }, { type: "null" as const }] };
+    expect(normalizeNullableUnion(schema)).toBe(schema);
+  });
+
+  it("does not infer string for a typeless mixed enum branch", () => {
+    const schema = { anyOf: [{ enum: ["a", 2] }, { type: "null" as const }] };
+    expect(normalizeNullableUnion(schema)).toBe(schema);
+  });
+
+  it("does not infer string for a typeless empty enum branch", () => {
+    const schema = { anyOf: [{ enum: [] }, { type: "null" as const }] };
+    expect(normalizeNullableUnion(schema)).toBe(schema);
+  });
+
+  // An explicit `type` is authoritative — the enum members are the server's
+  // problem at that point, not an inference this function is making.
+  it("still collapses a non-string enum branch that declares its type", () => {
+    expect(
+      normalizeNullableUnion({
+        anyOf: [{ type: "number", enum: [1, 2] }, { type: "null" }],
+      }),
+    ).toEqual({
+      type: "number",
+      enum: [1, 2],
+      anyOf: undefined,
+      nullable: true,
+    });
+  });
+
   it("infers string for a typeless enum branch", () => {
     expect(
       normalizeNullableUnion({

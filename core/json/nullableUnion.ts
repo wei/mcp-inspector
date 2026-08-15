@@ -25,7 +25,8 @@ const RENDERABLE_TYPES = [
   "object",
 ] as const;
 
-type RenderableType = (typeof RENDERABLE_TYPES)[number];
+/** A `type` name the collapse is willing to produce. */
+export type RenderableType = (typeof RENDERABLE_TYPES)[number];
 
 function isRenderableType(type: unknown): type is RenderableType {
   return RENDERABLE_TYPES.includes(type as RenderableType);
@@ -49,6 +50,71 @@ function toBranch(value: unknown): Record<string, unknown> | null {
     return null;
   }
   return value as Record<string, unknown>;
+}
+
+/**
+ * Whether a branch's `enum` is one a *typeless* branch can be read as a string
+ * enum.
+ *
+ * JSON Schema's `enum` is untyped — `[1, 2]`, `[true, false]`, and `[null]` are
+ * all legal — so a bare `{ enum: [...] }` does **not** imply strings. Guessing
+ * `"string"` for a numeric enum would hand non-strings to a renderer that has
+ * declared them `string[]`: the web `Select` would receive numbers, and the TUI
+ * would `String(...)` them and submit `"1"` where the server expects `1`. So
+ * only an all-string enum earns the inference; anything else stays on the
+ * fallback path, which renders the value honestly as JSON.
+ */
+function isStringEnum(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every((member) => typeof member === "string")
+  );
+}
+
+/**
+ * The result of a collapse that actually matched. Spelled out rather than
+ * reusing `T` because the collapse genuinely changes two of `T`'s fields:
+ * `type` becomes a single renderable name (never an array, never `"null"`),
+ * and `anyOf` is cleared. Returning `T` for these would let a caller whose `T`
+ * types `type` as an array go on treating it as one after it has become a
+ * string, or dereference an `anyOf` that is now `undefined`.
+ *
+ * Note this cannot make the *hoist* sound: an `anyOf` branch is `unknown`, so
+ * any keyword lifted off it is whatever the server sent, however `T` declares
+ * it. {@link isStringEnum} validates the one keyword the renderers dereference
+ * as a typed array (`enum`); the rest reach widgets that read them defensively.
+ */
+export type NormalizedNullableUnion<T extends NullableUnionSchema> = Omit<
+  T,
+  "type" | "anyOf"
+> & {
+  type?: RenderableType;
+  anyOf?: undefined;
+  nullable?: boolean;
+};
+
+/**
+ * Build the collapsed schema.
+ *
+ * The assertion is needed because the spread merges an unresolved generic `T`
+ * with an `unknown` branch, and `NormalizedNullableUnion<T>`'s `Omit` stays
+ * deferred while `T` is open — so TS cannot verify the two line up even though
+ * every field is set right here. Isolated in this one function so the exported
+ * signature carries the contract and nothing else has to assert it.
+ */
+function collapsed<T extends NullableUnionSchema>(
+  schema: T,
+  branch: Record<string, unknown> | undefined,
+  type: RenderableType,
+): NormalizedNullableUnion<T> {
+  return {
+    ...schema,
+    ...branch,
+    type,
+    anyOf: undefined,
+    nullable: true,
+  } as NormalizedNullableUnion<T>;
 }
 
 /**
@@ -76,7 +142,7 @@ function toBranch(value: unknown): Record<string, unknown> | null {
  */
 export function normalizeNullableUnion<T extends NullableUnionSchema>(
   schema: T,
-): T {
+): T | NormalizedNullableUnion<T> {
   if (schema.anyOf?.length === 2) {
     const branches = schema.anyOf.map(toBranch);
     const nullBranch = branches.find((entry) => entry?.type === "null");
@@ -85,21 +151,13 @@ export function normalizeNullableUnion<T extends NullableUnionSchema>(
     );
 
     if (nullBranch && branch) {
-      // A bare `{ enum: [...] }` branch carries no `type`; JSON Schema allows
-      // that, and every value such a schema admits here is a string.
-      const type = branch.type ?? (branch.enum ? "string" : undefined);
+      // A branch may carry an `enum` and no `type`; JSON Schema allows that, and
+      // an all-string enum is unambiguously a string field. See isStringEnum for
+      // why a non-string enum deliberately does not get the same treatment.
+      const type =
+        branch.type ?? (isStringEnum(branch.enum) ? "string" : undefined);
       if (isRenderableType(type)) {
-        // The result is `schema` with `type` narrowed to a value it already
-        // admitted, the branch's keywords merged in, and `nullable` added. TS
-        // cannot express "a spread of T and a subset of T is still a T", and a
-        // non-generic return would force every caller to cast instead.
-        return {
-          ...schema,
-          ...branch,
-          type,
-          anyOf: undefined,
-          nullable: true,
-        } as T;
+        return collapsed(schema, branch, type);
       }
     }
   }
@@ -111,8 +169,7 @@ export function normalizeNullableUnion<T extends NullableUnionSchema>(
   ) {
     const type = schema.type.find((member) => member !== "null");
     if (isRenderableType(type)) {
-      // Same reasoning as above.
-      return { ...schema, type, nullable: true } as T;
+      return collapsed(schema, undefined, type);
     }
   }
 
