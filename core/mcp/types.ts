@@ -919,8 +919,16 @@ export interface InspectorClientOptions {
   pipeStderr?: boolean;
 
   /**
-   * Initial logging level to set after connection (if server supports logging)
-   * If not provided, logging level will not be set automatically
+   * Initial logging level to set after connection, via `logging/setLevel`.
+   * If not provided, the logging level will not be set automatically.
+   *
+   * **Legacy era only (#1990).** `logging/setLevel` is a legacy-era method, and
+   * the modern (2026-07-28) era rejects it — so this option is ignored on a
+   * modern connection even when the server advertises `logging`. Modern has no
+   * session-scoped level at all: the equivalent is the per-request
+   * `io.modelcontextprotocol/logLevel` `_meta` opt-in, configured through the
+   * `modernLogLevel` server setting and applied via
+   * `InspectorClient.setModernLogLevel()`.
    */
   initialLoggingLevel?: LoggingLevel;
 

@@ -1976,8 +1976,23 @@ export class InspectorClient extends InspectorClientEventTarget {
       // capabilities and wipe tools/prompts/resources to empty on every connect.
       await this.fetchServerInfo();
 
-      // Set initial logging level if configured and server supports it
-      if (this.initialLoggingLevel && this.capabilities?.logging) {
+      // Set initial logging level if configured and server supports it.
+      //
+      // Era-gated (#1990): `logging/setLevel` is a legacy-era method, and the
+      // modern wire era rejects it outright — so an unconditional call here
+      // failed the *connect* of every modern server advertising `logging`,
+      // taking down commands that have nothing to do with logging. Modern has
+      // no session-scoped level at all: the equivalent is the per-request
+      // `io.modelcontextprotocol/logLevel` `_meta` opt-in, which
+      // `modernLogLevel` already drives from the server settings (see
+      // {@link setModernLogLevel}). So the right behavior on modern is to skip
+      // this call rather than translate it — `initialLoggingLevel` names a
+      // mechanism that era does not have.
+      if (
+        this.initialLoggingLevel &&
+        this.capabilities?.logging &&
+        this.protocolEra !== "modern"
+      ) {
         await this.client.setLoggingLevel(
           this.initialLoggingLevel,
           this.getRequestOptions(),
