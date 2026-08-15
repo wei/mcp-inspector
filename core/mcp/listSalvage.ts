@@ -79,19 +79,70 @@ export function isClientDecodeRejection(err: unknown): boolean {
 }
 
 /**
- * A list page parsed with everything except pagination left unvalidated.
+ * Whether a decode rejection is one the per-item fallback may attempt at all.
  *
- * `looseObject` keeps the unknown keys, so the primitive array (`tools`,
- * `resources`, `resourceTemplates`, `prompts`) survives as `unknown` for
- * per-item validation. Only `nextCursor` is typed, because the walk itself
- * depends on it — if THAT is malformed the page is unusable and the strict
- * error should stand.
+ * Narrower than {@link isClientDecodeRejection} on purpose, and the difference
+ * is the point: `UnsupportedResultType` says the codec does not recognize what
+ * KIND of frame arrived, so it is not a list result with a bad entry in it —
+ * it is not a list result at all. Salvaging it would report an item-level
+ * reason for a protocol-level failure and hide the real one. Marking the
+ * Protocol entry rejected still applies to both, which is why the broader
+ * predicate stays.
  */
-export const LenientListPageSchema = z.looseObject({
-  nextCursor: z.string().optional(),
-});
+export function isSalvageableRejection(err: unknown): boolean {
+  return SdkError.isInstance(err) && err.code === SdkErrorCode.InvalidResult;
+}
 
-export type LenientListPage = z.infer<typeof LenientListPageSchema>;
+/**
+ * The page schema for a salvage re-walk: the method's REAL result schema with
+ * only its item array relaxed to `unknown[]`.
+ *
+ * Deriving it from the spec schema rather than hand-rolling a permissive object
+ * is what keeps the fallback honest. A hand-rolled `{ nextCursor? }` validates
+ * pagination and nothing else, so a response carrying a malformed item AND an
+ * unrelated top-level violation would be accepted, the item reported, and the
+ * other violation silently dropped along with the strict error that caught it.
+ * Extending the real schema means every top-level field — `_meta`, `nextCursor`,
+ * anything a future revision adds — is still validated; only the entries, which
+ * this whole module exists to check one at a time, are left raw.
+ */
+export function lenientListPageSchema(
+  resultSchema: z.ZodObject,
+  itemsKey: string,
+): z.ZodObject {
+  return resultSchema.extend({ [itemsKey]: z.array(z.unknown()) });
+}
+
+/**
+ * Read the pagination cursor off a leniently-parsed page.
+ *
+ * The page is typed as a plain object because `extend()` on a runtime-selected
+ * key loses the shape, so the fields are read through narrowing helpers rather
+ * than asserted with a cast. The schema has already validated that a present
+ * `nextCursor` is a string; this narrows the static type to match.
+ */
+export function nextCursorOf(page: unknown): string | undefined {
+  if (typeof page !== "object" || page === null) return undefined;
+  const value = (page as Record<string, unknown>).nextCursor;
+  return typeof value === "string" ? value : undefined;
+}
+
+/**
+ * The era envelope a modern (2026-07-28) result must carry, checked separately
+ * because it lives in the SDK's codec rather than in the spec result schema —
+ * and the modern salvage path deliberately goes around that codec.
+ *
+ * Without this, a modern response that is missing its cache hints AND has one
+ * bad entry would salvage: the entry gets reported and the envelope violation
+ * disappears. A failure here means "not salvageable", so the strict error
+ * stands — the safe direction if a future revision changes these rules, since
+ * the strict path remains the authority on what is valid.
+ */
+export const ModernResultEnvelopeSchema = z.looseObject({
+  resultType: z.literal("complete"),
+  ttlMs: z.number(),
+  cacheScope: z.enum(["public", "private"]),
+});
 
 /**
  * Read the primitive array out of a leniently-parsed page.
@@ -104,9 +155,10 @@ export type LenientListPage = z.infer<typeof LenientListPageSchema>;
  * that was correct about it is discarded.
  */
 export function rawItemsOf(
-  page: LenientListPage,
+  page: unknown,
   itemsKey: string,
 ): unknown[] | undefined {
+  if (typeof page !== "object" || page === null) return undefined;
   const value = (page as Record<string, unknown>)[itemsKey];
   return Array.isArray(value) ? value : undefined;
 }

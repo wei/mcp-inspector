@@ -172,8 +172,10 @@ import { AjvJsonSchemaValidator } from "@modelcontextprotocol/client/validators/
 import { z } from "zod/v4";
 import { validateToolOutput } from "./toolOutputValidation.js";
 import {
-  LenientListPageSchema,
-  isClientDecodeRejection,
+  ModernResultEnvelopeSchema,
+  isSalvageableRejection,
+  nextCursorOf,
+  lenientListPageSchema,
   rawItemsOf,
   salvageListItems,
   summarizeMalformed,
@@ -3187,6 +3189,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     const tools = await this.listAllSalvaging({
       method: "tools/list",
       itemsKey: "tools",
+      resultSchema: ListToolsResultSchema,
       itemSchema: ToolSchema,
       metadata: options?.metadata,
       finalize: (salvaged) => this.excludeInvalidXMcpHeaderTools(salvaged),
@@ -3254,6 +3257,27 @@ export class InspectorClient extends InspectorClientEventTarget {
     this.dispatchTypedEvent("responseRejected", { id, reason });
   }
 
+  /**
+   * Put the method's response correlation back where it was before a salvage
+   * re-walk, so a caller that goes on to mark the failure still marks the
+   * ORIGINAL rejected response.
+   *
+   * The re-walk answers the same method, so on any rethrow path the map points
+   * at a lenient page that succeeded. `ManagedListState.refresh()` catches the
+   * rethrown error and calls `markResponseRejected(method, ...)`, which would
+   * then stamp "Rejected by the Inspector" onto that page and leave the real
+   * one rendering clean — the same misattribution the capture inside
+   * `salvageList` exists to prevent, just one frame further out. Deleting when
+   * nothing had answered before makes the outer mark a no-op rather than a lie.
+   */
+  private restoreResponseCorrelation(
+    method: string,
+    id: string | number | undefined,
+  ): void {
+    if (id === undefined) this.lastAnsweredRequestByMethod.delete(method);
+    else this.lastAnsweredRequestByMethod.set(method, id);
+  }
+
   /** Every entry dropped from a list result as malformed, across methods (#1909). */
   getMalformedListItems(): MalformedListItem[] {
     return [...this.malformedListItems.values()].flat();
@@ -3295,6 +3319,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     method,
     itemsKey,
     itemSchema,
+    resultSchema,
     aggregate,
     metadata,
     finalize,
@@ -3302,6 +3327,9 @@ export class InspectorClient extends InspectorClientEventTarget {
     method: string;
     itemsKey: string;
     itemSchema: z.ZodType<T>;
+    /** The method's real result schema — the salvage page schema is derived
+     *  from it so every field except the entries is still validated. */
+    resultSchema: z.ZodObject;
     aggregate: () => Promise<T[]>;
     metadata?: Record<string, string>;
     /**
@@ -3316,11 +3344,15 @@ export class InspectorClient extends InspectorClientEventTarget {
       this.setMalformedListItems(method, []);
       return items;
     } catch (err) {
-      if (!isClientDecodeRejection(err)) throw err;
+      // Deliberately narrower than the Protocol-marking predicate — see
+      // `isSalvageableRejection`: an unrecognized result KIND is not a list
+      // with a bad entry in it.
+      if (!isSalvageableRejection(err)) throw err;
       const salvaged = await this.salvageList({
         method,
         itemsKey,
         itemSchema,
+        resultSchema,
         metadata,
         err,
       });
@@ -3369,15 +3401,18 @@ export class InspectorClient extends InspectorClientEventTarget {
     method,
     itemsKey,
     itemSchema,
+    resultSchema,
     metadata,
     err,
   }: {
     method: string;
     itemsKey: string;
     itemSchema: z.ZodType<T>;
+    resultSchema: z.ZodObject;
     metadata?: Record<string, string>;
     err: unknown;
   }): Promise<T[]> {
+    const pageSchema = lenientListPageSchema(resultSchema, itemsKey);
     // Capture the correlation id BEFORE re-walking. `markResponseRejected`
     // resolves "the last response received for this method", and the re-walk
     // below answers that same method one or more times — so marking afterwards
@@ -3413,15 +3448,23 @@ export class InspectorClient extends InspectorClientEventTarget {
               ? this.rawWireRequest(
                   method,
                   this.withModernEnvelope(params),
-                  LenientListPageSchema,
+                  pageSchema,
                 )
               : this.client!.request(
                   { method, params },
-                  LenientListPageSchema,
+                  pageSchema,
                   this.getRequestOptions(metadata?.progressToken),
                 ),
           { method },
         );
+        // The raw-wire path skips the era codec, so the envelope it would have
+        // enforced is checked here; a violation is not salvageable.
+        if (
+          this.isModernEra() &&
+          !ModernResultEnvelopeSchema.safeParse(page).success
+        ) {
+          throw err;
+        }
         const items = rawItemsOf(page, itemsKey);
         // The page's list member is missing or isn't a list: a top-level
         // violation, not a per-item one. Reading it as "no entries" would return
@@ -3436,7 +3479,7 @@ export class InspectorClient extends InspectorClientEventTarget {
         });
         valid.push(...salvaged.valid);
         malformed.push(...salvaged.malformed);
-        cursor = page.nextCursor;
+        cursor = nextCursorOf(page);
         if (cursor !== undefined) {
           /* v8 ignore next -- defensive: a spec-compliant server never repeats a cursor; this guards a non-converging server from an infinite walk (mirrors the SDK's drainList guard) */
           if (seenCursors.has(cursor)) break;
@@ -3456,12 +3499,16 @@ export class InspectorClient extends InspectorClientEventTarget {
           "Salvage re-walk failed; surfacing the original list error",
         );
       }
+      this.restoreResponseCorrelation(method, rejectedResponseId);
       throw err;
     }
 
     // Nothing per-item was wrong, so the strict rejection was about something
     // this fallback cannot explain — surface it rather than hide it.
-    if (malformed.length === 0) throw err;
+    if (malformed.length === 0) {
+      this.restoreResponseCorrelation(method, rejectedResponseId);
+      throw err;
+    }
 
     if (rejectedResponseId !== undefined) {
       this.dispatchTypedEvent("responseRejected", {
@@ -3568,7 +3615,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       const page = await this.listTools(cursor, metadata);
       return { ...page, malformed: [] };
     } catch (err) {
-      if (!isClientDecodeRejection(err)) throw err;
+      if (!isSalvageableRejection(err)) throw err;
       // Capture before the re-fetch, for the reason `salvageList` documents:
       // this refused response is a distinct exchange from the aggregate's, and
       // the re-fetch below moves the method's correlation off it. Without this
@@ -3582,17 +3629,26 @@ export class InspectorClient extends InspectorClientEventTarget {
         // See `salvageList`: "" is a valid cursor.
         ...(cursor !== undefined && { cursor }),
       };
+      const pageSchema = lenientListPageSchema(ListToolsResultSchema, "tools");
       const page = this.isModernEra()
         ? await this.rawWireRequest(
             "tools/list",
             this.withModernEnvelope(params),
-            LenientListPageSchema,
+            pageSchema,
           )
         : await this.client!.request(
             { method: "tools/list", params },
-            LenientListPageSchema,
+            pageSchema,
             this.getRequestOptions(metadata?.progressToken),
           );
+      // Same era-envelope check as `salvageList` — the raw-wire path bypasses
+      // the codec that would otherwise enforce it.
+      if (
+        this.isModernEra() &&
+        !ModernResultEnvelopeSchema.safeParse(page).success
+      ) {
+        throw err;
+      }
       const items = rawItemsOf(page, "tools");
       // Not a list at all — a top-level violation the per-item pass can't
       // explain, so the strict error stands (mirrors `salvageList`).
@@ -3608,9 +3664,10 @@ export class InspectorClient extends InspectorClientEventTarget {
           reason: summarizeMalformed(malformed),
         });
       }
+      const nextCursor = nextCursorOf(page);
       return {
         tools: valid,
-        ...(page.nextCursor !== undefined && { nextCursor: page.nextCursor }),
+        ...(nextCursor !== undefined && { nextCursor }),
         malformed,
       };
     }
@@ -4737,6 +4794,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     const resources = await this.listAllSalvaging({
       method: "resources/list",
       itemsKey: "resources",
+      resultSchema: ListResourcesResultSchema,
       itemSchema: ResourceSchema,
       metadata: options?.metadata,
       aggregate: async () => [
@@ -4902,6 +4960,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     const resourceTemplates = await this.listAllSalvaging({
       method: "resources/templates/list",
       itemsKey: "resourceTemplates",
+      resultSchema: ListResourceTemplatesResultSchema,
       itemSchema: ResourceTemplateSchema,
       metadata: options?.metadata,
       aggregate: async () => [
@@ -4963,6 +5022,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     const prompts = await this.listAllSalvaging({
       method: "prompts/list",
       itemsKey: "prompts",
+      resultSchema: ListPromptsResultSchema,
       itemSchema: PromptSchema,
       metadata: options?.metadata,
       aggregate: async () => [

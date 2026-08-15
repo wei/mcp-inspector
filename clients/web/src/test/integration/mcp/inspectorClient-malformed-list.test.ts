@@ -565,6 +565,36 @@ describe("InspectorClient list salvage (#1909)", () => {
     expect(reported[0]?.label).toBeUndefined();
   });
 
+  it("leaves the correlation on the original response when it rethrows", async () => {
+    // On a rethrow the re-walk has already answered the same method, so the
+    // caller's own `markResponseRejected` would land on the lenient page that
+    // succeeded. The correlation is restored so the outer mark still finds the
+    // response that was actually refused.
+    const server = await startMalformedServer({
+      resourceTemplates: [{ items: [VALID_TEMPLATE], nextCursor: 42 }],
+    });
+    stopServer = server.stop;
+    const connected = await connectTo(server.url);
+    const log = new MessageLogState(connected);
+
+    await expect(connected.listAllResourceTemplates()).rejects.toThrow();
+    // Simulates what ManagedListState.refresh() does in its catch.
+    connected.markResponseRejected("resources/templates/list", "outer mark");
+
+    const calls = log
+      .getMessages()
+      .filter(
+        (entry) =>
+          "method" in entry.message &&
+          entry.message.method === "resources/templates/list",
+      );
+    expect(calls[0]?.clientError).toBe("outer mark");
+    for (const later of calls.slice(1)) {
+      expect(later.clientError).toBeUndefined();
+    }
+    log.destroy();
+  });
+
   it("rethrows when the rejection is not about any single entry", async () => {
     // Every entry validates; the result is bad for another reason (a cursor of
     // the wrong type). There is no per-item story, so the original error must

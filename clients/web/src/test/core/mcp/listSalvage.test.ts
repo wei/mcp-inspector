@@ -2,14 +2,18 @@ import { describe, it, expect } from "vitest";
 import { z } from "zod/v4";
 import { SdkError, SdkErrorCode } from "@modelcontextprotocol/client";
 import {
-  LenientListPageSchema,
+  ModernResultEnvelopeSchema,
   describeIssues,
   isClientDecodeRejection,
+  isSalvageableRejection,
   labelForRawItem,
+  lenientListPageSchema,
+  nextCursorOf,
   rawItemsOf,
   salvageListItems,
   summarizeMalformed,
 } from "@inspector/core/mcp/listSalvage.js";
+import { ListToolsResultSchema } from "@modelcontextprotocol/core";
 
 /**
  * Per-item list salvage (#1909).
@@ -48,34 +52,102 @@ describe("isClientDecodeRejection", () => {
   });
 });
 
-describe("LenientListPageSchema", () => {
-  it("keeps the primitive array unvalidated while typing the cursor", () => {
-    const parsed = LenientListPageSchema.parse({
-      resourceTemplates: [{ name: "ok" }, { name: 42 }],
+describe("lenientListPageSchema", () => {
+  const ToolsPageSchema = lenientListPageSchema(ListToolsResultSchema, "tools");
+
+  it("leaves the entries raw while still validating every other field", () => {
+    // The entries are this module's job to check one at a time; everything
+    // else is the real schema's, so a second violation can't ride along.
+    const parsed = ToolsPageSchema.parse({
+      tools: [{ name: "ok" }, { name: 42 }],
       nextCursor: "page-2",
     });
-    expect(parsed.nextCursor).toBe("page-2");
-    expect(rawItemsOf(parsed, "resourceTemplates")).toHaveLength(2);
+    expect(nextCursorOf(parsed)).toBe("page-2");
+    expect(rawItemsOf(parsed, "tools")).toHaveLength(2);
   });
 
   it("rejects a page whose cursor is malformed", () => {
     // The walk itself depends on `nextCursor`, so a bad one is not salvageable
     // — the strict error should stand rather than a partial list being kept.
     expect(
-      LenientListPageSchema.safeParse({ tools: [], nextCursor: 7 }).success,
+      ToolsPageSchema.safeParse({ tools: [], nextCursor: 7 }).success,
+    ).toBe(false);
+  });
+
+  it("rejects a top-level violation that rides along with a bad entry", () => {
+    // A hand-rolled `{ nextCursor? }` schema would accept this, report the bad
+    // entry, and silently drop the `_meta` violation with the strict error.
+    expect(
+      ToolsPageSchema.safeParse({ tools: [{ name: 42 }], _meta: "nope" })
+        .success,
     ).toBe(false);
   });
 
   it("distinguishes an empty page from one that is not a list at all", () => {
-    // Reading either as "no entries" would let a top-level violation pass as a
-    // silently truncated list.
-    expect(
-      rawItemsOf(LenientListPageSchema.parse({ tools: [] }), "tools"),
-    ).toEqual([]);
+    expect(rawItemsOf(ToolsPageSchema.parse({ tools: [] }), "tools")).toEqual(
+      [],
+    );
     expect(rawItemsOf({}, "tools")).toBeUndefined();
+    expect(rawItemsOf({ tools: "not-a-list" }, "tools")).toBeUndefined();
+    expect(rawItemsOf(null, "tools")).toBeUndefined();
+  });
+
+  it("reads no cursor from a non-object page", () => {
+    expect(nextCursorOf(null)).toBeUndefined();
+    expect(nextCursorOf({ nextCursor: 7 })).toBeUndefined();
+  });
+});
+
+describe("isSalvageableRejection", () => {
+  it("salvages an invalid result but not an unrecognized result type", () => {
+    // `UnsupportedResultType` means the codec doesn't know what KIND of frame
+    // arrived — not a list with a bad entry, so there is nothing to salvage
+    // and reporting an item-level reason would hide the real failure.
     expect(
-      rawItemsOf(LenientListPageSchema.parse({ tools: "not-a-list" }), "tools"),
-    ).toBeUndefined();
+      isSalvageableRejection(new SdkError(SdkErrorCode.InvalidResult, "bad")),
+    ).toBe(true);
+    expect(
+      isSalvageableRejection(
+        new SdkError(SdkErrorCode.UnsupportedResultType, "unknown"),
+      ),
+    ).toBe(false);
+    // Still marks the Protocol entry, which is why both predicates exist.
+    expect(
+      isClientDecodeRejection(
+        new SdkError(SdkErrorCode.UnsupportedResultType, "unknown"),
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("ModernResultEnvelopeSchema", () => {
+  it("accepts a complete modern result with its cache hints", () => {
+    expect(
+      ModernResultEnvelopeSchema.safeParse({
+        resultType: "complete",
+        ttlMs: 0,
+        cacheScope: "public",
+        tools: [],
+      }).success,
+    ).toBe(true);
+  });
+
+  it("rejects a modern result missing the envelope the codec would enforce", () => {
+    // The raw-wire salvage path goes around that codec, so a response missing
+    // its cache hints AND carrying a bad entry must not salvage.
+    expect(
+      ModernResultEnvelopeSchema.safeParse({
+        resultType: "complete",
+        tools: [],
+      }).success,
+    ).toBe(false);
+    expect(
+      ModernResultEnvelopeSchema.safeParse({
+        resultType: "task",
+        ttlMs: 0,
+        cacheScope: "public",
+      }).success,
+    ).toBe(false);
   });
 });
 
