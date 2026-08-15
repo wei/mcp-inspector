@@ -10,6 +10,7 @@ import {
   mcpConfigToServerEntries,
   mergeSecretsIntoStored,
   normalizeServerType,
+  oauthAuthorizationParamsFromSettings,
   serverEntriesToMcpConfig,
   serializeMcpConfig,
   storedFieldsToInspectorSettings,
@@ -924,6 +925,21 @@ describe("extractSecretsFromStored", () => {
     expect(stripped.oauth).toEqual({ enterpriseManaged: true });
   });
 
+  it("preserves oauth.authorizationParams when lifting clientSecret to keychain", () => {
+    const stored: StoredMCPServer = {
+      type: "streamable-http",
+      url: "https://x.test",
+      oauth: {
+        clientSecret: "shh",
+        authorizationParams: { kc_idp_hint: "corp" },
+      },
+    };
+    const { stripped } = extractSecretsFromStored(stored);
+    expect(stripped.oauth).toEqual({
+      authorizationParams: { kc_idp_hint: "corp" },
+    });
+  });
+
   it("removes the oauth block entirely when clientSecret was its only property", () => {
     const stored: StoredMCPServer = {
       type: "streamable-http",
@@ -1187,6 +1203,68 @@ describe("oauthOnInsufficientScope (SEP-2350)", () => {
       oauthClientId: "cid",
     });
     expect(stored.oauth?.onInsufficientScope).toBeUndefined();
+  });
+
+  // #2018 — custom authorization-request parameters.
+  it("lifts oauth.authorizationParams into settings rows", () => {
+    const settings = storedFieldsToInspectorSettings({
+      oauth: { authorizationParams: { kc_idp_hint: "corp", prompt: "login" } },
+    });
+    expect(settings?.oauthAuthorizationParams).toEqual([
+      { key: "kc_idp_hint", value: "corp" },
+      { key: "prompt", value: "login" },
+    ]);
+  });
+
+  it("reads an empty authorizationParams object back as unset", () => {
+    const settings = storedFieldsToInspectorSettings({
+      oauth: { clientId: "cid", authorizationParams: {} },
+    });
+    expect(settings?.oauthAuthorizationParams).toBeUndefined();
+  });
+
+  it("persists authorizationParams under oauth, dropping blank-key rows", () => {
+    const stored = inspectorSettingsToStoredFields({
+      ...baseSettings,
+      oauthAuthorizationParams: [
+        { key: "kc_idp_hint", value: "corp" },
+        { key: "   ", value: "orphan" },
+      ],
+    });
+    expect(stored.oauth?.authorizationParams).toEqual({ kc_idp_hint: "corp" });
+  });
+
+  it("omits the oauth block when every authorization-param row is blank", () => {
+    const stored = inspectorSettingsToStoredFields({
+      ...baseSettings,
+      oauthAuthorizationParams: [{ key: "", value: "" }],
+    });
+    expect(stored).not.toHaveProperty("oauth");
+  });
+
+  it("omits authorizationParams when the rows are absent", () => {
+    const stored = inspectorSettingsToStoredFields({
+      ...baseSettings,
+      oauthClientId: "cid",
+    });
+    expect(stored.oauth?.authorizationParams).toBeUndefined();
+  });
+
+  it("derives the client option record, or undefined when nothing survives", () => {
+    expect(
+      oauthAuthorizationParamsFromSettings({
+        oauthAuthorizationParams: [
+          { key: "kc_idp_hint", value: "corp" },
+          { key: "", value: "x" },
+        ],
+      }),
+    ).toEqual({ kc_idp_hint: "corp" });
+    expect(
+      oauthAuthorizationParamsFromSettings({
+        oauthAuthorizationParams: [{ key: " ", value: "x" }],
+      }),
+    ).toBeUndefined();
+    expect(oauthAuthorizationParamsFromSettings({})).toBeUndefined();
   });
 });
 

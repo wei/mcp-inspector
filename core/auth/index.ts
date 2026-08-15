@@ -27,6 +27,15 @@ export { ensureCimdClientRegistration } from "./cimd.js";
 export { mcpAuth, type McpAuthOptions, type McpAuthResult } from "./mcpAuth.js";
 export { computeScopeUnion, isStrictScopeSuperset } from "./scopes.js";
 
+// Custom authorization-request parameters (#2018)
+export {
+  RESERVED_AUTHORIZATION_PARAMS,
+  isReservedAuthorizationParam,
+  authorizationParamKeyError,
+  applyAuthorizationParams,
+} from "./authorizationParams.js";
+export type { ReservedAuthorizationParam } from "./authorizationParams.js";
+
 // Storage
 export type {
   OAuthStorage,

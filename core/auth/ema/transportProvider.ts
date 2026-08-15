@@ -84,7 +84,11 @@ export class EmaTransportOAuthProvider implements OAuthClientProvider {
   async redirectToAuthorization(_authorizationUrl: URL): Promise<void> {
     const idpAuthorizationUrl = await startEmaIdpAuthorization(this.emaConfig);
     this.inner.clearCapturedAuthUrl();
-    this.inner.redirectToAuthorization(idpAuthorizationUrl);
+    // The IdP is a different authorization server than the one the inner
+    // provider was configured for, so the per-server custom authorization
+    // parameters (#2018) must not be appended here — hence the "external"
+    // entry point rather than `redirectToAuthorization`.
+    this.inner.redirectToExternalAuthorization(idpAuthorizationUrl);
   }
 
   saveCodeVerifier(codeVerifier: string): void | Promise<void> {

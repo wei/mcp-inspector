@@ -449,6 +449,54 @@ describe("/api/servers routes", () => {
       });
     });
 
+    // #2018 — the authorization-parameter rows travel as a pair array on the
+    // wire and land as a record under `oauth` on disk, mirroring `headers`.
+    it("persists custom authorization params under oauth on POST", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "authparams",
+          config: { type: "streamable-http", url: "https://x.test/mcp" },
+          settings: {
+            headers: [],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+            oauthAuthorizationParams: [
+              { key: "kc_idp_hint", value: "corp" },
+              { key: "", value: "dropped" },
+            ],
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const stored = readConfig(h.configPath).mcpServers
+        .authparams as unknown as Record<string, unknown>;
+      expect(stored.oauth).toEqual({
+        authorizationParams: { kc_idp_hint: "corp" },
+      });
+    });
+
+    it("rejects a malformed oauthAuthorizationParams payload", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "badauthparams",
+          config: { type: "streamable-http", url: "https://x.test/mcp" },
+          settings: {
+            headers: [],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+            oauthAuthorizationParams: { kc_idp_hint: "corp" },
+          },
+        }),
+      });
+      expect(res.status).toBe(400);
+    });
+
     it("updates Inspector-extension fields at the top level on PUT", async () => {
       writeFileSync(
         h.configPath,

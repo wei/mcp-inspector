@@ -179,6 +179,10 @@ export function ServerSettingsModal({
       oauthClientId: oauth.clientId,
       oauthClientSecret: oauth.clientSecret,
       oauthScopes: oauth.scopes,
+      // #2018: kept as rows (blank ones included) so a half-typed parameter
+      // survives a re-render; the drop-blank/omit-empty filtering happens on the
+      // way to disk. An emptied list persists as `[]`, which writes nothing.
+      oauthAuthorizationParams: oauth.authorizationParams,
       enterpriseManaged: oauth.enterpriseManaged ? true : undefined,
       // SEP-2350: persist only the non-default ('throw') so unset servers keep
       // the SDK's `reauthorize` behavior without writing a spurious field.
