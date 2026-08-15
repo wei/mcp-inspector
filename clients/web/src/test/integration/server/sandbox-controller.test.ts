@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createServer, type Server } from "node:http";
+import { EventEmitter } from "node:events";
 import {
   createSandboxController,
   DEFAULT_SANDBOX_PORT,
@@ -408,27 +409,66 @@ describe("createSandboxController", () => {
   });
 
   it("gives up after one retry when the dynamic fallback also fails", async () => {
-    // Guards the `retriedDynamic` latch: without it an EADDRINUSE loop could
-    // re-listen forever instead of settling.
-    const { port, release } = await claimPort();
+    // Guards the `retriedDynamic` latch. A real `listen(0)` effectively always
+    // succeeds, so claiming a port only ever produces ONE EADDRINUSE — under
+    // which this test would pass with the latch deleted. Mock `node:http` so
+    // every listen fails with EADDRINUSE: the first trips the retry, the second
+    // must be caught by the latch and settle. Without the latch this recurses
+    // until the test times out rather than resolving.
+    vi.resetModules();
+    const listenCalls: number[] = [];
+    vi.doMock("node:http", async () => {
+      const actual =
+        await vi.importActual<typeof import("node:http")>("node:http");
+      return {
+        ...actual,
+        createServer: () => {
+          const emitter = new EventEmitter();
+          return Object.assign(emitter, {
+            listen: (p: number) => {
+              listenCalls.push(p);
+              setImmediate(() =>
+                emitter.emit(
+                  "error",
+                  Object.assign(new Error("in use"), { code: "EADDRINUSE" }),
+                ),
+              );
+            },
+            address: () => null,
+            close: (cb?: () => void) => cb?.(),
+          });
+        },
+      };
+    });
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const controller = createSandboxController({ port, host: "127.0.0.1" });
     try {
+      const mod = await import("../../../../server/sandbox-controller.js");
+      const controller = mod.createSandboxController({
+        port: 6275,
+        host: "127.0.0.1",
+      });
+      // Settles rather than looping — the contract the Vite plugin depends on.
       const result = await controller.start();
-      // The retry succeeds here (a dynamic port is always available), so assert
-      // the latch is what bounds it: exactly one retry warning was emitted.
+      expect(result).toEqual({ port: 0, url: "" });
+      expect(controller.getUrl()).toBeNull();
+      // Exactly two listens: the fixed port, then one dynamic retry. A third
+      // would mean the latch failed to bound the loop.
+      expect(listenCalls).toEqual([6275, 0]);
       expect(
         warnSpy.mock.calls.filter((c) =>
           String(c[0]).includes("falling back to an OS-assigned port"),
         ),
       ).toHaveLength(1);
-      expect(result.port).toBeGreaterThan(0);
+      // The second failure degrades loudly instead of retrying again.
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Sandbox: port 6275 in use"),
+      );
     } finally {
       warnSpy.mockRestore();
       errorSpy.mockRestore();
-      await controller.close();
-      await release();
+      vi.doUnmock("node:http");
+      vi.resetModules();
     }
   });
 
