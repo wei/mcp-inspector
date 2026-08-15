@@ -51,6 +51,8 @@ function startMalformedServer(
   url: string;
   stop: () => Promise<void>;
   calls: string[];
+  /** Every `cursor` param the server was sent, in order. */
+  cursors: (string | undefined)[];
   /** Swap what the server serves next, to model a server that got fixed. */
   setPages: (next: {
     resourceTemplates?: ListPage[];
@@ -60,10 +62,21 @@ function startMalformedServer(
   const calls: string[] = [];
   let pages = initialPages;
 
+  const cursors: (string | undefined)[] = [];
+  // Cursor string -> the page index it addresses, learned as pages are served.
+  // Modeling it this way (rather than parsing the cursor as a number) is what
+  // makes an EMPTY-STRING cursor meaningful: a client that drops it sends no
+  // cursor at all, lands back on page one, and duplicates its entries.
+  const cursorToIndex = new Map<string, number>();
   const pageFor = (key: "resourceTemplates" | "tools", cursor?: string) => {
+    cursors.push(cursor);
     const configured = pages[key] ?? [];
-    const index = cursor === undefined ? 0 : Number(cursor);
-    return configured[index] ?? { items: [] };
+    const index = cursor === undefined ? 0 : (cursorToIndex.get(cursor) ?? 0);
+    const page = configured[index] ?? { items: [] };
+    if (page.nextCursor !== undefined) {
+      cursorToIndex.set(page.nextCursor, index + 1);
+    }
+    return page;
   };
 
   const handler = async (req: IncomingMessage, res: ServerResponse) => {
@@ -160,6 +173,7 @@ function startMalformedServer(
       resolve({
         url: `http://127.0.0.1:${port}/mcp`,
         calls,
+        cursors,
         setPages: (next) => {
           pages = next;
         },
@@ -412,6 +426,62 @@ describe("InspectorClient list salvage (#1909)", () => {
     expect(connected.getExcludedTools().map((x) => x.tool.name)).toEqual([
       "invalid_header_tool",
     ]);
+  });
+
+  it("surfaces the ORIGINAL error when the re-walk itself fails", async () => {
+    // A malformed `nextCursor` fails the lenient page schema too, so the walk
+    // throws its own error. The original is what the caller's list actually
+    // failed on — and what `rejectedResponseId` was captured for — so that is
+    // the one that must surface.
+    const server = await startMalformedServer({
+      resourceTemplates: [
+        {
+          items: [PHP_EMPTY_ANNOTATIONS, VALID_TEMPLATE],
+          nextCursor: 42 as unknown as string,
+        },
+      ],
+    });
+    stopServer = server.stop;
+    const connected = await connectTo(server.url);
+
+    await expect(connected.listAllResourceTemplates()).rejects.toThrow(
+      /annotations/,
+    );
+    expect(connected.getMalformedListItems()).toEqual([]);
+  });
+
+  it("keeps the strict error when a page is not a list at all", async () => {
+    // `{ resourceTemplates: "nope" }` is a top-level violation the per-item
+    // pass cannot explain; treating it as an empty page would return a
+    // silently truncated list and discard the error that was right about it.
+    const server = await startMalformedServer({
+      resourceTemplates: [{ items: "nope" as unknown as unknown[] }],
+    });
+    stopServer = server.stop;
+    const connected = await connectTo(server.url);
+
+    await expect(connected.listAllResourceTemplates()).rejects.toThrow();
+    expect(connected.getMalformedListItems()).toEqual([]);
+  });
+
+  it("sends an empty-string cursor rather than re-fetching page one", async () => {
+    // "" is a valid cursor. A truthiness check would drop it, re-request page
+    // one, and duplicate its entries until the repeated-cursor guard fired.
+    const server = await startMalformedServer({
+      resourceTemplates: [
+        { items: [PHP_EMPTY_ANNOTATIONS, VALID_TEMPLATE], nextCursor: "" },
+        { items: [{ ...VALID_TEMPLATE, name: "page_two" }] },
+      ],
+    });
+    stopServer = server.stop;
+    const connected = await connectTo(server.url);
+
+    const { resourceTemplates } = await connected.listAllResourceTemplates();
+    expect(resourceTemplates.map((t) => t.name)).toEqual([
+      "full_annotations",
+      "page_two",
+    ]);
+    expect(server.cursors).toContain("");
   });
 
   it("rethrows when the rejection is not about any single entry", async () => {

@@ -93,10 +93,22 @@ export const LenientListPageSchema = z.looseObject({
 
 export type LenientListPage = z.infer<typeof LenientListPageSchema>;
 
-/** Read the primitive array out of a leniently-parsed page. */
-export function rawItemsOf(page: LenientListPage, itemsKey: string): unknown[] {
+/**
+ * Read the primitive array out of a leniently-parsed page.
+ *
+ * Returns `undefined` — NOT an empty array — when the member is missing or is
+ * not an array, because those are different facts. An empty page is a normal
+ * server answer; a page whose `tools` is the string `"invalid"` is a top-level
+ * schema violation this fallback cannot explain, and reading it as "no entries"
+ * would let the caller return a silently truncated list while the strict error
+ * that was correct about it is discarded.
+ */
+export function rawItemsOf(
+  page: LenientListPage,
+  itemsKey: string,
+): unknown[] | undefined {
   const value = (page as Record<string, unknown>)[itemsKey];
-  return Array.isArray(value) ? value : [];
+  return Array.isArray(value) ? value : undefined;
 }
 
 /**

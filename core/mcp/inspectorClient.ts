@@ -1616,14 +1616,22 @@ export class InspectorClient extends InspectorClientEventTarget {
     // (#1953).
     this.outboundRequestMethods.clear();
     this.lastAnsweredRequestByMethod.clear();
-    // Per-session for the same reason: a report names entries of the PREVIOUS
+    // Per-session for the same reason: both name entries of the PREVIOUS
     // server's list. Cleared here as well as in `disconnect()` because the
     // route out that tears down nothing (`onerror` with no `onclose`) would
-    // otherwise carry it into the next connection — indefinitely, if that
-    // server never lists the method again (#1909).
+    // otherwise carry them into the next connection — indefinitely, if that
+    // server never lists the method again. Safe to clear unconditionally at
+    // connect: `listAllTools` recomputes the excluded set on every aggregate
+    // and the salvage report on every list, so this can only drop a stale set,
+    // never a live one (#1909; the `excludedTools` half is the same latent bug
+    // from #1632, fixed here rather than left as a known sibling).
     if (this.malformedListItems.size > 0) {
       this.malformedListItems.clear();
       this.dispatchTypedEvent("malformedListItemsChange", []);
+    }
+    if (this.excludedTools.length > 0) {
+      this.excludedTools = [];
+      this.dispatchTypedEvent("excludedToolsChange", []);
     }
     for (const [, controller] of this.taskInputAbortControllers) {
       controller.abort(new Error("Connection ended"));
@@ -3381,50 +3389,75 @@ export class InspectorClient extends InspectorClientEventTarget {
     const malformed: MalformedListItem[] = [];
     const seenCursors = new Set<string>();
     let cursor: string | undefined;
-    do {
-      const effectiveMeta = this.mergeMeta(metadata);
-      const params = {
-        ...(effectiveMeta ? { _meta: effectiveMeta } : {}),
-        ...(cursor ? { cursor } : {}),
-      };
-      // The modern (2026-07-28) codec validates a result against the SPEC
-      // schema for the method before the caller's schema is consulted, so a
-      // lenient `client.request` is rejected exactly as the strict one was —
-      // there is no salvage without going around it. The raw-wire channel that
-      // exists for the modern `tasks/*` methods does precisely that: the frame
-      // goes straight through the transport (still logged for the Protocol /
-      // Network tabs) and only the caller's schema is applied. Legacy keeps the
-      // ordinary SDK path, which honors request options and `_meta` for us.
-      const page = await this.invokeMcpClient(
-        () =>
-          this.isModernEra()
-            ? this.rawWireRequest(
-                method,
-                this.withModernEnvelope(params),
-                LenientListPageSchema,
-              )
-            : this.client!.request(
-                { method, params },
-                LenientListPageSchema,
-                this.getRequestOptions(metadata?.progressToken),
-              ),
-        { method },
-      );
-      const salvaged = salvageListItems({
-        method,
-        items: rawItemsOf(page, itemsKey),
-        schema: itemSchema,
-        startIndex: valid.length + malformed.length,
-      });
-      valid.push(...salvaged.valid);
-      malformed.push(...salvaged.malformed);
-      cursor = page.nextCursor;
-      if (cursor !== undefined) {
-        /* v8 ignore next -- defensive: a spec-compliant server never repeats a cursor; this guards a non-converging server from an infinite walk (mirrors the SDK's drainList guard) */
-        if (seenCursors.has(cursor)) break;
-        seenCursors.add(cursor);
+    try {
+      do {
+        const effectiveMeta = this.mergeMeta(metadata);
+        const params = {
+          ...(effectiveMeta ? { _meta: effectiveMeta } : {}),
+          // `!== undefined`, not truthiness: "" is a valid cursor, and dropping it
+          // would re-request page one and duplicate its entries until the
+          // repeated-cursor guard below stopped the walk.
+          ...(cursor !== undefined && { cursor }),
+        };
+        // The modern (2026-07-28) codec validates a result against the SPEC
+        // schema for the method before the caller's schema is consulted, so a
+        // lenient `client.request` is rejected exactly as the strict one was —
+        // there is no salvage without going around it. The raw-wire channel that
+        // exists for the modern `tasks/*` methods does precisely that: the frame
+        // goes straight through the transport (still logged for the Protocol /
+        // Network tabs) and only the caller's schema is applied. Legacy keeps the
+        // ordinary SDK path, which honors request options and `_meta` for us.
+        const page = await this.invokeMcpClient(
+          () =>
+            this.isModernEra()
+              ? this.rawWireRequest(
+                  method,
+                  this.withModernEnvelope(params),
+                  LenientListPageSchema,
+                )
+              : this.client!.request(
+                  { method, params },
+                  LenientListPageSchema,
+                  this.getRequestOptions(metadata?.progressToken),
+                ),
+          { method },
+        );
+        const items = rawItemsOf(page, itemsKey);
+        // The page's list member is missing or isn't a list: a top-level
+        // violation, not a per-item one. Reading it as "no entries" would return
+        // a silently truncated list and discard the strict error that was right
+        // about it.
+        if (items === undefined) throw err;
+        const salvaged = salvageListItems({
+          method,
+          items,
+          schema: itemSchema,
+          startIndex: valid.length + malformed.length,
+        });
+        valid.push(...salvaged.valid);
+        malformed.push(...salvaged.malformed);
+        cursor = page.nextCursor;
+        if (cursor !== undefined) {
+          /* v8 ignore next -- defensive: a spec-compliant server never repeats a cursor; this guards a non-converging server from an infinite walk (mirrors the SDK's drainList guard) */
+          if (seenCursors.has(cursor)) break;
+          seenCursors.add(cursor);
+        }
+      } while (cursor !== undefined);
+    } catch (walkErr) {
+      // The re-walk itself failed — its own decode rejection (a malformed
+      // `nextCursor`, an unsalvageable page), or the connection going away
+      // mid-walk. Either way the ORIGINAL error is the one to surface: it is
+      // what the caller's list actually failed on, and `rejectedResponseId`
+      // above was captured for that response, not this one. The secondary
+      // failure is logged so it stays diagnosable rather than vanishing.
+      if (walkErr !== err) {
+        this.logger.warn(
+          { err: walkErr, method },
+          "Salvage re-walk failed; surfacing the original list error",
+        );
       }
-    } while (cursor !== undefined);
+      throw err;
+    }
 
     // Nothing per-item was wrong, so the strict rejection was about something
     // this fallback cannot explain — surface it rather than hide it.
@@ -3462,6 +3495,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     metadata?: Record<string, string>,
   ): Promise<ExcludedTool[]> {
     const excluded: ExcludedTool[] = [];
+    const malformed: MalformedListItem[] = [];
     // Gated to connections that actually exclude; otherwise this is a pure
     // no-op (no round trip). The raw `listTools` below guards the connection.
     if (this.excludesInvalidXMcpHeaderTools()) {
@@ -3469,6 +3503,13 @@ export class InspectorClient extends InspectorClientEventTarget {
       let cursor: string | undefined;
       do {
         const page = await this.listToolsForScan(cursor, metadata);
+        malformed.push(
+          ...page.malformed.map((entry) => ({
+            ...entry,
+            // Index against the aggregate this walk is building, not the page.
+            index: entry.index + excluded.length + page.tools.length,
+          })),
+        );
         for (const tool of page.tools) {
           const scan = scanXMcpHeaderDeclarations(tool.inputSchema);
           if (!scan.valid) excluded.push({ tool, reason: scan.reason });
@@ -3480,6 +3521,15 @@ export class InspectorClient extends InspectorClientEventTarget {
           seenCursors.add(cursor);
         }
       } while (cursor !== undefined);
+    }
+    // Report what the scan itself had to drop. This walk is deliberately
+    // un-cached, so it can see a malformed tool the `listAllTools` aggregate
+    // never did — that aggregate may have been served from the response cache,
+    // in which case its salvage never ran and cleared the report instead. Only
+    // ever ADDS: a scan that finds nothing must not clear a report the salvage
+    // path just wrote from its own walk of the same list.
+    if (malformed.length > 0) {
+      this.setMalformedListItems("tools/list", malformed);
     }
     this.excludedTools = excluded;
     this.dispatchTypedEvent("excludedToolsChange", excluded);
@@ -3501,15 +3551,21 @@ export class InspectorClient extends InspectorClientEventTarget {
   private async listToolsForScan(
     cursor: string | undefined,
     metadata: Record<string, string> | undefined,
-  ): Promise<{ tools: Tool[]; nextCursor?: string }> {
+  ): Promise<{
+    tools: Tool[];
+    nextCursor?: string;
+    malformed: MalformedListItem[];
+  }> {
     try {
-      return await this.listTools(cursor, metadata);
+      const page = await this.listTools(cursor, metadata);
+      return { ...page, malformed: [] };
     } catch (err) {
       if (!isClientDecodeRejection(err)) throw err;
       const effectiveMeta = this.mergeMeta(metadata);
       const params = {
         ...(effectiveMeta ? { _meta: effectiveMeta } : {}),
-        ...(cursor ? { cursor } : {}),
+        // See `salvageList`: "" is a valid cursor.
+        ...(cursor !== undefined && { cursor }),
       };
       const page = this.isModernEra()
         ? await this.rawWireRequest(
@@ -3522,14 +3578,19 @@ export class InspectorClient extends InspectorClientEventTarget {
             LenientListPageSchema,
             this.getRequestOptions(metadata?.progressToken),
           );
-      const { valid } = salvageListItems({
+      const items = rawItemsOf(page, "tools");
+      // Not a list at all — a top-level violation the per-item pass can't
+      // explain, so the strict error stands (mirrors `salvageList`).
+      if (items === undefined) throw err;
+      const { valid, malformed } = salvageListItems({
         method: "tools/list",
-        items: rawItemsOf(page, "tools"),
+        items,
         schema: ToolSchema,
       });
       return {
         tools: valid,
         ...(page.nextCursor !== undefined && { nextCursor: page.nextCursor }),
+        malformed,
       };
     }
   }

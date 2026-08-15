@@ -66,14 +66,16 @@ describe("LenientListPageSchema", () => {
     ).toBe(false);
   });
 
-  it("reads an absent or non-array items key as no entries", () => {
-    expect(rawItemsOf({}, "tools")).toEqual([]);
+  it("distinguishes an empty page from one that is not a list at all", () => {
+    // Reading either as "no entries" would let a top-level violation pass as a
+    // silently truncated list.
     expect(
-      rawItemsOf(
-        LenientListPageSchema.parse({ tools: "not-a-list" }) as never,
-        "tools",
-      ),
+      rawItemsOf(LenientListPageSchema.parse({ tools: [] }), "tools"),
     ).toEqual([]);
+    expect(rawItemsOf({}, "tools")).toBeUndefined();
+    expect(
+      rawItemsOf(LenientListPageSchema.parse({ tools: "not-a-list" }), "tools"),
+    ).toBeUndefined();
   });
 });
 
