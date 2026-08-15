@@ -347,10 +347,12 @@ Between steps 1 and 2 the two branches **do** differ, and that is expected, not 
 **3. Tag the `main` commit and draft the Release:**
 
 ```bash
-git checkout main && git pull
-git tag 2.3.0 && git push origin 2.3.0
+git fetch origin main
+git tag 2.3.0 origin/main && git push origin 2.3.0
 # then draft & publish a GitHub Release for that tag → triggers `publish`
 ```
+
+⚠️ **Tag `origin/main`, not your local `HEAD`.** `git checkout main && git pull` resolves through whatever merge-or-rebase strategy you have configured, so a divergent local `main` can quietly produce or replay local commits. Tagging `HEAD` there tags a commit that is not on `origin/main`, and `git push origin <tag>` pushes only the tag — leaving a release whose commit was never published. Naming `origin/main` explicitly makes the tagged commit exactly what the remote branch points at, regardless of local state.
 
 ⚠️ **No `v` prefix.** This repo's release tags are bare `x.y.z` — `2.2.0`, `2.1.0`, `2.0.0` — so tag `2.3.0`, not `v2.3.0`. Note npm's own `tag-version-prefix` defaults to `v` and the repo sets no `.npmrc`, so a bare `npm version` would have produced a `v`-prefixed tag that does not match the convention. Tagging by hand (step 3) is what keeps it right. The workflow's assert step strips a leading `v` before comparing, so a `v`-prefixed tag would still publish — it would just be inconsistent with every previous release.
 
