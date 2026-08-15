@@ -11,13 +11,14 @@ import {
   canonicalUrlHost,
   isAllInterfacesHost,
 } from "../../../core/node/hostUrl.ts";
+import { DEFAULT_BIND_HOST } from "./resolve-bind-host.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export interface SandboxControllerOptions {
   /** Port to bind (0 = dynamic). */
   port: number;
-  /** Host to bind (default localhost). */
+  /** Host to bind (default {@link DEFAULT_BIND_HOST}). */
   host?: string;
   /**
    * The backend's origin allow-list (the embedder origins). Used to build the
@@ -95,10 +96,28 @@ function parseListenPort(raw: string | undefined): number | undefined {
 }
 
 /**
- * Resolve sandbox port from env: MCP_SANDBOX_PORT → SERVER_PORT → 0 (dynamic).
- * An invalid value falls through rather than crashing the boot; a set-but-invalid
- * MCP_SANDBOX_PORT (the dedicated knob) is warned so the fall-through isn't
- * silent — matching the warn-and-drop precedent for ALLOWED_ORIGINS.
+ * The default sandbox listen port — **fixed**, deliberately not `0`.
+ *
+ * A `0` default lets the OS assign, which is fine on a desktop (the browser
+ * learns the port from `/api/config`) but unusable anywhere the port has to be
+ * declared *before* the process starts: a dev container's `forwardPorts`, a
+ * `docker run -p`, a k8s service, an SSH tunnel. The port changed on every run,
+ * so it could never be named in that config and the Apps tab was unreachable
+ * (#2008). `CLIENT_PORT` has always defaulted to a fixed `6274` for the same
+ * reason; this is its sandbox counterpart.
+ *
+ * `6275` sits next to the web port so the pair is easy to forward together. It
+ * is not a v1 carry-over — v2 has no proxy server on it.
+ */
+export const DEFAULT_SANDBOX_PORT = 6275;
+
+/**
+ * Resolve sandbox port from env: MCP_SANDBOX_PORT → SERVER_PORT →
+ * {@link DEFAULT_SANDBOX_PORT}. An invalid value falls through rather than
+ * crashing the boot; a set-but-invalid MCP_SANDBOX_PORT (the dedicated knob) is
+ * warned so the fall-through isn't silent — matching the warn-and-drop
+ * precedent for ALLOWED_ORIGINS. An explicit `0` is still honored as "let the
+ * OS assign" ({@link parseListenPort} accepts it).
  */
 export function resolveSandboxPort(): number {
   const fromSandbox = parseListenPort(process.env.MCP_SANDBOX_PORT);
@@ -107,13 +126,21 @@ export function resolveSandboxPort(): number {
       `Ignoring invalid MCP_SANDBOX_PORT="${process.env.MCP_SANDBOX_PORT}" (need an integer 0–65535); falling back.`,
     );
   }
-  return fromSandbox ?? parseListenPort(process.env.SERVER_PORT) ?? 0;
+  return (
+    fromSandbox ??
+    parseListenPort(process.env.SERVER_PORT) ??
+    DEFAULT_SANDBOX_PORT
+  );
 }
 
 export function createSandboxController(
   options: SandboxControllerOptions,
 ): SandboxController {
-  const { port, host = "localhost", allowedOrigins } = options;
+  // Defaulted to the same address the web server binds, never the name
+  // `localhost` — a name resolves to one address family and would reintroduce
+  // the #1951 split (web on IPv4, sandbox on IPv6) for any future call site
+  // that omits `host`. Both call sites pass `config.sandboxHost` today.
+  const { port, host = DEFAULT_BIND_HOST, allowedOrigins } = options;
   let server: Server | null = null;
   let sandboxUrl: string | null = null;
 
@@ -177,8 +204,28 @@ export function createSandboxController(
           });
           res.end(sandboxHtml);
         });
+        // A taken port used to mean "no sandbox at all", which was tolerable
+        // only because the default was dynamic and therefore never collided.
+        // Now that it's fixed (see DEFAULT_SANDBOX_PORT), a second Inspector —
+        // or anything else already on 6275 — would take the Apps tab down, so
+        // retry once on an OS-assigned port. The retry is announced loudly:
+        // whoever pinned MCP_SANDBOX_PORT to forward it needs to know the pin
+        // didn't take, and a silently-moved port is exactly the failure this
+        // default was introduced to fix.
+        let retriedDynamic = false;
         server.on("error", (err: NodeJS.ErrnoException) => {
           if (err.code === "EADDRINUSE") {
+            if (!retriedDynamic && port !== 0) {
+              retriedDynamic = true;
+              console.warn(
+                `Sandbox: port ${port} in use; falling back to an OS-assigned port. ` +
+                  `The MCP Apps tab will work locally, but the sandbox is no longer ` +
+                  `on a predictable port — set MCP_SANDBOX_PORT to a free one if you ` +
+                  `need to forward it (container / SSH tunnel / reverse proxy).`,
+              );
+              server!.listen(0, host);
+              return;
+            }
             console.error(
               `Sandbox: port ${port || "dynamic"} in use. MCP Apps tab may not work.`,
             );
