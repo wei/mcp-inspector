@@ -42,6 +42,10 @@ export interface NullableUnionSchema {
   type?: string | string[];
   enum?: unknown[];
   anyOf?: readonly unknown[];
+  // Read only by `admitsNull`, which considers encodings the collapse itself
+  // declines to flatten.
+  oneOf?: readonly unknown[];
+  nullable?: boolean;
 }
 
 /** Narrow an `anyOf` member to a readable object, or `null` if it isn't one. */
@@ -118,6 +122,46 @@ function collapsed<T extends NullableUnionSchema>(
     anyOf: undefined,
     nullable: true,
   } as NormalizedNullableUnion<T>;
+}
+
+/**
+ * Whether a schema permits an explicit `null`.
+ *
+ * Deliberately **independent of {@link normalizeNullableUnion}**, which is a
+ * *renderer* question — "can this become one widget?" — and is therefore
+ * narrower on purpose: it only collapses a two-member union. Null admission is
+ * a *validity* question and has no such limit, so
+ * `anyOf: [{ type: "string" }, { type: "number" }, { type: "null" }]` admits
+ * null even though it renders through the JSON fallback. Deriving one from the
+ * other would make a form reject a value its own schema accepts, which is why
+ * these are two functions rather than a `.nullable` flag read off the collapse.
+ *
+ * Recognizes every encoding the collapse does, plus the ones it declines:
+ * `nullable: true`, `type: "null"`, `type: [..., "null"]`, and a `"null"`
+ * branch anywhere in an `anyOf` or `oneOf` of any size.
+ */
+export function admitsNull(schema: NullableUnionSchema): boolean {
+  if (schema.nullable === true) {
+    return true;
+  }
+  if (schema.type === "null") {
+    return true;
+  }
+  if (Array.isArray(schema.type) && schema.type.includes("null")) {
+    return true;
+  }
+  return [schema.anyOf, schema.oneOf].some((branches) =>
+    branches?.some((entry) => {
+      const branch = toBranch(entry);
+      if (branch === null) {
+        return false;
+      }
+      return (
+        branch.type === "null" ||
+        (Array.isArray(branch.type) && branch.type.includes("null"))
+      );
+    }),
+  );
 }
 
 /**

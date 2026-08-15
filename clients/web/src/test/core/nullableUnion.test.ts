@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { normalizeNullableUnion } from "@inspector/core/json/nullableUnion.js";
+import {
+  admitsNull,
+  normalizeNullableUnion,
+} from "@inspector/core/json/nullableUnion.js";
 
 // The two JSON Schema encodings of "this type, or null". Both form builders —
 // the web `SchemaForm` and the TUI's `schemaToForm` — dispatch on a single
@@ -279,5 +282,50 @@ describe("normalizeNullableUnion", () => {
   it("ignores a schema with no union keywords at all", () => {
     const schema = { type: "object" as const, properties: {} };
     expect(normalizeNullableUnion(schema)).toBe(schema);
+  });
+});
+
+// `admitsNull` answers a *validity* question and is deliberately decoupled from
+// the collapse, which answers a narrower *rendering* one. A schema can admit
+// null while being unrenderable as a single widget, and a form that conflated
+// the two would reject a value its own schema accepts.
+describe("admitsNull", () => {
+  it("recognizes every encoding the collapse handles", () => {
+    expect(admitsNull({ anyOf: [{ type: "string" }, { type: "null" }] })).toBe(
+      true,
+    );
+    expect(admitsNull({ type: ["string", "null"] })).toBe(true);
+    expect(admitsNull({ type: "null" })).toBe(true);
+    expect(admitsNull({ nullable: true })).toBe(true);
+  });
+
+  it("recognizes a null branch the collapse declines to flatten", () => {
+    // Three members, so `normalizeNullableUnion` leaves this alone and it
+    // renders through the JSON fallback — where a user can still enter `null`.
+    const wide = {
+      anyOf: [{ type: "string" }, { type: "number" }, { type: "null" }],
+    };
+    expect(normalizeNullableUnion(wide)).toBe(wide);
+    expect(admitsNull(wide)).toBe(true);
+  });
+
+  it("recognizes a null branch in a oneOf, and a nested type array", () => {
+    expect(admitsNull({ oneOf: [{ type: "string" }, { type: "null" }] })).toBe(
+      true,
+    );
+    expect(admitsNull({ anyOf: [{ type: ["string", "null"] }] })).toBe(true);
+  });
+
+  it("is false for a schema that does not permit null", () => {
+    expect(admitsNull({ type: "string" })).toBe(false);
+    expect(admitsNull({ type: ["string", "number"] })).toBe(false);
+    expect(
+      admitsNull({ anyOf: [{ type: "string" }, { type: "number" }] }),
+    ).toBe(false);
+    expect(admitsNull({})).toBe(false);
+  });
+
+  it("ignores non-object anyOf members instead of throwing", () => {
+    expect(admitsNull({ anyOf: ["null", ["null"], 7] })).toBe(false);
   });
 });

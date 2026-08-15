@@ -1,4 +1,7 @@
-import { normalizeNullableUnion } from "@inspector/core/json/nullableUnion.js";
+import {
+  admitsNull,
+  normalizeNullableUnion,
+} from "@inspector/core/json/nullableUnion.js";
 
 export type JsonValue =
   | string
@@ -147,6 +150,12 @@ export function collectSchemaDefaults(
  * since #1928 the user can produce exactly that by clearing a nullable enum.
  * Treating it as missing would leave the form's submit permanently disabled on
  * a value the schema calls valid.
+ *
+ * The test is `admitsNull`, **not** whether the renderer's collapse recognized
+ * the field. Those differ: the collapse only handles a two-member union, so a
+ * three-member `anyOf: [string, number, null]` renders through the JSON
+ * fallback — where a user can still type `null` — while plainly admitting it.
+ * Gating on the collapse would reject a value the schema accepts.
  */
 export function hasMissingRequiredFields(
   schema: InspectorFormSchema,
@@ -158,9 +167,7 @@ export function hasMissingRequiredFields(
     const value = values[field];
     if (value === null) {
       const fieldSchema = properties[field];
-      return fieldSchema === undefined
-        ? true
-        : normalizeNullableUnion(fieldSchema).nullable !== true;
+      return fieldSchema === undefined ? true : !admitsNull(fieldSchema);
     }
     return value === undefined || value === "";
   });

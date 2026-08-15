@@ -1022,6 +1022,26 @@ describe("SchemaForm nullable unions", () => {
     expect(screen.getByLabelText(/Items/).tagName).toBe("TEXTAREA");
   });
 
+  // Mantine's select is string-valued, so a numeric const would submit "1" for
+  // 1 — the same wrong-type-on-the-wire problem that keeps a numeric enum off
+  // the select path.
+  it("falls back to the JSON input for non-string anyOf consts", () => {
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        items: {
+          title: "Items",
+          type: "array",
+          items: { anyOf: [{ const: 1 }, { const: 2 }] },
+        },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={vi.fn()} />,
+    );
+    expect(screen.getByLabelText(/Items/).tagName).toBe("TEXTAREA");
+  });
+
   it("falls back to the JSON input when two anyOf branches share a const", () => {
     const schema: InspectorFormSchema = {
       type: "object",

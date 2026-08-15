@@ -315,6 +315,22 @@ describe("hasMissingRequiredFields", () => {
     expect(hasMissingRequiredFields(schema, { name: null })).toBe(true);
   });
 
+  // The renderer's collapse only handles a two-member union, but null admission
+  // has no such limit — this one renders through the JSON fallback, where the
+  // user can still type `null`, and the schema plainly accepts it.
+  it("accepts an explicit null for a required three-member union", () => {
+    const wide: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        mixed: {
+          anyOf: [{ type: "string" }, { type: "number" }, { type: "null" }],
+        },
+      },
+      required: ["mixed"],
+    };
+    expect(hasMissingRequiredFields(wide, { mixed: null })).toBe(false);
+  });
+
   it("rejects null for a required field the schema does not describe", () => {
     const undescribed: InspectorFormSchema = {
       type: "object",

@@ -60,10 +60,14 @@ function toEnumData(
  * branches that are expected to be constants.
  *
  * Returns `null` when the branches are not usable as options, which sends the
- * field to the JSON fallback instead. Three ways that happens, all of which
- * Mantine reacts to badly:
+ * field to the JSON fallback instead. Four ways that happens:
  *
- * - **No `const`.** An `anyOf` of *object* schemas — what
+ * - **A non-string `const`.** Mantine's select is string-valued, so
+ *   `anyOf: [{ const: 1 }, { const: 2 }]` would submit `["1"]` where the
+ *   schema says `[1]` — the same wrong-type-on-the-wire problem that keeps a
+ *   numeric `enum` off the select path. An inspector must not misreport what
+ *   it sends, so this stays on the JSON editor, where the value keeps its type.
+ * - **No `const` at all.** An `anyOf` of *object* schemas — what
  *   `z.array(z.union([z.object(…), z.object(…)]))` compiles to — has no
  *   top-level `const` on any branch, so every option would be the empty
  *   string. Mantine **throws** on duplicate option values, which greys out the
@@ -80,10 +84,10 @@ function toConstOptions(
   const options: { value: string; label: string }[] = [];
   const seen = new Set<string>();
   for (const branch of branches) {
-    if (branch.const === undefined || branch.const === null) {
+    if (typeof branch.const !== "string") {
       return null;
     }
-    const value = String(branch.const);
+    const value = branch.const;
     if (value === "" || seen.has(value)) {
       return null;
     }
