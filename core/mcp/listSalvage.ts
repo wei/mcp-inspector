@@ -47,6 +47,41 @@ export interface MalformedListItem {
 }
 
 /**
+ * Hard cap on the pages a salvage / scan re-walk will fetch.
+ *
+ * The SDK's auto-aggregating `list*()` is capped by
+ * `ClientOptions.listMaxPages` and THROWS when it is hit, so a partial
+ * aggregate is never presented as a complete one. The fallback walks in this
+ * module go around that aggregate, so without their own bound a server whose
+ * `nextCursor` never converges — but never repeats, so the non-converging guard
+ * never fires — would keep the walk issuing requests and accumulating entries
+ * forever. That is reachable from any server the user points the Inspector at,
+ * which is the whole population here.
+ *
+ * The value is passed to the SDK client as `listMaxPages` (see
+ * `InspectorClient`'s constructor) rather than merely matching its default, so
+ * the strict path and the fallback are bounded by the SAME number by
+ * construction and cannot drift if the SDK changes its default.
+ */
+export const LIST_MAX_PAGES = 64;
+
+/**
+ * The error a walk raises when it hits {@link LIST_MAX_PAGES}.
+ *
+ * Both callers turn this into "the strict error stands": hitting the cap means
+ * there are more entries we did not fetch, so returning what we have would
+ * present a TRUNCATED list as a complete one — the same silent-truncation
+ * failure {@link rawItemsOf} refuses for a non-array page. That is why this
+ * aborts rather than `break`ing like the repeated-cursor guard, which stops on
+ * a page whose entries were all seen already and so loses nothing.
+ */
+export function listPaginationExceeded(method: string): Error {
+  return new Error(
+    `Salvage walk for ${method} exceeded ${LIST_MAX_PAGES} pages without the server's pagination converging`,
+  );
+}
+
+/**
  * Whether a failed fetch is the CLIENT refusing a response it received, rather
  * than the request never producing one.
  *

@@ -9,6 +9,7 @@ import { InspectorClient } from "@inspector/core/mcp/inspectorClient.js";
 import { MessageLogState } from "@inspector/core/mcp/state/index.js";
 import { createTransportNode } from "@inspector/core/mcp/node/transport.js";
 import { eraToVersionNegotiation } from "@inspector/core/mcp/types.js";
+import { LIST_MAX_PAGES } from "@inspector/core/mcp/listSalvage.js";
 
 /**
  * Per-item list salvage against a real connection (#1909).
@@ -607,5 +608,92 @@ describe("InspectorClient list salvage (#1909)", () => {
 
     await expect(connected.listAllResourceTemplates()).rejects.toThrow();
     expect(connected.getMalformedListItems()).toEqual([]);
+  });
+
+  it("stops the salvage walk at the page cap instead of paging forever", async () => {
+    // A server whose `nextCursor` never converges but never REPEATS slips the
+    // repeated-cursor guard: every cursor is fresh, so the walk had no reason
+    // to stop and would page (and accumulate) without bound. The bound is the
+    // same `LIST_MAX_PAGES` the SDK aggregate is configured with.
+    const server = await startMalformedServer({
+      resourceTemplates: Array.from(
+        { length: LIST_MAX_PAGES + 40 },
+        (_, i) => ({
+          items: [PHP_EMPTY_ANNOTATIONS],
+          nextCursor: `cursor-${i}`,
+        }),
+      ),
+    });
+    stopServer = server.stop;
+    const connected = await connectTo(server.url);
+
+    // Truncation is not salvage: with entries still unfetched, returning what
+    // we have would present a partial list as complete, so the original
+    // validation error stands.
+    await expect(connected.listAllResourceTemplates()).rejects.toThrow();
+    expect(connected.getMalformedListItems()).toEqual([]);
+
+    const listCalls = server.calls.filter(
+      (method) => method === "resources/templates/list",
+    );
+    // One strict aggregate attempt (rejected on page one), then a salvage walk
+    // bounded at exactly the cap. Without the bound this runs to 104 pages —
+    // and against a truly endless server, forever.
+    expect(listCalls).toHaveLength(1 + LIST_MAX_PAGES);
+  });
+
+  it("stops the exclusion scan at the page cap too", async () => {
+    // The SEP-2243 scan walks pages of its own, outside the SDK aggregate's
+    // cap, so it needs the same bound. Driven directly because a non-converging
+    // list trips `listAllTools`'s salvage walk first.
+    const server = await startMalformedServer(
+      {
+        tools: Array.from({ length: LIST_MAX_PAGES + 40 }, (_, i) => ({
+          items: [{ name: `tool_${i}`, inputSchema: { type: "object" } }],
+          nextCursor: `cursor-${i}`,
+        })),
+      },
+      true,
+    );
+    stopServer = server.stop;
+    const connected = await connectTo(server.url, "modern");
+
+    await expect(connected.refreshExcludedTools()).rejects.toThrow(
+      /exceeded 64 pages/,
+    );
+    expect(
+      server.calls.filter((method) => method === "tools/list"),
+    ).toHaveLength(LIST_MAX_PAGES);
+  });
+
+  it("marks the scan's refused response when its own fallback fails", async () => {
+    // `tools` is not a list at all, so the scan's lenient re-fetch cannot
+    // explain the rejection and rethrows. `listAllTools` catches a failing scan
+    // by design (it must never fail the tools list), so nothing downstream
+    // would mark the response the client demonstrably refused — it would render
+    // as a clean exchange.
+    const server = await startMalformedServer(
+      { tools: [{ items: "not-a-list" }] },
+      true,
+    );
+    stopServer = server.stop;
+    const connected = await connectTo(server.url, "modern");
+    const log = new MessageLogState(connected);
+
+    await expect(connected.refreshExcludedTools()).rejects.toThrow();
+
+    const marked = log
+      .getMessages()
+      .filter(
+        (entry) =>
+          "method" in entry.message &&
+          entry.message.method === "tools/list" &&
+          entry.clientError !== undefined,
+      );
+    // The mark carries the ORIGINAL decode error: the fallback's own failure is
+    // a different event from the response being marked.
+    expect(marked).toHaveLength(1);
+    expect(marked[0]?.clientError).toBeTruthy();
+    log.destroy();
   });
 });

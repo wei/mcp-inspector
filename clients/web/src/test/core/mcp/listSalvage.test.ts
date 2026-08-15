@@ -2,8 +2,10 @@ import { describe, it, expect } from "vitest";
 import { z } from "zod/v4";
 import { SdkError, SdkErrorCode } from "@modelcontextprotocol/client";
 import {
+  LIST_MAX_PAGES,
   ModernResultEnvelopeSchema,
   describeIssues,
+  listPaginationExceeded,
   isClientDecodeRejection,
   isSalvageableRejection,
   labelForRawItem,
@@ -316,5 +318,22 @@ describe("summarizeMalformed", () => {
     expect(summary).toContain("Dropped 2 malformed entries");
     expect(summary).toContain("index 0");
     expect(summary).toContain("(+1 more)");
+  });
+
+  describe("the page bound", () => {
+    it("matches the cap the SDK client is configured with", () => {
+      // The value is passed to the SDK as `listMaxPages`, so the strict
+      // aggregate and the fallback walks are bounded by the same number.
+      expect(LIST_MAX_PAGES).toBe(64);
+    });
+
+    it("names the method and the cap it hit", () => {
+      // The walk's failure is logged rather than surfaced (the original
+      // validation error is what the caller sees), so the message is the only
+      // record of why salvage gave up.
+      const error = listPaginationExceeded("resources/templates/list");
+      expect(error.message).toContain("resources/templates/list");
+      expect(error.message).toContain("64 pages");
+    });
   });
 });

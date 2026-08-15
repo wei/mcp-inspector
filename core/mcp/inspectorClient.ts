@@ -172,8 +172,10 @@ import { AjvJsonSchemaValidator } from "@modelcontextprotocol/client/validators/
 import { z } from "zod/v4";
 import { validateToolOutput } from "./toolOutputValidation.js";
 import {
+  LIST_MAX_PAGES,
   ModernResultEnvelopeSchema,
   isSalvageableRejection,
+  listPaginationExceeded,
   toolItemSchemaForEra,
   nextCursorOf,
   lenientListPageSchema,
@@ -688,7 +690,13 @@ export class InspectorClient extends InspectorClientEventTarget {
       capabilities?: ClientCapabilities;
       versionNegotiation?: VersionNegotiationOptions;
       inputRequired?: InputRequiredOptions;
+      listMaxPages?: number;
     } = {
+      // Bound the SDK's auto-aggregate with the SAME constant the #1909 salvage
+      // re-walks use, so the strict path and its fallback cannot drift apart.
+      // This is the SDK's own default today; setting it explicitly is what makes
+      // the shared value a fact rather than a copied guess.
+      listMaxPages: LIST_MAX_PAGES,
       // Per-server protocol era (SEP §7.8), threaded from config via
       // `eraToVersionNegotiation` and defaulted to `{ mode: "legacy" }` in the
       // constructor. "legacy" keeps the wire byte-identical to a 2025 client;
@@ -3442,8 +3450,15 @@ export class InspectorClient extends InspectorClientEventTarget {
     const malformed: MalformedListItem[] = [];
     const seenCursors = new Set<string>();
     let cursor: string | undefined;
+    let pages = 0;
     try {
       do {
+        // Bounded like the SDK aggregate this stands in for: a server emitting
+        // endlessly UNIQUE cursors never trips the repeated-cursor guard below,
+        // so without this the walk would run forever. Aborting surfaces the
+        // original validation error rather than a truncated list.
+        if (pages >= LIST_MAX_PAGES) throw listPaginationExceeded(method);
+        pages += 1;
         const effectiveMeta = this.mergeMeta(metadata);
         const params = {
           ...(effectiveMeta ? { _meta: effectiveMeta } : {}),
@@ -3569,7 +3584,14 @@ export class InspectorClient extends InspectorClientEventTarget {
     if (this.excludesInvalidXMcpHeaderTools()) {
       const seenCursors = new Set<string>();
       let cursor: string | undefined;
+      let pages = 0;
       do {
+        // Same bound as `salvageList`, for the same reason: this walk is also
+        // outside the SDK aggregate's `listMaxPages` cap. Throwing (rather than
+        // committing a partial set) keeps the caller's "the excluded list may
+        // be incomplete" warning the honest description of what happened.
+        if (pages >= LIST_MAX_PAGES) throw listPaginationExceeded("tools/list");
+        pages += 1;
         const page = await this.listToolsForScan(cursor, metadata);
         malformed.push(
           ...page.malformed.map((entry) => ({
@@ -3641,53 +3663,90 @@ export class InspectorClient extends InspectorClientEventTarget {
       // client refused the result.
       const rejectedResponseId =
         this.lastAnsweredRequestByMethod.get("tools/list");
-      const effectiveMeta = this.mergeMeta(metadata);
-      const params = {
-        ...(effectiveMeta ? { _meta: effectiveMeta } : {}),
-        // See `salvageList`: "" is a valid cursor.
-        ...(cursor !== undefined && { cursor }),
-      };
-      const pageSchema = lenientListPageSchema(ListToolsResultSchema, "tools");
-      const page = this.isModernEra()
-        ? await this.rawWireRequest(
-            "tools/list",
-            this.withModernEnvelope(params),
-            pageSchema,
-          )
-        : await this.client!.request(
-            { method: "tools/list", params },
-            pageSchema,
-            this.getRequestOptions(metadata?.progressToken),
+      try {
+        const effectiveMeta = this.mergeMeta(metadata);
+        const params = {
+          ...(effectiveMeta ? { _meta: effectiveMeta } : {}),
+          // See `salvageList`: "" is a valid cursor.
+          ...(cursor !== undefined && { cursor }),
+        };
+        const pageSchema = lenientListPageSchema(
+          ListToolsResultSchema,
+          "tools",
+        );
+        const page = this.isModernEra()
+          ? await this.rawWireRequest(
+              "tools/list",
+              this.withModernEnvelope(params),
+              pageSchema,
+            )
+          : await this.client!.request(
+              { method: "tools/list", params },
+              pageSchema,
+              this.getRequestOptions(metadata?.progressToken),
+            );
+        // Same era-envelope check as `salvageList` — the raw-wire path bypasses
+        // the codec that would otherwise enforce it.
+        if (
+          this.isModernEra() &&
+          !ModernResultEnvelopeSchema.safeParse(page).success
+        ) {
+          throw err;
+        }
+        const items = rawItemsOf(page, "tools");
+        // Not a list at all — a top-level violation the per-item pass can't
+        // explain, so the strict error stands (mirrors `salvageList`).
+        if (items === undefined) throw err;
+        const { valid, malformed } = salvageListItems({
+          method: "tools/list",
+          items,
+          schema: toolItemSchemaForEra(this.isModernEra()),
+        });
+        if (rejectedResponseId !== undefined && malformed.length > 0) {
+          this.dispatchTypedEvent("responseRejected", {
+            id: rejectedResponseId,
+            reason: summarizeMalformed(malformed),
+          });
+        }
+        const nextCursor = nextCursorOf(page);
+        return {
+          tools: valid,
+          ...(nextCursor !== undefined && { nextCursor }),
+          malformed,
+        };
+      } catch (fallbackErr) {
+        // The fallback could not explain the rejection — the re-fetch itself
+        // failed, or the page carried a violation that is not per-item (a bad
+        // modern envelope, a `tools` that is not a list).
+        //
+        // `salvageList` can simply rethrow here, because ITS caller
+        // (`ManagedListState.refresh`) marks the Protocol entry from the error
+        // it receives. This walk has no such backstop: `listAllTools` catches
+        // and LOGS a failing scan so it can never fail the tools list, so an
+        // unmarked rethrow leaves the response the client demonstrably refused
+        // (`isSalvageableRejection` above proves it was an `InvalidResult`)
+        // rendering as a clean exchange — the exact lie #1953 removes and the
+        // one this method's own capture above exists to prevent. So mark it
+        // here, with the ORIGINAL decode error as the reason: the fallback's
+        // own failure is a different event, and the response being marked is
+        // the one `err` was raised for.
+        if (rejectedResponseId !== undefined) {
+          this.dispatchTypedEvent("responseRejected", {
+            id: rejectedResponseId,
+            reason: err instanceof Error ? err.message : String(err),
+          });
+        }
+        if (fallbackErr !== err) {
+          this.logger.warn(
+            { err: fallbackErr },
+            "Excluded-tools salvage re-fetch failed; surfacing the original list error",
           );
-      // Same era-envelope check as `salvageList` — the raw-wire path bypasses
-      // the codec that would otherwise enforce it.
-      if (
-        this.isModernEra() &&
-        !ModernResultEnvelopeSchema.safeParse(page).success
-      ) {
+        }
+        // Restore the correlation the re-fetch moved, so a later mark for this
+        // method does not land on a lenient page that succeeded.
+        this.restoreResponseCorrelation("tools/list", rejectedResponseId);
         throw err;
       }
-      const items = rawItemsOf(page, "tools");
-      // Not a list at all — a top-level violation the per-item pass can't
-      // explain, so the strict error stands (mirrors `salvageList`).
-      if (items === undefined) throw err;
-      const { valid, malformed } = salvageListItems({
-        method: "tools/list",
-        items,
-        schema: toolItemSchemaForEra(this.isModernEra()),
-      });
-      if (rejectedResponseId !== undefined && malformed.length > 0) {
-        this.dispatchTypedEvent("responseRejected", {
-          id: rejectedResponseId,
-          reason: summarizeMalformed(malformed),
-        });
-      }
-      const nextCursor = nextCursorOf(page);
-      return {
-        tools: valid,
-        ...(nextCursor !== undefined && { nextCursor }),
-        malformed,
-      };
     }
   }
 
