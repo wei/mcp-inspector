@@ -127,6 +127,72 @@ function nullExcludedBySiblings(schema: NullableUnionSchema): boolean {
 }
 
 /**
+ * Keywords that *constrain what values are valid*, as opposed to describing the
+ * field (`title`, `description`, `default`, `enumNames`).
+ *
+ * Only these can conflict in a way that matters: a wrapper and its branch each
+ * carrying one means the value must satisfy **both**, which the hoist cannot
+ * express. Metadata is safe to merge because nothing validates against it.
+ */
+const VALIDATION_KEYWORDS = [
+  "type",
+  "enum",
+  "const",
+  "items",
+  "properties",
+  "required",
+  "additionalProperties",
+  "minimum",
+  "maximum",
+  "exclusiveMinimum",
+  "exclusiveMaximum",
+  "multipleOf",
+  "minLength",
+  "maxLength",
+  "pattern",
+  "format",
+  "minItems",
+  "maxItems",
+  "uniqueItems",
+] as const;
+
+/**
+ * Whether hoisting this branch would *drop* one of the wrapper's constraints.
+ *
+ * The hoist is a spread, so a branch key replaces the wrapper's — but JSON
+ * Schema applies sibling keywords **conjunctively**, and a replacement is not a
+ * conjunction. A wrapper `enum: ["a"]` around a branch `enum: ["a", "b"]` means
+ * `"a"` (both must hold), yet the spread yields `["a", "b"]` and the rendered
+ * dropdown would offer — and submit — a `"b"` the schema rejects. `type`,
+ * bounds, and the object keywords fail the same way.
+ *
+ * Rather than implement intersection for every keyword (a much larger surface,
+ * and one where a subtly wrong intersection is worse than none), the collapse
+ * **declines** when wrapper and branch disagree, and the field renders through
+ * the JSON editor with its full schema intact. Identical values are not a
+ * conflict, so the common `{ type: "string", anyOf: [{ type: "string", … }] }`
+ * still collapses.
+ *
+ * Comparison is by canonical JSON, so two structurally equal objects written
+ * with different key order read as a conflict. That is conservative in the safe
+ * direction: the field falls back rather than mis-renders.
+ */
+function branchDropsWrapperConstraint(
+  schema: NullableUnionSchema,
+  branch: Record<string, unknown>,
+): boolean {
+  const wrapper = schema as Record<string, unknown>;
+  return VALIDATION_KEYWORDS.some((keyword) => {
+    const wrapperValue = wrapper[keyword];
+    const branchValue = branch[keyword];
+    if (wrapperValue === undefined || branchValue === undefined) {
+      return false;
+    }
+    return JSON.stringify(wrapperValue) !== JSON.stringify(branchValue);
+  });
+}
+
+/**
  * What {@link stripNullEnumMembers} concluded about an `enum`.
  *
  * `"only-null"` is a distinct outcome rather than "an empty list" because it
@@ -250,11 +316,15 @@ export function admitsNull(schema: NullableUnionSchema): boolean {
   if (schema.nullable === true) {
     return true;
   }
-  if (schema.type === "null") {
-    return true;
-  }
-  if (Array.isArray(schema.type) && schema.type.includes("null")) {
-    return true;
+  // An explicit `type` is a sibling constraint too, so it *decides* — it does
+  // not merely add a way to say yes. `{ type: "string", anyOf: [..., { type:
+  // "null" }] }` rejects null, because a value must satisfy the `type` as well
+  // as the union. Falling through to the branch scan here would let the union
+  // override a constraint that outranks it.
+  if (schema.type !== undefined) {
+    return Array.isArray(schema.type)
+      ? schema.type.includes("null")
+      : schema.type === "null";
   }
   return [schema.anyOf, schema.oneOf].some((branches) =>
     branches?.some((entry) => {
@@ -303,7 +373,9 @@ export function normalizeNullableUnion<T extends NullableUnionSchema>(
       (entry) => entry !== null && entry.type !== "null",
     );
 
-    if (nullBranch && branch) {
+    // Hoisting would silently drop a wrapper constraint the branch also
+    // carries, so decline instead; see `branchDropsWrapperConstraint`.
+    if (nullBranch && branch && !branchDropsWrapperConstraint(schema, branch)) {
       // A branch may carry an `enum` and no `type`; JSON Schema allows that, and
       // an all-string enum is unambiguously a string field. See isStringEnum for
       // why a non-string enum deliberately does not get the same treatment.

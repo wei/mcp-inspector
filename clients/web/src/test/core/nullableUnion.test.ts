@@ -390,6 +390,70 @@ describe("normalizeNullableUnion", () => {
     expect(normalizeNullableUnion(schema)).toBe(schema);
   });
 
+  // The hoist is a spread, but JSON Schema applies sibling keywords
+  // conjunctively — so a branch keyword replacing the wrapper's would *widen*
+  // the field. `enum: ["a"]` around a branch `enum: ["a","b"]` means "a", yet
+  // the spread would offer "b" in the dropdown and submit it.
+  it("declines when the branch would drop a conflicting wrapper enum", () => {
+    const schema = {
+      enum: ["a"],
+      anyOf: [{ type: "string", enum: ["a", "b"] }, { type: "null" as const }],
+    };
+    expect(normalizeNullableUnion(schema)).toBe(schema);
+  });
+
+  it("declines when wrapper and branch disagree on type", () => {
+    const schema = {
+      type: "string",
+      anyOf: [{ type: "integer" }, { type: "null" as const }],
+    };
+    expect(normalizeNullableUnion(schema)).toBe(schema);
+  });
+
+  it("declines when wrapper and branch disagree on bounds", () => {
+    const schema = {
+      minimum: 5,
+      anyOf: [{ type: "integer", minimum: 1 }, { type: "null" as const }],
+    };
+    expect(normalizeNullableUnion(schema)).toBe(schema);
+  });
+
+  // Identical values are no conflict, so the ordinary redundant-type shape
+  // still collapses rather than being punished for being explicit.
+  it("collapses when wrapper and branch agree on a shared keyword", () => {
+    expect(
+      normalizeNullableUnion({
+        type: "string",
+        anyOf: [{ type: "string", enum: ["a"] }, { type: "null" }],
+      }),
+    ).toEqual({
+      type: "string",
+      enum: ["a"],
+      anyOf: undefined,
+      // The explicit non-null `type` rules null out, conjunctively.
+      nullable: false,
+    });
+  });
+
+  it("treats wrapper metadata as safe to keep alongside branch constraints", () => {
+    expect(
+      normalizeNullableUnion({
+        title: "Direction",
+        description: "Which way",
+        default: "envio",
+        anyOf: [{ type: "string", enum: ["envio"] }, { type: "null" }],
+      }),
+    ).toEqual({
+      title: "Direction",
+      description: "Which way",
+      default: "envio",
+      type: "string",
+      enum: ["envio"],
+      anyOf: undefined,
+      nullable: true,
+    });
+  });
+
   it("ignores a schema with no union keywords at all", () => {
     const schema = { type: "object" as const, properties: {} };
     expect(normalizeNullableUnion(schema)).toBe(schema);
@@ -470,6 +534,30 @@ describe("admitsNull", () => {
 
   // A branch's enum is scoped to that branch, not a sibling of the union — this
   // is the #1928 shape, and reading it as a sibling would call it non-nullable.
+  // An explicit `type` is conjunctive with the union, so it decides rather than
+  // merely offering another way to say yes. A `{ type: "null" }` branch cannot
+  // override a top-level `type: "string"`.
+  it("lets an explicit non-null type override a null branch", () => {
+    expect(
+      admitsNull({
+        type: "string",
+        anyOf: [{ type: "string", enum: ["a"] }, { type: "null" }],
+      }),
+    ).toBe(false);
+  });
+
+  it("still honors an explicit type that does admit null", () => {
+    expect(
+      admitsNull({
+        type: ["string", "null"],
+        anyOf: [{ type: "string" }, { type: "null" }],
+      }),
+    ).toBe(true);
+    expect(admitsNull({ type: "null", anyOf: [{ type: "string" }] })).toBe(
+      true,
+    );
+  });
+
   it("is unaffected by an enum that lives inside an anyOf branch", () => {
     expect(
       admitsNull({
