@@ -7,6 +7,7 @@ import {
   webServerConfigToInitialPayload,
   type WebServerConfig,
 } from "../../../../server/web-server-config.js";
+import { DEFAULT_SANDBOX_PORT } from "../../../../server/sandbox-controller.js";
 import {
   API_SERVER_ENV_VARS,
   LEGACY_AUTH_TOKEN_ENV,
@@ -32,7 +33,7 @@ const MUTATED_ENV_KEYS = [
 
 const baseConfig = (): WebServerConfig => ({
   port: 6274,
-  hostname: "localhost",
+  hostname: "127.0.0.1",
   authToken: "tok",
   dangerouslyOmitAuth: false,
   initialMcpConfig: null,
@@ -42,7 +43,7 @@ const baseConfig = (): WebServerConfig => ({
   storageDir: undefined,
   allowedOrigins: ["http://localhost:6274"],
   sandboxPort: 0,
-  sandboxHost: "localhost",
+  sandboxHost: "127.0.0.1",
   logger: undefined,
   autoOpen: false,
 });
@@ -72,7 +73,7 @@ describe("buildWebServerConfigFromEnv", () => {
   it("returns defaults when no env vars are set", () => {
     const cfg = buildWebServerConfigFromEnv();
     expect(cfg.port).toBe(6274);
-    expect(cfg.hostname).toBe("localhost");
+    expect(cfg.hostname).toBe("127.0.0.1");
     expect(cfg.authToken).toBe("");
     expect(cfg.dangerouslyOmitAuth).toBe(false);
     expect(cfg.initialMcpConfig).toBeNull();
@@ -82,8 +83,8 @@ describe("buildWebServerConfigFromEnv", () => {
       "http://127.0.0.1:6274",
       "http://[::1]:6274",
     ]);
-    expect(cfg.sandboxPort).toBe(0);
-    expect(cfg.sandboxHost).toBe("localhost");
+    expect(cfg.sandboxPort).toBe(DEFAULT_SANDBOX_PORT);
+    expect(cfg.sandboxHost).toBe("127.0.0.1");
     expect(cfg.logger).toBeUndefined();
     // Vitest sets `process.env.VITEST = 'true'`, so the autoOpen default is
     // suppressed here. Real `vite dev` runs don't set VITEST and default to
@@ -289,7 +290,9 @@ describe("buildWebServerConfigFromEnv", () => {
 
   it("ignores non-numeric SERVER_PORT", () => {
     process.env.SERVER_PORT = "nope";
-    expect(buildWebServerConfigFromEnv().sandboxPort).toBe(0);
+    expect(buildWebServerConfigFromEnv().sandboxPort).toBe(
+      DEFAULT_SANDBOX_PORT,
+    );
   });
 
   it("treats MCP_SANDBOX_PORT empty string as unset", () => {
@@ -596,7 +599,7 @@ describe("printServerBanner", () => {
   it("includes the auth token in the URL when auth is enabled", () => {
     const url = printServerBanner(baseConfig(), 6274, "secret", undefined);
     expect(url).toBe(
-      `http://localhost:6274?${API_SERVER_ENV_VARS.AUTH_TOKEN}=secret`,
+      `http://127.0.0.1:6274?${API_SERVER_ENV_VARS.AUTH_TOKEN}=secret`,
     );
     expect(logSpy.lines.some((l) => l.includes("Auth token: secret"))).toBe(
       true,
@@ -607,7 +610,7 @@ describe("printServerBanner", () => {
     const cfg = baseConfig();
     cfg.dangerouslyOmitAuth = true;
     const url = printServerBanner(cfg, 6274, "irrelevant", undefined);
-    expect(url).toBe("http://localhost:6274");
+    expect(url).toBe("http://127.0.0.1:6274");
     expect(
       logSpy.lines.some((l) =>
         l.includes("Auth: disabled (DANGEROUSLY_OMIT_AUTH)"),
@@ -617,7 +620,7 @@ describe("printServerBanner", () => {
 
   it("omits the query string when no token is supplied", () => {
     const url = printServerBanner(baseConfig(), 6274, "", undefined);
-    expect(url).toBe("http://localhost:6274");
+    expect(url).toBe("http://127.0.0.1:6274");
   });
 
   it("brackets an IPv6 bind host in the printed URL", () => {

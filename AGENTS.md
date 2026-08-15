@@ -17,7 +17,10 @@ v2/main/
 │   │   │                               #   sandbox-controller.ts (MCP Apps sandbox HTTP server),
 │   │   │                               #   inject-auth-token.ts (embeds the API token into served index.html),
 │   │   │                               #   vite-base-config.ts (shared optimizeDeps exclusions),
-│   │   │                               #   resolve-bind-host.ts (bind-host POLICY: refuses an
+│   │   │                               #   resolve-bind-host.ts (bind-host POLICY: defaults to
+│   │   │                               #     127.0.0.1 — an ADDRESS, never the name `localhost`, which
+│   │   │                               #     listen() resolves to a SINGLE family (::1 on glibc Linux),
+│   │   │                               #     refusing every IPv4 client — #1951; and refuses an
 │   │   │                               #     all-interfaces HOST unless DANGEROUSLY_BIND_ALL_INTERFACES;
 │   │   │                               #     the all-interfaces DETECTION is core/node/hostUrl.isAllInterfacesHost.
 │   │   │                               #     Used by both bind points — web-server-config.ts + vite.config.ts — #1795),

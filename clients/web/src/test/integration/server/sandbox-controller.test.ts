@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createServer, type Server } from "node:http";
 import {
   createSandboxController,
+  DEFAULT_SANDBOX_PORT,
   resolveSandboxPort,
   sandboxFrameAncestors,
 } from "../../../../server/sandbox-controller.js";
@@ -75,7 +76,17 @@ describe("resolveSandboxPort", () => {
     else process.env.SERVER_PORT = envSnapshot.server;
   });
 
-  it("returns 0 when no env vars are set", () => {
+  // Regression guard for #2008: the default must be a FIXED port. An
+  // OS-assigned one changes every run, so it can never be named in a dev
+  // container's `forwardPorts`, a `docker run -p`, or an SSH tunnel — leaving
+  // the Apps tab unreachable in every such environment.
+  it("returns a fixed default port when no env vars are set", () => {
+    expect(resolveSandboxPort()).toBe(DEFAULT_SANDBOX_PORT);
+    expect(resolveSandboxPort()).not.toBe(0);
+  });
+
+  it("still honors an explicit MCP_SANDBOX_PORT=0 as OS-assigned", () => {
+    process.env.MCP_SANDBOX_PORT = "0";
     expect(resolveSandboxPort()).toBe(0);
   });
 
@@ -102,19 +113,19 @@ describe("resolveSandboxPort", () => {
     expect(resolveSandboxPort()).toBe(9100);
   });
 
-  it("returns 0 when SERVER_PORT is non-numeric and no MCP_SANDBOX_PORT", () => {
+  it("falls back to the default when SERVER_PORT is non-numeric and no MCP_SANDBOX_PORT", () => {
     process.env.SERVER_PORT = "not-a-port";
-    expect(resolveSandboxPort()).toBe(0);
+    expect(resolveSandboxPort()).toBe(DEFAULT_SANDBOX_PORT);
   });
 
   it("ignores empty-string SERVER_PORT", () => {
     process.env.SERVER_PORT = "";
-    expect(resolveSandboxPort()).toBe(0);
+    expect(resolveSandboxPort()).toBe(DEFAULT_SANDBOX_PORT);
   });
 
   it("ignores negative values", () => {
     process.env.MCP_SANDBOX_PORT = "-1";
-    expect(resolveSandboxPort()).toBe(0);
+    expect(resolveSandboxPort()).toBe(DEFAULT_SANDBOX_PORT);
   });
 
   it("rejects a partial-parse value (6274abc) rather than binding 6274", () => {
@@ -125,7 +136,7 @@ describe("resolveSandboxPort", () => {
 
   it("rejects an out-of-range value (70000) so it can't crash listen", () => {
     process.env.MCP_SANDBOX_PORT = "70000";
-    expect(resolveSandboxPort()).toBe(0);
+    expect(resolveSandboxPort()).toBe(DEFAULT_SANDBOX_PORT);
   });
 });
 
@@ -135,7 +146,8 @@ describe("createSandboxController", () => {
     try {
       const { url, port } = await controller.start();
       expect(port).toBeGreaterThan(0);
-      expect(url).toBe(`http://localhost:${port}/sandbox`);
+      // Default host is now the IPv4 loopback address, not the name (#1951).
+      expect(url).toBe(`http://127.0.0.1:${port}/sandbox`);
       expect(controller.getUrl()).toBe(url);
 
       const res = await fetch(url);
@@ -312,11 +324,11 @@ describe("createSandboxController", () => {
     }
   });
 
-  it("resolves with empty values when listen fails (EADDRINUSE)", async () => {
-    // Bind a placeholder HTTP server to claim a port, then point a sandbox
-    // controller at the same port to force EADDRINUSE. The Vite plugin awaits
-    // start() in configureServer; if start() ever stops resolving, the entire
-    // dev backend hangs. This test pins down the resolve-on-error contract.
+  /** Claim a port so a subsequent listen on it fails with EADDRINUSE. */
+  async function claimPort(): Promise<{
+    port: number;
+    release: () => Promise<void>;
+  }> {
     const blocker: Server = createServer();
     await new Promise<void>((resolve) =>
       blocker.listen(0, "127.0.0.1", () => resolve()),
@@ -327,21 +339,96 @@ describe("createSandboxController", () => {
         ? addr.port
         : 0;
     expect(port).toBeGreaterThan(0);
+    return {
+      port,
+      release: () =>
+        new Promise<void>((resolve) => blocker.close(() => resolve())),
+    };
+  }
 
+  it("falls back to an OS-assigned port when the fixed port is taken", async () => {
+    // #2008 made the default port fixed, which introduced a collision the
+    // dynamic default never had: a second Inspector, or anything else already
+    // on 6275, would have taken the Apps tab down entirely. Retrying on a
+    // dynamic port keeps it working locally.
+    const { port, release } = await claimPort();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const controller = createSandboxController({ port, host: "127.0.0.1" });
+    try {
+      const result = await controller.start();
+      expect(result.port).toBeGreaterThan(0);
+      expect(result.port).not.toBe(port);
+      expect(result.url).toBe(`http://127.0.0.1:${result.port}/sandbox`);
+      expect(controller.getUrl()).toBe(result.url);
+      // The sandbox must actually be serving on the fallback port, not merely
+      // reporting one.
+      expect((await fetch(result.url)).status).toBe(200);
+      // Loud, not silent: a pinned-and-forwarded port that quietly moved is the
+      // very failure the fixed default exists to prevent.
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`Sandbox: port ${port} in use`),
+      );
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("MCP_SANDBOX_PORT"),
+      );
+    } finally {
+      warnSpy.mockRestore();
+      await controller.close();
+      await release();
+    }
+  });
+
+  it("resolves with empty values when even the dynamic retry fails", async () => {
+    // The Vite plugin awaits start() in configureServer; if start() ever stops
+    // resolving, the entire dev backend hangs. This pins the resolve-on-error
+    // contract for the case the retry can't rescue — an explicit `port: 0` that
+    // fails has nowhere left to fall back to, so it degrades as before.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const controller = createSandboxController({ port: 0, host: "127.0.0.1" });
+    try {
+      // Force the listen to fail the way a dynamic listen can (an unusable bind
+      // address), since port 0 cannot collide.
+      const broken = createSandboxController({
+        port: 0,
+        host: "203.0.113.1", // TEST-NET-3: not assigned to any local interface
+      });
+      const result = await broken.start();
+      expect(result).toEqual({ port: 0, url: "" });
+      expect(broken.getUrl()).toBeNull();
+      // close() must be a no-op since the server never bound.
+      await expect(broken.close()).resolves.toBeUndefined();
+      expect(errorSpy).toHaveBeenCalledWith(
+        "Sandbox server error:",
+        expect.objectContaining({ code: "EADDRNOTAVAIL" }),
+      );
+    } finally {
+      errorSpy.mockRestore();
+      await controller.close();
+    }
+  });
+
+  it("gives up after one retry when the dynamic fallback also fails", async () => {
+    // Guards the `retriedDynamic` latch: without it an EADDRINUSE loop could
+    // re-listen forever instead of settling.
+    const { port, release } = await claimPort();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const controller = createSandboxController({ port, host: "127.0.0.1" });
     try {
       const result = await controller.start();
-      expect(result).toEqual({ port: 0, url: "" });
-      expect(controller.getUrl()).toBeNull();
-      // close() must be a no-op since the server never bound.
-      await expect(controller.close()).resolves.toBeUndefined();
-      expect(errorSpy).toHaveBeenCalledWith(
-        expect.stringContaining(`Sandbox: port ${port} in use`),
-      );
+      // The retry succeeds here (a dynamic port is always available), so assert
+      // the latch is what bounds it: exactly one retry warning was emitted.
+      expect(
+        warnSpy.mock.calls.filter((c) =>
+          String(c[0]).includes("falling back to an OS-assigned port"),
+        ),
+      ).toHaveLength(1);
+      expect(result.port).toBeGreaterThan(0);
     } finally {
+      warnSpy.mockRestore();
       errorSpy.mockRestore();
-      await new Promise<void>((resolve) => blocker.close(() => resolve()));
+      await controller.close();
+      await release();
     }
   });
 

@@ -349,6 +349,15 @@ docker build -t mcp-inspector .
 docker run --rm -p 127.0.0.1:6274:6274 mcp-inspector
 ```
 
+**Using the Apps tab? Publish `6275` too.** The MCP Apps sandbox is a second listener the browser reaches directly, on `MCP_SANDBOX_PORT` (default `6275`). Nothing else needs it, so the single-port commands above are fine for ordinary inspection — but the Apps tab renders a blank widget without it:
+
+```bash
+docker run --rm -p 127.0.0.1:6274:6274 -p 127.0.0.1:6275:6275 \
+  ghcr.io/modelcontextprotocol/inspector
+```
+
+Publish it on the **same port number** inside and out. The sandbox URL is handed to the browser via `/api/config` as `http://localhost:<container port>/sandbox`, so remapping it (`-p 9000:6275`) advertises a port the browser can't reach; use `-e MCP_SANDBOX_PORT=9000 -p 127.0.0.1:9000:9000` instead.
+
 **Keep the `127.0.0.1:` prefix on the published port.** A bare `-p 6274:6274` publishes on **every host interface**, putting the Inspector on your local network. The container's `HOST=0.0.0.0` is a separate concern — it governs the _container's_ interfaces, not the host's — so the `DANGEROUSLY_BIND_ALL_INTERFACES` opt-in that guards a wildcard bind outside a container does not cover this. It matters more here than for an ordinary web app: the backend spawns processes on request, `GET /` embeds the API token into the served HTML, and a request arriving with **no** `Origin` header skips the origin allow-list entirely — so for any non-browser client the API token is the only guard. Publishing wider needs a real access-control boundary in front of the Inspector — a reverse proxy that authenticates, an SSH tunnel, a private network. Setting your own `MCP_INSPECTOR_API_TOKEN` does **not** substitute: `GET /` discloses whatever token is in use, so a custom one is harvested exactly as easily as a generated one.
 
 **Keeping the servers you add.** The Inspector saves your server list to `$HOME/.mcp-inspector/mcp.json`, which in the image is `/home/node/.mcp-inspector/mcp.json` — inside the container's writable layer, so `--rm` discards it and every run starts with an empty list. Mount a volume there to keep it:
