@@ -330,21 +330,25 @@ Because there is **one version number** (only the root `package.json` has one �
 
 **1. Bump on `v2/main`, before the milestone merge.** The bump is part of the milestone's work, so it belongs on the develop branch and flows into `main` with everything else:
 
+Substitute the real issue number and release below — the commands are written to be copy-pasteable as-is (a `2.2.0` → `2.3.0` minor bump):
+
 ```bash
-git checkout -b v2/chore/<issue>-bump-x-y-z v2/main
-npm version <major|minor|patch> --no-git-tag-version   # bump only, no tag
+git checkout -b v2/chore/2010-bump-2-3-0 v2/main
+npm version minor --no-git-tag-version   # or major / patch; bump only, no tag
 # PR → v2/main
 ```
 
 ⚠️ **`--no-git-tag-version` is load-bearing.** A bare `npm version` also tags, and the tag would land on a `v2/main` commit — but the release must be cut from `main`, so the tag has to point at the merge commit there (step 3). Tagging here creates a tag on a commit that is never released.
 
-**2. Merge `v2/main` → `main`** through the usual milestone-merge branch. It now carries the bump, so `main` and `v2/main` agree on the version at every point.
+**2. Merge `v2/main` → `main`** through the usual milestone-merge branch. It now carries the bump, so the release lands on `main` with the version already correct.
+
+Between steps 1 and 2 the two branches **do** differ, and that is expected, not drift: `v2/main` reads the version being built while `main` still reads the one currently released. What this ordering removes is *post-release* drift — once the milestone merge lands they agree again, and `v2/main` is never left **behind** `main`. If you see `v2/main` ahead of `main`, a release is in flight; if you see it behind, something went wrong.
 
 **3. Tag the `main` commit and draft the Release:**
 
 ```bash
 git checkout main && git pull
-git tag <x.y.z> && git push origin <x.y.z>
+git tag 2.3.0 && git push origin 2.3.0
 # then draft & publish a GitHub Release for that tag → triggers `publish`
 ```
 
