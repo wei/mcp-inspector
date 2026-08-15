@@ -326,15 +326,33 @@ Publishing is automated by two release-gated jobs in [`.github/workflows/main.ym
 
 A v2 release is cut from **`main`**, after the milestone's work has been merged there from `v2/main` — not from `v2/main` itself. (The v1 line releases independently from `v1/main` to the `v1-latest` tag and never touches `main`; see [Repo status](#mcp-inspector).)
 
-Because there is **one version number** (only the root `package.json` has one — the clients carry none, so there is nothing to keep in sync and no `check-version` step), the release flow is just:
+Because there is **one version number** (only the root `package.json` has one — the clients carry none, so there is nothing to keep in sync and no `check-version` step), the release flow is three steps.
+
+**1. Bump on `v2/main`, before the milestone merge.** The bump is part of the milestone's work, so it belongs on the develop branch and flows into `main` with everything else:
 
 ```bash
-npm version <major|minor|patch>   # bumps the root package.json + tags
-git push --follow-tags
+git checkout -b v2/chore/<issue>-bump-x-y-z v2/main
+npm version <major|minor|patch> --no-git-tag-version   # bump only, no tag
+# PR → v2/main
+```
+
+⚠️ **`--no-git-tag-version` is load-bearing.** A bare `npm version` also tags, and the tag would land on a `v2/main` commit — but the release must be cut from `main`, so the tag has to point at the merge commit there (step 3). Tagging here creates a tag on a commit that is never released.
+
+**2. Merge `v2/main` → `main`** through the usual milestone-merge branch. It now carries the bump, so `main` and `v2/main` agree on the version at every point.
+
+**3. Tag the `main` commit and draft the Release:**
+
+```bash
+git checkout main && git pull
+git tag v<x.y.z> && git push origin v<x.y.z>
 # then draft & publish a GitHub Release for that tag → triggers `publish`
 ```
 
 The release's target commit selects which workflow runs, so this only publishes when a release is cut from a commit carrying this (v2) workflow.
+
+**Why the bump goes on `v2/main` first ([#2010](https://github.com/modelcontextprotocol/inspector/issues/2010)).** It used to happen on the milestone-merge branch, which is cut from `main` — so the bump existed only *downstream* of `v2/main` and nothing carried it back. `v2/main` sat at `2.0.0` through both the 2.1.0 and 2.2.0 releases. That is not cosmetic: a branch cut from a milestone-merge branch silently carries the bump into an unrelated PR (this happened on [#2009](https://github.com/modelcontextprotocol/inspector/issues/2009), where a container bugfix arrived with a `2.0.0 → 2.2.0` diff), and anything reading the version in development — `readInspectorVersion()`, `--version`, `GET /api/config` — reported a version two releases old.
+
+Do **not** "fix" a future drift by merging `main` back into `v2/main`. `main` carries the entire pre-v2 v1 history (retained through `ec5d8e13 chore: replace main's tree with v2` — ~230 commits `v2/main` does not have), so a back-merge grafts all of it into the develop branch's log permanently in order to deliver a two-file change. Bumping first means there is nothing to back-merge.
 
 ### Docker
 
