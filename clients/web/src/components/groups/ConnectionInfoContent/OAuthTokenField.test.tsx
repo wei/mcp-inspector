@@ -2,13 +2,13 @@ import { describe, it, expect, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import { renderWithMantine, screen } from "../../../test/renderWithMantine";
 import { CLEAR_OAUTH_STATE_AND_DISCONNECT_LABEL } from "./ConnectionInfoContent";
-import { OAuthAccessTokenField } from "./OAuthAccessTokenField";
+import { OAuthTokenField } from "./OAuthTokenField";
 
 const jwt = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ1c2VyIn0.";
 
-describe("OAuthAccessTokenField", () => {
+describe("OAuthTokenField", () => {
   it("renders token with copy control beside the content", () => {
-    renderWithMantine(<OAuthAccessTokenField accessToken={jwt} />);
+    renderWithMantine(<OAuthTokenField label="Access Token" token={jwt} />);
     expect(screen.getByText("Access Token")).toBeInTheDocument();
     expect(screen.getByText(/eyJhbGciOiJub25lIn0/)).toBeInTheDocument();
     expect(screen.getByText(/eyJzdWIiOiJ1c2VyIn0/)).toBeInTheDocument();
@@ -17,7 +17,7 @@ describe("OAuthAccessTokenField", () => {
 
   it("replaces raw token with decoded JSON and restores on toggle", async () => {
     const user = userEvent.setup();
-    renderWithMantine(<OAuthAccessTokenField accessToken={jwt} />);
+    renderWithMantine(<OAuthTokenField label="Access Token" token={jwt} />);
 
     expect(screen.getByText(/eyJhbGciOiJub25lIn0/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Decode JWT" }));
@@ -31,7 +31,10 @@ describe("OAuthAccessTokenField", () => {
 
   it("omits decode toggle for opaque tokens", () => {
     renderWithMantine(
-      <OAuthAccessTokenField accessToken="opaque-access-token-value" />,
+      <OAuthTokenField
+        label="Access Token"
+        token="opaque-access-token-value"
+      />,
     );
     expect(
       screen.queryByRole("button", { name: "Decode JWT" }),
@@ -46,7 +49,7 @@ describe("OAuthAccessTokenField", () => {
       configurable: true,
     });
 
-    renderWithMantine(<OAuthAccessTokenField accessToken={jwt} />);
+    renderWithMantine(<OAuthTokenField label="Access Token" token={jwt} />);
     await user.click(screen.getByRole("button", { name: "Decode JWT" }));
     await user.click(screen.getByRole("button", { name: "Copy" }));
 
@@ -64,7 +67,7 @@ describe("OAuthAccessTokenField", () => {
       configurable: true,
     });
 
-    renderWithMantine(<OAuthAccessTokenField accessToken={jwt} />);
+    renderWithMantine(<OAuthTokenField label="Access Token" token={jwt} />);
     await user.click(screen.getByRole("button", { name: "Copy" }));
 
     expect(writeText).toHaveBeenCalledWith(jwt);
@@ -74,8 +77,9 @@ describe("OAuthAccessTokenField", () => {
     const user = userEvent.setup();
     const onClear = vi.fn();
     renderWithMantine(
-      <OAuthAccessTokenField
-        accessToken="opaque-access-token-value"
+      <OAuthTokenField
+        label="Access Token"
+        token="opaque-access-token-value"
         onClear={onClear}
         clearLabel={CLEAR_OAUTH_STATE_AND_DISCONNECT_LABEL}
       />,
@@ -86,5 +90,27 @@ describe("OAuthAccessTokenField", () => {
       }),
     );
     expect(onClear).toHaveBeenCalledTimes(1);
+  });
+
+  it("labels the row from the label prop and decodes an ID token", async () => {
+    const user = userEvent.setup();
+    // header {"alg":"none"} / payload {"sub":"user"} — same shape an AS returns
+    // for an `id_token`; the decode path is identical to the access token's.
+    renderWithMantine(<OAuthTokenField label="ID Token" token={jwt} />);
+
+    expect(screen.getByText("ID Token")).toBeInTheDocument();
+    expect(screen.queryByText("Access Token")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Decode JWT" }));
+    expect(screen.getByText(/"sub": "user"/)).toBeInTheDocument();
+  });
+
+  it("omits the clear action when no handler is given", () => {
+    renderWithMantine(<OAuthTokenField label="ID Token" token={jwt} />);
+    expect(
+      screen.queryByRole("button", {
+        name: CLEAR_OAUTH_STATE_AND_DISCONNECT_LABEL,
+      }),
+    ).not.toBeInTheDocument();
   });
 });

@@ -473,6 +473,60 @@ describe("ConnectionInfoContent", () => {
     expect(screen.queryByText("Auth URL")).not.toBeInTheDocument();
     expect(screen.queryByText("Scopes")).not.toBeInTheDocument();
     expect(screen.queryByText("Access Token")).not.toBeInTheDocument();
+    expect(screen.queryByText("ID Token")).not.toBeInTheDocument();
+  });
+
+  it("renders the ID Token row when the token set carries one", () => {
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={fullResult}
+        clientCapabilities={fullClientCaps}
+        transport="streamable-http"
+        oauth={{
+          protocol: "standard",
+          authorized: true,
+          accessToken: "token-123",
+          idToken: "id-token-456",
+        }}
+      />,
+    );
+    expect(screen.getByText("Access Token")).toBeInTheDocument();
+    expect(screen.getByText("ID Token")).toBeInTheDocument();
+    expect(screen.getByText("id-token-456")).toBeInTheDocument();
+  });
+
+  it("renders the ID Token row on its own when there is no access token", () => {
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={fullResult}
+        clientCapabilities={fullClientCaps}
+        transport="streamable-http"
+        oauth={{
+          protocol: "standard",
+          authorized: true,
+          idToken: "id-token-456",
+        }}
+      />,
+    );
+    expect(screen.queryByText("Access Token")).not.toBeInTheDocument();
+    expect(screen.getByText("ID Token")).toBeInTheDocument();
+  });
+
+  it("omits the ID Token row when only an access token is present", () => {
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={fullResult}
+        clientCapabilities={fullClientCaps}
+        transport="streamable-http"
+        oauth={{
+          protocol: "standard",
+          authorized: true,
+          accessToken: "token-123",
+        }}
+      />,
+    );
+    expect(screen.getByText("Access Token")).toBeInTheDocument();
+    expect(screen.queryByText("ID Token")).not.toBeInTheDocument();
   });
 
   it("does not render OAuth section when oauth prop is omitted", () => {
