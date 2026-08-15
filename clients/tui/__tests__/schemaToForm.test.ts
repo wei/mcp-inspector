@@ -213,4 +213,117 @@ describe("schemaToForm", () => {
     );
     expect(form.sections[0]!.fields[0]).toMatchObject({ initialValue: "hi" });
   });
+
+  // #2015 (the TUI twin of #1928): an argument declared with Zod's `.nullish()`
+  // has no top-level `type`/`enum` — they sit on the surviving `anyOf` branch —
+  // so before normalization every one of these degraded to a plain text field.
+  describe("nullable unions", () => {
+    it("renders a select for an anyOf string-enum|null argument", () => {
+      const form = schemaToForm(
+        {
+          properties: {
+            direction: {
+              anyOf: [
+                { type: "string", enum: ["envio", "recebimento"] },
+                { type: "null" },
+              ],
+            },
+          },
+        },
+        "nullableEnum",
+      );
+      expect(form.sections[0]!.fields[0]).toMatchObject({
+        name: "direction",
+        type: "select",
+        options: [
+          { label: "envio", value: "envio" },
+          { label: "recebimento", value: "recebimento" },
+        ],
+      });
+    });
+
+    it("maps the remaining nullable scalar branches to their typed fields", () => {
+      const form = schemaToForm(
+        {
+          properties: {
+            reference: { anyOf: [{ type: "string" }, { type: "null" }] },
+            quantity: {
+              anyOf: [
+                { type: "integer", minimum: 1, maximum: 9 },
+                { type: "null" },
+              ],
+            },
+            ratio: { anyOf: [{ type: "number" }, { type: "null" }] },
+            express: { anyOf: [{ type: "boolean" }, { type: "null" }] },
+          },
+        },
+        "nullableScalars",
+      );
+      const fields = form.sections[0]!.fields;
+      expect(fields.map((f) => ({ name: f.name, type: f.type }))).toEqual([
+        { name: "reference", type: "string" },
+        { name: "quantity", type: "integer" },
+        { name: "ratio", type: "float" },
+        { name: "express", type: "boolean" },
+      ]);
+      // The branch's own constraints are hoisted along with its type.
+      expect(fields[1]).toMatchObject({ min: 1, max: 9 });
+    });
+
+    it("renders a select for a nullable array-of-enum argument", () => {
+      const form = schemaToForm(
+        {
+          properties: {
+            tags: {
+              anyOf: [
+                { type: "array", items: { enum: ["a", "b"] } },
+                { type: "null" },
+              ],
+            },
+          },
+        },
+        "nullableArrayEnum",
+      );
+      expect(form.sections[0]!.fields[0]).toMatchObject({
+        type: "select",
+        options: [
+          { label: "a", value: "a" },
+          { label: "b", value: "b" },
+        ],
+      });
+    });
+
+    it("collapses the type: [T, null] encoding too", () => {
+      const form = schemaToForm(
+        {
+          properties: {
+            note: { type: ["string", "null"] },
+            flag: { type: ["boolean", "null"] },
+          },
+        },
+        "typeArrayNull",
+      );
+      expect(
+        form.sections[0]!.fields.map((f) => ({ name: f.name, type: f.type })),
+      ).toEqual([
+        { name: "note", type: "string" },
+        { name: "flag", type: "boolean" },
+      ]);
+    });
+
+    it("leaves a union of two real types as a plain string field", () => {
+      const form = schemaToForm(
+        {
+          properties: {
+            mixed: { anyOf: [{ type: "string" }, { type: "number" }] },
+          },
+        },
+        "realUnion",
+      );
+      expect(form.sections[0]!.fields[0]).toMatchObject({
+        name: "mixed",
+        type: "string",
+      });
+    });
+  });
 });

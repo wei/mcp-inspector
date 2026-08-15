@@ -12,7 +12,7 @@ import { useState } from "react";
 import { ClearButton } from "../../elements/ClearButton/ClearButton";
 import { useValueChange } from "../../../hooks/useValueChange";
 import type { InspectorFormSchema } from "../../../utils/jsonUtils";
-import { normalizeUnionType } from "../../../utils/schemaUtils";
+import { normalizeNullableUnion } from "@inspector/core/json/nullableUnion.js";
 
 const FieldLabel = Text.withProps({
   fw: 500,
@@ -224,7 +224,7 @@ export function SchemaForm({
     // without this an "optional and explicitly nullable" field — what Zod's
     // `.nullish()` emits — matches nothing and falls through to the raw-JSON
     // fallback, which is unusable for a value the user has to type (#1928).
-    const fieldSchema = normalizeUnionType(rawSchema);
+    const fieldSchema = normalizeNullableUnion(rawSchema);
     const isRequired = requiredFields.includes(fieldName);
     const label = fieldSchema.title ?? fieldName;
     const description = fieldSchema.description;
