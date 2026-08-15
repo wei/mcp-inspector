@@ -3496,6 +3496,9 @@ export class InspectorClient extends InspectorClientEventTarget {
   ): Promise<ExcludedTool[]> {
     const excluded: ExcludedTool[] = [];
     const malformed: MalformedListItem[] = [];
+    // Raw entries seen so far, across pages — the frame the reported indices
+    // are relative to (see the mapping below).
+    let rawOffset = 0;
     // Gated to connections that actually exclude; otherwise this is a pure
     // no-op (no round trip). The raw `listTools` below guards the connection.
     if (this.excludesInvalidXMcpHeaderTools()) {
@@ -3506,10 +3509,15 @@ export class InspectorClient extends InspectorClientEventTarget {
         malformed.push(
           ...page.malformed.map((entry) => ({
             ...entry,
-            // Index against the aggregate this walk is building, not the page.
-            index: entry.index + excluded.length + page.tools.length,
+            // Offset by the RAW entries of PRIOR pages only. `excluded.length`
+            // would be wrong twice over: it counts just the invalid-header
+            // tools, and on page one it would also fold in this page's own
+            // valid count — putting an unlabeled entry, whose index is all the
+            // user has to go on, at a position that doesn't exist.
+            index: entry.index + rawOffset,
           })),
         );
+        rawOffset += page.tools.length + page.malformed.length;
         for (const tool of page.tools) {
           const scan = scanXMcpHeaderDeclarations(tool.inputSchema);
           if (!scan.valid) excluded.push({ tool, reason: scan.reason });
@@ -3561,6 +3569,13 @@ export class InspectorClient extends InspectorClientEventTarget {
       return { ...page, malformed: [] };
     } catch (err) {
       if (!isClientDecodeRejection(err)) throw err;
+      // Capture before the re-fetch, for the reason `salvageList` documents:
+      // this refused response is a distinct exchange from the aggregate's, and
+      // the re-fetch below moves the method's correlation off it. Without this
+      // the scan's Protocol entry renders as a clean success even though the
+      // client refused the result.
+      const rejectedResponseId =
+        this.lastAnsweredRequestByMethod.get("tools/list");
       const effectiveMeta = this.mergeMeta(metadata);
       const params = {
         ...(effectiveMeta ? { _meta: effectiveMeta } : {}),
@@ -3587,6 +3602,12 @@ export class InspectorClient extends InspectorClientEventTarget {
         items,
         schema: ToolSchema,
       });
+      if (rejectedResponseId !== undefined && malformed.length > 0) {
+        this.dispatchTypedEvent("responseRejected", {
+          id: rejectedResponseId,
+          reason: summarizeMalformed(malformed),
+        });
+      }
       return {
         tools: valid,
         ...(page.nextCursor !== undefined && { nextCursor: page.nextCursor }),

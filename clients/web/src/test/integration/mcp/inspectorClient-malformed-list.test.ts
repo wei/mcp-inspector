@@ -26,9 +26,18 @@ import { eraToVersionNegotiation } from "@inspector/core/mcp/types.js";
 
 const MODERN_VERSION = "2026-07-28";
 
+/**
+ * One page exactly as the server will put it on the wire.
+ *
+ * Both fields are `unknown` on purpose: this server exists to serve shapes the
+ * spec forbids (a non-array `items`, a numeric `nextCursor`), so the fixture
+ * models raw wire data rather than the validated type. Declaring the spec type
+ * and casting malformed values through it at each call site would assert the
+ * opposite of what these tests are for.
+ */
 interface ListPage {
-  items: unknown[];
-  nextCursor?: string;
+  items: unknown;
+  nextCursor?: unknown;
 }
 
 function jsonRpcResult(id: unknown, result: unknown) {
@@ -73,7 +82,9 @@ function startMalformedServer(
     const configured = pages[key] ?? [];
     const index = cursor === undefined ? 0 : (cursorToIndex.get(cursor) ?? 0);
     const page = configured[index] ?? { items: [] };
-    if (page.nextCursor !== undefined) {
+    // Only a string cursor can address a page; a malformed one is served
+    // verbatim so the client can reject it, but it maps to nothing.
+    if (typeof page.nextCursor === "string") {
       cursorToIndex.set(page.nextCursor, index + 1);
     }
     return page;
@@ -437,7 +448,7 @@ describe("InspectorClient list salvage (#1909)", () => {
       resourceTemplates: [
         {
           items: [PHP_EMPTY_ANNOTATIONS, VALID_TEMPLATE],
-          nextCursor: 42 as unknown as string,
+          nextCursor: 42,
         },
       ],
     });
@@ -455,7 +466,7 @@ describe("InspectorClient list salvage (#1909)", () => {
     // pass cannot explain; treating it as an empty page would return a
     // silently truncated list and discard the error that was right about it.
     const server = await startMalformedServer({
-      resourceTemplates: [{ items: "nope" as unknown as unknown[] }],
+      resourceTemplates: [{ items: "nope" }],
     });
     stopServer = server.stop;
     const connected = await connectTo(server.url);
@@ -484,14 +495,82 @@ describe("InspectorClient list salvage (#1909)", () => {
     expect(server.cursors).toContain("");
   });
 
+  it("marks the exclusion scan's own refused response too", async () => {
+    // The scan is a separate exchange from the aggregate's, and its re-fetch
+    // moves the method correlation off it — so without marking it here its
+    // Protocol entry renders as a clean success the client actually refused.
+    const server = await startMalformedServer(
+      {
+        tools: [
+          {
+            items: [
+              { name: "ok_tool", inputSchema: { type: "object" } },
+              { name: "broken", inputSchema: "not-a-schema" },
+            ],
+          },
+        ],
+      },
+      true,
+    );
+    stopServer = server.stop;
+    const connected = await connectTo(server.url, "modern");
+    const log = new MessageLogState(connected);
+
+    await connected.listAllTools();
+
+    const marked = log
+      .getMessages()
+      .filter(
+        (entry) =>
+          "method" in entry.message &&
+          entry.message.method === "tools/list" &&
+          entry.clientError !== undefined,
+      );
+    // Two refused responses: the aggregate's and the scan's.
+    expect(marked).toHaveLength(2);
+    for (const entry of marked) {
+      expect(entry.clientError).toContain("Dropped 1 malformed entry");
+    }
+    log.destroy();
+  });
+
+  it("reports scan-dropped tools at their position in the whole list", async () => {
+    // The exclusion scan walks pages of its own, so its report has to be
+    // offset by the RAW entries of PRIOR pages. An unlabeled entry's index is
+    // all the user has to go on, so a wrong offset points at nothing.
+    const server = await startMalformedServer(
+      {
+        tools: [
+          {
+            items: [
+              { name: "one", inputSchema: { type: "object" } },
+              { name: "two", inputSchema: { type: "object" } },
+            ],
+            nextCursor: "p2",
+          },
+          // Page two, entry one (index 2 of the whole list) is unlabelable.
+          { items: [42, { name: "four", inputSchema: { type: "object" } }] },
+        ],
+      },
+      true,
+    );
+    stopServer = server.stop;
+    const connected = await connectTo(server.url, "modern");
+
+    const { tools } = await connected.listAllTools();
+    expect(tools.map((t) => t.name)).toEqual(["one", "two", "four"]);
+    const reported = connected.getMalformedListItems();
+    expect(reported).toHaveLength(1);
+    expect(reported[0]?.index).toBe(2);
+    expect(reported[0]?.label).toBeUndefined();
+  });
+
   it("rethrows when the rejection is not about any single entry", async () => {
     // Every entry validates; the result is bad for another reason (a cursor of
     // the wrong type). There is no per-item story, so the original error must
     // survive rather than being swallowed into a partial list.
     const server = await startMalformedServer({
-      resourceTemplates: [
-        { items: [VALID_TEMPLATE], nextCursor: 42 as unknown as string },
-      ],
+      resourceTemplates: [{ items: [VALID_TEMPLATE], nextCursor: 42 }],
     });
     stopServer = server.stop;
     const connected = await connectTo(server.url);
