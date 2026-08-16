@@ -6,6 +6,9 @@ import {
   MutableRedirectUrlProvider,
 } from "@inspector/core/auth/providers.js";
 import type { OAuthStorage } from "@inspector/core/auth/storage.js";
+import { OAuthStorageBase } from "@inspector/core/auth/oauth-storage.js";
+import { OAuthMemoryStore } from "@inspector/core/auth/store.js";
+import type { OAuthPersistBackend } from "@inspector/core/auth/oauth-persist.js";
 import type { EmaFlowConfig } from "@inspector/core/auth/ema/emaFlow.js";
 import { EmaTransportOAuthProvider } from "@inspector/core/auth/ema/transportProvider.js";
 import {
@@ -22,6 +25,20 @@ const refreshMock = vi.mocked(refreshEmaResourceTokens);
 const startIdpMock = vi.mocked(startEmaIdpAuthorization);
 
 const SERVER_URL = "http://127.0.0.1:9999/mcp";
+
+/**
+ * A real `OAuthStorage` — in-memory state over a no-op persist backend — for the
+ * one test below that drives an actual `BaseOAuthClientProvider`. Building the
+ * genuine article costs two lines and avoids an `as unknown as` stub that would
+ * stop type-checking against the interface the provider is handed.
+ */
+function makeRealStorage(): OAuthStorage {
+  const backend: OAuthPersistBackend = {
+    read: async () => null,
+    write: async () => {},
+  };
+  return new OAuthStorageBase(new OAuthMemoryStore(), backend);
+}
 
 function jwtWithExp(expSec: number): string {
   const payload = btoa(JSON.stringify({ exp: expSec }))
@@ -200,9 +217,10 @@ describe("EmaTransportOAuthProvider", () => {
   it("does not leak custom authorization params onto the IdP authorize URL", async () => {
     const navCallback = vi.fn();
     const realInner = new BaseOAuthClientProvider(SERVER_URL, {
-      storage: {
-        getScope: vi.fn().mockResolvedValue(undefined),
-      } as unknown as OAuthStorage,
+      // A real OAuthStorage rather than a cast stub: the redirect path never
+      // reads it, and a genuine implementation keeps this test honest if the
+      // storage contract changes.
+      storage: makeRealStorage(),
       redirectUrlProvider: new MutableRedirectUrlProvider(),
       navigation: new CallbackNavigation(navCallback),
       authorizationParams: { kc_idp_hint: "corp-idp", audience: "api://mcp" },
