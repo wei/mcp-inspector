@@ -1,4 +1,5 @@
 import { Button, Divider, ScrollArea, Stack, Text } from "@mantine/core";
+import { useState } from "react";
 import { MdPlayArrow } from "react-icons/md";
 import type { Tool } from "@modelcontextprotocol/client";
 import { SchemaForm } from "../SchemaForm/SchemaForm";
@@ -58,7 +59,12 @@ export function AppDetailPanel({
   /* v8 ignore next -- unreachable: Tool.inputSchema is always an object */
   const formSchema = toFormSchema(inputSchema) ?? {};
   const hasErrors = hasMissingRequiredFields(formSchema, formValues);
-  const disabled = isOpening || hasErrors;
+  // A field holding text it could not turn into a value (unparseable JSON, an
+  // unrepresentable number) reports `undefined`, which is indistinguishable
+  // from empty once it reaches `formValues` — so the form reports it directly
+  // and an optional argument can no longer be dropped silently (#2020).
+  const [hasInvalidDraft, setHasInvalidDraft] = useState(false);
+  const disabled = isOpening || hasErrors || hasInvalidDraft;
   const hasFields = hasInputFields(tool);
 
   return (
@@ -82,6 +88,7 @@ export function AppDetailPanel({
           // tool's name to drop another app's in-progress field text. See
           // SchemaFormProps.resetKey.
           resetKey={tool.name}
+          onValidityChange={setHasInvalidDraft}
         />
 
         <OpenAppButton

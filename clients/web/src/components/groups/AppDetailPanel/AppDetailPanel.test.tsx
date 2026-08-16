@@ -173,4 +173,30 @@ describe("AppDetailPanel", () => {
     rerender(<AppDetailPanel {...baseProps} tool={numberFieldTool("app_b")} />);
     expect(input().value).toBe("");
   });
+
+  // #2020: `hasMissingRequiredFields` sees a field with no value, but text a
+  // field could not turn into a value looks identical to it — both report
+  // `undefined` — so an optional argument was dropped from the call with no
+  // gate. The form reports draft validity for this reason.
+  it("disables Open App while a field holds text it cannot send", async () => {
+    const user = userEvent.setup();
+    const jsonFieldTool: Tool = {
+      name: "chart_app",
+      title: "Chart App",
+      inputSchema: {
+        type: "object",
+        properties: { series: { type: "array", title: "Series" } },
+      },
+    };
+    renderWithMantine(<AppDetailPanel {...baseProps} tool={jsonFieldTool} />);
+    const openApp = screen.getByRole("button", { name: /open app/i });
+    expect(openApp).not.toBeDisabled();
+
+    const jsonInput = screen.getByLabelText(/Series/);
+    await user.type(jsonInput, "x");
+    expect(openApp).toBeDisabled();
+
+    await user.clear(jsonInput);
+    expect(openApp).not.toBeDisabled();
+  });
 });

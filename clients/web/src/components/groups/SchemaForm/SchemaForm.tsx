@@ -8,7 +8,7 @@ import {
   Text,
   TextInput,
 } from "@mantine/core";
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ClearButton } from "../../elements/ClearButton/ClearButton";
 import { useValueChange } from "../../../hooks/useValueChange";
 import type {
@@ -169,13 +169,47 @@ function isSameJson(a: unknown, b: unknown): boolean {
   return serializeJson(a) === serializeJson(b);
 }
 
+/**
+ * How a field tells the enclosing `SchemaForm` whether the text it is holding
+ * can be sent. Keyed by field name rather than closed over per field so the
+ * reporter is referentially stable, which is what keeps the effect below from
+ * re-subscribing on every render.
+ */
+type DraftValidityReporter = (fieldName: string, isValid: boolean) => void;
+
+/**
+ * Publish a field's draft validity to the enclosing `SchemaForm`.
+ *
+ * Reported from an effect rather than from the change handler because validity
+ * also moves when the *parent* replaces the value — a cleared form or a loaded
+ * example re-syncs the draft and makes invalid text valid again without the
+ * user touching the field. Reporting during that render instead would mean
+ * updating another component mid-render, which React rejects.
+ *
+ * The cleanup reports the field as valid again, so a field that goes away —
+ * unmounted with the panel, or remounted under a new `resetKey` when the form
+ * moves to another entity — cannot leave a stale draft blocking submission.
+ */
+function useDraftValidity(
+  fieldName: string,
+  isValid: boolean,
+  onValidityChange: DraftValidityReporter,
+): void {
+  useEffect(() => {
+    onValidityChange(fieldName, isValid);
+    return () => onValidityChange(fieldName, true);
+  }, [fieldName, isValid, onValidityChange]);
+}
+
 interface SchemaJsonFieldProps {
+  fieldName: string;
   label: string;
   description?: string;
   withAsterisk: boolean;
   disabled: boolean;
   value: unknown;
   onChange: (value: unknown) => void;
+  onValidityChange: DraftValidityReporter;
 }
 
 /**
@@ -200,18 +234,18 @@ interface SchemaJsonFieldProps {
  * it cannot send, and `undefined` is how "no value supplied" is spelled
  * everywhere else in this form.
  *
- * That leaves invalid text and an empty field indistinguishable *to the
- * parent*, so the field says so itself via `error`. A **required** field is
- * already gated — its value is `undefined`, which `hasMissingRequiredFields`
- * treats as missing — but an **optional** one would otherwise be dropped from
- * the submission with no indication. Disabling Execute/Open/Submit on an
- * invalid optional draft needs a validity channel out of this component and
- * into all four callers, which is a wider change than this fix; tracked
- * separately.
+ * That leaves invalid text and an empty field indistinguishable *to the value*,
+ * so the field reports the difference two other ways: it says so on itself via
+ * `error`, and it reports draft validity up through `onValidityChange` so the
+ * enclosing form's caller can disable Execute/Open App/Submit (#2020). Without
+ * the second channel an **optional** field's invalid text is simply dropped
+ * from a submission the user was allowed to make.
  */
 function SchemaJsonField({
+  fieldName,
   value,
   onChange,
+  onValidityChange,
   ...inputProps
 }: SchemaJsonFieldProps) {
   const [draft, setDraft] = useState(() =>
@@ -230,11 +264,11 @@ function SchemaJsonField({
 
   // Text that is present but does not parse yields no value, so the field would
   // otherwise submit as absent while the user is still looking at what they
-  // typed. Saying so on the field is what keeps that from being silent; see the
-  // note on `SchemaJsonField` for the submit-gating half, which is not local to
-  // this component.
+  // typed. Saying so on the field keeps that from being silent; reporting it
+  // upward is what keeps it from being submittable.
   const hasInvalidDraft =
     draft.trim() !== "" && parseJsonDraft(draft) === undefined;
+  useDraftValidity(fieldName, !hasInvalidDraft, onValidityChange);
 
   return (
     <SchemaJsonInput
@@ -253,7 +287,24 @@ function SchemaJsonField({
   );
 }
 
+/**
+ * Whether a number field's draft is text that cannot be sent.
+ *
+ * Anything non-empty that `toNumericValue` declines is invalid: a half-typed
+ * `"-"`, and — the case that matters — an integer past `MAX_SAFE_INTEGER`,
+ * which is deliberately dropped rather than silently rounded (see
+ * `toNumericValue`). Both would otherwise submit as an absent argument while
+ * the text sits in the box.
+ */
+function hasInvalidNumericDraft(draft: string | number): boolean {
+  if (typeof draft === "number") {
+    return false;
+  }
+  return draft.trim() !== "" && toNumericValue(draft) === undefined;
+}
+
 interface SchemaNumberInputProps {
+  fieldName: string;
   label: string;
   description?: string;
   withAsterisk: boolean;
@@ -263,6 +314,7 @@ interface SchemaNumberInputProps {
   max?: number;
   allowDecimal: boolean;
   onChange: (value: number | undefined) => void;
+  onValidityChange: DraftValidityReporter;
 }
 
 /**
@@ -289,8 +341,10 @@ interface SchemaNumberInputProps {
  * prop for the case it covers.
  */
 function SchemaNumberInput({
+  fieldName,
   value,
   onChange,
+  onValidityChange,
   ...inputProps
 }: SchemaNumberInputProps) {
   const [draft, setDraft] = useState<string | number>(value ?? "");
@@ -301,10 +355,19 @@ function SchemaNumberInput({
     }
   });
 
+  // Same split as the JSON field: text this client cannot send reports no value,
+  // so it has to say so on the field and report it upward, or the argument is
+  // dropped from a submission the user was allowed to make (#2020).
+  const invalidDraft = hasInvalidNumericDraft(draft);
+  useDraftValidity(fieldName, !invalidDraft, onValidityChange);
+
   return (
     <NumberInput
       {...inputProps}
       value={draft}
+      error={
+        invalidDraft ? "Not a number — this field will be omitted" : undefined
+      }
       onChange={(next) => {
         setDraft(next);
         onChange(toNumericValue(next));
@@ -337,6 +400,21 @@ export interface SchemaFormProps {
    * substitute — callers rebuild it every render, so its identity is unstable.
    */
   resetKey?: string;
+  /**
+   * Called with `true` while any field is holding text that cannot be sent —
+   * unparseable JSON, or a number this client cannot represent exactly. Both
+   * report their value as `undefined`, which is indistinguishable from an empty
+   * field once it reaches `values`, so a caller cannot derive this from the
+   * values it already has (#2020).
+   *
+   * Gate the submit action on it: `hasMissingRequiredFields` covers a field with
+   * *no* value, and this covers a field whose visible text produced none. An
+   * empty optional field is unaffected — it stays valid and submittable.
+   *
+   * The callback is read through a ref, so an inline closure is fine — it is
+   * called when the answer changes, not on every render.
+   */
+  onValidityChange?: (hasInvalidDraft: boolean) => void;
 }
 
 function getDefaultValue(fieldSchema: InspectorFormSchema): unknown {
@@ -362,9 +440,58 @@ export function SchemaForm({
   onChange,
   disabled = false,
   resetKey,
+  onValidityChange,
 }: SchemaFormProps) {
   const properties = schema.properties ?? {};
   const requiredFields = schema.required ?? [];
+
+  // The names of fields currently holding unsendable text. Held here rather
+  // than in each field because only the form sees them all, and only the form
+  // knows when the last one cleared.
+  const [invalidFields, setInvalidFields] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+
+  // Stable so a field's reporting effect subscribes once, not per render. The
+  // updater returns the previous set unchanged when nothing moved, which is
+  // what makes a nested form's inline callback safe to call repeatedly.
+  const reportFieldValidity = useCallback<DraftValidityReporter>(
+    (fieldName, isValid) => {
+      setInvalidFields((previous) => {
+        if (previous.has(fieldName) === !isValid) {
+          return previous;
+        }
+        const next = new Set(previous);
+        if (isValid) {
+          next.delete(fieldName);
+        } else {
+          next.add(fieldName);
+        }
+        return next;
+      });
+    },
+    [],
+  );
+
+  // Read through a ref so the callback's identity is not a dependency. It has
+  // to be one or the other, and a *stable* dependency is what this needs: a
+  // nested form is handed a fresh closure every render, and re-running the
+  // effect for that alone would toggle the parent's state (cleanup, then
+  // re-report), re-render this form, and loop forever.
+  const notifyValidity = useRef(onValidityChange);
+  useEffect(() => {
+    notifyValidity.current = onValidityChange;
+  });
+
+  // The cleanup mirrors the one in `useDraftValidity`: a form that is no longer
+  // rendered holds no drafts, so an unmounted nested form must not leave the
+  // outer one blocked. It runs in the same commit as the re-report, so the
+  // transient `false` is never rendered.
+  const hasInvalidDraft = invalidFields.size > 0;
+  useEffect(() => {
+    notifyValidity.current?.(hasInvalidDraft);
+    return () => notifyValidity.current?.(false);
+  }, [hasInvalidDraft]);
 
   function handleFieldChange(fieldName: string, fieldValue: unknown) {
     onChange({ ...values, [fieldName]: fieldValue });
@@ -452,6 +579,7 @@ export function SchemaForm({
           // The only field holding local state, so the only one that has to be
           // remounted when `resetKey` says the form moved to another entity.
           key={resetKey === undefined ? fieldName : `${resetKey}:${fieldName}`}
+          fieldName={fieldName}
           label={label}
           description={description}
           withAsterisk={isRequired}
@@ -463,6 +591,7 @@ export function SchemaForm({
           // accepting a value the schema forbids.
           allowDecimal={fieldSchema.type === "number"}
           onChange={(val) => handleFieldChange(fieldName, val)}
+          onValidityChange={reportFieldValidity}
         />
       );
     }
@@ -541,6 +670,11 @@ export function SchemaForm({
               disabled={disabled}
               // Sub-fields belong to the same entity, so they reset with it.
               resetKey={resetKey}
+              // A nested form's invalid draft is the outer form's invalid draft,
+              // so it reports through the same channel under this field's name.
+              onValidityChange={(nestedInvalid) =>
+                reportFieldValidity(fieldName, !nestedInvalid)
+              }
             />
           </IndentedStack>
         </Stack>
@@ -553,12 +687,14 @@ export function SchemaForm({
         // Holds local draft state, so — like the number field — it has to be
         // remounted when `resetKey` says the form moved to another entity.
         key={resetKey === undefined ? fieldName : `${resetKey}:${fieldName}`}
+        fieldName={fieldName}
         label={label}
         description={description}
         withAsterisk={isRequired}
         disabled={disabled}
         value={rawValue}
         onChange={(val) => handleFieldChange(fieldName, val)}
+        onValidityChange={reportFieldValidity}
       />
     );
   }
