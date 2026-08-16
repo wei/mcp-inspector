@@ -341,9 +341,9 @@ interface SchemaNumberInputProps {
    * Raw, not `resolveValue`-substituted — see `SchemaJsonFieldProps.value`.
    *
    * `null` is admitted alongside `undefined` because a nullable number schema
-   * produces it, and the two are not interchangeable here: `undefined` means
-   * "no value supplied" and takes `defaultValue`, while `null` is a value and
-   * displays as an empty box.
+   * produces it — by way of parent state, never by clearing the box — and the
+   * two are not interchangeable here: `undefined` means "no value supplied"
+   * and takes `defaultValue`, while `null` is a value and displays empty.
    */
   value: number | null | undefined;
   /** The schema `default`, used to seed the draft only (#2026). May be `null`. */
@@ -387,10 +387,15 @@ function SchemaNumberInput({
   ...inputProps
 }: SchemaNumberInputProps) {
   // `undefined` means "no value supplied", which is what the default is for.
-  // An explicit `null` is a value — a nullable number the user cleared, or one
-  // the server sent — so it must not be overwritten by a non-null default; it
-  // displays as the empty box `resolveValue` produced before. Hence the
-  // `undefined` test rather than `??`, matching `SchemaJsonField`.
+  // An explicit `null` is a value, so it must not be overwritten by a non-null
+  // default; it displays as the empty box `resolveValue` produced before.
+  // Hence the `undefined` test rather than `??`, matching `SchemaJsonField`.
+  //
+  // Clearing the box does *not* produce that `null` — `toNumericValue("")`
+  // reports `undefined`, which is the behavior the "passes undefined to
+  // onChange when a number field is cleared" test pins. A `null` reaches this
+  // field only from parent state: a value received from the server, restored
+  // from a deep link, or written by a caller for a nullable schema.
   const [draft, setDraft] = useState<string | number>(
     (value === undefined ? defaultValue : value) ?? "",
   );

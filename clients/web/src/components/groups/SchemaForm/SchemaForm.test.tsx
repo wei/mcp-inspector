@@ -1743,8 +1743,11 @@ describe("SchemaForm defaulted fields (#2026)", () => {
   });
 
   // An explicit `null` is a value, not an absent one, so a non-null default
-  // must not be substituted for it. Reachable for a nullable number field the
-  // user cleared, or one the server sent as null.
+  // must not be substituted for it. Note the field itself never emits `null` —
+  // clearing it reports `undefined` (pinned by "passes undefined to onChange
+  // when a number field is cleared") — so this arrives from parent state: a
+  // value received from the server, restored from a deep link, or written by a
+  // caller for a nullable schema.
   it("shows an explicit null as empty, not as the default", () => {
     const schema: InspectorFormSchema = {
       type: "object",
