@@ -218,7 +218,13 @@ describe("ToolDetailPanel", () => {
   });
 
   it("renders the Execute Tool button enabled when not executing", () => {
-    renderWithMantine(<ToolDetailPanel {...baseProps} tool={simpleTool} />);
+    renderWithMantine(
+      <ToolDetailPanel
+        {...baseProps}
+        tool={simpleTool}
+        formValues={{ message: "hi" }}
+      />,
+    );
     const button = screen.getByRole("button", { name: "Execute Tool" });
     expect(button).toBeInTheDocument();
     expect(button).not.toBeDisabled();
@@ -231,6 +237,7 @@ describe("ToolDetailPanel", () => {
       <ToolDetailPanel
         {...baseProps}
         tool={simpleTool}
+        formValues={{ message: "hi" }}
         onExecute={onExecute}
       />,
     );
@@ -500,6 +507,63 @@ describe("ToolDetailPanel", () => {
       expect(
         screen.queryByText("Mirrored request headers (SEP-2243)"),
       ).not.toBeInTheDocument();
+    });
+  });
+
+  // #2020: Execute used to be gated on `isExecuting` alone — this panel never
+  // called `hasMissingRequiredFields`, unlike the App and elicitation panels —
+  // so arguments that could not be sent were executed anyway and simply arrived
+  // absent at the server.
+  describe("submit gating (#2020)", () => {
+    const optionalJsonTool: Tool = {
+      name: "record_shipment",
+      inputSchema: {
+        type: "object",
+        // An array of no declared item type renders through the JSON editor,
+        // which is where a draft can fail to parse.
+        properties: { payload: { type: "array", title: "Payload" } },
+      },
+    };
+
+    it("disables Execute while a required argument has no value", () => {
+      renderWithMantine(
+        <ToolDetailPanel {...baseProps} tool={simpleTool} formValues={{}} />,
+      );
+      expect(
+        screen.getByRole("button", { name: "Execute Tool" }),
+      ).toBeDisabled();
+    });
+
+    it("enables Execute once the required argument is filled", () => {
+      renderWithMantine(
+        <ToolDetailPanel
+          {...baseProps}
+          tool={simpleTool}
+          formValues={{ message: "hi" }}
+        />,
+      );
+      expect(
+        screen.getByRole("button", { name: "Execute Tool" }),
+      ).not.toBeDisabled();
+    });
+
+    it("disables Execute while an optional field holds text it cannot send", async () => {
+      const user = userEvent.setup();
+      renderWithMantine(
+        <ToolDetailPanel {...baseProps} tool={optionalJsonTool} />,
+      );
+      const execute = screen.getByRole("button", { name: "Execute Tool" });
+      expect(execute).not.toBeDisabled();
+
+      // The draft never reaches `formValues` — the field reports `undefined`
+      // for text it cannot parse — so only the form's validity channel makes
+      // this visible to the gate.
+      const jsonInput = screen.getByLabelText(/Payload/);
+      await user.type(jsonInput, "x");
+      expect(execute).toBeDisabled();
+
+      await user.clear(jsonInput);
+      expect(execute).not.toBeDisabled();
     });
   });
 });
