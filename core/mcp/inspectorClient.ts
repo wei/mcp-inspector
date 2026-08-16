@@ -159,10 +159,31 @@ import {
   ListResourcesResultSchema,
   ListResourceTemplatesResultSchema,
   ListPromptsResultSchema,
+  // Per-primitive item schemas — the salvage fallback validates a list's
+  // entries one at a time with these when the whole-result parse rejects
+  // (#1909, see `listAllSalvaging`). Tools go through `toolItemSchemaForEra`
+  // instead, since the neutral schema is looser than the negotiated era's.
+  ResourceSchema,
+  ResourceTemplateSchema,
+  PromptSchema,
 } from "@modelcontextprotocol/core";
 import type { ClientResult } from "@modelcontextprotocol/client";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/client/validators/ajv";
+import { z } from "zod/v4";
 import { validateToolOutput } from "./toolOutputValidation.js";
+import {
+  LIST_MAX_PAGES,
+  ModernResultEnvelopeSchema,
+  isSalvageableRejection,
+  listPaginationExceeded,
+  toolItemSchemaForEra,
+  nextCursorOf,
+  lenientListPageSchema,
+  rawItemsOf,
+  salvageListItems,
+  summarizeMalformed,
+  type MalformedListItem,
+} from "./listSalvage.js";
 import { TasksListChangedNotificationSchema } from "./taskNotificationSchemas.js";
 import {
   type JsonValue,
@@ -407,6 +428,11 @@ export class InspectorClient extends InspectorClientEventTarget {
   // annotations (SEP-2243), recomputed on every aggregate tools refresh and
   // surfaced so the Tools tab can show why a tool vanished (#1632).
   private excludedTools: ExcludedTool[] = [];
+  // Entries the Inspector dropped from a list result because they failed the
+  // spec schema for that primitive, keyed by list method. Populated only by the
+  // salvage fallback in `listAllSalvaging` — empty against a conforming server
+  // (#1909).
+  private malformedListItems = new Map<string, MalformedListItem[]>();
   // The capabilities this Inspector client advertises to the server during the
   // initialize handshake. Built once in setupClient() and snapshotted here so
   // UI surfaces (Server Info modal) can display them without poking at the
@@ -664,7 +690,13 @@ export class InspectorClient extends InspectorClientEventTarget {
       capabilities?: ClientCapabilities;
       versionNegotiation?: VersionNegotiationOptions;
       inputRequired?: InputRequiredOptions;
+      listMaxPages?: number;
     } = {
+      // Bound the SDK's auto-aggregate with the SAME constant the #1909 salvage
+      // re-walks use, so the strict path and its fallback cannot drift apart.
+      // This is the SDK's own default today; setting it explicitly is what makes
+      // the shared value a fact rather than a copied guess.
+      listMaxPages: LIST_MAX_PAGES,
       // Per-server protocol era (SEP §7.8), threaded from config via
       // `eraToVersionNegotiation` and defaulted to `{ mode: "legacy" }` in the
       // constructor. "legacy" keeps the wire byte-identical to a 2025 client;
@@ -1595,6 +1627,23 @@ export class InspectorClient extends InspectorClientEventTarget {
     // (#1953).
     this.outboundRequestMethods.clear();
     this.lastAnsweredRequestByMethod.clear();
+    // Per-session for the same reason: both name entries of the PREVIOUS
+    // server's list. Cleared here as well as in `disconnect()` because the
+    // route out that tears down nothing (`onerror` with no `onclose`) would
+    // otherwise carry them into the next connection — indefinitely, if that
+    // server never lists the method again. Safe to clear unconditionally at
+    // connect: `listAllTools` recomputes the excluded set on every aggregate
+    // and the salvage report on every list, so this can only drop a stale set,
+    // never a live one (#1909; the `excludedTools` half is the same latent bug
+    // from #1632, fixed here rather than left as a known sibling).
+    if (this.malformedListItems.size > 0) {
+      this.malformedListItems.clear();
+      this.dispatchTypedEvent("malformedListItemsChange", []);
+    }
+    if (this.excludedTools.length > 0) {
+      this.excludedTools = [];
+      this.dispatchTypedEvent("excludedToolsChange", []);
+    }
     for (const [, controller] of this.taskInputAbortControllers) {
       controller.abort(new Error("Connection ended"));
     }
@@ -2226,6 +2275,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     this.protocolEra = undefined;
     this.discoverResult = undefined;
     this.excludedTools = [];
+    this.malformedListItems.clear();
     // Read as "not opted in" while disconnected. This is no longer what stops
     // it leaking into the next connection — `resetSessionState()` re-derives it
     // at connect, so removing this would leak nothing (#1629). Note the web
@@ -2245,6 +2295,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     this.dispatchTypedEvent("protocolEraChange", this.protocolEra);
     this.dispatchTypedEvent("discoverResultChange", this.discoverResult);
     this.dispatchTypedEvent("excludedToolsChange", this.excludedTools);
+    this.dispatchTypedEvent("malformedListItemsChange", []);
   }
 
   /**
@@ -2364,8 +2415,6 @@ export class InspectorClient extends InspectorClientEventTarget {
   private withModernTaskEnvelope(
     params: Record<string, unknown>,
   ): Record<string, unknown> {
-    const existingMeta =
-      (params._meta as Record<string, unknown> | undefined) ?? {};
     const clientCapabilities = {
       ...this.clientCapabilities,
       // Force-stamp the tasks extension regardless of what the client
@@ -2377,11 +2426,31 @@ export class InspectorClient extends InspectorClientEventTarget {
         [TASKS_EXTENSION_KEY]: {},
       },
     };
-    // Use the NEGOTIATED protocol version so the envelope agrees with the
-    // `MCP-Protocol-Version` header the transport stamps from the same source —
-    // a future modern-family revision would negotiate a different string, and
-    // the two must not disagree. The raw channel only runs on a connected modern
-    // session, so this is always set; the constant is a defensive fallback.
+    return this.withModernEnvelope(params, clientCapabilities);
+  }
+
+  /**
+   * Stamp the `_meta` envelope every raw-wire request needs on the modern leg:
+   * the negotiated protocol version, the client identity, and the client
+   * capabilities.
+   *
+   * Split out of {@link withModernTaskEnvelope} so the list-salvage re-walk
+   * (#1909) can reuse it WITHOUT that method's force-stamped tasks extension —
+   * a `tools/list` has no business claiming an extension the user may have
+   * deliberately turned off (#1738).
+   *
+   * The NEGOTIATED protocol version is used so the envelope agrees with the
+   * `MCP-Protocol-Version` header the transport stamps from the same source — a
+   * future modern-family revision would negotiate a different string, and the
+   * two must not disagree. The raw channel only runs on a connected modern
+   * session, so this is always set; the constant is a defensive fallback.
+   */
+  private withModernEnvelope(
+    params: Record<string, unknown>,
+    clientCapabilities: ClientCapabilities = this.clientCapabilities,
+  ): Record<string, unknown> {
+    const existingMeta =
+      (params._meta as Record<string, unknown> | undefined) ?? {};
     /* v8 ignore start -- fallback only if getProtocolVersion() is unset, which
        can't happen on the connected modern session this runs on. Bracketed so
        the ignore is reflow-proof however prettier splits the statement. */
@@ -3109,7 +3178,11 @@ export class InspectorClient extends InspectorClientEventTarget {
     const effectiveMeta = this.mergeMeta(metadata);
     const params: ListToolsRequest["params"] = {
       ...(effectiveMeta ? { _meta: effectiveMeta } : {}),
-      ...(cursor ? { cursor } : {}),
+      // `!== undefined`, not truthiness: "" is a valid cursor. Dropping it asks
+      // for page one again — and `listToolsForScan` pairs this call with a
+      // fallback that already preserves it, so the two legs of one scan page
+      // would otherwise disagree about which page they fetched.
+      ...(cursor !== undefined && { cursor }),
     };
     const response = await this.invokeMcpClient(() =>
       this.client!.request(
@@ -3141,12 +3214,24 @@ export class InspectorClient extends InspectorClientEventTarget {
     if (!this.client) {
       throw new Error("Client is not connected");
     }
-    const response = await this.invokeMcpClient(() =>
-      this.client!.listTools(
-        this.aggregateListParams(options?.metadata),
-        this.getCacheableRequestOptions(options?.cacheMode),
-      ),
-    );
+    const tools = await this.listAllSalvaging({
+      method: "tools/list",
+      itemsKey: "tools",
+      resultSchema: ListToolsResultSchema,
+      // Era-aware: the neutral `ToolSchema` is more permissive than the
+      // negotiated era's wire schema — see `toolItemSchemaForEra`.
+      itemSchema: toolItemSchemaForEra(this.isModernEra()),
+      metadata: options?.metadata,
+      finalize: (salvaged) => this.excludeInvalidXMcpHeaderTools(salvaged),
+      aggregate: async () => [
+        ...(
+          await this.client!.listTools(
+            this.aggregateListParams(options?.metadata),
+            this.getCacheableRequestOptions(options?.cacheMode),
+          )
+        ).tools,
+      ],
+    });
     // Recompute the SEP-2243 excluded-tools set alongside the aggregate. The
     // SDK already filtered `response.tools`, so it can't tell us what it
     // dropped — {@link refreshExcludedTools} re-lists the RAW `tools/list` to
@@ -3168,7 +3253,7 @@ export class InspectorClient extends InspectorClientEventTarget {
         "Excluded-tools walk failed; the SEP-2243 excluded list may be incomplete",
       );
     });
-    return { tools: [...response.tools] };
+    return { tools };
   }
 
   /**
@@ -3202,6 +3287,280 @@ export class InspectorClient extends InspectorClientEventTarget {
     this.dispatchTypedEvent("responseRejected", { id, reason });
   }
 
+  /**
+   * Put the method's response correlation back where it was before a salvage
+   * re-walk, so a caller that goes on to mark the failure still marks the
+   * ORIGINAL rejected response.
+   *
+   * The re-walk answers the same method, so on any rethrow path the map points
+   * at a lenient page that succeeded. `ManagedListState.refresh()` catches the
+   * rethrown error and calls `markResponseRejected(method, ...)`, which would
+   * then stamp "Rejected by the Inspector" onto that page and leave the real
+   * one rendering clean — the same misattribution the capture inside
+   * `salvageList` exists to prevent, just one frame further out. Deleting when
+   * nothing had answered before makes the outer mark a no-op rather than a lie.
+   */
+  private restoreResponseCorrelation(
+    method: string,
+    id: string | number | undefined,
+  ): void {
+    if (id === undefined) this.lastAnsweredRequestByMethod.delete(method);
+    else this.lastAnsweredRequestByMethod.set(method, id);
+  }
+
+  /** Every entry dropped from a list result as malformed, across methods (#1909). */
+  getMalformedListItems(): MalformedListItem[] {
+    return [...this.malformedListItems.values()].flat();
+  }
+
+  /**
+   * Record (or clear) the malformed entries for one list method and notify.
+   *
+   * A no-op when the method had none and still has none, so the common case —
+   * every conforming refresh, of which there are many — costs no event and no
+   * re-render.
+   */
+  private setMalformedListItems(
+    method: string,
+    malformed: MalformedListItem[],
+  ): void {
+    const previous = this.malformedListItems.get(method) ?? [];
+    if (previous.length === 0 && malformed.length === 0) return;
+    if (malformed.length === 0) this.malformedListItems.delete(method);
+    else this.malformedListItems.set(method, malformed);
+    this.dispatchTypedEvent(
+      "malformedListItemsChange",
+      this.getMalformedListItems(),
+    );
+  }
+
+  /**
+   * Run a list aggregate, falling back to a per-item salvage when the SDK
+   * rejects the result it received (#1909).
+   *
+   * The strict aggregate runs first and unchanged, so a conforming server pays
+   * nothing: no extra request, no extra parse, and the SDK's response cache
+   * still serves it. Only an `InvalidResult` rejection — a response in hand
+   * that failed validation — reaches {@link salvageList}; every other failure
+   * (transport drop, timeout, server-sent error) rethrows untouched, because
+   * re-listing would not produce anything to salvage.
+   */
+  private async listAllSalvaging<T>({
+    method,
+    itemsKey,
+    itemSchema,
+    resultSchema,
+    aggregate,
+    metadata,
+    finalize,
+  }: {
+    method: string;
+    itemsKey: string;
+    itemSchema: z.ZodType<T>;
+    /** The method's real result schema — the salvage page schema is derived
+     *  from it so every field except the entries is still validated. */
+    resultSchema: z.ZodObject;
+    aggregate: () => Promise<T[]>;
+    metadata?: Record<string, string>;
+    /**
+     * Filter applied to SALVAGED entries only, to reproduce a filter the SDK's
+     * strict aggregate applies for us. Without it the fallback would return a
+     * longer list than the strict path — see the `tools/list` caller.
+     */
+    finalize?: (items: T[]) => T[];
+  }): Promise<T[]> {
+    try {
+      const items = await this.invokeMcpClient(aggregate, { method });
+      this.setMalformedListItems(method, []);
+      return items;
+    } catch (err) {
+      // Deliberately narrower than the Protocol-marking predicate — see
+      // `isSalvageableRejection`: an unrecognized result KIND is not a list
+      // with a bad entry in it.
+      if (!isSalvageableRejection(err)) throw err;
+      const salvaged = await this.salvageList({
+        method,
+        itemsKey,
+        itemSchema,
+        resultSchema,
+        metadata,
+        err,
+      });
+      return finalize ? finalize(salvaged) : salvaged;
+    }
+  }
+
+  /**
+   * Drop the tools the SDK would have excluded from `tools/list` for invalid
+   * `x-mcp-header` annotations (SEP-2243).
+   *
+   * The strict aggregate is filtered by the SDK before we see it, so the
+   * salvage path has to reapply the same rule itself: otherwise one ordinary
+   * malformed tool anywhere in the list would trip the fallback and quietly
+   * readmit every invalid-header tool alongside it — turning a rendering fix
+   * into a spec violation. The dropped tools are still reported through
+   * `refreshExcludedTools`, which lists them with their reason.
+   */
+  private excludeInvalidXMcpHeaderTools(tools: Tool[]): Tool[] {
+    if (!this.excludesInvalidXMcpHeaderTools()) return tools;
+    return tools.filter(
+      (tool) => scanXMcpHeaderDeclarations(tool.inputSchema).valid,
+    );
+  }
+
+  /**
+   * Re-walk a list method with pagination validated but entries left raw, then
+   * validate each entry on its own — keeping the good ones and reporting the
+   * rest (#1909).
+   *
+   * Two deliberate properties:
+   *
+   * - **The original error wins when nothing is salvageable.** If every entry
+   *   validates here, the strict rejection was about something else (a
+   *   top-level field, an era codec decision), so there is no per-item story to
+   *   tell and swallowing it would hide a real failure. Rethrow the original.
+   * - **A salvaged response is still a rejected response.** The Protocol entry
+   *   is marked (#1953) with what was dropped, so the wire truth survives even
+   *   though the list now renders.
+   *
+   * This walk is deliberately un-cached (it uses the raw per-page path), which
+   * is fine: it only runs against a server that just returned a non-conforming
+   * result.
+   */
+  private async salvageList<T>({
+    method,
+    itemsKey,
+    itemSchema,
+    resultSchema,
+    metadata,
+    err,
+  }: {
+    method: string;
+    itemsKey: string;
+    itemSchema: z.ZodType<T>;
+    resultSchema: z.ZodObject;
+    metadata?: Record<string, string>;
+    err: unknown;
+  }): Promise<T[]> {
+    const pageSchema = lenientListPageSchema(resultSchema, itemsKey);
+    // Capture the correlation id BEFORE re-walking. `markResponseRejected`
+    // resolves "the last response received for this method", and the re-walk
+    // below answers that same method one or more times — so marking afterwards
+    // would stamp the rejection onto a salvage page that succeeded and leave
+    // the actually-invalid response rendering as a clean success, which is the
+    // precise lie #1953 exists to remove.
+    const rejectedResponseId = this.lastAnsweredRequestByMethod.get(method);
+    const valid: T[] = [];
+    const malformed: MalformedListItem[] = [];
+    const seenCursors = new Set<string>();
+    let cursor: string | undefined;
+    let pages = 0;
+    try {
+      do {
+        // Bounded like the SDK aggregate this stands in for: a server emitting
+        // endlessly UNIQUE cursors never trips the repeated-cursor guard below,
+        // so without this the walk would run forever. Aborting surfaces the
+        // original validation error rather than a truncated list.
+        if (pages >= LIST_MAX_PAGES) throw listPaginationExceeded(method);
+        pages += 1;
+        const effectiveMeta = this.mergeMeta(metadata);
+        const params = {
+          ...(effectiveMeta ? { _meta: effectiveMeta } : {}),
+          // `!== undefined`, not truthiness: "" is a valid cursor, and dropping it
+          // would re-request page one and duplicate its entries until the
+          // repeated-cursor guard below stopped the walk.
+          ...(cursor !== undefined && { cursor }),
+        };
+        // The modern (2026-07-28) codec validates a result against the SPEC
+        // schema for the method before the caller's schema is consulted, so a
+        // lenient `client.request` is rejected exactly as the strict one was —
+        // there is no salvage without going around it. The raw-wire channel that
+        // exists for the modern `tasks/*` methods does precisely that: the frame
+        // goes straight through the transport (still logged for the Protocol /
+        // Network tabs) and only the caller's schema is applied. Legacy keeps the
+        // ordinary SDK path, which honors request options and `_meta` for us.
+        const page = await this.invokeMcpClient(
+          () =>
+            this.isModernEra()
+              ? this.rawWireRequest(
+                  method,
+                  this.withModernEnvelope(params),
+                  pageSchema,
+                )
+              : this.client!.request(
+                  { method, params },
+                  pageSchema,
+                  this.getRequestOptions(metadata?.progressToken),
+                ),
+          { method },
+        );
+        // The raw-wire path skips the era codec, so the envelope it would have
+        // enforced is checked here; a violation is not salvageable.
+        if (
+          this.isModernEra() &&
+          !ModernResultEnvelopeSchema.safeParse(page).success
+        ) {
+          throw err;
+        }
+        const items = rawItemsOf(page, itemsKey);
+        // The page's list member is missing or isn't a list: a top-level
+        // violation, not a per-item one. Reading it as "no entries" would return
+        // a silently truncated list and discard the strict error that was right
+        // about it.
+        if (items === undefined) throw err;
+        const salvaged = salvageListItems({
+          method,
+          items,
+          schema: itemSchema,
+          startIndex: valid.length + malformed.length,
+        });
+        valid.push(...salvaged.valid);
+        malformed.push(...salvaged.malformed);
+        cursor = nextCursorOf(page);
+        if (cursor !== undefined) {
+          /* v8 ignore next -- defensive: a spec-compliant server never repeats a cursor; this guards a non-converging server from an infinite walk (mirrors the SDK's drainList guard) */
+          if (seenCursors.has(cursor)) break;
+          seenCursors.add(cursor);
+        }
+      } while (cursor !== undefined);
+    } catch (walkErr) {
+      // The re-walk itself failed — its own decode rejection (a malformed
+      // `nextCursor`, an unsalvageable page), or the connection going away
+      // mid-walk. Either way the ORIGINAL error is the one to surface: it is
+      // what the caller's list actually failed on, and `rejectedResponseId`
+      // above was captured for that response, not this one. The secondary
+      // failure is logged so it stays diagnosable rather than vanishing.
+      if (walkErr !== err) {
+        this.logger.warn(
+          { err: walkErr, method },
+          "Salvage re-walk failed; surfacing the original list error",
+        );
+      }
+      this.restoreResponseCorrelation(method, rejectedResponseId);
+      throw err;
+    }
+
+    // Nothing per-item was wrong, so the strict rejection was about something
+    // this fallback cannot explain — surface it rather than hide it.
+    if (malformed.length === 0) {
+      this.restoreResponseCorrelation(method, rejectedResponseId);
+      throw err;
+    }
+
+    if (rejectedResponseId !== undefined) {
+      this.dispatchTypedEvent("responseRejected", {
+        id: rejectedResponseId,
+        reason: summarizeMalformed(malformed),
+      });
+    }
+    this.setMalformedListItems(method, malformed);
+    this.logger.warn(
+      { method, malformed },
+      "Dropped malformed entries from a list result; the rest of the list was kept",
+    );
+    return valid;
+  }
+
   /** The current SEP-2243 excluded-tools set (empty on legacy/stdio). */
   getExcludedTools(): ExcludedTool[] {
     return this.excludedTools;
@@ -3225,8 +3584,15 @@ export class InspectorClient extends InspectorClientEventTarget {
     if (this.excludesInvalidXMcpHeaderTools()) {
       const seenCursors = new Set<string>();
       let cursor: string | undefined;
+      let pages = 0;
       do {
-        const page = await this.listTools(cursor, metadata);
+        // Same bound as `salvageList`, for the same reason: this walk is also
+        // outside the SDK aggregate's `listMaxPages` cap. Throwing (rather than
+        // committing a partial set) keeps the caller's "the excluded list may
+        // be incomplete" warning the honest description of what happened.
+        if (pages >= LIST_MAX_PAGES) throw listPaginationExceeded("tools/list");
+        pages += 1;
+        const page = await this.listToolsForScan(cursor, metadata);
         for (const tool of page.tools) {
           const scan = scanXMcpHeaderDeclarations(tool.inputSchema);
           if (!scan.valid) excluded.push({ tool, reason: scan.reason });
@@ -3239,9 +3605,168 @@ export class InspectorClient extends InspectorClientEventTarget {
         }
       } while (cursor !== undefined);
     }
+    // The scan deliberately does NOT publish what it dropped into the
+    // `tools/list` report. That report is rendered above the Tools list as
+    // "entries dropped from this list", and the aggregate is what that list
+    // is — so only the aggregate's salvage may write it.
+    //
+    // The reason is stronger than "these are two different requests". A
+    // successful strict aggregate means every entry parsed, so the rendered
+    // list has no malformed entries in it at all; and a FAILED aggregate runs
+    // salvage, which writes the report itself. So by the time this walk finds
+    // something, either the aggregate already reported it (with the indices
+    // that match what is on screen), or the aggregate succeeded and whatever
+    // this walk just found is provably not in the list being displayed — the
+    // server changed, or the aggregate came from cache. Publishing here can
+    // therefore only ever name entries the user cannot see.
+    //
+    // The finding is not lost: `listToolsForScan` marks the scan's own refused
+    // response, so it surfaces on the Protocol entry for the exchange that
+    // actually carried it, which is where it is true.
     this.excludedTools = excluded;
     this.dispatchTypedEvent("excludedToolsChange", excluded);
     return excluded;
+  }
+
+  /**
+   * One page of the RAW `tools/list` for the SEP-2243 scan, tolerating a
+   * malformed sibling entry (#1632 + #1909).
+   *
+   * The scan needs the unfiltered list, so it uses the strict single-page call
+   * — but that call rejects the whole page when any entry is non-conforming,
+   * which would blank the excluded set and leave a tool that vanished for an
+   * invalid header with no explanation at all. That is the same failure #1909
+   * is about, one level down. So on a decode rejection the page is re-fetched
+   * leniently and scanned entry by entry.
+   *
+   * The malformed ones are not "excluded tools" and are not returned: they
+   * describe THIS exchange, not the aggregate the Tools panel renders, so they
+   * surface as the rejection reason on this response's own Protocol entry and
+   * go no further (see `refreshExcludedTools`).
+   */
+  private async listToolsForScan(
+    cursor: string | undefined,
+    metadata: Record<string, string> | undefined,
+  ): Promise<{
+    tools: Tool[];
+    nextCursor?: string;
+  }> {
+    try {
+      return await this.listTools(cursor, metadata);
+    } catch (err) {
+      if (!isSalvageableRejection(err)) throw err;
+      // Capture before the re-fetch, for the reason `salvageList` documents:
+      // this refused response is a distinct exchange from the aggregate's, and
+      // the re-fetch below moves the method's correlation off it. Without this
+      // the scan's Protocol entry renders as a clean success even though the
+      // client refused the result.
+      const rejectedResponseId =
+        this.lastAnsweredRequestByMethod.get("tools/list");
+      try {
+        const effectiveMeta = this.mergeMeta(metadata);
+        const params = {
+          ...(effectiveMeta ? { _meta: effectiveMeta } : {}),
+          // See `salvageList`: "" is a valid cursor.
+          ...(cursor !== undefined && { cursor }),
+        };
+        const pageSchema = lenientListPageSchema(
+          ListToolsResultSchema,
+          "tools",
+        );
+        // Through `invokeMcpClient`, like the strict `listTools` above and like
+        // `salvageList`'s walk: this re-fetch can meet an auth challenge of its
+        // own, and outside that wrapper the recovery never runs. Its failure is
+        // then swallowed by `listAllTools`'s best-effort scan catch, leaving a
+        // stale excluded-tools set and no sign of why.
+        const page = await this.invokeMcpClient(
+          () =>
+            this.isModernEra()
+              ? this.rawWireRequest(
+                  "tools/list",
+                  this.withModernEnvelope(params),
+                  pageSchema,
+                )
+              : this.client!.request(
+                  { method: "tools/list", params },
+                  pageSchema,
+                  this.getRequestOptions(metadata?.progressToken),
+                ),
+          { method: "tools/list" },
+        );
+        // Same era-envelope check as `salvageList` — the raw-wire path bypasses
+        // the codec that would otherwise enforce it.
+        if (
+          this.isModernEra() &&
+          !ModernResultEnvelopeSchema.safeParse(page).success
+        ) {
+          throw err;
+        }
+        const items = rawItemsOf(page, "tools");
+        // Not a list at all — a top-level violation the per-item pass can't
+        // explain, so the strict error stands (mirrors `salvageList`).
+        if (items === undefined) throw err;
+        const { valid, malformed } = salvageListItems({
+          method: "tools/list",
+          items,
+          schema: toolItemSchemaForEra(this.isModernEra()),
+        });
+        // Mark regardless of what the re-fetch found. The list can change
+        // between the two requests, so a conforming re-fetch is possible — and
+        // it says nothing about the response that was actually refused. Leaving
+        // that one unmarked because the SECOND request came back clean would
+        // render a rejected exchange as a clean success, which is the lie
+        // #1953 removes. With nothing per-item to name, the original decode
+        // error is the reason.
+        if (rejectedResponseId !== undefined) {
+          this.dispatchTypedEvent("responseRejected", {
+            id: rejectedResponseId,
+            reason:
+              malformed.length > 0
+                ? summarizeMalformed(malformed)
+                : err instanceof Error
+                  ? err.message
+                  : String(err),
+          });
+        }
+        const nextCursor = nextCursorOf(page);
+        return {
+          tools: valid,
+          ...(nextCursor !== undefined && { nextCursor }),
+        };
+      } catch (fallbackErr) {
+        // The fallback could not explain the rejection — the re-fetch itself
+        // failed, or the page carried a violation that is not per-item (a bad
+        // modern envelope, a `tools` that is not a list).
+        //
+        // `salvageList` can simply rethrow here, because ITS caller
+        // (`ManagedListState.refresh`) marks the Protocol entry from the error
+        // it receives. This walk has no such backstop: `listAllTools` catches
+        // and LOGS a failing scan so it can never fail the tools list, so an
+        // unmarked rethrow leaves the response the client demonstrably refused
+        // (`isSalvageableRejection` above proves it was an `InvalidResult`)
+        // rendering as a clean exchange — the exact lie #1953 removes and the
+        // one this method's own capture above exists to prevent. So mark it
+        // here, with the ORIGINAL decode error as the reason: the fallback's
+        // own failure is a different event, and the response being marked is
+        // the one `err` was raised for.
+        if (rejectedResponseId !== undefined) {
+          this.dispatchTypedEvent("responseRejected", {
+            id: rejectedResponseId,
+            reason: err instanceof Error ? err.message : String(err),
+          });
+        }
+        if (fallbackErr !== err) {
+          this.logger.warn(
+            { err: fallbackErr },
+            "Excluded-tools salvage re-fetch failed; surfacing the original list error",
+          );
+        }
+        // Restore the correlation the re-fetch moved, so a later mark for this
+        // method does not land on a lenient page that succeeded.
+        this.restoreResponseCorrelation("tools/list", rejectedResponseId);
+        throw err;
+      }
+    }
   }
 
   /**
@@ -4362,13 +4887,22 @@ export class InspectorClient extends InspectorClientEventTarget {
     if (!this.client) {
       throw new Error("Client is not connected");
     }
-    const response = await this.invokeMcpClient(() =>
-      this.client!.listResources(
-        this.aggregateListParams(options?.metadata),
-        this.getCacheableRequestOptions(options?.cacheMode),
-      ),
-    );
-    return { resources: [...response.resources] };
+    const resources = await this.listAllSalvaging({
+      method: "resources/list",
+      itemsKey: "resources",
+      resultSchema: ListResourcesResultSchema,
+      itemSchema: ResourceSchema,
+      metadata: options?.metadata,
+      aggregate: async () => [
+        ...(
+          await this.client!.listResources(
+            this.aggregateListParams(options?.metadata),
+            this.getCacheableRequestOptions(options?.cacheMode),
+          )
+        ).resources,
+      ],
+    });
+    return { resources };
   }
 
   /**
@@ -4519,15 +5053,22 @@ export class InspectorClient extends InspectorClientEventTarget {
     if (!this.client) {
       throw new Error("Client is not connected");
     }
-    const response = await this.invokeMcpClient(
-      () =>
-        this.client!.listResourceTemplates(
-          this.aggregateListParams(options?.metadata),
-          this.getCacheableRequestOptions(options?.cacheMode),
-        ),
-      { method: "resources/templates/list" },
-    );
-    return { resourceTemplates: [...response.resourceTemplates] };
+    const resourceTemplates = await this.listAllSalvaging({
+      method: "resources/templates/list",
+      itemsKey: "resourceTemplates",
+      resultSchema: ListResourceTemplatesResultSchema,
+      itemSchema: ResourceTemplateSchema,
+      metadata: options?.metadata,
+      aggregate: async () => [
+        ...(
+          await this.client!.listResourceTemplates(
+            this.aggregateListParams(options?.metadata),
+            this.getCacheableRequestOptions(options?.cacheMode),
+          )
+        ).resourceTemplates,
+      ],
+    });
+    return { resourceTemplates };
   }
 
   /**
@@ -4574,13 +5115,22 @@ export class InspectorClient extends InspectorClientEventTarget {
     if (!this.client) {
       throw new Error("Client is not connected");
     }
-    const response = await this.invokeMcpClient(() =>
-      this.client!.listPrompts(
-        this.aggregateListParams(options?.metadata),
-        this.getCacheableRequestOptions(options?.cacheMode),
-      ),
-    );
-    return { prompts: [...response.prompts] };
+    const prompts = await this.listAllSalvaging({
+      method: "prompts/list",
+      itemsKey: "prompts",
+      resultSchema: ListPromptsResultSchema,
+      itemSchema: PromptSchema,
+      metadata: options?.metadata,
+      aggregate: async () => [
+        ...(
+          await this.client!.listPrompts(
+            this.aggregateListParams(options?.metadata),
+            this.getCacheableRequestOptions(options?.cacheMode),
+          )
+        ).prompts,
+      ],
+    });
+    return { prompts };
   }
 
   /**
@@ -5436,6 +5986,8 @@ export class InspectorClient extends InspectorClientEventTarget {
     clientSecret?: string;
     clientMetadataUrl?: string;
     scope?: string;
+    /** Custom authorization-request parameters (#2018). Authorize URL only. */
+    authorizationParams?: Record<string, string>;
   }): void {
     if (!this.oauthManager) {
       throw new Error(

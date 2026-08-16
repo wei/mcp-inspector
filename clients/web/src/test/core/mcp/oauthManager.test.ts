@@ -1574,6 +1574,53 @@ describe("OAuthManager", () => {
       const provider = await manager.createOAuthProviderForTransport();
       expect(provider.constructor.name).toBe("EmaTransportOAuthProvider");
     });
+
+    // #2018 — the manager→provider bridge for the custom authorization
+    // parameters. The provider test proves the merge and the runner test proves
+    // the options object, but neither crosses this seam: without this case,
+    // deleting `authorizationParams:` from `createOAuthProvider` would leave the
+    // feature dead with every other test still green.
+    it("forwards configured authorizationParams to the provider it builds", async () => {
+      const params = createMockParams();
+      const manager = new OAuthManager(params);
+      manager.setOAuthConfig({
+        authorizationParams: { kc_idp_hint: "corp-idp", prompt: "login" },
+      });
+
+      const provider = await manager.createOAuthProviderForTransport();
+      provider.redirectToAuthorization(
+        new URL("https://as.example.com/authorize?client_id=abc&state=xyz"),
+      );
+
+      const navigate = params.initialConfig.navigation
+        ?.navigateToAuthorization as ReturnType<typeof vi.fn>;
+      const navigated = navigate.mock.calls[0]?.[0] as URL;
+      expect(navigated.searchParams.get("kc_idp_hint")).toBe("corp-idp");
+      expect(navigated.searchParams.get("prompt")).toBe("login");
+      // The flow's own parameters are untouched.
+      expect(navigated.searchParams.get("state")).toBe("xyz");
+    });
+
+    it("drops a reserved key configured on the manager", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const params = createMockParams();
+      const manager = new OAuthManager(params);
+      manager.setOAuthConfig({
+        authorizationParams: { state: "spoofed", kc_idp_hint: "corp-idp" },
+      });
+
+      const provider = await manager.createOAuthProviderForTransport();
+      provider.redirectToAuthorization(
+        new URL("https://as.example.com/authorize?client_id=abc&state=xyz"),
+      );
+
+      const navigate = params.initialConfig.navigation
+        ?.navigateToAuthorization as ReturnType<typeof vi.fn>;
+      const navigated = navigate.mock.calls[0]?.[0] as URL;
+      expect(navigated.searchParams.get("state")).toBe("xyz");
+      expect(navigated.searchParams.get("kc_idp_hint")).toBe("corp-idp");
+      expect(warn).toHaveBeenCalled();
+    });
   });
 
   describe("getOAuthState (enterprise managed / scope)", () => {

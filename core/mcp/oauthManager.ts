@@ -94,6 +94,7 @@ export class OAuthManager {
     clientMetadataUrl?: string;
     scope?: string;
     enterpriseManaged?: boolean;
+    authorizationParams?: Record<string, string>;
   }): void {
     this.oauthConfig = {
       ...this.oauthConfig,
@@ -135,6 +136,11 @@ export class OAuthManager {
       redirectUrlProvider: this.oauthConfig.redirectUrlProvider,
       navigation: this.oauthConfig.navigation,
       clientMetadataUrl: this.oauthConfig.clientMetadataUrl,
+      // #2018: per-server custom authorization-request parameters. Carried on
+      // the provider (not in OAuth storage like `scope`) — they are pure config
+      // read from mcp.json, and nothing in the flow needs to persist or union
+      // them.
+      authorizationParams: this.oauthConfig.authorizationParams,
     });
 
     provider.setEventTarget(this.params.getEventTarget());

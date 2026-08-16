@@ -3,265 +3,68 @@
 // change that relaxes one is visible as a deleted assertion rather than a quiet
 // behavior shift. Run via `npm run test:scripts` (node:test; the root has no
 // vitest harness).
+//
+// The candidate derivation itself lives in `lib/tsc-program.mjs` (shared with
+// `verify:typecheck-coverage` since #1965) and is covered by
+// `lib/tsc-program.test.mjs`; what stays here is the lockfile comparison and the
+// client-enrollment rule this guard owns.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  clientProjects,
   findSkew,
   hasReadableLockShape,
-  importedPackageNames,
-  isSharedSourceFile,
+  lockVersionsByPath,
   majorOf,
-  packageNameOf,
   partitionSkew,
-  sourcesWithNoFiles,
-  topLevelLockVersions,
-  typeReferencePackageNames,
 } from "./verify-dep-lockstep.mjs";
 
-test("isSharedSourceFile: all four TS extensions, not just .ts/.tsx", () => {
-  // `.mts`/`.cts` are gated by `verify:format-coverage` and
-  // `verify:typecheck-coverage` too. None exist under the shared trees today,
-  // so dropping them here would go unnoticed until a new shared dependency
-  // arrived through one — the skew this guard exists to catch (Copilot, #1962).
-  for (const ext of [".ts", ".tsx", ".mts", ".cts"]) {
-    assert.equal(isSharedSourceFile(`core/mcp/thing${ext}`), true, ext);
-    assert.equal(
-      isSharedSourceFile(`test-servers/src/thing${ext}`),
-      true,
-      `test-servers ${ext}`,
-    );
-  }
-});
-
-test("isSharedSourceFile: non-TS files and other trees are excluded", () => {
-  const rejected = [
-    "core/README.md", // not TypeScript
-    "core/mcp/data.json",
-    "clients/web/src/App.tsx", // a client's own sources resolve from the client
-    "scripts/verify-dep-lockstep.mjs",
-    "test-servers/configs/modern-http.json",
-    // Path-boundary anchoring: a sibling dir whose name merely starts with a
-    // shared dir's name must not be swept in.
-    "core-internal/thing.ts",
-    "test-servers/src-legacy/thing.ts",
-  ];
-  for (const file of rejected)
-    assert.equal(isSharedSourceFile(file), false, file);
-});
-
-test("sourcesWithNoFiles: each configured source must contribute (Copilot, #1962)", () => {
-  const dirs = ["core", "test-servers/src"];
-  const named = ["vitest.shared.mts"];
-  const complete = [
-    "core/mcp/a.ts",
-    "test-servers/src/b.ts",
-    "vitest.shared.mts",
-  ];
-  assert.deepEqual(sourcesWithNoFiles(complete, dirs, named), []);
-
-  // The failure an aggregate count can't see: `core/` moved, but the other two
-  // sources keep `files.length` nonzero, so the guard would derive candidates
-  // from an incomplete set and pass on skew it should catch.
+test("clientProjects: a `typecheck` script's projects win over references", () => {
+  // Both enrollment paths exist (cli/tui/launcher declare `typecheck`,
+  // `clients/web` is a `tsc -b` solution) and this guard must measure the same
+  // programs as `verify:typecheck-coverage`, which prefers the script.
   assert.deepEqual(
-    sourcesWithNoFiles(
-      ["test-servers/src/b.ts", "vitest.shared.mts"],
-      dirs,
-      named,
+    clientProjects(
+      {
+        typecheck: "tsc --noEmit -p tsconfig.json && tsc -p tsconfig.test.json",
+      },
+      ["./ignored.json"],
     ),
-    ["core"],
+    ["tsconfig.json", "tsconfig.test.json"],
   );
+});
+
+test("clientProjects: a reference client is measured through its references", () => {
   assert.deepEqual(
-    sourcesWithNoFiles(["core/mcp/a.ts", "test-servers/src/b.ts"], dirs, named),
-    ["vitest.shared.mts"],
+    clientProjects({ build: "tsc -b && vite build" }, ["./a.json"]),
+    ["./a.json"],
   );
-  assert.deepEqual(sourcesWithNoFiles([], dirs, named), [
-    "core",
-    "test-servers/src",
-    "vitest.shared.mts",
-  ]);
+  // Neither path available — the caller reports it rather than measuring nothing.
+  assert.deepEqual(clientProjects({ build: "vite build" }, []), []);
 });
 
-test("sourcesWithNoFiles: a prefix sibling does not vouch for a dir", () => {
-  // `core-internal/` starts with `core` but is not it — the boundary check has
-  // to be on a path separator, or a renamed dir would look present.
-  assert.deepEqual(sourcesWithNoFiles(["core-internal/a.ts"], ["core"], []), [
-    "core",
-  ]);
+test("clientProjects: a NEUTERED project still contributes its program (#1965)", () => {
+  // `--noCheck` stops that pass type-checking, which is the sibling guard's
+  // complaint; the program still resolves its imports, and dropping it here
+  // would shrink what THIS guard measures on the strength of that other defect.
+  assert.deepEqual(
+    clientProjects(
+      {
+        typecheck:
+          "tsc -p tsconfig.json --noCheck && tsc -p tsconfig.test.json",
+      },
+      [],
+    ).sort(),
+    ["tsconfig.json", "tsconfig.test.json"],
+  );
 });
 
-test("packageNameOf: bare names, scopes, and subpaths", () => {
-  const cases = [
-    ["zod", "zod"],
-    ["zod/v4", "zod"], // subpath dropped — one package, one version
-    ["@modelcontextprotocol/client", "@modelcontextprotocol/client"],
-    ["@modelcontextprotocol/client/core", "@modelcontextprotocol/client"],
-    ["react-dom/client", "react-dom"],
-  ];
-  for (const [input, expected] of cases)
-    assert.equal(packageNameOf(input), expected, input);
-});
-
-test("packageNameOf: non-packages are rejected", () => {
-  // Relative/absolute paths, built-ins with and without the `node:` prefix,
-  // protocol specifiers, and prose that follows the word `from` in a comment.
-  const rejected = [
-    "./foo",
-    "../core/mcp",
-    "/abs/path",
-    "fs",
-    "path",
-    "node:crypto",
-    "node:test",
-    "file:",
-    "data:text/plain,x",
-    "cwd omitted",
-    "",
-  ];
-  for (const input of rejected)
-    assert.equal(packageNameOf(input), null, JSON.stringify(input));
-  assert.equal(packageNameOf(undefined), null);
-});
-
-test("importedPackageNames: CommonJS and awkward dynamic-import forms (Copilot, #1962)", () => {
-  // Under-approximating is the dangerous direction: a package the scan misses
-  // never enters the candidate set, so its skew passes the guard silently.
-  // `.cts` sources in the shared trees use `import x = require(…)` as ordinary
-  // syntax, and a dynamic import may carry import attributes or a static
-  // template literal — none of which the original three patterns matched.
-  const source = `
-    import express = require("express");
-    const yaml = require("yaml");
-    const a = await import("undici", { with: { type: "json" } });
-    const b = await import(\`jose\`);
-  `;
-  assert.deepEqual([...importedPackageNames(source)].sort(), [
-    "express",
-    "jose",
-    "undici",
-    "yaml",
-  ]);
-});
-
-test("importedPackageNames: comment trivia between tokens (Copilot, #1962)", () => {
-  // TypeScript allows a comment anywhere whitespace is legal, so all of these
-  // are valid imports. Missing one is the dangerous direction: the package
-  // never enters the candidate set and its skew passes the guard silently.
-  const source = `
-    import { a } from /* explanation */ "express";
-    const b = await import(/* webpackIgnore: true */ "undici");
-    const c = require(/* lazy */ "yaml");
-    import /* side effect */ "pino";
-  `;
-  assert.deepEqual([...importedPackageNames(source)].sort(), [
-    "express",
-    "pino",
-    "undici",
-    "yaml",
-  ]);
-});
-
-test("importedPackageNames: line-comment trivia, not just block (Copilot, #1962)", () => {
-  // `//` runs to end-of-line and is legal in every position a block comment is,
-  // so a specifier can sit on the next line and these are still valid imports.
-  const source = [
-    "import { a } from // reason",
-    '  "express";',
-    "const b = await import(// lazy",
-    '  "undici");',
-    "const c = require(// lazy",
-    '  "yaml");',
-  ].join("\n");
-  assert.deepEqual([...importedPackageNames(source)].sort(), [
-    "express",
-    "undici",
-    "yaml",
-  ]);
-});
-
-test("importedPackageNames: static, side-effect, and dynamic forms; builtins and relatives dropped", () => {
-  const source = `
-    import { z } from "zod/v4";
-    export type { Foo } from '@modelcontextprotocol/core';
-    import "./side-effect.css";
-    import "pino";
-    const mod = await import("chokidar");
-    import fs from "node:fs";
-    import { helper } from "../local/helper";
-  `;
-  assert.deepEqual([...importedPackageNames(source)].sort(), [
-    "@modelcontextprotocol/core",
-    "chokidar",
-    "pino",
-    "zod",
-  ]);
-});
-
-test("importedPackageNames: triple-slash type references count (Copilot, #1962)", () => {
-  // A `/// <reference types="x" />` pulls in declarations exactly like an
-  // import, but TypeScript reports it in `typeReferenceDirectives`, not
-  // `importedFiles` — so reading only the latter let a referenced package skew
-  // unseen. `path` references name a file, not a package, and are ignored.
-  const source = [
-    '/// <reference types="node" />',
-    '/// <reference types="express" />',
-    '/// <reference path="./local.d.ts" />',
-    'import { z } from "zod";',
-  ].join("\n");
-  assert.deepEqual([...importedPackageNames(source)].sort(), [
-    "@types/express",
-    "@types/node",
-    "express",
-    "node",
-    "zod",
-  ]);
-});
-
-test("typeReferencePackageNames: both the bare and the @types form (Copilot, #1962)", () => {
-  // The directive names a *type*, not a package: `node` resolves to
-  // `@types/node`, while a package shipping its own declarations resolves to
-  // itself. Returning both over-approximates, the safe direction — whichever
-  // isn't installed drops out downstream.
-  assert.deepEqual(typeReferencePackageNames("node"), ["node", "@types/node"]);
-  // Scoped names mangle with a double underscore, TypeScript's convention.
-  assert.deepEqual(typeReferencePackageNames("@scope/pkg"), [
-    "@scope/pkg",
-    "@types/scope__pkg",
-  ]);
-  assert.deepEqual(typeReferencePackageNames("./relative"), []);
-  assert.deepEqual(typeReferencePackageNames(""), []);
-});
-
-test("importedPackageNames: prose in comments never becomes a package (Copilot, #1962)", () => {
-  // The regex scan this replaced could not tell code from a comment, so
-  // `// adapted from "react"` added `react` to the candidate set — and if that
-  // installed package were skewed, an unrelated comment would fail `validate`.
-  // These use REAL package names, which is the case the old prose test missed:
-  // it only passed because `cwd omitted` isn't a valid package name.
-  const source = `
-    // adapted from "react"
-    /** Mirrors the behavior of "express", see require("yaml") below. */
-    /** The excluded set derived from \\\`hono\\\`-style paths. */
-    // const disabled = await import("undici");
-    import { z } from "zod";
-  `;
-  assert.deepEqual([...importedPackageNames(source)], ["zod"]);
-});
-
-test("importedPackageNames: a specifier inside a string literal is not an import", () => {
-  const source = `
-    const msg = 'run require("chokidar") to load it';
-    const re = /"jose"/;
-    import { z } from "zod";
-  `;
-  assert.deepEqual([...importedPackageNames(source)], ["zod"]);
-});
-
-test("topLevelLockVersions: nested duplicates are ignored", () => {
-  // A nested `node_modules/a/node_modules/b` is npm resolving a transitive
-  // conflict *inside* one install — routine, and not the cross-install skew
-  // this guard is about (`cosmiconfig`'s yaml@1 alongside the top-level yaml@2
-  // is the live example).
+test("lockVersionsByPath: keyed by install path, nested entries included (Copilot, #1965 r1)", () => {
+  // Keyed by PATH, not by package name: a nested copy that entered a program has
+  // to be priced from its own entry. Reading only `node_modules/<pkg>` would
+  // compare it against the install's top-level copy — a different version, or
+  // none — and a real pair could pass.
   const lock = {
     packages: {
       "": { name: "root" },
@@ -272,18 +75,173 @@ test("topLevelLockVersions: nested duplicates are ignored", () => {
       "node_modules/no-version": { resolved: "https://example.test/x.tgz" },
     },
   };
-  assert.deepEqual([...topLevelLockVersions(lock)].sort(), [
-    ["@modelcontextprotocol/client", "2.0.0-beta.5"],
-    ["yaml", "2.9.0"],
-    ["zod", "4.4.3"],
+  assert.deepEqual([...lockVersionsByPath(lock)].sort(), [
+    ["node_modules/@modelcontextprotocol/client", "2.0.0-beta.5"],
+    ["node_modules/cosmiconfig/node_modules/yaml", "1.10.3"],
+    ["node_modules/yaml", "2.9.0"],
+    ["node_modules/zod", "4.4.3"],
   ]);
 });
 
-test("topLevelLockVersions: a malformed or empty lockfile yields nothing", () => {
+test("lockVersionsByPath: a malformed or empty lockfile yields nothing", () => {
   // Safe as a pure helper *because* `hasReadableLockShape` rejects these before
   // any comparison — an empty map reaching `findSkew` is the fail-open path.
   for (const lock of [undefined, null, {}, { packages: {} }])
-    assert.equal(topLevelLockVersions(lock).size, 0);
+    assert.equal(lockVersionsByPath(lock).size, 0);
+});
+
+/** `crossInstallPackages`-shaped input: name → program → install → entry paths. */
+const occurrence = (name, program, byRoot) =>
+  new Map([
+    [
+      name,
+      new Map([
+        [
+          program,
+          new Map(
+            Object.entries(byRoot).map(([dir, paths]) => [dir, new Set(paths)]),
+          ),
+        ],
+      ]),
+    ],
+  ]);
+
+const lockPaths = (byDir) =>
+  new Map(
+    Object.entries(byDir).map(([dir, entries]) => [
+      dir,
+      new Map(Object.entries(entries)),
+    ]),
+  );
+
+test("findSkew: reports the copies one program loaded, with their paths", () => {
+  const { skewed, unresolved } = findSkew(
+    occurrence("zod", "clients/web/tsconfig.test.json", {
+      ".": ["node_modules/zod"],
+      "clients/web": ["node_modules/zod"],
+    }),
+    lockPaths({
+      ".": { "node_modules/zod": "4.3.6" },
+      "clients/web": { "node_modules/zod": "4.4.3" },
+    }),
+  );
+  assert.deepEqual(unresolved, []);
+  assert.deepEqual(skewed, [
+    {
+      name: "zod",
+      occurrences: [
+        {
+          program: "clients/web/tsconfig.test.json",
+          holders: [
+            { dir: ".", entryPath: "node_modules/zod", version: "4.3.6" },
+            {
+              dir: "clients/web",
+              entryPath: "node_modules/zod",
+              version: "4.4.3",
+            },
+          ],
+        },
+      ],
+    },
+  ]);
+});
+
+test("findSkew: only the installs that MET in a program are compared (Copilot, #1965 r1)", () => {
+  // `clients/cli` holds a different zod, but no program loads it beside another
+  // copy — nothing has to relate the two, so it is not a finding, and naming cli
+  // in a diagnostic about web's program would be wrong as well as noisy.
+  const { skewed } = findSkew(
+    occurrence("zod", "clients/web/tsconfig.test.json", {
+      ".": ["node_modules/zod"],
+      "clients/web": ["node_modules/zod"],
+    }),
+    lockPaths({
+      ".": { "node_modules/zod": "4.4.3" },
+      "clients/web": { "node_modules/zod": "4.4.3" },
+      "clients/cli": { "node_modules/zod": "4.3.6" },
+    }),
+  );
+  assert.deepEqual(skewed, []);
+});
+
+test("findSkew: a nested copy is priced from its own entry (Copilot, #1965 r1)", () => {
+  // The root loaded zod through `a`'s nested copy. Pricing it from the root's
+  // TOP-LEVEL entry (4.4.3, aligned with web) would report the pair as agreeing.
+  const { skewed } = findSkew(
+    occurrence("zod", "clients/web/tsconfig.test.json", {
+      ".": ["node_modules/a/node_modules/zod"],
+      "clients/web": ["node_modules/zod"],
+    }),
+    lockPaths({
+      ".": {
+        "node_modules/zod": "4.4.3",
+        "node_modules/a/node_modules/zod": "3.1.0",
+      },
+      "clients/web": { "node_modules/zod": "4.4.3" },
+    }),
+  );
+  assert.deepEqual(
+    skewed[0].occurrences[0].holders.map((h) => `${h.dir}:${h.version}`),
+    [".:3.1.0", "clients/web:4.4.3"],
+  );
+});
+
+test("findSkew: agreement is not skew", () => {
+  const { skewed, unresolved } = findSkew(
+    occurrence("zod", "p", {
+      ".": ["node_modules/zod"],
+      "clients/web": ["node_modules/zod"],
+    }),
+    lockPaths({
+      ".": { "node_modules/zod": "4.4.3" },
+      "clients/web": { "node_modules/zod": "4.4.3" },
+    }),
+  );
+  assert.deepEqual(skewed, []);
+  assert.deepEqual(unresolved, []);
+});
+
+test("findSkew: a copy with no lockfile entry is reported, not skipped", () => {
+  // Skipping it would drop a holder from the comparison and could report a real
+  // skew as agreement — the gate failing open.
+  const { skewed, unresolved } = findSkew(
+    occurrence("zod", "p", {
+      ".": ["node_modules/zod"],
+      "clients/web": ["node_modules/zod"],
+    }),
+    lockPaths({ ".": { "node_modules/zod": "4.4.3" }, "clients/web": {} }),
+  );
+  assert.deepEqual(unresolved, [
+    { name: "zod", dir: "clients/web", entryPath: "node_modules/zod" },
+  ]);
+  assert.deepEqual(skewed, []);
+});
+
+test("findSkew: results are sorted by package name", () => {
+  const found = new Map([
+    ...occurrence("zod", "p", {
+      ".": ["node_modules/zod"],
+      "clients/web": ["node_modules/zod"],
+    }),
+    ...occurrence("hono", "p", {
+      ".": ["node_modules/hono"],
+      "clients/web": ["node_modules/hono"],
+    }),
+  ]);
+  const { skewed } = findSkew(
+    found,
+    lockPaths({
+      ".": { "node_modules/zod": "1.0.0", "node_modules/hono": "1.0.0" },
+      "clients/web": {
+        "node_modules/zod": "2.0.0",
+        "node_modules/hono": "2.0.0",
+      },
+    }),
+  );
+  assert.deepEqual(
+    skewed.map((s) => s.name),
+    ["hono", "zod"],
+  );
 });
 
 test("hasReadableLockShape: only a v2+ packages table with a root entry (Copilot, #1962)", () => {
@@ -321,89 +279,32 @@ test("hasReadableLockShape: only a v2+ packages table with a root entry (Copilot
     assert.equal(hasReadableLockShape(lock), false, JSON.stringify(lock));
 });
 
-test("findSkew: reports a package held at two versions", () => {
-  const installs = [
-    { dir: ".", versions: new Map([["zod", "4.3.6"]]) },
-    { dir: "clients/web", versions: new Map([["zod", "4.4.3"]]) },
-    { dir: "clients/cli", versions: new Map([["zod", "4.4.3"]]) },
-  ];
-  assert.deepEqual(findSkew(new Set(["zod"]), installs), [
-    {
-      name: "zod",
-      holders: [
-        { dir: ".", version: "4.3.6" },
-        { dir: "clients/web", version: "4.4.3" },
-        { dir: "clients/cli", version: "4.4.3" },
-      ],
-    },
-  ]);
-});
-
-test("findSkew: agreement and single-install packages are not skew", () => {
-  const installs = [
-    {
-      dir: ".",
-      versions: new Map([
-        ["zod", "4.4.3"],
-        ["express", "5.2.1"],
-      ]),
-    },
-    { dir: "clients/web", versions: new Map([["zod", "4.4.3"]]) },
-  ];
-  // `express` lives in one install only, so it cannot skew — a package absent
-  // from a client is not a finding.
-  assert.deepEqual(findSkew(new Set(["zod", "express"]), installs), []);
-});
-
-test("findSkew: a candidate in no lockfile is inert", () => {
-  // `@inspector/core` is a build-time alias, not a package; the scan picks it
-  // up and it must drop out here rather than error.
-  const installs = [
-    { dir: ".", versions: new Map([["zod", "4.4.3"]]) },
-    { dir: "clients/web", versions: new Map([["zod", "4.4.3"]]) },
-  ];
-  assert.deepEqual(findSkew(new Set(["@inspector/core"]), installs), []);
-});
-
-test("findSkew: results are sorted by package name", () => {
-  const installs = [
-    {
-      dir: ".",
-      versions: new Map([
-        ["zod", "1.0.0"],
-        ["hono", "1.0.0"],
-      ]),
-    },
-    {
-      dir: "clients/web",
-      versions: new Map([
-        ["zod", "2.0.0"],
-        ["hono", "2.0.0"],
-      ]),
-    },
-  ];
-  assert.deepEqual(
-    findSkew(new Set(["zod", "hono"]), installs).map((s) => s.name),
-    ["hono", "zod"],
-  );
-});
-
 test("partitionSkew: the allowlist is by name, not by version pair", () => {
   // So an ordinary patch float within a tolerated package does not churn the
   // allowlist, while any *unlisted* package that starts skewing still fails.
   const skewed = [
     {
       name: "react",
-      holders: [
-        { dir: ".", version: "19.2.7" },
-        { dir: "clients/web", version: "19.2.8" },
+      occurrences: [
+        {
+          program: "p",
+          holders: [
+            { dir: ".", version: "19.2.7" },
+            { dir: "clients/web", version: "19.2.8" },
+          ],
+        },
       ],
     },
     {
       name: "zod",
-      holders: [
-        { dir: ".", version: "4.3.6" },
-        { dir: "clients/web", version: "4.4.3" },
+      occurrences: [
+        {
+          program: "p",
+          holders: [
+            { dir: ".", version: "4.3.6" },
+            { dir: "clients/web", version: "4.4.3" },
+          ],
+        },
       ],
     },
   ];
@@ -420,7 +321,14 @@ test("partitionSkew: the allowlist is by name, not by version pair", () => {
 });
 
 test("partitionSkew: deny by default — nothing tolerated fails everything", () => {
-  const skewed = [{ name: "zod", holders: [{ dir: ".", version: "1.0.0" }] }];
+  const skewed = [
+    {
+      name: "zod",
+      occurrences: [
+        { program: "p", holders: [{ dir: ".", version: "1.0.0" }] },
+      ],
+    },
+  ];
   assert.equal(partitionSkew(skewed, new Map()).failures.length, 1);
 });
 
@@ -432,18 +340,28 @@ test("partitionSkew: the allowlist tolerates skew only within a major (Copilot, 
   const withinMajor = [
     {
       name: "react",
-      holders: [
-        { dir: ".", version: "19.2.7" },
-        { dir: "clients/web", version: "19.2.8" },
+      occurrences: [
+        {
+          program: "p",
+          holders: [
+            { dir: ".", version: "19.2.7" },
+            { dir: "clients/web", version: "19.2.8" },
+          ],
+        },
       ],
     },
   ];
   const acrossMajor = [
     {
       name: "react",
-      holders: [
-        { dir: ".", version: "18.3.1" },
-        { dir: "clients/web", version: "19.2.8" },
+      occurrences: [
+        {
+          program: "p",
+          holders: [
+            { dir: ".", version: "18.3.1" },
+            { dir: "clients/web", version: "19.2.8" },
+          ],
+        },
       ],
     },
   ];
@@ -458,9 +376,14 @@ test("partitionSkew: an unparseable version can't be proven same-major, so it fa
   const skewed = [
     {
       name: "react",
-      holders: [
-        { dir: ".", version: "19.2.7" },
-        { dir: "clients/web", version: "next" },
+      occurrences: [
+        {
+          program: "p",
+          holders: [
+            { dir: ".", version: "19.2.7" },
+            { dir: "clients/web", version: "next" },
+          ],
+        },
       ],
     },
   ];
@@ -478,14 +401,4 @@ test("majorOf: prerelease and build metadata are irrelevant", () => {
     assert.equal(majorOf(input), expected, input);
   for (const bad of ["next", "", undefined, null, "v4.4.3"])
     assert.equal(majorOf(bad), null, JSON.stringify(bad));
-});
-
-test("isSharedSourceFile: individually-named shared files are included (Copilot, #1962)", () => {
-  // `vitest.shared.mts` is root-owned, imported by every client's vitest
-  // config, and already treated as shared by `verify:typecheck-coverage`. It
-  // imports only Node built-ins today, which is why omitting it would go
-  // unnoticed until a third-party import appeared there and skewed.
-  assert.equal(isSharedSourceFile("vitest.shared.mts"), true);
-  // Still anchored: a same-named file nested elsewhere is not the shared one.
-  assert.equal(isSharedSourceFile("clients/web/vitest.shared.mts"), false);
 });

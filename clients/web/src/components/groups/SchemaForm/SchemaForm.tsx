@@ -207,7 +207,14 @@ interface SchemaJsonFieldProps {
   description?: string;
   withAsterisk: boolean;
   disabled: boolean;
+  /**
+   * The field's own entry in the form's values — **not** run through
+   * `resolveValue`. A draft-holding field is handed the raw value and the
+   * schema default separately; see `defaultValue` for why.
+   */
   value: unknown;
+  /** The schema `default`, used to seed the draft only. See `defaultValue`. */
+  defaultValue: unknown;
   onChange: (value: unknown) => void;
   onValidityChange: DraftValidityReporter;
 }
@@ -244,18 +251,39 @@ interface SchemaJsonFieldProps {
 function SchemaJsonField({
   fieldName,
   value,
+  defaultValue,
   onChange,
   onValidityChange,
   ...inputProps
 }: SchemaJsonFieldProps) {
-  const [draft, setDraft] = useState(() =>
-    value === undefined ? "" : serializeJson(value),
-  );
+  const [draft, setDraft] = useState(() => {
+    const initial = value === undefined ? defaultValue : value;
+    return initial === undefined ? "" : serializeJson(initial);
+  });
 
   // Re-sync only when the parent's value genuinely diverges from what the draft
   // parses to, which leaves an external reset (a cleared form, a loaded
   // example) working while an in-progress `[` — whose parse is `undefined`,
   // matching the `undefined` we just emitted — is left alone.
+  //
+  // The value compared here is the field's *raw* entry, never `resolveValue`'s
+  // default substitution (#2026). Unsendable text reports `undefined`, and a
+  // defaulted field resolves that straight back to its default — a change from
+  // the previous value, so comparing against the resolved one would rewrite the
+  // draft to the default and revert the keystroke. Almost every edit passes
+  // through an unsendable state, so a defaulted array or object argument would
+  // be uneditable.
+  //
+  // Would be, not was: this is latent under today's seeding, where
+  // `collectSchemaDefaults` assigns `fieldSchema.default` itself, so the
+  // substitution returns the *same reference* and `useValueChange` never fires.
+  // It goes live as soon as the value is a structurally-equal but distinct
+  // object — parsed from the wire or a deep link, or a nested-object default,
+  // which `collectSchemaDefaults` rebuilds per call. `SchemaNumberInput` has no
+  // such accidental protection, since a number compares by value.
+  //
+  // Either way the default belongs to what the field *opens* with, seeded
+  // above, not to what is re-imposed while it is being typed into.
   useValueChange(value, (next) => {
     if (!isSameJson(parseJsonDraft(draft), next)) {
       setDraft(next === undefined ? "" : serializeJson(next));
@@ -309,7 +337,17 @@ interface SchemaNumberInputProps {
   description?: string;
   withAsterisk: boolean;
   disabled: boolean;
-  value: number | undefined;
+  /**
+   * Raw, not `resolveValue`-substituted — see `SchemaJsonFieldProps.value`.
+   *
+   * `null` is admitted alongside `undefined` because a nullable number schema
+   * produces it — by way of parent state, never by clearing the box — and the
+   * two are not interchangeable here: `undefined` means "no value supplied"
+   * and takes `defaultValue`, while `null` is a value and displays empty.
+   */
+  value: number | null | undefined;
+  /** The schema `default`, used to seed the draft only (#2026). May be `null`. */
+  defaultValue: number | null | undefined;
   min?: number;
   max?: number;
   allowDecimal: boolean;
@@ -343,12 +381,29 @@ interface SchemaNumberInputProps {
 function SchemaNumberInput({
   fieldName,
   value,
+  defaultValue,
   onChange,
   onValidityChange,
   ...inputProps
 }: SchemaNumberInputProps) {
-  const [draft, setDraft] = useState<string | number>(value ?? "");
+  // `undefined` means "no value supplied", which is what the default is for.
+  // An explicit `null` is a value, so it must not be overwritten by a non-null
+  // default; it displays as the empty box `resolveValue` produced before.
+  // Hence the `undefined` test rather than `??`, matching `SchemaJsonField`.
+  //
+  // Clearing the box does *not* produce that `null` — `toNumericValue("")`
+  // reports `undefined`, which is the behavior the "passes undefined to
+  // onChange when a number field is cleared" test pins. A `null` reaches this
+  // field only from parent state: a value received from the server, restored
+  // from a deep link, or written by a caller for a nullable schema.
+  const [draft, setDraft] = useState<string | number>(
+    (value === undefined ? defaultValue : value) ?? "",
+  );
 
+  // Compared against the raw value, never the default-substituted one, for the
+  // reason spelled out on `SchemaJsonField` (#2026): clearing this box reports
+  // no value, which a defaulted field resolved straight back to its default —
+  // so the box refilled itself and the argument could not be emptied.
   useValueChange(value, (next) => {
     if (!Object.is(toNumericValue(draft), next)) {
       setDraft(next ?? "");
@@ -584,7 +639,12 @@ export function SchemaForm({
           description={description}
           withAsterisk={isRequired}
           disabled={disabled}
-          value={rawValue as number | undefined}
+          // Raw and default kept apart, not pre-resolved (#2026). Both admit
+          // `null`, which a nullable number schema really produces.
+          value={values[fieldName] as number | null | undefined}
+          defaultValue={
+            getDefaultValue(fieldSchema) as number | null | undefined
+          }
           min={fieldSchema.minimum}
           max={fieldSchema.maximum}
           // An `integer` field rejects the decimal point outright rather than
@@ -692,7 +752,9 @@ export function SchemaForm({
         description={description}
         withAsterisk={isRequired}
         disabled={disabled}
-        value={rawValue}
+        // Raw and default kept apart, not pre-resolved (#2026).
+        value={values[fieldName]}
+        defaultValue={getDefaultValue(fieldSchema)}
         onChange={(val) => handleFieldChange(fieldName, val)}
         onValidityChange={reportFieldValidity}
       />

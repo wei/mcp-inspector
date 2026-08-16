@@ -24,7 +24,7 @@ import {
 import { ContentViewer } from "../../elements/ContentViewer/ContentViewer";
 import { EraBadge } from "../../elements/EraBadge/EraBadge";
 import { isModernEra } from "../../elements/EraBadge/eraUtils";
-import { OAuthAccessTokenField } from "./OAuthAccessTokenField";
+import { OAuthTokenField } from "./OAuthTokenField";
 
 export interface OAuthDetails {
   protocol: "standard" | "ema";
@@ -34,6 +34,13 @@ export interface OAuthDetails {
   authUrl?: string;
   scopes?: string[];
   accessToken?: string;
+  /**
+   * OIDC `id_token` from the stored token set, when the authorization server
+   * returned one. Shown for inspection only — the MCP authorization spec is
+   * plain OAuth 2.1 and the Inspector never treats this as a credential
+   * (#2019). Absent when the token set carries none, so no empty row renders.
+   */
+  idToken?: string;
   /** EMA only — install-level IdP session for legs 1–2. */
   idpSession?: "none" | "logged_in" | "expired";
 }
@@ -370,20 +377,27 @@ export function ConnectionInfoContent({
                 <ValueText>{formatScopes(oauth.scopes)}</ValueText>
               </SimpleGrid>
             )}
-            {oauth.accessToken ? (
-              <OAuthAccessTokenField
-                accessToken={oauth.accessToken}
+            {oauth.accessToken && (
+              <OAuthTokenField
+                label="Access Token"
+                token={oauth.accessToken}
                 onClear={onClearOAuth}
                 clearLabel={CLEAR_OAUTH_STATE_AND_DISCONNECT_LABEL}
               />
-            ) : (
-              onClearOAuth && (
-                <Flex justify="flex-end">
-                  <ClearOAuthButton onClick={onClearOAuth}>
-                    {CLEAR_OAUTH_STATE_AND_DISCONNECT_LABEL}
-                  </ClearOAuthButton>
-                </Flex>
-              )
+            )}
+            {/* Viewer only — an `id_token` the AS happened to return, decoded
+                on request. It carries no clear action: clearing OAuth state is
+                one action for the whole token set, owned by the access-token
+                row (or the standalone button below when there is none). */}
+            {oauth.idToken && (
+              <OAuthTokenField label="ID Token" token={oauth.idToken} />
+            )}
+            {!oauth.accessToken && onClearOAuth && (
+              <Flex justify="flex-end">
+                <ClearOAuthButton onClick={onClearOAuth}>
+                  {CLEAR_OAUTH_STATE_AND_DISCONNECT_LABEL}
+                </ClearOAuthButton>
+              </Flex>
             )}
           </Stack>
         </Stack>

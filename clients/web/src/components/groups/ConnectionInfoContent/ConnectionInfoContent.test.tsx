@@ -473,6 +473,95 @@ describe("ConnectionInfoContent", () => {
     expect(screen.queryByText("Auth URL")).not.toBeInTheDocument();
     expect(screen.queryByText("Scopes")).not.toBeInTheDocument();
     expect(screen.queryByText("Access Token")).not.toBeInTheDocument();
+    expect(screen.queryByText("ID Token")).not.toBeInTheDocument();
+  });
+
+  it("renders the ID Token row when the token set carries one", () => {
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={fullResult}
+        clientCapabilities={fullClientCaps}
+        transport="streamable-http"
+        oauth={{
+          protocol: "standard",
+          authorized: true,
+          accessToken: "token-123",
+          idToken: "id-token-456",
+        }}
+      />,
+    );
+    expect(screen.getByText("Access Token")).toBeInTheDocument();
+    expect(screen.getByText("ID Token")).toBeInTheDocument();
+    expect(screen.getByText("id-token-456")).toBeInTheDocument();
+  });
+
+  it("gives the two token rows' controls distinct accessible names", () => {
+    // Both rows carry a copy control, and both tokens here are JWTs so both
+    // carry a decode toggle. Screen-reader button navigation has only the
+    // accessible name to go on, so the four must not collide (#2019 review).
+    const jwt = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ1c2VyIn0.";
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={fullResult}
+        clientCapabilities={fullClientCaps}
+        transport="streamable-http"
+        oauth={{
+          protocol: "standard",
+          authorized: true,
+          accessToken: jwt,
+          idToken: jwt,
+        }}
+      />,
+    );
+
+    const names = screen
+      .getAllByRole("button")
+      .map((button) => button.getAttribute("aria-label") ?? button.textContent)
+      .filter((name): name is string => Boolean(name));
+    expect(new Set(names).size).toBe(names.length);
+
+    for (const name of [
+      "Copy Access Token",
+      "Copy ID Token",
+      "Decode JWT for Access Token",
+      "Decode JWT for ID Token",
+    ]) {
+      expect(screen.getByRole("button", { name })).toBeInTheDocument();
+    }
+  });
+
+  it("renders the ID Token row on its own when there is no access token", () => {
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={fullResult}
+        clientCapabilities={fullClientCaps}
+        transport="streamable-http"
+        oauth={{
+          protocol: "standard",
+          authorized: true,
+          idToken: "id-token-456",
+        }}
+      />,
+    );
+    expect(screen.queryByText("Access Token")).not.toBeInTheDocument();
+    expect(screen.getByText("ID Token")).toBeInTheDocument();
+  });
+
+  it("omits the ID Token row when only an access token is present", () => {
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={fullResult}
+        clientCapabilities={fullClientCaps}
+        transport="streamable-http"
+        oauth={{
+          protocol: "standard",
+          authorized: true,
+          accessToken: "token-123",
+        }}
+      />,
+    );
+    expect(screen.getByText("Access Token")).toBeInTheDocument();
+    expect(screen.queryByText("ID Token")).not.toBeInTheDocument();
   });
 
   it("does not render OAuth section when oauth prop is omitted", () => {
