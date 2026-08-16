@@ -1651,10 +1651,22 @@ describe("JSON editor escaping (#1853, #1856, #1885)", () => {
 
 // A schema `default` is what a field *opens* with, not a value re-imposed on
 // every unsendable draft. Unsendable text reports `undefined` by design, and
-// `resolveValue` used to turn that straight back into the default — a real
-// change from the previous value, so the draft/value re-sync rewrote the box
-// and reverted the keystroke. Almost every edit passes through an unsendable
-// state, which left a defaulted array or object argument uneditable.
+// `resolveValue` used to turn that straight back into the default — a change
+// from the previous value, so the draft/value re-sync rewrote the box and
+// reverted the keystroke.
+//
+// The two halves differed in how reachable they were, which the tests below
+// mirror deliberately:
+//
+// - **The number field reverted in the app.** Numbers compare by value, so
+//   clearing a defaulted box (value `3` → resolved default `30`) always fired
+//   the re-sync and refilled itself.
+// - **The JSON field was latent.** `collectSchemaDefaults` assigns
+//   `fieldSchema.default` itself, so a field seeded from the schema holds the
+//   *same reference* the substitution returns and nothing fires. It needs a
+//   structurally-equal but distinct value object to become observable — which
+//   is what parsed wire/deep-link values and rebuilt nested-object defaults
+//   produce, and what these tests construct.
 describe("SchemaForm defaulted fields (#2026)", () => {
   function DefaultHarness({
     schema,
@@ -1681,8 +1693,10 @@ describe("SchemaForm defaulted fields (#2026)", () => {
 
   it("keeps a keystroke typed into a defaulted JSON field", async () => {
     const user = userEvent.setup();
-    // Seeded the way the Tools tab seeds it — from the schema's defaults, as a
-    // separate value than the schema's own. Sharing one reference hid this.
+    // Seeded with a value that is equal to the schema default but is not the
+    // same object — how values parsed off the wire or out of a deep link
+    // arrive. Sharing the reference (what `collectSchemaDefaults` produces) is
+    // what keeps this latent rather than what makes it safe.
     renderWithMantine(
       <DefaultHarness schema={arrayWithDefault} initial={{ tags: ["a"] }} />,
     );
@@ -1697,6 +1711,7 @@ describe("SchemaForm defaulted fields (#2026)", () => {
 
   it("lets a defaulted JSON field be edited to a new value", async () => {
     const user = userEvent.setup();
+    // Distinct-object seed again, for the reason above.
     renderWithMantine(
       <DefaultHarness schema={arrayWithDefault} initial={{ tags: ["a"] }} />,
     );

@@ -268,12 +268,22 @@ function SchemaJsonField({
   //
   // The value compared here is the field's *raw* entry, never `resolveValue`'s
   // default substitution (#2026). Unsendable text reports `undefined`, and a
-  // defaulted field resolves that straight back to its default — a real change
-  // from the previous value, so this would rewrite the draft to the default and
-  // revert the keystroke. Almost every edit passes through an unsendable state,
-  // which made a defaulted array or object argument uneditable. The default
-  // belongs to what the field *opens* with, seeded above, not to what is
-  // re-imposed while it is being typed into.
+  // defaulted field resolves that straight back to its default — a change from
+  // the previous value, so comparing against the resolved one would rewrite the
+  // draft to the default and revert the keystroke. Almost every edit passes
+  // through an unsendable state, so a defaulted array or object argument would
+  // be uneditable.
+  //
+  // Would be, not was: this is latent under today's seeding, where
+  // `collectSchemaDefaults` assigns `fieldSchema.default` itself, so the
+  // substitution returns the *same reference* and `useValueChange` never fires.
+  // It goes live as soon as the value is a structurally-equal but distinct
+  // object — parsed from the wire or a deep link, or a nested-object default,
+  // which `collectSchemaDefaults` rebuilds per call. `SchemaNumberInput` has no
+  // such accidental protection, since a number compares by value.
+  //
+  // Either way the default belongs to what the field *opens* with, seeded
+  // above, not to what is re-imposed while it is being typed into.
   useValueChange(value, (next) => {
     if (!isSameJson(parseJsonDraft(draft), next)) {
       setDraft(next === undefined ? "" : serializeJson(next));
