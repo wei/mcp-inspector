@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
   expandUriTemplate,
+  expandUriTemplateStrict,
+  hasRequiredValues,
   parseUriTemplate,
   templateVariables,
 } from "@inspector/core/mcp/uriTemplate.js";
@@ -13,6 +15,7 @@ describe("parseUriTemplate", () => {
         kind: "expression",
         source: "{topic}",
         operator: "",
+        varspecs: [{ name: "topic" }],
         names: ["topic"],
       },
     ]);
@@ -25,6 +28,7 @@ describe("parseUriTemplate", () => {
         kind: "expression",
         source: "{?a,b*}",
         operator: "?",
+        varspecs: [{ name: "a" }, { name: "b" }],
         names: ["a", "b"],
       },
     ]);
@@ -44,13 +48,13 @@ describe("parseUriTemplate", () => {
 describe("templateVariables", () => {
   it("finds a simple variable and marks it required", () => {
     expect(templateVariables("foobar://events/{topic}")).toEqual([
-      { name: "topic", operator: "", required: true },
+      { name: "topic", operator: "", required: true, groupNames: ["topic"] },
     ]);
   });
 
   it("finds a query variable the old `\\{(\\w+)\\}` regex could not see", () => {
     expect(templateVariables("foobar://events{?topic}")).toEqual([
-      { name: "topic", operator: "?", required: false },
+      { name: "topic", operator: "?", required: false, groupNames: ["topic"] },
     ]);
   });
 
@@ -72,7 +76,7 @@ describe("templateVariables", () => {
 
   it("deduplicates a repeated name and keeps it required if any use is", () => {
     expect(templateVariables("x://{?id}/{id}")).toEqual([
-      { name: "id", operator: "?", required: true },
+      { name: "id", operator: "?", required: true, groupNames: ["id"] },
     ]);
   });
 
@@ -189,6 +193,164 @@ describe("expandUriTemplate - multi-name expressions (SDK correction)", () => {
   it("leaves multi-name query expressions to the SDK, which handles them", () => {
     expect(expandUriTemplate("x://a{?p,q}", { p: "x/y", q: "z" })).toBe(
       "x://a?p=x%2Fy&q=z",
+    );
+  });
+});
+
+describe("varspec modifiers", () => {
+  // The pinned SDK folds a `:length` modifier into the variable name --
+  // `new UriTemplate("x://a/{id:3}").variableNames` is `["id:3"]`, and it
+  // expands to "x://a/" -- so a form built on it would render a field the
+  // user cannot usefully fill.
+  it("parses a prefix modifier off the variable name", () => {
+    expect(templateVariables("x://a/{id:3}")).toEqual([
+      { name: "id", operator: "", required: true, groupNames: ["id"] },
+    ]);
+  });
+
+  it("truncates the value to the prefix length before encoding", () => {
+    expect(expandUriTemplate("x://a/{id:3}", { id: "abcdef" })).toBe(
+      "x://a/abc",
+    );
+  });
+
+  it("encodes what survives truncation", () => {
+    expect(expandUriTemplate("x://a/{id:3}", { id: "a/bcdef" })).toBe(
+      "x://a/a%2Fb",
+    );
+  });
+
+  it("truncates by code point, never splitting an astral character", () => {
+    // "\u{1F600}" is one code point but two UTF-16 units, so a naive
+    // `slice(0, 1)` would emit a lone surrogate.
+    expect(expandUriTemplate("x://{v:1}", { v: "\u{1F600}x" })).toBe(
+      `x://${encodeURIComponent("\u{1F600}")}`,
+    );
+  });
+
+  it("ignores a malformed modifier rather than inventing a truncation", () => {
+    expect(templateVariables("x://{id:}")[0].name).toBe("id");
+    expect(expandUriTemplate("x://{id:}", { id: "abcdef" })).toBe("x://abcdef");
+  });
+
+  it("strips the explode modifier from the name", () => {
+    expect(templateVariables("x://{id*}")[0].name).toBe("id");
+  });
+});
+
+describe("the ; (path-parameter) operator", () => {
+  // Absent from the SDK's operator list entirely: it parses `{;id}` as a
+  // variable named ";id" and expands to "".
+  it("is recognised as an operator, not part of the name", () => {
+    expect(templateVariables("x://a{;id}")).toEqual([
+      { name: "id", operator: ";", required: false, groupNames: ["id"] },
+    ]);
+  });
+
+  it("expands to a named path parameter", () => {
+    expect(expandUriTemplate("x://a{;id}", { id: "7" })).toBe("x://a;id=7");
+  });
+
+  it("repeats its separator per pair", () => {
+    expect(expandUriTemplate("x://a{;a,b}", { a: "1", b: "2" })).toBe(
+      "x://a;a=1;b=2",
+    );
+  });
+
+  it("encodes the value", () => {
+    expect(expandUriTemplate("x://a{;p}", { p: "x/y" })).toBe("x://a;p=x%2Fy");
+  });
+
+  it("omits cleanly when undefined", () => {
+    expect(expandUriTemplate("x://a{;id}", {})).toBe("x://a");
+  });
+});
+
+describe("hasRequiredValues", () => {
+  // A required *expression* is satisfied by any one of its names, because
+  // RFC 6570 drops the undefined ones -- verified against the SDK:
+  // `x://{a,b}` with only `a` expands to "x://only-a".
+  it("accepts a multi-name expression with only one name filled", () => {
+    const vars = templateVariables("x://{a,b}");
+    expect(hasRequiredValues(vars, { a: "only-a", b: "" })).toBe(true);
+    expect(expandUriTemplate("x://{a,b}", { a: "only-a", b: "" })).toBe(
+      "x://only-a",
+    );
+  });
+
+  it("rejects a multi-name expression with nothing filled", () => {
+    const vars = templateVariables("x://{a,b}");
+    expect(hasRequiredValues(vars, { a: "", b: "" })).toBe(false);
+  });
+
+  it("still requires a lone required variable", () => {
+    const vars = templateVariables("file:///users/{userId}/profile");
+    expect(hasRequiredValues(vars, { userId: "" })).toBe(false);
+    expect(hasRequiredValues(vars, { userId: "alice" })).toBe(true);
+  });
+
+  it("never blocks on an omittable expression", () => {
+    const vars = templateVariables("foobar://events{?topic}");
+    expect(hasRequiredValues(vars, { topic: "" })).toBe(true);
+  });
+
+  it("is satisfied by a template with no variables at all", () => {
+    expect(hasRequiredValues(templateVariables("file:///static.txt"), {})).toBe(
+      true,
+    );
+  });
+});
+
+describe("cross-expression query joining", () => {
+  it("rewrites a second ? to & on the own-expansion path too", () => {
+    // Forced onto the own-expansion path by the `;` expression; the `?`-to-`&`
+    // rewrite must still apply, exactly as the SDK does it.
+    expect(
+      expandUriTemplate("x://a{;k}{?one}{?two}", {
+        k: "v",
+        one: "1",
+        two: "2",
+      }),
+    ).toBe("x://a;k=v?one=1&two=2");
+  });
+
+  it("uses ? for the first query expression that actually emits", () => {
+    expect(
+      expandUriTemplate("x://a{;k}{?one}{?two}", { k: "v", two: "2" }),
+    ).toBe("x://a;k=v?two=2");
+  });
+});
+
+describe("strict vs lenient expansion", () => {
+  // `readResourceFromTemplate` wraps the thrown error with the template name;
+  // the web panel instead needs the raw template back, because an invalid
+  // template comes from the server and throwing would take out the panel.
+  it.each(["file:///{unclosed", "{a,b,c"])(
+    "strict throws on the invalid template %s",
+    (template) => {
+      expect(() => expandUriTemplateStrict(template, { x: "1" })).toThrow();
+    },
+  );
+
+  it.each(["file:///{unclosed", "{a,b,c"])(
+    "lenient returns %s unchanged",
+    (template) => {
+      expect(expandUriTemplate(template, { x: "1" })).toBe(template);
+    },
+  );
+
+  it("validates syntax even when taking the own-expansion path", () => {
+    // `{;a}` forces own-expansion, and this module's parser treats the
+    // unclosed tail as literal text -- so without the unconditional SDK
+    // construction nothing would reject this.
+    expect(() => expandUriTemplateStrict("x://{;a}{b,c", { a: "1" })).toThrow();
+  });
+
+  it("agrees with the lenient variant on a valid template", () => {
+    const template = "foobar://events{?topic}";
+    const values = { topic: "foo/bar" };
+    expect(expandUriTemplateStrict(template, values)).toBe(
+      expandUriTemplate(template, values),
     );
   });
 });

@@ -249,7 +249,17 @@ Open the Resources tab and pick **events_by_topic**, then enter `foo/bar`. The r
 
 > The plain `foobar://events` resource is registered deliberately, not as filler. The SDK's `UriTemplate.match()` compiles `{?topic}` to a **required** `\?topic=([^&]+)`, so a template alone cannot serve the blank read — `match("foobar://events")` returns `null`. A real server exposes the unfiltered collection as its own resource; the showcase does the same so that step actually resolves.
 
-All three clients expand through one shared helper, [`core/mcp/uriTemplate.ts`](./core/mcp/uriTemplate.ts) — the web Resources form directly, the TUI and CLI via `InspectorClient.readResourceFromTemplate` — so they cannot disagree about what a template means. It delegates to the SDK's `UriTemplate` with one correction applied first: the SDK's `expandPart` takes an early `names.length > 1` branch that raw-joins the values, skipping both percent-encoding **and** the operator prefix, so `x://{a,b}` with `a = "foo/bar"` expands to `x://foo/bar,q` and `x://a{/p,q}` to `x://ax y,z`. Those expressions are expanded by the helper and spliced in as literal text before the SDK sees them; every single-name and query expression still goes through the SDK untouched.
+All three clients expand through one shared helper, [`core/mcp/uriTemplate.ts`](./core/mcp/uriTemplate.ts) — the web Resources form directly, the TUI and CLI via `InspectorClient.readResourceFromTemplate` — so they cannot disagree about what a template means. It delegates to the SDK's `UriTemplate` for every expression the SDK handles correctly, and takes over any template containing one of the three shapes it does not (each measured against the pinned SDK, not inferred):
+
+| Shape | SDK `variableNames` | SDK expansion | Correct |
+| --- | --- | --- | --- |
+| `{a,b}` | `["a","b"]` | `foo/bar,q` — unencoded, operator prefix dropped | `foo%2Fbar,q` |
+| `{;id}` | `[";id"]` | `""` — the `;` operator is not in its list | `;id=7` |
+| `{id:3}` | `["id:3"]` | `""` — the prefix modifier is folded into the name | `abc` |
+
+The last two matter beyond the URI: a form has to *name* the variables it asks the user to fill, so on the SDK's parse it would render fields literally labelled `;id` and `id:3`. Takeover is per **template**, not per expression, so the cross-expression `?`-to-`&` rewrite always sees every expression that actually emitted.
+
+One consequence worth knowing when writing a test server: the SDK's **matcher** has the mirrored gaps (`partToRegExp` emits a single capture for `{a,b}` and knows no `;`), so an SDK-backed server cannot round-trip those templates whatever the client sends. Emitting a spec-correct URI is the half the client controls; the unit tests cover those shapes directly rather than through a showcase server.
 
 #### Advertised extensions
 

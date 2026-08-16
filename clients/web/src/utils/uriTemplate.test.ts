@@ -23,10 +23,16 @@ describe("previewUriTemplate", () => {
     ).toBe("foobar://events/foo%2Fbar");
   });
 
-  it("keeps a multi-name expression whole until every name is filled", () => {
+  it("expands a partially-filled multi-name expression, as submitting would", () => {
+    // RFC 6570 drops the undefined names rather than the whole expression, so
+    // showing `{?one,two}` here would promise a URI the submit does not send.
     expect(previewUriTemplate("x://a{?one,two}", { one: "1" })).toBe(
-      "x://a{?one,two}",
+      "x://a?one=1",
     );
+  });
+
+  it("keeps a multi-name expression whole while none of its names is filled", () => {
+    expect(previewUriTemplate("x://a{?one,two}", {})).toBe("x://a{?one,two}");
   });
 
   it("still rewrites the second ? to & when both query expressions resolve", () => {

@@ -16,6 +16,7 @@ import { AnnotationBadge } from "../../elements/AnnotationBadge/AnnotationBadge"
 import { CopyButton } from "../../elements/CopyButton/CopyButton";
 import {
   expandUriTemplate,
+  hasRequiredValues,
   previewUriTemplate,
   templateVariables,
 } from "../../../utils/uriTemplate";
@@ -215,12 +216,12 @@ export function ResourceTemplatePanel({
     void runCompletion(varName, value, buildContext(varName));
   }
 
-  // Only the variables whose absence would change the URI's shape gate the
+  // Only the expressions whose absence would change the URI's shape gate the
   // read; an unfilled `{?topic}` is a legitimate request for the unfiltered
-  // resource, and RFC 6570 drops the whole expression for it.
-  const canSubmit = declaredVariables.every(
-    (v) => !v.required || variables[v.name]?.length > 0,
-  );
+  // resource, and RFC 6570 drops the whole expression for it. The rule is
+  // per-expression rather than per-variable -- `{a,b}` with only `a` filled
+  // expands to `a`'s value -- so it lives in core beside the expander.
+  const canSubmit = hasRequiredValues(declaredVariables, variables);
 
   function handleSubmit() {
     onReadResource(expandUriTemplate(uriTemplate, variables));
@@ -239,12 +240,19 @@ export function ResourceTemplatePanel({
       </HeaderRow>
       {description && <DescriptionText>{description}</DescriptionText>}
       <Stack gap="sm">
-        {declaredVariables.map(({ name: varName, required }) => {
+        {declaredVariables.map(({ name: varName, required, groupNames }) => {
           /* v8 ignore next -- `?? ""` fallback unreachable: `variables` is seeded with every declared variable, so the key is always present. */
           const fieldValue = variables[varName] ?? "";
           // RFC 6570 omits an undefined variable under a query/path-segment
-          // operator entirely, so those fields are genuinely optional.
-          const description = required ? undefined : "Optional";
+          // operator entirely, so those fields are genuinely optional. In a
+          // required multi-name expression no single field is mandatory either
+          // -- any one of them satisfies it -- so say which, rather than
+          // marking each one required and blocking valid input.
+          const description = !required
+            ? "Optional"
+            : groupNames.length > 1
+              ? `Any one of: ${groupNames.join(", ")}`
+              : undefined;
           return useAutocomplete ? (
             <Autocomplete
               key={varName}

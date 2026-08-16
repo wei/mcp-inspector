@@ -1,18 +1,45 @@
 /**
  * RFC 6570 URI Template parsing and expansion, shared by every client (#1919).
  *
- * Expansion is delegated to the SDK's `UriTemplate` — with one correction
- * applied first, documented on {@link expandMultiNameExpression} below. This
- * lives in `core/` rather than in a client so the web form, the TUI, and the
- * CLI cannot disagree about what a template means; `InspectorClient
- * .readResourceFromTemplate` and the web Resources form both expand through
- * {@link expandUriTemplate}.
+ * This lives in `core/` rather than in a client so the web Resources form, the
+ * TUI, and the CLI cannot disagree about what a template means: the form calls
+ * {@link templateVariables} / {@link expandUriTemplate} directly, and the TUI
+ * and CLI reach the same code through `InspectorClient.readResourceFromTemplate`.
+ *
+ * ## Why this is not simply `new UriTemplate(t).expand(v)`
+ *
+ * Expansion is delegated to the SDK's `UriTemplate` for every expression it
+ * handles correctly — which is the overwhelmingly common case, and keeping it
+ * there means we cannot drift from the SDK on the ordinary path. But its parser
+ * and expander are incomplete in three ways that a *form* makes visible,
+ * because a form has to name the variables it is asking the user to fill in.
+ * Each was measured against the pinned SDK, not inferred:
+ *
+ * | Shape        | SDK `variableNames` | SDK expansion                     | Correct        |
+ * | ------------ | ------------------- | --------------------------------- | -------------- |
+ * | `{a,b}`      | `["a","b"]`         | `foo/bar,q` — unencoded, no prefix| `foo%2Fbar,q`  |
+ * | `{;id}`      | `[";id"]`           | `""` — operator unknown           | `;id=7`        |
+ * | `{id:3}`     | `["id:3"]`          | `""` — modifier folded into name  | `abc`          |
+ *
+ * For the last two the damage is not just a wrong URI: the form would render
+ * fields literally labelled `;id` and `id:3`, which the user cannot fill in
+ * usefully. So this module parses varspecs properly and, **when a template
+ * contains any expression the SDK gets wrong, expands that whole template
+ * itself** in {@link expandParts} rather than splicing corrected fragments into
+ * a template the SDK then re-expands — splicing would leave the SDK's
+ * cross-expression `?`-to-`&` rewrite unaware of the fragments we resolved.
  */
 
 import { UriTemplate } from "@modelcontextprotocol/client";
 
-/** The RFC 6570 operators, in the order the SDK's parser tests for them. */
-const OPERATORS = ["+", "#", ".", "/", "?", "&"] as const;
+/**
+ * The RFC 6570 operators.
+ *
+ * `;` is here but **not** in the SDK's own list, which is why `{;id}` parses
+ * there as a variable literally named `;id`. Order matters only in that each is
+ * a distinct single character; the first match wins.
+ */
+const OPERATORS = ["+", "#", ".", "/", ";", "?", "&"] as const;
 
 /**
  * Operators whose expansion omits cleanly when the variables in it are
@@ -29,7 +56,20 @@ const OPERATORS = ["+", "#", ".", "/", "?", "&"] as const;
  * `#` is in the omittable set on the same measurement: `x://a{#frag}` with no
  * `frag` expands to exactly `x://a`. A fragment is optional by construction.
  */
-const OMITTABLE_OPERATORS = new Set(["#", ".", "/", "?", "&"]);
+const OMITTABLE_OPERATORS = new Set(["#", ".", "/", ";", "?", "&"]);
+
+/** Operators that expand to `name=value` pairs rather than bare values. */
+const NAMED_OPERATORS = new Set([";", "?", "&"]);
+
+/** A single variable reference inside an expression, e.g. `id` or `id:3`. */
+export interface VarSpec {
+  name: string;
+  /**
+   * The RFC 6570 prefix modifier (`{id:3}`), a maximum length in *characters*.
+   * Applied to the value before percent-encoding, per §3.2.1.
+   */
+  maxLength?: number;
+}
 
 interface TemplateLiteral {
   kind: "literal";
@@ -42,7 +82,9 @@ interface TemplateExpression {
   source: string;
   /** The RFC 6570 operator, or `""` for a simple expression. */
   operator: string;
-  /** Variable names in the expression, `*` (explode) and whitespace stripped. */
+  /** The variable references, in order. */
+  varspecs: VarSpec[];
+  /** Bare variable names, `*` and any `:length` modifier stripped. */
   names: string[];
 }
 
@@ -53,20 +95,50 @@ export interface TemplateVariable {
   /** The operator of the expression the variable was first seen in. */
   operator: string;
   /**
-   * True when omitting the variable would change the URI's structure rather
-   * than shorten it — see {@link OMITTABLE_OPERATORS}.
+   * True when the expression this variable belongs to cannot be omitted
+   * without changing the URI's structure — see {@link OMITTABLE_OPERATORS}.
+   *
+   * Note this is a property of the *expression*, not of the single variable:
+   * RFC 6570 drops undefined names from a multi-name expression, so `{a,b}`
+   * with only `a` filled expands to `a`'s value. Use {@link hasRequiredValues}
+   * rather than testing every required variable individually, or a form will
+   * refuse input the expander would have accepted.
    */
   required: boolean;
+  /**
+   * Every name in the expression this variable belongs to, itself included.
+   * A single-name expression yields a one-element array.
+   */
+  groupNames: string[];
+}
+
+/** Parses one varspec (`id`, `id*`, `id:3`) into a name and optional prefix. */
+function parseVarSpec(raw: string): VarSpec | null {
+  // The explode modifier is stripped rather than honored: it only changes how
+  // a list or map value is joined, and every value reaching this module is a
+  // single string.
+  const spec = raw.replace("*", "").trim();
+  if (spec.length === 0) return null;
+
+  const colon = spec.indexOf(":");
+  if (colon === -1) return { name: spec };
+
+  const name = spec.slice(0, colon);
+  const length = Number(spec.slice(colon + 1));
+  // A malformed modifier (`{id:}`, `{id:abc}`) is not a valid varspec; keep the
+  // name and ignore the modifier rather than inventing a truncation.
+  if (name.length === 0) return null;
+  return Number.isInteger(length) && length > 0
+    ? { name, maxLength: length }
+    : { name };
 }
 
 /**
  * Splits a template into literal runs and expressions.
  *
- * Deliberately mirrors the SDK parser's own scanning rules (first matching
- * operator character wins, names split on `,`, `*` stripped) so this never
- * disagrees with the class that ultimately does the expanding. An unclosed
- * `{` yields a trailing literal, which is what makes the callers below degrade
- * to "render no inputs, show the template verbatim" rather than throw.
+ * An unclosed `{` yields a trailing literal, which is what makes the callers
+ * below degrade to "render no inputs, show the template verbatim" rather than
+ * throw at the user.
  */
 export function parseUriTemplate(uriTemplate: string): TemplatePart[] {
   const parts: TemplatePart[] = [];
@@ -91,16 +163,17 @@ export function parseUriTemplate(uriTemplate: string): TemplatePart[] {
     }
     const body = uriTemplate.slice(i + 1, end);
     const operator = OPERATORS.find((op) => body.startsWith(op)) ?? "";
-    const names = body
+    const varspecs = body
       .slice(operator.length)
       .split(",")
-      .map((name) => name.replace("*", "").trim())
-      .filter((name) => name.length > 0);
+      .map(parseVarSpec)
+      .filter((spec): spec is VarSpec => spec !== null);
     parts.push({
       kind: "expression",
       source: uriTemplate.slice(i, end + 1),
       operator,
-      names,
+      varspecs,
+      names: varspecs.map((spec) => spec.name),
     });
     i = end + 1;
   }
@@ -125,7 +198,12 @@ export function templateVariables(uriTemplate: string): TemplateVariable[] {
       if (existing) {
         existing.required = existing.required || required;
       } else {
-        byName.set(name, { name, operator: part.operator, required });
+        byName.set(name, {
+          name,
+          operator: part.operator,
+          required,
+          groupNames: part.names,
+        });
       }
     }
   }
@@ -134,9 +212,28 @@ export function templateVariables(uriTemplate: string): TemplateVariable[] {
 }
 
 /**
- * Drops empty entries so an untouched optional field reads as *undefined* to
- * the SDK (the expression disappears) rather than as the empty string (which
- * would expand to a valueless `?topic=`).
+ * Whether `values` supplies everything expansion structurally needs.
+ *
+ * A required *expression* is satisfied by any one of its names having a value,
+ * because RFC 6570 drops the undefined ones — `{a,b}` with only `a` filled
+ * expands to `a`'s value, which the SDK does too. Testing each required
+ * variable individually would block that valid input.
+ */
+export function hasRequiredValues(
+  variables: TemplateVariable[],
+  values: Record<string, string>,
+): boolean {
+  return variables.every(
+    (variable) =>
+      !variable.required ||
+      variable.groupNames.some((name) => (values[name] ?? "").length > 0),
+  );
+}
+
+/**
+ * Drops empty entries so an untouched optional field reads as *undefined*
+ * (the expression disappears) rather than as the empty string (which would
+ * expand to a valueless `?topic=`).
  */
 export function definedValues(
   values: Record<string, string>,
@@ -154,103 +251,156 @@ function encodeValue(value: string, operator: string): string {
 }
 
 /**
- * Expands a **multi-name, non-query** expression (`{a,b}`, `{/a,b}`, …).
+ * Applies a prefix modifier, then encodes.
  *
- * The pinned SDK gets this branch wrong: `UriTemplate.expandPart` takes an
- * early `part.names.length > 1` path that raw-joins the values with `,` —
- * skipping `encodeValue` *and* the operator prefix entirely. Measured against
- * the pinned SDK, `x://{a,b}` with `a = "foo/bar"` expands to `x://foo/bar,q`
- * (unencoded, so the slash creates a path segment — the very defect #1919 is
- * about), and `x://a{/p,q}` expands to `x://ax y,z` — no leading `/`, spaces
- * intact. Only the `?`/`&` operators are handled correctly there, because they
- * are dispatched before that branch.
- *
- * So those expressions are expanded here and spliced into the template as
- * *literal* text before the SDK ever sees them. This is deliberately surgical:
- * every other shape — the overwhelmingly common single-name expression, and
- * every query expression — still goes through the SDK untouched, so the two
- * cannot drift on the ordinary path, and if the SDK fixes its branch this
- * correction keeps producing the same (correct) answer.
- *
- * Splicing is safe because both encoders escape `{` and `}` (to `%7B`/`%7D`),
- * so an expanded value can never be re-parsed as an expression.
- *
- * Returns `""` when no name in the expression has a value, matching RFC 6570's
- * rule that an expression with only undefined variables expands to nothing.
+ * Truncation is by *code point* (`Array.from`), not by `slice`: RFC 6570 counts
+ * the prefix in characters, and `String.prototype.slice` counts UTF-16 code
+ * units, so it can cut an astral character in half and yield a lone surrogate.
  */
-function expandMultiNameExpression(
+function renderValue(value: string, spec: VarSpec, operator: string): string {
+  const truncated =
+    spec.maxLength === undefined
+      ? value
+      : Array.from(value).slice(0, spec.maxLength).join("");
+  return encodeValue(truncated, operator);
+}
+
+/**
+ * True for an expression the SDK would get wrong, and which this module must
+ * therefore expand itself. See the table in the module comment.
+ */
+function needsOwnExpansion(part: TemplatePart): boolean {
+  if (part.kind !== "expression") return false;
+  return (
+    // Multi-name, non-query: the SDK raw-joins, skipping encoding and prefix.
+    (part.varspecs.length > 1 &&
+      part.operator !== "?" &&
+      part.operator !== "&") ||
+    // The SDK has no `;` operator at all.
+    part.operator === ";" ||
+    // The SDK folds everything after a `:` into the variable name. Keyed on the
+    // raw source rather than on a parsed `maxLength` so a *malformed* modifier
+    // (`{id:}`, `{id:abc}`) is caught too: this module drops the modifier and
+    // looks up `id`, while the SDK would look up `id:` and find nothing.
+    part.source.includes(":")
+  );
+}
+
+/** Expands one expression per RFC 6570. Returns "" if no name has a value. */
+function expandExpression(
   part: TemplateExpression,
   values: Record<string, string>,
 ): string {
-  const encoded = part.names
-    .map((name) => values[name])
-    .filter((value) => value !== undefined)
-    .map((value) => encodeValue(value, part.operator));
+  const present = part.varspecs.filter(
+    (spec) => values[spec.name] !== undefined,
+  );
+  if (present.length === 0) return "";
 
-  if (encoded.length === 0) return "";
+  const { operator } = part;
 
-  switch (part.operator) {
+  if (NAMED_OPERATORS.has(operator)) {
+    const pairs = present.map(
+      (spec) =>
+        `${spec.name}=${renderValue(values[spec.name], spec, operator)}`,
+    );
+    // `;` repeats its separator per pair; `?`/`&` join with `&`.
+    return operator === ";"
+      ? `;${pairs.join(";")}`
+      : `${operator}${pairs.join("&")}`;
+  }
+
+  const rendered = present.map((spec) =>
+    renderValue(values[spec.name], spec, operator),
+  );
+
+  switch (operator) {
     case "#":
-      return `#${encoded.join(",")}`;
+      return `#${rendered.join(",")}`;
     case ".":
-      return `.${encoded.join(".")}`;
+      return `.${rendered.join(".")}`;
     case "/":
-      return `/${encoded.join("/")}`;
+      return `/${rendered.join("/")}`;
     // "" and "+" — a bare comma-joined list, no prefix.
     default:
-      return encoded.join(",");
+      return rendered.join(",");
   }
 }
 
 /**
- * True for the expressions {@link expandMultiNameExpression} has to take over:
- * more than one name, and not a query operator (which the SDK dispatches before
- * its broken branch and therefore handles correctly).
+ * Expands a whole parsed template, mirroring the SDK's `expand` — including its
+ * rule that a second query expression switches its leading `?` to `&`.
  */
-function needsMultiNameCorrection(part: TemplateExpression): boolean {
-  return (
-    part.names.length > 1 && part.operator !== "?" && part.operator !== "&"
-  );
-}
-
-/**
- * Rebuilds `uriTemplate` with every mis-expanded multi-name expression already
- * resolved to literal text, leaving the rest for the SDK.
- */
-export function applyMultiNameCorrection(
+export function expandParts(
   parts: TemplatePart[],
   values: Record<string, string>,
 ): string {
-  return parts
-    .map((part) => {
-      if (part.kind === "literal") return part.text;
-      return needsMultiNameCorrection(part)
-        ? expandMultiNameExpression(part, values)
-        : part.source;
-    })
-    .join("");
+  let result = "";
+  let hasQueryParam = false;
+
+  for (const part of parts) {
+    if (part.kind === "literal") {
+      result += part.text;
+      continue;
+    }
+    const expanded = expandExpression(part, values);
+    if (!expanded) continue;
+
+    const isQuery = part.operator === "?" || part.operator === "&";
+    result += isQuery && hasQueryParam ? `&${expanded.slice(1)}` : expanded;
+    if (isQuery) hasQueryParam = true;
+  }
+
+  return result;
 }
 
 /**
  * Expands a template against the entered values per RFC 6570 — percent-encoding
  * each value according to its operator, and omitting expressions whose
- * variables were left blank.
+ * variables were left blank. **Throws** on a template that is not valid.
  *
- * A template the SDK refuses to parse falls back to the raw template string,
- * which is what the user already sees in the preview and what the server will
- * reject with a legible error; throwing here would take out the whole panel.
+ * Templates the SDK handles correctly still go through the SDK, so the two
+ * cannot drift on the ordinary path; only a template containing at least one
+ * expression from the table above is expanded here instead. That is a
+ * whole-template switch rather than a per-expression splice so the `?`-to-`&`
+ * rewrite always sees every expression that actually produced output.
+ *
+ * The SDK template is constructed *before* choosing a path, and unconditionally:
+ * that construction is what validates the syntax and throws `Unclosed template
+ * expression`, and callers such as `readResourceFromTemplate` wrap that error.
+ * Skipping it on the own-expansion path would silently accept a template like
+ * `{;a}{b,c` — this module's parser treats the unclosed tail as literal text,
+ * so nothing else would object.
+ */
+export function expandUriTemplateStrict(
+  uriTemplate: string,
+  values: Record<string, string>,
+): string {
+  const defined = definedValues(values);
+  const sdkTemplate = new UriTemplate(uriTemplate);
+  const parts = parseUriTemplate(uriTemplate);
+  return parts.some(needsOwnExpansion)
+    ? expandParts(parts, defined)
+    : sdkTemplate.expand(defined);
+}
+
+/**
+ * {@link expandUriTemplateStrict}, but falling back to the raw template string
+ * instead of throwing.
+ *
+ * This is the form's variant: the template comes from the connected server, not
+ * from the user, so an invalid one is not something the user can fix from the
+ * panel — and what they already see in the URI preview is the raw template.
+ * Letting it throw would take out the whole panel on render; returning it
+ * unchanged sends the server a URI it rejects with a legible error instead.
+ * Call sites that need the failure (`readResourceFromTemplate`, which wraps it
+ * with the template name) use the strict variant.
  */
 export function expandUriTemplate(
   uriTemplate: string,
   values: Record<string, string>,
 ): string {
-  const defined = definedValues(values);
   try {
-    const corrected = applyMultiNameCorrection(
-      parseUriTemplate(uriTemplate),
-      defined,
-    );
-    return new UriTemplate(corrected).expand(defined);
+    return expandUriTemplateStrict(uriTemplate, values);
   } catch {
     return uriTemplate;
   }

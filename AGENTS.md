@@ -77,9 +77,16 @@ v2/main/
 │   │                                   #   shared by the web Resources form and
 │   │                                   #   readResourceFromTemplate (TUI + CLI), so the
 │   │                                   #   clients cannot drift on what a template means;
-│   │                                   #   delegates to the SDK's UriTemplate but corrects
-│   │                                   #   its multi-name `{a,b}` branch, which skips both
-│   │                                   #   encoding and the operator prefix — #1919;
+│   │                                   #   delegates to the SDK's UriTemplate for what it
+│   │                                   #   gets right, and takes over a whole template
+│   │                                   #   containing any of the three shapes it does not:
+│   │                                   #   `{a,b}` (raw-joined, unencoded, prefix dropped),
+│   │                                   #   `{;id}` (operator absent from its list), and
+│   │                                   #   `{id:3}` (prefix modifier folded into the name) —
+│   │                                   #   the last two would render form fields literally
+│   │                                   #   labelled `;id` / `id:3`. Requiredness is per
+│   │                                   #   EXPRESSION, not per variable (hasRequiredValues):
+│   │                                   #   `{a,b}` with only `a` filled is expandable — #1919;
 │   │                                   #   modernTaskSchemas.ts: SEP-2663 modern Tasks
 │   │                                   #   extension wire schemas + normalize/handle helpers,
 │   │                                   #   used by the raw-wire tasks/* channel — #1631;

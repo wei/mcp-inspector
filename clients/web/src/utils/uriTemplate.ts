@@ -9,20 +9,21 @@
  */
 
 import {
-  applyMultiNameCorrection,
   definedValues,
+  expandUriTemplate,
   parseUriTemplate,
 } from "@inspector/core/mcp/uriTemplate.js";
-import { UriTemplate } from "@modelcontextprotocol/client";
 
 export {
   expandUriTemplate,
+  hasRequiredValues,
   parseUriTemplate,
   templateVariables,
 } from "@inspector/core/mcp/uriTemplate.js";
 export type {
   TemplatePart,
   TemplateVariable,
+  VarSpec,
 } from "@inspector/core/mcp/uriTemplate.js";
 
 /**
@@ -41,8 +42,10 @@ const deferredToken = (index: number) => `\u0000${index}\u0000`;
  *
  * Unfilled expressions are swapped for an inert token and restored after
  * expansion -- rather than expanding each filled expression in isolation -- so
- * the SDK still sees one whole template and applies its cross-expression rules
- * (notably rewriting a second `?` query expression to `&`).
+ * the expander still sees one whole template and applies its cross-expression
+ * rules (notably rewriting a second `?` query expression to `&`). Routing the
+ * rewritten template back through `expandUriTemplate` is what keeps the preview
+ * honest: it can never promise a URI that submitting would not send.
  */
 export function previewUriTemplate(
   uriTemplate: string,
@@ -55,23 +58,15 @@ export function previewUriTemplate(
   const rewritten = parts
     .map((part) => {
       if (part.kind === "literal") return part.text;
-      if (part.names.every((name) => defined[name] !== undefined)) {
-        // Route the kept expression through the same multi-name correction the
-        // real expansion applies, so the preview can never promise a URI that
-        // submitting would not actually send.
-        return applyMultiNameCorrection([part], defined);
+      if (part.names.some((name) => defined[name] !== undefined)) {
+        return part.source;
       }
       deferred.push(part.source);
       return deferredToken(deferred.length - 1);
     })
     .join("");
 
-  let expanded: string;
-  try {
-    expanded = new UriTemplate(rewritten).expand(defined);
-  } catch {
-    return uriTemplate;
-  }
+  const expanded = expandUriTemplate(rewritten, defined);
 
   // Restored by exact-string replacement rather than by a pattern: a regex
   // matching the token would have to embed U+0000 literally, which `eslint`
