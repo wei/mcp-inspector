@@ -197,6 +197,29 @@ describe("salvage era item contract (#1909)", () => {
     );
   });
 
+  it("strips unknown fields the way the strict codec does", async () => {
+    // The contract validates through a wire schema; returning the ORIGINAL
+    // value rather than the parsed one would leave salvaged tools carrying
+    // fields the strict path drops, so the two paths would hand the UI
+    // differently-shaped tools for the same server.
+    const strayTool = {
+      name: "stray",
+      inputSchema: { type: "object" },
+      notAToolField: "should not survive",
+    };
+    const parsed = toolItemSchemaForEra(false).safeParse(strayTool);
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && parsed.data).not.toHaveProperty("notAToolField");
+
+    // And the strict path agrees — this is the shape being matched, not an
+    // invented rule.
+    const server = await startToolsServer([strayTool], false);
+    stop = server.stop;
+    const connected = await connect(server.url, "legacy");
+    const { tools } = await connected.listAllTools();
+    expect(tools[0]).not.toHaveProperty("notAToolField");
+  });
+
   it("the era contract matches the strict path on both divergences", () => {
     // Legacy: rejected, exactly as the strict parse above rejected it.
     expect(

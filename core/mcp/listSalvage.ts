@@ -229,21 +229,9 @@ export function describeIssues(error: z.ZodError): string {
   /* v8 ignore next -- zod never produces a failed parse with zero issues; guards against an empty message if it ever did */
   if (!issue) return "did not match the expected shape";
   const path = issue.path.join(".");
-  const message = describeIssue(issue);
-  return path.length > 0 ? `${path}: ${message}` : message;
-}
-
-/**
- * One issue's message, with the expected type folded in when it adds something.
- *
- * Split out from {@link describeIssues} because {@link eraToolItemSchema} has to
- * apply it EARLY: forwarding another schema's issues re-emits them as `custom`
- * ones, which carry a message and a path but no `expected` field, so the detail
- * has to be baked into the message while the original issue is still in hand.
- */
-function describeIssue(issue: z.core.$ZodIssue): string {
   const detail = expectedDetail(issue);
-  return detail ? `${issue.message} (${detail})` : issue.message;
+  const message = detail ? `${issue.message} (${detail})` : issue.message;
+  return path.length > 0 ? `${path}: ${message}` : message;
 }
 
 /**
@@ -398,40 +386,29 @@ function stripExecution(tool: Tool): Tool {
 /**
  * Bridge a per-era WIRE schema to the `Tool` the rest of the client works with.
  *
- * The two are deliberately separate, because on BOTH eras the wire schema
- * accepts values the exported `Tool` type cannot describe — `properties: 5` is
- * a valid modern `inputSchema` keyword set, and the SDK hands exactly that back
- * typed as a `Tool`. So the era rules are expressed as an ordinary schema whose
- * output type is irrelevant (it is only ever consulted for a verdict), and
- * `z.custom<Tool>` supplies the type the caller needs. That is what avoids the
- * `as unknown as` this would otherwise require — and it is the same assertion
- * the SDK itself makes, in the same place.
+ * The bridge exists because the two cannot be the same schema: on BOTH eras the
+ * wire shape accepts values the exported `Tool` type cannot describe —
+ * `properties: 5` is a valid modern `inputSchema` keyword set, and the SDK
+ * hands exactly that back typed as a `Tool`. So the era rules are expressed as
+ * an ordinary schema, and its parsed output is asserted to `Tool` here.
  *
- * The wire schema's issues are copied across one by one, each keeping its PATH,
- * rather than collapsed into a single "invalid tool" — so `describeIssues` can
- * still name the offending field (`inputSchema.type`) instead of reporting a
- * bare "Invalid input", which is the whole point of the report this module
- * produces. They are re-emitted as `custom` issues (the only code that can
- * carry an arbitrary forwarded message), which is why the expected-type detail
- * is folded into the message here by {@link describeIssue} rather than left for
- * `describeIssues` to recover from a field the new issue will not have.
+ * The parsed OUTPUT is what gets normalized and returned, not the raw input.
+ * That matters: both era schemas are `z.object`, so parsing strips unknown
+ * top-level fields (and unknown keys inside `annotations`) exactly as the
+ * strict codec does. Validating with the wire schema but returning the original
+ * value would leave salvaged tools carrying fields the strict path drops, so
+ * the two paths would hand the UI differently-shaped tools for the same server.
+ *
+ * The assertion is single and deliberate — `parsed` is `unknown`, so this is
+ * the narrow `as` the double-cast rule asks for rather than an `as unknown as`
+ * — and it is the same claim the SDK makes about its own era-parsed results.
+ * Issues come straight from the wire parse, so they keep their field paths and
+ * `describeIssues` can still name `inputSchema.type` rather than reporting a
+ * bare "Invalid input".
  */
 function eraToolItemSchema(
   wire: z.ZodType,
   normalize: (tool: Tool) => Tool,
 ): z.ZodType<Tool> {
-  return z
-    .custom<Tool>()
-    .superRefine((value, ctx) => {
-      const parsed = wire.safeParse(value);
-      if (parsed.success) return;
-      for (const issue of parsed.error.issues) {
-        ctx.addIssue({
-          code: "custom",
-          path: issue.path,
-          message: describeIssue(issue),
-        });
-      }
-    })
-    .transform(normalize);
+  return wire.transform((parsed) => normalize(parsed as Tool));
 }
