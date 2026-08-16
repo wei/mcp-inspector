@@ -3,8 +3,18 @@ import { Button, Code, Flex, Stack, Text } from "@mantine/core";
 import { decodeJwtPayload, isJwtFormat } from "@inspector/core/auth/ema/jwt.js";
 import { CopyButton } from "../../elements/CopyButton/CopyButton";
 
-export interface OAuthAccessTokenFieldProps {
-  accessToken: string;
+/**
+ * One labelled OAuth token row: the raw value, a copy control, and — when the
+ * value has the three-segment JWT shape — an in-place "Decode JWT" toggle.
+ *
+ * Shared by the Access Token and ID Token rows (#2019). The decode is
+ * display-only (`decodeJwtPayload` does no signature verification), so this is
+ * a viewer: neither token is treated as a credential here.
+ */
+export interface OAuthTokenFieldProps {
+  /** Row caption, e.g. "Access Token" / "ID Token". */
+  label: string;
+  token: string;
   onClear?: () => void;
   clearLabel?: string;
 }
@@ -64,16 +74,17 @@ function JwtTokenText({ token }: { token: string }) {
   );
 }
 
-export function OAuthAccessTokenField({
-  accessToken,
+export function OAuthTokenField({
+  label,
+  token,
   onClear,
   clearLabel = "Clear",
-}: OAuthAccessTokenFieldProps) {
+}: OAuthTokenFieldProps) {
   const [showDecoded, setShowDecoded] = useState(false);
-  const isJwt = isJwtFormat(accessToken);
+  const isJwt = isJwtFormat(token);
   const jwtDecoded = useMemo(
-    () => (isJwt ? decodeJwtPayload(accessToken) : undefined),
-    [accessToken, isJwt],
+    () => (isJwt ? decodeJwtPayload(token) : undefined),
+    [token, isJwt],
   );
 
   const decodedText = useMemo(() => {
@@ -85,17 +96,18 @@ export function OAuthAccessTokenField({
     );
   }, [jwtDecoded]);
 
-  const copyValue = showDecoded && decodedText ? decodedText : accessToken;
+  const copyValue = showDecoded && decodedText ? decodedText : token;
 
   return (
     <Stack gap="xs">
       <CaptionRow>
-        <Caption>Access Token</Caption>
+        <Caption>{label}</Caption>
         <Toolbar>
           {jwtDecoded && (
             <ToolbarButton
               onClick={() => setShowDecoded((open) => !open)}
               aria-pressed={showDecoded}
+              aria-label={`${showDecoded ? "Show token" : "Decode JWT"} for ${label}`}
             >
               {showDecoded ? "Show token" : "Decode JWT"}
             </ToolbarButton>
@@ -113,13 +125,13 @@ export function OAuthAccessTokenField({
             {showDecoded && decodedText ? (
               decodedText
             ) : isJwt ? (
-              <JwtTokenText token={accessToken} />
+              <JwtTokenText token={token} />
             ) : (
-              accessToken
+              token
             )}
           </TokenCode>
         </TokenColumn>
-        <CopyButton value={copyValue} flush />
+        <CopyButton value={copyValue} flush label={label} />
       </TokenRow>
     </Stack>
   );
