@@ -11,7 +11,14 @@ import {
 import { useState } from "react";
 import { ClearButton } from "../../elements/ClearButton/ClearButton";
 import { useValueChange } from "../../../hooks/useValueChange";
-import type { InspectorFormSchema } from "../../../utils/jsonUtils";
+import type {
+  InspectorFormSchema,
+  JsonSchemaConst,
+} from "../../../utils/jsonUtils";
+import {
+  isStringEnum,
+  normalizeNullableUnion,
+} from "@inspector/core/json/nullableUnion.js";
 
 const FieldLabel = Text.withProps({
   fw: 500,
@@ -52,6 +59,58 @@ function toEnumData(
 }
 
 /**
+ * Build `Select`/`MultiSelect` option data from a list of `oneOf`/`anyOf`
+ * branches that are expected to be constants.
+ *
+ * Returns `null` when the branches are not usable as options, which sends the
+ * field to the JSON fallback instead. Four ways that happens:
+ *
+ * - **A non-string `const`.** Mantine's select is string-valued, so
+ *   `anyOf: [{ const: 1 }, { const: 2 }]` would submit `["1"]` where the
+ *   schema says `[1]` — the same wrong-type-on-the-wire problem that keeps a
+ *   numeric `enum` off the select path. An inspector must not misreport what
+ *   it sends, so this stays on the JSON editor, where the value keeps its type.
+ * - **No `const` at all.** An `anyOf` of *object* schemas — what
+ *   `z.array(z.union([z.object(…), z.object(…)]))` compiles to — has no
+ *   top-level `const` on any branch, so every option would be the empty
+ *   string. Mantine **throws** on duplicate option values, which greys out the
+ *   whole tool panel rather than degrading (#2007).
+ * - **Duplicate values.** Two branches sharing a `const` throw the same way.
+ * - **An empty option value**, which Mantine cannot render as selectable.
+ *
+ * A union of object shapes has no faithful dropdown anyway, so the JSON editor
+ * is the honest widget for it rather than a lossy or crashing one.
+ */
+function toConstOptions(
+  branches: (InspectorFormSchema | JsonSchemaConst)[],
+): { value: string; label: string }[] | null {
+  const options: { value: string; label: string }[] = [];
+  const seen = new Set<string>();
+  for (const branch of branches) {
+    if (typeof branch.const !== "string") {
+      return null;
+    }
+    const value = branch.const;
+    if (value === "" || seen.has(value)) {
+      return null;
+    }
+    seen.add(value);
+    options.push({ value, label: branch.title ?? value });
+  }
+  return options.length > 0 ? options : null;
+}
+
+/**
+ * Whether an enum `Select` should offer a clear affordance. Only a schema that
+ * admits `null` does: clearing emits `null`, and an enum without a null branch
+ * would reject it. Without this a nullable enum is a one-way door — once a
+ * value is picked there is no way back to "no answer".
+ */
+function isClearable(fieldSchema: InspectorFormSchema): boolean {
+  return fieldSchema.nullable === true;
+}
+
+/**
  * Interpret whatever Mantine's `NumberInput` reported as the JSON value for the
  * field. Anything that is not a finite number becomes `undefined`, which is how
  * an absent optional argument is represented everywhere else in this form.
@@ -88,6 +147,110 @@ function toNumericValue(raw: string | number): number | undefined {
   // Case 2 above. The integer part is what overflows exact representation; the
   // fractional digits are bounded by the same guard and stay lossless.
   return Number.isSafeInteger(Math.trunc(parsed)) ? parsed : undefined;
+}
+
+/** Parse editor text, reporting `undefined` for anything that is not JSON yet. */
+function parseJsonDraft(text: string): unknown {
+  if (text.trim() === "") {
+    return undefined;
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Structural equality for the draft/value re-sync, via canonical JSON. */
+function isSameJson(a: unknown, b: unknown): boolean {
+  if (a === undefined || b === undefined) {
+    return a === b;
+  }
+  return serializeJson(a) === serializeJson(b);
+}
+
+interface SchemaJsonFieldProps {
+  label: string;
+  description?: string;
+  withAsterisk: boolean;
+  disabled: boolean;
+  value: unknown;
+  onChange: (value: unknown) => void;
+}
+
+/**
+ * A `JsonInput` that keeps the text the user is typing, not just the value it
+ * currently parses to.
+ *
+ * This field used to drive the box straight off the parent's value and, when
+ * the text failed `JSON.parse`, store the **raw text** back as the value — which
+ * the next render re-`JSON.stringify`d, adding a layer of escaping per
+ * keystroke. Typing `[` gave `"["`, then `"\"[\""`, and the field was unusable
+ * within a few characters. That compounding escape is the original #1928
+ * symptom, and it lived in this fallback rather than in the dispatch.
+ *
+ * Routing nullable fields to real widgets removed the common way of *landing*
+ * here, but it did not fix the editor — and #2007's fix deliberately sends a
+ * union of object shapes to it, so the editor itself has to be typeable. Hence
+ * the same split `SchemaNumberInput` uses: the raw text is the source of truth
+ * for what is *displayed*, while the parent only ever sees parsed JSON.
+ *
+ * While the text is mid-edit and does not parse, the parent is told
+ * `undefined` rather than handed the text. An inspector must not report a value
+ * it cannot send, and `undefined` is how "no value supplied" is spelled
+ * everywhere else in this form.
+ *
+ * That leaves invalid text and an empty field indistinguishable *to the
+ * parent*, so the field says so itself via `error`. A **required** field is
+ * already gated — its value is `undefined`, which `hasMissingRequiredFields`
+ * treats as missing — but an **optional** one would otherwise be dropped from
+ * the submission with no indication. Disabling Execute/Open/Submit on an
+ * invalid optional draft needs a validity channel out of this component and
+ * into all four callers, which is a wider change than this fix; tracked
+ * separately.
+ */
+function SchemaJsonField({
+  value,
+  onChange,
+  ...inputProps
+}: SchemaJsonFieldProps) {
+  const [draft, setDraft] = useState(() =>
+    value === undefined ? "" : serializeJson(value),
+  );
+
+  // Re-sync only when the parent's value genuinely diverges from what the draft
+  // parses to, which leaves an external reset (a cleared form, a loaded
+  // example) working while an in-progress `[` — whose parse is `undefined`,
+  // matching the `undefined` we just emitted — is left alone.
+  useValueChange(value, (next) => {
+    if (!isSameJson(parseJsonDraft(draft), next)) {
+      setDraft(next === undefined ? "" : serializeJson(next));
+    }
+  });
+
+  // Text that is present but does not parse yields no value, so the field would
+  // otherwise submit as absent while the user is still looking at what they
+  // typed. Saying so on the field is what keeps that from being silent; see the
+  // note on `SchemaJsonField` for the submit-gating half, which is not local to
+  // this component.
+  const hasInvalidDraft =
+    draft.trim() !== "" && parseJsonDraft(draft) === undefined;
+
+  return (
+    <SchemaJsonInput
+      {...inputProps}
+      value={draft}
+      error={
+        hasInvalidDraft
+          ? "Not valid JSON — this field will be omitted"
+          : undefined
+      }
+      onChange={(text) => {
+        setDraft(text);
+        onChange(parseJsonDraft(text));
+      }}
+    />
+  );
 }
 
 interface SchemaNumberInputProps {
@@ -207,7 +370,13 @@ export function SchemaForm({
     onChange({ ...values, [fieldName]: fieldValue });
   }
 
-  function renderField(fieldName: string, fieldSchema: InspectorFormSchema) {
+  function renderField(fieldName: string, rawSchema: InspectorFormSchema) {
+    // Flatten a nullable union (`anyOf: [X, {type:"null"}]`, `type: [X,"null"]`)
+    // before dispatching. Every branch below tests a single `type` string, so
+    // without this an "optional and explicitly nullable" field — what Zod's
+    // `.nullish()` emits — matches nothing and falls through to the raw-JSON
+    // fallback, which is unusable for a value the user has to type (#1928).
+    const fieldSchema = normalizeNullableUnion(rawSchema);
     const isRequired = requiredFields.includes(fieldName);
     const label = fieldSchema.title ?? fieldName;
     const description = fieldSchema.description;
@@ -223,6 +392,7 @@ export function SchemaForm({
           withAsterisk={isRequired}
           disabled={disabled}
           data={toEnumData(fieldSchema.enum, fieldSchema.enumNames)}
+          clearable={isClearable(fieldSchema)}
           value={(rawValue as string) ?? null}
           onChange={(val) => handleFieldChange(fieldName, val)}
         />
@@ -230,11 +400,11 @@ export function SchemaForm({
     }
 
     // string with oneOf
-    if (fieldSchema.type === "string" && fieldSchema.oneOf) {
-      const data = fieldSchema.oneOf.map((item) => ({
-        value: String(item.const ?? ""),
-        label: item.title ?? String(item.const ?? ""),
-      }));
+    const oneOfData = fieldSchema.oneOf
+      ? toConstOptions(fieldSchema.oneOf)
+      : null;
+    if (fieldSchema.type === "string" && oneOfData) {
+      const data = oneOfData;
       return (
         <Select
           key={fieldName}
@@ -243,6 +413,7 @@ export function SchemaForm({
           withAsterisk={isRequired}
           disabled={disabled}
           data={data}
+          clearable={isClearable(fieldSchema)}
           value={(rawValue as string) ?? null}
           onChange={(val) => handleFieldChange(fieldName, val)}
         />
@@ -312,12 +483,14 @@ export function SchemaForm({
       );
     }
 
-    // array of enum values (multi-select)
-    if (fieldSchema.type === "array" && fieldSchema.items?.enum) {
-      const data = toEnumData(
-        fieldSchema.items.enum,
-        fieldSchema.items.enumNames,
-      );
+    // array of enum values (multi-select). Gated on the members being strings
+    // for the same reason `toConstOptions` is: `MultiSelect` is string-valued,
+    // so `items: { enum: [1, 2] }` would submit `["1"]` where the schema says
+    // `[1]`. Reachable from a nullable array since the collapse landed, which
+    // is what makes the guard load-bearing rather than theoretical.
+    const itemsEnum = fieldSchema.items?.enum;
+    if (fieldSchema.type === "array" && isStringEnum(itemsEnum)) {
+      const data = toEnumData(itemsEnum, fieldSchema.items?.enumNames);
       return (
         <MultiSelect
           key={fieldName}
@@ -333,11 +506,11 @@ export function SchemaForm({
     }
 
     // array with items having anyOf
-    if (fieldSchema.type === "array" && fieldSchema.items?.anyOf) {
-      const data = fieldSchema.items.anyOf.map((item) => ({
-        value: String(item.const ?? ""),
-        label: item.title ?? String(item.const ?? ""),
-      }));
+    const itemsAnyOfData = fieldSchema.items?.anyOf
+      ? toConstOptions(fieldSchema.items.anyOf)
+      : null;
+    if (fieldSchema.type === "array" && itemsAnyOfData) {
+      const data = itemsAnyOfData;
       return (
         <MultiSelect
           key={fieldName}
@@ -376,20 +549,16 @@ export function SchemaForm({
 
     // fallback: JsonInput for complex schemas
     return (
-      <SchemaJsonInput
-        key={fieldName}
+      <SchemaJsonField
+        // Holds local draft state, so — like the number field — it has to be
+        // remounted when `resetKey` says the form moved to another entity.
+        key={resetKey === undefined ? fieldName : `${resetKey}:${fieldName}`}
         label={label}
         description={description}
         withAsterisk={isRequired}
         disabled={disabled}
-        value={rawValue !== undefined ? serializeJson(rawValue) : ""}
-        onChange={(val) => {
-          try {
-            handleFieldChange(fieldName, JSON.parse(val));
-          } catch {
-            handleFieldChange(fieldName, val);
-          }
-        }}
+        value={rawValue}
+        onChange={(val) => handleFieldChange(fieldName, val)}
       />
     );
   }

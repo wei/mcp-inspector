@@ -55,7 +55,15 @@ v2/main/
 │   │                                   #   annotation scan/validation + mirrored-param
 │   │                                   #   derivation, used by the Tools tab — #1632;
 │   │                                   #   plus `Mcp-Param-*` header building for the
-│   │                                   #   wire, used by both `tools/call` paths — #1846)
+│   │                                   #   wire, used by both `tools/call` paths — #1846;
+│   │                                   #   nullableUnion.ts: collapses the two JSON Schema
+│   │                                   #   encodings of "T or null" (`anyOf` with a null
+│   │                                   #   branch, `type: [T,"null"]`) into a plain type,
+│   │                                   #   hoisting the surviving branch's own keywords.
+│   │                                   #   Shared by BOTH form builders — web SchemaForm
+│   │                                   #   and TUI schemaToForm — since each dispatches on
+│   │                                   #   a single `type` string and would otherwise miss
+│   │                                   #   a nullable field entirely — #1928/#2015)
 │   ├── logging/                        # Silent pino logger singleton
 │   ├── mcp/                            # InspectorClient runtime + state stores
 │   │                                   #   (modernTaskSchemas.ts: SEP-2663 modern Tasks
