@@ -535,10 +535,12 @@ describe("InspectorClient list salvage (#1909)", () => {
     log.destroy();
   });
 
-  it("reports scan-dropped tools at their position in the whole list", async () => {
-    // The exclusion scan walks pages of its own, so its report has to be
-    // offset by the RAW entries of PRIOR pages. An unlabeled entry's index is
-    // all the user has to go on, so a wrong offset points at nothing.
+  it("indexes a dropped tool against the whole aggregate, across pages", async () => {
+    // The reported index has to be offset by the RAW entries of PRIOR pages —
+    // valid and malformed alike, not just the kept ones. An unlabeled entry's
+    // index is all the user has to go on, so a wrong offset points at nothing.
+    // This is the aggregate salvage's walk: it owns the `tools/list` report,
+    // because it is the walk that produced the list being rendered.
     const server = await startMalformedServer(
       {
         tools: [
@@ -610,12 +612,12 @@ describe("InspectorClient list salvage (#1909)", () => {
     expect(connected.getMalformedListItems()).toEqual([]);
   });
 
-  it("does not let the scan overwrite the aggregate's report", async () => {
+  it("keeps the aggregate's report when the scan sees a different list", async () => {
     // Both walks run on a modern connection and they are separate, uncached
-    // exchanges. The aggregate is the list being RENDERED, so its report owns
-    // the indices; the scan must not replace them with its own — the server can
-    // answer the second request differently, and then the warning would point
-    // into a list nobody is looking at.
+    // exchanges. The aggregate is the list being RENDERED, so it owns the
+    // report; the scan never writes it. Here the server answers the scan's
+    // request with a different malformed shape — which, if the scan published,
+    // would leave the warning pointing into a list nobody is looking at.
     const server = await startMalformedServer(
       {
         tools: [

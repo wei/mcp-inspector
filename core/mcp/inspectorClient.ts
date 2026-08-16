@@ -3579,10 +3579,6 @@ export class InspectorClient extends InspectorClientEventTarget {
     metadata?: Record<string, string>,
   ): Promise<ExcludedTool[]> {
     const excluded: ExcludedTool[] = [];
-    const malformed: MalformedListItem[] = [];
-    // Raw entries seen so far, across pages — the frame the reported indices
-    // are relative to (see the mapping below).
-    let rawOffset = 0;
     // Gated to connections that actually exclude; otherwise this is a pure
     // no-op (no round trip). The raw `listTools` below guards the connection.
     if (this.excludesInvalidXMcpHeaderTools()) {
@@ -3597,18 +3593,6 @@ export class InspectorClient extends InspectorClientEventTarget {
         if (pages >= LIST_MAX_PAGES) throw listPaginationExceeded("tools/list");
         pages += 1;
         const page = await this.listToolsForScan(cursor, metadata);
-        malformed.push(
-          ...page.malformed.map((entry) => ({
-            ...entry,
-            // Offset by the RAW entries of PRIOR pages only. `excluded.length`
-            // would be wrong twice over: it counts just the invalid-header
-            // tools, and on page one it would also fold in this page's own
-            // valid count — putting an unlabeled entry, whose index is all the
-            // user has to go on, at a position that doesn't exist.
-            index: entry.index + rawOffset,
-          })),
-        );
-        rawOffset += page.tools.length + page.malformed.length;
         for (const tool of page.tools) {
           const scan = scanXMcpHeaderDeclarations(tool.inputSchema);
           if (!scan.valid) excluded.push({ tool, reason: scan.reason });
@@ -3621,28 +3605,24 @@ export class InspectorClient extends InspectorClientEventTarget {
         }
       } while (cursor !== undefined);
     }
-    // Report what the scan itself had to drop — but only when the aggregate
-    // salvage left nothing to say.
+    // The scan deliberately does NOT publish what it dropped into the
+    // `tools/list` report. That report is rendered above the Tools list as
+    // "entries dropped from this list", and the aggregate is what that list
+    // is — so only the aggregate's salvage may write it.
     //
-    // The aggregate OWNS this report, because the aggregate is the list the
-    // user is looking at. This walk is a second, deliberately un-cached
-    // exchange, so its entries need not be the rendered ones: the server can
-    // change between the two requests, and a cache-served aggregate is a
-    // different list version entirely. Overwriting an aggregate report with
-    // this one would then replace accurate indices with indices into a list
-    // nobody is seeing.
+    // The reason is stronger than "these are two different requests". A
+    // successful strict aggregate means every entry parsed, so the rendered
+    // list has no malformed entries in it at all; and a FAILED aggregate runs
+    // salvage, which writes the report itself. So by the time this walk finds
+    // something, either the aggregate already reported it (with the indices
+    // that match what is on screen), or the aggregate succeeded and whatever
+    // this walk just found is provably not in the list being displayed — the
+    // server changed, or the aggregate came from cache. Publishing here can
+    // therefore only ever name entries the user cannot see.
     //
-    // It still publishes when the aggregate said nothing, which is the case
-    // this exists for: a cache-served aggregate succeeds without ever running
-    // salvage, so without this a malformed tool would be dropped from the scan
-    // with no explanation anywhere. `setMalformedListItems` is not called at
-    // all when empty, so a clean scan cannot clear what the aggregate wrote.
-    if (
-      malformed.length > 0 &&
-      this.malformedListItems.get("tools/list") === undefined
-    ) {
-      this.setMalformedListItems("tools/list", malformed);
-    }
+    // The finding is not lost: `listToolsForScan` marks the scan's own refused
+    // response, so it surfaces on the Protocol entry for the exchange that
+    // actually carried it, which is where it is true.
     this.excludedTools = excluded;
     this.dispatchTypedEvent("excludedToolsChange", excluded);
     return excluded;
@@ -3657,8 +3637,12 @@ export class InspectorClient extends InspectorClientEventTarget {
    * which would blank the excluded set and leave a tool that vanished for an
    * invalid header with no explanation at all. That is the same failure #1909
    * is about, one level down. So on a decode rejection the page is re-fetched
-   * leniently and scanned entry by entry; the malformed ones are not "excluded
-   * tools" and are reported through the salvage channel instead.
+   * leniently and scanned entry by entry.
+   *
+   * The malformed ones are not "excluded tools" and are not returned: they
+   * describe THIS exchange, not the aggregate the Tools panel renders, so they
+   * surface as the rejection reason on this response's own Protocol entry and
+   * go no further (see `refreshExcludedTools`).
    */
   private async listToolsForScan(
     cursor: string | undefined,
@@ -3666,11 +3650,9 @@ export class InspectorClient extends InspectorClientEventTarget {
   ): Promise<{
     tools: Tool[];
     nextCursor?: string;
-    malformed: MalformedListItem[];
   }> {
     try {
-      const page = await this.listTools(cursor, metadata);
-      return { ...page, malformed: [] };
+      return await this.listTools(cursor, metadata);
     } catch (err) {
       if (!isSalvageableRejection(err)) throw err;
       // Capture before the re-fetch, for the reason `salvageList` documents:
@@ -3750,7 +3732,6 @@ export class InspectorClient extends InspectorClientEventTarget {
         return {
           tools: valid,
           ...(nextCursor !== undefined && { nextCursor }),
-          malformed,
         };
       } catch (fallbackErr) {
         // The fallback could not explain the rejection — the re-fetch itself
