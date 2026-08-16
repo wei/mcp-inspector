@@ -1,12 +1,24 @@
 import { describe, it, expect } from "vitest";
 import {
   BIND_ALL_INTERFACES_ENV,
+  DEFAULT_BIND_HOST,
   resolveBindHostname,
 } from "../../../../server/resolve-bind-host.js";
 
 describe("resolveBindHostname", () => {
-  it("defaults to localhost when HOST is unset", () => {
-    expect(resolveBindHostname({})).toBe("localhost");
+  // Regression guard for #1951. The default must be an *address*, never the
+  // name `localhost`: `listen()` resolves a name and binds the single address
+  // the resolver returns first, which on glibc Linux is `::1` — leaving every
+  // IPv4 client (a dev container's port forwarder, an `ssh -L` to 127.0.0.1, a
+  // container healthcheck) refused. See DEFAULT_BIND_HOST.
+  it("defaults to the IPv4 loopback address, not the name localhost", () => {
+    expect(resolveBindHostname({})).toBe("127.0.0.1");
+    expect(resolveBindHostname({})).toBe(DEFAULT_BIND_HOST);
+    expect(resolveBindHostname({})).not.toBe("localhost");
+  });
+
+  it("still honors an explicit HOST=localhost as typed", () => {
+    expect(resolveBindHostname({ HOST: "localhost" })).toBe("localhost");
   });
 
   it("returns a loopback HOST unchanged", () => {

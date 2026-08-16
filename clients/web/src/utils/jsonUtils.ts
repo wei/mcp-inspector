@@ -1,3 +1,8 @@
+import {
+  admitsNull,
+  normalizeNullableUnion,
+} from "@inspector/core/json/nullableUnion.js";
+
 export type JsonValue =
   | string
   | number
@@ -116,7 +121,12 @@ export function collectSchemaDefaults(
 ): Record<string, unknown> {
   const properties = schema.properties ?? {};
   const result: Record<string, unknown> = {};
-  for (const [fieldName, fieldSchema] of Object.entries(properties)) {
+  for (const [fieldName, rawSchema] of Object.entries(properties)) {
+    // Collapse a nullable union first, for the same reason `SchemaForm` does:
+    // a nested object's `properties` live on the union's surviving branch, so
+    // without this the form would *display* a hoisted default that never
+    // reached the seeded values — the field would submit empty (#1928).
+    const fieldSchema = normalizeNullableUnion(rawSchema);
     if (fieldSchema.default !== undefined) {
       result[fieldName] = fieldSchema.default;
     } else if (fieldSchema.type === "object" && fieldSchema.properties) {
@@ -133,15 +143,33 @@ export function collectSchemaDefaults(
  * Whether any of the schema's required top-level fields is missing a value in
  * `values` (absent, null, or empty string). Used to gate a form's submit
  * action until required fields are supplied.
+ *
+ * `null` counts as missing only for a field that does not admit it. JSON
+ * Schema's `required` constrains *presence*, not content, so a required field
+ * whose schema is a nullable union is satisfied by an explicit `null` — and
+ * since #1928 the user can produce exactly that by clearing a nullable enum.
+ * Treating it as missing would leave the form's submit permanently disabled on
+ * a value the schema calls valid.
+ *
+ * The test is `admitsNull`, **not** whether the renderer's collapse recognized
+ * the field. Those differ: the collapse only handles a two-member union, so a
+ * three-member `anyOf: [string, number, null]` renders through the JSON
+ * fallback — where a user can still type `null` — while plainly admitting it.
+ * Gating on the collapse would reject a value the schema accepts.
  */
 export function hasMissingRequiredFields(
   schema: InspectorFormSchema,
   values: Record<string, unknown>,
 ): boolean {
   const required = schema.required ?? [];
+  const properties = schema.properties ?? {};
   return required.some((field) => {
     const value = values[field];
-    return value === undefined || value === null || value === "";
+    if (value === null) {
+      const fieldSchema = properties[field];
+      return fieldSchema === undefined ? true : !admitsNull(fieldSchema);
+    }
+    return value === undefined || value === "";
   });
 }
 

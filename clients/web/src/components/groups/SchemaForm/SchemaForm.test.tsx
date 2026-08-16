@@ -2,6 +2,7 @@ import { useState } from "react";
 import { describe, it, expect, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import type { InspectorFormSchema } from "../../../utils/jsonUtils";
+import { toFormSchema } from "../../../utils/jsonUtils";
 import {
   fireEvent,
   renderWithMantine,
@@ -737,7 +738,52 @@ describe("SchemaForm", () => {
     expect(lastCall.config).toEqual([1, 2]);
   });
 
-  it("falls back to passing raw string to onChange when JSON is invalid in JsonInput", async () => {
+  // The JSON field used to store unparseable text back as the *value*, which
+  // the next render re-stringified — so each keystroke added a layer of
+  // escaping (`[` → `"["` → `"\"[\""`). That compounding escape is #1928's
+  // original symptom, and it lived here rather than in the dispatch. It matters
+  // more since #2007, whose fix deliberately routes object unions to this
+  // editor: a fallback nobody can type into is not a fallback.
+  it("shows an error while the JSON draft does not parse", async () => {
+    const user = userEvent.setup();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        config: { type: "array", title: "Config" },
+      },
+    };
+    function Harness() {
+      const [values, setValues] = useState<Record<string, unknown>>({});
+      return (
+        <SchemaForm schema={schema} values={values} onChange={setValues} />
+      );
+    }
+    renderWithMantine(<Harness />);
+
+    const jsonInput = screen.getByLabelText(/Config/) as HTMLTextAreaElement;
+    await user.type(jsonInput, "[[1,");
+    // Invalid text yields no value, so without this the field would submit as
+    // absent while the user is still looking at what they typed.
+    expect(screen.getByText(/Not valid JSON/)).toBeInTheDocument();
+
+    await user.type(jsonInput, "2]");
+    expect(screen.queryByText(/Not valid JSON/)).not.toBeInTheDocument();
+  });
+
+  it("shows no error for an empty optional field", () => {
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        config: { type: "array", title: "Config" },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={vi.fn()} />,
+    );
+    expect(screen.queryByText(/Not valid JSON/)).not.toBeInTheDocument();
+  });
+
+  it("reports no value, not raw text, while the JSON is mid-edit", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
     const schema: InspectorFormSchema = {
@@ -751,9 +797,59 @@ describe("SchemaForm", () => {
     );
     const jsonInput = screen.getByLabelText(/Config/) as HTMLTextAreaElement;
     await user.type(jsonInput, "x");
-    expect(onChange).toHaveBeenCalled();
-    const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1][0];
-    expect(typeof lastCall.config).toBe("string");
+    expect(onChange).toHaveBeenLastCalledWith({ config: undefined });
+  });
+
+  it("lets an array literal be typed one character at a time", async () => {
+    const user = userEvent.setup();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        config: { type: "array", title: "Config" },
+      },
+    };
+    // Drive the real controlled loop: each onChange feeds straight back in as
+    // `values`, which is what turned the old handler's raw-text write into a
+    // compounding re-escape.
+    function Harness() {
+      const [values, setValues] = useState<Record<string, unknown>>({});
+      return (
+        <SchemaForm schema={schema} values={values} onChange={setValues} />
+      );
+    }
+    renderWithMantine(<Harness />);
+
+    const jsonInput = screen.getByLabelText(/Config/) as HTMLTextAreaElement;
+    // `[` is a userEvent keyboard descriptor, so it is escaped as `[[`.
+    await user.type(jsonInput, '[[1,"a"]');
+
+    // The box shows exactly what was typed — no injected quotes or backslashes.
+    expect(jsonInput.value).toBe('[1,"a"]');
+  });
+
+  it("keeps an in-progress draft visible instead of rewriting it", async () => {
+    const user = userEvent.setup();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        config: { type: "array", title: "Config" },
+      },
+    };
+    function Harness() {
+      const [values, setValues] = useState<Record<string, unknown>>({});
+      return (
+        <SchemaForm schema={schema} values={values} onChange={setValues} />
+      );
+    }
+    renderWithMantine(<Harness />);
+
+    const jsonInput = screen.getByLabelText(/Config/) as HTMLTextAreaElement;
+    await user.type(jsonInput, "[[1,");
+    // Unparseable so far, and it must survive the re-render untouched.
+    expect(jsonInput.value).toBe("[1,");
+
+    await user.type(jsonInput, "2]");
+    expect(jsonInput.value).toBe("[1,2]");
   });
 
   it("uses default values when value is undefined", () => {
@@ -809,5 +905,575 @@ describe("SchemaForm", () => {
     );
     // Stack root exists but has no children
     expect(container.firstChild).not.toBeNull();
+  });
+});
+
+// #1928: "optional AND explicitly nullable" (Zod's `.nullish()`) compiles to a
+// nullable union rather than a plain type. Before the normalization step these
+// matched no branch and fell through to the raw-JSON fallback, where every
+// keystroke re-escaped the value.
+describe("SchemaForm nullable unions", () => {
+  it("renders a Select for an anyOf string-enum|null field", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        type: {
+          title: "Type",
+          anyOf: [
+            { type: "string", enum: ["envio", "recebimento"] },
+            { type: "null" },
+          ],
+        },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={onChange} />,
+    );
+    await user.click(screen.getByRole("textbox", { name: "Type" }));
+    await user.click(
+      await screen.findByRole("option", { name: "envio", hidden: true }),
+    );
+    expect(onChange).toHaveBeenCalledWith({ type: "envio" });
+  });
+
+  it("clears a nullable enum back to null", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        type: {
+          title: "Type",
+          anyOf: [{ type: "string", enum: ["envio"] }, { type: "null" }],
+        },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm
+        schema={schema}
+        values={{ type: "envio" }}
+        onChange={onChange}
+      />,
+    );
+    // Mantine marks its combobox clear button `aria-hidden` (it is mouse-only,
+    // `tabIndex={-1}`), so it is only reachable with `hidden: true`.
+    await user.click(screen.getByRole("button", { hidden: true }));
+    expect(onChange).toHaveBeenCalledWith({ type: null });
+  });
+
+  it("offers no clear affordance on a non-nullable enum", () => {
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        format: { type: "string", title: "Format", enum: ["json"] },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm
+        schema={schema}
+        values={{ format: "json" }}
+        onChange={vi.fn()}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { hidden: true }),
+    ).not.toBeInTheDocument();
+  });
+
+  // The other supported nullable encoding: keywords stay at the top level, so
+  // the null sentinel sits inside the enum list rather than on a branch.
+  it("renders a Select for a type: [string, null] enum, without a null option", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    // Built through `toFormSchema`, the same narrowing boundary every
+    // production call site uses, rather than cast into `InspectorFormSchema`.
+    // A `null` member is valid JSON Schema but outside that type's `string[]`
+    // `enum`, and this fixture *is* wire data — so the honest way to introduce
+    // it is the wire→form narrow, not a double cast that erases the mismatch.
+    const schema = toFormSchema({
+      type: "object",
+      properties: {
+        direction: {
+          title: "Direction",
+          type: ["string", "null"],
+          enum: ["envio", "recebimento", null],
+        },
+      },
+    });
+    renderWithMantine(
+      <SchemaForm schema={schema!} values={{}} onChange={onChange} />,
+    );
+    await user.click(screen.getByRole("textbox", { name: "Direction" }));
+    const options = await screen.findAllByRole("option", { hidden: true });
+    expect(options.map((option) => option.textContent)).toEqual([
+      "envio",
+      "recebimento",
+    ]);
+    await user.click(options[0]);
+    expect(onChange).toHaveBeenCalledWith({ direction: "envio" });
+  });
+
+  it("renders a TextInput for a type: [string, null] field", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        note: { type: ["string", "null"], title: "Note" },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={onChange} />,
+    );
+    await user.type(screen.getByLabelText(/Note/), "a");
+    expect(onChange).toHaveBeenCalledWith({ note: "a" });
+  });
+
+  it("renders a checkbox for an anyOf boolean|null field", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        enabled: {
+          title: "Enabled",
+          anyOf: [{ type: "boolean" }, { type: "null" }],
+        },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={onChange} />,
+    );
+    await user.click(screen.getByLabelText("Enabled"));
+    expect(onChange).toHaveBeenCalledWith({ enabled: true });
+  });
+
+  it("renders a MultiSelect for an anyOf array-of-enum|null field", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        tags: {
+          title: "Tags",
+          anyOf: [
+            { type: "array", items: { type: "string", enum: ["a", "b"] } },
+            { type: "null" },
+          ],
+        },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={onChange} />,
+    );
+    await user.click(screen.getByRole("textbox", { name: "Tags" }));
+    await user.click(
+      await screen.findByRole("option", { name: "a", hidden: true }),
+    );
+    expect(onChange).toHaveBeenCalledWith({ tags: ["a"] });
+  });
+
+  it("renders nested fields for an anyOf object|null field", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        profile: {
+          title: "Profile",
+          anyOf: [
+            {
+              type: "object",
+              properties: { nick: { type: "string", title: "Nick" } },
+            },
+            { type: "null" },
+          ],
+        },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={onChange} />,
+    );
+    await user.type(screen.getByLabelText(/Nick/), "z");
+    expect(onChange).toHaveBeenCalledWith({ profile: { nick: "z" } });
+  });
+
+  // #2007: `z.array(z.union([z.object(…), z.object(…)]))` gives an `items.anyOf`
+  // whose branches carry no top-level `const`, so every MultiSelect option was
+  // the empty string — and Mantine *throws* on duplicate option values, greying
+  // out the whole tool panel. The nullable form below is reachable only because
+  // this PR now collapses it into `type: "array"`, so it has to be safe too.
+  it("falls back to the JSON input for an array of object-union items", () => {
+    const objectBranch = (name: string): InspectorFormSchema => ({
+      type: "object",
+      properties: { type: { type: "string", const: name } },
+      required: ["type"],
+    });
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        items: {
+          title: "Items",
+          type: "array",
+          items: { anyOf: [objectBranch("A"), objectBranch("B")] },
+        },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={vi.fn()} />,
+    );
+    expect(screen.getByLabelText(/Items/).tagName).toBe("TEXTAREA");
+  });
+
+  it("falls back to the JSON input for a nullable array of object-union items", () => {
+    const objectBranch = (name: string): InspectorFormSchema => ({
+      type: "object",
+      properties: { type: { type: "string", const: name } },
+      required: ["type"],
+    });
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        items: {
+          title: "Items",
+          anyOf: [
+            { type: "array", items: { anyOf: [objectBranch("A")] } },
+            { type: "null" },
+          ],
+        },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={vi.fn()} />,
+    );
+    expect(screen.getByLabelText(/Items/).tagName).toBe("TEXTAREA");
+  });
+
+  // Mantine's select is string-valued, so a numeric const would submit "1" for
+  // 1 — the same wrong-type-on-the-wire problem that keeps a numeric enum off
+  // the select path.
+  it("falls back to the JSON input for non-string anyOf consts", () => {
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        items: {
+          title: "Items",
+          type: "array",
+          items: { anyOf: [{ const: 1 }, { const: 2 }] },
+        },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={vi.fn()} />,
+    );
+    expect(screen.getByLabelText(/Items/).tagName).toBe("TEXTAREA");
+  });
+
+  it("falls back to the JSON input when two anyOf branches share a const", () => {
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        items: {
+          title: "Items",
+          type: "array",
+          items: { anyOf: [{ const: "dup" }, { const: "dup" }] },
+        },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={vi.fn()} />,
+    );
+    expect(screen.getByLabelText(/Items/).tagName).toBe("TEXTAREA");
+  });
+
+  it("falls back to a text input for a string oneOf with no consts", () => {
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        mode: {
+          title: "Mode",
+          type: "string",
+          oneOf: [{ type: "string" }, { type: "string" }],
+        },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={vi.fn()} />,
+    );
+    expect(screen.getByLabelText(/Mode/).tagName).toBe("INPUT");
+  });
+
+  it("still renders a MultiSelect when every anyOf branch has a distinct const", () => {
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        items: {
+          title: "Items",
+          type: "array",
+          items: { anyOf: [{ const: "a", title: "Alpha" }, { const: "b" }] },
+        },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={vi.fn()} />,
+    );
+    expect(screen.getByRole("textbox", { name: "Items" })).toBeInTheDocument();
+  });
+
+  // Reachable only since the collapse landed: the nullable wrapper had no
+  // top-level `type` before, so it fell to the JSON editor rather than into a
+  // string-valued MultiSelect that would submit ["1"] for [1].
+  it("falls back to the JSON input for a nullable array of numeric item enums", () => {
+    // Wire data again — a numeric `enum` is valid JSON Schema but outside
+    // `InspectorFormSchema`'s `string[]`, so it comes in through the narrow.
+    const schema = toFormSchema({
+      type: "object",
+      properties: {
+        levels: {
+          title: "Levels",
+          anyOf: [{ type: "array", items: { enum: [1, 2] } }, { type: "null" }],
+        },
+      },
+    });
+    renderWithMantine(
+      <SchemaForm schema={schema!} values={{}} onChange={vi.fn()} />,
+    );
+    expect(screen.getByLabelText(/Levels/).tagName).toBe("TEXTAREA");
+  });
+
+  // The sibling enum rules null out even though the type list names it, so the
+  // field must not get a clear button that emits a value the schema rejects.
+  it("offers no clear button when a sibling enum excludes null", () => {
+    const schema = toFormSchema({
+      type: "object",
+      properties: {
+        direction: {
+          title: "Direction",
+          type: ["string", "null"],
+          enum: ["envio", "recebimento"],
+        },
+      },
+    });
+    renderWithMantine(
+      <SchemaForm
+        schema={schema!}
+        values={{ direction: "envio" }}
+        onChange={vi.fn()}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { hidden: true }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("still falls back to the JSON input for a union of two real types", () => {
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        mixed: {
+          title: "Mixed",
+          anyOf: [{ type: "string" }, { type: "number" }],
+        },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={vi.fn()} />,
+    );
+    expect(screen.getByLabelText(/Mixed/).tagName).toBe("TEXTAREA");
+  });
+});
+
+// #2020: a field holding text it cannot turn into a value reports `undefined`,
+// which is exactly what an *empty* field reports. That makes the two states
+// indistinguishable to the caller, so invalid text in an optional field was
+// submittable and simply arrived at the server absent. The form reports draft
+// validity directly so a submit gate can see what `values` cannot.
+describe("SchemaForm draft validity (#2020)", () => {
+  const jsonSchema: InspectorFormSchema = {
+    type: "object",
+    properties: {
+      config: { type: "array", title: "Config" },
+    },
+  };
+
+  function ValidityHarness({
+    schema,
+    onValidityChange,
+    resetKey,
+  }: {
+    schema: InspectorFormSchema;
+    onValidityChange: (hasInvalidDraft: boolean) => void;
+    resetKey?: string;
+  }) {
+    const [values, setValues] = useState<Record<string, unknown>>({});
+    return (
+      <SchemaForm
+        schema={schema}
+        values={values}
+        onChange={setValues}
+        resetKey={resetKey}
+        onValidityChange={onValidityChange}
+      />
+    );
+  }
+
+  it("reports an empty optional field as valid", () => {
+    const onValidityChange = vi.fn();
+    renderWithMantine(
+      <ValidityHarness
+        schema={jsonSchema}
+        onValidityChange={onValidityChange}
+      />,
+    );
+    expect(onValidityChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("reports an unparseable JSON draft, then clears it once the text parses", async () => {
+    const user = userEvent.setup();
+    const onValidityChange = vi.fn();
+    renderWithMantine(
+      <ValidityHarness
+        schema={jsonSchema}
+        onValidityChange={onValidityChange}
+      />,
+    );
+
+    const jsonInput = screen.getByLabelText(/Config/) as HTMLTextAreaElement;
+    await user.type(jsonInput, "[[1,");
+    expect(onValidityChange).toHaveBeenLastCalledWith(true);
+
+    await user.type(jsonInput, "2]");
+    expect(onValidityChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("reports a number this client cannot send exactly, and says so on the field", async () => {
+    const user = userEvent.setup();
+    const onValidityChange = vi.fn();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        divisor: { type: "number", title: "Divisor" },
+      },
+    };
+    renderWithMantine(
+      <ValidityHarness schema={schema} onValidityChange={onValidityChange} />,
+    );
+
+    // Past MAX_SAFE_INTEGER the field reports no value rather than a rounded
+    // one, so — like the JSON editor — the text on screen would otherwise be
+    // submitted as an absent argument.
+    const input = screen.getByLabelText(/Divisor/) as HTMLInputElement;
+    await user.type(input, "90071992547409910");
+    expect(onValidityChange).toHaveBeenLastCalledWith(true);
+    expect(screen.getByText(/this field will be omitted/)).toBeInTheDocument();
+
+    await user.clear(input);
+    expect(onValidityChange).toHaveBeenLastCalledWith(false);
+    expect(
+      screen.queryByText(/this field will be omitted/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("stays invalid while any one field is invalid", async () => {
+    const user = userEvent.setup();
+    const onValidityChange = vi.fn();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        first: { type: "array", title: "First" },
+        second: { type: "array", title: "Second" },
+      },
+    };
+    renderWithMantine(
+      <ValidityHarness schema={schema} onValidityChange={onValidityChange} />,
+    );
+
+    await user.type(screen.getByLabelText(/First/), "x");
+    await user.type(screen.getByLabelText(/Second/), "y");
+    expect(onValidityChange).toHaveBeenLastCalledWith(true);
+
+    // One of the two recovering is not enough.
+    await user.clear(screen.getByLabelText(/First/));
+    expect(onValidityChange).toHaveBeenLastCalledWith(true);
+
+    await user.clear(screen.getByLabelText(/Second/));
+    expect(onValidityChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("surfaces a nested object's invalid draft through the outer form", async () => {
+    const user = userEvent.setup();
+    const onValidityChange = vi.fn();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        outer: {
+          type: "object",
+          title: "Outer",
+          properties: {
+            config: { type: "array", title: "Config" },
+          },
+        },
+      },
+    };
+    renderWithMantine(
+      <ValidityHarness schema={schema} onValidityChange={onValidityChange} />,
+    );
+
+    await user.type(screen.getByLabelText(/Config/), "x");
+    expect(onValidityChange).toHaveBeenLastCalledWith(true);
+  });
+
+  it("clears a stale invalid draft when the form moves to another entity", async () => {
+    const user = userEvent.setup();
+    const onValidityChange = vi.fn();
+    const { rerender } = renderWithMantine(
+      <ValidityHarness
+        schema={jsonSchema}
+        onValidityChange={onValidityChange}
+        resetKey="first_tool"
+      />,
+    );
+
+    await user.type(screen.getByLabelText(/Config/), "x");
+    expect(onValidityChange).toHaveBeenLastCalledWith(true);
+
+    // Switching entities remounts the field, discarding its draft — so text
+    // typed for the previous one must not keep the new one blocked.
+    rerender(
+      <ValidityHarness
+        schema={jsonSchema}
+        onValidityChange={onValidityChange}
+        resetKey="second_tool"
+      />,
+    );
+    expect(onValidityChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("reports valid when the form unmounts holding an invalid draft", async () => {
+    const user = userEvent.setup();
+    const onValidityChange = vi.fn();
+    const { unmount } = renderWithMantine(
+      <ValidityHarness
+        schema={jsonSchema}
+        onValidityChange={onValidityChange}
+      />,
+    );
+
+    await user.type(screen.getByLabelText(/Config/), "x");
+    expect(onValidityChange).toHaveBeenLastCalledWith(true);
+
+    unmount();
+    expect(onValidityChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("renders without a validity callback", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(
+      <SchemaForm schema={jsonSchema} values={{}} onChange={vi.fn()} />,
+    );
+    await user.type(screen.getByLabelText(/Config/), "x");
+    expect(screen.getByText(/Not valid JSON/)).toBeInTheDocument();
   });
 });

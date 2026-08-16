@@ -17,7 +17,10 @@ v2/main/
 │   │   │                               #   sandbox-controller.ts (MCP Apps sandbox HTTP server),
 │   │   │                               #   inject-auth-token.ts (embeds the API token into served index.html),
 │   │   │                               #   vite-base-config.ts (shared optimizeDeps exclusions),
-│   │   │                               #   resolve-bind-host.ts (bind-host POLICY: refuses an
+│   │   │                               #   resolve-bind-host.ts (bind-host POLICY: defaults to
+│   │   │                               #     127.0.0.1 — an ADDRESS, never the name `localhost`, which
+│   │   │                               #     listen() resolves to a SINGLE family (::1 on glibc Linux),
+│   │   │                               #     refusing every IPv4 client — #1951; and refuses an
 │   │   │                               #     all-interfaces HOST unless DANGEROUSLY_BIND_ALL_INTERFACES;
 │   │   │                               #     the all-interfaces DETECTION is core/node/hostUrl.isAllInterfacesHost.
 │   │   │                               #     Used by both bind points — web-server-config.ts + vite.config.ts — #1795),
@@ -52,7 +55,15 @@ v2/main/
 │   │                                   #   annotation scan/validation + mirrored-param
 │   │                                   #   derivation, used by the Tools tab — #1632;
 │   │                                   #   plus `Mcp-Param-*` header building for the
-│   │                                   #   wire, used by both `tools/call` paths — #1846)
+│   │                                   #   wire, used by both `tools/call` paths — #1846;
+│   │                                   #   nullableUnion.ts: collapses the two JSON Schema
+│   │                                   #   encodings of "T or null" (`anyOf` with a null
+│   │                                   #   branch, `type: [T,"null"]`) into a plain type,
+│   │                                   #   hoisting the surviving branch's own keywords.
+│   │                                   #   Shared by BOTH form builders — web SchemaForm
+│   │                                   #   and TUI schemaToForm — since each dispatches on
+│   │                                   #   a single `type` string and would otherwise miss
+│   │                                   #   a nullable field entirely — #1928/#2015)
 │   ├── logging/                        # Silent pino logger singleton
 │   ├── mcp/                            # InspectorClient runtime + state stores
 │   │                                   #   (modernTaskSchemas.ts: SEP-2663 modern Tasks
@@ -461,6 +472,10 @@ Don't lean on GitHub's permission gate to enforce this. Whether an outside repor
   | `v1/main` | **Maintenance.** The deprecated v1 line, security fixes only, no active development.            | **Yes** — every v1 PR, directly                           | `v1-latest`, published straight from this branch |
 
   So v2 flows `feature branch → v2/main → (milestone) main → npm latest`, while v1 is flat: `feature branch → v1/main → npm v1-latest`, with no merge into `main` at any point. The two lines are published independently under separate dist-tags, which is why a v1 fix does **not** need to be forward-ported to reach users on v1 (`npx @modelcontextprotocol/inspector@v1-latest`).
+
+  ⚠️ **The version bump rides that same flow — it is made on `v2/main`, never on the milestone-merge branch (#2010).** `npm version <x> --no-git-tag-version` lands on `v2/main` *before* the milestone merge, so the bump reaches `main` as part of the milestone's work; the release tag (bare `x.y.z`, no `v` prefix) is then applied to the resulting **`main`** commit. This deliberately leaves a normal in-flight interval where `v2/main` reads the version being built and `main` the one currently released — that difference is expected. The invariant it buys is that they converge when the release merge lands, so `v2/main` is never left *behind* `main` afterwards. Bumping on the milestone-merge branch instead (which is cut from `main`) puts the bump only downstream of `v2/main`, where nothing carries it back — that is how `v2/main` sat at `2.0.0` through both the 2.1.0 and 2.2.0 releases, and how #2009 came to carry an unrelated `2.0.0 → 2.2.0` diff simply because its branch was cut from a milestone-merge branch. **Never close a drift by merging `main` into `v2/main`**: `main` holds the whole pre-v2 v1 history (~230 commits `v2/main` lacks), so a back-merge grafts all of it into the develop branch permanently to deliver a two-file change. Full procedure in the root README's [Cutting a release](./README.md#cutting-a-release).
+
+  A corollary for **branching**: cut feature branches from **`v2/main`**, never from a milestone-merge branch — the latter carries release-only commits that will show up in your PR's diff.
 
 - **Project Boards**:
   - v2 - https://github.com/orgs/modelcontextprotocol/projects/28 (active board — all new work goes here)
