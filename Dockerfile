@@ -31,8 +31,12 @@ RUN npm install -g /tmp/inspector.tgz && rm /tmp/inspector.tgz
 ENV HOST=0.0.0.0 \
     DANGEROUSLY_BIND_ALL_INTERFACES=true \
     CLIENT_PORT=6274 \
+    MCP_SANDBOX_PORT=6275 \
     MCP_AUTO_OPEN_ENABLED=false
-EXPOSE 6274
+# 6275 is the MCP Apps sandbox, a second listener the browser reaches directly.
+# It is only needed for the Apps tab, so it is EXPOSEd but publishing it is
+# optional — see the Docker section of the root README.
+EXPOSE 6274 6275
 
 # Run as the non-root `node` user the base image ships. The inspector resolves
 # its runtime-state dir (default catalog, OAuth token storage) from `HOME`

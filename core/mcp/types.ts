@@ -436,9 +436,14 @@ export type ResourceSubscriptionStreamStatus =
  * persistent stream, so `active` is `false` and the UI surfaces no stream chrome.
  * On the modern era all subscriptions are a filter over one long-lived
  * `subscriptions/listen` stream; `active` is `true` whenever that stream is being
- * managed (i.e. at least one URI is subscribed), and `honoredUris` is the subset
- * of requested URIs the server acknowledged in its `honoredFilter` (may be a
- * strict subset — a server is allowed to decline some).
+ * managed *for resource subscriptions* (i.e. at least one URI is subscribed), and
+ * `honoredUris` is the subset of requested URIs the server acknowledged in its
+ * `honoredFilter` (may be a strict subset — a server is allowed to decline some).
+ *
+ * `active: false` does not imply no stream: the same stream also carries the
+ * list-change opt-ins, so it can be open with no subscribed URI at all (#1920).
+ * This state describes the Subscriptions section, which has nothing to show for
+ * such a stream.
  */
 export interface ResourceSubscriptionStreamState {
   active: boolean;
@@ -914,8 +919,16 @@ export interface InspectorClientOptions {
   pipeStderr?: boolean;
 
   /**
-   * Initial logging level to set after connection (if server supports logging)
-   * If not provided, logging level will not be set automatically
+   * Initial logging level to set after connection, via `logging/setLevel`.
+   * If not provided, the logging level will not be set automatically.
+   *
+   * **Legacy era only (#1990).** `logging/setLevel` is a legacy-era method, and
+   * the modern (2026-07-28) era rejects it — so this option is ignored on a
+   * modern connection even when the server advertises `logging`. Modern has no
+   * session-scoped level at all: the equivalent is the per-request
+   * `io.modelcontextprotocol/logLevel` `_meta` opt-in, configured through the
+   * `modernLogLevel` server setting and applied via
+   * `InspectorClient.setModernLogLevel()`.
    */
   initialLoggingLevel?: LoggingLevel;
 

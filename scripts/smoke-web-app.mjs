@@ -104,7 +104,12 @@ let mcpUrl = null;
 
 let mcpServer = null;
 let browser = null;
-const server = startProdWebServer({ host: HOST, port: PORT, token: TOKEN });
+const server = startProdWebServer({
+  host: HOST,
+  port: PORT,
+  token: TOKEN,
+  label: "smoke:web:app",
+});
 
 async function shutdown() {
   if (browser) {
@@ -115,7 +120,7 @@ async function shutdown() {
     }
     browser = null;
   }
-  server.stop();
+  await server.stop();
   if (mcpServer) {
     const child = mcpServer;
     mcpServer = null;
