@@ -1477,3 +1477,174 @@ describe("SchemaForm draft validity (#2020)", () => {
     expect(screen.getByText(/Not valid JSON/)).toBeInTheDocument();
   });
 });
+
+// Three separate reports of one defect: the JSON editor re-escaping the text
+// being typed. #1853 saw it while typing an array, #1856 on the Backspace that
+// first makes a valid array invalid, and #1885 on a nullable parameter whose
+// default `null` had to be edited in place. All three come from the same
+// mechanism — unparseable draft text stored back as the field's *value*, which
+// the next controlled render re-`JSON.stringify`d, adding a layer of quotes and
+// backslashes per keystroke.
+//
+// The mechanism was removed by the draft/value split in `SchemaJsonField`
+// (#1928/#2007) and the nullable-union collapse that keeps a `T | null` field
+// off this editor entirely (#1928). These lock each report's own reproduction
+// to it, since the fixes were made for differently-framed issues and nothing
+// otherwise pins the reported flows.
+describe("JSON editor escaping (#1853, #1856, #1885)", () => {
+  function EscapingHarness({
+    schema,
+    initial = {},
+  }: {
+    schema: InspectorFormSchema;
+    initial?: Record<string, unknown>;
+  }) {
+    const [values, setValues] = useState<Record<string, unknown>>(initial);
+    return <SchemaForm schema={schema} values={values} onChange={setValues} />;
+  }
+
+  // #1853: `batch_process_items`, typed character by character.
+  it("types a string array through without escaping it (#1853)", async () => {
+    const user = userEvent.setup();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        itemIds: {
+          type: "array",
+          title: "Item Ids",
+          items: { type: "string" },
+        },
+      },
+      required: ["itemIds"],
+    };
+    renderWithMantine(<EscapingHarness schema={schema} />);
+
+    const jsonInput = screen.getByLabelText(/Item Ids/) as HTMLTextAreaElement;
+    // `[` opens a userEvent keyboard descriptor, so it is escaped as `[[`.
+    await user.type(jsonInput, '[["item-1","item-2"]');
+
+    expect(jsonInput.value).toBe('["item-1","item-2"]');
+    expect(jsonInput.value).not.toContain("\\");
+  });
+
+  // #1853 again, from the comment thread: the caret sitting *outside* the
+  // quotes of a `""` value. One keystroke there made the draft invalid, which
+  // is all it took — `""` + `a` rendered as `"\"\"a"`.
+  it("keeps a keystroke typed outside a string's quotes literal (#1853)", async () => {
+    const user = userEvent.setup();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      // No `type`, so the field lands on the JSON editor holding a string.
+      properties: { note: { title: "Note" } },
+    };
+    renderWithMantine(
+      <EscapingHarness schema={schema} initial={{ note: "" }} />,
+    );
+
+    const jsonInput = screen.getByLabelText(/Note/) as HTMLTextAreaElement;
+    await user.click(jsonInput);
+    await user.keyboard("{End}a");
+
+    expect(jsonInput.value).toBe('""a');
+  });
+
+  // #1856: `sum_numbers`, Backspace with the caret after the closing `]`.
+  it("keeps the draft raw when Backspace invalidates an array (#1856)", async () => {
+    const user = userEvent.setup();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        numbers: {
+          type: "array",
+          title: "Numbers",
+          items: { type: "number" },
+        },
+      },
+      required: ["numbers"],
+    };
+    renderWithMantine(
+      <EscapingHarness schema={schema} initial={{ numbers: [1, 2] }} />,
+    );
+
+    const jsonInput = screen.getByLabelText(/Numbers/) as HTMLTextAreaElement;
+    await user.click(jsonInput);
+    await user.keyboard("{End}{Backspace}");
+
+    // Exactly the seeded text minus its last character — the draft the reporter
+    // expected, where the field instead showed a quoted, escaped string.
+    expect(jsonInput.value).toBe("[\n  1,\n  2\n");
+
+    // Each further edit compounded the escaping, so keep going.
+    await user.keyboard("{Backspace}{Backspace}");
+    expect(jsonInput.value).not.toContain("\\");
+    expect(jsonInput.value.startsWith('"')).toBe(false);
+
+    // And the draft is still live: closing it back up produces a real array.
+    await user.keyboard("2]");
+    expect(jsonInput.value).toBe("[\n  1,\n  2]");
+  });
+
+  // #1885: FastMCP's `b: int | None = None`, which compiles to an `anyOf` with
+  // a null branch and `default: null`. The reporter was editing the literal
+  // `null` token in a raw JSON box; collapsing the union routes the field to a
+  // real number input, so there is no JSON token to edit in the first place.
+  it("edits a nullable integer as a number input, not a null token (#1885)", async () => {
+    const user = userEvent.setup();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        a: { type: "integer", title: "A" },
+        b: {
+          title: "B",
+          anyOf: [{ type: "integer" }, { type: "null" }],
+          default: null,
+        },
+      },
+      required: ["a"],
+    };
+    renderWithMantine(
+      <EscapingHarness schema={schema} initial={{ b: null }} />,
+    );
+
+    const b = screen.getByLabelText(/^B$/) as HTMLInputElement;
+    expect(b.tagName).toBe("INPUT");
+    // `null` is rendered as "no value", not as four editable characters.
+    expect(b.value).toBe("");
+
+    await user.click(b);
+    await user.keyboard("42{Backspace}");
+    expect(b.value).toBe("4");
+    expect(b.value).not.toContain("\\");
+  });
+
+  // The same nullable-with-`default: null` shape on a field the collapse still
+  // sends to the JSON editor (an array union). Backspacing the `null` token
+  // there is the exact keystroke sequence from #1885's recording.
+  it("backspaces a null default in the JSON editor without escaping (#1885)", async () => {
+    const user = userEvent.setup();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        cfg: {
+          title: "Cfg",
+          anyOf: [{ type: "array" }, { type: "null" }],
+          default: null,
+        },
+      },
+    };
+    renderWithMantine(
+      <EscapingHarness schema={schema} initial={{ cfg: null }} />,
+    );
+
+    const jsonInput = screen.getByLabelText(/Cfg/) as HTMLTextAreaElement;
+    expect(jsonInput.value).toBe("null");
+
+    await user.click(jsonInput);
+    await user.keyboard("{End}{Backspace}");
+    expect(jsonInput.value).toBe("nul");
+
+    await user.keyboard("{Backspace}{Backspace}{Backspace}");
+    expect(jsonInput.value).toBe("");
+    expect(jsonInput.value).not.toContain("\\");
+  });
+});
