@@ -14,6 +14,11 @@ import { useValueChange } from "../../../hooks/useValueChange";
 import type { ResourceTemplateType as ResourceTemplate } from "@modelcontextprotocol/client";
 import { AnnotationBadge } from "../../elements/AnnotationBadge/AnnotationBadge";
 import { CopyButton } from "../../elements/CopyButton/CopyButton";
+import {
+  expandUriTemplate,
+  previewUriTemplate,
+  templateVariables,
+} from "../../../utils/uriTemplate";
 
 export interface ResourceTemplatePanelProps {
   template: ResourceTemplate;
@@ -38,34 +43,6 @@ export interface ResourceTemplatePanelProps {
 }
 
 const COMPLETION_DEBOUNCE_MS = 300;
-
-function parseVariableNames(uriTemplate: string): string[] {
-  const names: string[] = [];
-  const regex = /\{(\w+)\}/g;
-  let match: RegExpExecArray | null;
-
-  while ((match = regex.exec(uriTemplate)) !== null) {
-    names.push(match[1]);
-  }
-
-  return names;
-}
-
-function resolveUri(
-  uriTemplate: string,
-  variables: Record<string, string>,
-): string {
-  return uriTemplate.replace(/\{(\w+)\}/g, (_, key: string) => variables[key]);
-}
-
-function previewUri(
-  uriTemplate: string,
-  variables: Record<string, string>,
-): string {
-  return uriTemplate.replace(/\{(\w+)\}/g, (match, key: string) =>
-    variables[key]?.length > 0 ? variables[key] : match,
-  );
-}
 
 const HeaderRow = Group.withProps({
   justify: "space-between",
@@ -108,9 +85,15 @@ export function ResourceTemplatePanel({
 }: ResourceTemplatePanelProps) {
   const { name, title, uriTemplate, description, annotations } = template;
 
-  const variableNames = useMemo(
-    () => parseVariableNames(uriTemplate),
+  // Every variable the template declares, with the operator it appears under
+  // and whether omitting it would change the URI's shape (see `utils/uriTemplate`).
+  const declaredVariables = useMemo(
+    () => templateVariables(uriTemplate),
     [uriTemplate],
+  );
+  const variableNames = useMemo(
+    () => declaredVariables.map((v) => v.name),
+    [declaredVariables],
   );
 
   const [variables, setVariables] = useState<Record<string, string>>(() =>
@@ -232,13 +215,18 @@ export function ResourceTemplatePanel({
     void runCompletion(varName, value, buildContext(varName));
   }
 
-  const canSubmit = variableNames.every((n) => variables[n]?.length > 0);
+  // Only the variables whose absence would change the URI's shape gate the
+  // read; an unfilled `{?topic}` is a legitimate request for the unfiltered
+  // resource, and RFC 6570 drops the whole expression for it.
+  const canSubmit = declaredVariables.every(
+    (v) => !v.required || variables[v.name]?.length > 0,
+  );
 
   function handleSubmit() {
-    onReadResource(resolveUri(uriTemplate, variables));
+    onReadResource(expandUriTemplate(uriTemplate, variables));
   }
 
-  const preview = previewUri(uriTemplate, variables);
+  const preview = previewUriTemplate(uriTemplate, variables);
 
   return (
     <Stack gap="md">
@@ -251,13 +239,17 @@ export function ResourceTemplatePanel({
       </HeaderRow>
       {description && <DescriptionText>{description}</DescriptionText>}
       <Stack gap="sm">
-        {variableNames.map((varName) => {
+        {declaredVariables.map(({ name: varName, required }) => {
           /* v8 ignore next -- `?? ""` fallback unreachable: `variables` is seeded with every declared variable, so the key is always present. */
           const fieldValue = variables[varName] ?? "";
+          // RFC 6570 omits an undefined variable under a query/path-segment
+          // operator entirely, so those fields are genuinely optional.
+          const description = required ? undefined : "Optional";
           return useAutocomplete ? (
             <Autocomplete
               key={varName}
               label={varName}
+              description={description}
               placeholder={`Enter ${varName}`}
               value={fieldValue}
               data={completions[varName] ?? []}
@@ -273,6 +265,7 @@ export function ResourceTemplatePanel({
             <TextInput
               key={varName}
               label={varName}
+              description={description}
               placeholder={`Enter ${varName}`}
               value={fieldValue}
               onChange={(e) =>

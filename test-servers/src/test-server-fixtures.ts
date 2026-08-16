@@ -1475,6 +1475,53 @@ export function createFileResourceTemplate(
 }
 
 /**
+ * Resource templates that exercise RFC 6570 expansion (#1919).
+ *
+ * `events_by_topic` is the simple `{topic}` expression from the issue: a `/`,
+ * `?`, `#` or space in the value MUST be percent-encoded, or the URI gains a
+ * path segment and a conforming matcher rejects it. `events_by_query` is the
+ * `{?topic}` form, which the web client could not even render an input for.
+ *
+ * Both handlers echo the URI they were matched against plus the variables the
+ * server decoded, so the round-trip is visible in the read result.
+ */
+export function createRfc6570ResourceTemplates(): ResourceTemplateDefinition[] {
+  const echo =
+    (label: string) => async (uri: URL, params: Record<string, unknown>) => ({
+      contents: [
+        {
+          uri: uri.toString(),
+          mimeType: "application/json",
+          text: JSON.stringify(
+            { template: label, matchedUri: uri.toString(), variables: params },
+            null,
+            2,
+          ),
+        },
+      ],
+    });
+
+  return [
+    {
+      name: "events_by_topic",
+      uriTemplate: "foobar://events/{topic}",
+      description:
+        "Simple expression - a reserved character in `topic` must be percent-encoded",
+      inputSchema: { topic: z.string().describe("Topic name") },
+      handler: echo("foobar://events/{topic}"),
+    },
+    {
+      name: "events_by_query",
+      uriTemplate: "foobar://events{?topic}",
+      description:
+        "Query expression - optional, and omitted entirely when `topic` is blank",
+      inputSchema: { topic: z.string().describe("Topic name") },
+      handler: echo("foobar://events{?topic}"),
+    },
+  ];
+}
+
+/**
  * Create a "user" resource template that returns user data by ID
  */
 export function createUserResourceTemplate(

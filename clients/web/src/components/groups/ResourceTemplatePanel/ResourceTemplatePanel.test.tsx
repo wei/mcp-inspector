@@ -27,6 +27,11 @@ const noVarTemplate: ResourceTemplate = {
   uriTemplate: "file:///static.txt",
 };
 
+const queryTemplate: ResourceTemplate = {
+  name: "Events",
+  uriTemplate: "foobar://events{?topic}",
+};
+
 describe("ResourceTemplatePanel", () => {
   it("renders the template title (or name) and description", () => {
     renderWithMantine(
@@ -152,6 +157,92 @@ describe("ResourceTemplatePanel", () => {
     expect(
       screen.getByRole("button", { name: "Read Resource" }),
     ).not.toBeDisabled();
+  });
+
+  describe("RFC 6570 expansion (#1919)", () => {
+    it("renders an input for a query expression the old regex could not see", () => {
+      renderWithMantine(
+        <ResourceTemplatePanel
+          template={queryTemplate}
+          onReadResource={vi.fn()}
+        />,
+      );
+      expect(screen.getByLabelText("topic")).toBeInTheDocument();
+    });
+
+    it("percent-encodes a reserved character in a simple variable", async () => {
+      const user = userEvent.setup();
+      const onReadResource = vi.fn();
+      renderWithMantine(
+        <ResourceTemplatePanel
+          template={singleVarTemplate}
+          onReadResource={onReadResource}
+        />,
+      );
+      await user.type(screen.getByLabelText("userId"), "foo/bar");
+      await user.click(screen.getByRole("button", { name: "Read Resource" }));
+      expect(onReadResource).toHaveBeenCalledWith(
+        "file:///users/foo%2Fbar/profile",
+      );
+    });
+
+    it("builds an encoded query expression for {?topic}", async () => {
+      const user = userEvent.setup();
+      const onReadResource = vi.fn();
+      renderWithMantine(
+        <ResourceTemplatePanel
+          template={queryTemplate}
+          onReadResource={onReadResource}
+        />,
+      );
+      await user.type(screen.getByLabelText("topic"), "foo/bar");
+      await user.click(screen.getByRole("button", { name: "Read Resource" }));
+      expect(onReadResource).toHaveBeenCalledWith(
+        "foobar://events?topic=foo%2Fbar",
+      );
+    });
+
+    it("marks a query variable Optional and does not gate the read on it", async () => {
+      const user = userEvent.setup();
+      const onReadResource = vi.fn();
+      renderWithMantine(
+        <ResourceTemplatePanel
+          template={queryTemplate}
+          onReadResource={onReadResource}
+        />,
+      );
+      expect(screen.getByText("Optional")).toBeInTheDocument();
+      const button = screen.getByRole("button", { name: "Read Resource" });
+      expect(button).not.toBeDisabled();
+      // Left blank, the whole expression drops out per RFC 6570.
+      await user.click(button);
+      expect(onReadResource).toHaveBeenCalledWith("foobar://events");
+    });
+
+    it("does not mark a required simple variable Optional", () => {
+      renderWithMantine(
+        <ResourceTemplatePanel
+          template={singleVarTemplate}
+          onReadResource={vi.fn()}
+        />,
+      );
+      expect(screen.queryByText("Optional")).not.toBeInTheDocument();
+    });
+
+    it("previews the query expression verbatim until it is filled", async () => {
+      const user = userEvent.setup();
+      renderWithMantine(
+        <ResourceTemplatePanel
+          template={queryTemplate}
+          onReadResource={vi.fn()}
+        />,
+      );
+      expect(screen.getByText("foobar://events{?topic}")).toBeInTheDocument();
+      await user.type(screen.getByLabelText("topic"), "news");
+      expect(
+        screen.getByText("foobar://events?topic=news"),
+      ).toBeInTheDocument();
+    });
   });
 
   describe("completions", () => {

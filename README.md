@@ -147,6 +147,7 @@ Each config below is a ready-made server for exercising one feature by hand. Loa
 | `structured-output-http.json`             | Tools tab: a result's `structuredContent` section  | [#1908](https://github.com/modelcontextprotocol/inspector/issues/1908) |
 | `duplicate-tool-names-http.json`          | A `tools/list` that repeats a tool name            | [#1957](https://github.com/modelcontextprotocol/inspector/issues/1957) |
 | `nullable-fields-http.json`               | Tools tab: nullable (`anyOf` + `null`) arguments   | [#1928](https://github.com/modelcontextprotocol/inspector/issues/1928) |
+| `rfc6570-templates-http.json`             | Resources tab: RFC 6570 resource-template expansion | [#1919](https://github.com/modelcontextprotocol/inspector/issues/1919) |
 | `advertised-extensions-http.json`         | Tool registration gated on advertised extensions   | [#1739](https://github.com/modelcontextprotocol/inspector/issues/1739) |
 | `logging-{legacy,modern}-http.json`       | Logging, both eras                                 | [#1629](https://github.com/modelcontextprotocol/inspector/issues/1629) |
 | `subscriptions-{legacy,modern}-http.json` | Resource subscriptions, both eras                  | [#1630](https://github.com/modelcontextprotocol/inspector/issues/1630) |
@@ -236,6 +237,16 @@ The duplicated copies are appended rather than placed beside their twin on purpo
 Open the Tools tab and select `record_shipment`: `direction` must render as a **Select** (`envio` / `recebimento`) with a clear button that sets it back to `null`, `reference` as a text input, `quantity` as a number input, and `express` as a checkbox. On the broken build every one of them fell through to the raw-JSON textarea, which re-escaped its own contents on each keystroke until the value was unusable ([#1928](https://github.com/modelcontextprotocol/inspector/issues/1928)). The tool echoes the arguments it received, so the result panel shows exactly what was sent.
 
 The **TUI** had the same gap and is worth checking against the same server (`--tui`, then test `record_shipment`): `direction` is a select, `quantity` an integer field, `express` a boolean. Both clients now share one collapse step — `normalizeNullableUnion` in [`core/json/nullableUnion.ts`](./core/json/nullableUnion.ts) — precisely so they cannot drift on which schemas they can render.
+
+#### RFC 6570 resource templates
+
+`rfc6570-templates-http.json` serves two resource templates straight out of [#1919](https://github.com/modelcontextprotocol/inspector/issues/1919) — `events_by_topic` (`foobar://events/{topic}`) and `events_by_query` (`foobar://events{?topic}`) — each echoing the URI it was matched against and the variables the server decoded. Plain streamable-HTTP; connect with the **default (legacy)** protocol era.
+
+Open the Resources tab and pick **events_by_topic**, then enter `foo/bar`. The request must go out as `foobar://events/foo%2Fbar`, and the result echoes back the URI the server matched. On the broken build the value was spliced in raw, so the slash created a second path segment and the SDK's matcher answered `-32602 Resource not found: foobar://events/foo/bar` — the exact failure in the issue. The same holds for `?`, `#`, `%`, spaces, and non-ASCII text.
+
+**events_by_query** is the half that was invisible: the old `/\{(\w+)\}/g` scan could not see an expression carrying an operator, so no `topic` input was rendered at all. It now appears, marked **Optional** — RFC 6570 drops the whole expression when the variable is undefined, so reading with the field blank requests `foobar://events`, and filling it in requests `foobar://events?topic=foo%2Fbar`. The URI preview beside the title shows the partially-expanded form as you type, leaving unfilled expressions standing as written.
+
+Both clients expand through the SDK's `UriTemplate` — the web client via [`clients/web/src/utils/uriTemplate.ts`](./clients/web/src/utils/uriTemplate.ts), the TUI via `InspectorClient.readResourceFromTemplate` — so they cannot disagree about what a template means.
 
 #### Advertised extensions
 
