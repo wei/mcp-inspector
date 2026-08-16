@@ -3178,7 +3178,11 @@ export class InspectorClient extends InspectorClientEventTarget {
     const effectiveMeta = this.mergeMeta(metadata);
     const params: ListToolsRequest["params"] = {
       ...(effectiveMeta ? { _meta: effectiveMeta } : {}),
-      ...(cursor ? { cursor } : {}),
+      // `!== undefined`, not truthiness: "" is a valid cursor. Dropping it asks
+      // for page one again — and `listToolsForScan` pairs this call with a
+      // fallback that already preserves it, so the two legs of one scan page
+      // would otherwise disagree about which page they fetched.
+      ...(cursor !== undefined && { cursor }),
     };
     const response = await this.invokeMcpClient(() =>
       this.client!.request(
@@ -3617,13 +3621,26 @@ export class InspectorClient extends InspectorClientEventTarget {
         }
       } while (cursor !== undefined);
     }
-    // Report what the scan itself had to drop. This walk is deliberately
-    // un-cached, so it can see a malformed tool the `listAllTools` aggregate
-    // never did — that aggregate may have been served from the response cache,
-    // in which case its salvage never ran and cleared the report instead. Only
-    // ever ADDS: a scan that finds nothing must not clear a report the salvage
-    // path just wrote from its own walk of the same list.
-    if (malformed.length > 0) {
+    // Report what the scan itself had to drop — but only when the aggregate
+    // salvage left nothing to say.
+    //
+    // The aggregate OWNS this report, because the aggregate is the list the
+    // user is looking at. This walk is a second, deliberately un-cached
+    // exchange, so its entries need not be the rendered ones: the server can
+    // change between the two requests, and a cache-served aggregate is a
+    // different list version entirely. Overwriting an aggregate report with
+    // this one would then replace accurate indices with indices into a list
+    // nobody is seeing.
+    //
+    // It still publishes when the aggregate said nothing, which is the case
+    // this exists for: a cache-served aggregate succeeds without ever running
+    // salvage, so without this a malformed tool would be dropped from the scan
+    // with no explanation anywhere. `setMalformedListItems` is not called at
+    // all when empty, so a clean scan cannot clear what the aggregate wrote.
+    if (
+      malformed.length > 0 &&
+      this.malformedListItems.get("tools/list") === undefined
+    ) {
       this.setMalformedListItems("tools/list", malformed);
     }
     this.excludedTools = excluded;
@@ -3674,17 +3691,26 @@ export class InspectorClient extends InspectorClientEventTarget {
           ListToolsResultSchema,
           "tools",
         );
-        const page = this.isModernEra()
-          ? await this.rawWireRequest(
-              "tools/list",
-              this.withModernEnvelope(params),
-              pageSchema,
-            )
-          : await this.client!.request(
-              { method: "tools/list", params },
-              pageSchema,
-              this.getRequestOptions(metadata?.progressToken),
-            );
+        // Through `invokeMcpClient`, like the strict `listTools` above and like
+        // `salvageList`'s walk: this re-fetch can meet an auth challenge of its
+        // own, and outside that wrapper the recovery never runs. Its failure is
+        // then swallowed by `listAllTools`'s best-effort scan catch, leaving a
+        // stale excluded-tools set and no sign of why.
+        const page = await this.invokeMcpClient(
+          () =>
+            this.isModernEra()
+              ? this.rawWireRequest(
+                  "tools/list",
+                  this.withModernEnvelope(params),
+                  pageSchema,
+                )
+              : this.client!.request(
+                  { method: "tools/list", params },
+                  pageSchema,
+                  this.getRequestOptions(metadata?.progressToken),
+                ),
+          { method: "tools/list" },
+        );
         // Same era-envelope check as `salvageList` — the raw-wire path bypasses
         // the codec that would otherwise enforce it.
         if (
@@ -3702,10 +3728,22 @@ export class InspectorClient extends InspectorClientEventTarget {
           items,
           schema: toolItemSchemaForEra(this.isModernEra()),
         });
-        if (rejectedResponseId !== undefined && malformed.length > 0) {
+        // Mark regardless of what the re-fetch found. The list can change
+        // between the two requests, so a conforming re-fetch is possible — and
+        // it says nothing about the response that was actually refused. Leaving
+        // that one unmarked because the SECOND request came back clean would
+        // render a rejected exchange as a clean success, which is the lie
+        // #1953 removes. With nothing per-item to name, the original decode
+        // error is the reason.
+        if (rejectedResponseId !== undefined) {
           this.dispatchTypedEvent("responseRejected", {
             id: rejectedResponseId,
-            reason: summarizeMalformed(malformed),
+            reason:
+              malformed.length > 0
+                ? summarizeMalformed(malformed)
+                : err instanceof Error
+                  ? err.message
+                  : String(err),
           });
         }
         const nextCursor = nextCursorOf(page);

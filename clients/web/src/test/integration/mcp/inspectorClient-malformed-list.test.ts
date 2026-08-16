@@ -610,6 +610,107 @@ describe("InspectorClient list salvage (#1909)", () => {
     expect(connected.getMalformedListItems()).toEqual([]);
   });
 
+  it("does not let the scan overwrite the aggregate's report", async () => {
+    // Both walks run on a modern connection and they are separate, uncached
+    // exchanges. The aggregate is the list being RENDERED, so its report owns
+    // the indices; the scan must not replace them with its own — the server can
+    // answer the second request differently, and then the warning would point
+    // into a list nobody is looking at.
+    const server = await startMalformedServer(
+      {
+        tools: [
+          {
+            items: [
+              { name: "ok_tool", inputSchema: { type: "object" } },
+              { name: "broken", inputSchema: "not-a-schema" },
+            ],
+          },
+        ],
+      },
+      true,
+    );
+    stopServer = server.stop;
+    const connected = await connectTo(server.url, "modern");
+
+    // Serve a DIFFERENT malformed shape to the scan's walk, which runs after
+    // the aggregate — so an overwrite is visible as a changed index/label.
+    let swapped = false;
+    const original = connected.listTools.bind(connected);
+    connected.listTools = async (cursor?: string, meta?: object) => {
+      if (!swapped) {
+        swapped = true;
+        server.setPages({
+          tools: [
+            {
+              items: [
+                { name: "a", inputSchema: { type: "object" } },
+                { name: "b", inputSchema: { type: "object" } },
+                { name: "later_break", inputSchema: 42 },
+              ],
+            },
+          ],
+        });
+      }
+      return original(cursor, meta as Record<string, string> | undefined);
+    };
+
+    await connected.listAllTools();
+
+    // The aggregate's finding, at the aggregate's index — not the scan's.
+    expect(connected.getMalformedListItems()).toEqual([
+      {
+        method: "tools/list",
+        index: 1,
+        label: "broken",
+        reason: expect.stringMatching(/^inputSchema/),
+      },
+    ]);
+  });
+
+  it("marks the scan's refused response even when the re-fetch is clean", async () => {
+    // The list can change between the strict page and the lenient re-fetch. A
+    // conforming re-fetch says nothing about the response that was refused, so
+    // leaving it unmarked would render a rejected exchange as a clean success.
+    const server = await startMalformedServer(
+      { tools: [{ items: [{ name: "broken", inputSchema: 42 }] }] },
+      true,
+    );
+    stopServer = server.stop;
+    const connected = await connectTo(server.url, "modern");
+    const log = new MessageLogState(connected);
+
+    // Let the strict call fail, then serve a conforming list to every later
+    // request — so the scan's re-fetch finds nothing per-item wrong.
+    const original = connected.listTools.bind(connected);
+    connected.listTools = async (cursor?: string, meta?: object) => {
+      try {
+        return await original(
+          cursor,
+          meta as Record<string, string> | undefined,
+        );
+      } finally {
+        server.setPages({
+          tools: [
+            { items: [{ name: "fixed", inputSchema: { type: "object" } }] },
+          ],
+        });
+      }
+    };
+
+    await connected.refreshExcludedTools();
+
+    const marked = log
+      .getMessages()
+      .filter(
+        (entry) =>
+          "method" in entry.message &&
+          entry.message.method === "tools/list" &&
+          entry.clientError !== undefined,
+      );
+    expect(marked).toHaveLength(1);
+    log.destroy();
+  });
+
   it("stops the salvage walk at the page cap instead of paging forever", async () => {
     // A server whose `nextCursor` never converges but never REPEATS slips the
     // repeated-cursor guard: every cursor is fresh, so the walk had no reason
