@@ -12,7 +12,9 @@ describe("OAuthTokenField", () => {
     expect(screen.getByText("Access Token")).toBeInTheDocument();
     expect(screen.getByText(/eyJhbGciOiJub25lIn0/)).toBeInTheDocument();
     expect(screen.getByText(/eyJzdWIiOiJ1c2VyIn0/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Copy" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Copy Access Token" }),
+    ).toBeInTheDocument();
   });
 
   it("replaces raw token with decoded JSON and restores on toggle", async () => {
@@ -20,11 +22,15 @@ describe("OAuthTokenField", () => {
     renderWithMantine(<OAuthTokenField label="Access Token" token={jwt} />);
 
     expect(screen.getByText(/eyJhbGciOiJub25lIn0/)).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Decode JWT" }));
+    await user.click(
+      screen.getByRole("button", { name: "Decode JWT for Access Token" }),
+    );
     expect(screen.getByText(/"sub": "user"/)).toBeInTheDocument();
     expect(screen.queryByText(/eyJhbGciOiJub25lIn0/)).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Show token" }));
+    await user.click(
+      screen.getByRole("button", { name: "Show token for Access Token" }),
+    );
     expect(screen.getByText(/eyJhbGciOiJub25lIn0/)).toBeInTheDocument();
     expect(screen.queryByText(/"sub": "user"/)).not.toBeInTheDocument();
   });
@@ -37,7 +43,7 @@ describe("OAuthTokenField", () => {
       />,
     );
     expect(
-      screen.queryByRole("button", { name: "Decode JWT" }),
+      screen.queryByRole("button", { name: "Decode JWT for Access Token" }),
     ).not.toBeInTheDocument();
   });
 
@@ -50,8 +56,10 @@ describe("OAuthTokenField", () => {
     });
 
     renderWithMantine(<OAuthTokenField label="Access Token" token={jwt} />);
-    await user.click(screen.getByRole("button", { name: "Decode JWT" }));
-    await user.click(screen.getByRole("button", { name: "Copy" }));
+    await user.click(
+      screen.getByRole("button", { name: "Decode JWT for Access Token" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Copy Access Token" }));
 
     expect(writeText).toHaveBeenCalledWith(
       expect.stringContaining('"sub": "user"'),
@@ -68,7 +76,7 @@ describe("OAuthTokenField", () => {
     });
 
     renderWithMantine(<OAuthTokenField label="Access Token" token={jwt} />);
-    await user.click(screen.getByRole("button", { name: "Copy" }));
+    await user.click(screen.getByRole("button", { name: "Copy Access Token" }));
 
     expect(writeText).toHaveBeenCalledWith(jwt);
   });
@@ -101,8 +109,23 @@ describe("OAuthTokenField", () => {
     expect(screen.getByText("ID Token")).toBeInTheDocument();
     expect(screen.queryByText("Access Token")).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Decode JWT" }));
+    await user.click(
+      screen.getByRole("button", { name: "Decode JWT for ID Token" }),
+    );
     expect(screen.getByText(/"sub": "user"/)).toBeInTheDocument();
+  });
+
+  it("qualifies the decode and copy accessible names with the row label", () => {
+    // Two rows can render simultaneously (Access Token + ID Token), so the
+    // controls must not share accessible names — see #2019 review.
+    renderWithMantine(<OAuthTokenField label="ID Token" token={jwt} />);
+
+    expect(
+      screen.getByRole("button", { name: "Decode JWT for ID Token" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Copy ID Token" }),
+    ).toBeInTheDocument();
   });
 
   it("omits the clear action when no handler is given", () => {

@@ -189,7 +189,9 @@ export const WithOAuthIdToken: Story = {
     const canvas = within(canvasElement);
     expect(canvas.getByText("ID Token")).toBeInTheDocument();
     // Only the ID token is a JWT here, so exactly one decode toggle is offered.
-    await userEvent.click(canvas.getByRole("button", { name: "Decode JWT" }));
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Decode JWT for ID Token" }),
+    );
     expect(canvas.getByText(/"sub": "user-42"/)).toBeInTheDocument();
   },
 };

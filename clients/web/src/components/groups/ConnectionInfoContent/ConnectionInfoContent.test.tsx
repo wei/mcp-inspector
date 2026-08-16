@@ -495,6 +495,41 @@ describe("ConnectionInfoContent", () => {
     expect(screen.getByText("id-token-456")).toBeInTheDocument();
   });
 
+  it("gives the two token rows' controls distinct accessible names", () => {
+    // Both rows carry a copy control, and both tokens here are JWTs so both
+    // carry a decode toggle. Screen-reader button navigation has only the
+    // accessible name to go on, so the four must not collide (#2019 review).
+    const jwt = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ1c2VyIn0.";
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={fullResult}
+        clientCapabilities={fullClientCaps}
+        transport="streamable-http"
+        oauth={{
+          protocol: "standard",
+          authorized: true,
+          accessToken: jwt,
+          idToken: jwt,
+        }}
+      />,
+    );
+
+    const names = screen
+      .getAllByRole("button")
+      .map((button) => button.getAttribute("aria-label") ?? button.textContent)
+      .filter((name): name is string => Boolean(name));
+    expect(new Set(names).size).toBe(names.length);
+
+    for (const name of [
+      "Copy Access Token",
+      "Copy ID Token",
+      "Decode JWT for Access Token",
+      "Decode JWT for ID Token",
+    ]) {
+      expect(screen.getByRole("button", { name })).toBeInTheDocument();
+    }
+  });
+
   it("renders the ID Token row on its own when there is no access token", () => {
     renderWithMantine(
       <ConnectionInfoContent

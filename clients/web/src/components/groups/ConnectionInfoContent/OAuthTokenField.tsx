@@ -107,6 +107,7 @@ export function OAuthTokenField({
             <ToolbarButton
               onClick={() => setShowDecoded((open) => !open)}
               aria-pressed={showDecoded}
+              aria-label={`${showDecoded ? "Show token" : "Decode JWT"} for ${label}`}
             >
               {showDecoded ? "Show token" : "Decode JWT"}
             </ToolbarButton>
@@ -130,7 +131,7 @@ export function OAuthTokenField({
             )}
           </TokenCode>
         </TokenColumn>
-        <CopyButton value={copyValue} flush />
+        <CopyButton value={copyValue} flush label={label} />
       </TokenRow>
     </Stack>
   );
