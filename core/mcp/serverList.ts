@@ -642,23 +642,13 @@ export function extractSecretsFromStored(
 
   if (stored.oauth?.clientSecret) {
     secrets[SECRET_FIELD_OAUTH_CLIENT_SECRET] = stored.oauth.clientSecret;
-    const restOauth: {
-      clientId?: string;
-      scopes?: string;
-      authorizationParams?: Record<string, string>;
-      enterpriseManaged?: boolean;
-    } = {};
-    if (stored.oauth.clientId !== undefined)
-      restOauth.clientId = stored.oauth.clientId;
-    if (stored.oauth.scopes !== undefined)
-      restOauth.scopes = stored.oauth.scopes;
-    // Not a secret — the authorization parameters stay on the stripped entry so
-    // stripping the client secret doesn't silently discard them. (#2018)
-    if (stored.oauth.authorizationParams !== undefined)
-      restOauth.authorizationParams = stored.oauth.authorizationParams;
-    if (stored.oauth.enterpriseManaged === true) {
-      restOauth.enterpriseManaged = true;
-    }
+    // Keep every OAuth field except the one secret, rather than enumerating the
+    // non-secret ones. An allow-list here is a standing trap: it silently drops
+    // any field added to `oauth` afterwards, and it had already done so —
+    // `onInsufficientScope` was lost whenever a server carried both a client
+    // secret and a non-default SEP-2350 policy. Subtracting the secret instead
+    // means a future field is preserved by construction. (#2018)
+    const { clientSecret: _clientSecret, ...restOauth } = stored.oauth;
     if (Object.keys(restOauth).length > 0) {
       stripped.oauth = restOauth;
     } else {

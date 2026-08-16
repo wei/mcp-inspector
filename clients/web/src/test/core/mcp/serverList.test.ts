@@ -925,6 +925,27 @@ describe("extractSecretsFromStored", () => {
     expect(stripped.oauth).toEqual({ enterpriseManaged: true });
   });
 
+  // The stripped entry now subtracts the secret instead of enumerating the
+  // fields to keep, so a field added to `oauth` later survives by construction.
+  // `onInsufficientScope` is the case the old allow-list had already lost.
+  it("preserves oauth.onInsufficientScope when lifting clientSecret to keychain", () => {
+    const stored: StoredMCPServer = {
+      type: "streamable-http",
+      url: "https://x.test",
+      oauth: {
+        clientId: "cid",
+        clientSecret: "shh",
+        onInsufficientScope: "throw",
+      },
+    };
+    const { stripped, secrets } = extractSecretsFromStored(stored);
+    expect(secrets).toEqual({ [SECRET_FIELD_OAUTH_CLIENT_SECRET]: "shh" });
+    expect(stripped.oauth).toEqual({
+      clientId: "cid",
+      onInsufficientScope: "throw",
+    });
+  });
+
   it("preserves oauth.authorizationParams when lifting clientSecret to keychain", () => {
     const stored: StoredMCPServer = {
       type: "streamable-http",
