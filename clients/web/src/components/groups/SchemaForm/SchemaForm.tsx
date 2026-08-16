@@ -337,10 +337,17 @@ interface SchemaNumberInputProps {
   description?: string;
   withAsterisk: boolean;
   disabled: boolean;
-  /** Raw, not `resolveValue`-substituted — see `SchemaJsonFieldProps.value`. */
-  value: number | undefined;
-  /** The schema `default`, used to seed the draft only (#2026). */
-  defaultValue: number | undefined;
+  /**
+   * Raw, not `resolveValue`-substituted — see `SchemaJsonFieldProps.value`.
+   *
+   * `null` is admitted alongside `undefined` because a nullable number schema
+   * produces it, and the two are not interchangeable here: `undefined` means
+   * "no value supplied" and takes `defaultValue`, while `null` is a value and
+   * displays as an empty box.
+   */
+  value: number | null | undefined;
+  /** The schema `default`, used to seed the draft only (#2026). May be `null`. */
+  defaultValue: number | null | undefined;
   min?: number;
   max?: number;
   allowDecimal: boolean;
@@ -627,9 +634,12 @@ export function SchemaForm({
           description={description}
           withAsterisk={isRequired}
           disabled={disabled}
-          // Raw and default kept apart, not pre-resolved (#2026).
-          value={values[fieldName] as number | undefined}
-          defaultValue={getDefaultValue(fieldSchema) as number | undefined}
+          // Raw and default kept apart, not pre-resolved (#2026). Both admit
+          // `null`, which a nullable number schema really produces.
+          value={values[fieldName] as number | null | undefined}
+          defaultValue={
+            getDefaultValue(fieldSchema) as number | null | undefined
+          }
           min={fieldSchema.minimum}
           max={fieldSchema.maximum}
           // An `integer` field rejects the decimal point outright rather than
