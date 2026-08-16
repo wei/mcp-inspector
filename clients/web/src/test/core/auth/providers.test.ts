@@ -352,6 +352,68 @@ describe("OAuthNavigation", () => {
       expect(navCallback).toHaveBeenCalledWith(url);
     });
 
+    // #2018 — the provider is the seam where per-server custom parameters reach
+    // the authorize URL, since the SDK builds that URL with no hook of its own.
+    function makeProviderWithParams(
+      storage: OAuthStorage,
+      authorizationParams: Record<string, string>,
+      navCallback = vi.fn(),
+    ): BaseOAuthClientProvider {
+      return new BaseOAuthClientProvider(SERVER, {
+        storage,
+        redirectUrlProvider: new MutableRedirectUrlProvider(),
+        navigation: new CallbackNavigation(navCallback),
+        authorizationParams,
+      });
+    }
+
+    it("redirectToAuthorization merges configured authorization params", () => {
+      const storage = makeStorage();
+      const navCallback = vi.fn();
+      const provider = makeProviderWithParams(
+        storage,
+        { kc_idp_hint: "corp-idp" },
+        navCallback,
+      );
+      const target = new EventTarget();
+      const handler = vi.fn();
+      target.addEventListener("oauthAuthorizationRequired", handler);
+      provider.setEventTarget(target);
+
+      const url = new URL("https://mcp.example.com/authorize?client_id=abc");
+      provider.redirectToAuthorization(url);
+
+      const navigated = navCallback.mock.calls[0]?.[0] as URL;
+      expect(navigated.searchParams.get("kc_idp_hint")).toBe("corp-idp");
+      expect(navigated.searchParams.get("client_id")).toBe("abc");
+      // The captured URL, the event detail, and the navigation all agree.
+      expect(provider.getCapturedAuthUrl()?.href).toBe(navigated.href);
+      const detail = (handler.mock.calls[0]?.[0] as CustomEvent<{ url: URL }>)
+        .detail;
+      expect(detail.url.href).toBe(navigated.href);
+      // The URL the SDK handed in is left untouched.
+      expect(url.searchParams.get("kc_idp_hint")).toBeNull();
+    });
+
+    it("redirectToAuthorization refuses a reserved authorization param", () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const storage = makeStorage();
+      const navCallback = vi.fn();
+      const provider = makeProviderWithParams(
+        storage,
+        { state: "spoofed" },
+        navCallback,
+      );
+
+      const url = new URL("https://mcp.example.com/authorize?state=real");
+      provider.redirectToAuthorization(url);
+
+      const navigated = navCallback.mock.calls[0]?.[0] as URL;
+      expect(navigated.searchParams.get("state")).toBe("real");
+      expect(warn).toHaveBeenCalled();
+      warn.mockRestore();
+    });
+
     it("delegates token and scope persistence to storage", async () => {
       const storage = makeStorage();
       const provider = makeProvider(storage);

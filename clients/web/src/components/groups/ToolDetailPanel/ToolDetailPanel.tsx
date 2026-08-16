@@ -19,7 +19,10 @@ import type {
   ToolAnnotations,
 } from "@modelcontextprotocol/client";
 import { resolveDisplayLabel } from "../../../utils/toolUtils";
-import { toFormSchema } from "../../../utils/jsonUtils";
+import {
+  hasMissingRequiredFields,
+  toFormSchema,
+} from "../../../utils/jsonUtils";
 import { getMirroredHeaderParams } from "@inspector/core/json/xMcpHeader.js";
 import { AnnotationBadge } from "../../elements/AnnotationBadge/AnnotationBadge";
 import { ProgressDisplay } from "../../elements/ProgressDisplay/ProgressDisplay";
@@ -213,6 +216,10 @@ export function ToolDetailPanel({
   // a prior tool's hidden state doesn't carry over — mirrors how ToolsScreen
   // clears formValues on change.
   const [descriptionOpen, setDescriptionOpen] = useState(true);
+  // Text a field is holding that it could not turn into a value — unparseable
+  // JSON, or a number this client cannot send exactly. Reported by the form
+  // because the draft lives inside the field and never reaches `formValues`.
+  const [hasInvalidDraft, setHasInvalidDraft] = useState(false);
   const [prevToolName, setPrevToolName] = useState(name);
   if (name !== prevToolName) {
     setPrevToolName(name);
@@ -244,6 +251,15 @@ export function ToolDetailPanel({
     showRunAsTask &&
     (taskSupport === "required" ||
       ((taskSupport === "optional" || modernTasks) && runAsTask));
+
+  // Two distinct reasons the arguments aren't sendable, and this panel used to
+  // check neither — Execute was gated on `isExecuting` alone, so a required
+  // argument left empty and a field full of unparseable text were both
+  // executable, and simply arrived at the server absent (#2020).
+  const executeDisabled =
+    isExecuting ||
+    hasMissingRequiredFields(formSchema, formValues) ||
+    hasInvalidDraft;
 
   return (
     <PanelStack>
@@ -321,6 +337,7 @@ export function ToolDetailPanel({
             // so the form needs the tool name to drop another tool's
             // in-progress field text. See SchemaFormProps.resetKey.
             resetKey={name}
+            onValidityChange={setHasInvalidDraft}
           />
 
           {progress && <ProgressDisplay params={progress} />}
@@ -341,7 +358,7 @@ export function ToolDetailPanel({
         <Button
           size="md"
           onClick={() => onExecute(effectiveRunAsTask)}
-          disabled={isExecuting}
+          disabled={executeDisabled}
           loading={isExecuting}
         >
           Execute Tool

@@ -1,4 +1,5 @@
 import { Card, Flex, Stack, Text } from "@mantine/core";
+import type { MalformedListItem } from "@inspector/core/mcp";
 import type {
   CallToolResult,
   ReadResourceResult,
@@ -50,6 +51,11 @@ export interface ToolsScreenProps {
   /** Tools the SDK excluded from `tools/list` for invalid `x-mcp-header`
    * annotations (SEP-2243), shown in the sidebar with the reason (#1632). */
   excludedTools?: ExcludedTool[];
+  /**
+   * Entries dropped from a list result as malformed, across every list method.
+   * Each list panel filters for its own and warns about them (#1909).
+   */
+  malformedListItems?: MalformedListItem[];
   callState?: ToolCallState;
   ui: ToolsUiState;
   listChanged: boolean;
@@ -147,6 +153,7 @@ const EmptyState = Text.withProps({
 export function ToolsScreen({
   tools,
   excludedTools,
+  malformedListItems,
   callState,
   ui,
   listChanged,
@@ -191,6 +198,7 @@ export function ToolsScreen({
           <ToolControls
             tools={tools}
             excludedTools={excludedTools}
+            malformedListItems={malformedListItems}
             selectedName={selectedToolName}
             searchText={search}
             listChanged={listChanged}

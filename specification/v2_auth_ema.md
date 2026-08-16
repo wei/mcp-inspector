@@ -334,7 +334,7 @@ When the user connects to a server with `oauth.enterpriseManaged: true` but inst
 - **IdP session** (EMA only) — `none` / `logged_in` / `expired` from `idpSessions[issuer]`
 - **Auth URL** — cached from an in-flight or completed OAuth flow (`OAuthFlowState`), when present
 - **Scopes** — configured vs granted
-- **Access token** — `OAuthAccessTokenField`: copy (raw), decode JWT in place (`core/auth/ema/jwt.ts` helpers); multi-line wrap with segment-aware breaking for JWTs
+- **Access token** (and **ID token**, when the authorization server returned an `id_token`) — `OAuthTokenField`: copy (raw), decode JWT in place (`core/auth/ema/jwt.ts` helpers); multi-line wrap with segment-aware breaking for JWTs. Display only — the `id_token` is never treated as a credential (#2019)
 
 In-flight OAuth flow state uses `OAuthFlowState` / `getOAuthFlowState()` / `getOAuthFlowStep()`. `getOAuthState()` is the persisted connection snapshot; flow state is separate and ephemeral.
 
