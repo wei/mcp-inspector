@@ -5436,6 +5436,8 @@ export class InspectorClient extends InspectorClientEventTarget {
     clientSecret?: string;
     clientMetadataUrl?: string;
     scope?: string;
+    /** Custom authorization-request parameters (#2018). Authorize URL only. */
+    authorizationParams?: Record<string, string>;
   }): void {
     if (!this.oauthManager) {
       throw new Error(

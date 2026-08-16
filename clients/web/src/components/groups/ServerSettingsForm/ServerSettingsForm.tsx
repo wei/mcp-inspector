@@ -1,6 +1,7 @@
 import {
   Accordion,
   ActionIcon,
+  Alert,
   Button,
   Checkbox,
   Flex,
@@ -26,6 +27,11 @@ import {
   MODERN_LOG_LEVELS,
 } from "@inspector/core/mcp/types.js";
 import { isOAuthCapableServerType } from "@inspector/core/mcp/config.js";
+import {
+  RESERVED_AUTHORIZATION_PARAMS,
+  authorizationParamKeyError,
+  isReservedAuthorizationParam,
+} from "@inspector/core/auth/authorizationParams.js";
 import { ADVERTISABLE_EXTENSIONS } from "@inspector/core/mcp/extensions.js";
 import type { Root } from "@modelcontextprotocol/client";
 
@@ -184,6 +190,25 @@ const EmptyHint = Text.withProps({
   fs: "italic",
 });
 
+// Matches the label/description pair Mantine renders for a single input, so the
+// authorization-parameter row list reads as one labelled field next to Scopes.
+const FieldLabel = Text.withProps({
+  size: "sm",
+  fw: 500,
+});
+
+const FieldDescription = Text.withProps({
+  size: "xs",
+  c: "dimmed",
+});
+
+// `align="flex-start"` keeps the key/value/remove controls top-aligned when the
+// key input grows an error message, so the row doesn't jump as it appears.
+const AuthorizationParamRow = Group.withProps({
+  grow: true,
+  align: "flex-start",
+});
+
 const ClearStoredOAuthButton = Button.withProps({
   variant: "light",
   color: "red",
@@ -241,6 +266,74 @@ function KeyValueRows({
           <RemoveIcon onClick={() => onRemove(index)}>X</RemoveIcon>
         </Group>
       ))}
+    </>
+  );
+}
+
+// Reserved-key rejection is inline per row (#2018): the reason is passed as the
+// key input's `error` **string**, so Mantine renders it in the input's own error
+// slot and wires the `aria-describedby` association — a bare boolean would mark
+// the field invalid without telling a screen reader why. The section-level Alert
+// below repeats it so the rejection stays visible when the offending row is
+// scrolled out of view.
+//
+// Each control carries a per-row `aria-label`: the section heading and the
+// placeholders are not programmatically associated with the inputs, so without
+// one an assistive technology cannot tell the key box from the value box, and
+// the remove button announces only "X".
+function AuthorizationParamRows({
+  params,
+  onChange,
+  onRemove,
+}: {
+  params: { key: string; value: string }[];
+  onChange: (index: number, key: string, value: string) => void;
+  onRemove: (index: number) => void;
+}) {
+  return (
+    <>
+      {params.map((param, index) => {
+        const rowLabel = param.key.trim() || `row ${index + 1}`;
+        return (
+          <AuthorizationParamRow key={index}>
+            <ClearableTextInput
+              aria-label={`Authorization parameter name, ${rowLabel}`}
+              placeholder="Parameter (e.g. kc_idp_hint)"
+              value={param.key}
+              error={authorizationParamKeyError(param.key)}
+              onChange={(e) =>
+                onChange(index, e.currentTarget.value, param.value)
+              }
+              rightSection={
+                param.key ? (
+                  <ClearButton
+                    onClick={() => onChange(index, "", param.value)}
+                  />
+                ) : null
+              }
+            />
+            <ClearableTextInput
+              aria-label={`Authorization parameter value, ${rowLabel}`}
+              placeholder="Value"
+              value={param.value}
+              onChange={(e) =>
+                onChange(index, param.key, e.currentTarget.value)
+              }
+              rightSection={
+                param.value ? (
+                  <ClearButton onClick={() => onChange(index, param.key, "")} />
+                ) : null
+              }
+            />
+            <RemoveIcon
+              aria-label={`Remove authorization parameter ${rowLabel}`}
+              onClick={() => onRemove(index)}
+            >
+              X
+            </RemoveIcon>
+          </AuthorizationParamRow>
+        );
+      })}
     </>
   );
 }
@@ -374,14 +467,50 @@ export function ServerSettingsForm({
       onTimeoutChange(field, numValue);
     };
 
+  // #2018 — custom authorization-request parameters. The rows ride the single
+  // `onOAuthChange` callback with the rest of the Authorization section rather
+  // than growing three more props on this form.
+  const authorizationParams = settings.oauthAuthorizationParams ?? [];
+
   function currentOAuth(): OAuthSettings {
     return {
       clientId: settings.oauthClientId ?? "",
       clientSecret: settings.oauthClientSecret ?? "",
       scopes: settings.oauthScopes ?? "",
+      authorizationParams,
       enterpriseManaged: settings.enterpriseManaged ?? false,
       onInsufficientScope: settings.oauthOnInsufficientScope,
     };
+  }
+
+  const rejectedParamKeys = authorizationParams
+    .map((p) => p.key.trim())
+    .filter((key) => isReservedAuthorizationParam(key));
+
+  function changeAuthorizationParams(
+    params: { key: string; value: string }[],
+  ): void {
+    onOAuthChange({ ...currentOAuth(), authorizationParams: params });
+  }
+
+  function handleAddAuthorizationParam(): void {
+    changeAuthorizationParams([...authorizationParams, { key: "", value: "" }]);
+  }
+
+  function handleRemoveAuthorizationParam(index: number): void {
+    changeAuthorizationParams(
+      authorizationParams.filter((_, i) => i !== index),
+    );
+  }
+
+  function handleAuthorizationParamChange(
+    index: number,
+    key: string,
+    value: string,
+  ): void {
+    changeAuthorizationParams(
+      authorizationParams.map((p, i) => (i === index ? { key, value } : p)),
+    );
   }
 
   return (
@@ -699,6 +828,41 @@ export function ServerSettingsForm({
                   ) : null
                 }
               />
+              <Stack gap="xs">
+                <FieldLabel>Additional authorization parameters</FieldLabel>
+                <FieldDescription>
+                  Extra query parameters appended to the authorization request
+                  only — never the token request. Use them for provider-specific
+                  hints such as kc_idp_hint, login_hint, prompt, acr_values, or
+                  audience.
+                  {settings.enterpriseManaged
+                    ? " Not sent while Enterprise-managed authorization is on: that flow authorizes against the enterprise IdP, a different authorization server."
+                    : ""}
+                </FieldDescription>
+                {authorizationParams.length === 0 ? (
+                  <EmptyHint>No additional parameters configured</EmptyHint>
+                ) : (
+                  <AuthorizationParamRows
+                    params={authorizationParams}
+                    onChange={handleAuthorizationParamChange}
+                    onRemove={handleRemoveAuthorizationParam}
+                  />
+                )}
+                {rejectedParamKeys.length > 0 ? (
+                  <Alert color="red" title="Reserved parameters ignored">
+                    {`${rejectedParamKeys.join(", ")} ${
+                      rejectedParamKeys.length === 1 ? "is" : "are"
+                    } set by the authorization flow and will not be sent. Overriding ${
+                      rejectedParamKeys.length === 1 ? "it" : "them"
+                    } would break PKCE, the CSRF state binding, or the resource indicator. Reserved: ${RESERVED_AUTHORIZATION_PARAMS.join(
+                      ", ",
+                    )}.`}
+                  </Alert>
+                ) : null}
+                <AddButton onClick={handleAddAuthorizationParam}>
+                  + Add Parameter
+                </AddButton>
+              </Stack>
               <Select
                 label="Insufficient-scope response"
                 description="On a 403 insufficient_scope challenge (SEP-2350): re-authorize with the accumulated scope union, or surface the error to you."
