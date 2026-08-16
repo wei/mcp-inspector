@@ -1284,3 +1284,196 @@ describe("SchemaForm nullable unions", () => {
     expect(screen.getByLabelText(/Mixed/).tagName).toBe("TEXTAREA");
   });
 });
+
+// #2020: a field holding text it cannot turn into a value reports `undefined`,
+// which is exactly what an *empty* field reports. That makes the two states
+// indistinguishable to the caller, so invalid text in an optional field was
+// submittable and simply arrived at the server absent. The form reports draft
+// validity directly so a submit gate can see what `values` cannot.
+describe("SchemaForm draft validity (#2020)", () => {
+  const jsonSchema: InspectorFormSchema = {
+    type: "object",
+    properties: {
+      config: { type: "array", title: "Config" },
+    },
+  };
+
+  function ValidityHarness({
+    schema,
+    onValidityChange,
+    resetKey,
+  }: {
+    schema: InspectorFormSchema;
+    onValidityChange: (hasInvalidDraft: boolean) => void;
+    resetKey?: string;
+  }) {
+    const [values, setValues] = useState<Record<string, unknown>>({});
+    return (
+      <SchemaForm
+        schema={schema}
+        values={values}
+        onChange={setValues}
+        resetKey={resetKey}
+        onValidityChange={onValidityChange}
+      />
+    );
+  }
+
+  it("reports an empty optional field as valid", () => {
+    const onValidityChange = vi.fn();
+    renderWithMantine(
+      <ValidityHarness
+        schema={jsonSchema}
+        onValidityChange={onValidityChange}
+      />,
+    );
+    expect(onValidityChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("reports an unparseable JSON draft, then clears it once the text parses", async () => {
+    const user = userEvent.setup();
+    const onValidityChange = vi.fn();
+    renderWithMantine(
+      <ValidityHarness
+        schema={jsonSchema}
+        onValidityChange={onValidityChange}
+      />,
+    );
+
+    const jsonInput = screen.getByLabelText(/Config/) as HTMLTextAreaElement;
+    await user.type(jsonInput, "[[1,");
+    expect(onValidityChange).toHaveBeenLastCalledWith(true);
+
+    await user.type(jsonInput, "2]");
+    expect(onValidityChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("reports a number this client cannot send exactly, and says so on the field", async () => {
+    const user = userEvent.setup();
+    const onValidityChange = vi.fn();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        divisor: { type: "number", title: "Divisor" },
+      },
+    };
+    renderWithMantine(
+      <ValidityHarness schema={schema} onValidityChange={onValidityChange} />,
+    );
+
+    // Past MAX_SAFE_INTEGER the field reports no value rather than a rounded
+    // one, so — like the JSON editor — the text on screen would otherwise be
+    // submitted as an absent argument.
+    const input = screen.getByLabelText(/Divisor/) as HTMLInputElement;
+    await user.type(input, "90071992547409910");
+    expect(onValidityChange).toHaveBeenLastCalledWith(true);
+    expect(screen.getByText(/this field will be omitted/)).toBeInTheDocument();
+
+    await user.clear(input);
+    expect(onValidityChange).toHaveBeenLastCalledWith(false);
+    expect(
+      screen.queryByText(/this field will be omitted/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("stays invalid while any one field is invalid", async () => {
+    const user = userEvent.setup();
+    const onValidityChange = vi.fn();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        first: { type: "array", title: "First" },
+        second: { type: "array", title: "Second" },
+      },
+    };
+    renderWithMantine(
+      <ValidityHarness schema={schema} onValidityChange={onValidityChange} />,
+    );
+
+    await user.type(screen.getByLabelText(/First/), "x");
+    await user.type(screen.getByLabelText(/Second/), "y");
+    expect(onValidityChange).toHaveBeenLastCalledWith(true);
+
+    // One of the two recovering is not enough.
+    await user.clear(screen.getByLabelText(/First/));
+    expect(onValidityChange).toHaveBeenLastCalledWith(true);
+
+    await user.clear(screen.getByLabelText(/Second/));
+    expect(onValidityChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("surfaces a nested object's invalid draft through the outer form", async () => {
+    const user = userEvent.setup();
+    const onValidityChange = vi.fn();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        outer: {
+          type: "object",
+          title: "Outer",
+          properties: {
+            config: { type: "array", title: "Config" },
+          },
+        },
+      },
+    };
+    renderWithMantine(
+      <ValidityHarness schema={schema} onValidityChange={onValidityChange} />,
+    );
+
+    await user.type(screen.getByLabelText(/Config/), "x");
+    expect(onValidityChange).toHaveBeenLastCalledWith(true);
+  });
+
+  it("clears a stale invalid draft when the form moves to another entity", async () => {
+    const user = userEvent.setup();
+    const onValidityChange = vi.fn();
+    const { rerender } = renderWithMantine(
+      <ValidityHarness
+        schema={jsonSchema}
+        onValidityChange={onValidityChange}
+        resetKey="first_tool"
+      />,
+    );
+
+    await user.type(screen.getByLabelText(/Config/), "x");
+    expect(onValidityChange).toHaveBeenLastCalledWith(true);
+
+    // Switching entities remounts the field, discarding its draft — so text
+    // typed for the previous one must not keep the new one blocked.
+    rerender(
+      <ValidityHarness
+        schema={jsonSchema}
+        onValidityChange={onValidityChange}
+        resetKey="second_tool"
+      />,
+    );
+    expect(onValidityChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("reports valid when the form unmounts holding an invalid draft", async () => {
+    const user = userEvent.setup();
+    const onValidityChange = vi.fn();
+    const { unmount } = renderWithMantine(
+      <ValidityHarness
+        schema={jsonSchema}
+        onValidityChange={onValidityChange}
+      />,
+    );
+
+    await user.type(screen.getByLabelText(/Config/), "x");
+    expect(onValidityChange).toHaveBeenLastCalledWith(true);
+
+    unmount();
+    expect(onValidityChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("renders without a validity callback", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(
+      <SchemaForm schema={jsonSchema} values={{}} onChange={vi.fn()} />,
+    );
+    await user.type(screen.getByLabelText(/Config/), "x");
+    expect(screen.getByText(/Not valid JSON/)).toBeInTheDocument();
+  });
+});
