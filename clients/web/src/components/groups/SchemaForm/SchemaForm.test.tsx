@@ -1602,9 +1602,9 @@ describe("JSON editor escaping (#1853, #1856, #1885)", () => {
       },
       required: ["a"],
     };
-    renderWithMantine(
-      <EscapingHarness schema={schema} initial={{ b: null }} />,
-    );
+    // No seeded value: the `null` has to come from the schema's `default`,
+    // which is where the reporter's did.
+    renderWithMantine(<EscapingHarness schema={schema} />);
 
     const b = screen.getByLabelText(/^B$/) as HTMLInputElement;
     expect(b.tagName).toBe("INPUT");
@@ -1632,9 +1632,9 @@ describe("JSON editor escaping (#1853, #1856, #1885)", () => {
         },
       },
     };
-    renderWithMantine(
-      <EscapingHarness schema={schema} initial={{ cfg: null }} />,
-    );
+    // Again unseeded, so the editor's opening `null` is the schema default
+    // being resolved — the state the reporter's recording starts from.
+    renderWithMantine(<EscapingHarness schema={schema} />);
 
     const jsonInput = screen.getByLabelText(/Cfg/) as HTMLTextAreaElement;
     expect(jsonInput.value).toBe("null");
