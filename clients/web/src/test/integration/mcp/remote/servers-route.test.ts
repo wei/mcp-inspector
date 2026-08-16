@@ -471,9 +471,8 @@ describe("/api/servers routes", () => {
         }),
       });
       expect(res.status).toBe(200);
-      const stored = readConfig(h.configPath).mcpServers
-        .authparams as unknown as Record<string, unknown>;
-      expect(stored.oauth).toEqual({
+      const stored = readConfig(h.configPath).mcpServers.authparams;
+      expect(stored?.oauth).toEqual({
         authorizationParams: { kc_idp_hint: "corp" },
       });
     });

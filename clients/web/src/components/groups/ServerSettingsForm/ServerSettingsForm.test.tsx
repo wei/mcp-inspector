@@ -826,6 +826,83 @@ describe("ServerSettingsForm", () => {
     );
   });
 
+  // #2018 — the section heading and the placeholders are not programmatically
+  // associated with these inputs, so each control carries its own aria-label and
+  // the reserved-key reason is the input's `error` string (which Mantine wires
+  // to the input via aria-describedby) rather than free-standing text.
+  it("gives each authorization-parameter control an accessible name", () => {
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{
+          ...emptySettings,
+          oauthAuthorizationParams: [{ key: "kc_idp_hint", value: "corp" }],
+        }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.getByRole("textbox", {
+        name: "Authorization parameter name, kc_idp_hint",
+      }),
+    ).toHaveValue("kc_idp_hint");
+    expect(
+      screen.getByRole("textbox", {
+        name: "Authorization parameter value, kc_idp_hint",
+      }),
+    ).toHaveValue("corp");
+    expect(
+      screen.getByRole("button", {
+        name: "Remove authorization parameter kc_idp_hint",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("falls back to a row number in the accessible name when the key is blank", () => {
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{
+          ...emptySettings,
+          oauthAuthorizationParams: [{ key: "", value: "" }],
+        }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.getByRole("textbox", {
+        name: "Authorization parameter name, row 1",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  // The reason must reach assistive tech through the input, not just as text on
+  // the page: Mantine emits the `error` string with an id the input references.
+  it("associates the reserved-key reason with the key input", () => {
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{
+          ...emptySettings,
+          oauthAuthorizationParams: [{ key: "state", value: "spoofed" }],
+        }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    const keyInput = screen.getByRole("textbox", {
+      name: "Authorization parameter name, state",
+    });
+    const describedBy = keyInput.getAttribute("aria-describedby");
+    expect(describedBy).toBeTruthy();
+    const reason = describedBy
+      ?.split(" ")
+      .map((id) => document.getElementById(id)?.textContent ?? "")
+      .join(" ");
+    expect(reason).toContain(
+      '"state" is set by the authorization flow and cannot be overridden.',
+    );
+  });
+
   it("does not flag a blank authorization-parameter row as reserved", () => {
     renderWithMantine(
       <ServerSettingsForm

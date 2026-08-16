@@ -202,11 +202,6 @@ const FieldDescription = Text.withProps({
   c: "dimmed",
 });
 
-const ReservedParamError = Text.withProps({
-  size: "xs",
-  c: "var(--inspector-danger-text)",
-});
-
 const ClearStoredOAuthButton = Button.withProps({
   variant: "light",
   color: "red",
@@ -268,9 +263,17 @@ function KeyValueRows({
   );
 }
 
-// Reserved-key rejection is inline per row (#2018): the key input goes red with
-// the reason under it, and the section-level warning below repeats it so the
-// rejection is visible even when the offending row is scrolled out of view.
+// Reserved-key rejection is inline per row (#2018): the reason is passed as the
+// key input's `error` **string**, so Mantine renders it in the input's own error
+// slot and wires the `aria-describedby` association — a bare boolean would mark
+// the field invalid without telling a screen reader why. The section-level Alert
+// below repeats it so the rejection stays visible when the offending row is
+// scrolled out of view.
+//
+// Each control carries a per-row `aria-label`: the section heading and the
+// placeholders are not programmatically associated with the inputs, so without
+// one an assistive technology cannot tell the key box from the value box, and
+// the remove button announces only "X".
 function AuthorizationParamRows({
   params,
   onChange,
@@ -282,13 +285,15 @@ function AuthorizationParamRows({
 }) {
   return (
     <>
-      {params.map((param, index) => (
-        <Stack key={index} gap={4}>
-          <Group grow>
+      {params.map((param, index) => {
+        const rowLabel = param.key.trim() || `row ${index + 1}`;
+        return (
+          <Group key={index} grow align="flex-start">
             <ClearableTextInput
+              aria-label={`Authorization parameter name, ${rowLabel}`}
               placeholder="Parameter (e.g. kc_idp_hint)"
               value={param.key}
-              error={authorizationParamKeyError(param.key) !== undefined}
+              error={authorizationParamKeyError(param.key)}
               onChange={(e) =>
                 onChange(index, e.currentTarget.value, param.value)
               }
@@ -301,6 +306,7 @@ function AuthorizationParamRows({
               }
             />
             <ClearableTextInput
+              aria-label={`Authorization parameter value, ${rowLabel}`}
               placeholder="Value"
               value={param.value}
               onChange={(e) =>
@@ -312,15 +318,15 @@ function AuthorizationParamRows({
                 ) : null
               }
             />
-            <RemoveIcon onClick={() => onRemove(index)}>X</RemoveIcon>
+            <RemoveIcon
+              aria-label={`Remove authorization parameter ${rowLabel}`}
+              onClick={() => onRemove(index)}
+            >
+              X
+            </RemoveIcon>
           </Group>
-          {authorizationParamKeyError(param.key) ? (
-            <ReservedParamError>
-              {authorizationParamKeyError(param.key)}
-            </ReservedParamError>
-          ) : null}
-        </Stack>
-      ))}
+        );
+      })}
     </>
   );
 }
