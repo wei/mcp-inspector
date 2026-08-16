@@ -20,54 +20,48 @@
 // `@modelcontextprotocol/*` schema is built out of zod generics. Aligning the
 // two copies — changing nothing else — returned the build to its baseline cost.
 //
-// The candidate set is DERIVED, not hand-listed: it is the packages imported by
-// the shared first-party TypeScript — `core/`, `test-servers/src`, and the
-// root-owned `vitest.shared.mts` — the surfaces compiled into more than one
-// client's program. Skew is then denied by default, with a small
-// allowlist of packages verified to tolerate it (below). A dependency that
-// starts skewing therefore fails `validate` and forces a decision, rather than
-// surfacing months later as an unexplained OOM.
+// The candidate set is DERIVED from what actually enters each `tsc` program
+// (#1965): every client tsconfig project is listed with `tsc --listFilesOnly`
+// (the shared `lib/tsc-program.mjs` machinery `verify:typecheck-coverage` reads
+// too), each resolved `node_modules` file is mapped to its owning install and
+// package, and a package that reaches ONE program from TWO installs is a
+// candidate. That is exactly the set that can put two structurally-distinct
+// copies of a type in front of one type checker — no more, no less.
 //
-// KNOWN BOUNDARY (#1965): the candidate set covers packages the shared sources
-// name *directly*. A package whose declarations reach the program only through
-// another package's `.d.ts` is invisible here — `@modelcontextprotocol/sdk` is
-// the live example, skewed root 1.29.0 vs `clients/web` 1.30.0 and present in
-// web's program from both installs, yet never written in first-party code
-// (the shared sources import the split `@modelcontextprotocol/client|core|…`).
-// Two derivations were measured for closing this. A lockfile dependency
-// closure is unusable — 155 packages, 25 of them skewed, nearly all irrelevant
-// tooling (`chai`, `qs`, `iconv-lite`) — and it misses the SDK anyway. Reading
-// what actually lands in each program (`tsc --listFilesOnly`, keeping packages
-// present under two install roots) is both correct and small: 15 for
-// `clients/web`, ~10 once nested duplicates are dropped. That is the right
-// derivation and is tracked separately, since it changes what the guard
-// measures and surfaces skews needing their own decisions.
+// It replaced a derivation that read the packages the shared sources named
+// *directly*, which could not see a package whose declarations arrive only
+// through another package's `.d.ts`. `@modelcontextprotocol/sdk` was the live
+// example: it is never written in first-party code (the shared sources import
+// the split `@modelcontextprotocol/client|core|…`), yet 16 of its `.d.ts` files
+// land in `clients/web`'s test program, so a second copy under
+// `clients/web/node_modules` would have skewed unseen. The other derivation
+// measured for #1965 — expanding the direct imports over the lockfiles'
+// `dependencies` — was unusable: 155 packages, 25 of them skewed, nearly all
+// irrelevant transitive tooling (`chai`, `qs`, `iconv-lite`), and it missed the
+// SDK anyway.
+//
+// Skew among the candidates is then denied by default, with an allowlist of
+// packages verified to tolerate it (below). A dependency that starts skewing
+// fails `validate` and forces a decision, rather than surfacing months later as
+// an unexplained OOM.
 
 import { readFileSync, existsSync, readdirSync } from "node:fs";
-import { execFileSync } from "node:child_process";
-import { builtinModules, createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { rootReachesScript } from "./lib/npm-scripts.mjs";
+import {
+  clientTsconfigReferences,
+  crossInstallPackages,
+  projectListingError,
+  projectPackageFiles,
+  resolveLeafProjects,
+  typecheckProjects,
+} from "./lib/tsc-program.mjs";
 
 const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
 );
-
-// The first-party source trees that are compiled into more than one install's
-// `tsc` program, and so define which dependencies can appear twice in one
-// program. `core/` is consumed by every client via the `@inspector/core` alias;
-// `test-servers/src` is pulled into the web and cli test projects.
-const SHARED_SOURCE_DIRS = ["core", "test-servers/src"];
-
-// Individual root-owned TypeScript files that are shared the same way but sit
-// outside those trees. `vitest.shared.mts` is imported by every client's vitest
-// config, and `verify:typecheck-coverage` already treats it as shared
-// non-client source. It imports only Node built-ins today — which is precisely
-// why omitting it would go unnoticed until a third-party import appeared there,
-// resolved from the root, and skewed (Copilot, #1962).
-const SHARED_SOURCE_FILES = ["vitest.shared.mts"];
 
 // Packages whose cross-install skew is verified benign, each with the reason.
 // This is an allowlist of *names*, not of version pairs, so an ordinary patch
@@ -75,155 +69,40 @@ const SHARED_SOURCE_FILES = ["vitest.shared.mts"];
 // listed here failing the check is a genuine, unreviewed new skew.
 //
 // Being listed is NOT a blanket exemption: it tolerates skew only *within a
-// major version*. Each rationale below establishes that a patch/minor
-// difference is harmless, which is not evidence that a React 18-vs-19 or Hono
-// 4-vs-5 split across installs would be — that is a different type surface, and
-// it fails like anything else (Copilot, #1962).
+// major version*. A rationale establishes that a patch/minor difference is
+// harmless, which is not evidence that a React 18-vs-19 or Hono 4-vs-5 split
+// across installs would be — that is a different type surface, and it fails like
+// anything else (Copilot, #1962).
 //
 // The admission test is the one the zod incident established: does the
 // package's public type surface consist of deeply recursive generics that
 // first-party code relates across the boundary? If yes it must stay in
 // lockstep; if no, a patch-level difference costs nothing.
-const TOLERATED_SKEW = new Map([
-  [
-    "react",
-    "Types are shallow interfaces (`ReactNode`, `FC`), not recursive generics; the runtime copies never meet — each client bundles its own.",
-  ],
-  [
-    "hono",
-    "Only used behind first-party wrappers in `core/mcp/remote/node`; its generic router types are not related across the boundary.",
-  ],
-  [
-    "jose",
-    "Consumed as flat function calls in `core/auth`; no generic type flows between installs.",
-  ],
-  [
-    "@modelcontextprotocol/ext-apps",
-    "Plain interface/constant surface for the MCP Apps UI protocol; no generic instantiation to blow up.",
-  ],
-]);
-
-/** Package names that are Node built-ins (with or without the `node:` prefix). */
-const BUILTINS = new Set([
-  ...builtinModules,
-  ...builtinModules.map((m) => `node:${m}`),
-]);
-
-// A bare package specifier: optional `@scope/`, then a name, then any subpath.
-// Anchored so prose that happens to sit after the word `from` in a comment
-// ("from cwd omitted") cannot be mistaken for an import.
-const PACKAGE_SPECIFIER = /^(?:(@[^/\s]+)\/)?([^@/\s][^/\s]*)(?:\/.*)?$/;
-
-/**
- * The bare package name a module specifier resolves to — `@scope/name` or
- * `name`, with any subpath dropped (`zod/v4` → `zod`). Returns null for
- * relative paths, built-ins, URLs, and anything not shaped like a specifier.
- */
-export function packageNameOf(specifier) {
-  if (typeof specifier !== "string" || specifier === "") return null;
-  if (specifier.startsWith(".") || specifier.startsWith("/")) return null;
-  if (BUILTINS.has(specifier)) return null;
-  const m = PACKAGE_SPECIFIER.exec(specifier);
-  if (!m) return null;
-  const name = m[1] ? `${m[1]}/${m[2]}` : m[2];
-  // A protocol-ish specifier (`node:test`, `file:`, `data:`) is not a package.
-  if (name.includes(":")) return null;
-  return name;
-}
-
-// Specifiers are extracted with TypeScript's own `preProcessFile` rather than
-// by regex (Copilot, #1962 — raised across three review rounds, and correctly).
-// A regex scan gets both directions wrong: it *misses* valid syntax (an
-// `import x = require(…)` in a `.cts`, an import-attributes argument, a comment
-// between tokens — each a silent miss, so the package never enters the
-// candidate set and its skew passes), and it *invents* names from prose, since
-// `// adapted from "react"` is indistinguishable from an import to a pattern
-// that can't tell code from a comment. Every widening of the regex traded one
-// of those failures for the other.
 //
-// `preProcessFile` is TypeScript's lightweight pre-parse scanner — not a full
-// parse and no type checking — and it is exactly built for this: it returns
-// every module specifier, handling all import forms, trivia, strings, and
-// regex literals correctly, and it never sees a comment as code.
+// **Empty today**, and that is a consequence of the #1965 derivation rather than
+// a relaxation. The four former entries were all admitted under the old
+// direct-import derivation, which asked only "is this name written in shared
+// source and held at two versions somewhere" — a question two installs can
+// answer yes to without any program ever seeing both copies:
 //
-// typescript is resolved from `clients/web`, which already carries it; the root
-// has no TS dependency of its own. The `createRequire` base is load-bearing —
-// a bare `import("typescript")` would resolve relative to `scripts/`, not the
-// cwd (the same reason `smoke-web-browser.mjs` resolves playwright this way).
-let tsCache;
-function typescript() {
-  if (!tsCache) {
-    const require_ = createRequire(
-      path.join(repoRoot, "clients", "web", "package.json"),
-    );
-    try {
-      tsCache = require_("typescript");
-    } catch (cause) {
-      // Fail with the cause, not a bare MODULE_NOT_FOUND: the realistic way to
-      // get here is a root install run with INSPECTOR_SKIP_CLIENT_INSTALL=1,
-      // which leaves `clients/web/node_modules` empty. Silently skipping the
-      // check instead would be worse — an unrun guard guards nothing.
-      throw new Error(
-        "verify:dep-lockstep — could not resolve `typescript` from clients/web. " +
-          "Run `npm install` at the repo root (the postinstall cascade installs each client); " +
-          "if you set INSPECTOR_SKIP_CLIENT_INSTALL=1, this guard cannot run.",
-        { cause },
-      );
-    }
-  }
-  return tsCache;
-}
-
-/**
- * The package(s) a `/// <reference types="x" />` directive can resolve to
- * (Copilot, #1962). Such a directive pulls in declarations exactly like an
- * import does, but TypeScript reports it separately from `importedFiles`, so
- * reading only the latter would let a referenced package skew unseen.
- *
- * Both candidates are returned because the directive name is the *type* name,
- * not the package: `node` resolves to `@types/node`, while a package shipping
- * its own declarations resolves to itself. Returning both over-approximates,
- * which is the safe direction — whichever isn't installed drops out. A scoped
- * name mangles as `@scope/pkg` → `@types/scope__pkg`, TypeScript's convention.
- */
-export function typeReferencePackageNames(directive) {
-  const name = packageNameOf(directive);
-  if (!name) return [];
-  const scoped = /^@([^/]+)\/(.+)$/.exec(name);
-  const typesName = scoped
-    ? `@types/${scoped[1]}__${scoped[2]}`
-    : `@types/${name}`;
-  return [name, typesName];
-}
-
-/**
- * Every third-party package name whose declarations a blob of TypeScript source
- * pulls in — via an import of any form, or a triple-slash type reference.
- * Over-approximating is safe (a name absent from every lockfile contributes
- * nothing downstream — `@inspector/core` is a build-time alias, not a package,
- * and drops out that way); under-approximating is not, since a missed package
- * never enters the candidate set and its skew would pass silently.
- */
-export function importedPackageNames(source) {
-  const names = new Set();
-  // (source, readImportFiles, detectJavaScriptImports) — the latter two make it
-  // report `require(…)` and dynamic imports as well as static ones.
-  const { importedFiles, typeReferenceDirectives } =
-    typescript().preProcessFile(source, true, true);
-  for (const { fileName } of importedFiles) {
-    const name = packageNameOf(fileName);
-    if (name) names.add(name);
-  }
-  for (const { fileName } of typeReferenceDirectives ?? [])
-    for (const name of typeReferencePackageNames(fileName)) names.add(name);
-  return names;
-}
+//   • `jose` and `@modelcontextprotocol/ext-apps` are declared only at the root
+//     since #1970, so neither can skew at all now.
+//   • `react` ships no types of its own, so what lands in a program is
+//     `@types/react`, and it lands from a single install; the `react` package's
+//     own files never enter one. `hono` likewise resolves from one install per
+//     program (`clients/web` in web's node project).
+//
+// If any of them ever does reach one program from two installs, the guard fails
+// and forces the decision then — with the actual version pair in hand, which is
+// a better basis for a rationale than a pre-emptive entry.
+const TOLERATED_SKEW = new Map();
 
 /**
  * Top-level installed versions of every package in a parsed lockfile, keyed by
  * package name. Only `node_modules/<pkg>` entries count — a *nested*
  * `node_modules/a/node_modules/b` is npm resolving a transitive conflict inside
- * one install, which is routine and not what this guard is about.
+ * one install, which is routine and not what this guard is about (the same
+ * asymmetry `classifyModulePath` applies to a resolved path).
  */
 export function topLevelLockVersions(lock) {
   const versions = new Map();
@@ -311,84 +190,124 @@ export function partitionSkew(skewed, tolerated = TOLERATED_SKEW) {
   };
 }
 
-// The TypeScript extensions the shared trees can hold. Deliberately the same
-// four `verify:format-coverage` and `verify:typecheck-coverage` gate on: a
-// `.mts`/`.cts` under `core/` or `test-servers/src` is typechecked like any
-// other source, so its imports must reach the candidate set too. None exist
-// under those trees today, which is exactly why omitting them would go
-// unnoticed until a new shared dependency arrived through one and skewed.
-const SOURCE_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts"];
-
 /**
- * Whether a repo-relative path is shared first-party TypeScript — under one of
- * the shared trees, or one of the individually-named shared files.
+ * The tsconfig projects whose programs a client contributes, from its own
+ * `package.json` scripts and its root `tsconfig.json` `references` — the same
+ * two enrollment paths `verify:typecheck-coverage` uses, so the two guards
+ * measure the same programs.
+ *
+ * A `neutered` project (its `typecheck` command carries `--noCheck` /
+ * `--listFilesOnly`) counts here even though its sibling guard rejects it:
+ * whether that pass type-checks is that guard's question, while this one only
+ * asks what the program *resolves*, and a program still resolves its imports
+ * either way. Dropping them would shrink what this guard measures on the
+ * strength of a defect the other guard is already failing on.
  */
-export function isSharedSourceFile(file) {
-  if (SHARED_SOURCE_FILES.includes(file)) return true;
-  if (!SOURCE_EXTENSIONS.some((ext) => file.endsWith(ext))) return false;
-  // Anchored on a path boundary so a sibling whose name merely starts with a
-  // shared dir (`core-internal/`, `test-servers/src-legacy/`) isn't swept in.
-  return SHARED_SOURCE_DIRS.some((dir) => file.startsWith(`${dir}/`));
+export function clientProjects(scripts, references) {
+  if (typeof scripts?.typecheck === "string") {
+    const { projects, neutered } = typecheckProjects(scripts);
+    return [...projects, ...neutered.map((n) => n.project)];
+  }
+  return references;
 }
 
 /**
- * Which configured shared sources contributed no file to `files`. Each dir and
- * each individually-named file must be represented; an aggregate count can't
- * see one of them going missing, because the others keep the total nonzero.
+ * The `clients/*` directories that are real installs — one with a
+ * `package.json`. Enrolment is by manifest, NOT by the presence of a lockfile
+ * (Copilot, #1962): filtering on the lockfile made a missing one silently drop
+ * that install from the comparison.
  */
-export function sourcesWithNoFiles(
-  files,
-  dirs = SHARED_SOURCE_DIRS,
-  named = SHARED_SOURCE_FILES,
-) {
-  const missingDirs = dirs.filter(
-    (dir) => !files.some((f) => f.startsWith(`${dir}/`)),
-  );
-  const missingNamed = named.filter((name) => !files.includes(name));
-  return [...missingDirs, ...missingNamed];
-}
-
-/** Tracked TypeScript files under the shared first-party source trees. */
-function sharedSourceFiles() {
-  const out = execFileSync(
-    "git",
-    [
-      "ls-files",
-      "--",
-      ...SHARED_SOURCE_DIRS.map((d) => `${d}/**`),
-      ...SHARED_SOURCE_FILES,
-    ],
-    { cwd: repoRoot, encoding: "utf8" },
-  );
-  return out.split("\n").filter(isSharedSourceFile);
+function clientDirs() {
+  const dir = path.join(repoRoot, "clients");
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.isDirectory())
+    .map((e) => `clients/${e.name}`)
+    .filter((rel) => existsSync(path.join(repoRoot, rel, "package.json")))
+    .sort();
 }
 
 /**
- * The installs to compare: the repo root plus every `clients/*` that carries a
- * lockfile. Discovered from disk rather than listed, so a new client is covered
- * without editing this guard (the same enrollment style as
- * `verify:typecheck-coverage`).
+ * The installs to compare: the repo root plus every `clients/*` install.
+ * Discovered from disk rather than listed, so a new client is covered without
+ * editing this guard (the same enrollment style as `verify:typecheck-coverage`).
+ * The root is always enrolled: it is this repo, so its manifest is a given.
  */
 function installDirs() {
-  const clientsDir = path.join(repoRoot, "clients");
-  const clients = existsSync(clientsDir)
-    ? readdirSync(clientsDir, { withFileTypes: true })
-        .filter((e) => e.isDirectory())
-        .map((e) => `clients/${e.name}`)
-        .sort()
-    : [];
-  // Enrolment is by `package.json` — an install we are meant to compare —
-  // NOT by the presence of a lockfile (Copilot, #1962). Filtering on the
-  // lockfile made a missing one silently drop that install from the
-  // comparison; for the root, the install every shared source resolves from,
-  // that meant the guard could report success from client locks alone. A
-  // missing lockfile is now a loud failure in `main`, not an absent row. The
-  // root is always enrolled: it is this repo, so its manifest is a given.
-  return ["."].concat(
-    clients.filter((dir) =>
-      existsSync(path.join(repoRoot, dir, "package.json")),
-    ),
-  );
+  return ["."].concat(clientDirs());
+}
+
+/**
+ * List every client program and reduce it to the packages that reach one program
+ * from two installs. Returns `{ found, programs, problems }` — `found` is the
+ * {@link crossInstallPackages} map, `programs` the labels listed (for the
+ * success line), `problems` any reason the measurement itself can't be trusted.
+ *
+ * A program that resolves NO installed file at all is a problem, not an empty
+ * result: every real program pulls in at least the toolchain's own `.d.ts` from
+ * some `node_modules`, so an empty listing means `tsc` never ran (a missing
+ * install) or the config is broken. Treating it as "no candidates here" is the
+ * gate failing open.
+ */
+function deriveCandidates() {
+  const problems = [];
+  const programs = [];
+  for (const clientDir of clientDirs()) {
+    let scripts;
+    try {
+      scripts = JSON.parse(
+        readFileSync(path.join(repoRoot, clientDir, "package.json"), "utf8"),
+      ).scripts;
+    } catch (cause) {
+      throw new Error(
+        `verify:dep-lockstep — could not parse ${clientDir}/package.json.`,
+        { cause },
+      );
+    }
+    const projects = clientProjects(
+      scripts,
+      clientTsconfigReferences(clientDir),
+    );
+    if (projects.length === 0) {
+      problems.push(
+        `${clientDir}: names no tsconfig project (no \`typecheck\` script, no \`tsconfig.json\` references) — none of its programs is measured.`,
+      );
+      continue;
+    }
+    const leaves = new Set();
+    for (const project of projects)
+      for (const leaf of resolveLeafProjects(clientDir, project))
+        leaves.add(leaf);
+    for (const leaf of leaves) {
+      // A failed config is not a program: tsc still prints a file list, but it
+      // is whatever its fallback resolved rather than what the project declares,
+      // so measuring it would narrow the candidate set for a reason that has
+      // nothing to do with the dependency tree.
+      const error = projectListingError(clientDir, leaf);
+      if (error) {
+        problems.push(
+          `${clientDir}: \`tsc -p ${leaf} --listFilesOnly\` exited non-zero — ${error.split("\n")[0]}`,
+        );
+        continue;
+      }
+      const files = projectPackageFiles(clientDir, leaf);
+      if (files.size === 0) {
+        problems.push(
+          `${clientDir}: \`tsc -p ${leaf} --listFilesOnly\` resolved no installed file — the program could not be listed.`,
+        );
+        continue;
+      }
+      programs.push({ label: `${clientDir}/${leaf}`, files });
+    }
+  }
+  // No program at all means the enumeration itself broke (a moved `clients/`
+  // dir), not that there is nothing to check — and an empty candidate set from a
+  // broken enumeration is indistinguishable from a clean bill of health.
+  if (programs.length === 0 && problems.length === 0)
+    problems.push(
+      "found no client program to measure — every `clients/*` install must contribute at least one tsconfig project.",
+    );
+  return { found: crossInstallPackages(programs), programs, problems };
 }
 
 /**
@@ -411,29 +330,20 @@ export function main() {
     process.exit(1);
   }
 
-  const files = sharedSourceFiles();
-  // Per-source, not an aggregate count (Copilot, #1962): `vitest.shared.mts`
-  // alone keeps the total nonzero, so a moved or renamed `core/` would leave
-  // the guard checking a near-empty candidate set and passing. Every configured
-  // source must contribute, or the enumeration is broken.
-  const empty = sourcesWithNoFiles(files);
-  if (empty.length > 0) {
+  const { found, programs, problems } = deriveCandidates();
+  if (problems.length > 0) {
     console.error(
-      `verify:dep-lockstep — ${empty.length} configured shared source(s) matched no tracked file:\n`,
+      `verify:dep-lockstep — ${problems.length} program(s) could not be measured:\n`,
     );
-    for (const source of empty) console.error(`  ${source}`);
+    for (const problem of problems) console.error(`  ${problem}`);
     console.error(
-      "\nThe guard would derive its candidates from an incomplete set and pass on skew it should catch." +
-        "\nA path was moved or renamed — fix SHARED_SOURCE_DIRS / SHARED_SOURCE_FILES in this file.",
+      "\nThe candidate set is derived from what each `tsc` program resolves, so an unmeasured program" +
+        "\nmeans real skew could pass unseen. Run `npm install` at the repo root (the postinstall cascade" +
+        "\ninstalls each client), and see `verify:typecheck-coverage` for the tsconfig-project enrollment rules.",
     );
     process.exit(1);
   }
-
-  const candidates = new Set();
-  for (const file of files) {
-    const source = readFileSync(path.join(repoRoot, file), "utf8");
-    for (const name of importedPackageNames(source)) candidates.add(name);
-  }
+  const candidates = new Set(found.keys());
 
   const dirs = installDirs();
 
@@ -510,12 +420,15 @@ export function main() {
       );
       for (const { dir, version } of holders)
         console.error(`    ${version}  (${dir})`);
+      // Which program saw both copies is the whole reason the package is a
+      // candidate — without it the reader has no way to check the claim.
+      for (const label of [...found.get(name).programs].sort())
+        console.error(`    seen in ${label}`);
     }
-    const shared = [...SHARED_SOURCE_DIRS, ...SHARED_SOURCE_FILES].join(", ");
     console.error(
-      "\nThese packages' types are compiled into a single `tsc` program from two installs" +
-        `\n(${shared} resolve from the root, a client's own sources from the client),` +
-        "\nso a version skew makes TypeScript relate two structurally-distinct copies of the same" +
+      "\nEach of these reaches a single `tsc` program from two installs (a client's own sources resolve" +
+        "\nfrom the client install, the shared `core/` + `test-servers/src` they pull in resolve from the" +
+        "\nroot), so a version skew makes TypeScript relate two structurally-distinct copies of the same" +
         "\ntype. For a recursive-generic surface like zod that is what exhausted the tsc heap in #1896.",
     );
     console.error(
@@ -534,7 +447,8 @@ export function main() {
 
   const note = ignored.length > 0 ? `, ${ignored.length} tolerated` : "";
   console.log(
-    `verify:dep-lockstep — OK: ${candidates.size} install-crossing dependencies agree across ${installs.length} installs${note}.`,
+    `verify:dep-lockstep — OK: ${candidates.size} install-crossing dependencies agree across ${installs.length} installs${note} ` +
+      `(derived from ${programs.length} tsc programs).`,
   );
 }
 
