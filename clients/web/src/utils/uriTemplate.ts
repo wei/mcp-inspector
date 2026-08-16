@@ -18,6 +18,7 @@ export {
   expandUriTemplate,
   hasRequiredValues,
   parseUriTemplate,
+  requiredGroups,
   templateVariables,
 } from "@inspector/core/mcp/uriTemplate.js";
 export type {

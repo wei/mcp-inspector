@@ -95,21 +95,17 @@ export interface TemplateVariable {
   /** The operator of the expression the variable was first seen in. */
   operator: string;
   /**
-   * True when the expression this variable belongs to cannot be omitted
-   * without changing the URI's structure — see {@link OMITTABLE_OPERATORS}.
+   * True when this variable appears in at least one expression that cannot be
+   * omitted without changing the URI's structure — see
+   * {@link OMITTABLE_OPERATORS}. Drives the form's "Optional" marker.
    *
-   * Note this is a property of the *expression*, not of the single variable:
-   * RFC 6570 drops undefined names from a multi-name expression, so `{a,b}`
-   * with only `a` filled expands to `a`'s value. Use {@link hasRequiredValues}
-   * rather than testing every required variable individually, or a form will
-   * refuse input the expander would have accepted.
+   * It does **not** mean "the user must fill this field in". Requiredness is a
+   * property of the *expression*: RFC 6570 drops undefined names from a
+   * multi-name expression, so `{a,b}` with only `a` filled expands to `a`'s
+   * value. Gate submission on {@link hasRequiredValues} over
+   * {@link requiredGroups}, never by testing this flag per variable.
    */
   required: boolean;
-  /**
-   * Every name in the expression this variable belongs to, itself included.
-   * A single-name expression yields a one-element array.
-   */
-  groupNames: string[];
 }
 
 /** Parses one varspec (`id`, `id*`, `id:3`) into a name and optional prefix. */
@@ -198,12 +194,7 @@ export function templateVariables(uriTemplate: string): TemplateVariable[] {
       if (existing) {
         existing.required = existing.required || required;
       } else {
-        byName.set(name, {
-          name,
-          operator: part.operator,
-          required,
-          groupNames: part.names,
-        });
+        byName.set(name, { name, operator: part.operator, required });
       }
     }
   }
@@ -212,21 +203,39 @@ export function templateVariables(uriTemplate: string): TemplateVariable[] {
 }
 
 /**
- * Whether `values` supplies everything expansion structurally needs.
+ * The variable names of each expression that cannot be omitted, in template
+ * order — one entry per expression, not per variable.
  *
- * A required *expression* is satisfied by any one of its names having a value,
- * because RFC 6570 drops the undefined ones — `{a,b}` with only `a` filled
- * expands to `a`'s value, which the SDK does too. Testing each required
- * variable individually would block that valid input.
+ * This is deliberately *not* folded onto {@link TemplateVariable}. A name can
+ * appear in several expressions with different operators, and each required
+ * expression has to be satisfied on its own: in `x{?a}{?b}{a,b}` the only
+ * required expression is `{a,b}`, which either `a` or `b` satisfies (the SDK
+ * expands that template with just `a` to `x?a=11`), while a per-variable model
+ * that kept only the first occurrence's group would mark both names required
+ * with singleton groups and refuse it. And in `{a,b}{a,c}` — two required
+ * expressions sharing `a` — filling `b` and `c` satisfies both, which no
+ * per-variable flag can express at all.
+ */
+export function requiredGroups(uriTemplate: string): string[][] {
+  const groups: string[][] = [];
+  for (const part of parseUriTemplate(uriTemplate)) {
+    if (part.kind !== "expression") continue;
+    if (OMITTABLE_OPERATORS.has(part.operator)) continue;
+    groups.push(part.names);
+  }
+  return groups;
+}
+
+/**
+ * Whether `values` supplies everything expansion structurally needs: every
+ * required expression has at least one of its names filled in.
  */
 export function hasRequiredValues(
-  variables: TemplateVariable[],
+  groups: string[][],
   values: Record<string, string>,
 ): boolean {
-  return variables.every(
-    (variable) =>
-      !variable.required ||
-      variable.groupNames.some((name) => (values[name] ?? "").length > 0),
+  return groups.every((names) =>
+    names.some((name) => (values[name] ?? "").length > 0),
   );
 }
 
@@ -243,10 +252,45 @@ export function definedValues(
   );
 }
 
-/** The SDK's `encodeValue`: reserved characters survive under `+` and `#`. */
+/**
+ * The characters RFC 6570 leaves alone under the `+` and `#` operators:
+ * RFC 3986 *unreserved* plus *reserved* (gen-delims and sub-delims).
+ */
+const ALLOW_RESERVED = /[^A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=]/gu;
+
+/**
+ * The `allow-reserved` value encoding of RFC 6570 §3.2.1, used by `+` and `#`.
+ *
+ * The SDK reaches for `encodeURI` here, which is close but wrong twice over,
+ * and both cases corrupt the URI rather than merely over-escaping it:
+ *
+ * - It escapes `[` and `]`, which are *reserved* and must survive — so an IPv6
+ *   literal `[::1]` becomes `%5B::1%5D`.
+ * - It escapes `%`, so an already-encoded value is double-encoded: `%2F`
+ *   becomes `%252F`, and the server sees a literal "%2F" rather than a slash.
+ *
+ * The spec instead keeps existing pct-triplets intact, which is what the split
+ * below does: odd chunks are whole `%XX` triplets and pass through untouched,
+ * even chunks are scanned for anything outside the allowed set. A lone `%` is
+ * not a triplet, so it lands in an even chunk and is correctly encoded to
+ * `%25`. The `u` flag makes the class match by code point, so an astral
+ * character is handed to `encodeURIComponent` whole rather than as surrogates.
+ */
+function encodeAllowReserved(value: string): string {
+  return value
+    .split(/(%[0-9A-Fa-f]{2})/g)
+    .map((chunk, index) =>
+      index % 2 === 1
+        ? chunk
+        : chunk.replace(ALLOW_RESERVED, (char) => encodeURIComponent(char)),
+    )
+    .join("");
+}
+
+/** Encodes one value for its operator: reserved characters survive `+` and `#`. */
 function encodeValue(value: string, operator: string): string {
   return operator === "+" || operator === "#"
-    ? encodeURI(value)
+    ? encodeAllowReserved(value)
     : encodeURIComponent(value);
 }
 
@@ -278,6 +322,12 @@ function needsOwnExpansion(part: TemplatePart): boolean {
       part.operator !== "&") ||
     // The SDK has no `;` operator at all.
     part.operator === ";" ||
+    // The SDK encodes `+`/`#` values with `encodeURI`, which mangles reserved
+    // `[`/`]` and double-encodes existing pct-triplets — see
+    // `encodeAllowReserved`. Taken over even for a single name so both paths
+    // agree on what these operators mean.
+    part.operator === "+" ||
+    part.operator === "#" ||
     // The SDK folds everything after a `:` into the variable name. Keyed on the
     // raw source rather than on a parsed `maxLength` so a *malformed* modifier
     // (`{id:}`, `{id:abc}`) is caught too: this module drops the modifier and

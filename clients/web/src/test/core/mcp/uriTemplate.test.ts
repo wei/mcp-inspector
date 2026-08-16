@@ -4,6 +4,7 @@ import {
   expandUriTemplateStrict,
   hasRequiredValues,
   parseUriTemplate,
+  requiredGroups,
   templateVariables,
 } from "@inspector/core/mcp/uriTemplate.js";
 
@@ -48,13 +49,13 @@ describe("parseUriTemplate", () => {
 describe("templateVariables", () => {
   it("finds a simple variable and marks it required", () => {
     expect(templateVariables("foobar://events/{topic}")).toEqual([
-      { name: "topic", operator: "", required: true, groupNames: ["topic"] },
+      { name: "topic", operator: "", required: true },
     ]);
   });
 
   it("finds a query variable the old `\\{(\\w+)\\}` regex could not see", () => {
     expect(templateVariables("foobar://events{?topic}")).toEqual([
-      { name: "topic", operator: "?", required: false, groupNames: ["topic"] },
+      { name: "topic", operator: "?", required: false },
     ]);
   });
 
@@ -76,7 +77,7 @@ describe("templateVariables", () => {
 
   it("deduplicates a repeated name and keeps it required if any use is", () => {
     expect(templateVariables("x://{?id}/{id}")).toEqual([
-      { name: "id", operator: "?", required: true, groupNames: ["id"] },
+      { name: "id", operator: "?", required: true },
     ]);
   });
 
@@ -204,7 +205,7 @@ describe("varspec modifiers", () => {
   // user cannot usefully fill.
   it("parses a prefix modifier off the variable name", () => {
     expect(templateVariables("x://a/{id:3}")).toEqual([
-      { name: "id", operator: "", required: true, groupNames: ["id"] },
+      { name: "id", operator: "", required: true },
     ]);
   });
 
@@ -243,7 +244,7 @@ describe("the ; (path-parameter) operator", () => {
   // variable named ";id" and expands to "".
   it("is recognised as an operator, not part of the name", () => {
     expect(templateVariables("x://a{;id}")).toEqual([
-      { name: "id", operator: ";", required: false, groupNames: ["id"] },
+      { name: "id", operator: ";", required: false },
     ]);
   });
 
@@ -266,38 +267,66 @@ describe("the ; (path-parameter) operator", () => {
   });
 });
 
-describe("hasRequiredValues", () => {
+describe("requiredGroups / hasRequiredValues", () => {
   // A required *expression* is satisfied by any one of its names, because
   // RFC 6570 drops the undefined ones -- verified against the SDK:
   // `x://{a,b}` with only `a` expands to "x://only-a".
   it("accepts a multi-name expression with only one name filled", () => {
-    const vars = templateVariables("x://{a,b}");
-    expect(hasRequiredValues(vars, { a: "only-a", b: "" })).toBe(true);
+    const groups = requiredGroups("x://{a,b}");
+    expect(groups).toEqual([["a", "b"]]);
+    expect(hasRequiredValues(groups, { a: "only-a", b: "" })).toBe(true);
     expect(expandUriTemplate("x://{a,b}", { a: "only-a", b: "" })).toBe(
       "x://only-a",
     );
   });
 
   it("rejects a multi-name expression with nothing filled", () => {
-    const vars = templateVariables("x://{a,b}");
-    expect(hasRequiredValues(vars, { a: "", b: "" })).toBe(false);
+    expect(
+      hasRequiredValues(requiredGroups("x://{a,b}"), { a: "", b: "" }),
+    ).toBe(false);
   });
 
   it("still requires a lone required variable", () => {
-    const vars = templateVariables("file:///users/{userId}/profile");
-    expect(hasRequiredValues(vars, { userId: "" })).toBe(false);
-    expect(hasRequiredValues(vars, { userId: "alice" })).toBe(true);
+    const groups = requiredGroups("file:///users/{userId}/profile");
+    expect(hasRequiredValues(groups, { userId: "" })).toBe(false);
+    expect(hasRequiredValues(groups, { userId: "alice" })).toBe(true);
   });
 
   it("never blocks on an omittable expression", () => {
-    const vars = templateVariables("foobar://events{?topic}");
-    expect(hasRequiredValues(vars, { topic: "" })).toBe(true);
+    expect(requiredGroups("foobar://events{?topic}")).toEqual([]);
+    expect(
+      hasRequiredValues(requiredGroups("foobar://events{?topic}"), {
+        topic: "",
+      }),
+    ).toBe(true);
   });
 
   it("is satisfied by a template with no variables at all", () => {
-    expect(hasRequiredValues(templateVariables("file:///static.txt"), {})).toBe(
+    expect(hasRequiredValues(requiredGroups("file:///static.txt"), {})).toBe(
       true,
     );
+  });
+
+  it("tracks a name that recurs under a different operator", () => {
+    // A per-variable model keeping only the first occurrence's group would
+    // mark both names required with singleton groups and refuse this input;
+    // the SDK expands the same template with just `a` to "x?a=11".
+    const groups = requiredGroups("x{?a}{?b}{a,b}");
+    expect(groups).toEqual([["a", "b"]]);
+    expect(hasRequiredValues(groups, { a: "1", b: "" })).toBe(true);
+    expect(expandUriTemplate("x{?a}{?b}{a,b}", { a: "1" })).toBe("x?a=11");
+  });
+
+  it("satisfies two required expressions sharing a name, from the others", () => {
+    // `{a,b}{a,c}`: filling only b and c satisfies both groups. No
+    // per-variable flag can express this, which is why groups are separate.
+    const groups = requiredGroups("x://{a,b}{a,c}");
+    expect(groups).toEqual([
+      ["a", "b"],
+      ["a", "c"],
+    ]);
+    expect(hasRequiredValues(groups, { b: "B", c: "C" })).toBe(true);
+    expect(hasRequiredValues(groups, { b: "B" })).toBe(false);
   });
 });
 
@@ -351,6 +380,55 @@ describe("strict vs lenient expansion", () => {
     const values = { topic: "foo/bar" };
     expect(expandUriTemplateStrict(template, values)).toBe(
       expandUriTemplate(template, values),
+    );
+  });
+});
+
+describe("allow-reserved encoding under + and #", () => {
+  // The SDK uses `encodeURI` for these operators, which corrupts two classes
+  // of value rather than merely over-escaping: measured, encodeURI("[::1]")
+  // is "%5B::1%5D" and encodeURI("%2F") is "%252F".
+  it.each(["+", "#"])("leaves reserved [ and ] intact under %s", (operator) => {
+    const prefix = operator === "#" ? "#" : "";
+    expect(expandUriTemplate(`x://{${operator}v}`, { v: "[::1]" })).toBe(
+      `x://${prefix}[::1]`,
+    );
+  });
+
+  it.each(["+", "#"])(
+    "does not double-encode an existing pct-triplet under %s",
+    (operator) => {
+      const prefix = operator === "#" ? "#" : "";
+      expect(expandUriTemplate(`x://{${operator}v}`, { v: "a%2Fb" })).toBe(
+        `x://${prefix}a%2Fb`,
+      );
+    },
+  );
+
+  it("still encodes a lone % that is not a triplet", () => {
+    expect(expandUriTemplate("x://{+v}", { v: "100%" })).toBe("x://100%25");
+  });
+
+  it("still encodes characters outside the allowed set", () => {
+    expect(expandUriTemplate("x://{+v}", { v: "a b" })).toBe("x://a%20b");
+  });
+
+  it("encodes an astral character whole rather than as surrogates", () => {
+    expect(expandUriTemplate("x://{+v}", { v: "\u{1F600}" })).toBe(
+      `x://${encodeURIComponent("\u{1F600}")}`,
+    );
+  });
+
+  it("applies the same encoding in a multi-name + expression", () => {
+    expect(expandUriTemplate("x://{+a,b}", { a: "[::1]", b: "%2F" })).toBe(
+      "x://[::1],%2F",
+    );
+  });
+
+  it("still percent-encodes reserved characters under the simple operator", () => {
+    // Only + and # allow reserved through; the default path is unchanged.
+    expect(expandUriTemplate("x://{v}", { v: "[::1]" })).toBe(
+      "x://%5B%3A%3A1%5D",
     );
   });
 });

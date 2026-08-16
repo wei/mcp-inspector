@@ -82,11 +82,15 @@ v2/main/
 │   │                                   #   containing any of the three shapes it does not:
 │   │                                   #   `{a,b}` (raw-joined, unencoded, prefix dropped),
 │   │                                   #   `{;id}` (operator absent from its list), and
-│   │                                   #   `{id:3}` (prefix modifier folded into the name) —
-│   │                                   #   the last two would render form fields literally
+│   │                                   #   `{id:3}` (prefix modifier folded into the name),
+│   │                                   #   and `{+v}`/`{#v}` (encodeURI mangles reserved
+│   │                                   #   `[`/`]` and double-encodes pct-triplets). The `;`
+│   │                                   #   and `:N` cases would render form fields literally
 │   │                                   #   labelled `;id` / `id:3`. Requiredness is per
-│   │                                   #   EXPRESSION, not per variable (hasRequiredValues):
-│   │                                   #   `{a,b}` with only `a` filled is expandable — #1919;
+│   │                                   #   EXPRESSION, not per variable — requiredGroups +
+│   │                                   #   hasRequiredValues: `{a,b}` with only `a` filled is
+│   │                                   #   expandable, and a name recurring across
+│   │                                   #   expressions needs each group checked — #1919;
 │   │                                   #   modernTaskSchemas.ts: SEP-2663 modern Tasks
 │   │                                   #   extension wire schemas + normalize/handle helpers,
 │   │                                   #   used by the raw-wire tasks/* channel — #1631;

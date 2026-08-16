@@ -251,13 +251,16 @@ Open the Resources tab and pick **events_by_topic**, then enter `foo/bar`. The r
 
 All three clients expand through one shared helper, [`core/mcp/uriTemplate.ts`](./core/mcp/uriTemplate.ts) — the web Resources form directly, the TUI and CLI via `InspectorClient.readResourceFromTemplate` — so they cannot disagree about what a template means. It delegates to the SDK's `UriTemplate` for every expression the SDK handles correctly, and takes over any template containing one of the three shapes it does not (each measured against the pinned SDK, not inferred):
 
-| Shape | SDK `variableNames` | SDK expansion | Correct |
-| --- | --- | --- | --- |
-| `{a,b}` | `["a","b"]` | `foo/bar,q` — unencoded, operator prefix dropped | `foo%2Fbar,q` |
-| `{;id}` | `[";id"]` | `""` — the `;` operator is not in its list | `;id=7` |
-| `{id:3}` | `["id:3"]` | `""` — the prefix modifier is folded into the name | `abc` |
+| Shape | SDK behavior | Correct |
+| --- | --- | --- |
+| `{a,b}` | `foo/bar,q` — raw-joined, unencoded, operator prefix dropped | `foo%2Fbar,q` |
+| `{;id}` | `""` — the `;` operator is not in its list, so the variable parses as `;id` | `;id=7` |
+| `{id:3}` | `""` — the prefix modifier is folded into the name, giving `id:3` | `abc` |
+| `{+v}` / `{#v}` | `encodeURI` mangles reserved `[`/`]` (`[::1]` → `%5B::1%5D`) and double-encodes pct-triplets (`%2F` → `%252F`) | `[::1]`, `%2F` |
 
-The last two matter beyond the URI: a form has to *name* the variables it asks the user to fill, so on the SDK's parse it would render fields literally labelled `;id` and `id:3`. Takeover is per **template**, not per expression, so the cross-expression `?`-to-`&` rewrite always sees every expression that actually emitted.
+The `;` and `:3` rows matter beyond the URI: a form has to *name* the variables it asks the user to fill, so on the SDK's parse it would render fields literally labelled `;id` and `id:3`. The `+`/`#` row is silent corruption rather than over-escaping — an IPv6 literal or an already-encoded path arrives at the server altered. Takeover is per **template**, not per expression, so the cross-expression `?`-to-`&` rewrite always sees every expression that actually emitted.
+
+Requiredness is likewise a property of the **expression**, not the variable: RFC 6570 drops undefined names from a multi-name expression, so `{a,b}` with only `a` filled is expandable and the form must not block it. `requiredGroups` returns one entry per non-omittable expression and `hasRequiredValues` asks that each be satisfied by any one of its names — which a per-variable flag cannot express once a name recurs across expressions.
 
 One consequence worth knowing when writing a test server: the SDK's **matcher** has the mirrored gaps (`partToRegExp` emits a single capture for `{a,b}` and knows no `;`), so an SDK-backed server cannot round-trip those templates whatever the client sends. Emitting a spec-correct URI is the half the client controls; the unit tests cover those shapes directly rather than through a showcase server.
 

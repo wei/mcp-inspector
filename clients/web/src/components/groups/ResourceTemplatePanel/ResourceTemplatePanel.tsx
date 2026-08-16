@@ -18,6 +18,7 @@ import {
   expandUriTemplate,
   hasRequiredValues,
   previewUriTemplate,
+  requiredGroups,
   templateVariables,
 } from "../../../utils/uriTemplate";
 
@@ -96,6 +97,10 @@ export function ResourceTemplatePanel({
     () => declaredVariables.map((v) => v.name),
     [declaredVariables],
   );
+  // The names of each expression that cannot be omitted. Kept separate from
+  // `declaredVariables` (which is deduplicated for rendering) because each
+  // required expression has to be satisfied on its own — see `requiredGroups`.
+  const groups = useMemo(() => requiredGroups(uriTemplate), [uriTemplate]);
 
   const [variables, setVariables] = useState<Record<string, string>>(() =>
     Object.fromEntries(variableNames.map((n) => [n, ""])),
@@ -221,7 +226,7 @@ export function ResourceTemplatePanel({
   // resource, and RFC 6570 drops the whole expression for it. The rule is
   // per-expression rather than per-variable -- `{a,b}` with only `a` filled
   // expands to `a`'s value -- so it lives in core beside the expander.
-  const canSubmit = hasRequiredValues(declaredVariables, variables);
+  const canSubmit = hasRequiredValues(groups, variables);
 
   function handleSubmit() {
     onReadResource(expandUriTemplate(uriTemplate, variables));
@@ -240,7 +245,7 @@ export function ResourceTemplatePanel({
       </HeaderRow>
       {description && <DescriptionText>{description}</DescriptionText>}
       <Stack gap="sm">
-        {declaredVariables.map(({ name: varName, required, groupNames }) => {
+        {declaredVariables.map(({ name: varName, required }) => {
           /* v8 ignore next -- `?? ""` fallback unreachable: `variables` is seeded with every declared variable, so the key is always present. */
           const fieldValue = variables[varName] ?? "";
           // RFC 6570 omits an undefined variable under a query/path-segment
@@ -248,10 +253,13 @@ export function ResourceTemplatePanel({
           // required multi-name expression no single field is mandatory either
           // -- any one of them satisfies it -- so say which, rather than
           // marking each one required and blocking valid input.
+          const sharedGroup = groups.find(
+            (names) => names.length > 1 && names.includes(varName),
+          );
           const description = !required
             ? "Optional"
-            : groupNames.length > 1
-              ? `Any one of: ${groupNames.join(", ")}`
+            : sharedGroup
+              ? `Any one of: ${sharedGroup.join(", ")}`
               : undefined;
           return useAutocomplete ? (
             <Autocomplete
