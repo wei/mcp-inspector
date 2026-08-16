@@ -12,6 +12,7 @@ import type {
 } from "./composable-test-server.js";
 import {
   createEchoTool,
+  createNullableFieldsTool,
   createGetEnvTool,
   createAddTool,
   createGetSumTool,
@@ -91,6 +92,9 @@ function resolveToolPreset(
   switch (name) {
     case "echo":
       return createEchoTool();
+    case "record_shipment":
+    case "nullable_fields":
+      return createNullableFieldsTool();
     case "get-env":
     case "get_env":
       return createGetEnvTool();
