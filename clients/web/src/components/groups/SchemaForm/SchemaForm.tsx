@@ -207,7 +207,14 @@ interface SchemaJsonFieldProps {
   description?: string;
   withAsterisk: boolean;
   disabled: boolean;
+  /**
+   * The field's own entry in the form's values — **not** run through
+   * `resolveValue`. A draft-holding field is handed the raw value and the
+   * schema default separately; see `defaultValue` for why.
+   */
   value: unknown;
+  /** The schema `default`, used to seed the draft only. See `defaultValue`. */
+  defaultValue: unknown;
   onChange: (value: unknown) => void;
   onValidityChange: DraftValidityReporter;
 }
@@ -244,18 +251,29 @@ interface SchemaJsonFieldProps {
 function SchemaJsonField({
   fieldName,
   value,
+  defaultValue,
   onChange,
   onValidityChange,
   ...inputProps
 }: SchemaJsonFieldProps) {
-  const [draft, setDraft] = useState(() =>
-    value === undefined ? "" : serializeJson(value),
-  );
+  const [draft, setDraft] = useState(() => {
+    const initial = value === undefined ? defaultValue : value;
+    return initial === undefined ? "" : serializeJson(initial);
+  });
 
   // Re-sync only when the parent's value genuinely diverges from what the draft
   // parses to, which leaves an external reset (a cleared form, a loaded
   // example) working while an in-progress `[` — whose parse is `undefined`,
   // matching the `undefined` we just emitted — is left alone.
+  //
+  // The value compared here is the field's *raw* entry, never `resolveValue`'s
+  // default substitution (#2026). Unsendable text reports `undefined`, and a
+  // defaulted field resolves that straight back to its default — a real change
+  // from the previous value, so this would rewrite the draft to the default and
+  // revert the keystroke. Almost every edit passes through an unsendable state,
+  // which made a defaulted array or object argument uneditable. The default
+  // belongs to what the field *opens* with, seeded above, not to what is
+  // re-imposed while it is being typed into.
   useValueChange(value, (next) => {
     if (!isSameJson(parseJsonDraft(draft), next)) {
       setDraft(next === undefined ? "" : serializeJson(next));
@@ -309,7 +327,10 @@ interface SchemaNumberInputProps {
   description?: string;
   withAsterisk: boolean;
   disabled: boolean;
+  /** Raw, not `resolveValue`-substituted — see `SchemaJsonFieldProps.value`. */
   value: number | undefined;
+  /** The schema `default`, used to seed the draft only (#2026). */
+  defaultValue: number | undefined;
   min?: number;
   max?: number;
   allowDecimal: boolean;
@@ -343,12 +364,19 @@ interface SchemaNumberInputProps {
 function SchemaNumberInput({
   fieldName,
   value,
+  defaultValue,
   onChange,
   onValidityChange,
   ...inputProps
 }: SchemaNumberInputProps) {
-  const [draft, setDraft] = useState<string | number>(value ?? "");
+  const [draft, setDraft] = useState<string | number>(
+    value ?? defaultValue ?? "",
+  );
 
+  // Compared against the raw value, never the default-substituted one, for the
+  // reason spelled out on `SchemaJsonField` (#2026): clearing this box reports
+  // no value, which a defaulted field resolved straight back to its default —
+  // so the box refilled itself and the argument could not be emptied.
   useValueChange(value, (next) => {
     if (!Object.is(toNumericValue(draft), next)) {
       setDraft(next ?? "");
@@ -584,7 +612,9 @@ export function SchemaForm({
           description={description}
           withAsterisk={isRequired}
           disabled={disabled}
-          value={rawValue as number | undefined}
+          // Raw and default kept apart, not pre-resolved (#2026).
+          value={values[fieldName] as number | undefined}
+          defaultValue={getDefaultValue(fieldSchema) as number | undefined}
           min={fieldSchema.minimum}
           max={fieldSchema.maximum}
           // An `integer` field rejects the decimal point outright rather than
@@ -692,7 +722,9 @@ export function SchemaForm({
         description={description}
         withAsterisk={isRequired}
         disabled={disabled}
-        value={rawValue}
+        // Raw and default kept apart, not pre-resolved (#2026).
+        value={values[fieldName]}
+        defaultValue={getDefaultValue(fieldSchema)}
         onChange={(val) => handleFieldChange(fieldName, val)}
         onValidityChange={reportFieldValidity}
       />

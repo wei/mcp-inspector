@@ -1648,3 +1648,108 @@ describe("JSON editor escaping (#1853, #1856, #1885)", () => {
     expect(jsonInput.value).not.toContain("\\");
   });
 });
+
+// A schema `default` is what a field *opens* with, not a value re-imposed on
+// every unsendable draft. Unsendable text reports `undefined` by design, and
+// `resolveValue` used to turn that straight back into the default — a real
+// change from the previous value, so the draft/value re-sync rewrote the box
+// and reverted the keystroke. Almost every edit passes through an unsendable
+// state, which left a defaulted array or object argument uneditable.
+describe("SchemaForm defaulted fields (#2026)", () => {
+  function DefaultHarness({
+    schema,
+    initial = {},
+  }: {
+    schema: InspectorFormSchema;
+    initial?: Record<string, unknown>;
+  }) {
+    const [values, setValues] = useState<Record<string, unknown>>(initial);
+    return <SchemaForm schema={schema} values={values} onChange={setValues} />;
+  }
+
+  const arrayWithDefault: InspectorFormSchema = {
+    type: "object",
+    properties: { tags: { type: "array", title: "Tags", default: ["a"] } },
+  };
+
+  it("opens the JSON editor on the schema default", () => {
+    renderWithMantine(<DefaultHarness schema={arrayWithDefault} />);
+    expect((screen.getByLabelText(/Tags/) as HTMLTextAreaElement).value).toBe(
+      '[\n  "a"\n]',
+    );
+  });
+
+  it("keeps a keystroke typed into a defaulted JSON field", async () => {
+    const user = userEvent.setup();
+    // Seeded the way the Tools tab seeds it — from the schema's defaults, as a
+    // separate value than the schema's own. Sharing one reference hid this.
+    renderWithMantine(
+      <DefaultHarness schema={arrayWithDefault} initial={{ tags: ["a"] }} />,
+    );
+
+    const jsonInput = screen.getByLabelText(/Tags/) as HTMLTextAreaElement;
+    await user.click(jsonInput);
+    await user.keyboard("{End}x");
+
+    // The invalid draft is the user's, not the default reasserting itself.
+    expect(jsonInput.value).toBe('[\n  "a"\n]x');
+  });
+
+  it("lets a defaulted JSON field be edited to a new value", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(
+      <DefaultHarness schema={arrayWithDefault} initial={{ tags: ["a"] }} />,
+    );
+
+    const jsonInput = screen.getByLabelText(/Tags/) as HTMLTextAreaElement;
+    await user.clear(jsonInput);
+    await user.type(jsonInput, '[["b"]');
+
+    expect(jsonInput.value).toBe('["b"]');
+    expect(screen.queryByText(/Not valid JSON/)).not.toBeInTheDocument();
+  });
+
+  it("lets a defaulted number field be emptied", async () => {
+    const user = userEvent.setup();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: { n: { type: "integer", title: "N", default: 30 } },
+    };
+    renderWithMantine(<DefaultHarness schema={schema} initial={{ n: 30 }} />);
+
+    const n = screen.getByLabelText(/N/) as HTMLInputElement;
+    expect(n.value).toBe("30");
+
+    await user.click(n);
+    await user.keyboard("{End}{Backspace}{Backspace}");
+
+    // The box stays empty instead of refilling itself with the default.
+    expect(n.value).toBe("");
+  });
+
+  it("still re-syncs a defaulted field when the value changes externally", async () => {
+    function ExternalHarness() {
+      const [values, setValues] = useState<Record<string, unknown>>({
+        tags: ["a"],
+      });
+      return (
+        <>
+          <SchemaForm
+            schema={arrayWithDefault}
+            values={values}
+            onChange={setValues}
+          />
+          <button type="button" onClick={() => setValues({ tags: ["z"] })}>
+            load example
+          </button>
+        </>
+      );
+    }
+    const user = userEvent.setup();
+    renderWithMantine(<ExternalHarness />);
+
+    const jsonInput = screen.getByLabelText(/Tags/) as HTMLTextAreaElement;
+    await user.click(screen.getByRole("button", { name: "load example" }));
+    expect(jsonInput.value).toBe('[\n  "z"\n]');
+  });
+});
