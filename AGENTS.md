@@ -38,7 +38,14 @@ v2/main/
 │   │                                   #   issuerBinding.ts SEP-2352 callback-leg failure
 │   │                                   #   classification — separates a recoverable
 │   │                                   #   "lost authorization state" from a genuine
-│   │                                   #   cross-AS issuer mismatch — #1808)
+│   │                                   #   cross-AS issuer mismatch — #1808;
+│   │                                   #   authorizationParams.ts per-server custom
+│   │                                   #   authorization-request parameters — the
+│   │                                   #   reserved-key list plus the merge applied in
+│   │                                   #   providers.redirectToAuthorization, the only
+│   │                                   #   seam that sees the SDK-built authorize URL;
+│   │                                   #   authorization request only, never the token
+│   │                                   #   request — #2018)
 │   │   ├── browser/                    # Browser-side OAuth (sessionStorage, BrowserNavigation)
 │   │   ├── node/                       # Node-side OAuth (NodeOAuthStorage, OAuthCallbackServer,
 │   │   │                               #   runner-interactive-oauth loopback callback flow)

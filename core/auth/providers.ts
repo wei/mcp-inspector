@@ -11,6 +11,7 @@ import type {
 } from "@modelcontextprotocol/client";
 import type { OAuthStorage, SaveClientInformationOptions } from "./storage.js";
 import { generateOAuthState } from "./utils.js";
+import { applyAuthorizationParams } from "./authorizationParams.js";
 
 /**
  * Redirect URL provider. Returns the redirect URL for OAuth flows.
@@ -96,6 +97,14 @@ export type OAuthProviderConfig = {
   redirectUrlProvider: RedirectUrlProvider;
   navigation: OAuthNavigation;
   clientMetadataUrl?: string;
+  /**
+   * Per-server custom authorization-request parameters (#2018), merged into the
+   * finished authorize URL in {@link BaseOAuthClientProvider.redirectToAuthorization}.
+   * Reserved (protocol-critical) keys are dropped with a warning — see
+   * `authorizationParams.ts`. Authorization request only; the token request is
+   * unaffected.
+   */
+  authorizationParams?: Record<string, string>;
 };
 
 /**
@@ -115,6 +124,8 @@ export class BaseOAuthClientProvider implements OAuthClientProvider {
   protected redirectUrlProvider: RedirectUrlProvider;
   protected navigation: OAuthNavigation;
   public clientMetadataUrl?: string;
+  /** Custom authorization-request parameters (#2018). Authorize URL only. */
+  protected authorizationParams?: Record<string, string>;
 
   constructor(serverUrl: string, oauthConfig: OAuthProviderConfig) {
     this.serverUrl = serverUrl;
@@ -122,6 +133,7 @@ export class BaseOAuthClientProvider implements OAuthClientProvider {
     this.redirectUrlProvider = oauthConfig.redirectUrlProvider;
     this.navigation = oauthConfig.navigation;
     this.clientMetadataUrl = oauthConfig.clientMetadataUrl;
+    this.authorizationParams = oauthConfig.authorizationParams;
   }
 
   /**
@@ -272,6 +284,34 @@ export class BaseOAuthClientProvider implements OAuthClientProvider {
   }
 
   redirectToAuthorization(authorizationUrl: URL): void {
+    // #2018: the SDK builds the authorize URL and offers no hook for extra
+    // parameters, so the per-server ones are merged here — the one seam that
+    // sees the finished URL before navigation. Everything downstream (the
+    // captured URL used by the step-up modal, the event, the navigation) uses
+    // the merged URL so all three agree on what was actually requested.
+    this.performAuthorizationRedirect(
+      applyAuthorizationParams(authorizationUrl, this.authorizationParams),
+    );
+  }
+
+  /**
+   * Redirect to an authorize URL belonging to a **different** authorization
+   * server than the one this provider was configured for, so the per-server
+   * custom parameters (#2018) MUST NOT be applied.
+   *
+   * The only caller is the enterprise-managed (EMA) transport provider, which
+   * discards the resource AS URL and sends the user to the enterprise IdP
+   * instead. Parameters a user configured for their MCP server's authorization
+   * server — a `kc_idp_hint`, an `audience` — are meaningless and potentially
+   * flow-breaking on the IdP's, and appending them there would leak per-server
+   * config across an authorization-server boundary.
+   */
+  redirectToExternalAuthorization(authorizationUrl: URL): void {
+    this.performAuthorizationRedirect(authorizationUrl);
+  }
+
+  /** Capture, announce, and navigate to a finished authorize URL. */
+  private performAuthorizationRedirect(authorizationUrl: URL): void {
     // Capture URL for return value
     this.capturedAuthUrl = authorizationUrl;
 

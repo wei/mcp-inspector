@@ -63,6 +63,7 @@ import { ManagedRequestorTasksState } from "@inspector/core/mcp/state/managedReq
 import { ResourceSubscriptionsState } from "@inspector/core/mcp/state/resourceSubscriptionsState.js";
 import {
   cleanRoots,
+  oauthAuthorizationParamsFromSettings,
   serializeMcpConfig,
 } from "@inspector/core/mcp/serverList.js";
 import type { ClientConfig } from "@inspector/core/client/types.js";
@@ -2311,11 +2312,15 @@ function App() {
               .map((m) => [m.key, m.value]),
           )
         : undefined;
+      const serverAuthorizationParams = savedSettings
+        ? oauthAuthorizationParamsFromSettings(savedSettings)
+        : undefined;
       const oauthFromServer =
         savedSettings &&
         (savedSettings.oauthClientId ||
           savedSettings.oauthClientSecret ||
           savedSettings.oauthScopes ||
+          serverAuthorizationParams ||
           savedSettings.enterpriseManaged)
           ? {
               ...(savedSettings.oauthClientId && {
@@ -2326,6 +2331,9 @@ function App() {
               }),
               ...(savedSettings.oauthScopes && {
                 scope: savedSettings.oauthScopes,
+              }),
+              ...(serverAuthorizationParams && {
+                authorizationParams: serverAuthorizationParams,
               }),
               ...(savedSettings.enterpriseManaged && {
                 enterpriseManaged: true,
