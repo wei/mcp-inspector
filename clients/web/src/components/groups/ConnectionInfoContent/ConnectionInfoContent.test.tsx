@@ -254,7 +254,9 @@ describe("ConnectionInfoContent", () => {
           ...fullResult,
           capabilities: {
             ...fullResult.capabilities,
-            tasks: { list: true, cancel: true },
+            // `ServerTasksCapability`'s sub-capabilities are objects, not
+            // booleans — `{}` is the "supported, no sub-options" shape.
+            tasks: { list: {}, cancel: {} },
           },
         }}
         clientCapabilities={fullClientCaps}
