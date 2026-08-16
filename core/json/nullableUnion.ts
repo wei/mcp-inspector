@@ -206,6 +206,26 @@ function hasOpaqueApplicator(schema: NullableUnionSchema): boolean {
 }
 
 /**
+ * Whether a schema composes further constraints this module cannot evaluate —
+ * {@link hasOpaqueApplicator}, **plus a nested `anyOf`**.
+ *
+ * This is the single test every position uses on a schema that is *not* the
+ * union being recognized: the surviving branch, a null branch, and the
+ * `type: [T, "null"]` schema. Each of those was missed independently at some
+ * point — the guard existed but was spelled out inline and drifted between
+ * sites — so they now share one predicate rather than three conditions that
+ * have to be kept in step.
+ *
+ * A nested `anyOf` matters as much as the others because the hoist *drops* it:
+ * the branch's `anyOf` overwrites the wrapper's in the spread and is then
+ * cleared, so `{ anyOf: [{ type: "string", anyOf: [...] }, { type: "null" }] }`
+ * would otherwise widen into an unconstrained nullable string.
+ */
+function hasUnevaluatedComposition(schema: NullableUnionSchema): boolean {
+  return schema.anyOf !== undefined || hasOpaqueApplicator(schema);
+}
+
+/**
  * What {@link stripNullEnumMembers} concluded about an `enum`.
  *
  * `"only-null"` is a distinct outcome rather than "an empty list" because it
@@ -378,12 +398,12 @@ export function admitsNull(schema: NullableUnionSchema): boolean {
       // const: "x" }` is unsatisfiable, and its own applicators are as opaque
       // here as the wrapper's.
       const branchSchema = branch as NullableUnionSchema;
+      // A branch that names null can still admit nothing: `{ type: "null",
+      // const: "x" }` is unsatisfiable, and a nested union or applicator inside
+      // it is as opaque here as one on the wrapper.
       return (
         !nullExcludedBySiblings(branchSchema) &&
-        !hasOpaqueApplicator(branchSchema) &&
-        // A nested union inside the branch is as opaque as the others: `{ type:
-        // "null", anyOf: [{ type: "string" }] }` names null and admits nothing.
-        branchSchema.anyOf === undefined
+        !hasUnevaluatedComposition(branchSchema)
       );
     }) ?? false
   );
@@ -424,7 +444,14 @@ export function normalizeNullableUnion<T extends NullableUnionSchema>(
 
     // Hoisting would silently drop a wrapper constraint the branch also
     // carries, so decline instead; see `branchDropsWrapperConstraint`.
-    if (nullBranch && branch && !wrapperCarriesConstraints(schema)) {
+    // The wrapper may only carry annotations, and the surviving branch may not
+    // compose anything this module cannot evaluate — the hoist would drop it.
+    if (
+      nullBranch &&
+      branch &&
+      !wrapperCarriesConstraints(schema) &&
+      !hasUnevaluatedComposition(branch as NullableUnionSchema)
+    ) {
       // A branch may carry an `enum` and no `type`; JSON Schema allows that, and
       // an all-string enum is unambiguously a string field. See isStringEnum for
       // why a non-string enum deliberately does not get the same treatment.
@@ -449,8 +476,7 @@ export function normalizeNullableUnion<T extends NullableUnionSchema>(
     // and the renderers ignore the other applicators — so a compound schema
     // like `{ type: ["string", "null"], anyOf: [{ const: "a" }] }` would be
     // widened into an unconstrained string field. Leave it for the JSON editor.
-    schema.anyOf === undefined &&
-    !hasOpaqueApplicator(schema)
+    !hasUnevaluatedComposition(schema)
   ) {
     const type = schema.type.find((member) => member !== "null");
     if (isRenderableType(type)) {

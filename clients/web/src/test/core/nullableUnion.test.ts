@@ -450,6 +450,43 @@ describe("normalizeNullableUnion", () => {
     expect(normalizeNullableUnion(schema)).toBe(schema);
   });
 
+  // The hoist *drops* a nested union: the branch's `anyOf` overwrites the
+  // wrapper's in the spread and is then cleared, so the constraint vanishes and
+  // the field widens into an unconstrained nullable string.
+  it("declines when the surviving branch carries its own anyOf", () => {
+    const schema = {
+      anyOf: [
+        { type: "string", anyOf: [{ const: "a" }] },
+        { type: "null" as const },
+      ],
+    };
+    expect(normalizeNullableUnion(schema)).toBe(schema);
+  });
+
+  it("declines when the surviving branch carries an opaque applicator", () => {
+    const withNot = {
+      anyOf: [
+        { type: "string", not: { const: "a" } },
+        { type: "null" as const },
+      ],
+    };
+    expect(normalizeNullableUnion(withNot)).toBe(withNot);
+    const withAllOf = {
+      anyOf: [
+        { type: "string", allOf: [{ minLength: 2 }] },
+        { type: "null" as const },
+      ],
+    };
+    expect(normalizeNullableUnion(withAllOf)).toBe(withAllOf);
+    const withOneOf = {
+      anyOf: [
+        { type: "string", oneOf: [{ const: "a" }] },
+        { type: "null" as const },
+      ],
+    };
+    expect(normalizeNullableUnion(withOneOf)).toBe(withOneOf);
+  });
+
   it("declines when the wrapper carries an applicator the module cannot read", () => {
     const schema = {
       allOf: [{ minLength: 2 }],
