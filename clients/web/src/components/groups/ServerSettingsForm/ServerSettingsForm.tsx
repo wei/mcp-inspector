@@ -202,6 +202,13 @@ const FieldDescription = Text.withProps({
   c: "dimmed",
 });
 
+// `align="flex-start"` keeps the key/value/remove controls top-aligned when the
+// key input grows an error message, so the row doesn't jump as it appears.
+const AuthorizationParamRow = Group.withProps({
+  grow: true,
+  align: "flex-start",
+});
+
 const ClearStoredOAuthButton = Button.withProps({
   variant: "light",
   color: "red",
@@ -288,7 +295,7 @@ function AuthorizationParamRows({
       {params.map((param, index) => {
         const rowLabel = param.key.trim() || `row ${index + 1}`;
         return (
-          <Group key={index} grow align="flex-start">
+          <AuthorizationParamRow key={index}>
             <ClearableTextInput
               aria-label={`Authorization parameter name, ${rowLabel}`}
               placeholder="Parameter (e.g. kc_idp_hint)"
@@ -324,7 +331,7 @@ function AuthorizationParamRows({
             >
               X
             </RemoveIcon>
-          </Group>
+          </AuthorizationParamRow>
         );
       })}
     </>
