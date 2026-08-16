@@ -379,8 +379,13 @@ function SchemaNumberInput({
   onValidityChange,
   ...inputProps
 }: SchemaNumberInputProps) {
+  // `undefined` means "no value supplied", which is what the default is for.
+  // An explicit `null` is a value — a nullable number the user cleared, or one
+  // the server sent — so it must not be overwritten by a non-null default; it
+  // displays as the empty box `resolveValue` produced before. Hence the
+  // `undefined` test rather than `??`, matching `SchemaJsonField`.
   const [draft, setDraft] = useState<string | number>(
-    value ?? defaultValue ?? "",
+    (value === undefined ? defaultValue : value) ?? "",
   );
 
   // Compared against the raw value, never the default-substituted one, for the

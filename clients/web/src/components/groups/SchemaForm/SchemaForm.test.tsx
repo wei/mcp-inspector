@@ -1742,6 +1742,25 @@ describe("SchemaForm defaulted fields (#2026)", () => {
     expect(n.value).toBe("");
   });
 
+  // An explicit `null` is a value, not an absent one, so a non-null default
+  // must not be substituted for it. Reachable for a nullable number field the
+  // user cleared, or one the server sent as null.
+  it("shows an explicit null as empty, not as the default", () => {
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        n: {
+          title: "N",
+          anyOf: [{ type: "integer" }, { type: "null" }],
+          default: 30,
+        },
+      },
+    };
+    renderWithMantine(<DefaultHarness schema={schema} initial={{ n: null }} />);
+
+    expect((screen.getByLabelText(/^N$/) as HTMLInputElement).value).toBe("");
+  });
+
   it("still re-syncs a defaulted field when the value changes externally", async () => {
     function ExternalHarness() {
       const [values, setValues] = useState<Record<string, unknown>>({
