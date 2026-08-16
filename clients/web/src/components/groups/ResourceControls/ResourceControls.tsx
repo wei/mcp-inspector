@@ -14,6 +14,8 @@ import { isModernEra } from "../../elements/EraBadge/eraUtils";
 import { SubscriptionStreamBadge } from "../../elements/SubscriptionStreamBadge/SubscriptionStreamBadge";
 import { ListChangedIndicator } from "../../elements/ListChangedIndicator/ListChangedIndicator";
 import { ListLoadError } from "../../elements/ListLoadError/ListLoadError";
+import { MalformedItemsWarning } from "../../elements/MalformedItemsWarning/MalformedItemsWarning";
+import type { MalformedListItem } from "@inspector/core/mcp";
 import {
   ListPaginationControls,
   type ListPaginationControlsProps,
@@ -73,6 +75,12 @@ export interface ResourceControlsProps {
    * A failed list load, surfaced above the list instead of leaving the panel
    * empty (which reads as "this server has none") (#1953).
    */
+  /**
+   * Entries the client dropped from `resources/list` or
+   * `resources/templates/list` because they failed the MCP schema. Rendered as
+   * a warning above the list, which still shows the rest (#1909).
+   */
+  malformedListItems?: MalformedListItem[];
   loadError?: Error | null;
   /** Pagination controls for the Resources list (#1721). */
   pagination: ListPaginationControlsProps;
@@ -117,6 +125,7 @@ export function ResourceControls({
   openSections: controlledOpenSections,
   listChanged,
   onRefreshList,
+  malformedListItems = [],
   loadError,
   pagination,
   onSearchChange,
@@ -247,6 +256,16 @@ export function ResourceControls({
         error={loadError}
         what="resources"
         onRetry={onRefreshList}
+      />
+      <MalformedItemsWarning
+        items={malformedListItems}
+        method="resources/list"
+        what="resources"
+      />
+      <MalformedItemsWarning
+        items={malformedListItems}
+        method="resources/templates/list"
+        what="resource templates"
       />
       {/* Stays inline: Accordion is a compound, `multiple`-discriminated generic,
           so `.withProps({ multiple: true, ... })` loses its JSX call signature

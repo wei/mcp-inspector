@@ -164,6 +164,7 @@ import {
 import { buildExportFilename, downloadJsonFile } from "./lib/downloadFile";
 import { INSPECTOR_SERVERS_TAB } from "./utils/inspectorTabs";
 import { enrichProtocolEntries } from "./utils/correlateTransportErrors";
+import { visibleMalformedListItems } from "./utils/malformedListReport";
 import {
   parseDeepLink,
   deepLinkConfigEquals,
@@ -991,6 +992,7 @@ function App() {
     protocolEra,
     discoverResult,
     excludedTools,
+    malformedListItems,
     lastError,
   } = useInspectorClient(inspectorClient);
   const {
@@ -1056,6 +1058,14 @@ function App() {
     setPaginatedListsOverride(null);
   }, [persistedPaginatedLists, activeServerId]);
   const paginatedLists = paginatedListsOverride ?? persistedPaginatedLists;
+  // The malformed-entry report is written by the aggregate walk's salvage. In
+  // paginated mode the tools/prompts/resources panels render the paged stores
+  // instead, which never write or clear it — so it would linger above a page it
+  // does not describe. See `visibleMalformedListItems` (#1909 + #1721).
+  const shownMalformedListItems = useMemo(
+    () => visibleMalformedListItems(malformedListItems, paginatedLists),
+    [malformedListItems, paginatedLists],
+  );
   const connected = connectionStatus === "connected";
   const toolsPagination = usePaginatedList({
     connected,
@@ -4384,6 +4394,7 @@ function App() {
           latencyMs={latencyMs}
           tools={tools}
           excludedTools={excludedTools}
+          malformedListItems={shownMalformedListItems}
           prompts={prompts}
           resources={resources}
           resourceTemplates={resourceTemplates}

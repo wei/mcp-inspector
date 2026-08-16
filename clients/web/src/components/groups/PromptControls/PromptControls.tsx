@@ -3,6 +3,8 @@ import { ClearButton } from "../../elements/ClearButton/ClearButton";
 import type { Prompt } from "@modelcontextprotocol/client";
 import { ListChangedIndicator } from "../../elements/ListChangedIndicator/ListChangedIndicator";
 import { ListLoadError } from "../../elements/ListLoadError/ListLoadError";
+import { MalformedItemsWarning } from "../../elements/MalformedItemsWarning/MalformedItemsWarning";
+import type { MalformedListItem } from "@inspector/core/mcp";
 import {
   ListPaginationControls,
   type ListPaginationControlsProps,
@@ -41,6 +43,12 @@ export interface PromptControlsProps {
    * A failed list load, surfaced above the list instead of leaving the panel
    * empty (which reads as "this server has none") (#1953).
    */
+  /**
+   * Entries the client dropped from this list because they failed the MCP
+   * schema. Rendered as a warning above the list, which still shows the rest
+   * (#1909).
+   */
+  malformedListItems?: MalformedListItem[];
   loadError?: Error | null;
   /** Pagination controls (#1721). */
   pagination: ListPaginationControlsProps;
@@ -54,6 +62,7 @@ export function PromptControls({
   searchText = "",
   listChanged,
   onRefreshList,
+  malformedListItems = [],
   loadError,
   pagination,
   onSearchChange,
@@ -83,6 +92,11 @@ export function PromptControls({
       />
       <ListPaginationControls {...pagination} />
       <ListLoadError error={loadError} what="prompts" onRetry={onRefreshList} />
+      <MalformedItemsWarning
+        items={malformedListItems}
+        method="prompts/list"
+        what="prompts"
+      />
       <ListScroll viewportRef={viewportRef}>
         <Stack gap="xs">
           {filteredPrompts.map((prompt) => (
