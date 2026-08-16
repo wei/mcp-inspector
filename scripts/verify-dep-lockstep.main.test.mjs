@@ -44,14 +44,18 @@ const typescriptDir = path.dirname(
   ),
 );
 
-/** A lockfileVersion 3 lockfile, including the `""` root entry npm always writes. */
+/**
+ * A lockfileVersion 3 lockfile, including the `""` root entry npm always writes.
+ * A key already containing `node_modules/` is used verbatim, so a nested install
+ * path (`node_modules/outer/node_modules/inner`) can be expressed.
+ */
 const lock = (deps) => ({
   lockfileVersion: 3,
   packages: {
     "": { name: "fixture" },
     ...Object.fromEntries(
       Object.entries(deps).map(([name, version]) => [
-        `node_modules/${name}`,
+        name.includes("node_modules/") ? name : `node_modules/${name}`,
         { version },
       ]),
     ),
@@ -76,6 +80,8 @@ function makeFixture({
   webScripts,
   rawWebLock,
   webTsconfig,
+  rootNestedInner,
+  cliDeps,
 } = {}) {
   // realpath matters: on macOS `tmpdir()` is `/var/...`, a symlink to
   // `/private/var/...`. The guard only runs `main()` when `import.meta.url`
@@ -161,8 +167,53 @@ function makeFixture({
   }
   stub("", root, "solo", "export type Solo = string;\n");
 
-  write("package-lock.json", lock(root));
+  // The root reaches `inner` only through a copy NESTED under `outer`, at a
+  // version its top-level entry does not carry. npm's own conflict resolution,
+  // and the case that must still be priced from the entry the program resolved.
+  const rootLockDeps = { ...root };
+  if (rootNestedInner) {
+    stub(
+      "node_modules/outer/",
+      { inner: rootNestedInner },
+      "inner",
+      "export type Inner = number;\n",
+    );
+    rootLockDeps["node_modules/outer/node_modules/inner"] = rootNestedInner;
+  }
+
+  write("package-lock.json", lock(rootLockDeps));
   write("clients/web/package-lock.json", rawWebLock ?? lock(web));
+
+  // A second client, to prove a third install's copy is not dragged into a
+  // comparison it never took part in. Its program spans only its own install.
+  if (cliDeps) {
+    write("clients/cli/package.json", {
+      name: "cli",
+      scripts: { typecheck: "tsc --noEmit -p tsconfig.json" },
+    });
+    write("clients/cli/tsconfig.json", {
+      compilerOptions: {
+        noEmit: true,
+        module: "esnext",
+        target: "esnext",
+        moduleResolution: "bundler",
+        types: [],
+      },
+      include: ["src/**/*.ts"],
+    });
+    write(
+      "clients/cli/src/main.ts",
+      'import type { Outer } from "outer";\nexport type FromCli = Outer;\n',
+    );
+    stub(
+      "clients/cli/",
+      cliDeps,
+      "outer",
+      'import type { Inner } from "inner";\nexport type Outer = Inner;\n',
+    );
+    stub("clients/cli/", cliDeps, "inner", "export type Inner = number;\n");
+    write("clients/cli/package-lock.json", lock(cliDeps));
+  }
 
   // The guard resolves its repo root from its own location, so it has to live
   // inside the fixture; its `lib/` imports come along.
@@ -236,10 +287,10 @@ test("main: exits 1 and names the skewed package and every holder", () => {
       const { status, out } = runGuard(dir);
       assert.equal(status, 1, out);
       assert.match(out, /\bouter\b/);
-      assert.match(out, /1\.0\.0\s+\(\.\)/);
-      assert.match(out, /1\.2\.3\s+\(clients\/web\)/);
+      assert.match(out, /1\.0\.0\s+\(\.\/node_modules\/outer\)/);
+      assert.match(out, /1\.2\.3\s+\(clients\/web\/node_modules\/outer\)/);
       // The program that saw both copies is named, so the claim is checkable.
-      assert.match(out, /seen in clients\/web\/tsconfig\.json/);
+      assert.match(out, /in clients\/web\/tsconfig\.json/);
       // `inner` agrees, so it must not be reported.
       assert.doesNotMatch(out, /^\s+inner$/m);
     },
@@ -263,8 +314,8 @@ test("main: a package reached only through another package's .d.ts is caught (#1
       const { status, out } = runGuard(dir);
       assert.equal(status, 1, out);
       assert.match(out, /^\s+inner$/m);
-      assert.match(out, /4\.0\.0\s+\(\.\)/);
-      assert.match(out, /4\.5\.6\s+\(clients\/web\)/);
+      assert.match(out, /4\.0\.0\s+\(\.\/node_modules\/inner\)/);
+      assert.match(out, /4\.5\.6\s+\(clients\/web\/node_modules\/inner\)/);
     },
   );
 });
@@ -280,6 +331,45 @@ test("main: a package that reaches the program from ONE install is not a candida
       const { status, out } = runGuard(dir);
       assert.equal(status, 0, out);
       assert.doesNotMatch(out, /\bsolo\b/);
+    },
+  );
+});
+
+test("main: a third install's copy is not dragged into a comparison it never joined (Copilot, #1965 r1)", () => {
+  // `clients/cli` holds `outer` at a different version, but its own program is
+  // the only one that loads that copy and no second install meets it there.
+  // Flattening the candidates to names would compare cli against web's aligned
+  // pair and fail — naming an install that never took part.
+  withFixture(
+    { cliDeps: { ...ALIGNED, outer: "9.9.9", inner: "9.9.9" } },
+    (dir) => {
+      const { status, out } = runGuard(dir);
+      assert.equal(status, 0, out);
+      assert.doesNotMatch(out, /clients\/cli/);
+    },
+  );
+});
+
+test("main: a nested copy is priced from its own lockfile entry (Copilot, #1965 r1)", () => {
+  // The root reaches `inner` only through `node_modules/outer/node_modules/inner`
+  // at 9.9.9, while its top-level entry still reads 4.5.6 — the version web
+  // holds. Pricing the copy from the top-level entry would report the pair as
+  // agreeing and let a real 9.9.9-vs-4.5.6 program through.
+  withFixture(
+    {
+      rootDeps: { ...ALIGNED, outer: "1.0.0" },
+      webDeps: ALIGNED,
+      rootNestedInner: "9.9.9",
+    },
+    (dir) => {
+      const { status, out } = runGuard(dir);
+      assert.equal(status, 1, out);
+      assert.match(out, /^\s+inner$/m);
+      assert.match(
+        out,
+        /9\.9\.9\s+\(\.\/node_modules\/outer\/node_modules\/inner\)/,
+      );
+      assert.match(out, /4\.5\.6\s+\(clients\/web\/node_modules\/inner\)/);
     },
   );
 });

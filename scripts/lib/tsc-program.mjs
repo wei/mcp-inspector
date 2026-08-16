@@ -302,18 +302,26 @@ export function projectPackageFiles(clientDir, project) {
 }
 
 /**
- * The install a repo-relative `node_modules` path belongs to, and the package it
- * holds — `{ installRoot, name }`, or null for a path that names neither.
+ * Where a repo-relative `node_modules` path came from — `{ installRoot, name,
+ * entryPath }`, or null for a path that names no package.
  *
- * The install root is the prefix before the **first** `node_modules` segment
- * (`.` for the repo root, `clients/web` for a client install), while the package
- * name comes from after the **last** one. That asymmetry is deliberate: a
- * *nested* `node_modules/a/node_modules/b` is npm resolving a transitive
- * conflict **inside one install**, which is routine and not a cross-install
- * skew — the same reason the lockfile comparison reads only top-level entries.
- * Folding it onto its outermost install is what keeps the candidate set the
- * handful of genuinely install-crossing packages instead of every transitive
- * duplicate in the tree.
+ * - `installRoot` is the prefix before the **first** `node_modules` segment
+ *   (`.` for the repo root, `clients/web` for a client install). A *nested*
+ *   `node_modules/a/node_modules/b` folds onto its outermost install, because it
+ *   is npm resolving a transitive conflict **inside one install** — routine, and
+ *   not the cross-install skew this feeds. Folding it is what keeps the
+ *   candidate set the handful of genuinely install-crossing packages instead of
+ *   every transitive duplicate in the tree.
+ * - `name` comes from after the **last** `node_modules`, so the nested copy is
+ *   still attributed to the package it actually is.
+ * - `entryPath` is the package directory relative to that install — exactly the
+ *   key npm writes in that install's lockfile (`node_modules/zod`,
+ *   `node_modules/a/node_modules/zod`). Folding tells you *which install* loaded
+ *   it; this tells you *which copy*, so the version can be read from the entry
+ *   the program actually resolved rather than from whatever sits at the
+ *   install's top level (Copilot, #1965 r1 — a nested copy at a different
+ *   version would otherwise be compared against a top-level entry that is
+ *   absent, or worse, present and aligned, and the real pair would pass).
  */
 export function classifyModulePath(rel) {
   const parts = rel.split("/");
@@ -324,13 +332,13 @@ export function classifyModulePath(rel) {
   // `node_modules/.bin/…`, `node_modules/.package-lock.json`: npm's own
   // bookkeeping, not a package.
   if (!head || head.startsWith(".")) return null;
-  const name = head.startsWith("@")
-    ? parts[last + 2] && `${head}/${parts[last + 2]}`
-    : head;
+  const scoped = head.startsWith("@");
+  const name = scoped ? parts[last + 2] && `${head}/${parts[last + 2]}` : head;
   if (!name) return null; // a bare `node_modules/@scope` path names no package
   return {
     installRoot: first === 0 ? "." : parts.slice(0, first).join("/"),
     name,
+    entryPath: parts.slice(first, last + (scoped ? 3 : 2)).join("/"),
   };
 }
 
@@ -340,9 +348,15 @@ export function classifyModulePath(rel) {
  * type in front of the type checker.
  *
  * `programs` is an iterable of `{ label, files }`, one per leaf tsconfig project,
- * `files` being repo-relative `node_modules` paths. Returns a Map keyed by
- * package name, each value `{ installRoots, programs }` naming where it was seen
- * — the diagnostic a failure needs.
+ * `files` being repo-relative `node_modules` paths. Returns
+ * `Map<name, Map<programLabel, Map<installRoot, Set<entryPath>>>>` — the
+ * co-occurrences themselves, not a flattened name list.
+ *
+ * Keeping the structure is what lets the caller compare only the copies that met
+ * (Copilot, #1965 r1). Flattening to names hands the comparison a package that
+ * is aligned wherever it co-occurs, and a third install holding a different
+ * version of it then fails the guard even though no program ever loads that
+ * copy — with a diagnostic naming an install that was never involved.
  *
  * The two-install test is applied **within one program**, not across the run: a
  * package reached from the root install in web's program and from the client
@@ -362,20 +376,20 @@ export function classifyModulePath(rel) {
 export function crossInstallPackages(programs) {
   const found = new Map();
   for (const { label, files } of programs) {
-    const roots = new Map(); // name -> Set(installRoot), within THIS program
+    // Within THIS program: name -> installRoot -> the entry paths loaded from it.
+    const seen = new Map();
     for (const rel of files) {
       const hit = classifyModulePath(rel);
       if (!hit) continue;
-      if (!roots.has(hit.name)) roots.set(hit.name, new Set());
-      roots.get(hit.name).add(hit.installRoot);
+      if (!seen.has(hit.name)) seen.set(hit.name, new Map());
+      const byRoot = seen.get(hit.name);
+      if (!byRoot.has(hit.installRoot)) byRoot.set(hit.installRoot, new Set());
+      byRoot.get(hit.installRoot).add(hit.entryPath);
     }
-    for (const [name, installRoots] of roots) {
-      if (installRoots.size < 2) continue;
-      if (!found.has(name))
-        found.set(name, { installRoots: new Set(), programs: new Set() });
-      const entry = found.get(name);
-      for (const root of installRoots) entry.installRoots.add(root);
-      entry.programs.add(label);
+    for (const [name, byRoot] of seen) {
+      if (byRoot.size < 2) continue; // one install — nothing to relate
+      if (!found.has(name)) found.set(name, new Map());
+      found.get(name).set(label, byRoot);
     }
   }
   return found;

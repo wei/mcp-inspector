@@ -155,28 +155,46 @@ test("classifyModulePath: install root is the OUTERMOST node_modules, package th
   assert.deepEqual(classifyModulePath("node_modules/zod/index.d.ts"), {
     installRoot: ".",
     name: "zod",
+    entryPath: "node_modules/zod",
   });
   assert.deepEqual(
     classifyModulePath("clients/web/node_modules/zod/index.d.ts"),
-    { installRoot: "clients/web", name: "zod" },
+    {
+      installRoot: "clients/web",
+      name: "zod",
+      entryPath: "node_modules/zod",
+    },
   );
   // A scoped package keeps both segments.
   assert.deepEqual(
     classifyModulePath("node_modules/@modelcontextprotocol/sdk/dist/x.d.ts"),
-    { installRoot: ".", name: "@modelcontextprotocol/sdk" },
+    {
+      installRoot: ".",
+      name: "@modelcontextprotocol/sdk",
+      entryPath: "node_modules/@modelcontextprotocol/sdk",
+    },
   );
   // A NESTED copy folds onto its outermost install: npm resolving a transitive
-  // conflict inside one install is routine, not a cross-install skew, and the
-  // lockfile comparison ignores it for the same reason.
+  // conflict inside one install is routine, not a cross-install skew. Its
+  // `entryPath` still names the copy itself, so the caller can price the version
+  // the program actually loaded (Copilot, #1965 r1).
   assert.deepEqual(
     classifyModulePath("node_modules/a/node_modules/zod/index.d.ts"),
-    { installRoot: ".", name: "zod" },
+    {
+      installRoot: ".",
+      name: "zod",
+      entryPath: "node_modules/a/node_modules/zod",
+    },
   );
   assert.deepEqual(
     classifyModulePath(
       "clients/cli/node_modules/a/node_modules/@scope/b/index.d.ts",
     ),
-    { installRoot: "clients/cli", name: "@scope/b" },
+    {
+      installRoot: "clients/cli",
+      name: "@scope/b",
+      entryPath: "node_modules/a/node_modules/@scope/b",
+    },
   );
 });
 
@@ -210,14 +228,11 @@ test("crossInstallPackages: two installs in ONE program is the whole test (#1965
     },
   ]);
   assert.deepEqual([...found.keys()], ["zod"]);
-  assert.deepEqual([...found.get("zod").installRoots].sort(), [
-    ".",
-    "clients/web",
-  ]);
-  assert.deepEqual(
-    [...found.get("zod").programs],
-    ["clients/web/tsconfig.test.json"],
-  );
+  const byRoot = found.get("zod").get("clients/web/tsconfig.test.json");
+  assert.deepEqual([...byRoot.keys()].sort(), [".", "clients/web"]);
+  // The entry paths ride along so the caller can price each copy from its own
+  // lockfile entry (Copilot, #1965 r1).
+  assert.deepEqual([...byRoot.get(".")], ["node_modules/zod"]);
 });
 
 test("crossInstallPackages: two installs across SEPARATE programs is not a candidate", () => {
@@ -252,8 +267,26 @@ test("crossInstallPackages: every program that saw both copies is recorded", () 
     { label: "web/test", files: both },
     { label: "cli/src", files: ["node_modules/zod/index.d.ts"] },
   ]);
-  assert.deepEqual([...found.get("zod").programs].sort(), [
+  assert.deepEqual([...found.get("zod").keys()].sort(), [
     "web/app",
     "web/test",
   ]);
+});
+
+test("crossInstallPackages: a nested copy is kept as its own entry path (Copilot, #1965 r1)", () => {
+  // Folded onto the root install for candidacy, but recorded at the path it was
+  // loaded from so its real version can be read.
+  const found = crossInstallPackages([
+    {
+      label: "p",
+      files: [
+        "node_modules/a/node_modules/zod/index.d.ts",
+        "clients/web/node_modules/zod/index.d.ts",
+      ],
+    },
+  ]);
+  assert.deepEqual(
+    [...found.get("zod").get("p").get(".")],
+    ["node_modules/a/node_modules/zod"],
+  );
 });

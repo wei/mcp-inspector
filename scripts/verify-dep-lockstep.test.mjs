@@ -15,9 +15,9 @@ import {
   clientProjects,
   findSkew,
   hasReadableLockShape,
+  lockVersionsByPath,
   majorOf,
   partitionSkew,
-  topLevelLockVersions,
 } from "./verify-dep-lockstep.mjs";
 
 test("clientProjects: a `typecheck` script's projects win over references", () => {
@@ -60,11 +60,11 @@ test("clientProjects: a NEUTERED project still contributes its program (#1965)",
   );
 });
 
-test("topLevelLockVersions: nested duplicates are ignored", () => {
-  // A nested `node_modules/a/node_modules/b` is npm resolving a transitive
-  // conflict *inside* one install — routine, and not the cross-install skew
-  // this guard is about (`cosmiconfig`'s yaml@1 alongside the top-level yaml@2
-  // is the live example).
+test("lockVersionsByPath: keyed by install path, nested entries included (Copilot, #1965 r1)", () => {
+  // Keyed by PATH, not by package name: a nested copy that entered a program has
+  // to be priced from its own entry. Reading only `node_modules/<pkg>` would
+  // compare it against the install's top-level copy — a different version, or
+  // none — and a real pair could pass.
   const lock = {
     packages: {
       "": { name: "root" },
@@ -75,18 +75,173 @@ test("topLevelLockVersions: nested duplicates are ignored", () => {
       "node_modules/no-version": { resolved: "https://example.test/x.tgz" },
     },
   };
-  assert.deepEqual([...topLevelLockVersions(lock)].sort(), [
-    ["@modelcontextprotocol/client", "2.0.0-beta.5"],
-    ["yaml", "2.9.0"],
-    ["zod", "4.4.3"],
+  assert.deepEqual([...lockVersionsByPath(lock)].sort(), [
+    ["node_modules/@modelcontextprotocol/client", "2.0.0-beta.5"],
+    ["node_modules/cosmiconfig/node_modules/yaml", "1.10.3"],
+    ["node_modules/yaml", "2.9.0"],
+    ["node_modules/zod", "4.4.3"],
   ]);
 });
 
-test("topLevelLockVersions: a malformed or empty lockfile yields nothing", () => {
+test("lockVersionsByPath: a malformed or empty lockfile yields nothing", () => {
   // Safe as a pure helper *because* `hasReadableLockShape` rejects these before
   // any comparison — an empty map reaching `findSkew` is the fail-open path.
   for (const lock of [undefined, null, {}, { packages: {} }])
-    assert.equal(topLevelLockVersions(lock).size, 0);
+    assert.equal(lockVersionsByPath(lock).size, 0);
+});
+
+/** `crossInstallPackages`-shaped input: name → program → install → entry paths. */
+const occurrence = (name, program, byRoot) =>
+  new Map([
+    [
+      name,
+      new Map([
+        [
+          program,
+          new Map(
+            Object.entries(byRoot).map(([dir, paths]) => [dir, new Set(paths)]),
+          ),
+        ],
+      ]),
+    ],
+  ]);
+
+const lockPaths = (byDir) =>
+  new Map(
+    Object.entries(byDir).map(([dir, entries]) => [
+      dir,
+      new Map(Object.entries(entries)),
+    ]),
+  );
+
+test("findSkew: reports the copies one program loaded, with their paths", () => {
+  const { skewed, unresolved } = findSkew(
+    occurrence("zod", "clients/web/tsconfig.test.json", {
+      ".": ["node_modules/zod"],
+      "clients/web": ["node_modules/zod"],
+    }),
+    lockPaths({
+      ".": { "node_modules/zod": "4.3.6" },
+      "clients/web": { "node_modules/zod": "4.4.3" },
+    }),
+  );
+  assert.deepEqual(unresolved, []);
+  assert.deepEqual(skewed, [
+    {
+      name: "zod",
+      occurrences: [
+        {
+          program: "clients/web/tsconfig.test.json",
+          holders: [
+            { dir: ".", entryPath: "node_modules/zod", version: "4.3.6" },
+            {
+              dir: "clients/web",
+              entryPath: "node_modules/zod",
+              version: "4.4.3",
+            },
+          ],
+        },
+      ],
+    },
+  ]);
+});
+
+test("findSkew: only the installs that MET in a program are compared (Copilot, #1965 r1)", () => {
+  // `clients/cli` holds a different zod, but no program loads it beside another
+  // copy — nothing has to relate the two, so it is not a finding, and naming cli
+  // in a diagnostic about web's program would be wrong as well as noisy.
+  const { skewed } = findSkew(
+    occurrence("zod", "clients/web/tsconfig.test.json", {
+      ".": ["node_modules/zod"],
+      "clients/web": ["node_modules/zod"],
+    }),
+    lockPaths({
+      ".": { "node_modules/zod": "4.4.3" },
+      "clients/web": { "node_modules/zod": "4.4.3" },
+      "clients/cli": { "node_modules/zod": "4.3.6" },
+    }),
+  );
+  assert.deepEqual(skewed, []);
+});
+
+test("findSkew: a nested copy is priced from its own entry (Copilot, #1965 r1)", () => {
+  // The root loaded zod through `a`'s nested copy. Pricing it from the root's
+  // TOP-LEVEL entry (4.4.3, aligned with web) would report the pair as agreeing.
+  const { skewed } = findSkew(
+    occurrence("zod", "clients/web/tsconfig.test.json", {
+      ".": ["node_modules/a/node_modules/zod"],
+      "clients/web": ["node_modules/zod"],
+    }),
+    lockPaths({
+      ".": {
+        "node_modules/zod": "4.4.3",
+        "node_modules/a/node_modules/zod": "3.1.0",
+      },
+      "clients/web": { "node_modules/zod": "4.4.3" },
+    }),
+  );
+  assert.deepEqual(
+    skewed[0].occurrences[0].holders.map((h) => `${h.dir}:${h.version}`),
+    [".:3.1.0", "clients/web:4.4.3"],
+  );
+});
+
+test("findSkew: agreement is not skew", () => {
+  const { skewed, unresolved } = findSkew(
+    occurrence("zod", "p", {
+      ".": ["node_modules/zod"],
+      "clients/web": ["node_modules/zod"],
+    }),
+    lockPaths({
+      ".": { "node_modules/zod": "4.4.3" },
+      "clients/web": { "node_modules/zod": "4.4.3" },
+    }),
+  );
+  assert.deepEqual(skewed, []);
+  assert.deepEqual(unresolved, []);
+});
+
+test("findSkew: a copy with no lockfile entry is reported, not skipped", () => {
+  // Skipping it would drop a holder from the comparison and could report a real
+  // skew as agreement — the gate failing open.
+  const { skewed, unresolved } = findSkew(
+    occurrence("zod", "p", {
+      ".": ["node_modules/zod"],
+      "clients/web": ["node_modules/zod"],
+    }),
+    lockPaths({ ".": { "node_modules/zod": "4.4.3" }, "clients/web": {} }),
+  );
+  assert.deepEqual(unresolved, [
+    { name: "zod", dir: "clients/web", entryPath: "node_modules/zod" },
+  ]);
+  assert.deepEqual(skewed, []);
+});
+
+test("findSkew: results are sorted by package name", () => {
+  const found = new Map([
+    ...occurrence("zod", "p", {
+      ".": ["node_modules/zod"],
+      "clients/web": ["node_modules/zod"],
+    }),
+    ...occurrence("hono", "p", {
+      ".": ["node_modules/hono"],
+      "clients/web": ["node_modules/hono"],
+    }),
+  ]);
+  const { skewed } = findSkew(
+    found,
+    lockPaths({
+      ".": { "node_modules/zod": "1.0.0", "node_modules/hono": "1.0.0" },
+      "clients/web": {
+        "node_modules/zod": "2.0.0",
+        "node_modules/hono": "2.0.0",
+      },
+    }),
+  );
+  assert.deepEqual(
+    skewed.map((s) => s.name),
+    ["hono", "zod"],
+  );
 });
 
 test("hasReadableLockShape: only a v2+ packages table with a root entry (Copilot, #1962)", () => {
@@ -124,89 +279,32 @@ test("hasReadableLockShape: only a v2+ packages table with a root entry (Copilot
     assert.equal(hasReadableLockShape(lock), false, JSON.stringify(lock));
 });
 
-test("findSkew: reports a package held at two versions", () => {
-  const installs = [
-    { dir: ".", versions: new Map([["zod", "4.3.6"]]) },
-    { dir: "clients/web", versions: new Map([["zod", "4.4.3"]]) },
-    { dir: "clients/cli", versions: new Map([["zod", "4.4.3"]]) },
-  ];
-  assert.deepEqual(findSkew(new Set(["zod"]), installs), [
-    {
-      name: "zod",
-      holders: [
-        { dir: ".", version: "4.3.6" },
-        { dir: "clients/web", version: "4.4.3" },
-        { dir: "clients/cli", version: "4.4.3" },
-      ],
-    },
-  ]);
-});
-
-test("findSkew: agreement and single-install packages are not skew", () => {
-  const installs = [
-    {
-      dir: ".",
-      versions: new Map([
-        ["zod", "4.4.3"],
-        ["express", "5.2.1"],
-      ]),
-    },
-    { dir: "clients/web", versions: new Map([["zod", "4.4.3"]]) },
-  ];
-  // `express` lives in one install only, so it cannot skew — a package absent
-  // from a client is not a finding.
-  assert.deepEqual(findSkew(new Set(["zod", "express"]), installs), []);
-});
-
-test("findSkew: a candidate in no lockfile is inert", () => {
-  // `@inspector/core` is a build-time alias, not a package; the scan picks it
-  // up and it must drop out here rather than error.
-  const installs = [
-    { dir: ".", versions: new Map([["zod", "4.4.3"]]) },
-    { dir: "clients/web", versions: new Map([["zod", "4.4.3"]]) },
-  ];
-  assert.deepEqual(findSkew(new Set(["@inspector/core"]), installs), []);
-});
-
-test("findSkew: results are sorted by package name", () => {
-  const installs = [
-    {
-      dir: ".",
-      versions: new Map([
-        ["zod", "1.0.0"],
-        ["hono", "1.0.0"],
-      ]),
-    },
-    {
-      dir: "clients/web",
-      versions: new Map([
-        ["zod", "2.0.0"],
-        ["hono", "2.0.0"],
-      ]),
-    },
-  ];
-  assert.deepEqual(
-    findSkew(new Set(["zod", "hono"]), installs).map((s) => s.name),
-    ["hono", "zod"],
-  );
-});
-
 test("partitionSkew: the allowlist is by name, not by version pair", () => {
   // So an ordinary patch float within a tolerated package does not churn the
   // allowlist, while any *unlisted* package that starts skewing still fails.
   const skewed = [
     {
       name: "react",
-      holders: [
-        { dir: ".", version: "19.2.7" },
-        { dir: "clients/web", version: "19.2.8" },
+      occurrences: [
+        {
+          program: "p",
+          holders: [
+            { dir: ".", version: "19.2.7" },
+            { dir: "clients/web", version: "19.2.8" },
+          ],
+        },
       ],
     },
     {
       name: "zod",
-      holders: [
-        { dir: ".", version: "4.3.6" },
-        { dir: "clients/web", version: "4.4.3" },
+      occurrences: [
+        {
+          program: "p",
+          holders: [
+            { dir: ".", version: "4.3.6" },
+            { dir: "clients/web", version: "4.4.3" },
+          ],
+        },
       ],
     },
   ];
@@ -223,7 +321,14 @@ test("partitionSkew: the allowlist is by name, not by version pair", () => {
 });
 
 test("partitionSkew: deny by default — nothing tolerated fails everything", () => {
-  const skewed = [{ name: "zod", holders: [{ dir: ".", version: "1.0.0" }] }];
+  const skewed = [
+    {
+      name: "zod",
+      occurrences: [
+        { program: "p", holders: [{ dir: ".", version: "1.0.0" }] },
+      ],
+    },
+  ];
   assert.equal(partitionSkew(skewed, new Map()).failures.length, 1);
 });
 
@@ -235,18 +340,28 @@ test("partitionSkew: the allowlist tolerates skew only within a major (Copilot, 
   const withinMajor = [
     {
       name: "react",
-      holders: [
-        { dir: ".", version: "19.2.7" },
-        { dir: "clients/web", version: "19.2.8" },
+      occurrences: [
+        {
+          program: "p",
+          holders: [
+            { dir: ".", version: "19.2.7" },
+            { dir: "clients/web", version: "19.2.8" },
+          ],
+        },
       ],
     },
   ];
   const acrossMajor = [
     {
       name: "react",
-      holders: [
-        { dir: ".", version: "18.3.1" },
-        { dir: "clients/web", version: "19.2.8" },
+      occurrences: [
+        {
+          program: "p",
+          holders: [
+            { dir: ".", version: "18.3.1" },
+            { dir: "clients/web", version: "19.2.8" },
+          ],
+        },
       ],
     },
   ];
@@ -261,9 +376,14 @@ test("partitionSkew: an unparseable version can't be proven same-major, so it fa
   const skewed = [
     {
       name: "react",
-      holders: [
-        { dir: ".", version: "19.2.7" },
-        { dir: "clients/web", version: "next" },
+      occurrences: [
+        {
+          program: "p",
+          holders: [
+            { dir: ".", version: "19.2.7" },
+            { dir: "clients/web", version: "next" },
+          ],
+        },
       ],
     },
   ];

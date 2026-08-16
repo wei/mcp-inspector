@@ -98,18 +98,23 @@ const repoRoot = path.resolve(
 const TOLERATED_SKEW = new Map();
 
 /**
- * Top-level installed versions of every package in a parsed lockfile, keyed by
- * package name. Only `node_modules/<pkg>` entries count — a *nested*
- * `node_modules/a/node_modules/b` is npm resolving a transitive conflict inside
- * one install, which is routine and not what this guard is about (the same
- * asymmetry `classifyModulePath` applies to a resolved path).
+ * Installed versions in a parsed lockfile, keyed by the **install path** npm
+ * writes — `node_modules/zod`, `node_modules/a/node_modules/zod`.
+ *
+ * Keyed by path rather than by package name so a version is read from the exact
+ * copy a program resolved (Copilot, #1965 r1). Reading only top-level entries
+ * would mean a nested copy that entered the program got compared against
+ * whatever sits at the install's top level — a different version, or nothing at
+ * all — and a real pair could pass. Nested copies are still not a *candidate* on
+ * their own (`classifyModulePath` folds them onto their outermost install); this
+ * is about pricing a copy correctly once a program has loaded it.
  */
-export function topLevelLockVersions(lock) {
+export function lockVersionsByPath(lock) {
   const versions = new Map();
   for (const [entryPath, entry] of Object.entries(lock?.packages ?? {})) {
-    const m = /^node_modules\/(@[^/]+\/[^/]+|[^@/][^/]*)$/.exec(entryPath);
-    if (!m || typeof entry?.version !== "string") continue;
-    versions.set(m[1], entry.version);
+    if (!entryPath.startsWith("node_modules/")) continue;
+    if (typeof entry?.version !== "string") continue;
+    versions.set(entryPath, entry.version);
   }
   return versions;
 }
@@ -120,7 +125,7 @@ export function topLevelLockVersions(lock) {
  * the root project.
  *
  * This is checked rather than tolerated because the gate is deny-by-default and
- * `topLevelLockVersions` returns an empty map for anything else. An unreadable
+ * `lockVersionsByPath` returns an empty map for anything else. An unreadable
  * lockfile would otherwise contribute no holders, and a real skew among the
  * remaining installs would be reported as aligned — the gate failing *open*,
  * which is the one way it must never fail (Copilot, #1962). A v1 lockfile
@@ -141,22 +146,48 @@ export function hasReadableLockShape(lock) {
 }
 
 /**
- * Find candidate packages that resolve to more than one version across the
- * installs. `installs` is an array of `{ dir, versions }`. Returns one entry per
- * skewed package, sorted by name, each listing the version each install holds.
- * Packages present in fewer than two installs cannot skew and are skipped.
+ * Price each co-occurrence and keep the ones whose copies disagree.
+ *
+ * `found` is {@link crossInstallPackages}' output —
+ * `Map<name, Map<program, Map<installRoot, Set<entryPath>>>>` — and `versions`
+ * maps an install dir to that install's {@link lockVersionsByPath}. A package is
+ * skewed when the copies **one program** loaded, from two different installs,
+ * carry more than one version. Only the installs that actually met in that
+ * program are compared: a third install's copy that no program loads is not
+ * evidence of anything (Copilot, #1965 r1).
+ *
+ * Returns `{ skewed, unresolved }`, sorted by name. `unresolved` names a copy
+ * whose lockfile entry is missing — the tree and the lockfile disagree, so the
+ * comparison cannot be trusted and the caller must fail rather than skip it.
  */
-export function findSkew(candidates, installs) {
+export function findSkew(found, versions) {
   const skewed = [];
-  for (const name of [...candidates].sort()) {
-    const holders = installs
-      .filter(({ versions }) => versions.has(name))
-      .map(({ dir, versions }) => ({ dir, version: versions.get(name) }));
-    if (holders.length < 2) continue;
-    const distinct = new Set(holders.map((h) => h.version));
-    if (distinct.size > 1) skewed.push({ name, holders });
+  const unresolved = [];
+  for (const name of [...found.keys()].sort()) {
+    const occurrences = [];
+    for (const [program, byRoot] of found.get(name)) {
+      const holders = [];
+      for (const [dir, entryPaths] of byRoot)
+        for (const entryPath of entryPaths) {
+          const version = versions.get(dir)?.get(entryPath);
+          if (version === undefined) unresolved.push({ name, dir, entryPath });
+          else holders.push({ dir, entryPath, version });
+        }
+      if (new Set(holders.map((h) => h.version)).size > 1)
+        occurrences.push({ program, holders });
+    }
+    if (occurrences.length > 0) skewed.push({ name, occurrences });
   }
-  return skewed;
+  return { skewed, unresolved };
+}
+
+/** Every holder across a skewed package's occurrences, deduped by install + path. */
+export function skewHolders(entry) {
+  const byKey = new Map();
+  for (const { holders } of entry.occurrences)
+    for (const holder of holders)
+      byKey.set(`${holder.dir}|${holder.entryPath}`, holder);
+  return [...byKey.values()];
 }
 
 /**
@@ -181,7 +212,7 @@ export function majorOf(version) {
 export function partitionSkew(skewed, tolerated = TOLERATED_SKEW) {
   const isTolerated = (s) => {
     if (!tolerated.has(s.name)) return false;
-    const majors = new Set(s.holders.map((h) => majorOf(h.version)));
+    const majors = new Set(skewHolders(s).map((h) => majorOf(h.version)));
     return majors.size === 1 && !majors.has(null);
   };
   return {
@@ -343,8 +374,6 @@ export function main() {
     );
     process.exit(1);
   }
-  const candidates = new Set(found.keys());
-
   const dirs = installDirs();
 
   // A missing lockfile is a failure, not a skipped install: dropping one would
@@ -398,32 +427,53 @@ export function main() {
     process.exit(1);
   }
 
-  const installs = locks.map(({ dir, lock }) => ({
-    dir,
-    versions: topLevelLockVersions(lock),
-  }));
+  const versions = new Map(
+    locks.map(({ dir, lock }) => [dir, lockVersionsByPath(lock)]),
+  );
 
-  const { failures, ignored } = partitionSkew(findSkew(candidates, installs));
+  const { skewed, unresolved } = findSkew(found, versions);
+
+  // A copy the program loaded but the lockfile doesn't list means the installed
+  // tree and the lockfile disagree — the comparison would be reading a version
+  // that isn't the one on disk, so refuse it rather than skip the copy.
+  if (unresolved.length > 0) {
+    console.error(
+      `verify:dep-lockstep — ${unresolved.length} resolved package(s) have no lockfile entry:\n`,
+    );
+    for (const { name, dir, entryPath } of unresolved)
+      console.error(`  ${name}  ${dir}/${entryPath}`);
+    console.error(
+      "\nThe program loaded these, so their versions decide the comparison — but the install's lockfile" +
+        "\ndoesn't list them, which means the tree and the lockfile disagree. Run `npm install` at the repo" +
+        "\nroot to re-sync every install.",
+    );
+    process.exit(1);
+  }
+
+  const { failures, ignored } = partitionSkew(skewed);
 
   if (failures.length > 0) {
     console.error(
       `verify:dep-lockstep — ${failures.length} ${failures.length === 1 ? "dependency resolves" : "dependencies resolve"} to different versions across installs:\n`,
     );
     let anyListed = false;
-    for (const { name, holders } of failures) {
+    for (const failure of failures) {
       // A package already on the allowlist reached here only by skewing across
       // a MAJOR boundary, so say that rather than advising an entry that exists.
-      const listed = TOLERATED_SKEW.has(name);
+      const listed = TOLERATED_SKEW.has(failure.name);
       anyListed ||= listed;
       console.error(
-        `  ${name}${listed ? "  (allowlisted — but this is a MAJOR skew)" : ""}`,
+        `  ${failure.name}${listed ? "  (allowlisted — but this is a MAJOR skew)" : ""}`,
       );
-      for (const { dir, version } of holders)
-        console.error(`    ${version}  (${dir})`);
-      // Which program saw both copies is the whole reason the package is a
-      // candidate — without it the reader has no way to check the claim.
-      for (const label of [...found.get(name).programs].sort())
-        console.error(`    seen in ${label}`);
+      // Report per program: which copies met, and where. The program is the
+      // whole reason the package is a candidate, and naming only the versions
+      // would leave the reader unable to check the claim — or to tell a nested
+      // copy from the install's top-level one.
+      for (const { program, holders } of failure.occurrences) {
+        console.error(`    in ${program}`);
+        for (const { dir, entryPath, version } of holders)
+          console.error(`      ${version}  (${dir}/${entryPath})`);
+      }
     }
     console.error(
       "\nEach of these reaches a single `tsc` program from two installs (a client's own sources resolve" +
@@ -447,7 +497,7 @@ export function main() {
 
   const note = ignored.length > 0 ? `, ${ignored.length} tolerated` : "";
   console.log(
-    `verify:dep-lockstep — OK: ${candidates.size} install-crossing dependencies agree across ${installs.length} installs${note} ` +
+    `verify:dep-lockstep — OK: ${found.size} install-crossing dependencies agree across ${dirs.length} installs${note} ` +
       `(derived from ${programs.length} tsc programs).`,
   );
 }
