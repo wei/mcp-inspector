@@ -1485,6 +1485,27 @@ export function createFileResourceTemplate(
  * Both handlers echo the URI they were matched against plus the variables the
  * server decoded, so the round-trip is visible in the read result.
  */
+/**
+ * The plain `foobar://events` resource that a blank `{?topic}` read lands on.
+ *
+ * Registering it is not decoration. RFC 6570 omits a query expression whose
+ * variable is undefined, so leaving `topic` blank legitimately requests the
+ * unfiltered collection -- but the SDK's own matcher cannot serve that from the
+ * template: `UriTemplate.partToRegExp` compiles `{?topic}` to a **required**
+ * `\?topic=([^&]+)`, so `match("foobar://events")` returns null and the read
+ * would 404. A real server would expose the collection as its own resource;
+ * this fixture does the same so the showcase's "read it blank" step works.
+ */
+export function createRfc6570BaseResource(): ResourceDefinition {
+  return {
+    uri: "foobar://events",
+    name: "events",
+    description: "All events - what a blank `{?topic}` read resolves to",
+    mimeType: "application/json",
+    text: JSON.stringify({ collection: "events", filtered: false }, null, 2),
+  };
+}
+
 export function createRfc6570ResourceTemplates(): ResourceTemplateDefinition[] {
   const echo =
     (label: string) => async (uri: URL, params: Record<string, unknown>) => ({

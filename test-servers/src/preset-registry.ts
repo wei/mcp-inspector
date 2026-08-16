@@ -63,6 +63,7 @@ import {
   createUserResourceTemplate,
   createNumberedResourceTemplates,
   createRfc6570ResourceTemplates,
+  createRfc6570BaseResource,
   createSimplePrompt,
   createArgsPrompt,
   createNumberedPrompts,
@@ -243,6 +244,8 @@ function resolveResourcePreset(
       return createNumberedResources(Number(get("count")) || 3);
     case "mcp_app_demo_widget":
       return createMcpAppDemoResource();
+    case "rfc6570_base":
+      return createRfc6570BaseResource();
     default:
       throw new Error(`Unknown resource preset: ${name}`);
   }

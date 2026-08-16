@@ -192,6 +192,11 @@ import {
 } from "../json/jsonUtils.js";
 import { UriTemplate } from "@modelcontextprotocol/client";
 import {
+  applyMultiNameCorrection,
+  definedValues,
+  parseUriTemplate,
+} from "./uriTemplate.js";
+import {
   InspectorClientEventTarget,
   type TaskWithOptionalCreatedAt,
 } from "./inspectorClientEventTarget.js";
@@ -4971,11 +4976,20 @@ export class InspectorClient extends InspectorClientEventTarget {
 
     const uriTemplateString = uriTemplate;
 
-    // Expand the template's uriTemplate using the provided params
+    // Expand the template's uriTemplate using the provided params. Routed
+    // through the shared helpers in ./uriTemplate.js so this and the web
+    // Resources form cannot disagree: `definedValues` makes a blank field read
+    // as *undefined* (the expression drops out) rather than as the empty string
+    // (a valueless `?topic=`), and `applyMultiNameCorrection` fixes the SDK's
+    // mis-expansion of `{a,b}`-style expressions before it sees them (#1919).
     let expandedUri: string;
     try {
-      const uriTemplate = new UriTemplate(uriTemplateString);
-      expandedUri = uriTemplate.expand(params);
+      const defined = definedValues(params);
+      const corrected = applyMultiNameCorrection(
+        parseUriTemplate(uriTemplateString),
+        defined,
+      );
+      expandedUri = new UriTemplate(corrected).expand(defined);
     } catch (error) {
       throw new Error(
         `Failed to expand URI template "${uriTemplate}": ${error instanceof Error ? error.message : String(error)}`,

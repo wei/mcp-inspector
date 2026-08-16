@@ -73,7 +73,14 @@ v2/main/
 │   │                                   #   a nullable field entirely — #1928/#2015)
 │   ├── logging/                        # Silent pino logger singleton
 │   ├── mcp/                            # InspectorClient runtime + state stores
-│   │                                   #   (modernTaskSchemas.ts: SEP-2663 modern Tasks
+│   │                                   #   (uriTemplate.ts: RFC 6570 parse/classify/expand
+│   │                                   #   shared by the web Resources form and
+│   │                                   #   readResourceFromTemplate (TUI + CLI), so the
+│   │                                   #   clients cannot drift on what a template means;
+│   │                                   #   delegates to the SDK's UriTemplate but corrects
+│   │                                   #   its multi-name `{a,b}` branch, which skips both
+│   │                                   #   encoding and the operator prefix — #1919;
+│   │                                   #   modernTaskSchemas.ts: SEP-2663 modern Tasks
 │   │                                   #   extension wire schemas + normalize/handle helpers,
 │   │                                   #   used by the raw-wire tasks/* channel — #1631;
 │   │                                   #   listSalvage.ts: per-item salvage for list results —
