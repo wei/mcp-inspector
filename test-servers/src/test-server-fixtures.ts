@@ -163,6 +163,39 @@ export function createEchoTool(): ToolDefinition {
 }
 
 /**
+ * Create a "record_shipment" tool whose arguments are all **nullable** — the
+ * shape Zod's `.nullish()` / `.nullable()` compiles to, where the real type
+ * sits inside `anyOf: [<branch>, { type: "null" }]` rather than at the top
+ * level.
+ *
+ * `direction` is the case from #1928: a nullable *enum*, whose `enum` keyword
+ * lives on the surviving branch. Before the fix nothing in the tool-call form
+ * matched such a field, so it fell through to the raw-JSON textarea and
+ * re-escaped its own value on every keystroke. The other three cover the
+ * remaining scalar branches so a regression in one is visible next to a
+ * working sibling.
+ */
+export function createNullableFieldsTool(): ToolDefinition {
+  return {
+    name: "record_shipment",
+    description:
+      "Record a shipment. Every argument is optional AND explicitly nullable (Zod .nullish()), so each compiles to an anyOf union with a null branch.",
+    inputSchema: {
+      direction: z
+        .enum(["envio", "recebimento"])
+        .nullish()
+        .describe("Direction of the shipment (nullable enum — #1928)"),
+      reference: z.string().nullish().describe("Free-text reference"),
+      quantity: z.number().int().nullish().describe("Number of packages"),
+      express: z.boolean().nullish().describe("Ship express"),
+    },
+    handler: async (params: Record<string, unknown>) => {
+      return toToolResult(JSON.stringify(params, null, 2));
+    },
+  };
+}
+
+/**
  * Create a "get-env" tool matching @modelcontextprotocol/server-everything.
  * Returns the server process environment as pretty-printed JSON text.
  */
