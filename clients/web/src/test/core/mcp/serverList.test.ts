@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
+  cleanAuthorizationParams,
   cleanRoots,
   DEFAULT_SEED_CONFIG,
   envPairsToRecord,
@@ -1413,5 +1414,96 @@ describe("stdio env / cwd mirroring", () => {
       env: { API_KEY: "secret" },
       cwd: "/srv/app",
     });
+  });
+});
+
+// #2018 — `StoredMCPServer.oauth.authorizationParams` is typed
+// `Record<string, string>`, but only the web client's `/api/servers` route
+// validates it; the CLI and TUI read `mcp.json` off disk. These cases drive the
+// shapes a hand-edited file can hold, which the type says are impossible.
+describe("cleanAuthorizationParams", () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  it("passes a well-formed record through", () => {
+    expect(
+      cleanAuthorizationParams({ kc_idp_hint: "corp", prompt: "login" }),
+    ).toEqual({ kc_idp_hint: "corp", prompt: "login" });
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("returns undefined for an absent or empty record", () => {
+    expect(cleanAuthorizationParams(undefined)).toBeUndefined();
+    expect(cleanAuthorizationParams({})).toBeUndefined();
+  });
+
+  // A bare string enumerates as character-indexed pairs (0=o, 1=o, …), so
+  // without this guard the Inspector would send four invented parameters.
+  it("rejects a string with a warning instead of enumerating its characters", () => {
+    expect(
+      cleanAuthorizationParams("oops" as unknown as Record<string, string>),
+    ).toBeUndefined();
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an array with a warning", () => {
+    expect(
+      cleanAuthorizationParams(["a"] as unknown as Record<string, string>),
+    ).toBeUndefined();
+    expect(warnSpy.mock.calls[0]?.[1]).toBe("array");
+  });
+
+  it("rejects null with a warning", () => {
+    expect(
+      cleanAuthorizationParams(null as unknown as Record<string, string>),
+    ).toBeUndefined();
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  // `URLSearchParams.set` stringifies whatever it is given, so a number would
+  // otherwise reach the authorize URL as "5".
+  it("drops a non-string value with a warning and keeps the rest", () => {
+    expect(
+      cleanAuthorizationParams({
+        audience: 5,
+        kc_idp_hint: "corp",
+      } as unknown as Record<string, string>),
+    ).toEqual({ kc_idp_hint: "corp" });
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns undefined when every value was dropped", () => {
+    expect(
+      cleanAuthorizationParams({ audience: 5 } as unknown as Record<
+        string,
+        string
+      >),
+    ).toBeUndefined();
+  });
+
+  it("skips a blank key", () => {
+    expect(cleanAuthorizationParams({ "  ": "x", ok: "y" })).toEqual({
+      ok: "y",
+    });
+  });
+
+  it("is applied when lifting stored fields into settings", () => {
+    const settings = storedFieldsToInspectorSettings({
+      type: "streamable-http",
+      url: "https://x.test",
+      oauth: {
+        authorizationParams: { audience: 5, kc_idp_hint: "corp" },
+      },
+    } as unknown as StoredMCPServer);
+    expect(settings?.oauthAuthorizationParams).toEqual([
+      { key: "kc_idp_hint", value: "corp" },
+    ]);
   });
 });

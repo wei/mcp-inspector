@@ -835,6 +835,9 @@ export function ServerSettingsForm({
                   only — never the token request. Use them for provider-specific
                   hints such as kc_idp_hint, login_hint, prompt, acr_values, or
                   audience.
+                  {settings.enterpriseManaged
+                    ? " Not sent while Enterprise-managed authorization is on: that flow authorizes against the enterprise IdP, a different authorization server."
+                    : ""}
                 </FieldDescription>
                 {authorizationParams.length === 0 ? (
                   <EmptyHint>No additional parameters configured</EmptyHint>

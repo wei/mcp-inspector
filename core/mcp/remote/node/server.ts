@@ -1255,7 +1255,7 @@ export function createRemoteApp(
       if ("oauth" in valObj && !isOauthObject(valObj.oauth)) {
         logWarn(
           { route: "/api/servers", id, droppedKey: "oauth" },
-          "Dropping malformed `oauth` field — expected `{ clientId?, clientSecret?, scopes?, authorizationParams?, enterpriseManaged? }`.",
+          "Dropping malformed `oauth` field — expected `{ clientId?, clientSecret?, scopes?, authorizationParams?, enterpriseManaged?, onInsufficientScope? }`.",
         );
         delete valObj.oauth;
       }

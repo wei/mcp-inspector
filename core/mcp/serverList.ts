@@ -195,6 +195,45 @@ export function envPairsToRecord(
 }
 
 /**
+ * Validate a server's `oauth.authorizationParams` as it comes off disk, or
+ * `undefined` when there is nothing usable. (#2018)
+ *
+ * `StoredMCPServer` types this as `Record<string, string>`, but that is a
+ * compile-time promise a hand-edited `mcp.json` does not keep — and only the web
+ * client's `/api/servers` route checks it, while the CLI and TUI read the file
+ * directly. Without this, `authorizationParams: "oops"` enumerates as the
+ * character-indexed pairs `0=o, 1=o, …` and `{ audience: 5 }` reaches
+ * `URLSearchParams.set`, which stringifies it — either way the Inspector sends
+ * query parameters the user never wrote. Each rejection warns, following
+ * `cleanRoots` above, which guards the same class for `roots`.
+ */
+export function cleanAuthorizationParams(
+  params: Record<string, string> | undefined,
+): Record<string, string> | undefined {
+  if (params === undefined) return undefined;
+  // Keep: unreachable per the parameter type, reachable from disk.
+  if (typeof params !== "object" || params === null || Array.isArray(params)) {
+    console.warn(
+      "Ignoring `oauth.authorizationParams`: expected an object of string values, got",
+      Array.isArray(params) ? "array" : typeof params,
+    );
+    return undefined;
+  }
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(params)) {
+    if (typeof value !== "string") {
+      console.warn(
+        `Dropping \`oauth.authorizationParams.${key}\`: expected a string value, got ${typeof value}.`,
+      );
+      continue;
+    }
+    if (key.trim() === "") continue;
+    out[key] = value;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
  * Collapse a server's custom authorization-parameter rows into the record the
  * `InspectorClientOptions.oauth.authorizationParams` option takes, or
  * `undefined` when nothing survives (no rows, or every row blank-keyed). Shared
@@ -309,14 +348,14 @@ export function storedFieldsToInspectorSettings(
   if (stored.oauth?.scopes) settings.oauthScopes = stored.oauth.scopes;
   // Optional record with no default; carried through only when the file has a
   // non-empty object, so an absent/empty field reads back as unset and the
-  // write side then omits it — keeping a byte-stable round-trip. (#2018)
-  if (
-    stored.oauth?.authorizationParams &&
-    Object.keys(stored.oauth.authorizationParams).length > 0
-  ) {
-    settings.oauthAuthorizationParams = envRecordToPairs(
-      stored.oauth.authorizationParams,
-    );
+  // write side then omits it — keeping a byte-stable round-trip. Sanitized
+  // rather than trusted: only the web client's `/api/servers` route validates
+  // this field, while the CLI/TUI read `mcp.json` straight off disk. (#2018)
+  const authorizationParams = cleanAuthorizationParams(
+    stored.oauth?.authorizationParams,
+  );
+  if (authorizationParams) {
+    settings.oauthAuthorizationParams = envRecordToPairs(authorizationParams);
   }
   if (stored.oauth?.onInsufficientScope) {
     settings.oauthOnInsufficientScope = stored.oauth.onInsufficientScope;

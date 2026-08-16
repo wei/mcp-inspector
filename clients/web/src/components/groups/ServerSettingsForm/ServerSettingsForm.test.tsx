@@ -903,6 +903,36 @@ describe("ServerSettingsForm", () => {
     );
   });
 
+  // #2018 — the EMA leg authorizes against the enterprise IdP, a different
+  // authorization server, and deliberately sends none of these parameters. The
+  // description has to say so, or the form shows a configured value as active
+  // when it will not be sent.
+  it("warns that authorization parameters are unused under enterprise-managed auth", () => {
+    const { rerender } = renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{ ...emptySettings, enterpriseManaged: true }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.getByText(/Not sent while Enterprise-managed authorization is on/),
+    ).toBeInTheDocument();
+
+    rerender(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{ ...emptySettings, enterpriseManaged: false }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.queryByText(
+        /Not sent while Enterprise-managed authorization is on/,
+      ),
+    ).not.toBeInTheDocument();
+  });
+
   it("does not flag a blank authorization-parameter row as reserved", () => {
     renderWithMantine(
       <ServerSettingsForm
