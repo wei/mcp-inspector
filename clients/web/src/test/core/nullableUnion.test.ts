@@ -341,7 +341,27 @@ describe("normalizeNullableUnion", () => {
     });
   });
 
-  it("leaves a mismatched enumNames alone rather than inventing an alignment", () => {
+  // Keeping a mismatched list is not neutral: filtering shortens `enum`, so a
+  // list both renderers had correctly *ignored* can come out the same length
+  // and start labelling — `enum: [null, "b"]` + `enumNames: ["None"]` would
+  // otherwise label `b` as "None". Dropping it preserves the ignore.
+  it("drops a mismatched enumNames rather than letting filtering align it", () => {
+    expect(
+      normalizeNullableUnion({
+        type: ["string", "null"],
+        enum: [null, "b"],
+        enumNames: ["None"],
+      }),
+    ).toEqual({
+      type: "string",
+      enum: ["b"],
+      enumNames: undefined,
+      anyOf: undefined,
+      nullable: true,
+    });
+  });
+
+  it("drops a mismatched enumNames that stays mismatched too", () => {
     expect(
       normalizeNullableUnion({
         type: ["string", "null"],
@@ -351,10 +371,41 @@ describe("normalizeNullableUnion", () => {
     ).toEqual({
       type: "string",
       enum: ["a"],
-      enumNames: ["Alpha"],
+      enumNames: undefined,
       anyOf: undefined,
       nullable: true,
     });
+  });
+
+  // An empty enum permits nothing at all, so it reaches the same conclusion as
+  // `[null]`: no value a dropdown could offer, so do not build one.
+  it("declines to collapse an empty enum", () => {
+    const typeArray = { type: ["string", "null"], enum: [] };
+    expect(normalizeNullableUnion(typeArray)).toBe(typeArray);
+    const union = {
+      anyOf: [{ type: "string", enum: [] }, { type: "null" as const }],
+    };
+    expect(normalizeNullableUnion(union)).toBe(union);
+  });
+
+  // `$ref` applies alongside its siblings and is never resolved here, so a
+  // branch carrying one can be unsatisfiable.
+  it("treats $ref as opaque wherever it appears", () => {
+    const onBranch = {
+      anyOf: [
+        { type: "string", $ref: "#/$defs/intOnly" },
+        { type: "null" as const },
+      ],
+    };
+    expect(normalizeNullableUnion(onBranch)).toBe(onBranch);
+    const onTypeArray = { type: ["string", "null"], $ref: "#/$defs/intOnly" };
+    expect(normalizeNullableUnion(onTypeArray)).toBe(onTypeArray);
+    expect(admitsNull({ type: ["string", "null"], $ref: "#/$defs/x" })).toBe(
+      false,
+    );
+    expect(admitsNull({ anyOf: [{ type: "null", $ref: "#/$defs/x" }] })).toBe(
+      false,
+    );
   });
 
   // The type-array path keeps the schema's own keywords, but `collapsed` clears

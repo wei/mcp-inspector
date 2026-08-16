@@ -47,6 +47,7 @@ export interface NullableUnionSchema {
   oneOf?: readonly unknown[];
   allOf?: readonly unknown[];
   not?: unknown;
+  $ref?: string;
   nullable?: boolean;
   const?: unknown;
 }
@@ -201,7 +202,12 @@ function hasOpaqueApplicator(schema: NullableUnionSchema): boolean {
   return (
     schema.not !== undefined ||
     schema.allOf !== undefined ||
-    schema.oneOf !== undefined
+    schema.oneOf !== undefined ||
+    // `$ref` points at a schema this module never resolves, and it applies
+    // *alongside* its siblings — `{ type: "string", $ref: "#/$defs/intOnly" }`
+    // can be unsatisfiable. The wrapper path already declines on it (it is not
+    // an annotation); this is the same rule for every other position.
+    schema.$ref !== undefined
   );
 }
 
@@ -228,13 +234,13 @@ function hasUnevaluatedComposition(schema: NullableUnionSchema): boolean {
 /**
  * What {@link stripNullEnumMembers} concluded about an `enum`.
  *
- * `"only-null"` is a distinct outcome rather than "an empty list" because it
+ * `"unselectable"` is a distinct outcome rather than "an empty list" because it
  * has to **stop the collapse**, not just empty a field. See below.
  */
 type EnumStrip =
   | { kind: "unchanged" }
   | { kind: "filtered"; members: unknown[]; names?: unknown }
-  | { kind: "only-null" };
+  | { kind: "unselectable" };
 
 /**
  * Drop `null` members from an `enum`, keeping the parallel `enumNames` aligned.
@@ -252,12 +258,13 @@ type EnumStrip =
  * the two lengths disagree — so stripping one without the other silently loses
  * every label rather than just the dropped one's.
  *
- * **An enum of nothing but `null` reports `"only-null"` so the caller declines
- * to collapse at all.** Emitting `enum: undefined` instead would turn a schema
- * permitting *only* `null` into a plain string field that accepts arbitrary
- * text — trading a cosmetic problem for a correctness one, since the form would
- * then invite values the schema forbids. Left uncollapsed it renders through
- * the JSON editor, which represents it honestly.
+ * **An enum that offers no selectable value reports `"unselectable"`, so the
+ * caller declines to collapse at all.** That covers `[null]` and the empty
+ * `[]`: the first permits only `null`, the second permits nothing. Emitting
+ * `enum: undefined` instead would turn either into a plain string field
+ * accepting arbitrary text — trading a cosmetic problem for a correctness one,
+ * since the form would then invite values the schema forbids. Left uncollapsed
+ * they render through the JSON editor, which represents them honestly.
  */
 function stripNullEnumMembers(members: unknown, names: unknown): EnumStrip {
   if (!Array.isArray(members)) {
@@ -266,19 +273,23 @@ function stripNullEnumMembers(members: unknown, names: unknown): EnumStrip {
   const kept = members
     .map((member, index) => ({ member, index }))
     .filter((entry) => entry.member !== null);
+  // An empty `enum` permits nothing at all, so it reaches the same conclusion
+  // as `[null]` by a different route: there is no value a dropdown could offer.
+  if (kept.length === 0) {
+    return { kind: "unselectable" };
+  }
   if (kept.length === members.length) {
     return { kind: "unchanged" };
   }
-  if (kept.length === 0) {
-    return { kind: "only-null" };
-  }
-  // Only realign names that were positionally parallel to begin with; a
-  // mismatched list is already ignored by both renderers, so re-indexing it
-  // would invent an alignment the server never declared.
-  const aligned =
-    Array.isArray(names) && names.length === members.length
-      ? kept.map((entry) => names[entry.index])
-      : names;
+  // Only realign names that were positionally parallel to begin with, and DROP
+  // them otherwise. Keeping a mismatched list is not neutral: filtering shortens
+  // `enum`, so `enum: [null, "b"]` with `enumNames: ["None"]` would come out the
+  // same length and start *labelling* `b` as "None" — turning labels both
+  // renderers had correctly ignored into a confident mislabel.
+  const wasParallel = Array.isArray(names) && names.length === members.length;
+  const aligned = wasParallel
+    ? kept.map((entry) => names[entry.index])
+    : undefined;
   return {
     kind: "filtered",
     members: kept.map((entry) => entry.member),
@@ -309,7 +320,7 @@ function collapsed<T extends NullableUnionSchema>(
     merged.enum,
     (merged as { enumNames?: unknown }).enumNames,
   );
-  if (strip.kind === "only-null") {
+  if (strip.kind === "unselectable") {
     return null;
   }
   return {
@@ -458,7 +469,7 @@ export function normalizeNullableUnion<T extends NullableUnionSchema>(
       const type =
         branch.type ?? (isStringEnum(branch.enum) ? "string" : undefined);
       if (isRenderableType(type)) {
-        // `null` when the merged enum permits only `null`, which is not
+        // `null` when the merged enum offers nothing selectable, which is not
         // collapsible — fall through and return the schema by identity.
         const result = collapsed(schema, branch, type);
         if (result !== null) {
