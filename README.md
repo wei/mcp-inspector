@@ -32,7 +32,8 @@ inspector/
 ├── core/             # Shared code consumed via the `@inspector/core` alias (no package.json)
 │   ├── auth/         # OAuth: providers, discovery, storage, mid-session recovery (browser/node/remote backends)
 │   ├── client/       # Install-level client config (`client.json`): browser-safe parse/validate + Node load/save, remote backend, secrets
-│   ├── json/         # JSON + parameter/argument conversion utilities
+│   ├── json/         # JSON + parameter/argument conversion utilities, and the nullable-union
+│   │                 #   schema collapse shared by the web and TUI form builders
 │   ├── logging/      # Silent pino logger singleton
 │   ├── mcp/          # InspectorClient runtime, state stores, transports, config import
 │   ├── node/         # Node-only shared helpers: version reader, hostUrl (host normalize/canonicalize + all-interfaces/loopback detection)
@@ -145,6 +146,7 @@ Each config below is a ready-made server for exercising one feature by hand. Loa
 | `pagination-http.json`                    | Page-by-page list fetching                         | [#1721](https://github.com/modelcontextprotocol/inspector/issues/1721) |
 | `structured-output-http.json`             | Tools tab: a result's `structuredContent` section  | [#1908](https://github.com/modelcontextprotocol/inspector/issues/1908) |
 | `duplicate-tool-names-http.json`          | A `tools/list` that repeats a tool name            | [#1957](https://github.com/modelcontextprotocol/inspector/issues/1957) |
+| `nullable-fields-http.json`               | Tools tab: nullable (`anyOf` + `null`) arguments   | [#1928](https://github.com/modelcontextprotocol/inspector/issues/1928) |
 | `advertised-extensions-http.json`         | Tool registration gated on advertised extensions   | [#1739](https://github.com/modelcontextprotocol/inspector/issues/1739) |
 | `logging-{legacy,modern}-http.json`       | Logging, both eras                                 | [#1629](https://github.com/modelcontextprotocol/inspector/issues/1629) |
 | `subscriptions-{legacy,modern}-http.json` | Resource subscriptions, both eras                  | [#1630](https://github.com/modelcontextprotocol/inspector/issues/1630) |
@@ -226,6 +228,14 @@ Run `list_items` from the Tools tab: the result panel shows the `content[]` text
 Connect (default legacy era), open the Tools tab, and type `get` into **Search tools**: the list must narrow to exactly the three `get_*` rows. On the broken build it kept a stale `echo` row, because the sidebar keyed rows by `tool.name` alone and the colliding keys orphaned a child during reconciliation ([#1957](https://github.com/modelcontextprotocol/inspector/issues/1957)).
 
 The duplicated copies are appended rather than placed beside their twin on purpose. React matches a leading run of same-key children first, so a head-adjacent duplicate happens to line up and the defect hides; separating the pair is what makes it observable — and it is also the realistic shape, two tool sources concatenated.
+
+#### Nullable arguments
+
+`nullable-fields-http.json` serves `record_shipment`, whose four arguments are each declared with Zod's `.nullish()` — "optional **and** explicitly nullable". That compiles to `anyOf: [<branch>, { "type": "null" }]`, so the real type (and, for the enum, its `enum` list) sits on a branch rather than at the top level. `get_temp` sits alongside it with a plain, non-nullable `units` enum for comparison. Plain streamable-HTTP — connect with the **default (legacy)** protocol era.
+
+Open the Tools tab and select `record_shipment`: `direction` must render as a **Select** (`envio` / `recebimento`) with a clear button that sets it back to `null`, `reference` as a text input, `quantity` as a number input, and `express` as a checkbox. On the broken build every one of them fell through to the raw-JSON textarea, which re-escaped its own contents on each keystroke until the value was unusable ([#1928](https://github.com/modelcontextprotocol/inspector/issues/1928)). The tool echoes the arguments it received, so the result panel shows exactly what was sent.
+
+The **TUI** had the same gap and is worth checking against the same server (`--tui`, then test `record_shipment`): `direction` is a select, `quantity` an integer field, `express` a boolean. Both clients now share one collapse step — `normalizeNullableUnion` in [`core/json/nullableUnion.ts`](./core/json/nullableUnion.ts) — precisely so they cannot drift on which schemas they can render.
 
 #### Advertised extensions
 

@@ -3,10 +3,19 @@
  */
 
 import type { FormStructure, FormSection, FormField } from "ink-form";
+import {
+  isStringEnum,
+  normalizeNullableUnion,
+} from "@inspector/core/json/nullableUnion.js";
 
 /** Minimal JSON Schema property shape used when building tool parameter forms */
 interface JsonSchemaProperty {
-  type?: string;
+  /**
+   * An array here is the `["string", "null"]` nullable encoding, which
+   * {@link normalizeNullableUnion} collapses to a single name before the
+   * dispatch below reads it.
+   */
+  type?: string | string[];
   title?: string;
   enum?: unknown[];
   /** Non-standard legacy support: titles for enum values */
@@ -15,6 +24,8 @@ interface JsonSchemaProperty {
   minimum?: number;
   maximum?: number;
   default?: unknown;
+  /** Present on a nullable union; see {@link normalizeNullableUnion}. */
+  anyOf?: readonly unknown[];
 }
 
 /**
@@ -68,9 +79,16 @@ export function schemaToForm(
     // `properties` values are `unknown` (the SDK schema admits anything), so
     // guard before treating a value as a schema object — a malformed server
     // schema with e.g. `properties: { foo: null }` must not throw on `.title`.
-    const property = (
-      typeof prop === "object" && prop !== null ? prop : {}
-    ) as JsonSchemaProperty;
+    // Flatten a nullable union (`anyOf: [X, {type:"null"}]`, `type: [X,"null"]`)
+    // before dispatching. Every branch below reads a single `type` string, and
+    // for an enum the `enum` keyword sits on the union's surviving branch — so
+    // without this an argument declared with Zod's `.nullish()` loses its
+    // select and degrades to a plain text field (#2015, the TUI twin of #1928).
+    const property = normalizeNullableUnion(
+      (typeof prop === "object" && prop !== null
+        ? prop
+        : {}) as JsonSchemaProperty,
+    );
     const baseField = {
       name: key,
       label: property.title || key,
@@ -90,12 +108,17 @@ export function schemaToForm(
         ...baseField,
         options: toSelectOptions(property.items.enum, property.items.enumNames),
       } as FormField;
-    } else if (property.enum) {
-      // Single select
+    } else if (isStringEnum(property.enum)) {
+      // Single select. Gated on the members being strings because
+      // `toSelectOptions` stringifies them and ink-form hands the string
+      // straight back: a numeric `enum: [1, 2]` would submit `"1"` and violate
+      // the schema. A typed non-string enum falls through to its typed field
+      // below, which loses the enum constraint but keeps the value's type —
+      // the safer of the two losses.
       field = {
         type: "select",
         ...baseField,
-        options: toSelectOptions(property.enum, property.enumNames),
+        options: toSelectOptions(property.enum ?? [], property.enumNames),
       } as FormField;
     } else {
       // Map JSON Schema types to ink-form types
