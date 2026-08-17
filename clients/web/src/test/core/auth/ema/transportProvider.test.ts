@@ -1,6 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { OAuthTokens } from "@modelcontextprotocol/client";
-import type { BaseOAuthClientProvider } from "@inspector/core/auth/providers.js";
+import {
+  BaseOAuthClientProvider,
+  CallbackNavigation,
+  MutableRedirectUrlProvider,
+} from "@inspector/core/auth/providers.js";
+import type { OAuthStorage } from "@inspector/core/auth/storage.js";
+import { OAuthStorageBase } from "@inspector/core/auth/oauth-storage.js";
+import { OAuthMemoryStore } from "@inspector/core/auth/store.js";
+import type { OAuthPersistBackend } from "@inspector/core/auth/oauth-persist.js";
 import type { EmaFlowConfig } from "@inspector/core/auth/ema/emaFlow.js";
 import { EmaTransportOAuthProvider } from "@inspector/core/auth/ema/transportProvider.js";
 import {
@@ -17,6 +25,20 @@ const refreshMock = vi.mocked(refreshEmaResourceTokens);
 const startIdpMock = vi.mocked(startEmaIdpAuthorization);
 
 const SERVER_URL = "http://127.0.0.1:9999/mcp";
+
+/**
+ * A real `OAuthStorage` — in-memory state over a no-op persist backend — for the
+ * one test below that drives an actual `BaseOAuthClientProvider`. Building the
+ * genuine article costs two lines and avoids an `as unknown as` stub that would
+ * stop type-checking against the interface the provider is handed.
+ */
+function makeRealStorage(): OAuthStorage {
+  const backend: OAuthPersistBackend = {
+    read: async () => null,
+    write: async () => {},
+  };
+  return new OAuthStorageBase(new OAuthMemoryStore(), backend);
+}
 
 function jwtWithExp(expSec: number): string {
   const payload = btoa(JSON.stringify({ exp: expSec }))
@@ -39,6 +61,7 @@ interface FakeInner {
   tokens: ReturnType<typeof vi.fn>;
   saveTokens: ReturnType<typeof vi.fn>;
   redirectToAuthorization: ReturnType<typeof vi.fn>;
+  redirectToExternalAuthorization: ReturnType<typeof vi.fn>;
   clearCapturedAuthUrl: ReturnType<typeof vi.fn>;
   saveCodeVerifier: ReturnType<typeof vi.fn>;
   codeVerifier: ReturnType<typeof vi.fn>;
@@ -55,6 +78,7 @@ function createInner(): FakeInner {
     tokens: vi.fn(),
     saveTokens: vi.fn(),
     redirectToAuthorization: vi.fn(),
+    redirectToExternalAuthorization: vi.fn(),
     clearCapturedAuthUrl: vi.fn(),
     saveCodeVerifier: vi.fn(),
     codeVerifier: vi.fn(() => "verifier-xyz"),
@@ -178,6 +202,43 @@ describe("EmaTransportOAuthProvider", () => {
 
     expect(startIdpMock).toHaveBeenCalledWith(emaConfig);
     expect(inner.clearCapturedAuthUrl).toHaveBeenCalledTimes(1);
-    expect(inner.redirectToAuthorization).toHaveBeenCalledWith(idpUrl);
+    expect(inner.redirectToExternalAuthorization).toHaveBeenCalledWith(idpUrl);
+    // The custom-parameter merge lives on `redirectToAuthorization`, so the EMA
+    // leg must never take that path.
+    expect(inner.redirectToAuthorization).not.toHaveBeenCalled();
+  });
+
+  // #2018 — the inner provider carries the per-server custom authorization
+  // parameters, which belong to the MCP server's authorization server. The EMA
+  // leg sends the user to a *different* authorization server (the enterprise
+  // IdP), so those parameters must not reach it. Driven against a real
+  // BaseOAuthClientProvider rather than the fake inner above, since the defect
+  // is precisely in what the real provider does with the URL it is handed.
+  it("does not leak custom authorization params onto the IdP authorize URL", async () => {
+    const navCallback = vi.fn();
+    const realInner = new BaseOAuthClientProvider(SERVER_URL, {
+      // A real OAuthStorage rather than a cast stub: the redirect path never
+      // reads it, and a genuine implementation keeps this test honest if the
+      // storage contract changes.
+      storage: makeRealStorage(),
+      redirectUrlProvider: new MutableRedirectUrlProvider(),
+      navigation: new CallbackNavigation(navCallback),
+      authorizationParams: { kc_idp_hint: "corp-idp", audience: "api://mcp" },
+    });
+    const emaProvider = new EmaTransportOAuthProvider(realInner, emaConfig);
+
+    const idpUrl = new URL("https://idp.test/authorize?state=abc");
+    startIdpMock.mockResolvedValue(idpUrl);
+
+    await emaProvider.redirectToAuthorization(
+      new URL("https://resource-as.test/authorize"),
+    );
+
+    const navigated = navCallback.mock.calls[0]?.[0] as URL;
+    expect(navigated.searchParams.get("kc_idp_hint")).toBeNull();
+    expect(navigated.searchParams.get("audience")).toBeNull();
+    expect(navigated.href).toBe(idpUrl.href);
+    // The captured URL (what the step-up UI shows) must agree.
+    expect(realInner.getCapturedAuthUrl()?.href).toBe(idpUrl.href);
   });
 });

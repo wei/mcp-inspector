@@ -1130,12 +1130,19 @@ export function createRemoteApp(
     clientId?: string;
     clientSecret?: string;
     scopes?: string;
+    authorizationParams?: Record<string, string>;
     enterpriseManaged?: boolean;
   } => {
     if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
     const o = v as Record<string, unknown>;
     for (const k of ["clientId", "clientSecret", "scopes"] as const) {
       if (o[k] !== undefined && typeof o[k] !== "string") return false;
+    }
+    if (
+      o.authorizationParams !== undefined &&
+      !isStringRecord(o.authorizationParams)
+    ) {
+      return false;
     }
     if (
       o.enterpriseManaged !== undefined &&
@@ -1248,7 +1255,7 @@ export function createRemoteApp(
       if ("oauth" in valObj && !isOauthObject(valObj.oauth)) {
         logWarn(
           { route: "/api/servers", id, droppedKey: "oauth" },
-          "Dropping malformed `oauth` field — expected `{ clientId?, clientSecret?, scopes?, enterpriseManaged? }`.",
+          "Dropping malformed `oauth` field — expected `{ clientId?, clientSecret?, scopes?, authorizationParams?, enterpriseManaged?, onInsufficientScope? }`.",
         );
         delete valObj.oauth;
       }
@@ -1520,6 +1527,18 @@ export function createRemoteApp(
         return { ok: false, error: `settings.${optional} must be a string` };
       }
     }
+    // Optional on the wire (older clients won't send it); when present it must
+    // be the same `{ key, value }` row shape the headers/metadata lists use.
+    if (
+      obj.oauthAuthorizationParams !== undefined &&
+      !isKvArray(obj.oauthAuthorizationParams)
+    ) {
+      return {
+        ok: false,
+        error:
+          "settings.oauthAuthorizationParams must be an array of { key, value }",
+      };
+    }
     if (
       obj.enterpriseManaged !== undefined &&
       typeof obj.enterpriseManaged !== "boolean"
@@ -1634,6 +1653,12 @@ export function createRemoteApp(
     }
     if (typeof obj.oauthScopes === "string" && obj.oauthScopes !== "") {
       value.oauthScopes = obj.oauthScopes;
+    }
+    // Carried through with its blank rows intact — the omit-on-empty filtering
+    // happens on the way to disk (inspectorSettingsToStoredFields), matching
+    // how the headers/metadata rows are handled. (#2018)
+    if (isKvArray(obj.oauthAuthorizationParams)) {
+      value.oauthAuthorizationParams = obj.oauthAuthorizationParams;
     }
     if (obj.enterpriseManaged === true) {
       value.enterpriseManaged = true;

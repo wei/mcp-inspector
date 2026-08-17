@@ -81,6 +81,7 @@ test("unresolvable tsc is a hard 'cannot measure' error, not an empty file set",
       "verify-typecheck-coverage.mjs",
       path.join("lib", "npm-scripts.mjs"),
       path.join("lib", "resolve-node-bin.mjs"),
+      path.join("lib", "tsc-program.mjs"),
     ])
       cpSync(path.join(scriptsDir, rel), path.join(dir, "scripts", rel));
     execFileSync("git", ["init", "-q"], { cwd: dir });

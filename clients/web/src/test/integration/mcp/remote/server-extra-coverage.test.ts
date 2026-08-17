@@ -701,6 +701,58 @@ describe("server.ts supplemental coverage", () => {
         await stop(h);
       }
     });
+
+    // #2018 — authorizationParams must be a string record; a hand-edited file
+    // with anything else drops the whole `oauth` node rather than feeding
+    // non-string values to the authorize-URL merge.
+    it("drops oauth whose authorizationParams is not a string record", async () => {
+      const h = await start({
+        seedConfig: JSON.stringify({
+          mcpServers: {
+            srv: {
+              type: "streamable-http",
+              url: "https://x.test/mcp",
+              oauth: { authorizationParams: { kc_idp_hint: 5 } },
+            },
+          },
+        }),
+      });
+      try {
+        const res = await fetch(`${h.baseUrl}/api/servers`);
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as {
+          mcpServers: Record<string, Record<string, unknown>>;
+        };
+        expect(body.mcpServers.srv).not.toHaveProperty("oauth");
+      } finally {
+        await stop(h);
+      }
+    });
+
+    it("keeps a well-formed authorizationParams record on read", async () => {
+      const h = await start({
+        seedConfig: JSON.stringify({
+          mcpServers: {
+            srv: {
+              type: "streamable-http",
+              url: "https://x.test/mcp",
+              oauth: { authorizationParams: { kc_idp_hint: "corp" } },
+            },
+          },
+        }),
+      });
+      try {
+        const res = await fetch(`${h.baseUrl}/api/servers`);
+        const body = (await res.json()) as {
+          mcpServers: Record<string, Record<string, unknown>>;
+        };
+        expect(body.mcpServers.srv?.oauth).toEqual({
+          authorizationParams: { kc_idp_hint: "corp" },
+        });
+      } finally {
+        await stop(h);
+      }
+    });
   });
 
   describe("plaintext-secret migration over a mixed config", () => {

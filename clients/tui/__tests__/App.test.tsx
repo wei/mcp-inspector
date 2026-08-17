@@ -507,6 +507,9 @@ function renderApp(servers: Record<string, TuiServer>) {
 async function mount(servers: Record<string, TuiServer>) {
   const r = renderApp(servers);
   await tick();
+  // The mount commit's effect flush can still be queued behind this tick, and
+  // this write is the one that absorbs the dropped first keypress.
+  await settleInputHandlers();
   r.stdin.write("x");
   await tick();
   return r;
@@ -532,6 +535,11 @@ const ENTER = "\r";
  */
 async function press(r: RenderResult, keys: string[]) {
   for (const k of keys) {
+    // Same hazard `waitUntil` guards against, at the other end: a caller can
+    // reach here on a turn that still has React's passive-effect flush queued
+    // (e.g. straight after a plain `tick`, or after an earlier key committed a
+    // render), so settle before every write rather than only after a poll.
+    await settleInputHandlers();
     r.stdin.write(k);
     await tick();
     await tick();
@@ -552,9 +560,29 @@ async function press(r: RenderResult, keys: string[]) {
  */
 const POLL_TRIES = 100;
 
+/**
+ * One check-phase turn, queued BEHIND React's already-scheduled passive-effect
+ * flush. A frame observed by a poll predicate is written during React's
+ * COMMIT, but ink re-arms its useInput listeners in the passive-effect flush
+ * React schedules (via setImmediate in Node) during that same commit. Node's
+ * event loop runs the timers phase before the check phase, so a 25ms poll
+ * tick can observe the new frame and let the test write the next keypress
+ * BEFORE that flush has run — the key is then dispatched to the previous
+ * commit's stale useInput closures (where e.g. pendingStepUp is still null)
+ * and silently swallowed (#1942). Yielding one setImmediate turn after the
+ * predicate passes sequences the next stdin write after the flush (FIFO
+ * within the check queue), so "frame visible" once again implies "input
+ * handlers armed".
+ */
+const settleInputHandlers = () =>
+  new Promise((resolve) => setImmediate(resolve));
+
 async function waitUntil(predicate: () => boolean, tries = POLL_TRIES) {
   for (let i = 0; i < tries; i++) {
-    if (predicate()) return;
+    if (predicate()) {
+      await settleInputHandlers();
+      return;
+    }
     await tick();
   }
 }
@@ -624,6 +652,23 @@ beforeEach(() => {
 
 afterEach(() => {
   while (mounted.length) mounted.pop()?.unmount();
+});
+
+// Pins the synchronization contract the OAuth step-up assertions depend on
+// (#1942). The `setImmediate` sentinel below stands in for React's pending
+// passive-effect flush — the turn where ink re-arms `useInput`. If `waitUntil`
+// ever returns without yielding a check-phase turn, the sentinel has not run
+// and this fails, instead of the regression resurfacing as a differently-named
+// flaky OAuth test under coverage instrumentation.
+describe("test helpers", () => {
+  it("waitUntil settles input handlers before resolving", async () => {
+    let flushed = false;
+    setImmediate(() => {
+      flushed = true;
+    });
+    await waitUntil(() => true);
+    expect(flushed).toBe(true);
+  });
 });
 
 describe("App (foundation)", () => {

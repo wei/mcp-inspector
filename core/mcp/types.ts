@@ -166,6 +166,16 @@ export type StoredMCPServer = MCPServerConfig & {
     enterpriseManaged?: boolean;
     /** SEP-2350 step-up policy for `403 insufficient_scope` (default `reauthorize`). */
     onInsufficientScope?: OnInsufficientScopePolicy;
+    /**
+     * Custom query parameters appended to the OAuth **authorization request**
+     * (never the token request) — e.g. Keycloak's `kc_idp_hint`, OIDC's
+     * `login_hint` / `prompt` / `acr_values`, Auth0's `audience`. Reserved,
+     * protocol-critical keys (`client_id`, `state`, `code_challenge`, …) are
+     * rejected by the form and dropped with a warning at merge time. Omitted on
+     * disk when empty, keeping the file diff minimal. Inspector-specific.
+     * (#2018)
+     */
+    authorizationParams?: Record<string, string>;
   };
   /**
    * Filesystem/URI roots advertised to the server via the `roots` client
@@ -516,6 +526,14 @@ export interface OAuthSettings {
   clientId: string;
   clientSecret: string;
   scopes: string;
+  /**
+   * Custom authorization-request parameters as controlled key/value rows.
+   * Optional so callers constructing an `OAuthSettings` for the other fields
+   * don't have to supply an empty array; the form always passes the current
+   * rows (blank ones included, so a half-typed row survives a re-render).
+   * (#2018)
+   */
+  authorizationParams?: { key: string; value: string }[];
   enterpriseManaged?: boolean;
   onInsufficientScope?: OnInsufficientScopePolicy;
 }
@@ -674,6 +692,13 @@ export interface InspectorServerSettings {
   oauthClientId?: string;
   oauthClientSecret?: string;
   oauthScopes?: string;
+  /**
+   * Custom authorization-request parameters, edited as controlled key/value
+   * rows (mirrors `headers` / `metadata`). Persisted as the
+   * `oauth.authorizationParams` record on disk; blank-key rows are dropped on
+   * the way there. Applied to the authorization request only. (#2018)
+   */
+  oauthAuthorizationParams?: { key: string; value: string }[];
   /**
    * SEP-2350 step-up policy for a `403 insufficient_scope` challenge on this
    * server's HTTP transport. Defaults to `reauthorize` when unset.
@@ -919,8 +944,16 @@ export interface InspectorClientOptions {
   pipeStderr?: boolean;
 
   /**
-   * Initial logging level to set after connection (if server supports logging)
-   * If not provided, logging level will not be set automatically
+   * Initial logging level to set after connection, via `logging/setLevel`.
+   * If not provided, the logging level will not be set automatically.
+   *
+   * **Legacy era only (#1990).** `logging/setLevel` is a legacy-era method, and
+   * the modern (2026-07-28) era rejects it — so this option is ignored on a
+   * modern connection even when the server advertises `logging`. Modern has no
+   * session-scoped level at all: the equivalent is the per-request
+   * `io.modelcontextprotocol/logLevel` `_meta` opt-in, configured through the
+   * `modernLogLevel` server setting and applied via
+   * `InspectorClient.setModernLogLevel()`.
    */
   initialLoggingLevel?: LoggingLevel;
 
@@ -1026,6 +1059,11 @@ export interface InspectorClientOptions {
     scope?: string;
     /** Route to EMA flow when true (resource AS creds in clientId/clientSecret). */
     enterpriseManaged?: boolean;
+    /**
+     * Custom query parameters merged into the authorization request URL only
+     * (#2018). Reserved, protocol-critical keys are dropped with a warning.
+     */
+    authorizationParams?: Record<string, string>;
   };
 
   /**

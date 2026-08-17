@@ -8,6 +8,7 @@ import {
   Stack,
   Text,
 } from "@mantine/core";
+import type { MalformedListItem } from "@inspector/core/mcp";
 import type { GetPromptResult, Prompt } from "@modelcontextprotocol/client";
 import { PromptControls } from "../../groups/PromptControls/PromptControls";
 import type { ListPaginationControlsProps } from "../../elements/ListPaginationControls/ListPaginationControls";
@@ -34,6 +35,11 @@ export interface PromptsScreenProps {
   onUiChange: (next: PromptsUiState) => void;
   onRefreshList: () => void;
   /** A failed list load, rendered above the sidebar list (#1953). */
+  /**
+   * Entries dropped from this screen's list result(s) as malformed; the list
+   * panel warns about them above the list (#1909).
+   */
+  malformedListItems?: MalformedListItem[];
   loadError?: Error | null;
   /** Pagination controls rendered in the sidebar (#1721). */
   pagination: ListPaginationControlsProps;
@@ -138,6 +144,7 @@ export function PromptsScreen({
   completionsSupported,
   onUiChange,
   onRefreshList,
+  malformedListItems,
   loadError,
   pagination,
   onGetPrompt,
@@ -277,6 +284,7 @@ export function PromptsScreen({
             listChanged={listChanged}
             onRefreshList={onRefreshList}
             loadError={loadError}
+            malformedListItems={malformedListItems}
             pagination={pagination}
             onSearchChange={(value) => onUiChange({ ...ui, search: value })}
             onSelectPrompt={handleSelectPrompt}

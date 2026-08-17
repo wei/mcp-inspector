@@ -37,6 +37,7 @@ import type {
   Tool,
 } from "@modelcontextprotocol/client";
 import type { JsonValue } from "../json/jsonUtils.js";
+import type { MalformedListItem } from "./listSalvage.js";
 import type { InspectorClientEventTarget } from "./inspectorClientEventTarget.js";
 import type { SamplingCreateMessage } from "./samplingCreateMessage.js";
 import type { ElicitationCreateMessage } from "./elicitationCreateMessage.js";
@@ -65,6 +66,9 @@ export interface InspectorClientProtocol extends InspectorClientEventTarget {
   /** Tools excluded from `tools/list` for invalid `x-mcp-header` annotations
    * (SEP-2243); empty on legacy/stdio connections (#1632). */
   getExcludedTools(): ExcludedTool[];
+  /** Entries dropped from a list result as malformed, across every list method;
+   * empty against a conforming server (#1909). */
+  getMalformedListItems(): MalformedListItem[];
   getResourceSubscriptionStreamState(): ResourceSubscriptionStreamState;
   getDiscoverResult(): DiscoverResult | undefined;
   getServerSettings(): InspectorServerSettings | undefined;

@@ -440,8 +440,33 @@ describe("ServerSettingsModal", () => {
       oauthClientId: "",
       oauthClientSecret: "",
       oauthScopes: "",
+      oauthAuthorizationParams: [],
       enterpriseManaged: true,
     });
+  });
+
+  // #2018 — the authorization-parameter rows ride the same onOAuthChange
+  // callback, so the modal folds them onto the settings object.
+  it("persists an added authorization-parameter row onto the settings", async () => {
+    const user = userEvent.setup();
+    const onSettingsChange = vi.fn();
+    renderWithMantine(
+      <ServerSettingsModal
+        opened
+        settings={emptySettings}
+        serverType="streamable-http"
+        isStdio={false}
+        onClose={vi.fn()}
+        onSettingsChange={onSettingsChange}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "OAuth Settings" }));
+    await user.click(screen.getByRole("button", { name: "+ Add Parameter" }));
+    expect(onSettingsChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        oauthAuthorizationParams: [{ key: "", value: "" }],
+      }),
+    );
   });
 
   it("calls onSettingsChange with a blank row when adding a root", async () => {
