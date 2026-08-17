@@ -154,9 +154,11 @@ describe("useServers", () => {
         { key: "Cookie", value: "branch=feature-x" },
       ]);
     });
-    const stored = readConfig(h.configPath).mcpServers
-      .remote as unknown as Record<string, unknown>;
-    expect(stored.headers).toEqual({ Cookie: "branch=feature-x" });
+    // On disk headers are the flat `Record<string, string>` form, a direct key
+    // on the entry (post-#1358) rather than a nested settings node.
+    expect(readConfig(h.configPath).mcpServers.remote?.headers).toEqual({
+      Cookie: "branch=feature-x",
+    });
   });
 
   it("updateServer replaces the settings node when one is supplied (#1915)", async () => {

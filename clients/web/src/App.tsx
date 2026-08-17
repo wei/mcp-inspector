@@ -3927,11 +3927,20 @@ function App() {
   const onConfigSubmit = useCallback(
     async (id: string, config: MCPServerConfig, headers: KeyValuePair[]) => {
       // Headers live on the entry's `settings`, not on the transport config,
-      // so they're folded back in here (#1915). Send `settings` only when it
-      // would change something: with no headers either way there is nothing to
-      // write, and omitting the key is what makes the backend preserve the
-      // rest of the settings node.
-      const existing = configModalTarget?.settings;
+      // so they're folded back in here (#1915).
+      //
+      // Only an EDIT carries the target's other settings forward. `settings`
+      // replaces the whole node, so an edit must re-send the fields this modal
+      // doesn't expose (metadata, timeouts, OAuth credentials, roots) or they
+      // would be dropped. A CLONE must not: `configModalTarget` there is the
+      // *source* server, and spreading it would copy that server's OAuth
+      // client secret and every behavior flag onto a new entry the user only
+      // gave a URL and some headers.
+      const isEdit = configModal?.mode === "edit" && !!configModal.targetId;
+      const existing = isEdit ? configModalTarget?.settings : undefined;
+      // Send `settings` only when it would change something: with no headers
+      // on either side there is nothing to write, and omitting the key is what
+      // makes the backend preserve the node it already has.
       const settingsChanged =
         headers.length > 0 || (existing?.headers.length ?? 0) > 0;
       const settings = settingsChanged

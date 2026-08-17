@@ -265,8 +265,8 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       // settings node on disk" — so a config-only save cannot silently wipe
       // persisted headers / metadata / OAuth credentials. A caller editing a
       // field that lives on settings (e.g. ServerConfigModal's custom headers)
-      // passes the full settings object it wants written. To explicitly clear
-      // settings, send `settings: null`.
+      // passes the full settings object it wants written, which replaces the
+      // node wholesale — so it must carry forward the fields it isn't editing.
       const res = await doFetch(
         `${base}/api/servers/${encodeURIComponent(originalId)}`,
         {
