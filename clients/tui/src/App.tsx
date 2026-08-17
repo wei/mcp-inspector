@@ -446,7 +446,11 @@ function App({
     setOauthStatus("idle");
     setOauthMessage(null);
     // The header banner is server-scoped, so a failure from the server we just
-    // left must not be read as this one's.
+    // left must not be read as this one's. Clearing is not enough: a switch
+    // away and back (A → B → A) would leave both the attempt token and the
+    // server name matching again, so the stale rejection would land on the
+    // re-selected A. Retiring the token on every switch is what closes that.
+    disconnectAttemptRef.current++;
     setDisconnectError(null);
     const stepUp = pendingStepUpRef.current;
     if (stepUp && selectedServer && stepUp.serverName !== selectedServer) {

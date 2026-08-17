@@ -722,6 +722,30 @@ describe("App (foundation)", () => {
     expect(r.lastFrame() ?? "").not.toContain("stale-alpha-failure");
   });
 
+  it("drops a stale disconnect rejection across an A → B → A round trip", async () => {
+    // The server-name check alone passes here: by the time the rejection
+    // lands, alpha is selected again. Only retiring the attempt token on
+    // every switch catches it.
+    h.ctrl.status = "connected";
+    let rejectDisconnect: (err: Error) => void = () => {};
+    h.disconnect.mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectDisconnect = reject;
+        }),
+    );
+    const r = await mount(stdioServer());
+    r.stdin.write("d"); // alpha's disconnect starts, and hangs
+    await tick();
+    await press(r, [DOWN]); // alpha -> beta
+    await expectFrame(r, "b.js");
+    await press(r, [UP]); // beta -> alpha again
+    await expectFrame(r, "s.js");
+    rejectDisconnect(new Error("round-trip-failure"));
+    await waitUntil(() => (r.lastFrame() ?? "").includes("round-trip-failure"));
+    expect(r.lastFrame() ?? "").not.toContain("round-trip-failure");
+  });
+
   it("switches tabs via accelerator keys", async () => {
     const r = await mount(stdioServer());
     await press(r, ["t"]); // tools tab (server is auto-selected)
