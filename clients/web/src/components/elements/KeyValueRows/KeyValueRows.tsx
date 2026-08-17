@@ -56,7 +56,13 @@ export function KeyValueRows({
   return (
     <>
       {items.map((item, index) => {
-        const rowLabel = item.key.trim() || `row ${index + 1}`;
+        // The row number is always part of the label, not just a fallback for
+        // a blank key: two rows can carry the SAME key (mid-edit, or a
+        // duplicate a server legitimately persisted), and a key-only label
+        // would give both rows' controls identical accessible names — the very
+        // thing this labelling exists to prevent.
+        const key = item.key.trim();
+        const rowLabel = key ? `${key}, row ${index + 1}` : `row ${index + 1}`;
         return (
           <Group key={index} grow>
             <ClearableTextInput

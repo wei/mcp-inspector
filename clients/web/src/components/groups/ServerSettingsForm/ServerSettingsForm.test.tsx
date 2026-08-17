@@ -10,7 +10,7 @@ import {
 
 /** Find the clear button living in the rightSection of `input`'s field. The
  *  name is a prefix match because a KeyValueRows field names its clear button
- *  for the row it belongs to ("Clear header name, Cookie"), while a standalone
+ *  for the row it belongs to ("Clear header name, Cookie, row 1"), while a standalone
  *  field keeps the bare "Clear". */
 function clearButtonFor(input: HTMLElement): HTMLElement {
   const root =
@@ -333,7 +333,9 @@ describe("ServerSettingsForm", () => {
       />,
     );
     await user.click(
-      screen.getByRole("button", { name: "Remove header, Authorization" }),
+      screen.getByRole("button", {
+        name: "Remove header, Authorization, row 1",
+      }),
     );
     expect(onRemoveHeader).toHaveBeenCalledWith(0);
   });
@@ -356,7 +358,9 @@ describe("ServerSettingsForm", () => {
     expect(onMetadataChange).toHaveBeenCalled();
 
     await user.click(
-      screen.getByRole("button", { name: "Remove metadata entry, userId" }),
+      screen.getByRole("button", {
+        name: "Remove metadata entry, userId, row 1",
+      }),
     );
     expect(onRemoveMetadata).toHaveBeenCalledWith(0);
   });
@@ -685,7 +689,7 @@ describe("ServerSettingsForm", () => {
       // accessible name identifies which row it belongs to.
       await user.click(
         screen.getByRole("button", {
-          name: "Remove environment variable, API_KEY",
+          name: "Remove environment variable, API_KEY, row 1",
         }),
       );
       expect(onRemoveEnv).toHaveBeenCalledWith(0);

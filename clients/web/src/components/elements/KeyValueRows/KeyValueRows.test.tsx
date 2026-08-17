@@ -30,12 +30,12 @@ describe("KeyValueRows", () => {
       { key: "", value: "" },
     ]);
     expect(
-      screen.getByRole("textbox", { name: "header name, Cookie" }),
+      screen.getByRole("textbox", { name: "header name, Cookie, row 1" }),
     ).toHaveValue("Cookie");
     expect(
-      screen.getByRole("textbox", { name: "header value, Cookie" }),
+      screen.getByRole("textbox", { name: "header value, Cookie, row 1" }),
     ).toHaveValue("a=1");
-    // A key that is blank (or only whitespace) falls back to its position.
+    // A blank (or whitespace-only) key leaves the position alone as the name.
     expect(
       screen.getByRole("textbox", { name: "header name, row 2" }),
     ).toBeInTheDocument();
@@ -46,13 +46,13 @@ describe("KeyValueRows", () => {
     const { onChange } = setup([{ key: "X", value: "1" }]);
 
     await user.type(
-      screen.getByRole("textbox", { name: "header name, X" }),
+      screen.getByRole("textbox", { name: "header name, X, row 1" }),
       "Y",
     );
     expect(onChange).toHaveBeenLastCalledWith(0, "XY", "1");
 
     await user.type(
-      screen.getByRole("textbox", { name: "header value, X" }),
+      screen.getByRole("textbox", { name: "header value, X, row 1" }),
       "2",
     );
     expect(onChange).toHaveBeenLastCalledWith(0, "X", "12");
@@ -65,12 +65,12 @@ describe("KeyValueRows", () => {
     // A bare "Clear" repeated per field would be indistinguishable across
     // rows, so each clear button names the field it empties.
     await user.click(
-      screen.getByRole("button", { name: "Clear header name, X" }),
+      screen.getByRole("button", { name: "Clear header name, X, row 1" }),
     );
     expect(onChange).toHaveBeenLastCalledWith(0, "", "1");
 
     await user.click(
-      screen.getByRole("button", { name: "Clear header value, X" }),
+      screen.getByRole("button", { name: "Clear header value, X, row 1" }),
     );
     expect(onChange).toHaveBeenLastCalledWith(0, "X", "");
   });
@@ -83,17 +83,32 @@ describe("KeyValueRows", () => {
   it("locks every control when disabled", () => {
     setup([{ key: "X", value: "1" }], true);
     expect(
-      screen.getByRole("textbox", { name: "header name, X" }),
+      screen.getByRole("textbox", { name: "header name, X, row 1" }),
     ).toBeDisabled();
     expect(
-      screen.getByRole("textbox", { name: "header value, X" }),
+      screen.getByRole("textbox", { name: "header value, X, row 1" }),
     ).toBeDisabled();
     expect(
-      screen.getByRole("button", { name: "Clear header name, X" }),
+      screen.getByRole("button", { name: "Clear header name, X, row 1" }),
     ).toBeDisabled();
     expect(
-      screen.getByRole("button", { name: "Remove header, X" }),
+      screen.getByRole("button", { name: "Remove header, X, row 1" }),
     ).toBeDisabled();
+  });
+
+  it("distinguishes two rows that share a key", () => {
+    // Duplicate keys happen mid-edit, and a server can persist duplicate
+    // metadata, so the key alone cannot identify a row.
+    setup([
+      { key: "Set-Cookie", value: "a=1" },
+      { key: "Set-Cookie", value: "b=2" },
+    ]);
+    expect(
+      screen.getByRole("textbox", { name: "header value, Set-Cookie, row 1" }),
+    ).toHaveValue("a=1");
+    expect(
+      screen.getByRole("textbox", { name: "header value, Set-Cookie, row 2" }),
+    ).toHaveValue("b=2");
   });
 
   it("removes the clicked row", async () => {
@@ -103,7 +118,9 @@ describe("KeyValueRows", () => {
       { key: "B", value: "2" },
     ]);
 
-    await user.click(screen.getByRole("button", { name: "Remove header, B" }));
+    await user.click(
+      screen.getByRole("button", { name: "Remove header, B, row 2" }),
+    );
     expect(onRemove).toHaveBeenCalledWith(1);
   });
 });

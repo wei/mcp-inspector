@@ -159,7 +159,7 @@ export const EditSseWithHeaders: Story = {
     const body = within(canvasElement.ownerDocument.body);
     const dialog = within(await findDialog(body, "Edit server"));
     const value = (await dialog.findByRole("textbox", {
-      name: "header value, Cookie",
+      name: "header value, Cookie, row 1",
     })) as HTMLInputElement;
     await expect(value.value).toBe("branch=feature-x");
 

@@ -15,11 +15,14 @@ import type { KeyValuePair } from "../components/elements/KeyValueRows/KeyValueR
  *    the modal's target in clone mode is the *source* server, so spreading it
  *    would copy that server's OAuth client secret and behavior flags onto a
  *    new entry the user only gave a URL and some headers.
- * 2. **`undefined` means "don't send the key at all."** Omitting `settings`
- *    is what makes the backend preserve the node it already has, so with no
- *    headers on either side there is nothing to write and nothing to clear.
- *    Clearing the last header still sends — `existing` had headers, so the
- *    node must be rewritten without them.
+ * 2. **`undefined` means "don't send the key at all", and that is the
+ *    default.** Omitting `settings` makes the backend preserve the node it
+ *    already has, which matters beyond convenience: what this modal holds is
+ *    a snapshot taken when it opened, so writing it back on a save that did
+ *    not touch a header would overwrite a metadata or OAuth change made in
+ *    the settings form in the meantime. So the patch is sent only when the
+ *    submitted headers actually differ from the stored ones — including the
+ *    case where the last one was cleared, which does need the node rewritten.
  *
  * Lives here rather than inline in App.tsx so this seam is unit-testable:
  * App.tsx is outside the coverage gate, and the edit-vs-clone distinction is
@@ -35,8 +38,15 @@ export function buildHeaderSettingsPatch(
   emptySettings: InspectorServerSettings,
 ): InspectorServerSettings | undefined {
   const existing = mode === "edit" ? existingSettings : undefined;
-  const changesSomething =
-    headers.length > 0 || (existing?.headers.length ?? 0) > 0;
-  if (!changesSomething) return undefined;
+  if (sameHeaders(existing?.headers ?? [], headers)) return undefined;
   return { ...(existing ?? emptySettings), headers };
+}
+
+/**
+ * Order-sensitive pair-list equality. Order matters because it is what the
+ * form round-trips and what the user sees, so a reorder is a real edit.
+ */
+function sameHeaders(a: KeyValuePair[], b: KeyValuePair[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((h, i) => h.key === b[i]?.key && h.value === b[i]?.value);
 }

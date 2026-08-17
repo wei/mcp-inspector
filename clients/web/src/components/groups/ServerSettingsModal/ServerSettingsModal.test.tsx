@@ -277,7 +277,9 @@ describe("ServerSettingsModal", () => {
     );
     await user.click(screen.getByRole("button", { name: "Custom Headers" }));
     await user.click(
-      screen.getByRole("button", { name: "Remove header, Authorization" }),
+      screen.getByRole("button", {
+        name: "Remove header, Authorization, row 1",
+      }),
     );
     expect(onSettingsChange).toHaveBeenCalledWith({
       ...initialSettings,
@@ -346,7 +348,9 @@ describe("ServerSettingsModal", () => {
     // Both the header and metadata rows have a remove button; each is named
     // for the row it belongs to, so no positional guess is needed.
     await user.click(
-      screen.getByRole("button", { name: "Remove metadata entry, userId" }),
+      screen.getByRole("button", {
+        name: "Remove metadata entry, userId, row 1",
+      }),
     );
     expect(onSettingsChange).toHaveBeenCalledWith({
       ...initialSettings,
@@ -767,7 +771,9 @@ describe("ServerSettingsModal", () => {
         screen.getByRole("button", { name: "Environment Variables" }),
       );
       await user.click(
-        screen.getByRole("button", { name: "Remove environment variable, A" }),
+        screen.getByRole("button", {
+          name: "Remove environment variable, A, row 1",
+        }),
       );
       expect(onSettingsChange).toHaveBeenCalledWith({
         ...emptySettings,

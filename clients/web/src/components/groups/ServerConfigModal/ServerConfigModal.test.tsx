@@ -509,7 +509,7 @@ describe("ServerConfigModal", () => {
           "Cookie",
         );
         await user.type(
-          screen.getByRole("textbox", { name: /header value, Cookie/ }),
+          screen.getByRole("textbox", { name: /header value, Cookie, row 1/ }),
           "branch=feature-x",
         );
         await user.click(screen.getByRole("button", { name: /^Add$/ }));
@@ -538,7 +538,7 @@ describe("ServerConfigModal", () => {
       );
 
       const valueInput = screen.getByRole("textbox", {
-        name: /header value, X-Env/,
+        name: /header value, X-Env, row 1/,
       });
       expect(valueInput).toHaveValue("dev");
       await user.type(valueInput, "-2");
@@ -573,11 +573,11 @@ describe("ServerConfigModal", () => {
       await user.click(screen.getByRole("button", { name: "+ Add Header" }));
       // Editing one row of several must leave its siblings untouched.
       await user.type(
-        screen.getByRole("textbox", { name: "header value, Keep" }),
+        screen.getByRole("textbox", { name: "header value, Keep, row 1" }),
         "9",
       );
       await user.click(
-        screen.getByRole("button", { name: "Remove header, Drop" }),
+        screen.getByRole("button", { name: "Remove header, Drop, row 2" }),
       );
       await user.click(screen.getByRole("button", { name: /^Save$/ }));
 

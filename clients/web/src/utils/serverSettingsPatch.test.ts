@@ -52,6 +52,48 @@ describe("buildHeaderSettingsPatch", () => {
     expect(patch?.connectionTimeout).toBe(5000);
   });
 
+  it("sends nothing when an edit leaves the headers untouched", () => {
+    // The modal holds a snapshot taken when it opened, so writing it back on
+    // an id/URL-only save would clobber a metadata or OAuth change made in the
+    // settings form since. Omitting the key is what preserves it.
+    expect(
+      buildHeaderSettingsPatch(
+        "edit",
+        POPULATED,
+        // A fresh array with equal contents — the modal always rebuilds it.
+        [{ key: "X-Old", value: "1" }],
+        EMPTY,
+      ),
+    ).toBeUndefined();
+  });
+
+  it("sends when an edit only reorders the headers", () => {
+    const two: InspectorServerSettings = {
+      ...POPULATED,
+      headers: [
+        { key: "A", value: "1" },
+        { key: "B", value: "2" },
+      ],
+    };
+    expect(
+      buildHeaderSettingsPatch(
+        "edit",
+        two,
+        [
+          { key: "B", value: "2" },
+          { key: "A", value: "1" },
+        ],
+        EMPTY,
+      ),
+    ).toEqual({
+      ...two,
+      headers: [
+        { key: "B", value: "2" },
+        { key: "A", value: "1" },
+      ],
+    });
+  });
+
   it("still sends on an edit that clears the last header", () => {
     expect(buildHeaderSettingsPatch("edit", POPULATED, [], EMPTY)).toEqual({
       ...POPULATED,

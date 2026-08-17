@@ -27,18 +27,18 @@ export const Populated: Story = {
   play: async ({ args, canvasElement }) => {
     const canvas = within(canvasElement);
     const value = await canvas.findByRole("textbox", {
-      name: "header value, Cookie",
+      name: "header value, Cookie, row 1",
     });
     await expect(value).toHaveValue("branch=feature-x");
 
     await userEvent.click(
-      canvas.getByRole("button", { name: "Remove header, X-Env" }),
+      canvas.getByRole("button", { name: "Remove header, X-Env, row 2" }),
     );
     await expect(args.onRemove).toHaveBeenCalledWith(1);
   },
 };
 
-// A row whose key is still blank falls back to a positional name rather than
+// A row whose key is still blank is named by position alone rather than
 // announcing nothing.
 export const BlankKeyRow: Story = {
   args: { items: [{ key: "", value: "" }] },
