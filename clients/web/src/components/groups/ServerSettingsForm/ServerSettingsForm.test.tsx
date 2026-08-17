@@ -8,12 +8,15 @@ import {
   type ServerSettingsSection,
 } from "./ServerSettingsForm";
 
-/** Find the "Clear" button living in the rightSection of `input`'s field. */
+/** Find the clear button living in the rightSection of `input`'s field. The
+ *  name is a prefix match because a KeyValueRows field names its clear button
+ *  for the row it belongs to ("Clear header name, Cookie"), while a standalone
+ *  field keeps the bare "Clear". */
 function clearButtonFor(input: HTMLElement): HTMLElement {
   const root =
     input.closest('[class*="mantine-TextInput-root"]') ??
     input.closest('[class*="Input-wrapper"]');
-  return within(root as HTMLElement).getByRole("button", { name: "Clear" });
+  return within(root as HTMLElement).getByRole("button", { name: /^Clear/ });
 }
 
 const emptySettings: InspectorServerSettings = {
@@ -1391,12 +1394,12 @@ describe("ServerSettingsForm", () => {
     expect(
       within(
         keyInput.closest('[class*="Input-wrapper"]') as HTMLElement,
-      ).queryByRole("button", { name: "Clear" }),
+      ).queryByRole("button", { name: /^Clear/ }),
     ).toBeNull();
     expect(
       within(
         valueInput.closest('[class*="Input-wrapper"]') as HTMLElement,
-      ).queryByRole("button", { name: "Clear" }),
+      ).queryByRole("button", { name: /^Clear/ }),
     ).toBeNull();
   });
 
@@ -1419,12 +1422,12 @@ describe("ServerSettingsForm", () => {
     expect(
       within(
         uriInput.closest('[class*="Input-wrapper"]') as HTMLElement,
-      ).queryByRole("button", { name: "Clear" }),
+      ).queryByRole("button", { name: /^Clear/ }),
     ).toBeNull();
     expect(
       within(
         nameInput.closest('[class*="Input-wrapper"]') as HTMLElement,
-      ).queryByRole("button", { name: "Clear" }),
+      ).queryByRole("button", { name: /^Clear/ }),
     ).toBeNull();
     // Typing into the URI threads the empty name through (`root.name ?? ""`).
     await user.type(uriInput, "f");

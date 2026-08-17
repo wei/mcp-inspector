@@ -504,6 +504,7 @@ export function ServerConfigModal({
                 <KeyValueRows
                   items={form.headers}
                   entityLabel="header"
+                  disabled={submitting}
                   onChange={changeHeader}
                   onRemove={removeHeader}
                 />

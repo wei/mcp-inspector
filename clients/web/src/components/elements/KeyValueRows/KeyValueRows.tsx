@@ -13,9 +13,16 @@ export interface KeyValueRowsProps {
    * to build each control's `aria-label`: the section heading and the "Key" /
    * "Value" placeholders are not programmatically associated with the inputs,
    * so without it an assistive technology cannot tell one list's key box from
-   * another's, and the remove button announces only "X".
+   * another's, and the remove button announces only "X". The clear buttons are
+   * named the same way — a bare "Clear" repeated six times across three rows
+   * tells a screen-reader user nothing about which field it empties.
    */
   entityLabel: string;
+  /**
+   * Lock every control in the list — used while a submit is in flight, so the
+   * rows can't drift out of sync with the payload the caller already captured.
+   */
+  disabled?: boolean;
   onChange: (index: number, key: string, value: string) => void;
   onRemove: (index: number) => void;
 }
@@ -42,6 +49,7 @@ const RemoveIcon = ActionIcon.withProps({
 export function KeyValueRows({
   items,
   entityLabel,
+  disabled,
   onChange,
   onRemove,
 }: KeyValueRowsProps) {
@@ -55,12 +63,15 @@ export function KeyValueRows({
               placeholder="Key"
               aria-label={`${entityLabel} name, ${rowLabel}`}
               value={item.key}
+              disabled={disabled}
               onChange={(e) =>
                 onChange(index, e.currentTarget.value, item.value)
               }
               rightSection={
                 item.key ? (
                   <ClearButton
+                    aria-label={`Clear ${entityLabel} name, ${rowLabel}`}
+                    disabled={disabled}
                     onClick={() => onChange(index, "", item.value)}
                   />
                 ) : null
@@ -70,15 +81,21 @@ export function KeyValueRows({
               placeholder="Value"
               aria-label={`${entityLabel} value, ${rowLabel}`}
               value={item.value}
+              disabled={disabled}
               onChange={(e) => onChange(index, item.key, e.currentTarget.value)}
               rightSection={
                 item.value ? (
-                  <ClearButton onClick={() => onChange(index, item.key, "")} />
+                  <ClearButton
+                    aria-label={`Clear ${entityLabel} value, ${rowLabel}`}
+                    disabled={disabled}
+                    onClick={() => onChange(index, item.key, "")}
+                  />
                 ) : null
               }
             />
             <RemoveIcon
               aria-label={`Remove ${entityLabel}, ${rowLabel}`}
+              disabled={disabled}
               onClick={() => onRemove(index)}
             >
               X
