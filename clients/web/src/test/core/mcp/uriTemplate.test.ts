@@ -9,6 +9,7 @@ import {
   templateVariables,
   tryExpandUriTemplate,
   unmetRequiredGroups,
+  valueLengthError,
 } from "@inspector/core/mcp/uriTemplate.js";
 
 describe("parseUriTemplate", () => {
@@ -749,6 +750,26 @@ describe("prefix modifier truncation", () => {
     },
   );
 
+  it.each([
+    // A pct-encoded UTF-8 sequence is ONE character: `%C3%A9` is `é`. Counting
+    // per triplet returned `%C3`, a lone lead byte decoding to nothing.
+    ["x{+v:1}", "%C3%A9x", "x%C3%A9"],
+    ["x{+v:2}", "%C3%A9x", "x%C3%A9x"],
+    // Three-octet (`€`) and four-octet (an emoji) sequences, same rule.
+    ["x{+v:1}", "%E2%82%ACy", "x%E2%82%AC"],
+    ["x{+v:1}", "%F0%9F%98%80z", "x%F0%9F%98%80"],
+    // A malformed sequence -- a lead byte with too few continuations -- falls
+    // back to per-triplet counting rather than swallowing what follows.
+    ["x{+v:1}", "%C3x", "x%C3"],
+    // A stray continuation byte is not a sequence start.
+    ["x{+v:1}", "%A9%C3%A9", "x%A9"],
+  ])(
+    "keeps a multi-octet sequence whole (%s over %s)",
+    (template, value, expected) => {
+      expect(expandUriTemplate(template, { v: value })).toBe(expected);
+    },
+  );
+
   it("counts a triplet as one character under a named operator too", () => {
     expect(expandUriTemplate("x{?v:1}", { v: "%61%62" })).toBe("x?v=%2561");
   });
@@ -852,6 +873,18 @@ describe("the per-value length ceiling", () => {
       tryExpandUriTemplate("x://{a}/{b}", { a: "1", b: "b".repeat(1_000_001) })
         .error,
     ).toMatch(/"b"/);
+  });
+});
+
+describe("valueLengthError", () => {
+  it("names the first oversized value", () => {
+    expect(valueLengthError({ a: "1", b: "b".repeat(1_000_001) })).toMatch(
+      /"b" exceeds the 1000000-character limit/,
+    );
+  });
+
+  it("passes values at or under the limit", () => {
+    expect(valueLengthError({ a: "a".repeat(1_000_000) })).toBeNull();
   });
 });
 

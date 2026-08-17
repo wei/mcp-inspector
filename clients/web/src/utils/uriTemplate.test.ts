@@ -126,3 +126,19 @@ describe("previewUriTemplate - it must never throw or over-promise", () => {
     );
   });
 });
+
+describe("previewUriTemplate - the value ceiling", () => {
+  it("falls back before encoding an oversized value", () => {
+    // Without this the guard was half a guard: the read was refused while the
+    // preview still encoded the same value on every keystroke, so a large
+    // paste froze the UI anyway.
+    expect(previewUriTemplate("x://{v}", { v: "a".repeat(1_000_001) })).toBe(
+      "x://{v}",
+    );
+  });
+
+  it("still previews a value at the limit", () => {
+    const value = "a".repeat(1_000_000);
+    expect(previewUriTemplate("x://{v}", { v: value })).toBe(`x://${value}`);
+  });
+});

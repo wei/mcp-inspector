@@ -15,6 +15,7 @@ import {
   encodeLiteral,
   expandTemplateExpression,
   parseUriTemplate,
+  valueLengthError,
 } from "@inspector/core/mcp/uriTemplate.js";
 
 export {
@@ -27,6 +28,7 @@ export {
   templateVariables,
   tryExpandUriTemplate,
   unmetRequiredGroups,
+  valueLengthError,
 } from "@inspector/core/mcp/uriTemplate.js";
 export type {
   TemplateExpansion,
@@ -70,6 +72,12 @@ export function previewUriTemplate(
   values: Record<string, string>,
 ): string {
   const defined = definedValues(values);
+
+  // The same ceiling `tryExpandUriTemplate` enforces for the read. Without it
+  // the guard was half a guard: submission was refused while this path still
+  // handed the oversized value to the encoders on every keystroke, so a large
+  // paste froze the UI anyway. Checked before any encoding happens.
+  if (valueLengthError(defined) !== null) return uriTemplate;
 
   try {
     return parseUriTemplate(uriTemplate)

@@ -513,6 +513,27 @@ function encodeValue(value: string, operator: string): string {
 }
 
 /**
+ * One unit a prefix modifier counts: a code point, a pct-encoded octet, or a
+ * whole pct-encoded UTF-8 *sequence*.
+ *
+ * The sequence alternatives are what stop a multi-octet character being cut in
+ * half. `%C3%A9` is one character — `é` — so `{+v:1}` over `%C3%A9x` must keep
+ * both octets; counting per triplet returned `%C3`, a lone lead byte that
+ * decodes to nothing. The lead byte announces the length (RFC 3629: `C2-DF`
+ * two octets, `E0-EF` three, `F0-F4` four) and each continuation is `80-BF`,
+ * so a well-formed sequence is recognizable without decoding.
+ *
+ * Order matters: longest first, so a four-octet sequence is not matched as a
+ * two-octet one followed by loose triplets. A malformed sequence — a lead byte
+ * with too few continuations, or a stray continuation — matches no sequence
+ * alternative and falls through to the single-triplet rule, which is the
+ * conservative behavior: it counts as more units, so truncation keeps less
+ * rather than emitting something that was never in the value.
+ */
+const PREFIX_UNIT =
+  /%F[0-4](?:%[89AB][0-9A-F]){3}|%E[0-9A-F](?:%[89AB][0-9A-F]){2}|%[CD][0-9A-F]%[89AB][0-9A-F]|%[0-9A-F]{2}|[\s\S]/giu;
+
+/**
  * Splits a value into the units a prefix modifier counts.
  *
  * RFC 6570 §2.4.1 counts *characters*, and is explicit that a pct-encoded
@@ -532,12 +553,12 @@ function encodeValue(value: string, operator: string): string {
  * still escapes the `%`, so the retained `%61` goes out as `%2561`), not what
  * counts as one.
  *
- * The `u` flag makes the alternation match by code point, so an astral
+ * The `u` flag makes the final alternative match by code point, so an astral
  * character is one unit rather than a surrogate pair that truncation could
  * split.
  */
 function prefixUnits(value: string): string[] {
-  return value.match(/%[0-9A-Fa-f]{2}|[\s\S]/gu) ?? [];
+  return value.match(PREFIX_UNIT) ?? [];
 }
 
 /**
@@ -687,17 +708,8 @@ export function expandUriTemplateStrict(
     );
   }
 
-  // Replacing `UriTemplate.expand` also dropped its per-value ceiling, and
-  // nothing else bounded what reaches the allocation-heavy encoders below: a
-  // pasted or programmatically supplied megabyte-plus value hit them unguarded.
-  // Kept at the SDK's own limit so this is the guard it was, not a new policy.
-  for (const [name, value] of Object.entries(values)) {
-    if (value.length > MAX_VALUE_LENGTH) {
-      throw new Error(
-        `The value for "${name}" exceeds the ${MAX_VALUE_LENGTH}-character limit.`,
-      );
-    }
-  }
+  const tooLong = valueLengthError(values);
+  if (tooLong) throw new Error(tooLong);
 
   const bad = parts.find((part) => part.kind === "expression" && part.invalid);
   if (bad) {
@@ -722,6 +734,26 @@ export function expandUriTemplateStrict(
  * constructs a `UriTemplate`, so those remain enforced by it.
  */
 const MAX_VALUE_LENGTH = 1_000_000;
+
+/**
+ * The first value exceeding {@link MAX_VALUE_LENGTH}, as a message, or `null`.
+ *
+ * Exported because the *preview* needs the same verdict and cannot get it from
+ * {@link expandUriTemplateStrict}: it expands expression by expression, so it
+ * would otherwise hand an oversized value straight to the encoders during
+ * render — the guard would hold for the read while the UI still froze on the
+ * paste that triggered it.
+ */
+export function valueLengthError(
+  values: Record<string, string>,
+): string | null {
+  for (const [name, value] of Object.entries(values)) {
+    if (value.length > MAX_VALUE_LENGTH) {
+      return `The value for "${name}" exceeds the ${MAX_VALUE_LENGTH}-character limit.`;
+    }
+  }
+  return null;
+}
 
 /**
  * The outcome of an expansion: the URI, or the reason there isn't one.
