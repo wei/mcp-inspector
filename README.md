@@ -36,7 +36,7 @@ inspector/
 │   │                 #   schema collapse shared by the web and TUI form builders
 │   ├── logging/      # Silent pino logger singleton
 │   ├── mcp/          # InspectorClient runtime, state stores, transports, config import,
-│   │                 #   and the RFC 6570 URI-template helpers all three clients expand through
+│   │                 #   and the RFC 6570 URI-template helpers the web form and TUI expand through
 │   ├── node/         # Node-only shared helpers: version reader, hostUrl (host normalize/canonicalize + all-interfaces/loopback detection)
 │   ├── react/        # React hooks over the state stores
 │   └── storage/      # File I/O helpers for the OAuth persist backends

@@ -257,8 +257,25 @@ export function hasRequiredValues(
   values: Record<string, string>,
 ): boolean {
   return groups.every((names) =>
-    names.some((name) => (values[name] ?? "").length > 0),
+    names.some((name) => (readValue(values, name) ?? "").length > 0),
   );
+}
+
+/**
+ * Reads a variable, ignoring anything inherited from `Object.prototype`.
+ *
+ * `toString`, `constructor`, `valueOf` and `__proto__` are all valid RFC 6570
+ * variable names (`varname` allows ALPHA / DIGIT / `_` / pct-encoded), and a
+ * plain object lookup finds the prototype's member for every one of them. A
+ * bare `values[name] !== undefined` therefore reports a *blank* `{?toString}`
+ * as supplied and expands a function body into the URI; `hasRequiredValues`
+ * likewise saw `constructor` as satisfied because `Object.length` is 1.
+ */
+function readValue(
+  values: Record<string, string>,
+  name: string,
+): string | undefined {
+  return Object.hasOwn(values, name) ? values[name] : undefined;
 }
 
 /**
@@ -361,17 +378,20 @@ function expandExpression(
   part: TemplateExpression,
   values: Record<string, string>,
 ): string {
-  const present = part.varspecs.filter(
-    (spec) => values[spec.name] !== undefined,
-  );
+  // The value is carried through the filter rather than re-read afterwards, so
+  // the "is it defined" test and the read cannot disagree — and so nothing
+  // downstream needs a non-null assertion to convince the compiler.
+  const present = part.varspecs.flatMap((spec) => {
+    const value = readValue(values, spec.name);
+    return value === undefined ? [] : [{ spec, value }];
+  });
   if (present.length === 0) return "";
 
   const { operator } = part;
 
   if (NAMED_OPERATORS.has(operator)) {
     const pairs = present.map(
-      (spec) =>
-        `${spec.name}=${renderValue(values[spec.name], spec, operator)}`,
+      ({ spec, value }) => `${spec.name}=${renderValue(value, spec, operator)}`,
     );
     // `;` repeats its separator per pair; `?`/`&` join with `&`.
     return operator === ";"
@@ -379,8 +399,8 @@ function expandExpression(
       : `${operator}${pairs.join("&")}`;
   }
 
-  const rendered = present.map((spec) =>
-    renderValue(values[spec.name], spec, operator),
+  const rendered = present.map(({ spec, value }) =>
+    renderValue(value, spec, operator),
   );
 
   switch (operator) {

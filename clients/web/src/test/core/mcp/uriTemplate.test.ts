@@ -468,3 +468,41 @@ describe("prefix-modifier grammar", () => {
     );
   });
 });
+
+describe("variable names that collide with Object.prototype", () => {
+  // `toString`, `constructor`, `valueOf` and `__proto__` are all valid RFC 6570
+  // varnames. A bare `values[name]` lookup finds the prototype's member for
+  // every one of them, so a *blank* field read as supplied: measured,
+  // `({})["toString"] !== undefined` is true and its typeof is "function".
+  it.each(["toString", "constructor", "valueOf", "hasOwnProperty"])(
+    "omits a blank {?%s} instead of expanding a prototype member",
+    (name) => {
+      expect(expandUriTemplate(`x://a{?${name}}`, { [name]: "" })).toBe(
+        "x://a",
+      );
+    },
+  );
+
+  it("omits the expression when the key is absent entirely", () => {
+    expect(expandUriTemplate("x://a{?toString}", {})).toBe("x://a");
+  });
+
+  it("still expands such a variable when it really has a value", () => {
+    expect(expandUriTemplate("x://a{?toString}", { toString: "v" })).toBe(
+      "x://a?toString=v",
+    );
+  });
+
+  it("does not treat an inherited member as satisfying a required group", () => {
+    // `Object` (the inherited constructor) has length 1, so the old
+    // `(values[name] ?? "").length > 0` test reported this as satisfied.
+    expect(hasRequiredValues([["constructor"]], {})).toBe(false);
+    expect(hasRequiredValues([["constructor"]], { constructor: "c" })).toBe(
+      true,
+    );
+  });
+
+  it("handles __proto__ as an ordinary variable name", () => {
+    expect(expandUriTemplate("x://a{?__proto__}", {})).toBe("x://a");
+  });
+});

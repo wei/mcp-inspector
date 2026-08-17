@@ -2,10 +2,12 @@
  * The web Resources form's view of an RFC 6570 URI template (#1919).
  *
  * Parsing, variable classification, and expansion live in
- * `@inspector/core/mcp/uriTemplate.js` so the web form, the TUI, and the CLI
- * cannot disagree about what a template means -- they are re-exported here so
- * the panel has a single import. What this module adds is the one piece that is
- * purely a display concern: the partially-expanded preview string.
+ * `@inspector/core/mcp/uriTemplate.js` so the web form and the TUI cannot
+ * disagree about what a template means -- they are re-exported here so the
+ * panel has a single import. (The CLI is not a consumer: it has no template
+ * form, and its `resources/read` passes an already-expanded `--uri` straight to
+ * `readResource`.) What this module adds is the one piece that is purely a
+ * display concern: the partially-expanded preview string.
  */
 
 import {
@@ -37,16 +39,16 @@ export type {
 const deferredToken = (index: number) => `\u0000${index}\u0000`;
 
 /**
- * A partially-expanded template for display: expressions whose variables are
- * all filled are expanded exactly as `expandUriTemplate` would, and the rest
- * are left standing as written so the user can see what is still needed.
+ * A partially-expanded template for display: expressions with at least one
+ * value are expanded exactly as `expandUriTemplate` would, and the rest are
+ * left standing as written so the user can see what is still needed.
  *
- * Unfilled expressions are swapped for an inert token and restored after
- * expansion -- rather than expanding each filled expression in isolation -- so
- * the expander still sees one whole template and applies its cross-expression
- * rules (notably rewriting a second `?` query expression to `&`). Routing the
- * rewritten template back through `expandUriTemplate` is what keeps the preview
- * honest: it can never promise a URI that submitting would not send.
+ * Unfilled expressions are swapped for an inert token and restored afterwards,
+ * and the rewritten template is expanded by `expandUriTemplate` itself. Routing
+ * it back through the real expander is what keeps the preview honest: it cannot
+ * promise a URI that submitting would not send. (Expansion carries no
+ * cross-expression state — see `expandParts` — so this is a per-expression
+ * substitution, not a whole-template rewrite that some later pass depends on.)
  */
 export function previewUriTemplate(
   uriTemplate: string,
@@ -59,7 +61,10 @@ export function previewUriTemplate(
   const rewritten = parts
     .map((part) => {
       if (part.kind === "literal") return part.text;
-      if (part.names.some((name) => defined[name] !== undefined)) {
+      // `Object.hasOwn`, not a bare lookup: `toString` and `constructor` are
+      // valid RFC 6570 variable names, and a plain lookup would find
+      // `Object.prototype`'s member and treat a blank field as filled.
+      if (part.names.some((name) => Object.hasOwn(defined, name))) {
         return part.source;
       }
       deferred.push(part.source);

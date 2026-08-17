@@ -63,3 +63,19 @@ describe("previewUriTemplate - multi-name expressions", () => {
     );
   });
 });
+
+describe("preview with Object.prototype-colliding names", () => {
+  it("leaves a blank {?toString} standing rather than treating it as filled", () => {
+    // A bare `defined[name] !== undefined` finds Object.prototype.toString and
+    // would expand the expression instead of showing the placeholder.
+    expect(previewUriTemplate("x://a{?toString}", { toString: "" })).toBe(
+      "x://a{?toString}",
+    );
+  });
+
+  it("expands it once it really has a value", () => {
+    expect(previewUriTemplate("x://a{?toString}", { toString: "v" })).toBe(
+      "x://a?toString=v",
+    );
+  });
+});
