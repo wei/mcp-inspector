@@ -32,6 +32,7 @@ import {
   authorizationParamKeyError,
   isReservedAuthorizationParam,
 } from "@inspector/core/auth/authorizationParams.js";
+import { oauthEndpointUrlError } from "@inspector/core/auth/endpointOverrides.js";
 import { ADVERTISABLE_EXTENSIONS } from "@inspector/core/mcp/extensions.js";
 import type { Root } from "@modelcontextprotocol/client";
 
@@ -478,10 +479,19 @@ export function ServerSettingsForm({
       clientSecret: settings.oauthClientSecret ?? "",
       scopes: settings.oauthScopes ?? "",
       authorizationParams,
+      authorizationUrl: settings.oauthAuthorizationUrl ?? "",
+      tokenUrl: settings.oauthTokenUrl ?? "",
       enterpriseManaged: settings.enterpriseManaged ?? false,
       onInsufficientScope: settings.oauthOnInsufficientScope,
     };
   }
+
+  // #1906 — the overrides are suppressed under EMA for the same reason the
+  // custom authorization parameters are: that leg authorizes against the
+  // enterprise IdP, a different authorization server.
+  const endpointOverrideEmaNote = settings.enterpriseManaged
+    ? " Not applied while Enterprise-managed authorization is on: that flow authorizes against the enterprise IdP, a different authorization server."
+    : "";
 
   const rejectedParamKeys = authorizationParams
     .map((p) => p.key.trim())
@@ -863,6 +873,55 @@ export function ServerSettingsForm({
                   + Add Parameter
                 </AddButton>
               </Stack>
+              <ClearableTextInput
+                label="Authorization URL override"
+                description={`Leave blank to use the authorization_endpoint the authorization server's metadata advertises. Set it to point this server at a development or staging authorization server instead. Endpoints only — the discovered issuer is unchanged, so an authorization server advertising a different issuer is rejected on callback (RFC 9207).${endpointOverrideEmaNote}`}
+                placeholder="https://staging.auth.example.com/authorize"
+                value={settings.oauthAuthorizationUrl ?? ""}
+                error={oauthEndpointUrlError(
+                  settings.oauthAuthorizationUrl ?? "",
+                )}
+                onChange={(e) =>
+                  onOAuthChange({
+                    ...currentOAuth(),
+                    authorizationUrl: e.currentTarget.value,
+                  })
+                }
+                rightSection={
+                  settings.oauthAuthorizationUrl ? (
+                    <ClearButton
+                      onClick={() =>
+                        onOAuthChange({
+                          ...currentOAuth(),
+                          authorizationUrl: "",
+                        })
+                      }
+                    />
+                  ) : null
+                }
+              />
+              <ClearableTextInput
+                label="Token URL override"
+                description={`Leave blank to use the token_endpoint the authorization server's metadata advertises. Independent of the authorization URL — either can be overridden alone.${endpointOverrideEmaNote}`}
+                placeholder="https://staging.auth.example.com/token"
+                value={settings.oauthTokenUrl ?? ""}
+                error={oauthEndpointUrlError(settings.oauthTokenUrl ?? "")}
+                onChange={(e) =>
+                  onOAuthChange({
+                    ...currentOAuth(),
+                    tokenUrl: e.currentTarget.value,
+                  })
+                }
+                rightSection={
+                  settings.oauthTokenUrl ? (
+                    <ClearButton
+                      onClick={() =>
+                        onOAuthChange({ ...currentOAuth(), tokenUrl: "" })
+                      }
+                    />
+                  ) : null
+                }
+              />
               <Select
                 label="Insufficient-scope response"
                 description="On a 403 insufficient_scope challenge (SEP-2350): re-authorize with the accumulated scope union, or surface the error to you."

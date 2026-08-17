@@ -31,5 +31,32 @@ export default defineConfig([
       "react-refresh/only-export-components": "off",
     },
   },
+  {
+    // Type-aware pass for `no-floating-promises` (#1959). The rule needs type
+    // information, which `tseslint.configs.recommended` does not provide, and
+    // the parser needs a project that literally contains the linted file — so
+    // all four leaf projects are listed (`tsconfig.json` itself is a
+    // solution file with `files: []`, so it contains nothing).
+    //
+    // `.d.ts` is excluded: `vitest.shims.d.ts` is pulled in through a `types`
+    // reference rather than an `include`, so no project owns it, and a
+    // declaration file cannot float a promise anyway.
+    files: ["**/*.{ts,tsx}"],
+    ignores: ["**/*.d.ts"],
+    languageOptions: {
+      parserOptions: {
+        project: [
+          "./tsconfig.app.json",
+          "./tsconfig.node.json",
+          "./tsconfig.storybook.json",
+          "./tsconfig.test.json",
+        ],
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+    rules: {
+      "@typescript-eslint/no-floating-promises": "error",
+    },
+  },
   ...storybook.configs["flat/recommended"],
 ]);
