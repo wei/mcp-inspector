@@ -270,10 +270,13 @@ export function templateVariables(uriTemplate: string): TemplateVariable[] {
   for (const part of parseUriTemplate(uriTemplate)) {
     if (part.kind !== "expression") continue;
     const required = !OMITTABLE_OPERATORS.has(part.operator);
-    for (const name of part.names) {
-      const conforming = !part.varspecs.some(
-        (spec) => spec.name === name && spec.conforming === false,
-      );
+    // Iterating the varspecs (rather than the names, re-scanning the varspecs
+    // for each) keeps discovery linear. A template is server-controlled and the
+    // SDK admits one up to 1 MB, so a single expression can carry thousands of
+    // short comma-separated names -- and this runs on the render thread.
+    for (const spec of part.varspecs) {
+      const { name } = spec;
+      const conforming = spec.conforming !== false;
       const existing = byName.get(name);
       if (existing) {
         existing.required = existing.required || required;
@@ -668,6 +671,33 @@ export function expandUriTemplateStrict(
 ): string {
   new UriTemplate(uriTemplate);
   const parts = parseUriTemplate(uriTemplate);
+
+  // A brace left in a literal is an unmatched one, and it is not a legal
+  // literal character. The SDK's constructor rejects an unclosed `{` but reads
+  // a stray `}` as text, and this parser does the same, so without this check
+  // `x://a}` expanded to itself -- a "URI" carrying a brace, with the panel
+  // happily enabling the read. Both halves are now refused the same way.
+  const stray = parts.find(
+    (part) => part.kind === "literal" && /[{}]/.test(part.text),
+  );
+  if (stray) {
+    throw new Error(
+      `Unmatched brace in "${uriTemplate}" — an expression must be a complete {…}.`,
+    );
+  }
+
+  // Replacing `UriTemplate.expand` also dropped its per-value ceiling, and
+  // nothing else bounded what reaches the allocation-heavy encoders below: a
+  // pasted or programmatically supplied megabyte-plus value hit them unguarded.
+  // Kept at the SDK's own limit so this is the guard it was, not a new policy.
+  for (const [name, value] of Object.entries(values)) {
+    if (value.length > MAX_VALUE_LENGTH) {
+      throw new Error(
+        `The value for "${name}" exceeds the ${MAX_VALUE_LENGTH}-character limit.`,
+      );
+    }
+  }
+
   const bad = parts.find((part) => part.kind === "expression" && part.invalid);
   if (bad) {
     throw new Error(
@@ -678,6 +708,12 @@ export function expandUriTemplateStrict(
   }
   return expandParts(parts, values);
 }
+
+/**
+ * The pinned SDK's per-value ceiling, enforced here because this module no
+ * longer calls `UriTemplate.expand` — which is where that check lived.
+ */
+const MAX_VALUE_LENGTH = 1_000_000;
 
 /**
  * The outcome of an expansion: the URI, or the reason there isn't one.

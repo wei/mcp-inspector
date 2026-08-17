@@ -801,6 +801,60 @@ describe("a value defined as the empty string", () => {
   });
 });
 
+describe("unmatched braces", () => {
+  // The SDK's constructor rejects an unclosed `{` but reads a stray `}` as
+  // literal text, and this parser does the same -- so `x://a}` used to expand
+  // to itself, a "URI" carrying a brace, with the panel enabling the read.
+  it.each([
+    ["a stray closing brace", "x://a}"],
+    ["a closing brace after an expression", "x://{a}}"],
+    ["an unclosed opening brace", "x://a/{oops"],
+  ])("strict refuses %s", (_label, template) => {
+    // The stray `}` is ours to catch; the unclosed `{` the SDK's constructor
+    // already rejects ("Unclosed template expression"). Either way the read is
+    // withheld, which is the property under test.
+    expect(() => expandUriTemplateStrict(template, { a: "1" })).toThrow(
+      /Unmatched brace|Unclosed template expression/,
+    );
+  });
+
+  it("leaves such a template unexpanded on the display path", () => {
+    expect(expandUriTemplate("x://a}", {})).toBe("x://a}");
+    expect(expandUriTemplate("x://a/{oops", {})).toBe("x://a/{oops");
+  });
+
+  it("still accepts a well-formed expression", () => {
+    expect(expandUriTemplate("x://{a}/b", { a: "1" })).toBe("x://1/b");
+  });
+});
+
+describe("the per-value length ceiling", () => {
+  // Replacing `UriTemplate.expand` dropped the SDK's own 1,000,000-character
+  // guard, leaving the allocation-heavy encoders unbounded for a pasted or
+  // programmatically supplied value.
+  it("refuses a value past the limit", () => {
+    const result = tryExpandUriTemplate("x://{v}", {
+      v: "a".repeat(1_000_001),
+    });
+    expect(result.uri).toBeUndefined();
+    expect(result.error).toMatch(/exceeds the 1000000-character limit/);
+  });
+
+  it("accepts a value at the limit", () => {
+    const value = "a".repeat(1_000_000);
+    expect(tryExpandUriTemplate("x://{v}", { v: value }).uri).toBe(
+      `x://${value}`,
+    );
+  });
+
+  it("names the offending variable", () => {
+    expect(
+      tryExpandUriTemplate("x://{a}/{b}", { a: "1", b: "b".repeat(1_000_001) })
+        .error,
+    ).toMatch(/"b"/);
+  });
+});
+
 describe("tryExpandUriTemplate", () => {
   it("returns the URI and no error when the template expands", () => {
     expect(
