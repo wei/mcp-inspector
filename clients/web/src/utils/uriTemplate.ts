@@ -50,6 +50,19 @@ export type {
  * Each half still comes from the shared expander -- `encodeLiteral` for literal
  * runs, `expandTemplateExpression` for filled ones -- so the preview cannot
  * promise a URI that submitting would not send.
+ *
+ * Two guards keep that promise, both of them things the previous
+ * expand-the-whole-template implementation got for free from the lenient
+ * `expandUriTemplate` it called:
+ *
+ * - **An invalid expression is left standing.** `{a,}` still parses `a` into
+ *   its varspecs, so filling `a` would preview `x://1` for a template whose
+ *   submission is refused outright -- a URI the user could never send.
+ * - **The whole thing is wrapped.** This runs during render, where a throw
+ *   unmounts the panel instead of disabling its button, and encoding can throw
+ *   for real input: `encodeURIComponent` raises `URIError` on an unpaired
+ *   surrogate, which a paste can deliver. The panel already reports that case
+ *   through `tryExpandUriTemplate`; here it degrades to the raw template.
  */
 export function previewUriTemplate(
   uriTemplate: string,
@@ -57,15 +70,20 @@ export function previewUriTemplate(
 ): string {
   const defined = definedValues(values);
 
-  return parseUriTemplate(uriTemplate)
-    .map((part) => {
-      if (part.kind === "literal") return encodeLiteral(part.text);
-      // `Object.hasOwn`, not a bare lookup: `toString` and `constructor` are
-      // valid RFC 6570 variable names, and a plain lookup would find
-      // `Object.prototype`'s member and treat a blank field as filled.
-      return part.names.some((name) => Object.hasOwn(defined, name))
-        ? expandTemplateExpression(part, defined)
-        : part.source;
-    })
-    .join("");
+  try {
+    return parseUriTemplate(uriTemplate)
+      .map((part) => {
+        if (part.kind === "literal") return encodeLiteral(part.text);
+        if (part.invalid) return part.source;
+        // `Object.hasOwn`, not a bare lookup: `toString` and `constructor` are
+        // valid RFC 6570 variable names, and a plain lookup would find
+        // `Object.prototype`'s member and treat a blank field as filled.
+        return part.names.some((name) => Object.hasOwn(defined, name))
+          ? expandTemplateExpression(part, defined)
+          : part.source;
+      })
+      .join("");
+  } catch {
+    return uriTemplate;
+  }
 }

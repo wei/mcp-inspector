@@ -99,3 +99,30 @@ describe("previewUriTemplate - literals", () => {
     );
   });
 });
+
+describe("previewUriTemplate - it must never throw or over-promise", () => {
+  // Both of these were free when the preview expanded a rewritten template
+  // through the lenient `expandUriTemplate`; assembling part by part has to
+  // reinstate them explicitly.
+  it("falls back to the raw template when a value cannot be encoded", () => {
+    // An unpaired surrogate has no UTF-8 encoding, so `encodeURIComponent`
+    // raises URIError -- and this runs during render, where an escaping throw
+    // unmounts the panel rather than disabling its button. A paste delivers it.
+    expect(previewUriTemplate("x://{v}", { v: "\ud800" })).toBe("x://{v}");
+  });
+
+  it("leaves an invalid expression standing rather than expanding it", () => {
+    // `{a,}` keeps `a` in its varspecs, so expanding it would preview a URI
+    // for a template whose submission is refused outright.
+    expect(previewUriTemplate("x://{a,}", { a: "1" })).toBe("x://{a,}");
+    expect(previewUriTemplate("x://{id:abc}", { "id:abc": "1" })).toBe(
+      "x://{id:abc}",
+    );
+  });
+
+  it("still previews the valid expressions around an invalid one", () => {
+    expect(previewUriTemplate("x://{a,}/{b}", { a: "1", b: "2" })).toBe(
+      "x://{a,}/2",
+    );
+  });
+});
