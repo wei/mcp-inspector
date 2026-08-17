@@ -1519,6 +1519,92 @@ export function createFileResourceTemplate(
 }
 
 /**
+ * Resource templates that exercise RFC 6570 expansion (#1919).
+ *
+ * `events_by_topic` is the simple `{topic}` expression from the issue: a `/`,
+ * `?`, `#` or space in the value MUST be percent-encoded, or the URI gains a
+ * path segment and a conforming matcher rejects it. `events_by_query` is the
+ * `{?topic}` form, which the web client could not even render an input for.
+ *
+ * Both handlers echo the URI they were matched against plus the variables the
+ * server decoded, so the round-trip is visible in the read result.
+ */
+/**
+ * The plain `foobar://events` resource that a blank `{?topic}` read lands on.
+ *
+ * Registering it is not decoration. RFC 6570 omits a query expression whose
+ * variable is undefined, so leaving `topic` blank legitimately requests the
+ * unfiltered collection -- but the SDK's own matcher cannot serve that from the
+ * template: `UriTemplate.partToRegExp` compiles `{?topic}` to a **required**
+ * `\?topic=([^&]+)`, so `match("foobar://events")` returns null and the read
+ * would 404. A real server would expose the collection as its own resource;
+ * this fixture does the same so the showcase's "read it blank" step works.
+ */
+export function createRfc6570BaseResource(): ResourceDefinition {
+  return {
+    uri: "foobar://events",
+    name: "events",
+    description: "All events - what a blank `{?topic}` read resolves to",
+    mimeType: "application/json",
+    text: JSON.stringify({ collection: "events", filtered: false }, null, 2),
+  };
+}
+
+export function createRfc6570ResourceTemplates(): ResourceTemplateDefinition[] {
+  const echo =
+    (label: string) => async (uri: URL, params: Record<string, unknown>) => ({
+      contents: [
+        {
+          uri: uri.toString(),
+          mimeType: "application/json",
+          text: JSON.stringify(
+            { template: label, matchedUri: uri.toString(), variables: params },
+            null,
+            2,
+          ),
+        },
+      ],
+    });
+
+  return [
+    {
+      name: "events_by_topic",
+      uriTemplate: "foobar://events/{topic}",
+      description:
+        "Simple expression - a reserved character in `topic` must be percent-encoded",
+      inputSchema: { topic: z.string().describe("Topic name") },
+      handler: echo("foobar://events/{topic}"),
+    },
+    {
+      name: "events_by_query",
+      uriTemplate: "foobar://events{?topic}",
+      description:
+        "Query expression - optional, and omitted entirely when `topic` is blank",
+      inputSchema: { topic: z.string().describe("Topic name") },
+      handler: echo("foobar://events{?topic}"),
+    },
+    {
+      // A template no client can honor: `abc` is not RFC 6570's `max-length`
+      // production (`%x31-39 0*3DIGIT`), so `{topic:abc}` is a malformed
+      // *template* rather than one with an ignorable modifier. The SDK's
+      // `UriTemplate` constructor accepts it, which is exactly why the
+      // Inspector checks the grammar itself and refuses the read -- guessing
+      // `{topic}` would send a URI this server never advertised.
+      //
+      // The handler is therefore unreachable through the Inspector by design.
+      // It is registered anyway so the template appears in
+      // `resources/templates/list`, which is what puts the refusal on screen.
+      name: "events_malformed",
+      uriTemplate: "foobar://events/{topic:abc}",
+      description:
+        "Malformed template - an out-of-grammar prefix modifier; the read is withheld",
+      inputSchema: { topic: z.string().describe("Topic name") },
+      handler: echo("foobar://events/{topic:abc}"),
+    },
+  ];
+}
+
+/**
  * Create a "user" resource template that returns user data by ID
  */
 export function createUserResourceTemplate(

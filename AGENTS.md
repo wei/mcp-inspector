@@ -79,7 +79,34 @@ v2/main/
 │   │                                   #   a nullable field entirely — #1928/#2015)
 │   ├── logging/                        # Silent pino logger singleton
 │   ├── mcp/                            # InspectorClient runtime + state stores
-│   │                                   #   (modernTaskSchemas.ts: SEP-2663 modern Tasks
+│   │                                   #   (uriTemplate.ts: RFC 6570 parse/classify/expand.
+│   │                                   #   The ONE expander for the web Resources form and
+│   │                                   #   readResourceFromTemplate (TUI); the CLI is NOT a
+│   │                                   #   consumer — it has no template form and passes an
+│   │                                   #   already-expanded --uri to readResource. Both
+│   │                                   #   consumers derive their FORM FIELDS from it too
+│   │                                   #   (clients/tui uriTemplateToForm),
+│   │                                   #   which is what makes the sharing real: a form
+│   │                                   #   submits under the names it rendered, so a mangled
+│   │                                   #   name silently drops the value at expansion. The
+│   │                                   #   SDK's UriTemplate is used only to VALIDATE; its
+│   │                                   #   expander is wrong for `{a,b}` (raw-joined),
+│   │                                   #   `{;id}` (operator missing), `{id:3}` (modifier in
+│   │                                   #   the name), `{+v}`/`{#v}` (encodeURI mangles `[`/`]`
+│   │                                   #   and double-encodes pct-triplets), and `{v}`
+│   │                                   #   (encodeURIComponent leaves `!'()*` bare).
+│   │                                   #   Requiredness is per EXPRESSION, not per variable —
+│   │                                   #   requiredGroups + hasRequiredValues. A template that
+│   │                                   #   cannot expand ({id:abc}, {}, {a,}) WITHHOLDS the read:
+│   │                                   #   tryExpandUriTemplate returns the reason as a value, and
+│   │                                   #   the panel disables Read Resource rather than sending the
+│   │                                   #   raw template — expandUriTemplate's raw-template fallback
+│   │                                   #   is for DISPLAY (the preview) only. An UNDEFINED
+│   │                                   #   variable omits its expression; one defined as ""
+│   │                                   #   expands (`x{?q}` → `x?q=`), so each FORM — not the
+│   │                                   #   expander — drops its untouched blanks via
+│   │                                   #   definedValues — #1919;
+│   │                                   #   modernTaskSchemas.ts: SEP-2663 modern Tasks
 │   │                                   #   extension wire schemas + normalize/handle helpers,
 │   │                                   #   used by the raw-wire tasks/* channel — #1631;
 │   │                                   #   listSalvage.ts: per-item salvage for list results —

@@ -190,7 +190,7 @@ import {
   convertToolParameters,
   convertPromptArguments,
 } from "../json/jsonUtils.js";
-import { UriTemplate } from "@modelcontextprotocol/client";
+import { expandUriTemplateStrict } from "./uriTemplate.js";
 import {
   InspectorClientEventTarget,
   type TaskWithOptionalCreatedAt,
@@ -4982,11 +4982,21 @@ export class InspectorClient extends InspectorClientEventTarget {
 
     const uriTemplateString = uriTemplate;
 
-    // Expand the template's uriTemplate using the provided params
+    // Expand through the shared helper in ./uriTemplate.js so this and the web
+    // Resources form cannot disagree. It covers the expression shapes the SDK's
+    // own expander gets wrong -- `{a,b}`, `{;id}`, and the `{id:3}` prefix
+    // modifier (#1919).
+    //
+    // `params` is passed through AS GIVEN. Only an *absent* key omits its
+    // expression; a key present with `""` is a defined RFC 6570 value and
+    // expands (`{?q}` -> `?q=`, `{;q}` -> `;q`), which is what lets a caller
+    // request those URIs deliberately. A caller whose values come from a form
+    // -- where an untouched field is indistinguishable from a deliberately
+    // empty one -- drops its blanks with `definedValues` first, as the TUI's
+    // ResourceTestModal does.
     let expandedUri: string;
     try {
-      const uriTemplate = new UriTemplate(uriTemplateString);
-      expandedUri = uriTemplate.expand(params);
+      expandedUri = expandUriTemplateStrict(uriTemplateString, params);
     } catch (error) {
       throw new Error(
         `Failed to expand URI template "${uriTemplate}": ${error instanceof Error ? error.message : String(error)}`,

@@ -35,7 +35,8 @@ inspector/
 │   ├── json/         # JSON + parameter/argument conversion utilities, and the nullable-union
 │   │                 #   schema collapse shared by the web and TUI form builders
 │   ├── logging/      # Silent pino logger singleton
-│   ├── mcp/          # InspectorClient runtime, state stores, transports, config import
+│   ├── mcp/          # InspectorClient runtime, state stores, transports, config import,
+│   │                 #   and the RFC 6570 URI-template helpers the web form and TUI expand through
 │   ├── node/         # Node-only shared helpers: version reader, hostUrl (host normalize/canonicalize + all-interfaces/loopback detection)
 │   ├── react/        # React hooks over the state stores
 │   └── storage/      # File I/O helpers for the OAuth persist backends
@@ -147,6 +148,7 @@ Each config below is a ready-made server for exercising one feature by hand. Loa
 | `structured-output-http.json`             | Tools tab: a result's `structuredContent` section  | [#1908](https://github.com/modelcontextprotocol/inspector/issues/1908) |
 | `duplicate-tool-names-http.json`          | A `tools/list` that repeats a tool name            | [#1957](https://github.com/modelcontextprotocol/inspector/issues/1957) |
 | `nullable-fields-http.json`               | Tools tab: nullable (`anyOf` + `null`) arguments   | [#1928](https://github.com/modelcontextprotocol/inspector/issues/1928) |
+| `rfc6570-templates-http.json`             | Resources tab: RFC 6570 resource-template expansion | [#1919](https://github.com/modelcontextprotocol/inspector/issues/1919) |
 | `advertised-extensions-http.json`         | Tool registration gated on advertised extensions   | [#1739](https://github.com/modelcontextprotocol/inspector/issues/1739) |
 | `logging-{legacy,modern}-http.json`       | Logging, both eras                                 | [#1629](https://github.com/modelcontextprotocol/inspector/issues/1629) |
 | `subscriptions-{legacy,modern}-http.json` | Resource subscriptions, both eras                  | [#1630](https://github.com/modelcontextprotocol/inspector/issues/1630) |
@@ -249,6 +251,38 @@ The duplicated copies are appended rather than placed beside their twin on purpo
 Open the Tools tab and select `record_shipment`: `direction` must render as a **Select** (`envio` / `recebimento`) with a clear button that sets it back to `null`, `reference` as a text input, `quantity` as a number input, and `express` as a checkbox. On the broken build every one of them fell through to the raw-JSON textarea, which re-escaped its own contents on each keystroke until the value was unusable ([#1928](https://github.com/modelcontextprotocol/inspector/issues/1928)). The tool echoes the arguments it received, so the result panel shows exactly what was sent.
 
 The **TUI** had the same gap and is worth checking against the same server (`--tui`, then test `record_shipment`): `direction` is a select, `quantity` an integer field, `express` a boolean. Both clients now share one collapse step — `normalizeNullableUnion` in [`core/json/nullableUnion.ts`](./core/json/nullableUnion.ts) — precisely so they cannot drift on which schemas they can render.
+
+#### RFC 6570 resource templates
+
+`rfc6570-templates-http.json` serves two resource templates straight out of [#1919](https://github.com/modelcontextprotocol/inspector/issues/1919) — `events_by_topic` (`foobar://events/{topic}`) and `events_by_query` (`foobar://events{?topic}`) — each echoing the URI it was matched against, plus a plain `foobar://events` resource (see below). Plain streamable-HTTP; connect with the **default (legacy)** protocol era.
+
+Open the Resources tab and pick **events_by_topic**, then enter `foo/bar`. The request must go out as `foobar://events/foo%2Fbar`, and the result echoes back the URI the server matched. On the broken build the value was spliced in raw, so the slash created a second path segment and the SDK's matcher answered `-32602 Resource not found: foobar://events/foo/bar` — the exact failure in the issue. The same holds for `?`, `#`, `%`, spaces, and non-ASCII text.
+
+**events_by_query** is the half that was invisible: the old `/\{(\w+)\}/g` scan could not see an expression carrying an operator, so no `topic` input was rendered at all. It now appears, marked **Optional** — RFC 6570 drops the whole expression when the variable is undefined, so reading with the field blank requests `foobar://events`, and filling it in requests `foobar://events?topic=foo%2Fbar`. The URI preview beside the title shows the partially-expanded form as you type, leaving unfilled expressions standing as written.
+
+> The plain `foobar://events` resource is registered deliberately, not as filler. The SDK's `UriTemplate.match()` compiles `{?topic}` to a **required** `\?topic=([^&]+)`, so a template alone cannot serve the blank read — `match("foobar://events")` returns `null`. A real server exposes the unfiltered collection as its own resource; the showcase does the same so that step actually resolves.
+
+The web client and the TUI expand through one shared helper, [`core/mcp/uriTemplate.ts`](./core/mcp/uriTemplate.ts) — the web Resources form directly, the TUI via `InspectorClient.readResourceFromTemplate` — and both derive their **form fields** from its parser too, which is the half that makes the sharing real: a form submits values under the names it rendered, so a parser that mangles a name silently drops the value at expansion time. (The CLI is not a consumer: it has no template form, and its `resources/read` passes the already-expanded `--uri` straight through.)
+
+The SDK's `UriTemplate` is still used, but only to *validate* a template (constructing it is what rejects an unclosed expression). Its expander is not, because it is incomplete in five ways — each measured against the pinned SDK, not inferred:
+
+| Shape | SDK behavior |
+| --- | --- |
+| `{a,b}` | raw-joins the values — no encoding, operator prefix dropped |
+| `{;id}` | `;` is missing from its operator list, so the variable parses as `;id` |
+| `{id:3}` | the prefix modifier is folded into the name, giving `id:3` |
+| `{+v}` / `{#v}` | `encodeURI` mangles reserved `[`/`]` (`[::1]` → `%5B::1%5D`) and double-encodes pct-triplets (`%2F` → `%252F`) |
+| `{v}` | `encodeURIComponent` leaves the sub-delims `!'()*` bare, which RFC 6570 requires encoded |
+
+The `;` and `:3` rows are the ones a user sees directly: on the SDK's parse the form renders fields literally labelled `;id` and `id:3`. The `+`/`#` row is silent corruption rather than over-escaping — an IPv6 literal or an already-encoded path arrives at the server altered.
+
+A template that cannot be expanded at all — an out-of-grammar modifier (`{id:abc}`), or an expression declaring no variable (`{}`, `{a,}`, `{?}`) — **withholds the read** rather than sending something. Pick **events_malformed** (`foobar://events/{topic:abc}`) to see it: Read Resource is disabled, the reason is printed under the form, and the preview shows the template as the server declared it. The alternative is worse than it looks: `x://{}` would otherwise expand to `x://` with no inputs rendered, so the form's "everything required is filled" check passes vacuously and it reads a URI that is not the template the server published.
+
+Literals are pct-encoded on expansion too (RFC 6570 §3.1): `café/{var}` sends `caf%C3%A9/value`, not raw UTF-8 in the path — something the SDK's expander does not do either. And the *names* a template may use are RFC 6570's `varchar` plus a labelled tolerance for `-` and `~`: the conformance suite rejects `{default-graph-uri}`, but real servers publish such names and the SDK's matcher round-trips them, so the Inspector expands them and marks the variable `conforming: false` rather than refusing a resource that demonstrably works.
+
+An **undefined** variable is what omits its expression — a variable defined as the empty string expands (`x{?q}` gives `x?q=`, `x{;q}` gives `x;q`, per RFC 6570 §3.2.7). The expander honors that distinction, so a caller such as `readResourceFromTemplate` can request either URI. Collapsing the two is a *form* concern, not a template one: both clients seed every declared variable with `""` and a text input cannot express "defined but empty", so each form drops its blanks (`definedValues`) on the way in.
+
+Requiredness is a property of the **expression**, not the variable: RFC 6570 drops undefined names from a multi-name expression, so `{a,b}` with only `a` filled is expandable and a form must not block it. `requiredGroups` returns one entry per non-omittable expression and `hasRequiredValues` asks that each be satisfied by any one of its names — which no per-variable flag can express once a name recurs across expressions (`{a,b}{a,c}` is satisfied by filling `b` and `c`).
 
 #### Advertised extensions
 
