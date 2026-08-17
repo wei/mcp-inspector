@@ -30,7 +30,7 @@ inspector/
 │   ├── tui/          # TUI client (Ink + React, tsup bundle)
 │   └── launcher/     # Shared launcher — provides the `mcp-inspector` bin, dispatches to web/cli/tui
 ├── core/             # Shared code consumed via the `@inspector/core` alias (no package.json)
-│   ├── auth/         # OAuth: providers, discovery, storage, mid-session recovery (browser/node/remote backends)
+│   ├── auth/         # OAuth: providers, discovery, storage, endpoint overrides, mid-session recovery (browser/node/remote backends)
 │   ├── client/       # Install-level client config (`client.json`): browser-safe parse/validate + Node load/save, remote backend, secrets
 │   ├── json/         # JSON + parameter/argument conversion utilities, and the nullable-union
 │   │                 #   schema collapse shared by the web and TUI form builders

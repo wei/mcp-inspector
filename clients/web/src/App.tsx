@@ -64,6 +64,7 @@ import { ResourceSubscriptionsState } from "@inspector/core/mcp/state/resourceSu
 import {
   cleanRoots,
   oauthAuthorizationParamsFromSettings,
+  oauthEndpointOverridesFromSettings,
   serializeMcpConfig,
 } from "@inspector/core/mcp/serverList.js";
 import type { ClientConfig } from "@inspector/core/client/types.js";
@@ -2315,12 +2316,16 @@ function App() {
       const serverAuthorizationParams = savedSettings
         ? oauthAuthorizationParamsFromSettings(savedSettings)
         : undefined;
+      const serverEndpointOverrides = savedSettings
+        ? oauthEndpointOverridesFromSettings(savedSettings)
+        : undefined;
       const oauthFromServer =
         savedSettings &&
         (savedSettings.oauthClientId ||
           savedSettings.oauthClientSecret ||
           savedSettings.oauthScopes ||
           serverAuthorizationParams ||
+          serverEndpointOverrides ||
           savedSettings.enterpriseManaged)
           ? {
               ...(savedSettings.oauthClientId && {
@@ -2335,6 +2340,7 @@ function App() {
               ...(serverAuthorizationParams && {
                 authorizationParams: serverAuthorizationParams,
               }),
+              ...serverEndpointOverrides,
               ...(savedSettings.enterpriseManaged && {
                 enterpriseManaged: true,
               }),

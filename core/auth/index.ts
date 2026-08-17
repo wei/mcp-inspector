@@ -36,6 +36,16 @@ export {
 } from "./authorizationParams.js";
 export type { ReservedAuthorizationParam } from "./authorizationParams.js";
 
+// Authorization/token endpoint overrides (#1906)
+export {
+  oauthEndpointUrlError,
+  normalizeOAuthEndpointOverrides,
+  isAuthorizationServerMetadata,
+  applyOAuthEndpointOverrides,
+  withOAuthEndpointOverrides,
+} from "./endpointOverrides.js";
+export type { OAuthEndpointOverrides } from "./endpointOverrides.js";
+
 // Storage
 export type {
   OAuthStorage,

@@ -45,7 +45,13 @@ v2/main/
 │   │                                   #   providers.redirectToAuthorization, the only
 │   │                                   #   seam that sees the SDK-built authorize URL;
 │   │                                   #   authorization request only, never the token
-│   │                                   #   request — #2018)
+│   │                                   #   request — #2018;
+│   │                                   #   endpointOverrides.ts per-server
+│   │                                   #   authorization/token URL overrides — a fetch
+│   │                                   #   wrapper that rewrites the discovered AS
+│   │                                   #   metadata document, the one seam SDK v2 routes
+│   │                                   #   BOTH endpoints through (neither reaches the
+│   │                                   #   OAuthClientProvider) — #1906)
 │   │   ├── browser/                    # Browser-side OAuth (sessionStorage, BrowserNavigation)
 │   │   ├── node/                       # Node-side OAuth (NodeOAuthStorage, OAuthCallbackServer,
 │   │   │                               #   runner-interactive-oauth loopback callback flow)

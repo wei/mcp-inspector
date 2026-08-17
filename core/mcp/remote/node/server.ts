@@ -1147,11 +1147,22 @@ export function createRemoteApp(
     clientSecret?: string;
     scopes?: string;
     authorizationParams?: Record<string, string>;
+    authorizationUrl?: string;
+    tokenUrl?: string;
     enterpriseManaged?: boolean;
   } => {
     if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
     const o = v as Record<string, unknown>;
-    for (const k of ["clientId", "clientSecret", "scopes"] as const) {
+    for (const k of [
+      "clientId",
+      "clientSecret",
+      "scopes",
+      // #1906 — shape only; the values are validated as absolute http(s) URLs
+      // where they're applied (core/auth/endpointOverrides.ts), so a typo drops
+      // one field with a warning instead of dropping the whole `oauth` block.
+      "authorizationUrl",
+      "tokenUrl",
+    ] as const) {
       if (o[k] !== undefined && typeof o[k] !== "string") return false;
     }
     if (
@@ -1271,7 +1282,7 @@ export function createRemoteApp(
       if ("oauth" in valObj && !isOauthObject(valObj.oauth)) {
         logWarn(
           { route: "/api/servers", id, droppedKey: "oauth" },
-          "Dropping malformed `oauth` field — expected `{ clientId?, clientSecret?, scopes?, authorizationParams?, enterpriseManaged?, onInsufficientScope? }`.",
+          "Dropping malformed `oauth` field — expected `{ clientId?, clientSecret?, scopes?, authorizationParams?, authorizationUrl?, tokenUrl?, enterpriseManaged?, onInsufficientScope? }`.",
         );
         delete valObj.oauth;
       }
@@ -1538,6 +1549,10 @@ export function createRemoteApp(
       "oauthClientId",
       "oauthClientSecret",
       "oauthScopes",
+      // #1906 — string-shaped on the wire; URL validity is checked where the
+      // override is applied, not here.
+      "oauthAuthorizationUrl",
+      "oauthTokenUrl",
     ] as const) {
       if (obj[optional] !== undefined && typeof obj[optional] !== "string") {
         return { ok: false, error: `settings.${optional} must be a string` };
@@ -1675,6 +1690,18 @@ export function createRemoteApp(
     // how the headers/metadata rows are handled. (#2018)
     if (isKvArray(obj.oauthAuthorizationParams)) {
       value.oauthAuthorizationParams = obj.oauthAuthorizationParams;
+    }
+    // Empty-string coerces to absent like the credential fields above: the form
+    // emits `""` when a user clears the input, and an empty override on disk
+    // would read back as a configured-but-blank endpoint. (#1906)
+    if (
+      typeof obj.oauthAuthorizationUrl === "string" &&
+      obj.oauthAuthorizationUrl !== ""
+    ) {
+      value.oauthAuthorizationUrl = obj.oauthAuthorizationUrl;
+    }
+    if (typeof obj.oauthTokenUrl === "string" && obj.oauthTokenUrl !== "") {
+      value.oauthTokenUrl = obj.oauthTokenUrl;
     }
     if (obj.enterpriseManaged === true) {
       value.enterpriseManaged = true;
