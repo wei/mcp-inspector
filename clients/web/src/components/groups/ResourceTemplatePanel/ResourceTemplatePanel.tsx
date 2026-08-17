@@ -15,11 +15,11 @@ import type { ResourceTemplateType as ResourceTemplate } from "@modelcontextprot
 import { AnnotationBadge } from "../../elements/AnnotationBadge/AnnotationBadge";
 import { CopyButton } from "../../elements/CopyButton/CopyButton";
 import {
-  expandUriTemplate,
   hasRequiredValues,
   previewUriTemplate,
   requiredGroups,
   templateVariables,
+  tryExpandUriTemplate,
 } from "../../../utils/uriTemplate";
 
 export interface ResourceTemplatePanelProps {
@@ -67,6 +67,13 @@ const UriText = Text.withProps({
 const DescriptionText = Text.withProps({
   size: "sm",
   c: "dimmed",
+});
+
+// Why Read Resource is disabled when the template itself cannot be expanded.
+// Without it the button is inert with nothing on screen explaining the refusal.
+const ExpansionErrorText = Text.withProps({
+  size: "sm",
+  c: "red",
 });
 
 // Left-aligned so the action sits closest to the sidebar controls / the form
@@ -221,15 +228,29 @@ export function ResourceTemplatePanel({
     void runCompletion(varName, value, buildContext(varName));
   }
 
-  // Only the expressions whose absence would change the URI's shape gate the
-  // read; an unfilled `{?topic}` is a legitimate request for the unfiltered
-  // resource, and RFC 6570 drops the whole expression for it. The rule is
-  // per-expression rather than per-variable -- `{a,b}` with only `a` filled
-  // expands to `a`'s value -- so it lives in core beside the expander.
-  const canSubmit = hasRequiredValues(groups, variables);
+  // Two independent gates on the read.
+  //
+  // First, whether the values cover what expansion structurally needs. Only the
+  // expressions whose absence would change the URI's shape count; an unfilled
+  // `{?topic}` is a legitimate request for the unfiltered resource, and RFC 6570
+  // drops the whole expression for it. The rule is per-expression rather than
+  // per-variable -- `{a,b}` with only `a` filled expands to `a`'s value -- so it
+  // lives in core beside the expander.
+  //
+  // Second, whether the template expands at all. A template the server
+  // advertised can be malformed (`{id:abc}`, `{a,}`) and a pasted value can be
+  // unencodable, and in neither case is there a URI to send -- so withhold the
+  // request and say why, rather than reading the raw template with its braces
+  // intact and letting the server answer with a confusing "not found".
+  const expansion = tryExpandUriTemplate(uriTemplate, variables);
+  const canSubmit =
+    expansion.error === undefined && hasRequiredValues(groups, variables);
 
   function handleSubmit() {
-    onReadResource(expandUriTemplate(uriTemplate, variables));
+    /* v8 ignore next -- unreachable: the button is disabled whenever the
+       expansion failed, which is the only way `uri` is undefined. */
+    if (expansion.uri === undefined) return;
+    onReadResource(expansion.uri);
   }
 
   const preview = previewUriTemplate(uriTemplate, variables);
@@ -308,6 +329,9 @@ export function ResourceTemplatePanel({
           );
         })}
       </Stack>
+      {expansion.error !== undefined && (
+        <ExpansionErrorText>{expansion.error}</ExpansionErrorText>
+      )}
       <FooterRow>
         <Button size="sm" disabled={!canSubmit} onClick={handleSubmit}>
           Read Resource

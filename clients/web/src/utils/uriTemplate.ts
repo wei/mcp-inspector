@@ -22,8 +22,10 @@ export {
   parseUriTemplate,
   requiredGroups,
   templateVariables,
+  tryExpandUriTemplate,
 } from "@inspector/core/mcp/uriTemplate.js";
 export type {
+  TemplateExpansion,
   TemplatePart,
   TemplateVariable,
   VarSpec,

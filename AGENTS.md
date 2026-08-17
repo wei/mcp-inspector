@@ -90,7 +90,12 @@ v2/main/
 │   │                                   #   and double-encodes pct-triplets), and `{v}`
 │   │                                   #   (encodeURIComponent leaves `!'()*` bare).
 │   │                                   #   Requiredness is per EXPRESSION, not per variable —
-│   │                                   #   requiredGroups + hasRequiredValues — #1919;
+│   │                                   #   requiredGroups + hasRequiredValues. A template that
+│   │                                   #   cannot expand ({id:abc}, {}, {a,}) WITHHOLDS the read:
+│   │                                   #   tryExpandUriTemplate returns the reason as a value, and
+│   │                                   #   the panel disables Read Resource rather than sending the
+│   │                                   #   raw template — expandUriTemplate's raw-template fallback
+│   │                                   #   is for DISPLAY (the preview) only — #1919;
 │   │                                   #   modernTaskSchemas.ts: SEP-2663 modern Tasks
 │   │                                   #   extension wire schemas + normalize/handle helpers,
 │   │                                   #   used by the raw-wire tasks/* channel — #1631;

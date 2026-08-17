@@ -92,9 +92,11 @@ interface TemplateExpression {
   /** Bare variable names, `*` and any `:length` modifier stripped. */
   names: string[];
   /**
-   * True when a varspec carried a modifier that is not valid RFC 6570. Strict
-   * expansion rejects the template; discovery stays lenient so the panel can
-   * still render something rather than going blank.
+   * True when a varspec is not one RFC 6570 admits — an out-of-grammar modifier
+   * (`{id:abc}`) or an empty member (`{}`, `{a,}`); see {@link parseVarSpec}.
+   * Strict expansion rejects such a template and the form withholds the read,
+   * while *discovery* stays lenient so the panel still renders whatever names
+   * the template does declare rather than going blank.
    */
   invalid: boolean;
 }
@@ -127,20 +129,28 @@ export interface TemplateVariable {
 const MAX_LENGTH_GRAMMAR = /^[1-9][0-9]{0,3}$/;
 
 /**
- * Parses one varspec (`id`, `id*`, `id:3`) into a name and optional prefix.
+ * Parses one varspec (`id`, `id*`, `id:3`) into a name and optional prefix,
+ * or `"invalid"` for anything RFC 6570's `varspec` production does not admit.
  *
- * Returns `null` for an empty varspec (a stray comma) and `"invalid"` for one
- * whose modifier does not match the grammar. The two are distinguished because
- * the first is ignorable and the second must fail the template: silently
- * treating `{id:abc}` as `{id}` would send a URI that does not match what the
- * server advertised, with nothing to alert anyone.
+ * Two shapes reach that verdict, and neither is ignorable:
+ *
+ * - **A modifier outside the grammar** (`{id:abc}`). Treating it as a plain
+ *   `{id}` would send a URI that does not match what the server advertised,
+ *   with nothing to alert anyone.
+ * - **An empty varspec** — `{}`, `{,}`, `{a,}`, `{?}`, `{*}`. RFC 6570 requires
+ *   at least one varspec per expression and admits no empty member, so this is
+ *   a malformed *template*, not an expression with a member to skip. Skipping
+ *   it is the more dangerous reading: `x://{}` would expand to `x://` while the
+ *   form rendered no inputs, so its "everything required is filled" check would
+ *   be vacuously true and it would submit a URI that is not the template the
+ *   server published.
  */
-function parseVarSpec(raw: string): VarSpec | null | "invalid" {
+function parseVarSpec(raw: string): VarSpec | "invalid" {
   // The explode modifier is stripped rather than honored: it only changes how
   // a list or map value is joined, and every value reaching this module is a
   // single string.
   const spec = raw.replace("*", "").trim();
-  if (spec.length === 0) return null;
+  if (spec.length === 0) return "invalid";
 
   const colon = spec.indexOf(":");
   if (colon === -1) return { name: spec };
@@ -183,7 +193,7 @@ export function parseUriTemplate(uriTemplate: string): TemplatePart[] {
     const operator = OPERATORS.find((op) => body.startsWith(op)) ?? "";
     const parsed = body.slice(operator.length).split(",").map(parseVarSpec);
     const varspecs = parsed.filter(
-      (spec): spec is VarSpec => spec !== null && spec !== "invalid",
+      (spec): spec is VarSpec => spec !== "invalid",
     );
     parts.push({
       kind: "expression",
@@ -243,6 +253,12 @@ export function requiredGroups(uriTemplate: string): string[][] {
   for (const part of parseUriTemplate(uriTemplate)) {
     if (part.kind !== "expression") continue;
     if (OMITTABLE_OPERATORS.has(part.operator)) continue;
+    // An expression naming no variable at all (`x://{}`) is a malformed
+    // template, which {@link tryExpandUriTemplate} refuses with that as the
+    // reason. Emitting an empty group here too would gate the form a second
+    // time on a condition nothing can satisfy, and the "any one of" message
+    // built from it would name no fields.
+    if (part.names.length === 0) continue;
     groups.push(part.names);
   }
   return groups;
@@ -472,31 +488,63 @@ export function expandUriTemplateStrict(
     throw new Error(
       `Invalid RFC 6570 varspec in "${uriTemplate}": ${
         bad.kind === "expression" ? bad.source : ""
-      } — a prefix modifier must be 1-9999 with no leading zero.`,
+      } — each varspec must name a variable, optionally with an explode (*) or a 1-9999 prefix modifier.`,
     );
   }
   return expandParts(parts, defined);
 }
 
 /**
+ * The outcome of an expansion: the URI, or the reason there isn't one.
+ *
+ * This is what a form gates its submit on. The lenient
+ * {@link expandUriTemplate} below is for *display* — it answers with the raw
+ * template so a panel can keep rendering — and a caller that mistook that
+ * fallback for a URI would issue a `resources/read` for the template itself,
+ * literal braces and all. Making the failure a value rather than a string the
+ * caller has to recognize is what keeps that from being possible.
+ *
+ * Failure is not only the malformed-template case: a value carrying an
+ * unpaired surrogate has no UTF-8 encoding, so `encodeURIComponent` throws
+ * `URIError` on it, and a text input can hold one via paste.
+ */
+export type TemplateExpansion =
+  | { uri: string; error?: undefined }
+  | { uri?: undefined; error: string };
+
+/**
+ * {@link expandUriTemplateStrict} with the throw turned into a value, for
+ * callers that must *decide* rather than degrade — chiefly the web panel, which
+ * disables Read Resource and shows the reason instead of sending a URI it knows
+ * is wrong.
+ */
+export function tryExpandUriTemplate(
+  uriTemplate: string,
+  values: Record<string, string>,
+): TemplateExpansion {
+  try {
+    return { uri: expandUriTemplateStrict(uriTemplate, values) };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
  * {@link expandUriTemplateStrict}, but falling back to the raw template string
  * instead of throwing.
  *
- * This is the form's variant: the template comes from the connected server, not
- * from the user, so an invalid one is not something the user can fix from the
- * panel — and what they already see in the URI preview is the raw template.
- * Letting it throw would take out the whole panel on render; returning it
- * unchanged sends the server a URI it rejects with a legible error instead.
- * Call sites that need the failure (`readResourceFromTemplate`, which wraps it
- * with the template name) use the strict variant.
+ * This is the **display** variant, and only that: it runs during render (the
+ * URI preview), where a throw would take out the whole panel, and the raw
+ * template is the honest thing to show for a template nothing can expand.
+ *
+ * Do **not** submit what it returns. A caller deciding whether to issue a read
+ * uses {@link tryExpandUriTemplate}, whose failure is a value it cannot
+ * mistake for a URI; `readResourceFromTemplate` uses the strict variant and
+ * wraps the error with the template's name.
  */
 export function expandUriTemplate(
   uriTemplate: string,
   values: Record<string, string>,
 ): string {
-  try {
-    return expandUriTemplateStrict(uriTemplate, values);
-  } catch {
-    return uriTemplate;
-  }
+  return tryExpandUriTemplate(uriTemplate, values).uri ?? uriTemplate;
 }

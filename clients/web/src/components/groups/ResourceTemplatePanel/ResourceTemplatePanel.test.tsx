@@ -243,6 +243,38 @@ describe("ResourceTemplatePanel", () => {
         screen.getByText("foobar://events?topic=news"),
       ).toBeInTheDocument();
     });
+
+    // A template the server advertised can be malformed. There is no URI to
+    // send for one, so the read is withheld and the reason shown -- reading the
+    // raw template with its braces intact would draw a confusing "not found"
+    // from the server for a defect that is not the user's.
+    it.each([
+      ["an out-of-grammar prefix modifier", "x://items/{id:abc}"],
+      ["an expression declaring no variable", "x://items/{}"],
+    ])("refuses to read a template with %s", (_label, uriTemplate) => {
+      const onReadResource = vi.fn();
+      renderWithMantine(
+        <ResourceTemplatePanel
+          template={{ name: "Broken", uriTemplate }}
+          onReadResource={onReadResource}
+        />,
+      );
+      expect(
+        screen.getByRole("button", { name: "Read Resource" }),
+      ).toBeDisabled();
+      expect(screen.getByText(/Invalid RFC 6570 varspec/)).toBeInTheDocument();
+      expect(onReadResource).not.toHaveBeenCalled();
+    });
+
+    it("shows the malformed template unexpanded in the preview", () => {
+      renderWithMantine(
+        <ResourceTemplatePanel
+          template={{ name: "Broken", uriTemplate: "x://items/{}" }}
+          onReadResource={vi.fn()}
+        />,
+      );
+      expect(screen.getByText("x://items/{}")).toBeInTheDocument();
+    });
   });
 
   describe("completions", () => {

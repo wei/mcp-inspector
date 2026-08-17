@@ -6,6 +6,7 @@ import {
   parseUriTemplate,
   requiredGroups,
   templateVariables,
+  tryExpandUriTemplate,
 } from "@inspector/core/mcp/uriTemplate.js";
 
 describe("parseUriTemplate", () => {
@@ -504,5 +505,67 @@ describe("variable names that collide with Object.prototype", () => {
 
   it("handles __proto__ as an ordinary variable name", () => {
     expect(expandUriTemplate("x://a{?__proto__}", {})).toBe("x://a");
+  });
+});
+
+describe("an expression that declares no variable", () => {
+  // RFC 6570 requires at least one varspec per expression and admits no empty
+  // member, so each of these is a malformed template rather than one with a
+  // member to skip. Skipping is the dangerous reading: `x://{}` would expand to
+  // `x://` while the form rendered no inputs, so its "everything required is
+  // filled" check is vacuously true and it submits a URI that is not the
+  // template the server published.
+  it.each([
+    ["an empty expression", "x://{}"],
+    ["only a separator", "x://{,}"],
+    ["a missing member", "x://{a,}"],
+    ["an operator and no name", "x://a{?}"],
+    // `*` is an explode modifier, not a name -- it is stripped before the
+    // emptiness test, so this must be rejected the same way.
+    ["only an explode modifier", "x://{*}"],
+  ])("strict rejects %s", (_label, template) => {
+    expect(() => expandUriTemplateStrict(template, { a: "1" })).toThrow(
+      /Invalid RFC 6570 varspec/,
+    );
+  });
+
+  it("declares no required group for it, so only the expansion gate reports it", () => {
+    // An empty group could never be satisfied, and the form's "any one of"
+    // message built from it would name no fields -- the accurate reason is the
+    // malformed template, which tryExpandUriTemplate gives.
+    expect(requiredGroups("x://{}")).toEqual([]);
+    expect(tryExpandUriTemplate("x://{}", {}).error).toMatch(
+      /Invalid RFC 6570 varspec/,
+    );
+  });
+
+  it("still reports the names a partly-empty expression does declare", () => {
+    expect(templateVariables("x://{a,}").map((v) => v.name)).toEqual(["a"]);
+  });
+
+  it("leaves the template unexpanded on the display path", () => {
+    expect(expandUriTemplate("x://{}", {})).toBe("x://{}");
+  });
+});
+
+describe("tryExpandUriTemplate", () => {
+  it("returns the URI and no error when the template expands", () => {
+    expect(
+      tryExpandUriTemplate("foobar://events/{topic}", { topic: "foo/bar" }),
+    ).toEqual({ uri: "foobar://events/foo%2Fbar" });
+  });
+
+  it("returns the reason instead of a URI for a malformed template", () => {
+    const result = tryExpandUriTemplate("x://{id:abc}", { id: "7" });
+    expect(result.uri).toBeUndefined();
+    expect(result.error).toMatch(/Invalid RFC 6570 varspec/);
+  });
+
+  it("reports a value that cannot be encoded rather than throwing", () => {
+    // A lone surrogate has no UTF-8 encoding, so encodeURIComponent throws
+    // URIError on it -- and a text input can hold one via paste.
+    const result = tryExpandUriTemplate("x://{v}", { v: "\ud800" });
+    expect(result.uri).toBeUndefined();
+    expect(result.error).toBeTruthy();
   });
 });
