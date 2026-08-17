@@ -197,6 +197,51 @@ export function applyOAuthEndpointOverrides(
 }
 
 /**
+ * The well-known paths authorization-server metadata is discovered at: RFC 8414
+ * (§3.1, including the path-suffixed and path-prefixed variants the SDK's
+ * `buildDiscoveryUrls` emits) and OpenID Connect Discovery. Matched as a
+ * substring of the pathname so every variant is covered by two literals.
+ */
+const AS_METADATA_WELL_KNOWN_PATHS = [
+  "/.well-known/oauth-authorization-server",
+  "/.well-known/openid-configuration",
+] as const;
+
+/** The request URL a `fetch` call was made with, in any of its three forms. */
+function requestUrlOf(input: RequestInfo | URL): string {
+  if (typeof input === "string") return input;
+  if (input instanceof URL) return input.href;
+  return input.url;
+}
+
+/**
+ * Whether a request is an authorization-server metadata discovery request.
+ *
+ * This is what keeps the wrapper off the hot path. Without it, every successful
+ * `application/json` response on the connection — every `tools/call` result, and
+ * every resource payload on the direct CLI/TUI transports — would be buffered
+ * and parsed a second time before the SDK could consume it, purely to discover
+ * that it is not a metadata document. Gating on the discovery URL first means
+ * ordinary traffic is untouched: one string test and the response is returned.
+ *
+ * A URL that will not parse falls back to testing the raw string, which is the
+ * conservative direction — worst case a request is *considered*, and the
+ * metadata predicate then rejects it.
+ */
+function isAuthorizationServerMetadataRequest(
+  input: RequestInfo | URL,
+): boolean {
+  const raw = requestUrlOf(input);
+  let pathname: string;
+  try {
+    pathname = new URL(raw).pathname;
+  } catch {
+    pathname = raw;
+  }
+  return AS_METADATA_WELL_KNOWN_PATHS.some((path) => pathname.includes(path));
+}
+
+/**
  * Whether a `content-type` names a **whole JSON document** — something that can
  * be read to completion.
  *
@@ -268,6 +313,9 @@ export function withOAuthEndpointOverrides(
     const response = await fetchFn(input, init);
     const overrides = resolveOverrides();
     if (!overrides) return response;
+    // Cheapest tests first: only a discovery request can carry the document
+    // this wrapper rewrites, so ordinary traffic never reaches the clone below.
+    if (!isAuthorizationServerMetadataRequest(input)) return response;
     if (!response.ok) return response;
     if (!isJsonDocumentResponse(response.headers.get("content-type")))
       return response;

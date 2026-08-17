@@ -249,6 +249,33 @@ export function oauthAuthorizationParamsFromSettings(
 }
 
 /**
+ * Validate one of a server's `oauth` endpoint overrides as it comes off disk,
+ * or `undefined` when there is nothing usable. (#1906)
+ *
+ * Same reasoning as `cleanAuthorizationParams` above: `StoredMCPServer` types
+ * these as `string`, but that is a compile-time promise a hand-edited file does
+ * not keep, and the CLI/TUI read `mcp.json` directly. A non-string reaches
+ * `oauthEndpointOverridesFromSettings`, which calls `.trim()` on it — so without
+ * this the whole server list fails to load. URL *validity* is not checked here;
+ * that happens where the override is applied, so a typo drops one field with a
+ * warning instead of anything louder.
+ */
+export function cleanEndpointOverride(
+  value: string | undefined,
+  field: "authorizationUrl" | "tokenUrl",
+): string | undefined {
+  if (value === undefined) return undefined;
+  // Keep: unreachable per the parameter type, reachable from disk.
+  if (typeof value !== "string") {
+    console.warn(
+      `Ignoring \`oauth.${field}\`: expected a string, got ${typeof value}.`,
+    );
+    return undefined;
+  }
+  return value.trim() || undefined;
+}
+
+/**
  * Collapse a server's endpoint-override fields into the
  * `InspectorClientOptions.oauth` sub-shape, or `undefined` when neither is set.
  * Shared by the web (`App.tsx`) and Node (`buildRunnerClientAuthOptions`) paths
@@ -381,10 +408,20 @@ export function storedFieldsToInspectorSettings(
     settings.oauthAuthorizationParams = envRecordToPairs(authorizationParams);
   }
   // Truthiness drops empty strings like the credential fields above, so a
-  // cleared field reads back as unset rather than as an empty override. (#1906)
-  if (stored.oauth?.authorizationUrl)
-    settings.oauthAuthorizationUrl = stored.oauth.authorizationUrl;
-  if (stored.oauth?.tokenUrl) settings.oauthTokenUrl = stored.oauth.tokenUrl;
+  // cleared field reads back as unset rather than as an empty override. The
+  // `string` type is a compile-time promise a hand-edited `mcp.json` does not
+  // keep, and only the web client's `/api/servers` route checks it — the CLI and
+  // TUI read the file directly and then call `.trim()` on these in
+  // `oauthEndpointOverridesFromSettings`, so a non-string would crash the server
+  // load. Sanitized like `authorizationParams` above rather than trusted.
+  // (#1906)
+  const authorizationUrl = cleanEndpointOverride(
+    stored.oauth?.authorizationUrl,
+    "authorizationUrl",
+  );
+  if (authorizationUrl) settings.oauthAuthorizationUrl = authorizationUrl;
+  const tokenUrl = cleanEndpointOverride(stored.oauth?.tokenUrl, "tokenUrl");
+  if (tokenUrl) settings.oauthTokenUrl = tokenUrl;
   if (stored.oauth?.onInsufficientScope) {
     settings.oauthOnInsufficientScope = stored.oauth.onInsufficientScope;
   }

@@ -1304,6 +1304,29 @@ describe("oauthOnInsufficientScope (SEP-2350)", () => {
     expect(settings?.oauthTokenUrl).toBe("https://staging.example.com/token");
   });
 
+  // Hand-edited `mcp.json` reaches the CLI/TUI unvalidated, and
+  // `oauthEndpointOverridesFromSettings` calls `.trim()` on these — so a
+  // non-string would crash the server load rather than being ignored.
+  it("drops a non-string endpoint override from disk", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const settings = storedFieldsToInspectorSettings({
+      oauth: {
+        clientId: "cid",
+        // Types the field as a string; disk does not honor that.
+        authorizationUrl: 42 as unknown as string,
+        tokenUrl: "https://staging.example.com/token",
+      },
+    });
+    expect(settings?.oauthAuthorizationUrl).toBeUndefined();
+    expect(settings?.oauthTokenUrl).toBe("https://staging.example.com/token");
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("oauth.authorizationUrl"),
+    );
+    // Restored here rather than left to a global teardown: a later describe
+    // spies on `console.warn` again and would inherit this spy's recorded call.
+    warn.mockRestore();
+  });
+
   it("reads a blank endpoint override back as unset", () => {
     const settings = storedFieldsToInspectorSettings({
       oauth: { clientId: "cid", authorizationUrl: "", tokenUrl: "" },

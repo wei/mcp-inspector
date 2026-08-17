@@ -14,6 +14,8 @@ const METADATA = {
   response_types_supported: ["code"],
 };
 
+const AS_METADATA_URL =
+  "https://as.example.com/.well-known/oauth-authorization-server";
 const STAGING_AUTHORIZE = "https://staging.example.com/authorize";
 const STAGING_TOKEN = "https://staging.example.com/token";
 
@@ -190,7 +192,7 @@ describe("withOAuthEndpointOverrides", () => {
       tokenUrl: STAGING_TOKEN,
     }));
 
-    const response = await wrapped("https://as.example.com/.well-known/x");
+    const response = await wrapped(AS_METADATA_URL);
     await expect(response.json()).resolves.toEqual({
       ...METADATA,
       authorization_endpoint: STAGING_AUTHORIZE,
@@ -206,16 +208,50 @@ describe("withOAuthEndpointOverrides", () => {
     const config: { overrides?: { tokenUrl?: string } } = {};
     const wrapped = withOAuthEndpointOverrides(base, () => config.overrides);
 
-    const before = await wrapped("https://as.example.com/.well-known/x");
+    const before = await wrapped(AS_METADATA_URL);
     await expect(before.json()).resolves.toMatchObject({
       token_endpoint: METADATA.token_endpoint,
     });
 
     config.overrides = { tokenUrl: STAGING_TOKEN };
-    const after = await wrapped("https://as.example.com/.well-known/x");
+    const after = await wrapped(AS_METADATA_URL);
     await expect(after.json()).resolves.toMatchObject({
       token_endpoint: STAGING_TOKEN,
     });
+  });
+
+  // The gate that keeps this wrapper off the hot path: an ordinary JSON-RPC
+  // response is not even cloned, let alone parsed. Regression test for PR #2037.
+  it("ignores a response to a request that is not metadata discovery", async () => {
+    const original = jsonResponse(METADATA);
+    const clone = vi.spyOn(original, "clone");
+    const wrapped = withOAuthEndpointOverrides(passThrough(original), () => ({
+      tokenUrl: STAGING_TOKEN,
+    }));
+
+    await expect(wrapped("https://mcp.example.com/mcp")).resolves.toBe(
+      original,
+    );
+    expect(clone).not.toHaveBeenCalled();
+  });
+
+  it("recognizes discovery through every request-input form", async () => {
+    const wrapped = withOAuthEndpointOverrides(
+      // A fresh response per call: each patched one consumes its own clone.
+      async () => jsonResponse(METADATA),
+      () => ({ tokenUrl: STAGING_TOKEN }),
+    );
+    const oidcUrl = "https://as.example.com/.well-known/openid-configuration";
+    for (const input of [
+      AS_METADATA_URL,
+      new URL(oidcUrl),
+      new Request(`${AS_METADATA_URL}/tenant-a`),
+    ]) {
+      const response = await wrapped(input);
+      await expect(response.json()).resolves.toMatchObject({
+        token_endpoint: STAGING_TOKEN,
+      });
+    }
   });
 
   it("warns once about a malformed override, not on every request", async () => {
@@ -225,9 +261,9 @@ describe("withOAuthEndpointOverrides", () => {
       tokenUrl: "not a url",
     }));
 
-    await wrapped("https://as.example.com/x");
-    await wrapped("https://as.example.com/x");
-    await wrapped("https://as.example.com/x");
+    await wrapped(AS_METADATA_URL);
+    await wrapped(AS_METADATA_URL);
+    await wrapped(AS_METADATA_URL);
 
     expect(warn).toHaveBeenCalledTimes(1);
   });
@@ -238,7 +274,7 @@ describe("withOAuthEndpointOverrides", () => {
       passThrough(original),
       () => undefined,
     );
-    await expect(wrapped("https://as.example.com/x")).resolves.toBe(original);
+    await expect(wrapped(AS_METADATA_URL)).resolves.toBe(original);
   });
 
   it("leaves an error response alone", async () => {
@@ -246,7 +282,7 @@ describe("withOAuthEndpointOverrides", () => {
     const wrapped = withOAuthEndpointOverrides(passThrough(original), () => ({
       tokenUrl: STAGING_TOKEN,
     }));
-    await expect(wrapped("https://as.example.com/x")).resolves.toBe(original);
+    await expect(wrapped(AS_METADATA_URL)).resolves.toBe(original);
   });
 
   it("leaves a non-JSON response alone", async () => {
@@ -256,7 +292,7 @@ describe("withOAuthEndpointOverrides", () => {
     const wrapped = withOAuthEndpointOverrides(passThrough(original), () => ({
       tokenUrl: STAGING_TOKEN,
     }));
-    await expect(wrapped("https://as.example.com/x")).resolves.toBe(original);
+    await expect(wrapped(AS_METADATA_URL)).resolves.toBe(original);
   });
 
   // Everything that is not a metadata document comes back as the caller's own
@@ -267,7 +303,7 @@ describe("withOAuthEndpointOverrides", () => {
     const wrapped = withOAuthEndpointOverrides(passThrough(original), () => ({
       tokenUrl: STAGING_TOKEN,
     }));
-    const response = await wrapped("https://as.example.com/token");
+    const response = await wrapped(AS_METADATA_URL);
     expect(response).toBe(original);
     await expect(response.json()).resolves.toEqual({ access_token: "abc" });
   });
@@ -277,7 +313,7 @@ describe("withOAuthEndpointOverrides", () => {
     const wrapped = withOAuthEndpointOverrides(passThrough(original), () => ({
       tokenUrl: STAGING_TOKEN,
     }));
-    const response = await wrapped("https://as.example.com/x");
+    const response = await wrapped(AS_METADATA_URL);
     expect(response).toBe(original);
     await expect(response.text()).resolves.toBe("not json at all");
   });
@@ -316,7 +352,7 @@ describe("withOAuthEndpointOverrides", () => {
       ),
       () => ({ tokenUrl: STAGING_TOKEN }),
     );
-    const response = await wrapped("https://as.example.com/x");
+    const response = await wrapped(AS_METADATA_URL);
     await expect(response.json()).resolves.toMatchObject({
       token_endpoint: STAGING_TOKEN,
     });
@@ -333,7 +369,7 @@ describe("withOAuthEndpointOverrides", () => {
     const wrapped = withOAuthEndpointOverrides(passThrough(original), () => ({
       tokenUrl: STAGING_TOKEN,
     }));
-    await expect(wrapped("https://as.example.com/x")).resolves.toBe(original);
+    await expect(wrapped(AS_METADATA_URL)).resolves.toBe(original);
   });
 
   it("drops the stale content-length and content-encoding of a rewritten body", async () => {
@@ -350,7 +386,7 @@ describe("withOAuthEndpointOverrides", () => {
       ),
       () => ({ tokenUrl: STAGING_TOKEN }),
     );
-    const response = await wrapped("https://as.example.com/x");
+    const response = await wrapped(AS_METADATA_URL);
     expect(response.headers.get("content-length")).toBeNull();
     expect(response.headers.get("content-encoding")).toBeNull();
     expect(response.headers.get("content-type")).toBe("application/json");
