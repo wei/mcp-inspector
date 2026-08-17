@@ -55,6 +55,17 @@ describe("oauthEndpointUrlError", () => {
       /not an http\(s\) URL/,
     );
   });
+
+  // `new URL` accepts these, but Fetch rejects a request URL carrying them —
+  // so without this check the value passes validation and fails mid-flow.
+  it("rejects embedded credentials", () => {
+    expect(
+      oauthEndpointUrlError("https://user:pass@as.example.com/token"),
+    ).toMatch(/username or password/);
+    expect(oauthEndpointUrlError("https://user@as.example.com/token")).toMatch(
+      /username or password/,
+    );
+  });
 });
 
 describe("normalizeOAuthEndpointOverrides", () => {
@@ -87,6 +98,18 @@ describe("normalizeOAuthEndpointOverrides", () => {
     ).toEqual({ tokenUrl: STAGING_TOKEN });
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining("Ignoring `authorizationUrl`"),
+    );
+  });
+
+  it("drops a URL with embedded credentials", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(
+      normalizeOAuthEndpointOverrides({
+        tokenUrl: "https://user:pass@as.example.com/token",
+      }),
+    ).toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("username or password"),
     );
   });
 
@@ -236,22 +259,41 @@ describe("withOAuthEndpointOverrides", () => {
     await expect(wrapped("https://as.example.com/x")).resolves.toBe(original);
   });
 
-  it("preserves a JSON body that is not metadata, and stays readable", async () => {
-    const wrapped = withOAuthEndpointOverrides(
-      passThrough(jsonResponse({ access_token: "abc" })),
-      () => ({ tokenUrl: STAGING_TOKEN }),
-    );
+  // Everything that is not a metadata document comes back as the caller's own
+  // Response — identity, not an equivalent copy — so native properties a
+  // synthesized Response cannot carry (`url`, `redirected`, `type`) survive.
+  it("returns the original response for a JSON body that is not metadata", async () => {
+    const original = jsonResponse({ access_token: "abc" });
+    const wrapped = withOAuthEndpointOverrides(passThrough(original), () => ({
+      tokenUrl: STAGING_TOKEN,
+    }));
     const response = await wrapped("https://as.example.com/token");
+    expect(response).toBe(original);
     await expect(response.json()).resolves.toEqual({ access_token: "abc" });
   });
 
-  it("hands back a readable response when the body is not valid JSON", async () => {
-    const wrapped = withOAuthEndpointOverrides(
-      passThrough(jsonResponse("not json at all")),
-      () => ({ tokenUrl: STAGING_TOKEN }),
-    );
+  it("returns the original response when the body is not valid JSON", async () => {
+    const original = jsonResponse("not json at all");
+    const wrapped = withOAuthEndpointOverrides(passThrough(original), () => ({
+      tokenUrl: STAGING_TOKEN,
+    }));
     const response = await wrapped("https://as.example.com/x");
+    expect(response).toBe(original);
     await expect(response.text()).resolves.toBe("not json at all");
+  });
+
+  // Fetch forbids a body on 204/205, so rebuilding one would throw. A JSON
+  // content-type on an empty response is unusual but legal, and it must not
+  // take down an unrelated transport request.
+  it("passes a body-less 204 through untouched", async () => {
+    const original = new Response(null, {
+      status: 204,
+      headers: { "content-type": "application/json" },
+    });
+    const wrapped = withOAuthEndpointOverrides(passThrough(original), () => ({
+      tokenUrl: STAGING_TOKEN,
+    }));
+    await expect(wrapped("https://as.example.com/x")).resolves.toBe(original);
   });
 
   it("drops the stale content-length and content-encoding of a rewritten body", async () => {

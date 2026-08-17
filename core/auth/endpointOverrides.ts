@@ -85,6 +85,14 @@ export function oauthEndpointUrlError(value: string): string | undefined {
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     return `"${trimmed}" is not an http(s) URL.`;
   }
+  // `new URL` accepts embedded credentials but Fetch rejects an HTTP(S) request
+  // URL that carries them, so without this the value would pass both the form
+  // and the runtime and then fail deep in the OAuth exchange — the failure mode
+  // this validation exists to prevent. (Sending credentials to an endpoint the
+  // flow discovered is not something to support quietly, either.)
+  if (parsed.username || parsed.password) {
+    return "URL must not contain a username or password.";
+  }
   return undefined;
 }
 
@@ -232,18 +240,20 @@ export function withOAuthEndpointOverrides(
     const contentType = response.headers.get("content-type") ?? "";
     if (!contentType.toLowerCase().includes("json")) return response;
 
-    const body = await response.text();
+    // Read through a clone so every path that does NOT patch can return the
+    // caller's own `Response`, untouched. Rebuilding unconditionally would drop
+    // native properties a synthesized `Response` cannot carry (`url`,
+    // `redirected`, `type`) from responses this wrapper has no business
+    // altering — and would throw outright on a body-less 204/205, whose status
+    // Fetch forbids a body on. A clone also makes a non-JSON body a plain
+    // parse failure with nothing consumed.
     let parsed: unknown;
     try {
-      parsed = JSON.parse(body);
+      parsed = await response.clone().json();
     } catch {
-      // Not JSON despite the header. The body is already consumed, so hand back
-      // an equivalent response rather than the drained original.
-      return responseWithBody(response, body);
+      return response;
     }
-    if (!isAuthorizationServerMetadata(parsed)) {
-      return responseWithBody(response, body);
-    }
+    if (!isAuthorizationServerMetadata(parsed)) return response;
     return responseWithBody(
       response,
       JSON.stringify(applyOAuthEndpointOverrides(parsed, overrides)),
