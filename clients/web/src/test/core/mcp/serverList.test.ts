@@ -12,6 +12,7 @@ import {
   mergeSecretsIntoStored,
   normalizeServerType,
   oauthAuthorizationParamsFromSettings,
+  oauthEndpointOverridesFromSettings,
   serverEntriesToMcpConfig,
   serializeMcpConfig,
   storedFieldsToInspectorSettings,
@@ -1287,6 +1288,66 @@ describe("oauthOnInsufficientScope (SEP-2350)", () => {
       }),
     ).toBeUndefined();
     expect(oauthAuthorizationParamsFromSettings({})).toBeUndefined();
+  });
+
+  // #1906 — authorization/token endpoint overrides.
+  it("lifts oauth endpoint overrides into settings fields", () => {
+    const settings = storedFieldsToInspectorSettings({
+      oauth: {
+        authorizationUrl: "https://staging.example.com/authorize",
+        tokenUrl: "https://staging.example.com/token",
+      },
+    });
+    expect(settings?.oauthAuthorizationUrl).toBe(
+      "https://staging.example.com/authorize",
+    );
+    expect(settings?.oauthTokenUrl).toBe("https://staging.example.com/token");
+  });
+
+  it("reads a blank endpoint override back as unset", () => {
+    const settings = storedFieldsToInspectorSettings({
+      oauth: { clientId: "cid", authorizationUrl: "", tokenUrl: "" },
+    });
+    expect(settings?.oauthAuthorizationUrl).toBeUndefined();
+    expect(settings?.oauthTokenUrl).toBeUndefined();
+  });
+
+  it("persists endpoint overrides under oauth, trimming whitespace", () => {
+    const stored = inspectorSettingsToStoredFields({
+      ...baseSettings,
+      oauthAuthorizationUrl: "  https://staging.example.com/authorize  ",
+      oauthTokenUrl: "https://staging.example.com/token",
+    });
+    expect(stored.oauth).toEqual({
+      authorizationUrl: "https://staging.example.com/authorize",
+      tokenUrl: "https://staging.example.com/token",
+    });
+  });
+
+  it("omits the oauth block when the endpoint overrides are blank", () => {
+    const stored = inspectorSettingsToStoredFields({
+      ...baseSettings,
+      oauthAuthorizationUrl: "   ",
+      oauthTokenUrl: "",
+    });
+    expect(stored).not.toHaveProperty("oauth");
+  });
+
+  it("derives the endpoint-override client option, or undefined when blank", () => {
+    expect(
+      oauthEndpointOverridesFromSettings({
+        oauthAuthorizationUrl: " https://staging.example.com/authorize ",
+      }),
+    ).toEqual({ authorizationUrl: "https://staging.example.com/authorize" });
+    expect(
+      oauthEndpointOverridesFromSettings({
+        oauthTokenUrl: "https://staging.example.com/token",
+      }),
+    ).toEqual({ tokenUrl: "https://staging.example.com/token" });
+    expect(
+      oauthEndpointOverridesFromSettings({ oauthAuthorizationUrl: "  " }),
+    ).toBeUndefined();
+    expect(oauthEndpointOverridesFromSettings({})).toBeUndefined();
   });
 });
 

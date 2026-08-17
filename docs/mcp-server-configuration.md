@@ -175,9 +175,13 @@ These have no analog in the broader `mcp.json` ecosystem. Each is **omitted on w
 | `paginatedLists`                       | `false`    | Fetch tools/resources/prompts one page at a time instead of auto-aggregating                        |
 | `advertisedExtensions`                 | —          | Per-extension overrides for what the Inspector declares in `capabilities.extensions`                |
 | `maxFetchRequests`                     | `1000`     | Network-log retention for this server (`DEFAULT_MAX_FETCH_REQUESTS`); `0` means unlimited           |
-| `oauth`                                | —          | `{ clientId, clientSecret, scopes, authorizationParams, enterpriseManaged, onInsufficientScope }`   |
+| `oauth`                                | —          | `{ clientId, clientSecret, scopes, authorizationParams, authorizationUrl, tokenUrl, enterpriseManaged, onInsufficientScope }` |
 
 `oauth.authorizationParams` is a string→string record of extra query parameters merged into the OAuth **authorization request** URL only — never the token request. Use it for provider-specific hints the core specs don't standardize (Keycloak's `kc_idp_hint`, OIDC's `login_hint` / `prompt` / `acr_values`, Auth0's `audience`). The protocol-critical parameters — `client_id`, `code_challenge`, `code_challenge_method`, `redirect_uri`, `resource`, `response_type`, `scope`, `state` — are **reserved**: the web form rejects them inline, and any that reach the merge anyway are dropped with a warning rather than overriding what the flow set (overriding them breaks PKCE, the CSRF state binding, or RFC 8707). Edit them in Server Settings → Authorization ("Additional authorization parameters"), beside Scopes.
+
+`oauth.authorizationUrl` and `oauth.tokenUrl` override the `authorization_endpoint` and `token_endpoint` that authorization-server metadata discovery resolved. The Inspector deliberately has no such fields by default — it resolves both from the AS's metadata document, exactly as a real MCP host does — but a server under development often advertises its *production* authorization server while you want to hit staging. Set either (they are independent) to an absolute `http(s)` URL and it replaces what the metadata returned, for both the authorization request and the token request; leave blank to use discovery. A malformed value is flagged inline in the form and dropped with a warning at connect time rather than failing the connection. Edit them in Server Settings → Authorization ("Authorization URL override" / "Token URL override").
+
+> Because the override is applied to the *discovered metadata document*, a server whose authorization server publishes no metadata at all is unaffected — there the SDK falls back to `/authorize` and `/token` on the AS origin, and there is nothing to override.
 
 A catalog carrying these fields:
 

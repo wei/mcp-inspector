@@ -115,6 +115,30 @@ describe("OAuthManager", () => {
     });
   });
 
+  // #1906 — the endpoint overrides are read live from the config so a settings
+  // edit reaches the already-built fetch wrapper.
+  describe("getEndpointOverrides", () => {
+    it("returns undefined when neither endpoint is configured", () => {
+      const manager = new OAuthManager(createMockParams());
+      expect(manager.getEndpointOverrides()).toBeUndefined();
+    });
+
+    it("reflects each endpoint set through setOAuthConfig", () => {
+      const manager = new OAuthManager(createMockParams());
+      manager.setOAuthConfig({
+        authorizationUrl: "https://staging.test/authorize",
+      });
+      expect(manager.getEndpointOverrides()).toEqual({
+        authorizationUrl: "https://staging.test/authorize",
+      });
+      manager.setOAuthConfig({ tokenUrl: "https://staging.test/token" });
+      expect(manager.getEndpointOverrides()).toEqual({
+        authorizationUrl: "https://staging.test/authorize",
+        tokenUrl: "https://staging.test/token",
+      });
+    });
+  });
+
   describe("getServerUrl propagation", () => {
     it("createOAuthProviderForTransport throws when getServerUrl throws", async () => {
       const params = createMockParams({
