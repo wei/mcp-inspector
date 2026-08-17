@@ -11,6 +11,7 @@
  */
 
 import {
+  declaredNames,
   definedValues,
   encodeLiteral,
   expandTemplateExpression,
@@ -79,20 +80,25 @@ export function previewUriTemplate(
 ): string {
   const defined = definedValues(values);
 
-  // The same ceiling `tryExpandUriTemplate` enforces for the read. Without it
-  // the guard was half a guard: submission was refused while this path still
-  // handed the oversized value to the encoders on every keystroke, so a large
-  // paste froze the UI anyway. Checked before any encoding happens.
-  if (valueLengthError(defined) !== null) return uriTemplate;
-
   // The same verdict the read is gated on. Without it this expanded expression
   // by expression regardless: `x://{a}}/{b}` with both fields filled previewed
   // `x://1}/2`, a URI whose stray `}` makes every read refuse -- the preview
   // promising something the form it sits in can never send.
   if (templateError(uriTemplate) !== null) return uriTemplate;
 
+  const parts = parseUriTemplate(uriTemplate);
+
+  // The same ceiling `tryExpandUriTemplate` enforces for the read, scoped the
+  // same way -- to the names this template references. Without it the guard was
+  // half a guard: submission was refused while this path still handed the
+  // oversized value to the encoders on every keystroke, so a large paste froze
+  // the UI anyway. Checked before any encoding happens.
+  if (valueLengthError(defined, declaredNames(parts)) !== null) {
+    return uriTemplate;
+  }
+
   try {
-    return parseUriTemplate(uriTemplate)
+    return parts
       .map((part) => {
         if (part.kind === "literal") return encodeLiteral(part.text);
         // `Object.hasOwn`, not a bare lookup: `toString` and `constructor` are

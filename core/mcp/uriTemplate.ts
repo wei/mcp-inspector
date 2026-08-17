@@ -709,13 +709,21 @@ export function expandUriTemplateStrict(
   uriTemplate: string,
   values: Record<string, string>,
 ): string {
-  const invalid = templateError(uriTemplate);
+  const sdk = sdkTemplateError(uriTemplate);
+  if (sdk) throw new Error(sdk);
+
+  // Parsed ONCE and reused for validation, the name list and the expansion --
+  // the template is server-controlled and may be up to 1 MB, so re-parsing it
+  // per step is real work on the render thread.
+  const parts = parseUriTemplate(uriTemplate);
+
+  const invalid = partsError(uriTemplate, parts);
   if (invalid) throw new Error(invalid);
 
-  const tooLong = valueLengthError(values);
+  const tooLong = valueLengthError(values, declaredNames(parts));
   if (tooLong) throw new Error(tooLong);
 
-  return expandParts(parseUriTemplate(uriTemplate), values);
+  return expandParts(parts, values);
 }
 
 /**
@@ -733,14 +741,27 @@ export function expandUriTemplateStrict(
  * literal, and a varspec this module's own grammar rejects.
  */
 export function templateError(uriTemplate: string): string | null {
+  return (
+    sdkTemplateError(uriTemplate) ??
+    partsError(uriTemplate, parseUriTemplate(uriTemplate))
+  );
+}
+
+/**
+ * What the SDK's constructor rejects: an unclosed `{`, and its template-length
+ * (1e6), expression-count (1e4) and variable-name-length (1e6) limits.
+ */
+function sdkTemplateError(uriTemplate: string): string | null {
   try {
     new UriTemplate(uriTemplate);
+    return null;
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
   }
+}
 
-  const parts = parseUriTemplate(uriTemplate);
-
+/** What this module's own grammar rejects, given the already-parsed template. */
+function partsError(uriTemplate: string, parts: TemplatePart[]): string | null {
   // A brace left in a literal is an unmatched one, and it is not a legal
   // literal character. The SDK's constructor rejects an unclosed `{` but reads
   // a stray `}` as text, and this parser does the same, so without this check
@@ -779,6 +800,13 @@ const MAX_VALUE_LENGTH = 1_000_000;
 /**
  * The first value exceeding {@link MAX_VALUE_LENGTH}, as a message, or `null`.
  *
+ * `names` limits the check to the variables a template actually references,
+ * and callers should pass it. RFC 6570 ignores an extra variable, and the SDK
+ * path this replaced validated a value only *after* looking one up by declared
+ * name — so checking the whole map made an unrelated entry fail a template
+ * that never mentions it: `x://{id}` with a valid `id` was refused because
+ * some stale megabyte-long key sat beside it in the caller's map.
+ *
  * Exported because the *preview* needs the same verdict and cannot get it from
  * {@link expandUriTemplateStrict}: it expands expression by expression, so it
  * would otherwise hand an oversized value straight to the encoders during
@@ -787,13 +815,26 @@ const MAX_VALUE_LENGTH = 1_000_000;
  */
 export function valueLengthError(
   values: Record<string, string>,
+  names?: Iterable<string>,
 ): string | null {
-  for (const [name, value] of Object.entries(values)) {
-    if (value.length > MAX_VALUE_LENGTH) {
+  const considered =
+    names === undefined ? Object.keys(values) : [...new Set(names)];
+  for (const name of considered) {
+    const value = readValue(values, name);
+    if (value !== undefined && value.length > MAX_VALUE_LENGTH) {
       return `The value for "${name}" exceeds the ${MAX_VALUE_LENGTH}-character limit.`;
     }
   }
   return null;
+}
+
+/** The variable names a parsed template references, in order, deduplicated. */
+export function declaredNames(parts: TemplatePart[]): string[] {
+  return [
+    ...new Set(
+      parts.flatMap((part) => (part.kind === "expression" ? part.names : [])),
+    ),
+  ];
 }
 
 /**

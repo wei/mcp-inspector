@@ -144,6 +144,15 @@ describe("previewUriTemplate - the value ceiling", () => {
     );
   });
 
+  it("ignores an oversized value the template never references", () => {
+    expect(
+      previewUriTemplate("x://{id}", {
+        id: "7",
+        stale: "a".repeat(1_000_001),
+      }),
+    ).toBe("x://7");
+  });
+
   it("still previews a value at the limit", () => {
     const value = "a".repeat(1_000_000);
     expect(previewUriTemplate("x://{v}", { v: value })).toBe(`x://${value}`);

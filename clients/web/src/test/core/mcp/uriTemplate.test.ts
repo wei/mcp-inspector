@@ -880,6 +880,27 @@ describe("the per-value length ceiling", () => {
     );
   });
 
+  it("ignores an oversized value the template never references", () => {
+    // RFC 6570 ignores an extra variable, and the SDK path this replaced
+    // validated a value only after looking one up by declared name -- so
+    // checking the whole map refused `x://{id}` over a stale key beside it.
+    expect(
+      tryExpandUriTemplate("x://{id}", {
+        id: "7",
+        stale: "a".repeat(1_000_001),
+      }).uri,
+    ).toBe("x://7");
+  });
+
+  it("scopes valueLengthError to the names it is given", () => {
+    const values = { id: "7", stale: "a".repeat(1_000_001) };
+    expect(valueLengthError(values, ["id"])).toBeNull();
+    expect(valueLengthError(values, ["id", "stale"])).not.toBeNull();
+    // Unscoped, every entry is examined -- the behavior the preview and the
+    // read both moved off.
+    expect(valueLengthError(values)).not.toBeNull();
+  });
+
   it("names the offending variable", () => {
     expect(
       tryExpandUriTemplate("x://{a}/{b}", { a: "1", b: "b".repeat(1_000_001) })
