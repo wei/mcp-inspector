@@ -969,6 +969,152 @@ describe("useServers", () => {
     );
   });
 
+  it("parses CRLF-delimited SSE frames as change notifications (#2006)", async () => {
+    // SSE permits CRLF line endings, and this hook is a hand-rolled parser
+    // (EventSource can't send `x-mcp-remote-auth`). Matching only `\n\n` left
+    // a CRLF frame buffered forever, so an external mcp.json edit never
+    // reached the list.
+    writeFileSync(
+      h.configPath,
+      JSON.stringify({
+        mcpServers: { seed: { type: "stdio", command: "s" } },
+      }),
+    );
+
+    // The frame is held back until the test has mutated the file, so the
+    // resulting list can only come from a refresh this frame triggered.
+    let releaseFrame: (() => void) | undefined;
+    const framed = new Promise<void>((r) => {
+      releaseFrame = r;
+    });
+    let reads = 0;
+    const encoder = new TextEncoder();
+    // Referentially stable: an inline arrow re-subscribes on every render, and
+    // the re-subscription's own mount refresh would pick the edit up on its
+    // own — passing whether or not the frame was ever parsed.
+    const fetchFn: typeof fetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.endsWith("/api/servers/events")) {
+        const body = {
+          getReader: () => ({
+            read: async () => {
+              reads += 1;
+              if (reads === 1) {
+                await framed;
+                return {
+                  done: false,
+                  value: encoder.encode("event: change\r\n\r\n"),
+                };
+              }
+              return { done: true, value: undefined };
+            },
+          }),
+        };
+        return { ok: true, body } as unknown as Response;
+      }
+      return h.fetchFn(url, init);
+    };
+    const { result } = renderHook(() =>
+      useServers({ baseUrl: "http://test.local", fetchFn }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.servers.map((s) => s.id)).toEqual(["seed"]);
+
+    writeFileSync(
+      h.configPath,
+      JSON.stringify({
+        mcpServers: { aftercrlf: { type: "stdio", command: "x" } },
+      }),
+    );
+    releaseFrame?.();
+
+    await waitFor(
+      () => {
+        expect(result.current.servers.map((s) => s.id)).toEqual(["aftercrlf"]);
+      },
+      { timeout: 3000 },
+    );
+  });
+
+  it("does not split a CRLF frame separator straddling two chunks (#2006)", async () => {
+    // The bare-CR terminator is deliberately not accepted: a chunk ending in
+    // `…\r\n\r` would otherwise read as a completed frame, and the `\n`
+    // arriving next would start a bogus one. Deliver exactly that split and
+    // assert the frame is recognized once — only after both halves land.
+    writeFileSync(
+      h.configPath,
+      JSON.stringify({
+        mcpServers: { seed: { type: "stdio", command: "s" } },
+      }),
+    );
+
+    let releaseFirstHalf: (() => void) | undefined;
+    const firstHalf = new Promise<void>((r) => {
+      releaseFirstHalf = r;
+    });
+    let releaseSecondHalf: (() => void) | undefined;
+    const secondHalf = new Promise<void>((r) => {
+      releaseSecondHalf = r;
+    });
+    let listGets = 0;
+    let reads = 0;
+    const encoder = new TextEncoder();
+    const fetchFn: typeof fetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.endsWith("/api/servers/events")) {
+        const body = {
+          getReader: () => ({
+            read: async () => {
+              reads += 1;
+              if (reads === 1) {
+                await firstHalf;
+                return {
+                  done: false,
+                  value: encoder.encode("event: change\r\n\r"),
+                };
+              }
+              if (reads === 2) {
+                await secondHalf;
+                return { done: false, value: encoder.encode("\n") };
+              }
+              return { done: true, value: undefined };
+            },
+          }),
+        };
+        return { ok: true, body } as unknown as Response;
+      }
+      if (url.endsWith("/api/servers")) listGets += 1;
+      return h.fetchFn(url, init);
+    };
+    const { result } = renderHook(() =>
+      useServers({ baseUrl: "http://test.local", fetchFn }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(listGets).toBe(1);
+
+    // Half a separator is not a frame: no refresh yet.
+    releaseFirstHalf?.();
+    await waitFor(() => expect(reads).toBeGreaterThanOrEqual(2));
+    await new Promise((r) => setTimeout(r, 100));
+    expect(listGets).toBe(1);
+
+    writeFileSync(
+      h.configPath,
+      JSON.stringify({
+        mcpServers: { aftersplit: { type: "stdio", command: "x" } },
+      }),
+    );
+    releaseSecondHalf?.();
+
+    await waitFor(
+      () => {
+        expect(result.current.servers.map((s) => s.id)).toEqual(["aftersplit"]);
+      },
+      { timeout: 3000 },
+    );
+    expect(listGets).toBe(2);
+  });
+
   it("ignores the backend's inert priming comment frame (#1858)", async () => {
     // The backend opens every SSE stream with a `:` comment so a streaming
     // fetch() resolves on Firefox at all. That frame carries no event/data
