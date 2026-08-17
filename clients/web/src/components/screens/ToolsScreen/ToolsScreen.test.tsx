@@ -82,6 +82,46 @@ describe("ToolsScreen", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("opens the second copy of a duplicated tool name and calls it by its protocol name", async () => {
+    // A `tools/list` may repeat a name with a different schema. Selection is
+    // keyed by row identity, so the later copy is reachable and the detail
+    // panel shows *its* schema — a name-based lookup always resolved the first
+    // (#2001). The wire identity stays the duplicated name.
+    const user = userEvent.setup();
+    const onCallTool = vi.fn();
+    const duplicated: Tool[] = [
+      {
+        name: "get_weather",
+        inputSchema: {
+          type: "object",
+          properties: { city: { type: "string" } },
+        },
+      },
+      {
+        name: "get_weather",
+        inputSchema: {
+          type: "object",
+          properties: { zip: { type: "string", default: "94103" } },
+        },
+      },
+    ];
+    renderWithMantine(
+      <ControlledToolsScreen tools={duplicated} onCallTool={onCallTool} />,
+    );
+    const rows = screen.getAllByText("get_weather");
+    await user.click(rows[1] as HTMLElement);
+    // The second copy's own field renders — the first copy's does not.
+    expect(screen.getByLabelText(/zip/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/city/i)).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: /Execute/ }));
+    expect(onCallTool).toHaveBeenCalledWith(
+      "get_weather",
+      { zip: "94103" },
+      false,
+    );
+  });
+
   it("filters the sidebar list as the search text changes", async () => {
     const user = userEvent.setup();
     renderWithMantine(<ControlledToolsScreen />);
@@ -111,7 +151,7 @@ describe("ToolsScreen", () => {
     renderWithMantine(
       <ToolsScreen
         {...baseProps}
-        ui={{ ...EMPTY_TOOLS_UI, selectedToolName: "alpha" }}
+        ui={{ ...EMPTY_TOOLS_UI, selectedToolKey: "0:alpha" }}
         callState={{
           status: "ok",
           result: { content: [{ type: "text", text: "ok" }] },
@@ -134,7 +174,7 @@ describe("ToolsScreen", () => {
     function Host() {
       const [ui, setUi] = useState<ToolsUiState>({
         ...EMPTY_TOOLS_UI,
-        selectedToolName: "alpha",
+        selectedToolKey: "0:alpha",
       });
       const [callState, setCallState] = useState<ToolsScreenProps["callState"]>(
         {
@@ -264,7 +304,7 @@ describe("ToolsScreen", () => {
     renderWithMantine(
       <ToolsScreen
         {...baseProps}
-        ui={{ ...EMPTY_TOOLS_UI, selectedToolName: "alpha" }}
+        ui={{ ...EMPTY_TOOLS_UI, selectedToolKey: "0:alpha" }}
         callState={{ status: "pending" }}
       />,
     );
@@ -277,7 +317,7 @@ describe("ToolsScreen", () => {
     renderWithMantine(
       <ToolsScreen
         {...baseProps}
-        ui={{ ...EMPTY_TOOLS_UI, selectedToolName: "alpha" }}
+        ui={{ ...EMPTY_TOOLS_UI, selectedToolKey: "0:alpha" }}
         onCancelCall={onCancelCall}
         callState={{ status: "pending" }}
       />,

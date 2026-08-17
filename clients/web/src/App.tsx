@@ -3160,17 +3160,17 @@ function App() {
   // drops the previous tool's result — the result panel renders `toolCallState`
   // regardless of selection, so without this a stale result would linger under
   // the newly-selected tool (which has no result of its own yet). Search and
-  // form edits keep `selectedToolName` unchanged, so they leave the result be.
-  // Depends on `selectedToolName` only (not the whole `toolsUi`), so a search
+  // form edits keep `selectedToolKey` unchanged, so they leave the result be.
+  // Depends on `selectedToolKey` only (not the whole `toolsUi`), so a search
   // keystroke doesn't churn the callback identity.
   const onToolsUiChange = useCallback(
     (next: ToolsUiState) => {
-      if (next.selectedToolName !== toolsUi.selectedToolName) {
+      if (next.selectedToolKey !== toolsUi.selectedToolKey) {
         setToolCallState(undefined);
       }
       setToolsUi(next);
     },
-    [toolsUi.selectedToolName],
+    [toolsUi.selectedToolKey],
   );
 
   // --- MCP Apps handlers. Unlike onCallTool (which feeds the Tools panel),

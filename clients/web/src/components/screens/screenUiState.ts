@@ -16,7 +16,7 @@ import { ALL_LEVELS_VISIBLE } from "./LoggingScreen/logLevels";
 import { ALL_CATEGORIES_VISIBLE } from "./NetworkScreen/fetchCategories";
 
 export const EMPTY_TOOLS_UI: ToolsUiState = {
-  selectedToolName: undefined,
+  selectedToolKey: undefined,
   formValues: {},
   search: "",
   runAsTask: false,

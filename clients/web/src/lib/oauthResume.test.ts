@@ -80,7 +80,7 @@ describe("oauthResume", () => {
       tabUi: {
         Tools: {
           ...EMPTY_TOOLS_UI,
-          selectedToolName: "echo",
+          selectedToolKey: "0:echo",
           formValues: { message: "hi" },
         },
       },
@@ -96,7 +96,7 @@ describe("oauthResume", () => {
   it("builds and restores tab ui snapshots", () => {
     const toolsUi = {
       ...EMPTY_TOOLS_UI,
-      selectedToolName: "get_temp",
+      selectedToolKey: "1:get_temp",
       formValues: { city: "NYC" },
     };
     const tabUi = buildTabUiSnapshot({
@@ -186,7 +186,7 @@ describe("oauthResume", () => {
   it("applyOAuthResumeUi restores tab ui, active tab, and clears in-flight panels", () => {
     const toolsUi = {
       ...EMPTY_TOOLS_UI,
-      selectedToolName: "get_temp",
+      selectedToolKey: "1:get_temp",
       formValues: { city: "NYC" },
     };
     const snapshot: OAuthResumeSnapshot = {
