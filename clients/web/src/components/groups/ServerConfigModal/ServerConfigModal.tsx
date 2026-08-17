@@ -497,9 +497,9 @@ export function ServerConfigModal({
                 </HeadersHeader>
                 <HeadersHint>
                   Sent with every HTTP request to this server — cookies
-                  included. If OAuth is configured later, the `Authorization`
-                  header is owned by the OAuth flow and any value set here is
-                  ignored.
+                  included. A custom `Authorization` header takes precedence
+                  over an OAuth access token, so remove it if you configure
+                  OAuth for this server later.
                 </HeadersHint>
                 <KeyValueRows
                   items={form.headers}

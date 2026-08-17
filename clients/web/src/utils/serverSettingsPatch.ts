@@ -1,6 +1,5 @@
 import type { InspectorServerSettings } from "@inspector/core/mcp/types.js";
-import type { ServerConfigModalMode } from "../components/groups/ServerConfigModal/ServerConfigModal";
-import type { KeyValuePair } from "../components/elements/KeyValueRows/KeyValueRows";
+import type { KeyValuePair } from "./keyValuePairs";
 
 /**
  * Decide what `settings` node ServerConfigModal's submit should send for the
@@ -32,7 +31,11 @@ import type { KeyValuePair } from "../components/elements/KeyValueRows/KeyValueR
  *   add or clone.
  */
 export function buildHeaderSettingsPatch(
-  mode: ServerConfigModalMode,
+  // Spelled as a literal union rather than imported from ServerConfigModal:
+  // `utils` must not depend on `components`. It stays honest because
+  // `ServerConfigModalMode` is checked against it at the call site — adding a
+  // fourth mode there is a compile error here.
+  mode: "add" | "edit" | "clone",
   existingSettings: InspectorServerSettings | undefined,
   headers: KeyValuePair[],
   emptySettings: InspectorServerSettings,

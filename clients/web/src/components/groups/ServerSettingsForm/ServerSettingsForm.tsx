@@ -611,9 +611,11 @@ export function ServerSettingsForm({
           <Stack gap="md">
             <Group justify="space-between">
               <HintText>
-                Headers sent with every HTTP request to this server. If OAuth is
-                configured below, the `Authorization` header is owned by the
-                OAuth flow and any value set here is ignored.
+                Headers sent with every HTTP request to this server. A custom
+                `Authorization` header takes precedence over an OAuth access
+                token — the SDK transports apply these headers last — so remove
+                it once OAuth is configured, or the flow's token never gets
+                sent.
               </HintText>
               <AddButton onClick={onAddHeader}>+ Add Header</AddButton>
             </Group>

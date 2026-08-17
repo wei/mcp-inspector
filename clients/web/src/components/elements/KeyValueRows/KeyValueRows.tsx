@@ -1,10 +1,10 @@
 import { ActionIcon, Group, TextInput } from "@mantine/core";
 import { ClearButton } from "../ClearButton/ClearButton";
+import type { KeyValuePair } from "../../../utils/keyValuePairs";
 
-export interface KeyValuePair {
-  key: string;
-  value: string;
-}
+// Re-exported for call sites that already import this component, so they need
+// not know the type lives a layer down.
+export type { KeyValuePair };
 
 export interface KeyValueRowsProps {
   items: KeyValuePair[];
