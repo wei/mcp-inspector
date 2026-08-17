@@ -5,7 +5,6 @@ import {
   Paper,
   ScrollArea,
   Stack,
-  Text,
   Title,
 } from "@mantine/core";
 import type {
@@ -176,6 +175,16 @@ const ErrorAlert = Alert.withProps({
   title: "Tool Error",
 });
 
+// A completed call whose result renders nothing. `content: []` with no
+// `structuredContent` is a legal CallToolResult, and this panel is only mounted
+// once a result exists — so saying "no results yet" here would deny a call the
+// user just watched succeed (#1860). Name the outcome instead.
+const EmptyResultAlert = Alert.withProps({
+  color: "gray",
+  variant: "light",
+  title: "Empty result",
+});
+
 function ResourceLinksGroup({
   links,
   onReadResource,
@@ -277,7 +286,9 @@ export function ToolResultPanel({
         </ResultScroll>
       ) : result.content.length === 0 && !structuredNode ? (
         <ResultScroll>
-          <Text c="dimmed">No results yet</Text>
+          <EmptyResultAlert>
+            The tool call completed successfully and returned no content.
+          </EmptyResultAlert>
         </ResultScroll>
       ) : hasLinks ? (
         <FillStack>

@@ -35,11 +35,20 @@ describe("ToolResultPanel", () => {
     expect(screen.getByText("boom")).toBeInTheDocument();
   });
 
-  it("renders the empty state when content is empty", () => {
+  // #1860: this panel only mounts once a result exists, so an empty result must
+  // read as "the call completed and returned nothing" — never as the pre-run
+  // "No results yet" placeholder, which denies a call the user watched succeed.
+  it("names the outcome when a completed result has no content", () => {
     renderWithMantine(
       <ToolResultPanel result={emptyResult} onClear={() => {}} />,
     );
-    expect(screen.getByText("No results yet")).toBeInTheDocument();
+    expect(screen.getByText("Empty result")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "The tool call completed successfully and returned no content.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("No results yet")).not.toBeInTheDocument();
   });
 
   it("groups resource_link blocks in a scrollable Resource Links box", async () => {
@@ -141,7 +150,7 @@ describe("ToolResultPanel", () => {
           onClear={() => {}}
         />,
       );
-      expect(screen.queryByText("No results yet")).not.toBeInTheDocument();
+      expect(screen.queryByText("Empty result")).not.toBeInTheDocument();
       expect(
         screen.getByRole("heading", { name: "Structured Output" }),
       ).toBeInTheDocument();
