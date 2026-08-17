@@ -987,7 +987,6 @@ describe("useServers", () => {
     const framed = new Promise<void>((r) => {
       releaseFrame = r;
     });
-    let reads = 0;
     const encoder = new TextEncoder();
     // Referentially stable: an inline arrow re-subscribes on every render, and
     // the re-subscription's own mount refresh would pick the edit up on its
@@ -995,22 +994,18 @@ describe("useServers", () => {
     const fetchFn: typeof fetch = async (input, init) => {
       const url = input instanceof Request ? input.url : String(input);
       if (url.endsWith("/api/servers/events")) {
-        const body = {
-          getReader: () => ({
-            read: async () => {
-              reads += 1;
-              if (reads === 1) {
-                await framed;
-                return {
-                  done: false,
-                  value: encoder.encode("event: change\r\n\r\n"),
-                };
-              }
-              return { done: true, value: undefined };
-            },
-          }),
-        };
-        return { ok: true, body } as unknown as Response;
+        // A real ReadableStream in a real Response — `pull` is only invoked
+        // when the hook's reader asks for a chunk, so awaiting inside it
+        // gates delivery exactly the way a hand-rolled reader double would,
+        // while keeping the mock type-checked against the Response API.
+        const stream = new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            await framed;
+            controller.enqueue(encoder.encode("event: change\r\n\r\n"));
+            controller.close();
+          },
+        });
+        return new Response(stream, { status: 200 });
       }
       return h.fetchFn(url, init);
     };
@@ -1057,31 +1052,30 @@ describe("useServers", () => {
       releaseSecondHalf = r;
     });
     let listGets = 0;
-    let reads = 0;
+    let chunks = 0;
     const encoder = new TextEncoder();
     const fetchFn: typeof fetch = async (input, init) => {
       const url = input instanceof Request ? input.url : String(input);
       if (url.endsWith("/api/servers/events")) {
-        const body = {
-          getReader: () => ({
-            read: async () => {
-              reads += 1;
-              if (reads === 1) {
-                await firstHalf;
-                return {
-                  done: false,
-                  value: encoder.encode("event: change\r\n\r"),
-                };
-              }
-              if (reads === 2) {
-                await secondHalf;
-                return { done: false, value: encoder.encode("\n") };
-              }
-              return { done: true, value: undefined };
-            },
-          }),
-        };
-        return { ok: true, body } as unknown as Response;
+        // `pull` runs once per chunk the hook's reader consumes, so `chunks`
+        // reaching 2 proves the half-separator chunk was read and parsed.
+        const stream = new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            chunks += 1;
+            if (chunks === 1) {
+              await firstHalf;
+              controller.enqueue(encoder.encode("event: change\r\n\r"));
+              return;
+            }
+            if (chunks === 2) {
+              await secondHalf;
+              controller.enqueue(encoder.encode("\n"));
+              return;
+            }
+            controller.close();
+          },
+        });
+        return new Response(stream, { status: 200 });
       }
       if (url.endsWith("/api/servers")) listGets += 1;
       return h.fetchFn(url, init);
@@ -1094,7 +1088,7 @@ describe("useServers", () => {
 
     // Half a separator is not a frame: no refresh yet.
     releaseFirstHalf?.();
-    await waitFor(() => expect(reads).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(chunks).toBeGreaterThanOrEqual(2));
     await new Promise((r) => setTimeout(r, 100));
     expect(listGets).toBe(1);
 
