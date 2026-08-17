@@ -111,7 +111,7 @@ const SSE_PRIMING_COMMENT = ":\n\n";
  * `async` listener into the same unhandled rejection one layer up. Swallowing
  * it here is the only place the rejection has an owner.
  */
-function closeAbortedStream(stream: { close(): Promise<void> }): void {
+export function closeAbortedStream(stream: { close(): Promise<void> }): void {
   stream.close().catch(() => {});
 }
 

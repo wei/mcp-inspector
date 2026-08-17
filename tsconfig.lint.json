@@ -27,6 +27,7 @@
     "core/**/*.ts",
     "core/**/*.tsx",
     "test-servers/src/**/*.ts",
+    "test-servers/src/**/*.tsx",
     "test-servers/src/**/*.mts",
     "test-servers/src/**/*.cts",
     "vitest.shared.mts"

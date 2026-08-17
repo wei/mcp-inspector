@@ -9,7 +9,6 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Plugin } from "vite";
-import open from "open";
 // Direct leaf import — the `core/mcp/remote/node/index.ts` barrel re-exports
 // from `../constants.js`, which would otherwise drag the broader
 // `core/mcp/remote/index.ts` barrel (including `createRemoteLogger`, with its
@@ -22,6 +21,7 @@ import type { WebServerConfig } from "./web-server-config.js";
 import {
   webServerConfigToInitialPayload,
   printServerBanner,
+  openBrowser,
 } from "./web-server-config.js";
 
 export function honoMiddlewarePlugin(config: WebServerConfig): Plugin {
@@ -114,12 +114,9 @@ export function honoMiddlewarePlugin(config: WebServerConfig): Plugin {
         );
 
         if (config.autoOpen) {
-          // Same as the prod server: a browser-less host rejects, the dev
-          // server is already up, and the banner above printed the URL — so
-          // warn rather than let the rejection escape this sync helper.
-          open(url).catch((err: unknown) => {
-            console.warn("Could not open a browser automatically:", err);
-          });
+          // Never a bare `open(url)`: `logBanner` is synchronous, so a
+          // rejection would escape it. See openBrowser.
+          openBrowser(url);
         }
       };
 

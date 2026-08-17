@@ -697,6 +697,31 @@ describe("App (foundation)", () => {
     expect(r.lastFrame() ?? "").not.toContain("Disconnect failed");
   });
 
+  it("drops a disconnect rejection that lands after the user switched servers", async () => {
+    // The stale attempt is the one that usually rejects, so without an
+    // attempt token server alpha's failure would surface in beta's header.
+    h.ctrl.status = "connected";
+    let rejectDisconnect: (err: Error) => void = () => {};
+    h.disconnect.mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectDisconnect = reject;
+        }),
+    );
+    const r = await mount(stdioServer());
+    r.stdin.write("d"); // alpha's disconnect starts, and hangs
+    await tick();
+    await press(r, [DOWN]); // switch to beta
+    await expectFrame(r, "beta");
+    rejectDisconnect(new Error("stale-alpha-failure"));
+    // Give the rejection every chance to be published before asserting it
+    // wasn't — a bare tick would pass even with the guard removed.
+    await waitUntil(() =>
+      (r.lastFrame() ?? "").includes("stale-alpha-failure"),
+    );
+    expect(r.lastFrame() ?? "").not.toContain("stale-alpha-failure");
+  });
+
   it("switches tabs via accelerator keys", async () => {
     const r = await mount(stdioServer());
     await press(r, ["t"]); // tools tab (server is auto-selected)

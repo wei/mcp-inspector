@@ -9,7 +9,6 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
-import open from "open";
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
@@ -22,6 +21,7 @@ import type { WebServerConfig } from "./web-server-config.js";
 import {
   webServerConfigToInitialPayload,
   printServerBanner,
+  openBrowser,
 } from "./web-server-config.js";
 import type { WebServerHandle } from "./types.js";
 
@@ -125,13 +125,9 @@ export async function startHonoServer(
         sandboxUrl ?? undefined,
       );
       if (config.autoOpen) {
-        // A headless or otherwise browser-less host rejects here. The server
-        // is already listening and the banner above printed the URL, so warn
-        // and carry on rather than letting the rejection escape this
-        // synchronous listen callback and take the process down.
-        open(url).catch((err: unknown) => {
-          console.warn("Could not open a browser automatically:", err);
-        });
+        // Never a bare `open(url)`: this callback is synchronous, so a
+        // rejection would escape it. See openBrowser.
+        openBrowser(url);
       }
     },
   );

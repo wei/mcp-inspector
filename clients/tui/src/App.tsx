@@ -170,6 +170,8 @@ function App({
     pendingStepUpRef.current = pendingStepUp;
   }, [pendingStepUp]);
   const [connectError, setConnectError] = useState<string | null>(null);
+  // Monotonic token for in-flight disconnects — see handleDisconnect.
+  const disconnectAttemptRef = useRef(0);
   // A failed disconnect is deliberately NOT folded into `connectError`. That
   // one is only rendered by InfoTab when the status is "error", which a
   // rejected disconnect leaves untouched (the status stays "connected"), so
@@ -769,7 +771,9 @@ function App({
     if (!selectedServer || !selectedInspectorClient || !selectedServerConfig) {
       return;
     }
-    // A connect attempt supersedes whatever the last disconnect reported.
+    // A connect attempt supersedes whatever the last disconnect reported —
+    // including one still in flight, which is what the counter bump retires.
+    disconnectAttemptRef.current++;
     setDisconnectError(null);
 
     const finishConnect = async () => {
@@ -901,6 +905,14 @@ function App({
   // Disconnect handler
   const handleDisconnect = useCallback(async () => {
     if (!selectedServer) return;
+    // Claim this attempt before awaiting. A disconnect can still be in flight
+    // when the user switches servers or presses 'd' again, and it is the
+    // *stale* one that usually rejects — so the catch below must be able to
+    // tell "my failure" from "one that has since been superseded", or server
+    // A's error lands in server B's header. `handleConnect` bumps the same
+    // counter for the same reason.
+    const attempt = ++disconnectAttemptRef.current;
+    const attemptServer = selectedServer;
     // Clear first, so a retry that succeeds leaves no stale message behind.
     setDisconnectError(null);
     try {
@@ -908,7 +920,14 @@ function App({
       // InspectorClient will update status automatically, and data is preserved
     } catch (err) {
       // Nothing above this catches: the only caller is the key handler, which
-      // cannot await, so without this the rejection escapes unhandled.
+      // cannot await, so without this the rejection escapes unhandled. A
+      // superseded one is still owned here — just not published.
+      if (
+        disconnectAttemptRef.current !== attempt ||
+        selectedServerRef.current !== attemptServer
+      ) {
+        return;
+      }
       setDisconnectError(err instanceof Error ? err.message : String(err));
     }
   }, [selectedServer, disconnectInspector]);
