@@ -9,7 +9,12 @@ import tseslint from "typescript-eslint";
 import { defineConfig, globalIgnores } from "eslint/config";
 
 export default defineConfig([
-  globalIgnores(["dist", "storybook-static", "coverage"]),
+  // Generated output, none of it first-party source. Web is the only client
+  // that emits *two* bundles — `dist` (the Vite SPA) and `build` (the tsup
+  // prod-server runner, which vendors ~1.2MB of `undici`) — and only the first
+  // was originally listed, so `lint` reported a warning from inside undici's
+  // own source that nobody could act on (#2043).
+  globalIgnores(["build", "dist", "storybook-static", "coverage"]),
   {
     files: ["**/*.{ts,tsx}"],
     extends: [
