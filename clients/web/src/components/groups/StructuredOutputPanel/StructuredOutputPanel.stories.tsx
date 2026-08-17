@@ -41,7 +41,7 @@ export const Nested: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    expect(
+    await expect(
       canvas.getByRole("heading", { name: "Structured Output" }),
     ).toBeInTheDocument();
     // The section starts expanded, so the payload is visible without a click.
@@ -78,9 +78,9 @@ export const Large: Story = {
     }
     // Capped: the visible height stays at the section's `mah`, well under the
     // payload's natural height…
-    expect(viewport.clientHeight).toBeLessThanOrEqual(400);
+    await expect(viewport.clientHeight).toBeLessThanOrEqual(400);
     // …and the overflow is reachable by scrolling rather than clipped away.
-    expect(viewport.scrollHeight).toBeGreaterThan(viewport.clientHeight);
+    await expect(viewport.scrollHeight).toBeGreaterThan(viewport.clientHeight);
   },
 };
 
@@ -95,7 +95,7 @@ export const Collapsed: Story = {
     const toggle = canvas.getByRole("button", {
       name: "Expand structured output",
     });
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
     await userEvent.click(toggle);
     await waitFor(() =>
       expect(

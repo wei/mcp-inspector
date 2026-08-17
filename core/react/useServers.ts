@@ -90,8 +90,36 @@ async function readErrorMessage(res: Response): Promise<string> {
  */
 function isSseDataFrame(frame: string): boolean {
   return frame
-    .split("\n")
+    .split(SSE_LINE_SEPARATOR)
     .some((line) => line.startsWith("event:") || line.startsWith("data:"));
+}
+
+/**
+ * SSE line terminators. The spec permits CRLF, LF, and a bare CR; we accept
+ * the first two. A bare CR is deliberately excluded because it can't be told
+ * apart from the first half of a CRLF that straddles a chunk boundary — a
+ * buffer ending in `…\r\n\r` would look like a completed frame and the `\n`
+ * arriving in the next chunk would be mis-read as the start of another. No
+ * SSE producer in the wild emits bare-CR frames, so the ambiguity buys
+ * nothing.
+ *
+ * A frame ends at a blank line, i.e. two terminators back to back.
+ */
+const SSE_LINE_SEPARATOR = /\r\n|\n/;
+const SSE_FRAME_SEPARATOR = /(?:\r\n|\n){2}/;
+
+/**
+ * Locates the next frame boundary in `buffer`. Returns the frame's end offset
+ * and the length of the blank-line separator that terminated it (2–4 chars,
+ * depending on which terminators the server used), or `null` when the buffer
+ * holds no complete frame yet.
+ */
+function findSseFrameEnd(
+  buffer: string,
+): { end: number; separatorLength: number } | null {
+  const match = SSE_FRAME_SEPARATOR.exec(buffer);
+  if (!match) return null;
+  return { end: match.index, separatorLength: match[0].length };
 }
 
 export function useServers(opts: UseServersOptions): UseServersResult {
@@ -163,7 +191,9 @@ export function useServers(opts: UseServersOptions): UseServersResult {
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
-        // SSE frames are separated by a blank line (`\n\n`). We don't parse
+        // SSE frames are separated by a blank line — LF- or CRLF-terminated,
+        // both of which the spec permits and `findSseFrameEnd` accepts (#2006).
+        // We don't parse
         // the event type or data — `refreshInternal()` re-fetches the
         // canonical state regardless — so we just count frames and fire a
         // single background refresh per decode chunk. Two `change`
@@ -183,12 +213,12 @@ export function useServers(opts: UseServersOptions): UseServersResult {
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
           let sawFrame = false;
-          let frameEnd = buffer.indexOf("\n\n");
-          while (frameEnd !== -1) {
-            const frame = buffer.slice(0, frameEnd);
-            buffer = buffer.slice(frameEnd + 2);
+          let boundary = findSseFrameEnd(buffer);
+          while (boundary !== null) {
+            const frame = buffer.slice(0, boundary.end);
+            buffer = buffer.slice(boundary.end + boundary.separatorLength);
             if (isSseDataFrame(frame)) sawFrame = true;
-            frameEnd = buffer.indexOf("\n\n");
+            boundary = findSseFrameEnd(buffer);
           }
           if (sawFrame) void refreshInternal(true);
         }

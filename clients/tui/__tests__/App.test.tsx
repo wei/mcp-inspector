@@ -507,6 +507,9 @@ function renderApp(servers: Record<string, TuiServer>) {
 async function mount(servers: Record<string, TuiServer>) {
   const r = renderApp(servers);
   await tick();
+  // The mount commit's effect flush can still be queued behind this tick, and
+  // this write is the one that absorbs the dropped first keypress.
+  await settleInputHandlers();
   r.stdin.write("x");
   await tick();
   return r;
@@ -532,6 +535,11 @@ const ENTER = "\r";
  */
 async function press(r: RenderResult, keys: string[]) {
   for (const k of keys) {
+    // Same hazard `waitUntil` guards against, at the other end: a caller can
+    // reach here on a turn that still has React's passive-effect flush queued
+    // (e.g. straight after a plain `tick`, or after an earlier key committed a
+    // render), so settle before every write rather than only after a poll.
+    await settleInputHandlers();
     r.stdin.write(k);
     await tick();
     await tick();
@@ -552,9 +560,29 @@ async function press(r: RenderResult, keys: string[]) {
  */
 const POLL_TRIES = 100;
 
+/**
+ * One check-phase turn, queued BEHIND React's already-scheduled passive-effect
+ * flush. A frame observed by a poll predicate is written during React's
+ * COMMIT, but ink re-arms its useInput listeners in the passive-effect flush
+ * React schedules (via setImmediate in Node) during that same commit. Node's
+ * event loop runs the timers phase before the check phase, so a 25ms poll
+ * tick can observe the new frame and let the test write the next keypress
+ * BEFORE that flush has run — the key is then dispatched to the previous
+ * commit's stale useInput closures (where e.g. pendingStepUp is still null)
+ * and silently swallowed (#1942). Yielding one setImmediate turn after the
+ * predicate passes sequences the next stdin write after the flush (FIFO
+ * within the check queue), so "frame visible" once again implies "input
+ * handlers armed".
+ */
+const settleInputHandlers = () =>
+  new Promise((resolve) => setImmediate(resolve));
+
 async function waitUntil(predicate: () => boolean, tries = POLL_TRIES) {
   for (let i = 0; i < tries; i++) {
-    if (predicate()) return;
+    if (predicate()) {
+      await settleInputHandlers();
+      return;
+    }
     await tick();
   }
 }
@@ -626,6 +654,23 @@ afterEach(() => {
   while (mounted.length) mounted.pop()?.unmount();
 });
 
+// Pins the synchronization contract the OAuth step-up assertions depend on
+// (#1942). The `setImmediate` sentinel below stands in for React's pending
+// passive-effect flush — the turn where ink re-arms `useInput`. If `waitUntil`
+// ever returns without yielding a check-phase turn, the sentinel has not run
+// and this fails, instead of the regression resurfacing as a differently-named
+// flaky OAuth test under coverage instrumentation.
+describe("test helpers", () => {
+  it("waitUntil settles input handlers before resolving", async () => {
+    let flushed = false;
+    setImmediate(() => {
+      flushed = true;
+    });
+    await waitUntil(() => true);
+    expect(flushed).toBe(true);
+  });
+});
+
 describe("App (foundation)", () => {
   it("renders the server list with the MCP Servers header", async () => {
     const r = renderApp(stdioServer());
@@ -659,6 +704,91 @@ describe("App (foundation)", () => {
     stdin.write("d");
     await tick();
     expect(h.disconnect).toHaveBeenCalled();
+  });
+
+  it("surfaces a disconnect failure instead of floating the rejection", async () => {
+    // 'd' is a key handler, so it cannot await handleDisconnect — the handler
+    // has to own the failure itself or it escapes as an unhandled rejection
+    // and fails the whole run from somewhere else (#1959).
+    // The banner is deliberately independent of connection status: a rejected
+    // disconnect leaves the status "connected", so anything gated on
+    // `status === "error"` would never be seen.
+    h.ctrl.status = "connected";
+    h.disconnect.mockRejectedValue(new Error("discfail"));
+    const r = await mount(oneStdio());
+    r.stdin.write("d");
+    await expectFrame(r, "Disconnect failed: discfail");
+  });
+
+  it("owns a non-Error disconnect rejection too", async () => {
+    // The catch stringifies a non-Error rejection rather than reading
+    // `.message` off it; a throw here would escape the same way.
+    h.ctrl.status = "connected";
+    h.disconnect.mockRejectedValue("plainstring");
+    const r = await mount(oneStdio());
+    r.stdin.write("d");
+    await expectFrame(r, "Disconnect failed: plainstring");
+  });
+
+  it("clears a disconnect failure once a retry succeeds", async () => {
+    // A stale banner would keep reporting a failure the user has since fixed.
+    h.ctrl.status = "connected";
+    h.disconnect.mockRejectedValueOnce(new Error("discfail"));
+    const r = await mount(oneStdio());
+    r.stdin.write("d");
+    await expectFrame(r, "Disconnect failed: discfail");
+    r.stdin.write("d");
+    await waitUntil(() => !(r.lastFrame() ?? "").includes("Disconnect failed"));
+    expect(r.lastFrame() ?? "").not.toContain("Disconnect failed");
+  });
+
+  it("drops a disconnect rejection that lands after the user switched servers", async () => {
+    // The stale attempt is the one that usually rejects, so without an
+    // attempt token server alpha's failure would surface in beta's header.
+    h.ctrl.status = "connected";
+    let rejectDisconnect: (err: Error) => void = () => {};
+    h.disconnect.mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectDisconnect = reject;
+        }),
+    );
+    const r = await mount(stdioServer());
+    r.stdin.write("d"); // alpha's disconnect starts, and hangs
+    await tick();
+    await press(r, [DOWN]); // switch to beta
+    await expectFrame(r, "beta");
+    rejectDisconnect(new Error("stale-alpha-failure"));
+    // Give the rejection every chance to be published before asserting it
+    // wasn't — a bare tick would pass even with the guard removed.
+    await waitUntil(() =>
+      (r.lastFrame() ?? "").includes("stale-alpha-failure"),
+    );
+    expect(r.lastFrame() ?? "").not.toContain("stale-alpha-failure");
+  });
+
+  it("drops a stale disconnect rejection across an A → B → A round trip", async () => {
+    // The server-name check alone passes here: by the time the rejection
+    // lands, alpha is selected again. Only retiring the attempt token on
+    // every switch catches it.
+    h.ctrl.status = "connected";
+    let rejectDisconnect: (err: Error) => void = () => {};
+    h.disconnect.mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectDisconnect = reject;
+        }),
+    );
+    const r = await mount(stdioServer());
+    r.stdin.write("d"); // alpha's disconnect starts, and hangs
+    await tick();
+    await press(r, [DOWN]); // alpha -> beta
+    await expectFrame(r, "b.js");
+    await press(r, [UP]); // beta -> alpha again
+    await expectFrame(r, "s.js");
+    rejectDisconnect(new Error("round-trip-failure"));
+    await waitUntil(() => (r.lastFrame() ?? "").includes("round-trip-failure"));
+    expect(r.lastFrame() ?? "").not.toContain("round-trip-failure");
   });
 
   it("switches tabs via accelerator keys", async () => {

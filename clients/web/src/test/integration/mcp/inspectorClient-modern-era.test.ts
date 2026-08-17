@@ -18,6 +18,8 @@ import {
   createMrtrSamplingTool,
   createMrtrLoopTool,
   createMrtrEdgeCaseTool,
+  loadConfig,
+  resolveConfig,
 } from "@modelcontextprotocol/inspector-test-server";
 import type { ServerConfig } from "@modelcontextprotocol/inspector-test-server";
 import type {
@@ -26,6 +28,13 @@ import type {
 } from "@modelcontextprotocol/client";
 import { LOG_LEVEL_META_KEY } from "@modelcontextprotocol/client";
 import type { MessageEntry } from "@inspector/core/mcp/types.js";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+// clients/web/src/test/integration/mcp → repo root is six levels up. Derived
+// from the module URL rather than `process.cwd()` so the showcase config
+// resolves the same however vitest is invoked.
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../".repeat(6));
 
 /**
  * Live coverage of the modern (2026-07-28) connection path (#1700). The bundled
@@ -387,6 +396,45 @@ describe("modern-era negotiation (2026-07-28)", () => {
     };
     expect(retry2.requestState).toBeDefined();
     expect(Object.keys(retry2.inputResponses ?? {})).toHaveLength(0);
+  });
+
+  // #1860. Drives the reproduction the README documents, through the SAME
+  // artifacts a human would use — the showcase config file, resolved through the
+  // preset registry — so the config entry, the `mrtr_empty` registry branch, and
+  // the handler are all covered rather than just the fixture factory. The
+  // assertion is that a completed MRTR call really does hand back an empty
+  // `CallToolResult`: that is the input the Tools panel has to render as
+  // "completed, returned nothing" instead of its pre-run placeholder.
+  it("completes an MRTR sequence with an empty result (mrtr_empty, via the showcase config)", async () => {
+    const config = loadConfig(
+      join(repoRoot, "test-servers/configs/mrtr-showcase-http.json"),
+    );
+    expect(config.tools).toContainEqual({ preset: "mrtr_empty" });
+
+    const started = createTestServerHttp(resolveConfig(config));
+    await started.start();
+    server = started;
+    const connected = await connectWithEra(started.url, "modern");
+
+    let pausedAtPendingUi = false;
+    connected.addEventListener("newPendingElicitation", (event) => {
+      pausedAtPendingUi = true;
+      void event.detail.respond({
+        action: "accept",
+        content: { ack: true },
+      });
+    });
+
+    const { tools } = await connected.listTools();
+    const tool = tools.find((t) => t.name === "mrtr_empty");
+    expect(tool).toBeDefined();
+
+    const result = await connected.callTool(tool!, {});
+    expect(result.success).toBe(true);
+    expect(pausedAtPendingUi).toBe(true);
+    expect(result.result!.content).toEqual([]);
+    expect(result.result!.structuredContent).toBeUndefined();
+    expect(result.result!.isError).toBeFalsy();
   });
 
   it("cancels an in-flight MRTR call while its embedded request is pending", async () => {

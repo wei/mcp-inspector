@@ -451,6 +451,52 @@ describe("ServerSettingsModal", () => {
     });
   });
 
+  // #1906 — a typed endpoint override lands on the settings; clearing it
+  // persists `undefined` rather than an empty string, so "cleared" and "never
+  // set" are the same state on disk.
+  it("persists a typed endpoint override, and clears it back to undefined", async () => {
+    const user = userEvent.setup();
+    const onSettingsChange = vi.fn();
+    const { rerender } = renderWithMantine(
+      <ServerSettingsModal
+        opened
+        settings={emptySettings}
+        serverType="streamable-http"
+        isStdio={false}
+        onClose={vi.fn()}
+        onSettingsChange={onSettingsChange}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "OAuth Settings" }));
+    await user.type(
+      screen.getByRole("textbox", { name: /Token URL override/i }),
+      "h",
+    );
+    expect(onSettingsChange).toHaveBeenCalledWith(
+      expect.objectContaining({ oauthTokenUrl: "h" }),
+    );
+
+    onSettingsChange.mockClear();
+    rerender(
+      <ServerSettingsModal
+        opened
+        settings={{
+          ...emptySettings,
+          oauthTokenUrl: "https://staging.test/token",
+        }}
+        serverType="streamable-http"
+        isStdio={false}
+        onClose={vi.fn()}
+        onSettingsChange={onSettingsChange}
+      />,
+    );
+    const clearButtons = screen.getAllByRole("button", { name: /clear/i });
+    await user.click(clearButtons[clearButtons.length - 1]);
+    expect(onSettingsChange).toHaveBeenCalledWith(
+      expect.objectContaining({ oauthTokenUrl: undefined }),
+    );
+  });
+
   // #2018 — the authorization-parameter rows ride the same onOAuthChange
   // callback, so the modal folds them onto the settings object.
   it("persists an added authorization-parameter row onto the settings", async () => {

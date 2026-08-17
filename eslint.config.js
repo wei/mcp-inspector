@@ -10,6 +10,31 @@ import { defineConfig, globalIgnores } from "eslint/config";
 // isomorphic TypeScript (browser-side OAuth + Node backends + shared runtime);
 // the shared surface is Node-only tooling/tests. Neither has JSX, so no React
 // plugin is needed.
+// Type-aware linting for the two blocks below. `no-floating-promises` needs
+// type information, which `tseslint.configs.recommended` (the non-type-aware
+// set) does not provide — so each block adds a parser project (#1959).
+//
+// `tsconfig.lint.json` exists for this and nothing else: the root has no
+// tsconfig of its own (`core/` is typechecked through `clients/web`'s
+// `tsc -b`, `test-servers/src` through `clients/cli`'s test project), and a
+// parser project must literally *contain* every file it is asked to lint.
+const typeAware = {
+  languageOptions: {
+    parserOptions: {
+      project: ["./tsconfig.lint.json"],
+      tsconfigRootDir: import.meta.dirname,
+    },
+  },
+  rules: {
+    // The class this catches is invisible at review time: the call reads like
+    // an awaited one minus four characters, and the unhandled rejection it
+    // produces surfaces in a different test, in a different file, as a stack
+    // pointing at SDK internals — which is how #1947 came to fail the whole
+    // `npm run ci` chain from two un-held `callTool` promises.
+    "@typescript-eslint/no-floating-promises": "error",
+  },
+};
+
 const sharedRules = {
   // An `_`-prefix is the explicit "intentionally unused" marker —
   // interface-conformance params in fakes, destructuring-rest omissions,
@@ -58,5 +83,16 @@ export default defineConfig([
       },
     },
     rules: sharedRules,
+  },
+  {
+    // Type-aware pass over the same surface, minus `eslint.config.js` — it is
+    // JavaScript, so no tsconfig contains it and asking the parser for a
+    // project would fail it outright rather than lint it.
+    files: [
+      "core/**/*.{ts,tsx}",
+      "test-servers/src/**/*.{ts,tsx,mts,cts}",
+      "vitest.shared.mts",
+    ],
+    ...typeAware,
   },
 ]);

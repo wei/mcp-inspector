@@ -452,10 +452,10 @@ export const Default: Story = {
     if (!(main instanceof HTMLElement)) {
       throw new Error("AppShell main not found");
     }
-    expect(getComputedStyle(main).overflowY).toBe("hidden");
+    await expect(getComputedStyle(main).overflowY).toBe("hidden");
     // Clamped to the viewport (within a pixel of rounding), so the shell can't
     // grow past it and push the page into scrolling.
-    expect(main.getBoundingClientRect().height).toBeLessThanOrEqual(
+    await expect(main.getBoundingClientRect().height).toBeLessThanOrEqual(
       window.innerHeight + 1,
     );
   },
@@ -489,8 +489,8 @@ export const ManyServers: Story = {
     if (!(main instanceof HTMLElement)) {
       throw new Error("AppShell main not found");
     }
-    expect(getComputedStyle(main).overflowY).toBe("hidden");
-    expect(main.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+    await expect(getComputedStyle(main).overflowY).toBe("hidden");
+    await expect(main.getBoundingClientRect().bottom).toBeLessThanOrEqual(
       window.innerHeight + 1,
     );
     // The overflow lives in the inner server-grid ScrollArea, which is actually
@@ -499,7 +499,7 @@ export const ManyServers: Story = {
     if (!(viewport instanceof HTMLElement)) {
       throw new Error("server-grid scroll viewport not found");
     }
-    expect(viewport.scrollHeight).toBeGreaterThan(viewport.clientHeight);
+    await expect(viewport.scrollHeight).toBeGreaterThan(viewport.clientHeight);
   },
 };
 

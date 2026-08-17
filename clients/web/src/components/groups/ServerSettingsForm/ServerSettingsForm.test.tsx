@@ -714,6 +714,8 @@ describe("ServerSettingsForm", () => {
       clientSecret: "",
       scopes: "",
       authorizationParams: [],
+      authorizationUrl: "",
+      tokenUrl: "",
       enterpriseManaged: false,
     });
   });
@@ -979,6 +981,104 @@ describe("ServerSettingsForm", () => {
     expect(screen.getByText(/state, scope are set/)).toBeInTheDocument();
   });
 
+  // #1906 — the endpoint overrides ride the same `onOAuthChange` callback as
+  // the rest of the Authorization section.
+  it("invokes onOAuthChange when an endpoint override is typed", async () => {
+    const user = userEvent.setup();
+    const onOAuthChange = vi.fn();
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        onOAuthChange={onOAuthChange}
+        settings={emptySettings}
+        expandedSections={["oauth"]}
+      />,
+    );
+    await user.type(
+      screen.getByRole("textbox", { name: /Authorization URL override/i }),
+      "h",
+    );
+    expect(onOAuthChange).toHaveBeenCalledWith(
+      expect.objectContaining({ authorizationUrl: "h" }),
+    );
+
+    onOAuthChange.mockClear();
+    await user.type(
+      screen.getByRole("textbox", { name: /Token URL override/i }),
+      "h",
+    );
+    expect(onOAuthChange).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenUrl: "h" }),
+    );
+  });
+
+  it("says the endpoint overrides are unused under enterprise-managed auth", () => {
+    const { rerender } = renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{ ...emptySettings, enterpriseManaged: true }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.getAllByText(
+        /Not applied while Enterprise-managed authorization is on/,
+      ),
+    ).toHaveLength(2);
+
+    rerender(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{ ...emptySettings, enterpriseManaged: false }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.queryByText(
+        /Not applied while Enterprise-managed authorization is on/,
+      ),
+    ).not.toBeInTheDocument();
+  });
+
+  it("flags an endpoint override that is not an absolute http(s) URL", () => {
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{
+          ...emptySettings,
+          oauthAuthorizationUrl: "/authorize",
+          oauthTokenUrl: "https://staging.test/token",
+        }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.getByText('"/authorize" is not an absolute URL.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/is not an http\(s\) URL/)).toBeNull();
+  });
+
+  it("clears an endpoint override through its clear button", async () => {
+    const user = userEvent.setup();
+    const onOAuthChange = vi.fn();
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        onOAuthChange={onOAuthChange}
+        settings={{
+          ...emptySettings,
+          oauthTokenUrl: "https://staging.test/token",
+        }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    const clearButtons = screen.getAllByRole("button", { name: /clear/i });
+    await user.click(clearButtons[clearButtons.length - 1]);
+    expect(onOAuthChange).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenUrl: "" }),
+    );
+  });
+
   it("invokes onOAuthChange with the chosen insufficient-scope policy (SEP-2350)", async () => {
     const user = userEvent.setup();
     const onOAuthChange = vi.fn();
@@ -1020,6 +1120,8 @@ describe("ServerSettingsForm", () => {
       clientSecret: "",
       scopes: "",
       authorizationParams: [],
+      authorizationUrl: "",
+      tokenUrl: "",
       enterpriseManaged: true,
     });
   });
@@ -1125,6 +1227,8 @@ describe("ServerSettingsForm", () => {
       clientSecret: "z",
       scopes: "",
       authorizationParams: [],
+      authorizationUrl: "",
+      tokenUrl: "",
       enterpriseManaged: false,
     });
   });

@@ -11,6 +11,7 @@ The Inspector ships as one package with three clients (**Web**, **CLI**, **TUI**
 - **Avoid double casts (`as unknown as T`).** They erase all type safety and usually mean the real type is being worked around. Prefer a type guard, a narrower single cast, or fixing the underlying type. If genuinely unavoidable (a documented gap in a third-party type, or bridging structurally-identical shapes TS can't relate), it **must** carry an inline comment justifying why it's safe and why nothing better exists. An unjustified `as unknown as` is not acceptable in review.
 - Prefer inference, type guards, and precise annotations over assertions.
 - An `_` prefix is the intentionally-unused marker (`argsIgnorePattern` / `varsIgnorePattern` / `caughtErrorsIgnorePattern`).
+- **Never float a promise.** `@typescript-eslint/no-floating-promises` is `error` in all five ESLint scopes, so every promise must be awaited, `.catch(…)`-terminated, returned, or explicitly discarded with `void`. Prefer **holding and settling** it — a floated rejection surfaces in an unrelated file as an SDK-internal stack, which is how two un-held `callTool` calls failed the whole `npm run ci` chain (#1947). Reach for `void` only when the callee already owns its failures (it ends in a `catch`) or the caller genuinely cannot await (a sync effect body, an Ink key handler), and say which in a comment. In Storybook play functions, `expect(...)` from `storybook/test` is instrumented and returns a promise — it must be awaited.
 
 ## React and UI (web client)
 
