@@ -23,13 +23,19 @@ import {
 } from "../../elements/ListPaginationControls/ListPaginationControls";
 import { ToolListItem } from "../ToolListItem/ToolListItem";
 import { useScrollMemory } from "../../../hooks/useScrollMemory";
+import { toolRowKey } from "../../../utils/toolUtils";
 
 export interface ToolControlsProps {
   tools: Tool[];
   /** Tools the SDK excluded from `tools/list` for invalid `x-mcp-header`
    * annotations (SEP-2243), shown below the list with the reason (#1632). */
   excludedTools?: ExcludedTool[];
-  selectedName?: string;
+  /**
+   * The selected row's {@link toolRowKey}, not its name — a `tools/list` may
+   * repeat a name, and a name-keyed selection would highlight every copy at
+   * once and make the others unclickable (#2001).
+   */
+  selectedKey?: string;
   // Search text is controlled by the parent (App, via ToolsScreen) so it
   // persists across tab navigation within a live session — see #1417.
   searchText?: string;
@@ -49,7 +55,8 @@ export interface ToolControlsProps {
   /** Pagination controls (#1721). */
   pagination: ListPaginationControlsProps;
   onSearchChange: (value: string) => void;
-  onSelectTool: (name: string) => void;
+  /** Emits the clicked row's {@link toolRowKey} (see `selectedKey`). */
+  onSelectTool: (key: string) => void;
 }
 
 // One excluded tool: a warning icon, the tool name (struck through, since it is
@@ -116,12 +123,12 @@ const ExcludedTooltip = Tooltip.withProps({
   position: "right",
 });
 
-// A server may return the same tool name more than once, so the name alone is
-// not a unique React key — colliding keys let a filtered-out row survive
-// reconciliation instead of unmounting (#1957). The tool's position in the
-// unfiltered list disambiguates duplicates and stays stable while the search
-// narrows, since it is captured before filtering.
-const rowKey = (name: string, sourceIndex: number) => `${sourceIndex}:${name}`;
+// Excluded rows render into the same `Stack` as the list rows above them, so
+// their keys share one namespace — and an excluded tool's index is counted
+// within its own list, which would collide with a listed tool of the same name
+// at the same index. The prefix keeps the two spaces apart.
+const excludedRowKey = (name: string, sourceIndex: number) =>
+  `excluded:${toolRowKey(name, sourceIndex)}`;
 
 /** Matches a tool against the (already lower-cased) search query by name or title. */
 const matchesQuery = (tool: Tool, query: string) =>
@@ -131,7 +138,7 @@ const matchesQuery = (tool: Tool, query: string) =>
 export function ToolControls({
   tools,
   excludedTools = [],
-  selectedName,
+  selectedKey,
   searchText = "",
   listChanged,
   onRefreshList,
@@ -146,14 +153,17 @@ export function ToolControls({
   // Stamp each row's source position before filtering, so the key survives the
   // list narrowing (#1957).
   const filteredTools = tools
-    .map((tool, sourceIndex) => ({ tool, key: rowKey(tool.name, sourceIndex) }))
+    .map((tool, sourceIndex) => ({
+      tool,
+      key: toolRowKey(tool.name, sourceIndex),
+    }))
     .filter(({ tool }) => !searchText || matchesQuery(tool, query));
   // Excluded tools are searchable too, matching name AND title like the main
   // list above, so a filtered view stays consistent.
   const filteredExcluded = excludedTools
     .map((excluded, sourceIndex) => ({
       ...excluded,
-      key: rowKey(excluded.tool.name, sourceIndex),
+      key: excludedRowKey(excluded.tool.name, sourceIndex),
     }))
     .filter(({ tool }) => !searchText || matchesQuery(tool, query));
 
@@ -183,9 +193,9 @@ export function ToolControls({
             <ToolListItem
               key={key}
               tool={tool}
-              selected={tool.name === selectedName}
+              selected={key === selectedKey}
               onClick={() => {
-                if (tool.name !== selectedName) onSelectTool(tool.name);
+                if (key !== selectedKey) onSelectTool(key);
               }}
             />
           ))}

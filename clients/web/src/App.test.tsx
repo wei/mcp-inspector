@@ -363,7 +363,7 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
   InspectorView: (props: {
     toolCallState?: { status?: string };
     toolsUi?: {
-      selectedToolName?: string;
+      selectedToolKey?: string;
       formValues: Record<string, unknown>;
       search: string;
     };
@@ -384,7 +384,7 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
     onConnectionInfo: () => void;
     onToggleConnection: (id: string) => void;
     onToolsUiChange: (next: {
-      selectedToolName?: string;
+      selectedToolKey?: string;
       formValues: Record<string, unknown>;
       search: string;
     }) => void;
@@ -433,7 +433,7 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
         {Object.keys(props.progressByTaskId ?? {}).join(",") || "none"}
       </span>
       <span data-testid="selected-tool">
-        {props.toolsUi?.selectedToolName ?? "none"}
+        {props.toolsUi?.selectedToolKey ?? "none"}
       </span>
       <span data-testid="tool-search">{props.toolsUi?.search || "none"}</span>
       <span data-testid="selected-prompt">
@@ -469,7 +469,7 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
             formValues: {},
             search: "",
             ...props.toolsUi,
-            selectedToolName: "get_acts",
+            selectedToolKey: "0:get_acts",
           })
         }
       >
@@ -481,7 +481,7 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
             formValues: {},
             search: "",
             ...props.toolsUi,
-            selectedToolName: "other_tool",
+            selectedToolKey: "1:other_tool",
           })
         }
       >
@@ -869,7 +869,7 @@ describe("App session-scoped state reset on disconnect", () => {
       expect(screen.getByTestId("tool-status")).toHaveTextContent("ok"),
     );
 
-    // A search keystroke leaves `selectedToolName` unchanged, so the result
+    // A search keystroke leaves `selectedToolKey` unchanged, so the result
     // stays put.
     await user.click(screen.getByText("set-tool-search"));
     await waitFor(() =>
