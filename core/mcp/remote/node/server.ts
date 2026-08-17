@@ -115,6 +115,50 @@ export function closeAbortedStream(stream: { close(): Promise<void> }): void {
   stream.close().catch(() => {});
 }
 
+/** The slice of Hono's `StreamingApi` the SSE prime-and-hold helper needs. */
+export interface PrimableSseStream {
+  write(input: string): Promise<unknown>;
+  onAbort(listener: () => void): void;
+  close(): Promise<void>;
+}
+
+/**
+ * Prime an SSE stream, then hold the handler open until the client aborts,
+ * running `cleanup` exactly once when it does.
+ *
+ * The registration order is the whole point (#1999). Hono's `onAbort` is a
+ * plain push onto a subscriber array with **no already-aborted replay**, and
+ * `abort()` fires only the subscribers registered at that moment
+ * (`hono/utils/stream`). Priming is an `await`, so a listener registered
+ * *after* it never runs if the client disconnects while that write is in
+ * flight — leaving the caller's subscriber/consumer installed forever and the
+ * handler parked on a promise nothing will resolve.
+ *
+ * So the listener goes in before the first `await`, and the same one both
+ * cleans up and releases the hold. Note this must not be inlined back into a
+ * caller in a way that reintroduces an `await` ahead of the registration —
+ * priming itself cannot move earlier, because callers deliberately install
+ * their subscriber before the first bytes go out (see GET /api/servers/events).
+ *
+ * `cleanup` runs inside Hono's bare `subscriber()` call, so it must be
+ * synchronous and must not throw — a rejection there has no owner.
+ */
+export async function primeAndHoldSseStream(
+  stream: PrimableSseStream,
+  cleanup: () => void,
+): Promise<void> {
+  const aborted = new Promise<void>((resolve) => {
+    stream.onAbort(() => {
+      cleanup();
+      closeAbortedStream(stream);
+      resolve();
+    });
+  });
+
+  await stream.write(SSE_PRIMING_COMMENT);
+  await aborted;
+}
+
 /**
  * Shape of the initial config returned by GET /api/config (defaults for client).
  */
@@ -855,6 +899,10 @@ export function createRemoteApp(
       // drained the queued stderr + the transport_error event. Yield once
       // so the writeSSE writes flush, then return — closing the stream and
       // surfacing the real error instead of a bare 404 / silent hang.
+      //
+      // This branch needs no abort listener despite its `await`: it performs
+      // the same teardown unconditionally on the way out, so a disconnect
+      // during the yield changes nothing.
       if (session.isTransportDead()) {
         await new Promise((resolve) => setTimeout(resolve, 0));
         session.clearEventConsumer();
@@ -864,28 +912,17 @@ export function createRemoteApp(
 
       // Prime only after the consumer is registered, so nothing observable
       // to the client happens before this stream can actually report
-      // events. See SSE_PRIMING_COMMENT.
-      await stream.write(SSE_PRIMING_COMMENT);
-
-      stream.onAbort(() => {
+      // events. See SSE_PRIMING_COMMENT. The disconnect cleanup is
+      // registered ahead of that priming write and the stream is then held
+      // open until the client aborts — see primeAndHoldSseStream (#1999).
+      await primeAndHoldSseStream(stream, () => {
         // Client disconnected - clear event consumer
         const shouldCleanup = session.clearEventConsumer();
-        closeAbortedStream(stream);
 
         // If transport is dead and no client connected, cleanup session
         if (shouldCleanup || session.isTransportDead()) {
           sessions.delete(sessionId);
         }
-      });
-
-      // Keep the stream open until the client disconnects. Hono's streamSSE
-      // closes the stream when this callback returns, so we must not return
-      // until the connection is aborted.
-      await new Promise<void>((resolve) => {
-        stream.onAbort(() => {
-          // Cleanup happens in onAbort handler above
-          resolve();
-        });
       });
     });
   });
@@ -2497,20 +2534,15 @@ export function createRemoteApp(
       // registered and the watcher started: callers treat the arrival of
       // this stream's first bytes as proof they are subscribed, so priming
       // first would hand out that proof across an `await`, before the
-      // watcher exists, and drop an edit made in the gap.
-      await stream.write(SSE_PRIMING_COMMENT);
-
-      stream.onAbort(() => {
+      // watcher exists, and drop an edit made in the gap. The unsubscribe is
+      // nonetheless registered *before* that write, and the stream is held
+      // open until the client aborts — see primeAndHoldSseStream (#1999).
+      await primeAndHoldSseStream(stream, () => {
         serverEventSubscribers.delete(send);
+        // Voided rather than awaited: this runs inside Hono's synchronous
+        // abort subscriber, which cannot await. maybeStopWatcher owns its
+        // own failures (it swallows a close() that throws).
         void maybeStopWatcher();
-        closeAbortedStream(stream);
-      });
-
-      // Hono closes the stream the moment this callback returns, so hold the
-      // promise open until the client aborts. Cleanup happens in the
-      // onAbort handler registered above.
-      await new Promise<void>((resolve) => {
-        stream.onAbort(() => resolve());
       });
     });
   });
