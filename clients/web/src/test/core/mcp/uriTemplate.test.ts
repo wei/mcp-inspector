@@ -7,6 +7,7 @@ import {
   parseUriTemplate,
   requiredGroups,
   templateVariables,
+  templateError,
   tryExpandUriTemplate,
   unmetRequiredGroups,
   valueLengthError,
@@ -763,6 +764,17 @@ describe("prefix modifier truncation", () => {
     ["x{+v:1}", "%C3x", "x%C3"],
     // A stray continuation byte is not a sequence start.
     ["x{+v:1}", "%A9%C3%A9", "x%A9"],
+    // RFC 3629 well-formedness, not just the length-announcing lead byte: an
+    // overlong encoding, a UTF-16 surrogate, and a code point past U+10FFFF
+    // are each refused the grouping and counted per triplet.
+    ["x{+v:1}", "%C0%80x", "x%C0"],
+    ["x{+v:1}", "%E0%80%80x", "x%E0"],
+    ["x{+v:1}", "%ED%A0%80x", "x%ED"],
+    ["x{+v:1}", "%F4%90%80%80x", "x%F4"],
+    // The boundary cases that ARE well-formed stay whole.
+    ["x{+v:1}", "%E0%A0%80x", "x%E0%A0%80"],
+    ["x{+v:1}", "%ED%9F%BFx", "x%ED%9F%BF"],
+    ["x{+v:1}", "%F4%8F%BF%BFx", "x%F4%8F%BF%BF"],
   ])(
     "keeps a multi-octet sequence whole (%s over %s)",
     (template, value, expected) => {
@@ -873,6 +885,32 @@ describe("the per-value length ceiling", () => {
       tryExpandUriTemplate("x://{a}/{b}", { a: "1", b: "b".repeat(1_000_001) })
         .error,
     ).toMatch(/"b"/);
+  });
+});
+
+describe("templateError", () => {
+  it.each([
+    ["a stray closing brace", "x://{a}}"],
+    ["an unclosed brace", "x://{oops"],
+    ["an invalid varspec", "x://{a,}"],
+    ["an out-of-grammar modifier", "x://{id:abc}"],
+  ])("reports %s", (_label, template) => {
+    expect(templateError(template)).not.toBeNull();
+  });
+
+  it.each(["x://{a}", "x://a{?b,c}", "x://a{;d:3}", "café/{var}"])(
+    "passes the valid template %s",
+    (template) => {
+      expect(templateError(template)).toBeNull();
+    },
+  );
+
+  it("gives strict expansion its verdict, so the two cannot disagree", () => {
+    // Every template the error reports must also refuse to expand.
+    for (const template of ["x://{a}}", "x://{oops", "x://{a,}"]) {
+      expect(templateError(template)).not.toBeNull();
+      expect(() => expandUriTemplateStrict(template, { a: "1" })).toThrow();
+    }
   });
 });
 

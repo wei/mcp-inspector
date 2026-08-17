@@ -524,14 +524,32 @@ function encodeValue(value: string, operator: string): string {
  * so a well-formed sequence is recognizable without decoding.
  *
  * Order matters: longest first, so a four-octet sequence is not matched as a
- * two-octet one followed by loose triplets. A malformed sequence — a lead byte
- * with too few continuations, or a stray continuation — matches no sequence
- * alternative and falls through to the single-triplet rule, which is the
- * conservative behavior: it counts as more units, so truncation keeps less
- * rather than emitting something that was never in the value.
+ * two-octet one followed by loose triplets.
+ *
+ * The lead-byte ranges are RFC 3629's **well-formed** ones, not merely the
+ * length-announcing prefixes: `C2-DF` (so the overlong `%C0%80` is excluded),
+ * `E0` only with `A0-BF`, `ED` only with `80-9F` (excluding UTF-16
+ * surrogates), `F0` only with `90-BF`, `F4` only with `80-8F` (nothing past
+ * U+10FFFF). An earlier revision accepted the whole `C0-DF`/`E0-EF`/`F0-F4`
+ * space and so grouped those invalid sequences as one character — the
+ * opposite of the fallback this comment promised.
+ *
+ * A malformed sequence — an excluded lead byte, too few continuations, or a
+ * stray continuation — now matches no sequence alternative and falls through
+ * to the single-triplet rule, which is the conservative behavior: it counts as
+ * more units, so truncation keeps less rather than emitting something that was
+ * never in the value.
  */
-const PREFIX_UNIT =
-  /%F[0-4](?:%[89AB][0-9A-F]){3}|%E[0-9A-F](?:%[89AB][0-9A-F]){2}|%[CD][0-9A-F]%[89AB][0-9A-F]|%[0-9A-F]{2}|[\s\S]/giu;
+const CONTINUATION = String.raw`%[89AB][0-9A-F]`;
+/** RFC 3629 well-formed sequences only — `C2-DF`, and the restricted second
+ *  bytes that exclude overlongs (`E0%A0-BF`, `F0%90-BF`), UTF-16 surrogates
+ *  (`ED%80-9F`) and anything past U+10FFFF (`F4%80-8F`). */
+const UTF8_SEQUENCE = [
+  String.raw`(?:%F0%(?:9[0-9A-F]|[AB][0-9A-F])|%F[1-3]${CONTINUATION}|%F4%8[0-9A-F])${CONTINUATION}${CONTINUATION}`,
+  String.raw`(?:%E0%[AB][0-9A-F]|%E[1-9ABCEF]${CONTINUATION}|%ED%[89][0-9A-F])${CONTINUATION}`,
+  String.raw`%(?:C[2-9A-F]|D[0-9A-F])${CONTINUATION}`,
+].join("|");
+const PREFIX_UNIT = new RegExp(`${UTF8_SEQUENCE}|%[0-9A-F]{2}|[\\s\\S]`, "giu");
 
 /**
  * Splits a value into the units a prefix modifier counts.
@@ -691,7 +709,36 @@ export function expandUriTemplateStrict(
   uriTemplate: string,
   values: Record<string, string>,
 ): string {
-  new UriTemplate(uriTemplate);
+  const invalid = templateError(uriTemplate);
+  if (invalid) throw new Error(invalid);
+
+  const tooLong = valueLengthError(values);
+  if (tooLong) throw new Error(tooLong);
+
+  return expandParts(parseUriTemplate(uriTemplate), values);
+}
+
+/**
+ * Why `uriTemplate` cannot be expanded **at all**, independent of any values,
+ * or `null` if it can.
+ *
+ * Exported because the preview needs the same verdict before it expands
+ * anything: it goes expression by expression, so without this it happily
+ * rendered `x://1}/2` for `x://{a}}/{b}` — a template whose stray `}` makes
+ * every read refuse, i.e. a URI the form it sits in can never send.
+ *
+ * Three sources, deliberately in one place so the two callers cannot drift:
+ * the SDK's constructor (an unclosed `{`, and its template-length,
+ * expression-count and variable-name-length limits), a brace surviving in a
+ * literal, and a varspec this module's own grammar rejects.
+ */
+export function templateError(uriTemplate: string): string | null {
+  try {
+    new UriTemplate(uriTemplate);
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+
   const parts = parseUriTemplate(uriTemplate);
 
   // A brace left in a literal is an unmatched one, and it is not a legal
@@ -703,23 +750,17 @@ export function expandUriTemplateStrict(
     (part) => part.kind === "literal" && /[{}]/.test(part.text),
   );
   if (stray) {
-    throw new Error(
-      `Unmatched brace in "${uriTemplate}" — an expression must be a complete {…}.`,
-    );
+    return `Unmatched brace in "${uriTemplate}" — an expression must be a complete {…}.`;
   }
-
-  const tooLong = valueLengthError(values);
-  if (tooLong) throw new Error(tooLong);
 
   const bad = parts.find((part) => part.kind === "expression" && part.invalid);
   if (bad) {
-    throw new Error(
-      `Invalid RFC 6570 varspec in "${uriTemplate}": ${
-        bad.kind === "expression" ? bad.source : ""
-      } — each varspec must name a variable, optionally with an explode (*) or a 1-9999 prefix modifier.`,
-    );
+    return `Invalid RFC 6570 varspec in "${uriTemplate}": ${
+      bad.kind === "expression" ? bad.source : ""
+    } — each varspec must name a variable, optionally with an explode (*) or a 1-9999 prefix modifier.`;
   }
-  return expandParts(parts, values);
+
+  return null;
 }
 
 /**

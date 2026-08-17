@@ -93,10 +93,10 @@ describe("previewUriTemplate - literals", () => {
     expect(previewUriTemplate("café/{var}", {})).toBe("caf%C3%A9/{var}");
   });
 
-  it("keeps a malformed template legible rather than encoding its brace", () => {
-    expect(previewUriTemplate("x://café/{oops", {})).toBe(
-      "x://caf%C3%A9/{oops",
-    );
+  it("shows a template the read would refuse exactly as the server wrote it", () => {
+    // Not even the literal is encoded: an unreadable template is displayed
+    // verbatim rather than half-normalized into something never published.
+    expect(previewUriTemplate("x://café/{oops", {})).toBe("x://café/{oops");
   });
 });
 
@@ -120,11 +120,18 @@ describe("previewUriTemplate - it must never throw or over-promise", () => {
     );
   });
 
-  it("still previews the valid expressions around an invalid one", () => {
-    expect(previewUriTemplate("x://{a,}/{b}", { a: "1", b: "2" })).toBe(
-      "x://{a,}/2",
-    );
-  });
+  it.each([
+    ["an invalid varspec", "x://{a,}/{b}"],
+    ["a stray closing brace", "x://{a}}/{b}"],
+  ])(
+    "does not expand the valid expressions around %s either",
+    (_label, template) => {
+      // The refusal is per TEMPLATE, not per expression: every read of these
+      // is refused, so previewing `x://{a,}/2` or `x://1}/2` would promise a
+      // URI this form can never send. An earlier revision did exactly that.
+      expect(previewUriTemplate(template, { a: "1", b: "2" })).toBe(template);
+    },
+  );
 });
 
 describe("previewUriTemplate - the value ceiling", () => {

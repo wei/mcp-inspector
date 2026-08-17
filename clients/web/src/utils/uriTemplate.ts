@@ -15,6 +15,7 @@ import {
   encodeLiteral,
   expandTemplateExpression,
   parseUriTemplate,
+  templateError,
   valueLengthError,
 } from "@inspector/core/mcp/uriTemplate.js";
 
@@ -25,6 +26,7 @@ export {
   hasRequiredValues,
   parseUriTemplate,
   requiredGroups,
+  templateError,
   templateVariables,
   tryExpandUriTemplate,
   unmetRequiredGroups,
@@ -58,9 +60,13 @@ export type {
  * expand-the-whole-template implementation got for free from the lenient
  * `expandUriTemplate` it called:
  *
- * - **An invalid expression is left standing.** `{a,}` still parses `a` into
- *   its varspecs, so filling `a` would preview `x://1` for a template whose
- *   submission is refused outright -- a URI the user could never send.
+ * - **A template the read would refuse is shown verbatim.** `{a,}` still
+ *   parses `a` into its varspecs, and `x://{a}}/{b}` parses two perfectly good
+ *   expressions around a stray `}`, so expanding either previewed a URI whose
+ *   submission is refused outright. `templateError` is the read's own verdict,
+ *   so consulting it first is what keeps the two from disagreeing -- and it
+ *   subsumes the narrower "skip the invalid part" rule this had at first,
+ *   which left the *rest* of such a template expanding.
  * - **The whole thing is wrapped.** This runs during render, where a throw
  *   unmounts the panel instead of disabling its button, and encoding can throw
  *   for real input: `encodeURIComponent` raises `URIError` on an unpaired
@@ -79,11 +85,16 @@ export function previewUriTemplate(
   // paste froze the UI anyway. Checked before any encoding happens.
   if (valueLengthError(defined) !== null) return uriTemplate;
 
+  // The same verdict the read is gated on. Without it this expanded expression
+  // by expression regardless: `x://{a}}/{b}` with both fields filled previewed
+  // `x://1}/2`, a URI whose stray `}` makes every read refuse -- the preview
+  // promising something the form it sits in can never send.
+  if (templateError(uriTemplate) !== null) return uriTemplate;
+
   try {
     return parseUriTemplate(uriTemplate)
       .map((part) => {
         if (part.kind === "literal") return encodeLiteral(part.text);
-        if (part.invalid) return part.source;
         // `Object.hasOwn`, not a bare lookup: `toString` and `constructor` are
         // valid RFC 6570 variable names, and a plain lookup would find
         // `Object.prototype`'s member and treat a blank field as filled.
