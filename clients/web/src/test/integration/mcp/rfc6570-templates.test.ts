@@ -3,7 +3,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { InspectorClient } from "@inspector/core/mcp/inspectorClient.js";
 import { createTransportNode } from "@inspector/core/mcp/node/transport.js";
-import { expandUriTemplate } from "@inspector/core/mcp/uriTemplate.js";
+import {
+  expandUriTemplate,
+  tryExpandUriTemplate,
+} from "@inspector/core/mcp/uriTemplate.js";
 import {
   createTestServerHttp,
   type TestServerHttp,
@@ -83,13 +86,29 @@ describe("RFC 6570 resource templates over the wire (#1919)", () => {
     return connected;
   }
 
-  it("advertises both templates from the checked-in config", async () => {
+  it("advertises every template from the checked-in config", async () => {
     const connected = await connectToShowcase();
     const { resourceTemplates } = await connected.listAllResourceTemplates();
     expect(resourceTemplates.map((entry) => entry.uriTemplate).sort()).toEqual([
+      // The malformed one is advertised precisely so a client has to decide
+      // what to do with it; the SDK's own constructor accepts it, so nothing
+      // upstream of the Inspector rejects it. See the refusal test below.
+      "foobar://events/{topic:abc}",
       "foobar://events/{topic}",
       "foobar://events{?topic}",
     ]);
+  });
+
+  it("refuses to expand the malformed template rather than guessing", async () => {
+    // `abc` is not RFC 6570's `max-length` production, so there is no URI to
+    // send. Guessing `{topic}` would read something the server never
+    // advertised -- and this server would answer it, which is exactly why the
+    // check has to happen client-side.
+    const result = tryExpandUriTemplate("foobar://events/{topic:abc}", {
+      topic: "news",
+    });
+    expect(result.uri).toBeUndefined();
+    expect(result.error).toMatch(/Invalid RFC 6570 varspec/);
   });
 
   it("resolves the encoded URI the simple expression expands to", async () => {

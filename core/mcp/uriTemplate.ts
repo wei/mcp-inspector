@@ -122,21 +122,62 @@ export interface TemplateVariable {
 }
 
 /**
- * RFC 6570's `max-length` production: `%x31-39 0*3DIGIT` — 1 to 9999, no
- * leading zero. `{id:}`, `{id:0}`, `{id:abc}` and `{id:10000}` are all invalid
- * *templates*, not templates with an ignorable modifier.
+ * One character of a variable's name.
+ *
+ * RFC 6570's `varchar` is `ALPHA / DIGIT / "_" / pct-encoded`. This admits two
+ * more — `-` and `~` — and the widening is deliberate, on a rule the RFC's own
+ * set is a subset of: **a name is the one thing expansion emits into the URI
+ * without encoding it** (the `;`, `?` and `&` operators write `name=value`), so
+ * a name must consist of characters that need no encoding. That is RFC 3986's
+ * *unreserved* set — `ALPHA / DIGIT / -._~` — plus pct-encoded.
+ *
+ * Strict `varchar` would refuse `{user-id}`, which real servers publish and
+ * which the SDK's own matcher round-trips (`match()` compiles the hyphen
+ * literally). Refusing to read a resource that demonstrably works is a worse
+ * outcome for a debugging tool than tolerating a name one character outside the
+ * production — whereas everything this *does* reject is a shape we would
+ * otherwise have to **guess** at, which is the line the rest of this module
+ * draws too.
  */
-const MAX_LENGTH_GRAMMAR = /^[1-9][0-9]{0,3}$/;
+const VARCHAR = String.raw`(?:[A-Za-z0-9_\-~]|%[0-9A-Fa-f]{2})`;
+
+/**
+ * RFC 6570's `varspec`: a `varname` with at most one trailing modifier, either
+ * the explode `*` or a `:max-length`, never both.
+ *
+ * `varname = varchar *( ["."] varchar )`, so a `.` may separate name segments
+ * but cannot lead, trail, or double. `max-length` is `%x31-39 0*3DIGIT` — 1 to
+ * 9999, no leading zero — so `{id:}`, `{id:0}`, `{id:abc}` and `{id:10000}` are
+ * invalid *templates*, not templates with an ignorable modifier.
+ *
+ * Anchoring the whole varspec is what rejects the shapes a looser "strip the
+ * `*`, split on `:`" pass waves through. Measured against this branch before
+ * the change, each expanded rather than being refused:
+ *
+ * | Varspec   | Was                  | Why it is invalid                   |
+ * | --------- | -------------------- | ----------------------------------- |
+ * | `{*id}`   | name `id`            | explode is a *trailing* modifier    |
+ * | `{id*:3}` | name `id`, truncated | the two modifiers are exclusive     |
+ * | `{ id }`  | name `id`            | whitespace is not a `varchar`       |
+ * | `{a b}`   | name `a b`           | ditto — and it emits into the URI   |
+ */
+const VARSPEC_GRAMMAR = new RegExp(
+  `^(${VARCHAR}(?:\\.?${VARCHAR})*)(?:\\*|:([1-9][0-9]{0,3}))?$`,
+);
 
 /**
  * Parses one varspec (`id`, `id*`, `id:3`) into a name and optional prefix,
- * or `"invalid"` for anything RFC 6570's `varspec` production does not admit.
+ * or `"invalid"` for anything {@link VARSPEC_GRAMMAR} does not admit.
  *
- * Two shapes reach that verdict, and neither is ignorable:
+ * Three classes reach that verdict, none of them ignorable:
  *
- * - **A modifier outside the grammar** (`{id:abc}`). Treating it as a plain
+ * - **A modifier outside the grammar** (`{id:abc}`), or two at once (`{id*:3}`),
+ *   or one in the wrong position (`{*id}`). Treating any of them as a plain
  *   `{id}` would send a URI that does not match what the server advertised,
- *   with nothing to alert anyone.
+ *   with nothing to alert anyone — and `{id*:3}` silently *truncated* the value.
+ * - **A name outside the character set** (`{a b}`, `{a/b}`). A named operator
+ *   emits the name verbatim, so this is the one place an unencodable character
+ *   reaches the URI as structure.
  * - **An empty varspec** — `{}`, `{,}`, `{a,}`, `{?}`, `{*}`. RFC 6570 requires
  *   at least one varspec per expression and admits no empty member, so this is
  *   a malformed *template*, not an expression with a member to skip. Skipping
@@ -144,21 +185,15 @@ const MAX_LENGTH_GRAMMAR = /^[1-9][0-9]{0,3}$/;
  *   form rendered no inputs, so its "everything required is filled" check would
  *   be vacuously true and it would submit a URI that is not the template the
  *   server published.
+ *
+ * The explode modifier parses but is not honored: it only changes how a list or
+ * map value is joined, and every value reaching this module is a single string.
  */
 function parseVarSpec(raw: string): VarSpec | "invalid" {
-  // The explode modifier is stripped rather than honored: it only changes how
-  // a list or map value is joined, and every value reaching this module is a
-  // single string.
-  const spec = raw.replace("*", "").trim();
-  if (spec.length === 0) return "invalid";
-
-  const colon = spec.indexOf(":");
-  if (colon === -1) return { name: spec };
-
-  const name = spec.slice(0, colon);
-  const modifier = spec.slice(colon + 1);
-  if (name.length === 0 || !MAX_LENGTH_GRAMMAR.test(modifier)) return "invalid";
-  return { name, maxLength: Number(modifier) };
+  const match = VARSPEC_GRAMMAR.exec(raw);
+  if (match === null) return "invalid";
+  const [, name, maxLength] = match;
+  return maxLength === undefined ? { name } : { name, maxLength: +maxLength };
 }
 
 /**
@@ -265,6 +300,28 @@ export function requiredGroups(uriTemplate: string): string[][] {
 }
 
 /**
+ * The required expressions `values` does **not** satisfy — none of their names
+ * filled in — in template order.
+ *
+ * Exported so a caller that has to *name* the missing fields derives them from
+ * the same pass that decides whether anything is missing at all. The TUI built
+ * its "Missing required template variable(s): …" list with its own bare
+ * `values[name]` filter, which for a variable legitimately named `constructor`
+ * or `toString` found `Object.prototype`'s member and judged the group
+ * satisfied — so {@link hasRequiredValues} blocked the submit while the message
+ * listed nothing.
+ */
+export function unmetRequiredGroups(
+  groups: string[][],
+  values: Record<string, string>,
+): string[][] {
+  return groups.filter(
+    (names) =>
+      !names.some((name) => (readValue(values, name) ?? "").length > 0),
+  );
+}
+
+/**
  * Whether `values` supplies everything expansion structurally needs: every
  * required expression has at least one of its names filled in.
  */
@@ -272,9 +329,7 @@ export function hasRequiredValues(
   groups: string[][],
   values: Record<string, string>,
 ): boolean {
-  return groups.every((names) =>
-    names.some((name) => (readValue(values, name) ?? "").length > 0),
-  );
+  return unmetRequiredGroups(groups, values).length === 0;
 }
 
 /**

@@ -7,6 +7,7 @@ import {
   requiredGroups,
   templateVariables,
   tryExpandUriTemplate,
+  unmetRequiredGroups,
 } from "@inspector/core/mcp/uriTemplate.js";
 
 describe("parseUriTemplate", () => {
@@ -205,7 +206,10 @@ describe("expandUriTemplate - multi-name expressions (SDK correction)", () => {
     expect(expandUriTemplate("x://a{/p,q}", {})).toBe("x://a");
   });
 
-  it("leaves multi-name query expressions to the SDK, which handles them", () => {
+  // Naming, not delegation: a multi-name QUERY expression pairs each name with
+  // its own value and joins with `&` (RFC 6570 §3.2.8), unlike the bare
+  // comma-joined list every non-named operator above produces.
+  it("pairs each name with its value in a multi-name query expression", () => {
     expect(expandUriTemplate("x://a{?p,q}", { p: "x/y", q: "z" })).toBe(
       "x://a?p=x%2Fy&q=z",
     );
@@ -545,6 +549,82 @@ describe("an expression that declares no variable", () => {
 
   it("leaves the template unexpanded on the display path", () => {
     expect(expandUriTemplate("x://{}", {})).toBe("x://{}");
+  });
+});
+
+describe("varspec grammar", () => {
+  // Each of these expanded rather than being refused before the anchored
+  // grammar landed -- measured on the previous commit: `{*id}` and `{ id }`
+  // both yielded "x://abcdef", and `{id*:3}` silently truncated to "x://abc"
+  // through a modifier combination RFC 6570 does not allow.
+  it.each([
+    ["explode in the leading position", "x://{*id}"],
+    ["explode combined with a prefix", "x://{id*:3}"],
+    ["whitespace around the name", "x://{ id }"],
+    ["whitespace inside the name", "x://{a b}"],
+    ["a name outside the character set", "x://{a/b}"],
+  ])("strict rejects %s", (_label, template) => {
+    expect(() =>
+      expandUriTemplateStrict(template, {
+        id: "abcdef",
+        a: "1",
+        "a/b": "1",
+        "a b": "1",
+      }),
+    ).toThrow(/Invalid RFC 6570 varspec/);
+  });
+
+  it.each([
+    // RFC 6570 varchar, plus the two RFC 3986 unreserved characters the set is
+    // deliberately widened by -- a name is emitted verbatim by `?`/`&`/`;`, so
+    // the rule is "needs no encoding", and `{user-id}` is common in the wild.
+    ["a plain name", "x://{id}", { id: "7" }, "x://7"],
+    ["a hyphen", "x://{user-id}", { "user-id": "7" }, "x://7"],
+    ["a tilde", "x://{a~b}", { "a~b": "7" }, "x://7"],
+    ["an underscore", "x://{a_b}", { a_b: "7" }, "x://7"],
+    ["a dot separator", "x://{a.b}", { "a.b": "7" }, "x://7"],
+    ["a pct-encoded varchar", "x://{a%2Fb}", { "a%2Fb": "7" }, "x://7"],
+    ["a trailing explode", "x://{id*}", { id: "7" }, "x://7"],
+    ["a trailing prefix", "x://{id:3}", { id: "abcdef" }, "x://abc"],
+  ])("accepts %s", (_label, template, values, expected) => {
+    expect(expandUriTemplate(template, values)).toBe(expected);
+  });
+
+  it.each(["x://{a.}", "x://{a..b}"])(
+    "rejects the misplaced dot in %s",
+    (template) => {
+      // varname = varchar *( ["."] varchar ) -- a dot separates, it cannot
+      // trail or double.
+      expect(() => expandUriTemplateStrict(template, {})).toThrow(
+        /Invalid RFC 6570 varspec/,
+      );
+    },
+  );
+
+  it("reads a leading dot as the label operator, not a malformed name", () => {
+    // `{.a}` is label expansion of `a` -- the one "misplaced dot" that is not
+    // one, since the operator is stripped before the varspec is parsed.
+    expect(expandUriTemplate("x://a{.ext}", { ext: "json" })).toBe(
+      "x://a.json",
+    );
+  });
+});
+
+describe("unmetRequiredGroups", () => {
+  it("names the groups that are missing", () => {
+    expect(unmetRequiredGroups([["a", "b"], ["c"]], { c: "1" })).toEqual([
+      ["a", "b"],
+    ]);
+  });
+
+  it("agrees with hasRequiredValues on a prototype-collision name", () => {
+    // The TUI derived its "Missing required template variable(s)" list with its
+    // own bare `values[name]` filter: `({})["constructor"]` is `Object`, whose
+    // `.length` is 1, so the group read as satisfied and the message named no
+    // field while the gate still blocked the submit.
+    const groups = [["constructor"]];
+    expect(hasRequiredValues(groups, {})).toBe(false);
+    expect(unmetRequiredGroups(groups, {})).toEqual([["constructor"]]);
   });
 });
 

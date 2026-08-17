@@ -6,8 +6,8 @@ import { AuthRecoveryRequiredError } from "@inspector/core/auth/challenge.js";
 import type { ReadResourceResult } from "@modelcontextprotocol/client";
 import { uriTemplateToForm } from "../utils/uriTemplateToForm.js";
 import {
-  hasRequiredValues,
   requiredGroups,
+  unmetRequiredGroups,
 } from "@inspector/core/mcp/uriTemplate.js";
 import { ScrollView, type ScrollViewRef } from "ink-scroll-view";
 
@@ -142,13 +142,16 @@ export function ResourceTestModal({
     // and its members are left optional there. Without this check the TUI would
     // submit `{a,b}` completely blank -- dropping the expression and reading a
     // different resource -- while the web panel blocks the same request (#1919).
-    const groups = requiredGroups(template.uriTemplate);
-    if (!hasRequiredValues(groups, values)) {
-      const unmet = groups
-        .filter(
-          (names) => !names.some((name) => (values[name] ?? "").length > 0),
-        )
-        .map((names) => names.join(" or "));
+    // The message and the gate come from the SAME pass. Filtering the groups
+    // again here with a bare `values[name]` disagreed with the gate for a
+    // variable named `constructor` or `toString`: the inherited member read as
+    // filled, so the list came out empty and the error named no field at all.
+    const unmetGroups = unmetRequiredGroups(
+      requiredGroups(template.uriTemplate),
+      values,
+    );
+    if (unmetGroups.length > 0) {
+      const unmet = unmetGroups.map((names) => names.join(" or "));
       setResult({
         input: values,
         output: null,

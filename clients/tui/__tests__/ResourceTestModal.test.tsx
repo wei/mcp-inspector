@@ -95,6 +95,23 @@ describe("ResourceTestModal", () => {
       unmount();
     });
 
+    it("blocks a required variable whose name collides with Object.prototype", async () => {
+      // `constructor` is a valid RFC 6570 varname, and the modal's own filter
+      // used to read `Object` (length 1) as a filled value. The *message* built
+      // from that filter came out naming no field; since frames render empty
+      // here (see the header note), that half is asserted on
+      // `unmetRequiredGroups` in the core suite. This asserts the gate.
+      const read = vi.fn();
+      const { onClose, unmount } = await renderAndSubmit(
+        fakeClient(read),
+        makeTemplate({ uriTemplate: "x://{constructor}" }),
+        { constructor: "" },
+      );
+      expect(read).not.toHaveBeenCalled();
+      expect(onClose).not.toHaveBeenCalled();
+      unmount();
+    });
+
     it("submits once any one name in the group has a value", async () => {
       const read = vi.fn().mockResolvedValue({
         result: { contents: [] },

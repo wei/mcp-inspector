@@ -1539,6 +1539,24 @@ export function createRfc6570ResourceTemplates(): ResourceTemplateDefinition[] {
       inputSchema: { topic: z.string().describe("Topic name") },
       handler: echo("foobar://events{?topic}"),
     },
+    {
+      // A template no client can honor: `abc` is not RFC 6570's `max-length`
+      // production (`%x31-39 0*3DIGIT`), so `{topic:abc}` is a malformed
+      // *template* rather than one with an ignorable modifier. The SDK's
+      // `UriTemplate` constructor accepts it, which is exactly why the
+      // Inspector checks the grammar itself and refuses the read -- guessing
+      // `{topic}` would send a URI this server never advertised.
+      //
+      // The handler is therefore unreachable through the Inspector by design.
+      // It is registered anyway so the template appears in
+      // `resources/templates/list`, which is what puts the refusal on screen.
+      name: "events_malformed",
+      uriTemplate: "foobar://events/{topic:abc}",
+      description:
+        "Malformed template - an out-of-grammar prefix modifier; the read is withheld",
+      inputSchema: { topic: z.string().describe("Topic name") },
+      handler: echo("foobar://events/{topic:abc}"),
+    },
   ];
 }
 
