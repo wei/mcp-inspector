@@ -506,23 +506,28 @@ function encodeValue(value: string, operator: string): string {
 /**
  * Splits a value into the units a prefix modifier counts.
  *
- * RFC 6570 §2.4.1 counts *characters*, and is explicit that "a pct-encoded
- * triplet counts as a single character" — so `{+v:5}` over `%61%62%63%64%65%66`
- * must stop after five whole triplets. Splitting on code points alone cut the
- * sixth in half, and the trailing `%6` was then no longer a triplet, so
- * `encodeAllowReserved` correctly encoded its `%`: the value went out as
- * `%61%256`, a byte the server never asked for.
+ * RFC 6570 §2.4.1 counts *characters*, and is explicit that a pct-encoded
+ * triplet counts as a single one — so `{+v:5}` over `%61%62%63%64%65%66` stops
+ * after five whole triplets. Splitting on code points cut the sixth in half,
+ * and the orphaned `%6` was no longer a triplet, so `encodeAllowReserved`
+ * correctly escaped its `%`: the value went out as `%61%256`, a byte the caller
+ * never asked for.
  *
- * Triplets are units only under `+` and `#`. Everywhere else the encoder
- * escapes a `%` anyway (`%61` becomes `%2561`), so the three characters are
- * three characters and grouping them would mis-count the prefix.
+ * The rule is **operator-independent**, which is a correction of the narrower
+ * version this shipped first. Grouping only under `+`/`#` made the same input
+ * mean two different things — `%61` an indivisible character under `+`, three
+ * loose characters under a simple expression — and produced the matching
+ * defect one operator over: `{v:1}` over `%61%62` kept just the `%` and emitted
+ * `%25`, a truncation to a character that was never in the value. What the
+ * operator decides is how a unit is *encoded* afterwards (a simple expansion
+ * still escapes the `%`, so the retained `%61` goes out as `%2561`), not what
+ * counts as one.
  *
  * The `u` flag makes the alternation match by code point, so an astral
  * character is one unit rather than a surrogate pair that truncation could
- * split — the reason `Array.from` was used here in the first place.
+ * split.
  */
-function prefixUnits(value: string, operator: string): string[] {
-  if (!allowsReserved(operator)) return Array.from(value);
+function prefixUnits(value: string): string[] {
   return value.match(/%[0-9A-Fa-f]{2}|[\s\S]/gu) ?? [];
 }
 
@@ -537,7 +542,7 @@ function renderValue(value: string, spec: VarSpec, operator: string): string {
   const truncated =
     spec.maxLength === undefined
       ? value
-      : prefixUnits(value, operator).slice(0, spec.maxLength).join("");
+      : prefixUnits(value).slice(0, spec.maxLength).join("");
   return encodeValue(truncated, operator);
 }
 

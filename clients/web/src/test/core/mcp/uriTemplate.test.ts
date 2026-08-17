@@ -714,11 +714,25 @@ describe("prefix modifier truncation", () => {
     );
   });
 
-  it("counts a triplet as three characters where the encoder escapes it", () => {
-    // Under a non-reserved operator `%` is escaped anyway (`%61` -> `%2561`),
-    // so the three characters really are three and grouping them would
-    // mis-count the prefix.
-    expect(expandUriTemplate("x/{v:3}", { v: "%61%62" })).toBe("x/%2561");
+  it.each([
+    // The counting rule is operator-INDEPENDENT: a triplet is one character
+    // wherever it appears. An earlier revision grouped only under `+`/`#`,
+    // which made the same input mean two things and truncated `{v:1}` to a `%`
+    // that was never a character of the value (it emitted "%25").
+    ["x/{v:1}", "x/%2561"],
+    ["x/{v:2}", "x/%2561%2562"],
+    ["x/{v:3}", "x/%2561%2562"],
+  ])(
+    "counts a triplet as one character under a simple expansion (%s)",
+    (template, expected) => {
+      // What the operator decides is the *encoding* afterwards -- a simple
+      // expansion still escapes the retained triplet's `%`, so `%61` -> `%2561`.
+      expect(expandUriTemplate(template, { v: "%61%62" })).toBe(expected);
+    },
+  );
+
+  it("counts a triplet as one character under a named operator too", () => {
+    expect(expandUriTemplate("x{?v:1}", { v: "%61%62" })).toBe("x?v=%2561");
   });
 
   it("truncates by code point, not UTF-16 code unit", () => {
