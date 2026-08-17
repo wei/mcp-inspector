@@ -318,6 +318,30 @@ describe("ResourceTemplatePanel", () => {
       expect(screen.getByText("Still needed: a")).toBeInTheDocument();
     });
 
+    it("renders an autocomplete field for a name that collides with Object.prototype", async () => {
+      // `toString` is a valid RFC 6570 varname and `completions` starts empty,
+      // so a bare `completions[varName] ?? []` handed Mantine the prototype's
+      // *function* as its options array (`??` catches only null/undefined) and
+      // the field crashed on first render.
+      const user = userEvent.setup();
+      const onCompleteArgument = vi.fn().mockResolvedValue(["a", "b"]);
+      const onReadResource = vi.fn();
+      renderWithMantine(
+        <ResourceTemplatePanel
+          template={{ name: "Proto", uriTemplate: "x://{toString}" }}
+          onReadResource={onReadResource}
+          onCompleteArgument={onCompleteArgument}
+          completionsSupported
+        />,
+      );
+      // By role, not label: "toString" also appears in the "Still needed" line.
+      const input = screen.getByRole("textbox", { name: "toString" });
+      expect(input).toBeInTheDocument();
+      await user.type(input, "v");
+      await user.click(screen.getByRole("button", { name: "Read Resource" }));
+      expect(onReadResource).toHaveBeenCalledWith("x://v");
+    });
+
     it("shows the malformed template unexpanded in the preview", () => {
       renderWithMantine(
         <ResourceTemplatePanel

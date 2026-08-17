@@ -47,6 +47,24 @@ export interface ResourceTemplatePanelProps {
 
 const COMPLETION_DEBOUNCE_MS = 300;
 
+/**
+ * The completions fetched for one variable, ignoring anything inherited from
+ * `Object.prototype`.
+ *
+ * `toString`, `constructor` and `__proto__` are valid RFC 6570 variable names,
+ * and this map starts empty — so a bare `completions[varName] ?? []` returned
+ * the prototype's *function* for such a name (`??` only catches null and
+ * undefined) and handed it to Mantine as its `data` array, crashing the field
+ * on first render. Same hazard the expansion path fixed for values; this is
+ * the one place the component reads a name-keyed map it did not seed.
+ */
+function completionsFor(
+  completions: Record<string, string[]>,
+  varName: string,
+): string[] {
+  return Object.hasOwn(completions, varName) ? completions[varName] : [];
+}
+
 const HeaderRow = Group.withProps({
   justify: "space-between",
   wrap: "nowrap",
@@ -206,7 +224,8 @@ export function ResourceTemplatePanel({
     // show ghost suggestions from the old keystroke while the new
     // request is in flight (300ms debounce + network latency).
     setCompletions((prev) => {
-      if (prev[varName] === undefined) return prev;
+      // Own-property, as above: an inherited member is not a stale dropdown.
+      if (!Object.hasOwn(prev, varName)) return prev;
       const next = { ...prev };
       delete next[varName];
       return next;
@@ -328,7 +347,7 @@ export function ResourceTemplatePanel({
               description={description}
               placeholder={`Enter ${varName}`}
               value={fieldValue}
-              data={completions[varName] ?? []}
+              data={completionsFor(completions, varName)}
               // The server already filtered the values for the typed
               // prefix; passing options through verbatim avoids hiding
               // valid suggestions when the input is empty or doesn't
