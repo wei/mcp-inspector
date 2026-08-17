@@ -7,7 +7,14 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveNodeBin } from "./resolve-node-bin.mjs";
@@ -46,10 +53,19 @@ test("resolves vite's bin despite Vite 8's exports map (no deep bin export)", ()
   assert.match(entry.split(path.sep).join("/"), /\/vite\/.*vite\.js$/);
 });
 
-test("resolves a string-form bin (prettier), ignoring the binName", () => {
+test("resolves a string-form bin (prettier) under the package's own name", () => {
   const entry = resolveNodeBin("prettier", "prettier", repoRoot);
   assert.ok(existsSync(entry), `resolved entry does not exist: ${entry}`);
   assert.match(entry.split(path.sep).join("/"), /\/prettier\//);
+});
+
+test("rejects a mismatched binName against a string-form bin", () => {
+  // npm's string shorthand declares ONE command, named after the package — so
+  // a typo must fail rather than silently resolving prettier's executable.
+  assert.throws(
+    () => resolveNodeBin("prettier", "prettierd", repoRoot),
+    /prettier declares no "prettierd" bin/,
+  );
 });
 
 test("throws when the package is not installed from fromDir", () => {
@@ -65,4 +81,65 @@ test("throws when the package declares no such bin", () => {
     () => resolveNodeBin("typescript", "vite", repoRoot),
     /typescript declares no "vite" bin/,
   );
+});
+
+// The remaining cases need a manifest shape the real installs don't have, so
+// they run against a throwaway node_modules tree rather than a real package.
+function fixtureDir(manifest, { createBinFile = false } = {}) {
+  const dir = mkdtempSync(path.join(tmpdir(), "resolve-node-bin-"));
+  const pkgDir = path.join(dir, "node_modules", manifest.name);
+  mkdirSync(pkgDir, { recursive: true });
+  writeFileSync(
+    path.join(pkgDir, "package.json"),
+    JSON.stringify(manifest),
+    "utf8",
+  );
+  if (createBinFile) {
+    const rel =
+      typeof manifest.bin === "string"
+        ? manifest.bin
+        : Object.values(manifest.bin)[0];
+    const target = path.join(pkgDir, rel);
+    mkdirSync(path.dirname(target), { recursive: true });
+    writeFileSync(target, "", "utf8");
+  }
+  // The consumer `package.json` `createRequire` is based at.
+  writeFileSync(
+    path.join(dir, "package.json"),
+    JSON.stringify({ name: "consumer" }),
+    "utf8",
+  );
+  return dir;
+}
+
+test("throws when a declared bin's file is missing (partial install)", () => {
+  // The silent case this helper exists to kill: `process.execPath <missing>`
+  // spawns fine and exits 1 with empty stdout, which downstream reads as "no
+  // diagnostic captured" and reports every tracked file as uncovered.
+  const dir = fixtureDir({ name: "ghostpkg", bin: { ghost: "bin/ghost.js" } });
+  try {
+    assert.throws(
+      () => resolveNodeBin("ghostpkg", "ghost", dir),
+      /ghostpkg's "ghost" bin points at a missing file/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("accepts a scoped package's string-form bin under its unscoped name", () => {
+  const dir = fixtureDir(
+    { name: "@scope/tool", bin: "bin/tool.js" },
+    { createBinFile: true },
+  );
+  try {
+    const entry = resolveNodeBin("@scope/tool", "tool", dir);
+    assert.ok(existsSync(entry), `resolved entry does not exist: ${entry}`);
+    assert.throws(
+      () => resolveNodeBin("@scope/tool", "scope-tool", dir),
+      /declares no "scope-tool" bin/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

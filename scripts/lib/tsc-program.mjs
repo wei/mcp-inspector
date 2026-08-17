@@ -192,16 +192,6 @@ export function resolveLeafProjects(clientDir, project, seen = new Set()) {
 }
 
 /**
- * Every file ONE project's program resolves, as absolute POSIX paths and with no
- * filtering at all — first-party sources, `node_modules` declarations, and the
- * out-of-repo `lib.*.d.ts` — plus the config diagnostic if `tsc` exited
- * non-zero. The two consumers want different slices of the files, so the slicing
- * happens in {@link projectSourceFiles} / {@link projectPackageFiles} rather than
- * here; they differ on the `error` too, which is why it is reported rather than
- * only warned about. Memoized per (client, project): the same project is listed
- * by `resolveLeafProjects` and again by whichever slice the caller asks for.
- */
-/**
  * The tsc JS entry a client's programs are measured with, resolved from the
  * client dir up the node_modules tree exactly as `npx --no-install tsc` walked
  * — but spawnable shell-free on Windows, where `npx` is a `.cmd` shim that
@@ -229,6 +219,16 @@ export function tscEntry(clientDir) {
   return entry;
 }
 
+/**
+ * Every file ONE project's program resolves, as absolute POSIX paths and with no
+ * filtering at all — first-party sources, `node_modules` declarations, and the
+ * out-of-repo `lib.*.d.ts` — plus the config diagnostic if `tsc` exited
+ * non-zero. The two consumers want different slices of the files, so the slicing
+ * happens in {@link projectSourceFiles} / {@link projectPackageFiles} rather than
+ * here; they differ on the `error` too, which is why it is reported rather than
+ * only warned about. Memoized per (client, project): the same project is listed
+ * by `resolveLeafProjects` and again by whichever slice the caller asks for.
+ */
 const listingCache = new Map();
 export function rawProjectListing(clientDir, project) {
   const key = `${clientDir}|${project}`;
