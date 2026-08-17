@@ -13,7 +13,6 @@ import {
   TextInput,
 } from "@mantine/core";
 import { ClearButton } from "../../elements/ClearButton/ClearButton";
-import { KeyValueRows } from "../../elements/KeyValueRows/KeyValueRows";
 import type { ProtocolEra } from "@modelcontextprotocol/client";
 import type {
   InspectorServerSettings,
@@ -223,6 +222,84 @@ const ClearStoredOAuthHint = Text.withProps({
   flex: 1,
   miw: "12rem",
 });
+
+function KeyValueRows({
+  items,
+  entityLabel,
+  onChange,
+  onRemove,
+}: {
+  items: { key: string; value: string }[];
+  /**
+   * Singular noun for one row ("header", "environment variable", …). Used only
+   * to build each control's `aria-label`: the section heading and the "Key" /
+   * "Value" placeholders are not programmatically associated with the inputs,
+   * so without it an assistive technology cannot tell one section's key box
+   * from another's, and every remove button announces only "X". The row number
+   * rides along because two rows can carry the same key — mid-edit, or a
+   * duplicate a server persisted — and a key-only name would leave both rows'
+   * controls indistinguishable, which is the thing this exists to prevent.
+   */
+  entityLabel: string;
+  onChange: (index: number, key: string, value: string) => void;
+  onRemove: (index: number) => void;
+}) {
+  /* v8 ignore next 3 -- unreachable: every caller guards with `length === 0`
+     and renders an EmptyHint instead, so KeyValueRows is only mounted with
+     a non-empty list. */
+  if (items.length === 0) {
+    return null;
+  }
+
+  return (
+    <>
+      {items.map((item, index) => {
+        const key = item.key.trim();
+        const rowLabel = key ? `${key}, row ${index + 1}` : `row ${index + 1}`;
+        return (
+          <Group key={index} grow>
+            <ClearableTextInput
+              placeholder="Key"
+              aria-label={`${entityLabel} name, ${rowLabel}`}
+              value={item.key}
+              onChange={(e) =>
+                onChange(index, e.currentTarget.value, item.value)
+              }
+              rightSection={
+                item.key ? (
+                  <ClearButton
+                    aria-label={`Clear ${entityLabel} name, ${rowLabel}`}
+                    onClick={() => onChange(index, "", item.value)}
+                  />
+                ) : null
+              }
+            />
+            <ClearableTextInput
+              placeholder="Value"
+              aria-label={`${entityLabel} value, ${rowLabel}`}
+              value={item.value}
+              onChange={(e) => onChange(index, item.key, e.currentTarget.value)}
+              rightSection={
+                item.value ? (
+                  <ClearButton
+                    aria-label={`Clear ${entityLabel} value, ${rowLabel}`}
+                    onClick={() => onChange(index, item.key, "")}
+                  />
+                ) : null
+              }
+            />
+            <RemoveIcon
+              aria-label={`Remove ${entityLabel}, ${rowLabel}`}
+              onClick={() => onRemove(index)}
+            >
+              X
+            </RemoveIcon>
+          </Group>
+        );
+      })}
+    </>
+  );
+}
 
 // Reserved-key rejection is inline per row (#2018): the reason is passed as the
 // key input's `error` **string**, so Mantine renders it in the input's own error

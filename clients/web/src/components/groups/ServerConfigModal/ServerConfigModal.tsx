@@ -10,10 +10,6 @@ import {
   Textarea,
 } from "@mantine/core";
 import { ClearButton } from "../../elements/ClearButton/ClearButton";
-import {
-  KeyValueRows,
-  type KeyValuePair,
-} from "../../elements/KeyValueRows/KeyValueRows";
 import { useValueChange } from "../../../hooks/useValueChange";
 import type {
   MCPServerConfig,
@@ -32,27 +28,11 @@ export interface ServerConfigModalProps {
   initialId?: string;
   /** When editing or cloning, the existing config to pre-populate. */
   initialConfig?: MCPServerConfig;
-  /**
-   * Custom HTTP headers already stored for the target server, pre-populated
-   * when editing or cloning. Headers are not part of `MCPServerConfig` — they
-   * live on the entry's `settings`, so they arrive (and leave, via `onSubmit`)
-   * as their own value rather than folded into the config. (#1915)
-   */
-  initialHeaders?: KeyValuePair[];
   /** Ids already in use — drives the uniqueness check (caller excludes the
    *  target id from this list when in 'edit' mode). */
   existingIds: string[];
   onClose: () => void;
-  /**
-   * `headers` carries the edited custom-header rows (blank-key rows already
-   * dropped). It is always `[]` for stdio, which has no HTTP request to attach
-   * headers to.
-   */
-  onSubmit: (
-    id: string,
-    config: MCPServerConfig,
-    headers: KeyValuePair[],
-  ) => Promise<void> | void;
+  onSubmit: (id: string, config: MCPServerConfig) => Promise<void> | void;
 }
 
 type TransportChoice = "stdio" | "sse" | "streamable-http";
@@ -67,8 +47,6 @@ interface FormState {
   cwd: string;
   // sse / streamable-http
   url: string;
-  /** Custom HTTP headers — sse / streamable-http only. (#1915) */
-  headers: KeyValuePair[];
 }
 
 // The `string`-valued FormState keys, which all share the same text-input
@@ -106,10 +84,6 @@ const EnvTextarea = Textarea.withProps({
   minRows: 2,
   rightSectionPointerEvents: "auto",
 });
-const AddHeaderButton = Button.withProps({ size: "xs", variant: "light" });
-const HeadersHeader = Group.withProps({ justify: "space-between", gap: "sm" });
-const HeadersLabel = Text.withProps({ size: "sm", fw: 500 });
-const HeadersHint = Text.withProps({ size: "xs", c: "dimmed" });
 
 const MODE_TITLES: Record<ServerConfigModalMode, string> = {
   add: "Add server",
@@ -120,14 +94,9 @@ const MODE_TITLES: Record<ServerConfigModalMode, string> = {
 function configToFormState(
   initialId: string | undefined,
   initialConfig: MCPServerConfig | undefined,
-  initialHeaders: KeyValuePair[] | undefined,
   mode: ServerConfigModalMode,
 ): FormState {
   const id = mode === "edit" ? (initialId ?? "") : "";
-  // Copy the rows rather than aliasing the caller's array — the form mutates
-  // this list as its own state, and a clone keeps a cancelled edit from
-  // reaching the entry the caller passed in.
-  const headers = (initialHeaders ?? []).map((h) => ({ ...h }));
   const transport: TransportChoice =
     initialConfig?.type === undefined ? "stdio" : initialConfig.type;
   if (!initialConfig) {
@@ -139,7 +108,6 @@ function configToFormState(
       envText: "",
       cwd: "",
       url: "",
-      headers,
     };
   }
   if (transport === "stdio") {
@@ -154,9 +122,9 @@ function configToFormState(
         .join("\n"),
       cwd: c.cwd ?? "",
       url: "",
-      headers,
     };
   }
+  // sse / streamable-http — custom headers live in ServerSettingsForm now.
   const url =
     initialConfig.type === "sse" || initialConfig.type === "streamable-http"
       ? initialConfig.url
@@ -169,7 +137,6 @@ function configToFormState(
     envText: "",
     cwd: "",
     url: url ?? "",
-    headers,
   };
 }
 
@@ -218,14 +185,13 @@ export function ServerConfigModal({
   mode,
   initialId,
   initialConfig,
-  initialHeaders,
   existingIds,
   onClose,
   onSubmit,
 }: ServerConfigModalProps) {
   const initial = useMemo(
-    () => configToFormState(initialId, initialConfig, initialHeaders, mode),
-    [initialId, initialConfig, initialHeaders, mode],
+    () => configToFormState(initialId, initialConfig, mode),
+    [initialId, initialConfig, mode],
   );
   const [form, setForm] = useState<FormState>(initial);
   const [submitError, setSubmitError] = useState<string | undefined>(undefined);
@@ -243,22 +209,6 @@ export function ServerConfigModal({
     };
   const clearTextField = (field: TextField) => () =>
     setForm((f) => ({ ...f, [field]: "" }));
-
-  // Header rows are a pair array rather than a plain string, so they get their
-  // own handlers instead of riding `setTextField` (which `TextField` excludes
-  // by type).
-  const addHeader = () =>
-    setForm((f) => ({ ...f, headers: [...f.headers, { key: "", value: "" }] }));
-  const removeHeader = (index: number) =>
-    setForm((f) => ({
-      ...f,
-      headers: f.headers.filter((_, i) => i !== index),
-    }));
-  const changeHeader = (index: number, key: string, value: string) =>
-    setForm((f) => ({
-      ...f,
-      headers: f.headers.map((h, i) => (i === index ? { key, value } : h)),
-    }));
 
   // Reset the form whenever the modal opens, or whenever `initial` changes
   // while it is open. Keying on `opened ? initial : undefined` collapses both
@@ -313,9 +263,9 @@ export function ServerConfigModal({
       return { ok: false, error: "URL is required for sse / streamable-http." };
     }
     const base = { url: form.url.trim() };
-    // Custom headers are persisted under `settings.headers` on the entry, not
-    // on the config — they leave through `onSubmit`'s third argument, so the
-    // SSE / streamable-http config here carries only transport fields.
+    // Custom headers live in ServerSettingsForm now (persisted under
+    // settings.headers on the entry); the SSE / streamable-http config here
+    // only carries the canonical transport fields.
     const config: MCPServerConfig =
       form.transport === "sse"
         ? { type: "sse", ...base }
@@ -338,19 +288,9 @@ export function ServerConfigModal({
       setSubmitError(built.error);
       return;
     }
-    // Blank-key rows are the form's placeholder for "row being typed" and mean
-    // nothing on the wire — the persist layer drops them anyway, so drop them
-    // here too and keep the caller's payload honest. stdio has no HTTP request
-    // to carry headers, so it always submits none.
-    const headers =
-      form.transport === "stdio"
-        ? []
-        : form.headers
-            .map((h) => ({ key: h.key.trim(), value: h.value }))
-            .filter((h) => h.key.length > 0);
     setSubmitting(true);
     try {
-      await onSubmit(trimmedId, built.config, headers);
+      await onSubmit(trimmedId, built.config);
       onClose();
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : String(err));
@@ -472,44 +412,21 @@ export function ServerConfigModal({
               />
             </>
           ) : (
-            <>
-              <RequiredTextInput
-                label="URL"
-                placeholder="https://example.com/mcp"
-                value={form.url}
-                onChange={setTextField("url")}
-                disabled={submitting}
-                rightSection={
-                  form.url ? (
-                    <ClearButton
-                      disabled={submitting}
-                      onClick={clearTextField("url")}
-                    />
-                  ) : null
-                }
-              />
-              <FieldGrid>
-                <HeadersHeader>
-                  <HeadersLabel>Custom headers</HeadersLabel>
-                  <AddHeaderButton onClick={addHeader} disabled={submitting}>
-                    + Add Header
-                  </AddHeaderButton>
-                </HeadersHeader>
-                <HeadersHint>
-                  Sent with every HTTP request to this server — cookies
-                  included. A custom `Authorization` header takes precedence
-                  over an OAuth access token, so remove it if you configure
-                  OAuth for this server later.
-                </HeadersHint>
-                <KeyValueRows
-                  items={form.headers}
-                  entityLabel="header"
-                  disabled={submitting}
-                  onChange={changeHeader}
-                  onRemove={removeHeader}
-                />
-              </FieldGrid>
-            </>
+            <RequiredTextInput
+              label="URL"
+              placeholder="https://example.com/mcp"
+              value={form.url}
+              onChange={setTextField("url")}
+              disabled={submitting}
+              rightSection={
+                form.url ? (
+                  <ClearButton
+                    disabled={submitting}
+                    onClick={clearTextField("url")}
+                  />
+                ) : null
+              }
+            />
           )}
         </FieldGrid>
 

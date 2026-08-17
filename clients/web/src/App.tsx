@@ -138,8 +138,6 @@ import {
   ServerConfigModal,
   type ServerConfigModalMode,
 } from "./components/groups/ServerConfigModal/ServerConfigModal";
-import type { KeyValuePair } from "./components/elements/KeyValueRows/KeyValueRows";
-import { buildHeaderSettingsPatch } from "./utils/serverSettingsPatch";
 import { ServerSettingsModal } from "./components/groups/ServerSettingsModal/ServerSettingsModal";
 import { ClientSettingsModal } from "./components/groups/ClientSettingsModal/ClientSettingsModal";
 import {
@@ -3897,15 +3895,28 @@ function App() {
   // each id), deduped. The batch is reset to empty when an add/import modal
   // opens (see the menu handlers).
   const addServerHighlighted = useCallback(
-    async (
-      id: string,
-      config: MCPServerConfig,
-      settings?: InspectorServerSettings,
-    ) => {
-      await addServer(id, config, settings);
+    async (id: string, config: MCPServerConfig) => {
+      await addServer(id, config);
       setHighlightedServerIds((ids) => (ids.includes(id) ? ids : [...ids, id]));
     },
     [addServer],
+  );
+
+  // On rename of the active server, keep activeServerId pointed at the new id.
+  const onConfigSubmit = useCallback(
+    async (id: string, config: MCPServerConfig) => {
+      if (configModal?.mode === "edit" && configModal.targetId) {
+        const originalId = configModal.targetId;
+        await updateServer(originalId, id, config);
+        if (originalId === activeServerId && id !== originalId) {
+          setActiveServerId(id);
+        }
+        return;
+      }
+      // add or clone
+      await addServerHighlighted(id, config);
+    },
+    [configModal, addServerHighlighted, updateServer, activeServerId],
   );
 
   // Derive the existingIds list the modal uses for uniqueness validation.
@@ -3923,39 +3934,6 @@ function App() {
     if (!configModal?.targetId) return undefined;
     return servers.find((s) => s.id === configModal.targetId);
   }, [configModal, servers]);
-
-  // On rename of the active server, keep activeServerId pointed at the new id.
-  const onConfigSubmit = useCallback(
-    async (id: string, config: MCPServerConfig, headers: KeyValuePair[]) => {
-      // Headers live on the entry's `settings`, not on the transport config,
-      // so they're folded back in here (#1915). The edit-vs-clone rules live
-      // in the helper, which is unit-tested — this file is outside the
-      // coverage gate and that distinction is where credentials can leak.
-      const settings = buildHeaderSettingsPatch(
-        configModal?.mode ?? "add",
-        configModalTarget?.settings,
-        headers,
-        EMPTY_SETTINGS,
-      );
-      if (configModal?.mode === "edit" && configModal.targetId) {
-        const originalId = configModal.targetId;
-        await updateServer(originalId, id, config, settings);
-        if (originalId === activeServerId && id !== originalId) {
-          setActiveServerId(id);
-        }
-        return;
-      }
-      // add or clone
-      await addServerHighlighted(id, config, settings);
-    },
-    [
-      configModal,
-      configModalTarget,
-      addServerHighlighted,
-      updateServer,
-      activeServerId,
-    ],
-  );
 
   const settingsModalTarget = useMemo(() => {
     if (!settingsModalTargetId) return undefined;
@@ -4572,7 +4550,6 @@ function App() {
         mode={configModal?.mode ?? "add"}
         initialId={configModalTarget?.id}
         initialConfig={configModalTarget?.config}
-        initialHeaders={configModalTarget?.settings?.headers}
         existingIds={existingIds}
         onClose={() => setConfigModal(null)}
         onSubmit={onConfigSubmit}
