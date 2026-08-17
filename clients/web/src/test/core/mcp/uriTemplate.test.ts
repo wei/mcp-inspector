@@ -54,13 +54,13 @@ describe("parseUriTemplate", () => {
 describe("templateVariables", () => {
   it("finds a simple variable and marks it required", () => {
     expect(templateVariables("foobar://events/{topic}")).toEqual([
-      { name: "topic", operator: "", required: true },
+      { name: "topic", operator: "", required: true, conforming: true },
     ]);
   });
 
   it("finds a query variable the old `\\{(\\w+)\\}` regex could not see", () => {
     expect(templateVariables("foobar://events{?topic}")).toEqual([
-      { name: "topic", operator: "?", required: false },
+      { name: "topic", operator: "?", required: false, conforming: true },
     ]);
   });
 
@@ -82,7 +82,7 @@ describe("templateVariables", () => {
 
   it("deduplicates a repeated name and keeps it required if any use is", () => {
     expect(templateVariables("x://{?id}/{id}")).toEqual([
-      { name: "id", operator: "?", required: true },
+      { name: "id", operator: "?", required: true, conforming: true },
     ]);
   });
 
@@ -232,7 +232,7 @@ describe("varspec modifiers", () => {
   // user cannot usefully fill.
   it("parses a prefix modifier off the variable name", () => {
     expect(templateVariables("x://a/{id:3}")).toEqual([
-      { name: "id", operator: "", required: true },
+      { name: "id", operator: "", required: true, conforming: true },
     ]);
   });
 
@@ -266,7 +266,7 @@ describe("the ; (path-parameter) operator", () => {
   // variable named ";id" and expands to "".
   it("is recognised as an operator, not part of the name", () => {
     expect(templateVariables("x://a{;id}")).toEqual([
-      { name: "id", operator: ";", required: false },
+      { name: "id", operator: ";", required: false, conforming: true },
     ]);
   });
 
@@ -638,6 +638,64 @@ describe("unmetRequiredGroups", () => {
     const groups = [["constructor"]];
     expect(hasRequiredValues(groups, {})).toBe(false);
     expect(unmetRequiredGroups(groups, {})).toEqual([["constructor"]]);
+  });
+});
+
+describe("literal normalization", () => {
+  // RFC 6570 3.1: a literal may contain non-ASCII, but expansion emits it
+  // pct-encoded -- the conformance case `café/{var}` expands to
+  // `caf%C3%A9/value`. Literals used to pass through verbatim, and since this
+  // module replaced the SDK's expander for both clients, nothing else was
+  // going to encode them. (Measured: the pinned SDK returns `café/value` too.)
+  it("percent-encodes a non-ASCII literal", () => {
+    expect(expandUriTemplate("café/{var}", { var: "value" })).toBe(
+      "caf%C3%A9/value",
+    );
+  });
+
+  it("encodes a space in a literal", () => {
+    expect(expandUriTemplate("a b/{v}", { v: "x" })).toBe("a%20b/x");
+  });
+
+  it.each([
+    ["URI delimiters", "x://a/b?c=d#e{?q}", { q: "1" }, "x://a/b?c=d#e?q=1"],
+    ["an existing pct-triplet", "a%20b/{v}", { v: "x" }, "a%20b/x"],
+  ])("preserves %s", (_label, template, values, expected) => {
+    expect(expandUriTemplate(template, values)).toBe(expected);
+  });
+
+  it("passes a brace through, so a malformed template stays legible", () => {
+    // A brace reaches a literal only from a malformed template (an unclosed
+    // `{` becomes trailing text). Encoding it to %7B would leave a string
+    // resembling neither the template nor anything the server could match.
+    expect(expandUriTemplate("x://a/{oops", { oops: "v" })).toBe("x://a/{oops");
+  });
+});
+
+describe("names outside RFC 6570 varchar", () => {
+  // The conformance suite rejects `{~thing}` and `{default-graph-uri}`. The
+  // Inspector expands them anyway -- real servers publish hyphenated names and
+  // the SDK's matcher round-trips them -- but the tolerance is labelled rather
+  // than folded into the grammar, so a caller wanting RFC-exact behavior can
+  // refuse on the flag.
+  it.each(["user-id", "a~b"])("expands the tolerated name %s", (name) => {
+    expect(expandUriTemplate(`x://{${name}}`, { [name]: "7" })).toBe("x://7");
+  });
+
+  it.each([
+    ["default-graph-uri", false],
+    ["~thing", false],
+    ["plain_name", true],
+    ["a.b", true],
+    ["%61%62", true],
+  ])("marks %s conforming=%s", (name, conforming) => {
+    expect(templateVariables(`x://{${name}}`)[0].conforming).toBe(conforming);
+  });
+
+  it("marks a name non-conforming if any occurrence needed the tolerance", () => {
+    expect(templateVariables("x://{user-id}{?user-id}")[0].conforming).toBe(
+      false,
+    );
   });
 });
 

@@ -79,3 +79,23 @@ describe("preview with Object.prototype-colliding names", () => {
     );
   });
 });
+
+describe("previewUriTemplate - literals", () => {
+  // The preview promises the URI that submitting would send, so it applies the
+  // same RFC 6570 3.1 literal encoding the wire does.
+  it("percent-encodes a non-ASCII literal", () => {
+    expect(previewUriTemplate("café/{var}", { var: "value" })).toBe(
+      "caf%C3%A9/value",
+    );
+  });
+
+  it("encodes the literal even while an expression is still unfilled", () => {
+    expect(previewUriTemplate("café/{var}", {})).toBe("caf%C3%A9/{var}");
+  });
+
+  it("keeps a malformed template legible rather than encoding its brace", () => {
+    expect(previewUriTemplate("x://café/{oops", {})).toBe(
+      "x://caf%C3%A9/{oops",
+    );
+  });
+});

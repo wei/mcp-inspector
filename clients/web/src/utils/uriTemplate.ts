@@ -12,12 +12,14 @@
 
 import {
   definedValues,
-  expandUriTemplate,
+  encodeLiteral,
+  expandTemplateExpression,
   parseUriTemplate,
 } from "@inspector/core/mcp/uriTemplate.js";
 
 export {
   definedValues,
+  encodeLiteral,
   expandUriTemplate,
   hasRequiredValues,
   parseUriTemplate,
@@ -33,56 +35,37 @@ export type {
 } from "@inspector/core/mcp/uriTemplate.js";
 
 /**
- * A placeholder standing in for an expression the user has not filled in yet.
+ * A partially-expanded template for display: an expression with at least one
+ * value is expanded exactly as the wire would render it, and the rest are left
+ * standing as written so the user can see what is still needed.
  *
- * `U+0000` cannot appear in a URI template, so a token built from it can never
- * collide with real template text; and because it is emitted as *literal* text
- * rather than as a variable value, expansion passes it through unencoded.
- */
-const deferredToken = (index: number) => `\u0000${index}\u0000`;
-
-/**
- * A partially-expanded template for display: expressions with at least one
- * value are expanded exactly as `expandUriTemplate` would, and the rest are
- * left standing as written so the user can see what is still needed.
+ * Assembled part by part rather than by rewriting the template and re-parsing
+ * it. The rewrite approach needed a placeholder to stand in for each unexpanded
+ * expression, and a placeholder is exactly what cannot survive the round trip
+ * now that literals are pct-encoded on expansion (RFC 6570 §3.1) -- whatever
+ * token stood in for `{?topic}` would come back encoded and no longer match.
+ * Going part by part removes the token, and with it the question of what text
+ * could never collide with a server-supplied template.
  *
- * Unfilled expressions are swapped for an inert token and restored afterwards,
- * and the rewritten template is expanded by `expandUriTemplate` itself. Routing
- * it back through the real expander is what keeps the preview honest: it cannot
- * promise a URI that submitting would not send. (Expansion carries no
- * cross-expression state — see `expandParts` — so this is a per-expression
- * substitution, not a whole-template rewrite that some later pass depends on.)
+ * Each half still comes from the shared expander -- `encodeLiteral` for literal
+ * runs, `expandTemplateExpression` for filled ones -- so the preview cannot
+ * promise a URI that submitting would not send.
  */
 export function previewUriTemplate(
   uriTemplate: string,
   values: Record<string, string>,
 ): string {
-  const parts = parseUriTemplate(uriTemplate);
-  const deferred: string[] = [];
   const defined = definedValues(values);
 
-  const rewritten = parts
+  return parseUriTemplate(uriTemplate)
     .map((part) => {
-      if (part.kind === "literal") return part.text;
+      if (part.kind === "literal") return encodeLiteral(part.text);
       // `Object.hasOwn`, not a bare lookup: `toString` and `constructor` are
       // valid RFC 6570 variable names, and a plain lookup would find
       // `Object.prototype`'s member and treat a blank field as filled.
-      if (part.names.some((name) => Object.hasOwn(defined, name))) {
-        return part.source;
-      }
-      deferred.push(part.source);
-      return deferredToken(deferred.length - 1);
+      return part.names.some((name) => Object.hasOwn(defined, name))
+        ? expandTemplateExpression(part, defined)
+        : part.source;
     })
     .join("");
-
-  const expanded = expandUriTemplate(rewritten, defined);
-
-  // Restored by exact-string replacement rather than by a pattern: a regex
-  // matching the token would have to embed U+0000 literally, which `eslint`
-  // rejects (`no-control-regex`) -- and each token's text is already known
-  // here, so there is nothing to match on.
-  return deferred.reduce(
-    (uri, source, index) => uri.replaceAll(deferredToken(index), source),
-    expanded,
-  );
 }

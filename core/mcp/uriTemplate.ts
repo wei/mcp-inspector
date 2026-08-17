@@ -70,6 +70,14 @@ const NAMED_OPERATORS = new Set([";", "?", "&"]);
 export interface VarSpec {
   name: string;
   /**
+   * Absent (i.e. conforming) unless the name needed the `-`/`~` tolerance to
+   * parse — see {@link TOLERATED_VARCHAR}. Present and `false` marks a name RFC
+   * 6570's own conformance suite would reject, which the Inspector expands
+   * anyway because real servers publish such names and the SDK's matcher
+   * accepts them.
+   */
+  conforming?: false;
+  /**
    * The RFC 6570 prefix modifier (`{id:3}`), a maximum length in *characters*.
    * Applied to the value before percent-encoding, per §3.2.1.
    */
@@ -108,6 +116,13 @@ export interface TemplateVariable {
   /** The operator of the expression the variable was first seen in. */
   operator: string;
   /**
+   * `false` when the name is outside RFC 6570's `varchar` and only parsed via
+   * the documented `-`/`~` tolerance (see {@link TOLERATED_VARCHAR}). A caller
+   * wanting RFC-exact behavior refuses on this rather than re-deriving the
+   * grammar; the Inspector itself expands such a template.
+   */
+  conforming: boolean;
+  /**
    * True when this variable appears in at least one expression that cannot be
    * omitted without changing the URI's structure — see
    * {@link OMITTABLE_OPERATORS}. Drives the form's "Optional" marker.
@@ -122,37 +137,51 @@ export interface TemplateVariable {
 }
 
 /**
- * One character of a variable's name.
+ * RFC 6570's `varchar`, exactly: `ALPHA / DIGIT / "_" / pct-encoded`.
  *
- * RFC 6570's `varchar` is `ALPHA / DIGIT / "_" / pct-encoded`. This admits two
- * more — `-` and `~` — and the widening is deliberate, on a rule the RFC's own
- * set is a subset of: **a name is the one thing expansion emits into the URI
- * without encoding it** (the `;`, `?` and `&` operators write `name=value`), so
- * a name must consist of characters that need no encoding. That is RFC 3986's
- * *unreserved* set — `ALPHA / DIGIT / -._~` — plus pct-encoded.
- *
- * Strict `varchar` would refuse `{user-id}`, which real servers publish and
- * which the SDK's own matcher round-trips (`match()` compiles the hyphen
- * literally). Refusing to read a resource that demonstrably works is a worse
- * outcome for a debugging tool than tolerating a name one character outside the
- * production — whereas everything this *does* reject is a shape we would
- * otherwise have to **guess** at, which is the line the rest of this module
- * draws too.
+ * This is the *conformance* production, kept unwidened so the grammar in the
+ * code says what the RFC says. What the parser goes on to **accept** is one
+ * tier wider — see {@link TOLERATED_VARCHAR}.
  */
-const VARCHAR = String.raw`(?:[A-Za-z0-9_\-~]|%[0-9A-Fa-f]{2})`;
+const VARCHAR = String.raw`(?:[A-Za-z0-9_]|%[0-9A-Fa-f]{2})`;
+
+/**
+ * The two characters accepted in a name beyond `varchar`, as an explicitly
+ * separate tier rather than a widened grammar.
+ *
+ * `-` and `~` are RFC 3986 *unreserved*, so they satisfy the property that
+ * actually matters at expansion time: a name is the one thing emitted into the
+ * URI **without** encoding (`;`, `?` and `&` write `name=value`), and these two
+ * need none. RFC 6570's own conformance suite rejects `{~thing}` and
+ * `{default-graph-uri}`, so a template using them is non-conforming — but real
+ * servers publish hyphenated names, and the SDK's matcher round-trips them
+ * (`match()` compiles the hyphen literally). Refusing to read a resource that
+ * demonstrably works is a worse failure for a debugging tool than expanding a
+ * name one character outside the production.
+ *
+ * So the tolerance is *labelled* rather than hidden: a varspec matching only
+ * this tier is parsed with `conforming: false`, surfaced on
+ * {@link TemplateVariable}, and a caller that wants RFC-exact behavior can
+ * refuse on that flag without re-implementing the grammar.
+ */
+const TOLERATED_VARCHAR = String.raw`[-~]`;
+
+/** `varname = varchar *( ["."] varchar )` — a dot separates, never leads or doubles. */
+function varnameGrammar(varchar: string): string {
+  return `${varchar}(?:\\.?${varchar})*`;
+}
 
 /**
  * RFC 6570's `varspec`: a `varname` with at most one trailing modifier, either
  * the explode `*` or a `:max-length`, never both.
  *
- * `varname = varchar *( ["."] varchar )`, so a `.` may separate name segments
- * but cannot lead, trail, or double. `max-length` is `%x31-39 0*3DIGIT` — 1 to
- * 9999, no leading zero — so `{id:}`, `{id:0}`, `{id:abc}` and `{id:10000}` are
- * invalid *templates*, not templates with an ignorable modifier.
+ * `max-length` is `%x31-39 0*3DIGIT` — 1 to 9999, no leading zero — so `{id:}`,
+ * `{id:0}`, `{id:abc}` and `{id:10000}` are invalid *templates*, not templates
+ * with an ignorable modifier.
  *
  * Anchoring the whole varspec is what rejects the shapes a looser "strip the
- * `*`, split on `:`" pass waves through. Measured against this branch before
- * the change, each expanded rather than being refused:
+ * `*`, split on `:`" pass waves through. Measured before it landed, each
+ * expanded rather than being refused:
  *
  * | Varspec   | Was                  | Why it is invalid                   |
  * | --------- | -------------------- | ----------------------------------- |
@@ -161,39 +190,24 @@ const VARCHAR = String.raw`(?:[A-Za-z0-9_\-~]|%[0-9A-Fa-f]{2})`;
  * | `{ id }`  | name `id`            | whitespace is not a `varchar`       |
  * | `{a b}`   | name `a b`           | ditto — and it emits into the URI   |
  */
-const VARSPEC_GRAMMAR = new RegExp(
-  `^(${VARCHAR}(?:\\.?${VARCHAR})*)(?:\\*|:([1-9][0-9]{0,3}))?$`,
+const MODIFIER = String.raw`(?:\*|:([1-9][0-9]{0,3}))?`;
+const CONFORMING_VARSPEC = new RegExp(
+  `^(${varnameGrammar(VARCHAR)})${MODIFIER}$`,
+);
+const TOLERATED_VARSPEC = new RegExp(
+  `^(${varnameGrammar(`(?:${VARCHAR}|${TOLERATED_VARCHAR})`)})${MODIFIER}$`,
 );
 
-/**
- * Parses one varspec (`id`, `id*`, `id:3`) into a name and optional prefix,
- * or `"invalid"` for anything {@link VARSPEC_GRAMMAR} does not admit.
- *
- * Three classes reach that verdict, none of them ignorable:
- *
- * - **A modifier outside the grammar** (`{id:abc}`), or two at once (`{id*:3}`),
- *   or one in the wrong position (`{*id}`). Treating any of them as a plain
- *   `{id}` would send a URI that does not match what the server advertised,
- *   with nothing to alert anyone — and `{id*:3}` silently *truncated* the value.
- * - **A name outside the character set** (`{a b}`, `{a/b}`). A named operator
- *   emits the name verbatim, so this is the one place an unencodable character
- *   reaches the URI as structure.
- * - **An empty varspec** — `{}`, `{,}`, `{a,}`, `{?}`, `{*}`. RFC 6570 requires
- *   at least one varspec per expression and admits no empty member, so this is
- *   a malformed *template*, not an expression with a member to skip. Skipping
- *   it is the more dangerous reading: `x://{}` would expand to `x://` while the
- *   form rendered no inputs, so its "everything required is filled" check would
- *   be vacuously true and it would submit a URI that is not the template the
- *   server published.
- *
- * The explode modifier parses but is not honored: it only changes how a list or
- * map value is joined, and every value reaching this module is a single string.
- */
 function parseVarSpec(raw: string): VarSpec | "invalid" {
-  const match = VARSPEC_GRAMMAR.exec(raw);
+  const conforming = CONFORMING_VARSPEC.exec(raw);
+  const match = conforming ?? TOLERATED_VARSPEC.exec(raw);
   if (match === null) return "invalid";
   const [, name, maxLength] = match;
-  return maxLength === undefined ? { name } : { name, maxLength: +maxLength };
+  return {
+    name,
+    ...(maxLength === undefined ? {} : { maxLength: +maxLength }),
+    ...(conforming === null ? { conforming: false } : {}),
+  };
 }
 
 /**
@@ -257,11 +271,20 @@ export function templateVariables(uriTemplate: string): TemplateVariable[] {
     if (part.kind !== "expression") continue;
     const required = !OMITTABLE_OPERATORS.has(part.operator);
     for (const name of part.names) {
+      const conforming = !part.varspecs.some(
+        (spec) => spec.name === name && spec.conforming === false,
+      );
       const existing = byName.get(name);
       if (existing) {
         existing.required = existing.required || required;
+        existing.conforming = existing.conforming && conforming;
       } else {
-        byName.set(name, { name, operator: part.operator, required });
+        byName.set(name, {
+          name,
+          operator: part.operator,
+          required,
+          conforming,
+        });
       }
     }
   }
@@ -398,6 +421,37 @@ const ALLOW_RESERVED = /[^A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=]/gu;
  * `%25`. The `u` flag makes the class match by code point, so an astral
  * character is handed to `encodeURIComponent` whole rather than as surrogates.
  */
+/**
+ * Percent-encodes a template's **literal** text (RFC 6570 §3.1).
+ *
+ * A literal may legally contain non-ASCII (`ucschar`), but expansion must emit
+ * it pct-encoded: the conformance case `café/{var}` expands to
+ * `caf%C3%A9/value`. Literals used to be copied through verbatim, so such a
+ * template went out with raw UTF-8 in the path — and since this module replaced
+ * the SDK's expander for both clients, nothing else was going to encode it. (The
+ * pinned SDK does not either; measured, it also returns `café/value`.)
+ *
+ * The rule is the same one {@link encodeAllowReserved} implements — keep
+ * unreserved, keep reserved (a literal's `/`, `?` and `#` are *structure*, not
+ * data), keep an existing pct-triplet, encode everything else — with one
+ * exception: a brace passes through.
+ *
+ * A brace is not a legal literal character, so it reaches this function only
+ * from a **malformed** template, where {@link parseUriTemplate} treats an
+ * unclosed `{` as trailing text. That case degrades to "show the template as
+ * the server wrote it", and encoding the brace to `%7B` would make the
+ * degradation unreadable — a string resembling neither the template nor
+ * anything the server could match.
+ */
+export function encodeLiteral(text: string): string {
+  return text
+    .split(/([{}])/g)
+    .map((chunk, index) =>
+      index % 2 === 1 ? chunk : encodeAllowReserved(chunk),
+    )
+    .join("");
+}
+
 function encodeAllowReserved(value: string): string {
   return value
     .split(/(%[0-9A-Fa-f]{2})/g)
@@ -487,8 +541,16 @@ function renderValue(value: string, spec: VarSpec, operator: string): string {
   return encodeValue(truncated, operator);
 }
 
-/** Expands one expression per RFC 6570. Returns "" if no name has a value. */
-function expandExpression(
+/**
+ * Expands one expression per RFC 6570. Returns "" if no name has a value.
+ *
+ * Exported for the web client's URI *preview*, which expands the expressions
+ * the user has filled while leaving the rest standing as written — it cannot
+ * go through {@link expandParts}, which expands all or nothing, and routing a
+ * half-rewritten template string back through the parser would mean smuggling
+ * a placeholder past {@link encodeLiteral}.
+ */
+export function expandTemplateExpression(
   part: TemplateExpression,
   values: Record<string, string>,
 ): string {
@@ -561,7 +623,9 @@ export function expandParts(
 ): string {
   return parts
     .map((part) =>
-      part.kind === "literal" ? part.text : expandExpression(part, values),
+      part.kind === "literal"
+        ? encodeLiteral(part.text)
+        : expandTemplateExpression(part, values),
     )
     .join("");
 }
