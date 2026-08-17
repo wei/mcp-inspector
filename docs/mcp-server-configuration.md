@@ -181,6 +181,8 @@ These have no analog in the broader `mcp.json` ecosystem. Each is **omitted on w
 
 `oauth.authorizationUrl` and `oauth.tokenUrl` override the `authorization_endpoint` and `token_endpoint` that authorization-server metadata discovery resolved. The Inspector deliberately has no such fields by default — it resolves both from the AS's metadata document, exactly as a real MCP host does — but a server under development often advertises its *production* authorization server while you want to hit staging. Set either (they are independent) to an absolute `http(s)` URL and it replaces what the metadata returned, for both the authorization request and the token request; leave blank to use discovery. A malformed value is flagged inline in the form and dropped with a warning at connect time rather than failing the connection. Edit them in Server Settings → Authorization ("Authorization URL override" / "Token URL override").
 
+They are **not applied under enterprise-managed authorization** (`oauth.enterpriseManaged`), for the same reason `oauth.authorizationParams` isn't: that flow authorizes against the enterprise IdP — a different authorization server, whose OIDC discovery would otherwise be rewritten too, pointing the IdP login (or the IdP code exchange) at the resource server's authorization server.
+
 > Because the override is applied to the *discovered metadata document*, a server whose authorization server publishes no metadata at all is unaffected — there the SDK falls back to `/authorize` and `/token` on the AS origin, and there is nothing to override.
 
 A catalog carrying these fields:

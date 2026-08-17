@@ -486,6 +486,13 @@ export function ServerSettingsForm({
     };
   }
 
+  // #1906 — the overrides are suppressed under EMA for the same reason the
+  // custom authorization parameters are: that leg authorizes against the
+  // enterprise IdP, a different authorization server.
+  const endpointOverrideEmaNote = settings.enterpriseManaged
+    ? " Not applied while Enterprise-managed authorization is on: that flow authorizes against the enterprise IdP, a different authorization server."
+    : "";
+
   const rejectedParamKeys = authorizationParams
     .map((p) => p.key.trim())
     .filter((key) => isReservedAuthorizationParam(key));
@@ -868,7 +875,7 @@ export function ServerSettingsForm({
               </Stack>
               <ClearableTextInput
                 label="Authorization URL override"
-                description="Leave blank to use the authorization_endpoint the authorization server's metadata advertises. Set it to point this server at a development or staging authorization server instead."
+                description={`Leave blank to use the authorization_endpoint the authorization server's metadata advertises. Set it to point this server at a development or staging authorization server instead.${endpointOverrideEmaNote}`}
                 placeholder="https://staging.auth.example.com/authorize"
                 value={settings.oauthAuthorizationUrl ?? ""}
                 error={oauthEndpointUrlError(
@@ -895,7 +902,7 @@ export function ServerSettingsForm({
               />
               <ClearableTextInput
                 label="Token URL override"
-                description="Leave blank to use the token_endpoint the authorization server's metadata advertises. Independent of the authorization URL — either can be overridden alone."
+                description={`Leave blank to use the token_endpoint the authorization server's metadata advertises. Independent of the authorization URL — either can be overridden alone.${endpointOverrideEmaNote}`}
                 placeholder="https://staging.auth.example.com/token"
                 value={settings.oauthTokenUrl ?? ""}
                 error={oauthEndpointUrlError(settings.oauthTokenUrl ?? "")}

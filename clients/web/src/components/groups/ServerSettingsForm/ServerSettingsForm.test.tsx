@@ -999,6 +999,34 @@ describe("ServerSettingsForm", () => {
     );
   });
 
+  it("says the endpoint overrides are unused under enterprise-managed auth", () => {
+    const { rerender } = renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{ ...emptySettings, enterpriseManaged: true }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.getAllByText(
+        /Not applied while Enterprise-managed authorization is on/,
+      ),
+    ).toHaveLength(2);
+
+    rerender(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{ ...emptySettings, enterpriseManaged: false }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.queryByText(
+        /Not applied while Enterprise-managed authorization is on/,
+      ),
+    ).not.toBeInTheDocument();
+  });
+
   it("flags an endpoint override that is not an absolute http(s) URL", () => {
     renderWithMantine(
       <ServerSettingsForm

@@ -22,7 +22,7 @@
  * sees both is the `fetchFn` the SDK uses for discovery, so the override is
  * applied to the metadata document in flight.
  *
- * Two consequences worth knowing:
+ * Three consequences worth knowing:
  *
  * - **A metadata document is required.** When discovery returns nothing, the SDK
  *   falls back to `/authorize` and `/token` on the authorization server's origin
@@ -30,6 +30,12 @@
  *   overriding "whatever urls the authorization server returns" — and a server
  *   publishing no metadata is already on a path where the endpoints are not
  *   being advertised in the first place.
+ * - **They do not apply to the enterprise-managed (EMA) leg.** That flow
+ *   authorizes against the enterprise IdP — a different authorization server —
+ *   and its OIDC discovery runs through this same fetch, so `OAuthManager`
+ *   suppresses the overrides when the server is enterprise-managed. This mirrors
+ *   `redirectToExternalAuthorization` skipping the custom authorization
+ *   parameters (#2018).
  * - **The Network tab shows the patched document.** The wrapper is applied to the
  *   base fetch, inside the request tracker, so what the tab renders is the
  *   metadata as the flow consumed it. That is the useful reading: it explains why
