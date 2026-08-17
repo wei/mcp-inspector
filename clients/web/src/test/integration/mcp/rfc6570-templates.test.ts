@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { InspectorClient } from "@inspector/core/mcp/inspectorClient.js";
 import { createTransportNode } from "@inspector/core/mcp/node/transport.js";
 import {
+  definedValues,
   expandUriTemplate,
   tryExpandUriTemplate,
 } from "@inspector/core/mcp/uriTemplate.js";
@@ -144,12 +145,18 @@ describe("RFC 6570 resource templates over the wire (#1919)", () => {
 
   it("resolves the base URI a blank query expression expands to", async () => {
     const connected = await connectToShowcase();
-    // RFC 6570 drops the whole expression when the variable is undefined, so
+    // RFC 6570 drops the whole expression when the variable is *undefined*, so
     // an unfilled `topic` legitimately requests the unfiltered collection. The
+    // form is what turns its untouched blank into "undefined" (`definedValues`)
+    // — a key present with "" is a defined value and would expand to
+    // `?topic=`, which is a different (and here, unregistered) resource. The
     // SDK's matcher compiles `{?topic}` to a *required* `\?topic=([^&]+)`, so a
     // template alone cannot serve this — the config registers the plain
     // resource, which is what a real server would do.
-    const uri = expandUriTemplate("foobar://events{?topic}", { topic: "" });
+    const uri = expandUriTemplate(
+      "foobar://events{?topic}",
+      definedValues({ topic: "" }),
+    );
     expect(uri).toBe("foobar://events");
 
     const { result } = await connected.readResource(uri);

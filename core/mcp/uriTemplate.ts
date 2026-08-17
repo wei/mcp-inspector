@@ -353,6 +353,18 @@ function readValue(
  * Drops empty entries so an untouched optional field reads as *undefined*
  * (the expression disappears) rather than as the empty string (which would
  * expand to a valueless `?topic=`).
+ *
+ * **A UI-boundary concern, deliberately not part of the expander.** RFC 6570
+ * distinguishes an undefined variable (the expression is omitted) from one
+ * defined as `""` (it expands — `x{?q}` gives `x?q=`, `x{;q}` gives `x;q`), and
+ * collapsing the two inside {@link expandUriTemplateStrict} made those URIs
+ * unrequestable through any caller, `readResourceFromTemplate` included.
+ *
+ * What forces the collapse is a *form*: both clients seed every declared
+ * variable with `""`, and a text input cannot express "defined but empty", so
+ * an untouched field is indistinguishable from a deliberately empty one. That
+ * is a property of the form, not of the template — so each form applies this
+ * on its way in, and the expander honors exactly what it is handed.
  */
 export function definedValues(
   values: Record<string, string>,
@@ -461,9 +473,17 @@ function expandExpression(
   const { operator } = part;
 
   if (NAMED_OPERATORS.has(operator)) {
-    const pairs = present.map(
-      ({ spec, value }) => `${spec.name}=${renderValue(value, spec, operator)}`,
-    );
+    const pairs = present.map(({ spec, value }) => {
+      const rendered = renderValue(value, spec, operator);
+      // RFC 6570 §3.2.7: the matrix operator drops the `=` for an empty value,
+      // so `x{;q}` with `q = ""` is `x;q` — while `?`/`&` keep it (`x?q=`).
+      // Both are only reachable now that the expander honors a defined-but-
+      // empty value instead of collapsing it into "undefined"; see
+      // `definedValues` for where that collapse legitimately happens instead.
+      return operator === ";" && rendered.length === 0
+        ? spec.name
+        : `${spec.name}=${rendered}`;
+    });
     // `;` repeats its separator per pair; `?`/`&` join with `&`.
     return operator === ";"
       ? `;${pairs.join(";")}`
@@ -516,9 +536,15 @@ export function expandParts(
 }
 
 /**
- * Expands a template against the entered values per RFC 6570 — percent-encoding
- * each value according to its operator, and omitting expressions whose
- * variables were left blank. **Throws** on a template that is not valid.
+ * Expands a template against the supplied values per RFC 6570 — percent-encoding
+ * each value according to its operator, and omitting an expression none of
+ * whose variables are defined. **Throws** on a template that is not valid.
+ *
+ * A key present with an empty string is *defined*, and expands: `x{?q}` gives
+ * `x?q=` and `x{;q}` gives `x;q`. Only an absent key omits its expression. A
+ * form that cannot tell "untouched" from "deliberately empty" drops its blanks
+ * with {@link definedValues} before calling — which is where that judgement
+ * belongs, since it is a fact about the form rather than about the template.
  *
  * Every expression is expanded by {@link expandParts}; the SDK's `UriTemplate`
  * is constructed only because that is what rejects an unclosed expression, and
@@ -535,7 +561,6 @@ export function expandUriTemplateStrict(
   uriTemplate: string,
   values: Record<string, string>,
 ): string {
-  const defined = definedValues(values);
   new UriTemplate(uriTemplate);
   const parts = parseUriTemplate(uriTemplate);
   const bad = parts.find((part) => part.kind === "expression" && part.invalid);
@@ -546,7 +571,7 @@ export function expandUriTemplateStrict(
       } — each varspec must name a variable, optionally with an explode (*) or a 1-9999 prefix modifier.`,
     );
   }
-  return expandParts(parts, defined);
+  return expandParts(parts, values);
 }
 
 /**

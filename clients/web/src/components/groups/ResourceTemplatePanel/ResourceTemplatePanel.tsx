@@ -15,6 +15,7 @@ import type { ResourceTemplateType as ResourceTemplate } from "@modelcontextprot
 import { AnnotationBadge } from "../../elements/AnnotationBadge/AnnotationBadge";
 import { CopyButton } from "../../elements/CopyButton/CopyButton";
 import {
+  definedValues,
   hasRequiredValues,
   previewUriTemplate,
   requiredGroups,
@@ -71,9 +72,15 @@ const DescriptionText = Text.withProps({
 
 // Why Read Resource is disabled when the template itself cannot be expanded.
 // Without it the button is inert with nothing on screen explaining the refusal.
+//
+// `role="alert"` because the message can appear *while typing* -- a pasted
+// value that cannot be encoded -- so a screen-reader user would otherwise meet
+// a silently disabled action. An alert is an assertive live region, which is
+// what announces text that arrives after first render.
 const ExpansionErrorText = Text.withProps({
   size: "sm",
   c: "red",
+  role: "alert",
 });
 
 // Left-aligned so the action sits closest to the sidebar controls / the form
@@ -242,7 +249,12 @@ export function ResourceTemplatePanel({
   // unencodable, and in neither case is there a URI to send -- so withhold the
   // request and say why, rather than reading the raw template with its braces
   // intact and letting the server answer with a confusing "not found".
-  const expansion = tryExpandUriTemplate(uriTemplate, variables);
+  // `definedValues` is applied here rather than inside the expander: a key
+  // present with `""` is a *defined* RFC 6570 value and legitimately expands to
+  // `?topic=`, but this form seeds every declared variable with `""`, so an
+  // untouched field is indistinguishable from a deliberately empty one. That is
+  // a fact about the form, so the form is what resolves it.
+  const expansion = tryExpandUriTemplate(uriTemplate, definedValues(variables));
   const canSubmit =
     expansion.error === undefined && hasRequiredValues(groups, variables);
 

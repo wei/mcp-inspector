@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  definedValues,
   expandUriTemplate,
   expandUriTemplateStrict,
   hasRequiredValues,
@@ -135,10 +136,18 @@ describe("expandUriTemplate", () => {
     expect(expandUriTemplate("x://{+path}", { path: "a/b" })).toBe("x://a/b");
   });
 
-  it("omits an expression whose variable was left blank", () => {
-    expect(expandUriTemplate("foobar://events{?topic}", { topic: "" })).toBe(
+  it("omits an expression whose variable is undefined", () => {
+    expect(expandUriTemplate("foobar://events{?topic}", {})).toBe(
       "foobar://events",
     );
+    // A form's untouched field arrives as "", which is a *defined* value; the
+    // form drops it on the way in. See "a value defined as the empty string".
+    expect(
+      expandUriTemplate(
+        "foobar://events{?topic}",
+        definedValues({ topic: "" }),
+      ),
+    ).toBe("foobar://events");
   });
 
   it("expands each query expression independently, per RFC 6570", () => {
@@ -288,9 +297,9 @@ describe("requiredGroups / hasRequiredValues", () => {
     const groups = requiredGroups("x://{a,b}");
     expect(groups).toEqual([["a", "b"]]);
     expect(hasRequiredValues(groups, { a: "only-a", b: "" })).toBe(true);
-    expect(expandUriTemplate("x://{a,b}", { a: "only-a", b: "" })).toBe(
-      "x://only-a",
-    );
+    expect(
+      expandUriTemplate("x://{a,b}", definedValues({ a: "only-a", b: "" })),
+    ).toBe("x://only-a");
   });
 
   it("rejects a multi-name expression with nothing filled", () => {
@@ -480,11 +489,15 @@ describe("variable names that collide with Object.prototype", () => {
   // every one of them, so a *blank* field read as supplied: measured,
   // `({})["toString"] !== undefined` is true and its typeof is "function".
   it.each(["toString", "constructor", "valueOf", "hasOwnProperty"])(
-    "omits a blank {?%s} instead of expanding a prototype member",
+    "reads a blank {?%s} as its own empty value, not a prototype member",
     (name) => {
+      // The own value is "", so the expression expands to a valueless pair --
+      // NOT the inherited function's body, which is what a bare lookup gave.
       expect(expandUriTemplate(`x://a{?${name}}`, { [name]: "" })).toBe(
-        "x://a",
+        `x://a?${name}=`,
       );
+      // And with the key absent, the expression is omitted entirely.
+      expect(expandUriTemplate(`x://a{?${name}}`, {})).toBe("x://a");
     },
   );
 
@@ -625,6 +638,38 @@ describe("unmetRequiredGroups", () => {
     const groups = [["constructor"]];
     expect(hasRequiredValues(groups, {})).toBe(false);
     expect(unmetRequiredGroups(groups, {})).toEqual([["constructor"]]);
+  });
+});
+
+describe("a value defined as the empty string", () => {
+  // RFC 6570 distinguishes an *undefined* variable (the expression is omitted)
+  // from one defined as "". The expander used to collapse the two, which made
+  // these URIs unrequestable through any caller -- `readResourceFromTemplate`
+  // included. Dropping blanks is a *form* concern (a text input cannot express
+  // "defined but empty"), so each client applies `definedValues` on its way in.
+  it.each([
+    ["a query expression keeps the =", "x{?q}", "x?q="],
+    ["a continuation keeps the =", "x?a=1{&q}", "x?a=1&q="],
+    // RFC 6570 3.2.7: the matrix operator drops the `=` for an empty value.
+    ["the matrix operator drops the =", "x{;q}", "x;q"],
+    ["a path segment expands to a bare separator", "x{/q}", "x/"],
+    ["a label expands to a bare separator", "x{.q}", "x."],
+    ["a simple expression contributes nothing visible", "x/{q}", "x/"],
+  ])("%s", (_label, template, expected) => {
+    expect(expandUriTemplate(template, { q: "" })).toBe(expected);
+  });
+
+  it("omits the expression only when the key is absent", () => {
+    expect(expandUriTemplate("x{?q}", {})).toBe("x");
+    expect(expandUriTemplate("x{;q}", {})).toBe("x");
+  });
+
+  it("keeps a defined-but-empty name alongside a filled one", () => {
+    expect(expandUriTemplate("x{?a,b}", { a: "", b: "2" })).toBe("x?a=&b=2");
+  });
+
+  it("definedValues is what a form applies to drop its untouched fields", () => {
+    expect(expandUriTemplate("x{?q}", definedValues({ q: "" }))).toBe("x");
   });
 });
 

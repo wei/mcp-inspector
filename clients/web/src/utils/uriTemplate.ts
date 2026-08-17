@@ -17,6 +17,7 @@ import {
 } from "@inspector/core/mcp/uriTemplate.js";
 
 export {
+  definedValues,
   expandUriTemplate,
   hasRequiredValues,
   parseUriTemplate,

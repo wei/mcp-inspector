@@ -6,6 +6,7 @@ import { AuthRecoveryRequiredError } from "@inspector/core/auth/challenge.js";
 import type { ReadResourceResult } from "@modelcontextprotocol/client";
 import { uriTemplateToForm } from "../utils/uriTemplateToForm.js";
 import {
+  definedValues,
   requiredGroups,
   unmetRequiredGroups,
 } from "@inspector/core/mcp/uriTemplate.js";
@@ -168,9 +169,14 @@ export function ResourceTestModal({
 
     try {
       // Use InspectorClient's readResourceFromTemplate method which encapsulates template expansion and resource reading
+      // Blanks are dropped HERE, not in the expander: a key present with `""`
+      // is a defined RFC 6570 value that legitimately expands to `?topic=`,
+      // but ink-form hands back `""` for every field the user never touched,
+      // so this form cannot tell the two apart. The web panel does the same at
+      // its own boundary.
       const invocation = await inspectorClient.readResourceFromTemplate(
         template.uriTemplate,
-        values,
+        definedValues(values),
       );
 
       const duration = Date.now() - startTime;

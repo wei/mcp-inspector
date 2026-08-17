@@ -95,7 +95,11 @@ v2/main/
 │   │                                   #   tryExpandUriTemplate returns the reason as a value, and
 │   │                                   #   the panel disables Read Resource rather than sending the
 │   │                                   #   raw template — expandUriTemplate's raw-template fallback
-│   │                                   #   is for DISPLAY (the preview) only — #1919;
+│   │                                   #   is for DISPLAY (the preview) only. An UNDEFINED
+│   │                                   #   variable omits its expression; one defined as ""
+│   │                                   #   expands (`x{?q}` → `x?q=`), so each FORM — not the
+│   │                                   #   expander — drops its untouched blanks via
+│   │                                   #   definedValues — #1919;
 │   │                                   #   modernTaskSchemas.ts: SEP-2663 modern Tasks
 │   │                                   #   extension wire schemas + normalize/handle helpers,
 │   │                                   #   used by the raw-wire tasks/* channel — #1631;

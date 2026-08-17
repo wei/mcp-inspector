@@ -265,6 +265,8 @@ The `;` and `:3` rows are the ones a user sees directly: on the SDK's parse the 
 
 A template that cannot be expanded at all — an out-of-grammar modifier (`{id:abc}`), or an expression declaring no variable (`{}`, `{a,}`, `{?}`) — **withholds the read** rather than sending something. Pick **events_malformed** (`foobar://events/{topic:abc}`) to see it: Read Resource is disabled, the reason is printed under the form, and the preview shows the template as the server declared it. The alternative is worse than it looks: `x://{}` would otherwise expand to `x://` with no inputs rendered, so the form's "everything required is filled" check passes vacuously and it reads a URI that is not the template the server published.
 
+An **undefined** variable is what omits its expression — a variable defined as the empty string expands (`x{?q}` gives `x?q=`, `x{;q}` gives `x;q`, per RFC 6570 §3.2.7). The expander honors that distinction, so a caller such as `readResourceFromTemplate` can request either URI. Collapsing the two is a *form* concern, not a template one: both clients seed every declared variable with `""` and a text input cannot express "defined but empty", so each form drops its blanks (`definedValues`) on the way in.
+
 Requiredness is a property of the **expression**, not the variable: RFC 6570 drops undefined names from a multi-name expression, so `{a,b}` with only `a` filled is expandable and a form must not block it. `requiredGroups` returns one entry per non-omittable expression and `hasRequiredValues` asks that each be satisfied by any one of its names — which no per-variable flag can express once a name recurs across expressions (`{a,b}{a,c}` is satisfied by filling `b` and `c`).
 
 #### Advertised extensions

@@ -122,7 +122,10 @@ describe("ResourceTestModal", () => {
         makeTemplate({ uriTemplate: "x://{a,b}" }),
         { a: "only-a", b: "" },
       );
-      expect(read).toHaveBeenCalledWith("x://{a,b}", { a: "only-a", b: "" });
+      // The untouched field is dropped before the read: `""` is a *defined*
+      // RFC 6570 value that would expand to a valueless pair, and ink-form
+      // cannot distinguish "never touched" from "deliberately empty".
+      expect(read).toHaveBeenCalledWith("x://{a,b}", { a: "only-a" });
       unmount();
     });
 
