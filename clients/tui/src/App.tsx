@@ -170,6 +170,15 @@ function App({
     pendingStepUpRef.current = pendingStepUp;
   }, [pendingStepUp]);
   const [connectError, setConnectError] = useState<string | null>(null);
+  // A failed disconnect is deliberately NOT folded into `connectError`. That
+  // one is only rendered by InfoTab when the status is "error", which a
+  // rejected disconnect leaves untouched (the status stays "connected"), so
+  // the message would never be seen — and it feeds
+  // `connectError ?? inspectorLastError`, where a stale value would go on
+  // masking a later, real connection error. This renders in the header
+  // regardless of status and is cleared on the next connect/disconnect
+  // attempt and on a server switch.
+  const [disconnectError, setDisconnectError] = useState<string | null>(null);
   const oauthInProgressRef = useRef(false);
   const callbackServerRef = useRef<OAuthCallbackServer | null>(null);
   const selectedServerRef = useRef<string | null>(null);
@@ -434,6 +443,9 @@ function App({
   useEffect(() => {
     setOauthStatus("idle");
     setOauthMessage(null);
+    // The header banner is server-scoped, so a failure from the server we just
+    // left must not be read as this one's.
+    setDisconnectError(null);
     const stepUp = pendingStepUpRef.current;
     if (stepUp && selectedServer && stepUp.serverName !== selectedServer) {
       setPendingStepUp(null);
@@ -757,6 +769,8 @@ function App({
     if (!selectedServer || !selectedInspectorClient || !selectedServerConfig) {
       return;
     }
+    // A connect attempt supersedes whatever the last disconnect reported.
+    setDisconnectError(null);
 
     const finishConnect = async () => {
       await connectInspector();
@@ -887,14 +901,15 @@ function App({
   // Disconnect handler
   const handleDisconnect = useCallback(async () => {
     if (!selectedServer) return;
+    // Clear first, so a retry that succeeds leaves no stale message behind.
+    setDisconnectError(null);
     try {
       await disconnectInspector();
       // InspectorClient will update status automatically, and data is preserved
     } catch (err) {
       // Nothing above this catches: the only caller is the key handler, which
-      // cannot await. Surface the failure the same way handleConnect does
-      // rather than letting it escape as an unhandled rejection.
-      setConnectError(err instanceof Error ? err.message : String(err));
+      // cannot await, so without this the rejection escapes unhandled.
+      setDisconnectError(err instanceof Error ? err.message : String(err));
     }
   }, [selectedServer, disconnectInspector]);
 
@@ -1625,6 +1640,11 @@ function App({
               {oauthStatus === "error" && oauthMessage && (
                 <Box marginTop={1}>
                   <Text color="red">OAuth: {oauthMessage}</Text>
+                </Box>
+              )}
+              {disconnectError && (
+                <Box marginTop={1}>
+                  <Text color="red">Disconnect failed: {disconnectError}</Text>
                 </Box>
               )}
             </Box>

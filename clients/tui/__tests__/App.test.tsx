@@ -665,17 +665,14 @@ describe("App (foundation)", () => {
     // 'd' is a key handler, so it cannot await handleDisconnect — the handler
     // has to own the failure itself or it escapes as an unhandled rejection
     // and fails the whole run from somewhere else (#1959).
-    // There is nothing to assert on screen — the message only renders once the
-    // client reports `status: "error"`, which a rejected disconnect does not
-    // do. The assertion is the run itself: vitest fails on an unhandled
-    // rejection, so this test passing is the proof the catch owns it.
+    // The banner is deliberately independent of connection status: a rejected
+    // disconnect leaves the status "connected", so anything gated on
+    // `status === "error"` would never be seen.
     h.ctrl.status = "connected";
     h.disconnect.mockRejectedValue(new Error("discfail"));
-    const { stdin } = await mount(oneStdio());
-    stdin.write("d");
-    await tick();
-    await tick();
-    expect(h.disconnect).toHaveBeenCalled();
+    const r = await mount(oneStdio());
+    r.stdin.write("d");
+    await expectFrame(r, "Disconnect failed: discfail");
   });
 
   it("owns a non-Error disconnect rejection too", async () => {
@@ -683,11 +680,21 @@ describe("App (foundation)", () => {
     // `.message` off it; a throw here would escape the same way.
     h.ctrl.status = "connected";
     h.disconnect.mockRejectedValue("plainstring");
-    const { stdin } = await mount(oneStdio());
-    stdin.write("d");
-    await tick();
-    await tick();
-    expect(h.disconnect).toHaveBeenCalled();
+    const r = await mount(oneStdio());
+    r.stdin.write("d");
+    await expectFrame(r, "Disconnect failed: plainstring");
+  });
+
+  it("clears a disconnect failure once a retry succeeds", async () => {
+    // A stale banner would keep reporting a failure the user has since fixed.
+    h.ctrl.status = "connected";
+    h.disconnect.mockRejectedValueOnce(new Error("discfail"));
+    const r = await mount(oneStdio());
+    r.stdin.write("d");
+    await expectFrame(r, "Disconnect failed: discfail");
+    r.stdin.write("d");
+    await waitUntil(() => !(r.lastFrame() ?? "").includes("Disconnect failed"));
+    expect(r.lastFrame() ?? "").not.toContain("Disconnect failed");
   });
 
   it("switches tabs via accelerator keys", async () => {
