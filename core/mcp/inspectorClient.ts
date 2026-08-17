@@ -218,6 +218,7 @@ import {
   type AuthChallengeOutcome,
   type HandleAuthChallengeOptions,
 } from "../auth/challenge.js";
+import { withOAuthEndpointOverrides } from "../auth/endpointOverrides.js";
 import type { OAuthTokens } from "@modelcontextprotocol/client";
 import { silentLogger, type InspectorLogger } from "../logging/logger.js";
 import { createFetchTracker } from "./fetchTracking.js";
@@ -650,6 +651,16 @@ export class InspectorClient extends InspectorClientEventTarget {
     };
 
     // Effective auth fetch: base fetch + tracking with category 'auth'
+    // #1906: apply the per-server authorization/token endpoint overrides to the
+    // authorization-server metadata document in flight. This wraps the *base*
+    // fetch rather than `effectiveAuthFetch` so it also covers the discovery the
+    // SDK runs from inside the transport (the 401/refresh path), which is handed
+    // `this.fetchFn` directly. The overrides are read lazily — `oauthManager` is
+    // created a few lines below, and `setOAuthConfig` can change them later — so
+    // the wrapper is inert until a server actually configures one.
+    this.fetchFn = withOAuthEndpointOverrides(this.fetchFn ?? fetch, () =>
+      this.oauthManager?.getEndpointOverrides(),
+    );
     this.effectiveAuthFetch = this.buildEffectiveAuthFetch();
 
     this.sessionId = options.sessionId;
@@ -5998,6 +6009,9 @@ export class InspectorClient extends InspectorClientEventTarget {
     scope?: string;
     /** Custom authorization-request parameters (#2018). Authorize URL only. */
     authorizationParams?: Record<string, string>;
+    /** Endpoint overrides applied to the discovered AS metadata (#1906). */
+    authorizationUrl?: string;
+    tokenUrl?: string;
   }): void {
     if (!this.oauthManager) {
       throw new Error(

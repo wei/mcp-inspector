@@ -249,6 +249,56 @@ export function oauthAuthorizationParamsFromSettings(
 }
 
 /**
+ * Validate one of a server's `oauth` endpoint overrides as it comes off disk,
+ * or `undefined` when there is nothing usable. (#1906)
+ *
+ * Same reasoning as `cleanAuthorizationParams` above: `StoredMCPServer` types
+ * these as `string`, but that is a compile-time promise a hand-edited file does
+ * not keep, and the CLI/TUI read `mcp.json` directly. A non-string reaches
+ * `oauthEndpointOverridesFromSettings`, which calls `.trim()` on it — so without
+ * this the whole server list fails to load. URL *validity* is not checked here;
+ * that happens where the override is applied, so a typo drops one field with a
+ * warning instead of anything louder.
+ */
+export function cleanEndpointOverride(
+  value: string | undefined,
+  field: "authorizationUrl" | "tokenUrl",
+): string | undefined {
+  if (value === undefined) return undefined;
+  // Keep: unreachable per the parameter type, reachable from disk.
+  if (typeof value !== "string") {
+    console.warn(
+      `Ignoring \`oauth.${field}\`: expected a string, got ${typeof value}.`,
+    );
+    return undefined;
+  }
+  return value.trim() || undefined;
+}
+
+/**
+ * Collapse a server's endpoint-override fields into the
+ * `InspectorClientOptions.oauth` sub-shape, or `undefined` when neither is set.
+ * Shared by the web (`App.tsx`) and Node (`buildRunnerClientAuthOptions`) paths
+ * so both derive the option identically. The values are passed through as
+ * typed; validation (absolute http(s) URL) happens once at the point of use, in
+ * `core/auth/endpointOverrides.ts`. (#1906)
+ */
+export function oauthEndpointOverridesFromSettings(
+  settings: Pick<
+    InspectorServerSettings,
+    "oauthAuthorizationUrl" | "oauthTokenUrl"
+  >,
+): { authorizationUrl?: string; tokenUrl?: string } | undefined {
+  const authorizationUrl = settings.oauthAuthorizationUrl?.trim();
+  const tokenUrl = settings.oauthTokenUrl?.trim();
+  if (!authorizationUrl && !tokenUrl) return undefined;
+  return {
+    ...(authorizationUrl && { authorizationUrl }),
+    ...(tokenUrl && { tokenUrl }),
+  };
+}
+
+/**
  * Lift the Inspector-extension fields off a freshly-read `StoredMCPServer`
  * into the pair-array / flat-OAuth `InspectorServerSettings` shape the form
  * and the rest of the in-memory layer consume. Returns `undefined` when none
@@ -357,6 +407,21 @@ export function storedFieldsToInspectorSettings(
   if (authorizationParams) {
     settings.oauthAuthorizationParams = envRecordToPairs(authorizationParams);
   }
+  // Truthiness drops empty strings like the credential fields above, so a
+  // cleared field reads back as unset rather than as an empty override. The
+  // `string` type is a compile-time promise a hand-edited `mcp.json` does not
+  // keep, and only the web client's `/api/servers` route checks it — the CLI and
+  // TUI read the file directly and then call `.trim()` on these in
+  // `oauthEndpointOverridesFromSettings`, so a non-string would crash the server
+  // load. Sanitized like `authorizationParams` above rather than trusted.
+  // (#1906)
+  const authorizationUrl = cleanEndpointOverride(
+    stored.oauth?.authorizationUrl,
+    "authorizationUrl",
+  );
+  if (authorizationUrl) settings.oauthAuthorizationUrl = authorizationUrl;
+  const tokenUrl = cleanEndpointOverride(stored.oauth?.tokenUrl, "tokenUrl");
+  if (tokenUrl) settings.oauthTokenUrl = tokenUrl;
   if (stored.oauth?.onInsufficientScope) {
     settings.oauthOnInsufficientScope = stored.oauth.onInsufficientScope;
   }
@@ -473,6 +538,14 @@ export function inspectorSettingsToStoredFields(
     if (Object.keys(authParams).length > 0) {
       oauthFields.authorizationParams = authParams;
     }
+  }
+  // Empty/blank reads back as unset (above), so a cleared field writes nothing
+  // and the file diff stays minimal for servers that never set one. (#1906)
+  if (settings.oauthAuthorizationUrl?.trim()) {
+    oauthFields.authorizationUrl = settings.oauthAuthorizationUrl.trim();
+  }
+  if (settings.oauthTokenUrl?.trim()) {
+    oauthFields.tokenUrl = settings.oauthTokenUrl.trim();
   }
   if (settings.oauthOnInsufficientScope) {
     oauthFields.onInsufficientScope = settings.oauthOnInsufficientScope;

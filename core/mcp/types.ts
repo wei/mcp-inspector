@@ -176,6 +176,19 @@ export type StoredMCPServer = MCPServerConfig & {
      * (#2018)
      */
     authorizationParams?: Record<string, string>;
+    /**
+     * Overrides the `authorization_endpoint` the authorization server's
+     * metadata document advertises — for pointing a server at a development or
+     * staging authorization server without changing what it publishes.
+     * Inspector-specific. (#1906)
+     */
+    authorizationUrl?: string;
+    /**
+     * Overrides the `token_endpoint` the authorization server's metadata
+     * document advertises. Independent of {@link authorizationUrl}.
+     * Inspector-specific. (#1906)
+     */
+    tokenUrl?: string;
   };
   /**
    * Filesystem/URI roots advertised to the server via the `roots` client
@@ -534,6 +547,13 @@ export interface OAuthSettings {
    * (#2018)
    */
   authorizationParams?: { key: string; value: string }[];
+  /**
+   * Endpoint overrides applied to the discovered authorization-server metadata
+   * (#1906). Optional for the same reason as `authorizationParams` — callers
+   * building an `OAuthSettings` for the other fields need not supply them.
+   */
+  authorizationUrl?: string;
+  tokenUrl?: string;
   enterpriseManaged?: boolean;
   onInsufficientScope?: OnInsufficientScopePolicy;
 }
@@ -699,6 +719,18 @@ export interface InspectorServerSettings {
    * the way there. Applied to the authorization request only. (#2018)
    */
   oauthAuthorizationParams?: { key: string; value: string }[];
+  /**
+   * Overrides the authorization endpoint discovery resolved, so a server can be
+   * pointed at a development or staging authorization server without changing
+   * what it advertises. Empty/absent means "use what discovery returned".
+   * Persisted as `oauth.authorizationUrl`. (#1906)
+   */
+  oauthAuthorizationUrl?: string;
+  /**
+   * Overrides the token endpoint discovery resolved. Independent of
+   * {@link oauthAuthorizationUrl}; persisted as `oauth.tokenUrl`. (#1906)
+   */
+  oauthTokenUrl?: string;
   /**
    * SEP-2350 step-up policy for a `403 insufficient_scope` challenge on this
    * server's HTTP transport. Defaults to `reauthorize` when unset.
@@ -1064,6 +1096,13 @@ export interface InspectorClientOptions {
      * (#2018). Reserved, protocol-critical keys are dropped with a warning.
      */
     authorizationParams?: Record<string, string>;
+    /**
+     * Overrides for the endpoints the authorization server's metadata document
+     * advertises (#1906). Applied to the discovered document, so they reach both
+     * the authorization request and the token request.
+     */
+    authorizationUrl?: string;
+    tokenUrl?: string;
   };
 
   /**

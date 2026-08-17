@@ -115,6 +115,53 @@ describe("OAuthManager", () => {
     });
   });
 
+  // #1906 — the endpoint overrides are read live from the config so a settings
+  // edit reaches the already-built fetch wrapper.
+  describe("getEndpointOverrides", () => {
+    it("returns undefined when neither endpoint is configured", () => {
+      const manager = new OAuthManager(createMockParams());
+      expect(manager.getEndpointOverrides()).toBeUndefined();
+    });
+
+    it("reflects each endpoint set through setOAuthConfig", () => {
+      const manager = new OAuthManager(createMockParams());
+      manager.setOAuthConfig({
+        authorizationUrl: "https://staging.test/authorize",
+      });
+      expect(manager.getEndpointOverrides()).toEqual({
+        authorizationUrl: "https://staging.test/authorize",
+      });
+      manager.setOAuthConfig({ tokenUrl: "https://staging.test/token" });
+      expect(manager.getEndpointOverrides()).toEqual({
+        authorizationUrl: "https://staging.test/authorize",
+        tokenUrl: "https://staging.test/token",
+      });
+    });
+
+    // The EMA leg authorizes against the enterprise IdP — a different
+    // authorization server, whose OIDC discovery runs through the same fetch the
+    // override wrapper is installed on. Applying a resource-AS override there
+    // would redirect the IdP login (or the IdP code exchange) to the resource
+    // AS. Regression test for the review finding on PR #2037.
+    it("suppresses the overrides under enterprise-managed authorization", () => {
+      const manager = new OAuthManager(createMockParams());
+      manager.setOAuthConfig({
+        authorizationUrl: "https://staging.test/authorize",
+        tokenUrl: "https://staging.test/token",
+      });
+      expect(manager.getEndpointOverrides()).toBeDefined();
+
+      manager.setOAuthConfig({ enterpriseManaged: true });
+      expect(manager.getEndpointOverrides()).toBeUndefined();
+
+      manager.setOAuthConfig({ enterpriseManaged: false });
+      expect(manager.getEndpointOverrides()).toEqual({
+        authorizationUrl: "https://staging.test/authorize",
+        tokenUrl: "https://staging.test/token",
+      });
+    });
+  });
+
   describe("getServerUrl propagation", () => {
     it("createOAuthProviderForTransport throws when getServerUrl throws", async () => {
       const params = createMockParams({
@@ -1588,7 +1635,7 @@ describe("OAuthManager", () => {
       });
 
       const provider = await manager.createOAuthProviderForTransport();
-      provider.redirectToAuthorization(
+      await provider.redirectToAuthorization(
         new URL("https://as.example.com/authorize?client_id=abc&state=xyz"),
       );
 
@@ -1610,7 +1657,7 @@ describe("OAuthManager", () => {
       });
 
       const provider = await manager.createOAuthProviderForTransport();
-      provider.redirectToAuthorization(
+      await provider.redirectToAuthorization(
         new URL("https://as.example.com/authorize?client_id=abc&state=xyz"),
       );
 
