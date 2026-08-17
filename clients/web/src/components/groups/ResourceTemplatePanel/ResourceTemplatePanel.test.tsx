@@ -266,6 +266,58 @@ describe("ResourceTemplatePanel", () => {
       expect(onReadResource).not.toHaveBeenCalled();
     });
 
+    it("names every unmet group, so a disabled button always has a reason", async () => {
+      // With `{a,b}{b,c}{a,c}`, filling `b` satisfies the first two groups. A
+      // per-field hint then looks satisfied while Read Resource stays disabled
+      // on the third -- so the outstanding requirement is stated form-level.
+      const user = userEvent.setup();
+      renderWithMantine(
+        <ResourceTemplatePanel
+          template={{ name: "Shared", uriTemplate: "x://{a,b}{b,c}{a,c}" }}
+          onReadResource={vi.fn()}
+        />,
+      );
+      expect(screen.getByText(/Still needed:/)).toHaveTextContent(
+        "Still needed: a or b; b or c; a or c",
+      );
+      await user.type(screen.getByLabelText("b"), "1");
+      expect(screen.getByText(/Still needed:/)).toHaveTextContent(
+        "Still needed: a or c",
+      );
+      expect(
+        screen.getByRole("button", { name: "Read Resource" }),
+      ).toBeDisabled();
+      await user.type(screen.getByLabelText("a"), "2");
+      expect(screen.queryByText(/Still needed:/)).not.toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Read Resource" }),
+      ).toBeEnabled();
+    });
+
+    it("hints every shared group a variable sits in, not just the first", () => {
+      renderWithMantine(
+        <ResourceTemplatePanel
+          template={{ name: "Shared", uriTemplate: "x://{a,b}{a,c}" }}
+          onReadResource={vi.fn()}
+        />,
+      );
+      expect(
+        screen.getByText("Any one of each: a, b; a, c"),
+      ).toBeInTheDocument();
+    });
+
+    it("treats a name repeated in one expression as a plain requirement", () => {
+      renderWithMantine(
+        <ResourceTemplatePanel
+          template={{ name: "Twice", uriTemplate: "x://{a,a}" }}
+          onReadResource={vi.fn()}
+        />,
+      );
+      // Not "Any one of: a, a" -- it is one field, required.
+      expect(screen.queryByText(/Any one of/)).not.toBeInTheDocument();
+      expect(screen.getByText("Still needed: a")).toBeInTheDocument();
+    });
+
     it("shows the malformed template unexpanded in the preview", () => {
       renderWithMantine(
         <ResourceTemplatePanel

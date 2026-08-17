@@ -317,7 +317,12 @@ export function requiredGroups(uriTemplate: string): string[][] {
     // time on a condition nothing can satisfy, and the "any one of" message
     // built from it would name no fields.
     if (part.names.length === 0) continue;
-    groups.push(part.names);
+    // Deduplicated within the expression: `{a,a}` is one requirement named
+    // twice, not two names either of which would do. Left as-is it read as a
+    // shared group everywhere downstream -- the TUI's `length === 1` test
+    // marked `a` optional while its submit guard still refused a blank, and the
+    // web panel offered the useless hint "Any one of: a, a".
+    groups.push([...new Set(part.names)]);
   }
   return groups;
 }

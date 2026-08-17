@@ -26,6 +26,7 @@ export {
   requiredGroups,
   templateVariables,
   tryExpandUriTemplate,
+  unmetRequiredGroups,
 } from "@inspector/core/mcp/uriTemplate.js";
 export type {
   TemplateExpansion,

@@ -64,3 +64,15 @@ describe("uriTemplateToForm", () => {
     expect(form.sections[0]!.fields).toEqual([]);
   });
 });
+
+describe("a name repeated inside one expression", () => {
+  it("is required, not treated as a shared group", () => {
+    // `{a,a}` is one requirement named twice. Before core deduplicated the
+    // group, `requiredGroups` returned ["a","a"], so this form's
+    // `length === 1` test left the field optional while ResourceTestModal's
+    // submit guard still refused a blank -- an un-submittable form.
+    const [field] = uriTemplateToForm("x://{a,a}", "T").sections[0].fields;
+    expect(field.name).toBe("a");
+    expect(field.required).toBe(true);
+  });
+});

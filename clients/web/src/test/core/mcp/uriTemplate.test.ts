@@ -352,6 +352,24 @@ describe("requiredGroups / hasRequiredValues", () => {
   });
 });
 
+describe("a name repeated inside one expression", () => {
+  // `{a,a}` is one requirement named twice, not two names either of which
+  // would do. Undeduplicated it read as a shared group everywhere downstream:
+  // the TUI's `length === 1` test marked `a` optional while its submit guard
+  // still refused a blank, and the web panel offered "Any one of: a, a".
+  it("collapses to a single-name required group", () => {
+    expect(requiredGroups("x://{a,a}")).toEqual([["a"]]);
+  });
+
+  it("still expands both occurrences, which RFC 6570 requires", () => {
+    expect(expandUriTemplate("x://{a,a}", { a: "1" })).toBe("x://1,1");
+  });
+
+  it("leaves genuinely distinct names alone", () => {
+    expect(requiredGroups("x://{a,b}")).toEqual([["a", "b"]]);
+  });
+});
+
 describe("expression independence", () => {
   it("does not rewrite a later query expression on the own-expansion path", () => {
     expect(

@@ -16,11 +16,11 @@ import { AnnotationBadge } from "../../elements/AnnotationBadge/AnnotationBadge"
 import { CopyButton } from "../../elements/CopyButton/CopyButton";
 import {
   definedValues,
-  hasRequiredValues,
   previewUriTemplate,
   requiredGroups,
   templateVariables,
   tryExpandUriTemplate,
+  unmetRequiredGroups,
 } from "../../../utils/uriTemplate";
 
 export interface ResourceTemplatePanelProps {
@@ -77,6 +77,13 @@ const DescriptionText = Text.withProps({
 // value that cannot be encoded -- so a screen-reader user would otherwise meet
 // a silently disabled action. An alert is an assertive live region, which is
 // what announces text that arrives after first render.
+// What is still missing before Read Resource can fire. Dimmed rather than red:
+// an incomplete form is the expected starting state, not an error.
+const RequirementText = Text.withProps({
+  size: "sm",
+  c: "dimmed",
+});
+
 const ExpansionErrorText = Text.withProps({
   size: "sm",
   c: "red",
@@ -255,8 +262,11 @@ export function ResourceTemplatePanel({
   // untouched field is indistinguishable from a deliberately empty one. That is
   // a fact about the form, so the form is what resolves it.
   const expansion = tryExpandUriTemplate(uriTemplate, definedValues(variables));
-  const canSubmit =
-    expansion.error === undefined && hasRequiredValues(groups, variables);
+  // Named rather than merely counted, so a disabled Read Resource always has a
+  // reason on screen. Per-field hints cannot carry this: a variable shared
+  // across several groups looks satisfied once any one of them is met.
+  const unmet = unmetRequiredGroups(groups, variables);
+  const canSubmit = expansion.error === undefined && unmet.length === 0;
 
   function handleSubmit() {
     /* v8 ignore next -- unreachable: the button is disabled whenever the
@@ -293,15 +303,23 @@ export function ResourceTemplatePanel({
           const individuallyRequired = groups.some(
             (names) => names.length === 1 && names[0] === varName,
           );
-          const sharedGroup = individuallyRequired
-            ? undefined
-            : groups.find(
+          // EVERY shared group this variable sits in, not the first. With
+          // `{a,b}{b,c}{a,c}`, showing only the first left `b` looking like it
+          // satisfied everything while Read Resource stayed disabled on the
+          // unmet `{a,c}` -- a hidden requirement is worse than a wordy hint.
+          // The form-level "Still needed" line below names what is actually
+          // outstanding, which is the part a per-field hint cannot express.
+          const sharedGroups = individuallyRequired
+            ? []
+            : groups.filter(
                 (names) => names.length > 1 && names.includes(varName),
               );
           const description = !required
             ? "Optional"
-            : sharedGroup
-              ? `Any one of: ${sharedGroup.join(", ")}`
+            : sharedGroups.length > 0
+              ? `Any one of${sharedGroups.length > 1 ? " each" : ""}: ${sharedGroups
+                  .map((names) => names.join(", "))
+                  .join("; ")}`
               : undefined;
           return useAutocomplete ? (
             <Autocomplete
@@ -343,6 +361,11 @@ export function ResourceTemplatePanel({
       </Stack>
       {expansion.error !== undefined && (
         <ExpansionErrorText>{expansion.error}</ExpansionErrorText>
+      )}
+      {expansion.error === undefined && unmet.length > 0 && (
+        <RequirementText>
+          Still needed: {unmet.map((names) => names.join(" or ")).join("; ")}
+        </RequirementText>
       )}
       <FooterRow>
         <Button size="sm" disabled={!canSubmit} onClick={handleSubmit}>
