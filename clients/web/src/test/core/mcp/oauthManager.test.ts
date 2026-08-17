@@ -1588,7 +1588,7 @@ describe("OAuthManager", () => {
       });
 
       const provider = await manager.createOAuthProviderForTransport();
-      provider.redirectToAuthorization(
+      await provider.redirectToAuthorization(
         new URL("https://as.example.com/authorize?client_id=abc&state=xyz"),
       );
 
@@ -1610,7 +1610,7 @@ describe("OAuthManager", () => {
       });
 
       const provider = await manager.createOAuthProviderForTransport();
-      provider.redirectToAuthorization(
+      await provider.redirectToAuthorization(
         new URL("https://as.example.com/authorize?client_id=abc&state=xyz"),
       );
 

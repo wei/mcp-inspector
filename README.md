@@ -307,6 +307,8 @@ Each client self-validates from its own folder; the root scripts chain them. The
 
 Per-client scripts exist too (`validate:web`, `coverage:cli`, `smoke:tui`, …), plus root `validate:core` / `format:core` for the shared `core/` package, `format:scripts` for the root `scripts/` tooling, and `format:shared` / `lint:shared` for the root "shared" surface (`test-servers/src/**`, `vitest.shared.mts`, the root `eslint.config.js`). Run `npm run format` before committing — the root `format` fixes `core/`, the root `scripts/`, the shared surface, and every client; `validate` runs the non-fixing `format:check` and fails CI on any unformatted file.
 
+**Linting is type-aware.** All five ESLint scopes (`clients/{web,cli,tui,launcher}` plus the root `core/` + shared gate) enable `@typescript-eslint/no-floating-promises` at `error`, so a promise that is neither awaited, returned, `.catch(…)`-terminated, nor explicitly discarded with `void` fails `lint` — and therefore `validate` ([#1959](https://github.com/modelcontextprotocol/inspector/issues/1959)). The rule needs type information, so each scope's config names a parser project; the root scope's is **`tsconfig.lint.json`**, a lint-only project covering `core/**`, `test-servers/src/**`, and `vitest.shared.mts`, which have no tsconfig of their own. It emits nothing and changes no typecheck — but a new first-party TS location added to the root lint scope must be added to its `include`. See **TypeScript instructions** in [`AGENTS.md`](./AGENTS.md) for when `void` is acceptable.
+
 For the full testing rules — the ≥90% per-file gate, where test files live, the unit vs. integration vs. storybook projects, and the `v8 ignore` policy — see [`AGENTS.md`](./AGENTS.md).
 
 ## Publishing

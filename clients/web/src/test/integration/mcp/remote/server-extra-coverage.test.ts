@@ -20,6 +20,7 @@ import { serve } from "@hono/node-server";
 import type { ServerType } from "@hono/node-server";
 import type pinoType from "pino";
 import {
+  closeAbortedStream,
   createRemoteApp,
   requestIdForSendWait,
   mcpParamHeadersOnly,
@@ -1105,6 +1106,39 @@ describe("server.ts supplemental coverage", () => {
       } finally {
         await stop(h);
       }
+    });
+  });
+  describe("closeAbortedStream", () => {
+    it("owns a rejected close instead of letting it go unhandled", async () => {
+      // The whole reason the helper exists. Both SSE `onAbort` listeners run
+      // after the peer is already gone, so `close()` can lose the race and
+      // reject — and Hono invokes abort subscribers with a bare
+      // `subscriber()`, so nothing upstream would catch it. A regression here
+      // does not fail at the call site; it fails the whole vitest run from
+      // wherever the rejection happens to surface.
+      const rejected = Promise.reject(new Error("peer already gone"));
+      const unhandled: unknown[] = [];
+      const onUnhandled = (err: unknown) => unhandled.push(err);
+      process.on("unhandledRejection", onUnhandled);
+      try {
+        expect(closeAbortedStream({ close: () => rejected })).toBeUndefined();
+        // An unhandledRejection fires on a later macrotask, not this one.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      } finally {
+        process.off("unhandledRejection", onUnhandled);
+      }
+      expect(unhandled).toEqual([]);
+    });
+
+    it("returns without waiting on a close that resolves", async () => {
+      let closed = false;
+      closeAbortedStream({
+        close: async () => {
+          closed = true;
+        },
+      });
+      await Promise.resolve();
+      expect(closed).toBe(true);
     });
   });
 });
