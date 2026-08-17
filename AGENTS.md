@@ -128,7 +128,15 @@ v2/main/
 │                                       #   pack-and-verify.mjs, and lib/ shared helpers
 │                                       #   (tsc-program.mjs is the `tsc --listFilesOnly`
 │                                       #   measurement both coverage guards read a program
-│                                       #   through — #1965). Prettier-gated via
+│                                       #   through — #1965; resolve-node-bin.mjs resolves a
+│                                       #   package's bin through its own package.json, so the
+│                                       #   verify/smoke scripts spawn it with `process.execPath`
+│                                       #   rather than the `npx` `.cmd` shim Node refuses to
+│                                       #   spawn shell-free on Windows. pack-and-verify.mjs is
+│                                       #   the exception — its children are `npm` itself and the
+│                                       #   installed `.bin` shim, neither resolvable that way, so
+│                                       #   it keeps a Windows shell and quotes its generated
+│                                       #   paths via win-shell-args.mjs — #1939). Prettier-gated via
 │                                       #   `format:check:scripts`; its own pure parsers are
 │                                       #   unit-tested by `npm run test:scripts` (node --test).
 ├── specification/                      # Build specification

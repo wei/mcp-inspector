@@ -221,6 +221,7 @@ function makeFixture({
   for (const rel of [
     "verify-dep-lockstep.mjs",
     path.join("lib", "npm-scripts.mjs"),
+    path.join("lib", "resolve-node-bin.mjs"),
     path.join("lib", "tsc-program.mjs"),
   ])
     cpSync(path.join(scriptsDir, rel), path.join(dir, "scripts", rel));

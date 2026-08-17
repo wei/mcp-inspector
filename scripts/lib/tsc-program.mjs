@@ -24,6 +24,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { reachableScripts, tokenize } from "./npm-scripts.mjs";
+import { resolveNodeBin } from "./resolve-node-bin.mjs";
 
 export const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -191,6 +192,34 @@ export function resolveLeafProjects(clientDir, project, seen = new Set()) {
 }
 
 /**
+ * The tsc JS entry a client's programs are measured with, resolved from the
+ * client dir up the node_modules tree exactly as `npx --no-install tsc` walked
+ * — but spawnable shell-free on Windows, where `npx` is a `.cmd` shim that
+ * `execFileSync` can't start (ENOENT — #1939). A resolution failure is a hard
+ * "cannot measure" error rather than an empty file set: the old ENOENT was
+ * doubly silent, echoing "(no diagnostic captured)" per project and then
+ * reporting every tracked file in the repo as uncovered. Cached per client;
+ * exported so a consumer's own tsc pass (`verify-typecheck-coverage`'s
+ * `--showConfig`) spawns the same entry the listings do.
+ */
+const tscEntryCache = new Map();
+export function tscEntry(clientDir) {
+  const cached = tscEntryCache.get(clientDir);
+  if (cached) return cached;
+  let entry;
+  try {
+    entry = resolveNodeBin("typescript", "tsc", path.join(repoRoot, clientDir));
+  } catch (err) {
+    console.error(
+      `cannot resolve \`typescript\` from ${clientDir} (${err.message}): no tsc program can be measured. Run \`npm install\` at the repo root first.`,
+    );
+    process.exit(1);
+  }
+  tscEntryCache.set(clientDir, entry);
+  return entry;
+}
+
+/**
  * Every file ONE project's program resolves, as absolute POSIX paths and with no
  * filtering at all — first-party sources, `node_modules` declarations, and the
  * out-of-repo `lib.*.d.ts` — plus the config diagnostic if `tsc` exited
@@ -209,8 +238,8 @@ export function rawProjectListing(clientDir, project) {
   let error = null;
   try {
     stdout = execFileSync(
-      "npx",
-      ["--no-install", "tsc", "-p", project, "--listFilesOnly"],
+      process.execPath,
+      [tscEntry(clientDir), "-p", project, "--listFilesOnly"],
       {
         cwd: path.join(repoRoot, clientDir),
         encoding: "utf8",

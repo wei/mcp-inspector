@@ -50,13 +50,16 @@ import {
 // The `tsc --listFilesOnly` machinery lives in `lib/` because
 // `verify-dep-lockstep` measures the same programs for a different question
 // (#1965) — one implementation, so the two guards can't disagree about what a
-// program contains.
+// program contains. `tscEntry` (the #1939 Windows-safe tsc resolver) comes from
+// the same module so the `--showConfig` pass below spawns tsc the same way the
+// listings do.
 import {
   clientTsconfigReferences,
   isDisablingFlag,
   isTsc,
   projectSourceFiles,
   resolveLeafProjects,
+  tscEntry,
   typecheckProjects,
 } from "./lib/tsc-program.mjs";
 
@@ -356,8 +359,8 @@ function nodeClients() {
 function projectDisablesChecking(clientDir, project) {
   try {
     const out = execFileSync(
-      "npx",
-      ["--no-install", "tsc", "-p", project, "--showConfig"],
+      process.execPath,
+      [tscEntry(clientDir), "-p", project, "--showConfig"],
       { cwd: path.join(repoRoot, clientDir), encoding: "utf8" },
     );
     return JSON.parse(out)?.compilerOptions?.noCheck === true;
