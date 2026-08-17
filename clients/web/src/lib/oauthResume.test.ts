@@ -123,6 +123,40 @@ describe("oauthResume", () => {
     expect(setToolsUi).toHaveBeenCalledWith(toolsUi);
   });
 
+  it("drops a pre-#2001 selectedToolName from a legacy snapshot, keeping the rest", () => {
+    // A redirect begun on a build that keyed tool selection by name, restored
+    // on one that keys it by row identity (the app upgraded mid-redirect).
+    // The name can't be mapped to a row key here — the tools list is fetched
+    // after reconnect — so the selection is dropped, not carried through as a
+    // stray field, and everything else survives.
+    const setToolsUi = vi.fn();
+    restoreTabUiFromSnapshot(
+      {
+        Tools: {
+          formValues: { city: "NYC" },
+          search: "get",
+          runAsTask: false,
+          selectedToolName: "get_temp",
+        },
+      },
+      {
+        setToolsUi,
+        setPromptsUi: vi.fn(),
+        setResourcesUi: vi.fn(),
+        setAppsUi: vi.fn(),
+        setTasksUi: vi.fn(),
+        setLogsUi: vi.fn(),
+        setProtocolUi: vi.fn(),
+        setNetworkUi: vi.fn(),
+      },
+    );
+    expect(setToolsUi).toHaveBeenCalledWith({
+      formValues: { city: "NYC" },
+      search: "get",
+      runAsTask: false,
+    });
+  });
+
   it("falls back to legacy pending server key", () => {
     storage.set(OAUTH_PENDING_SERVER_KEY, "legacy-srv");
     const snapshot = readOAuthResumeSnapshot();
