@@ -18,20 +18,18 @@ import path from "node:path";
  * Absolute path of the JS entry behind a package's bin (e.g. typescript's
  * `tsc`, vite's `vite`), resolved from `fromDir` up the node_modules tree —
  * the same walk `npx --no-install` does, minus the `.cmd` shim a shell-free
- * spawn can't start on Windows. Resolves `<pkg>/package.json` and reads its
- * `bin` field (what npx itself does) rather than resolving the bin path
- * directly, because an `exports` map blocks deep resolution — Vite 8 doesn't
- * export `./bin/vite.js`, so `require.resolve("vite/bin/vite.js")` throws
- * `ERR_PACKAGE_PATH_NOT_EXPORTED` (`./package.json` is always exported).
+ * spawn can't start on Windows. Reads the package's manifest and takes the
+ * path out of its `bin` field (what npx itself does) rather than resolving the
+ * bin path directly, because an `exports` map blocks deep resolution — Vite 8
+ * doesn't export `./bin/vite.js`, so `require.resolve("vite/bin/vite.js")`
+ * throws `ERR_PACKAGE_PATH_NOT_EXPORTED`.
  *
  * Throws if the package isn't installed from `fromDir`, declares no such bin,
  * or declares one whose file is missing — the caller decides whether that's a
  * hard "cannot measure" error or a fallback.
  */
 export function resolveNodeBin(pkg, binName, fromDir) {
-  const pkgPath = createRequire(path.join(fromDir, "package.json")).resolve(
-    `${pkg}/package.json`,
-  );
+  const pkgPath = resolveManifest(pkg, fromDir);
   const manifest = JSON.parse(readFileSync(pkgPath, "utf8"));
   const { bin } = manifest;
   // A string-form `bin` is npm's shorthand for ONE command, named after the
@@ -57,6 +55,29 @@ export function resolveNodeBin(pkg, binName, fromDir) {
       `${pkg}'s "${binName}" bin points at a missing file: ${entry}`,
     );
   return entry;
+}
+
+/**
+ * The package's own `package.json`, found by walking the same `node_modules`
+ * chain Node's resolver would from `fromDir` — deliberately NOT via
+ * `require.resolve("<pkg>/package.json")`.
+ *
+ * That shortcut reads as safe and isn't: subpath resolution is governed by the
+ * package's `exports`, and a package may declare one that omits `./package.json`
+ * (Node dropped its special case for it, so there is no guaranteed export). Such
+ * a package throws `ERR_PACKAGE_PATH_NOT_EXPORTED` here even though its bin is
+ * installed and perfectly spawnable — a false "not installed" that would send
+ * someone to `npm install` for a package already on disk. `resolve.paths()`
+ * gives the search dirs without consulting `exports` at all.
+ */
+function resolveManifest(pkg, fromDir) {
+  const require = createRequire(path.join(fromDir, "package.json"));
+  // `resolve.paths` returns null only for builtins, which have no bin to find.
+  for (const dir of require.resolve.paths(pkg) ?? []) {
+    const candidate = path.join(dir, ...pkg.split("/"), "package.json");
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error(`cannot find ${pkg} from ${fromDir}`);
 }
 
 /** `@scope/name` → `name`; an unscoped name is returned unchanged. */

@@ -98,12 +98,28 @@ function step(message) {
   console.log(`\npack:verify — ${message}`);
 }
 
+// Windows needs `shell: true` to start the `npm`/`npx` `.cmd` shims at all
+// (#1939), and with a shell Node hands the argv to `cmd.exe` as ONE
+// space-joined string — so an argument holding a path with a space is split
+// into two. That is not hypothetical here: every generated path in this file
+// lives under `tmpdir()`, which on Windows sits beneath the user profile and
+// so contains a space whenever the account name does. Quote each argument
+// that needs it; `cmd.exe` (and the CRT parser behind it) strips the quotes
+// back off, so the child sees exactly the argument we passed.
+const WIN_SHELL = process.platform === "win32";
+function shellArgs(args) {
+  if (!WIN_SHELL) return args;
+  return args.map((arg) =>
+    /[\s&|<>^"]/.test(arg) ? `"${arg.replace(/"/g, '""')}"` : arg,
+  );
+}
+
 /** Run a command to completion, inheriting stdio. Returns the exit status. */
 function runInherit(command, args, cwd = repoRoot) {
-  const r = spawnSync(command, args, {
+  const r = spawnSync(command, shellArgs(args), {
     cwd,
     stdio: "inherit",
-    shell: process.platform === "win32",
+    shell: WIN_SHELL,
   });
   return r.status;
 }
@@ -136,10 +152,17 @@ if (runInherit("npm", ["run", "build"]) !== 0) {
 step("packing the publishable tarball (npm pack)...");
 const pack = spawnSync(
   "npm",
-  ["pack", "--json", "--ignore-scripts", "--pack-destination", tmpdir()],
   // npm is npm.cmd on Windows, which needs a shell to resolve (#1939) — the
-  // same idiom as runInherit/runBin below.
-  { cwd: repoRoot, encoding: "utf8", shell: process.platform === "win32" },
+  // same idiom as runInherit/runBin. `shellArgs` quotes `tmpdir()`, which the
+  // shell would otherwise split on a space in the user profile path.
+  shellArgs([
+    "pack",
+    "--json",
+    "--ignore-scripts",
+    "--pack-destination",
+    tmpdir(),
+  ]),
+  { cwd: repoRoot, encoding: "utf8", shell: WIN_SHELL },
 );
 if (pack.status !== 0) {
   fail(`\`npm pack\` failed:\n${pack.stderr || pack.stdout}`);
@@ -253,11 +276,13 @@ try {
 
   /** Run the installed bin. Returns { status, output }. */
   const runBin = (args, extraEnv = {}) => {
-    const r = spawnSync(bin, args, {
+    // `bin` itself is quoted too: it lives under the throwaway consumer's
+    // `tmpdir()` path, and with a shell the command is joined with the argv.
+    const r = spawnSync(shellArgs([bin])[0], shellArgs(args), {
       cwd: work,
       encoding: "utf8",
       env: { ...process.env, ...extraEnv },
-      shell: process.platform === "win32",
+      shell: WIN_SHELL,
     });
     return {
       status: r.status,
@@ -378,7 +403,8 @@ async function verifyWeb(bin, cwd) {
   const host = "127.0.0.1";
   const port = process.env.PACK_VERIFY_WEB_PORT ?? "6399";
   const token = "pack-verify-token";
-  const child = spawn(bin, ["--web"], {
+  // Quoted for the same reason as runBin: `bin` sits under a `tmpdir()` path.
+  const child = spawn(shellArgs([bin])[0], ["--web"], {
     cwd,
     env: {
       ...process.env,
@@ -388,7 +414,7 @@ async function verifyWeb(bin, cwd) {
       MCP_AUTO_OPEN_ENABLED: "false",
     },
     stdio: ["ignore", "inherit", "inherit"],
-    shell: process.platform === "win32",
+    shell: WIN_SHELL,
   });
   // Expose the child so fail() can kill it if a check below exits the process
   // (process.exit skips the `finally { stop() }`).

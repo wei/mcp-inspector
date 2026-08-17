@@ -127,6 +127,27 @@ test("throws when a declared bin's file is missing (partial install)", () => {
   }
 });
 
+test("resolves a package whose `exports` hides ./package.json", () => {
+  // `require.resolve("<pkg>/package.json")` throws ERR_PACKAGE_PATH_NOT_EXPORTED
+  // for this shape — Node has no special case keeping `./package.json`
+  // exported — which would be a false "not installed" for a package whose bin
+  // is right there on disk. The manifest lookup walks node_modules instead.
+  const dir = fixtureDir(
+    {
+      name: "walledpkg",
+      exports: { ".": "./index.js" },
+      bin: { walled: "bin/walled.js" },
+    },
+    { createBinFile: true },
+  );
+  try {
+    const entry = resolveNodeBin("walledpkg", "walled", dir);
+    assert.ok(existsSync(entry), `resolved entry does not exist: ${entry}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("accepts a scoped package's string-form bin under its unscoped name", () => {
   const dir = fixtureDir(
     { name: "@scope/tool", bin: "bin/tool.js" },
