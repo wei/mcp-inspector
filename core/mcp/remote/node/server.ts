@@ -100,6 +100,22 @@ import { ZodError } from "zod";
 const SSE_PRIMING_COMMENT = ":\n\n";
 
 /**
+ * Close an SSE stream from inside an `onAbort` listener, discarding the
+ * rejection.
+ *
+ * `close()` is async and the peer is, by definition, already gone here — a
+ * write that loses the race rejects with nothing left to recover. The listener
+ * itself cannot own the promise either: Hono's `abort()` invokes subscribers
+ * with a bare `subscriber()` (`hono/utils/stream`), so a promise *returned*
+ * from the listener is floated by Hono rather than awaited, turning an
+ * `async` listener into the same unhandled rejection one layer up. Swallowing
+ * it here is the only place the rejection has an owner.
+ */
+export function closeAbortedStream(stream: { close(): Promise<void> }): void {
+  stream.close().catch(() => {});
+}
+
+/**
  * Shape of the initial config returned by GET /api/config (defaults for client).
  */
 export interface InitialConfigPayload {
@@ -854,7 +870,7 @@ export function createRemoteApp(
       stream.onAbort(() => {
         // Client disconnected - clear event consumer
         const shouldCleanup = session.clearEventConsumer();
-        stream.close();
+        closeAbortedStream(stream);
 
         // If transport is dead and no client connected, cleanup session
         if (shouldCleanup || session.isTransportDead()) {
@@ -1131,11 +1147,22 @@ export function createRemoteApp(
     clientSecret?: string;
     scopes?: string;
     authorizationParams?: Record<string, string>;
+    authorizationUrl?: string;
+    tokenUrl?: string;
     enterpriseManaged?: boolean;
   } => {
     if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
     const o = v as Record<string, unknown>;
-    for (const k of ["clientId", "clientSecret", "scopes"] as const) {
+    for (const k of [
+      "clientId",
+      "clientSecret",
+      "scopes",
+      // #1906 — shape only; the values are validated as absolute http(s) URLs
+      // where they're applied (core/auth/endpointOverrides.ts), so a typo drops
+      // one field with a warning instead of dropping the whole `oauth` block.
+      "authorizationUrl",
+      "tokenUrl",
+    ] as const) {
       if (o[k] !== undefined && typeof o[k] !== "string") return false;
     }
     if (
@@ -1255,7 +1282,7 @@ export function createRemoteApp(
       if ("oauth" in valObj && !isOauthObject(valObj.oauth)) {
         logWarn(
           { route: "/api/servers", id, droppedKey: "oauth" },
-          "Dropping malformed `oauth` field — expected `{ clientId?, clientSecret?, scopes?, authorizationParams?, enterpriseManaged?, onInsufficientScope? }`.",
+          "Dropping malformed `oauth` field — expected `{ clientId?, clientSecret?, scopes?, authorizationParams?, authorizationUrl?, tokenUrl?, enterpriseManaged?, onInsufficientScope? }`.",
         );
         delete valObj.oauth;
       }
@@ -1522,6 +1549,10 @@ export function createRemoteApp(
       "oauthClientId",
       "oauthClientSecret",
       "oauthScopes",
+      // #1906 — string-shaped on the wire; URL validity is checked where the
+      // override is applied, not here.
+      "oauthAuthorizationUrl",
+      "oauthTokenUrl",
     ] as const) {
       if (obj[optional] !== undefined && typeof obj[optional] !== "string") {
         return { ok: false, error: `settings.${optional} must be a string` };
@@ -1659,6 +1690,18 @@ export function createRemoteApp(
     // how the headers/metadata rows are handled. (#2018)
     if (isKvArray(obj.oauthAuthorizationParams)) {
       value.oauthAuthorizationParams = obj.oauthAuthorizationParams;
+    }
+    // Empty-string coerces to absent like the credential fields above: the form
+    // emits `""` when a user clears the input, and an empty override on disk
+    // would read back as a configured-but-blank endpoint. (#1906)
+    if (
+      typeof obj.oauthAuthorizationUrl === "string" &&
+      obj.oauthAuthorizationUrl !== ""
+    ) {
+      value.oauthAuthorizationUrl = obj.oauthAuthorizationUrl;
+    }
+    if (typeof obj.oauthTokenUrl === "string" && obj.oauthTokenUrl !== "") {
+      value.oauthTokenUrl = obj.oauthTokenUrl;
     }
     if (obj.enterpriseManaged === true) {
       value.enterpriseManaged = true;
@@ -2460,7 +2503,7 @@ export function createRemoteApp(
       stream.onAbort(() => {
         serverEventSubscribers.delete(send);
         void maybeStopWatcher();
-        stream.close();
+        closeAbortedStream(stream);
       });
 
       // Hono closes the stream the moment this callback returns, so hold the

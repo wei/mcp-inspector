@@ -2,6 +2,7 @@
  * Config object for the web server (dev and prod). Passed in-process; no env handoff.
  */
 
+import open from "open";
 import pino from "pino";
 import type { Logger } from "pino";
 import type { MCPConfig, MCPServerConfig } from "../../../core/mcp/types.ts";
@@ -201,6 +202,24 @@ export function printServerBanner(
   }
 
   return url;
+}
+
+/**
+ * Launch the user's browser at `url`, reporting a failure rather than throwing.
+ *
+ * Both callers — the prod Hono server's `serve()` listen callback and the dev
+ * plugin's `logBanner` — are synchronous, so a rejection has nowhere to go and
+ * escapes as an unhandled rejection (#1959). On a headless or otherwise
+ * browser-less host that rejection is the ordinary outcome, not an edge case,
+ * and by the time it happens the server is already listening and
+ * `printServerBanner` has printed a perfectly usable URL. So warn and carry
+ * on. Shared between the two servers deliberately: two copies of a one-line
+ * `.catch` is two chances for one of them to drift back to a bare `open(url)`.
+ */
+export function openBrowser(url: string): void {
+  open(url).catch((err: unknown) => {
+    console.warn("Could not open a browser automatically:", err);
+  });
 }
 
 export interface BuildWebServerConfigOptions {

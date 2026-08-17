@@ -30,7 +30,7 @@ inspector/
 │   ├── tui/          # TUI client (Ink + React, tsup bundle)
 │   └── launcher/     # Shared launcher — provides the `mcp-inspector` bin, dispatches to web/cli/tui
 ├── core/             # Shared code consumed via the `@inspector/core` alias (no package.json)
-│   ├── auth/         # OAuth: providers, discovery, storage, mid-session recovery (browser/node/remote backends)
+│   ├── auth/         # OAuth: providers, discovery, storage, endpoint overrides, mid-session recovery (browser/node/remote backends)
 │   ├── client/       # Install-level client config (`client.json`): browser-safe parse/validate + Node load/save, remote backend, secrets
 │   ├── json/         # JSON + parameter/argument conversion utilities, and the nullable-union
 │   │                 #   schema collapse shared by the web and TUI form builders
@@ -140,7 +140,7 @@ Each config below is a ready-made server for exercising one feature by hand. Loa
 | ----------------------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------- |
 | `mcp-app-http.json` **(legacy era)**      | An MCP App (UI resource + app tool) in the Apps tab | [#1859](https://github.com/modelcontextprotocol/inspector/issues/1859) |
 | `modern-mrtr-http.json`                   | A single MRTR round-trip                           | —                                                                      |
-| `mrtr-showcase-http.json`                 | Every MRTR preset in one server                    | —                                                                      |
+| `mrtr-showcase-http.json`                 | Every MRTR preset in one server                    | [#1860](https://github.com/modelcontextprotocol/inspector/issues/1860) |
 | `modern-network-http.json`                | Network tab: `Mcp-*` headers + error taxonomy      | [#1628](https://github.com/modelcontextprotocol/inspector/issues/1628) |
 | `xmcpheader-modern-http.json`             | Tools tab: `x-mcp-header` mirroring and exclusions | [#1632](https://github.com/modelcontextprotocol/inspector/issues/1632) |
 | `pagination-http.json`                    | Page-by-page list fetching                         | [#1721](https://github.com/modelcontextprotocol/inspector/issues/1721) |
@@ -175,7 +175,20 @@ The Inspector drives MRTR manually (`inputRequired: { autoFulfill: false }`), so
 | `mrtr_sample`   | Embedded sampling → the Sampling panel                                         |
 | `mrtr_roots`    | Embedded `roots/list`, auto-answered silently from configured roots (no modal) |
 | `mrtr_edge`     | An `inputRequests`-only round, then a `requestState`-only round                |
+| `mrtr_empty`    | Completes with an empty result — no `content`, no `structuredContent`          |
 | `mrtr_loop`     | Never completes → trips the `MRTR_MAX_ROUNDS` bound                            |
+
+Run `mrtr_empty` and answer its single elicitation: the Protocol tab groups the
+exchange as an MRTR conversation ending **COMPLETE**, and the Results panel says
+**"Empty result — The tool call completed successfully and returned no content."**
+On the broken build that same result rendered as **"No results yet"**, the panel's
+pre-run placeholder ([#1860](https://github.com/modelcontextprotocol/inspector/issues/1860)) —
+so a call the user had just watched succeed read as a call that never ran. An
+empty `content` array with no `structuredContent` is a legal `CallToolResult`,
+and the panel only ever mounts once a result exists, so the placeholder wording
+could not be true there. (The neighbouring half of the same gap — a result whose
+payload lives only in `structuredContent` — was closed by
+[#1908](https://github.com/modelcontextprotocol/inspector/issues/1908).)
 
 > The legacy `collect_elicitation` preset calls `server.elicitInput`, which errors on the 2026-07-28 leg — server→client requests aren't allowed there. MRTR is the modern replacement.
 
@@ -306,6 +319,8 @@ Each client self-validates from its own folder; the root scripts chain them. The
 | `npm run pack:verify`               | Publish smoke — see [Publishing](#publishing).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 
 Per-client scripts exist too (`validate:web`, `coverage:cli`, `smoke:tui`, …), plus root `validate:core` / `format:core` for the shared `core/` package, `format:scripts` for the root `scripts/` tooling, and `format:shared` / `lint:shared` for the root "shared" surface (`test-servers/src/**`, `vitest.shared.mts`, the root `eslint.config.js`). Run `npm run format` before committing — the root `format` fixes `core/`, the root `scripts/`, the shared surface, and every client; `validate` runs the non-fixing `format:check` and fails CI on any unformatted file.
+
+**Linting is type-aware.** All five ESLint scopes (`clients/{web,cli,tui,launcher}` plus the root `core/` + shared gate) enable `@typescript-eslint/no-floating-promises` at `error`, so a promise that is neither awaited, returned, `.catch(…)`-terminated, nor explicitly discarded with `void` fails `lint` — and therefore `validate` ([#1959](https://github.com/modelcontextprotocol/inspector/issues/1959)). The rule needs type information, so each scope's config names a parser project; the root scope's is **`tsconfig.lint.json`**, a lint-only project covering `core/**`, `test-servers/src/**`, and `vitest.shared.mts`, which have no tsconfig of their own. It emits nothing and changes no typecheck — but a new first-party TS location added to the root lint scope must be added to its `include`. See **TypeScript instructions** in [`AGENTS.md`](./AGENTS.md) for when `void` is acceptable.
 
 For the full testing rules — the ≥90% per-file gate, where test files live, the unit vs. integration vs. storybook projects, and the `v8 ignore` policy — see [`AGENTS.md`](./AGENTS.md).
 

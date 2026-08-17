@@ -5,6 +5,7 @@
  */
 
 import { BaseOAuthClientProvider } from "../auth/providers.js";
+import type { OAuthEndpointOverrides } from "../auth/endpointOverrides.js";
 import type { OAuthFlowState, OAuthStep } from "../auth/types.js";
 import { EMPTY_OAUTH_FLOW_STATE } from "../auth/types.js";
 import type { OAuthTokens } from "@modelcontextprotocol/client";
@@ -95,6 +96,8 @@ export class OAuthManager {
     scope?: string;
     enterpriseManaged?: boolean;
     authorizationParams?: Record<string, string>;
+    authorizationUrl?: string;
+    tokenUrl?: string;
   }): void {
     this.oauthConfig = {
       ...this.oauthConfig,
@@ -104,6 +107,31 @@ export class OAuthManager {
 
   private getServerUrl(): string {
     return this.params.getServerUrl();
+  }
+
+  /**
+   * The per-server authorization/token endpoint overrides, read live so a
+   * `setOAuthConfig` between requests takes effect without rebuilding the
+   * client's fetch. `InspectorClient` reads this from inside its fetch wrapper.
+   * (#1906)
+   *
+   * Returns nothing under enterprise-managed authorization, for the same reason
+   * `redirectToExternalAuthorization` skips the custom authorization parameters
+   * (#2018): the EMA leg authorizes against the enterprise IdP, a *different*
+   * authorization server, and its OIDC discovery runs through this same fetch
+   * (`emaFlow` → `idpOidc`). Rewriting that document would point the IdP login —
+   * or the IdP code/refresh-token exchange — at the resource server's
+   * authorization server, which is both wrong and a way to leak an IdP
+   * credential across an authorization-server boundary.
+   */
+  getEndpointOverrides(): OAuthEndpointOverrides | undefined {
+    if (this.isEnterpriseManaged()) return undefined;
+    const { authorizationUrl, tokenUrl } = this.oauthConfig;
+    if (!authorizationUrl && !tokenUrl) return undefined;
+    return {
+      ...(authorizationUrl && { authorizationUrl }),
+      ...(tokenUrl && { tokenUrl }),
+    };
   }
 
   /**

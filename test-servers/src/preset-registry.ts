@@ -29,6 +29,7 @@ import {
   createMrtrSamplingTool,
   createMrtrLoopTool,
   createMrtrEdgeCaseTool,
+  createMrtrEmptyResultTool,
   createCollectUrlElicitationTool,
   createUrlElicitationFormTool,
   createSendNotificationTool,
@@ -151,6 +152,8 @@ function resolveToolPreset(
       return createMrtrLoopTool();
     case "mrtr_edge":
       return createMrtrEdgeCaseTool();
+    case "mrtr_empty":
+      return createMrtrEmptyResultTool();
     case "collect_url_elicitation":
       return createCollectUrlElicitationTool();
     case "url_elicitation_form":

@@ -117,12 +117,12 @@ describe("EmaTransportOAuthProvider", () => {
     expect(await provider.clientInformation()).toEqual({ client_id: "abc" });
     expect(await provider.codeVerifier()).toBe("verifier-xyz");
 
-    provider.saveClientInformation({ client_id: "new" } as never);
+    await provider.saveClientInformation({ client_id: "new" } as never);
     expect(inner.saveClientInformation).toHaveBeenCalledWith({
       client_id: "new",
     });
 
-    provider.saveCodeVerifier("cv");
+    await provider.saveCodeVerifier("cv");
     expect(inner.saveCodeVerifier).toHaveBeenCalledWith("cv");
   });
 

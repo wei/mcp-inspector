@@ -756,6 +756,50 @@ export function createMrtrEdgeCaseTool(): ToolDefinition {
 }
 
 /**
+ * An MRTR tool whose FINAL (complete) result carries an empty `content` array
+ * and no `structuredContent` — a legal `CallToolResult` that renders nothing.
+ *
+ * This is the shape behind #1860: the sequence completes (the Protocol tab shows
+ * the conversation COMPLETE), a real result is stored, and the Results panel had
+ * no way to say so — it fell through to the same "No results yet" placeholder it
+ * shows before anything has run, so a successful call read as a call that never
+ * happened. Kept as an MRTR tool rather than a plain one because the multi-round
+ * case is where the ambiguity actually misleads: the user has answered prompts
+ * and watched rounds complete, so "no results yet" is flatly contradicted by
+ * what they just did.
+ */
+export function createMrtrEmptyResultTool(): ToolDefinition {
+  return {
+    name: "mrtr_empty",
+    description:
+      "MRTR tool that completes with an empty result (no content, no structuredContent).",
+    inputSchema: {},
+    handler: async (
+      _params: Record<string, unknown>,
+      _context?: TestServerContext,
+      extra?: HandlerExtra,
+    ) => {
+      if (extra?.inputResponses?.ack === undefined) {
+        return inputRequired({
+          inputRequests: {
+            ack: inputRequired.elicit({
+              message: "Acknowledge to finish (the result will be empty)",
+              requestedSchema: {
+                type: "object",
+                properties: { ack: { type: "boolean", title: "Acknowledge" } },
+                required: ["ack"],
+              },
+            }),
+          },
+          requestState: `mrtr-empty:${++mrtrMintCount}`,
+        });
+      }
+      return { content: [] } satisfies CallToolResult;
+    },
+  };
+}
+
+/**
  * Create a "url_elicitation_form" tool that spins up a simple HTTP server on a dynamic
  * port with a form page, sends that URL via URL elicitation, and on form submit collects
  * the text input, includes it in the tool response, and closes the server.

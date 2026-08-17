@@ -114,8 +114,10 @@ export const ServerInfoNotReported: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    expect(canvas.queryByText("my-catalog-name")).not.toBeInTheDocument();
-    expect(canvas.getAllByText(SERVER_INFO_NOT_REPORTED_LABEL)).toHaveLength(2);
+    await expect(canvas.queryByText("my-catalog-name")).not.toBeInTheDocument();
+    await expect(
+      canvas.getAllByText(SERVER_INFO_NOT_REPORTED_LABEL),
+    ).toHaveLength(2);
   },
 };
 
@@ -195,11 +197,11 @@ export const WithOAuthIdToken: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    expect(canvas.getByText("ID Token")).toBeInTheDocument();
+    await expect(canvas.getByText("ID Token")).toBeInTheDocument();
     // Only the ID token is a JWT here, so exactly one decode toggle is offered.
     await userEvent.click(
       canvas.getByRole("button", { name: "Decode JWT for ID Token" }),
     );
-    expect(canvas.getByText(/"sub": "user-42"/)).toBeInTheDocument();
+    await expect(canvas.getByText(/"sub": "user-42"/)).toBeInTheDocument();
   },
 };

@@ -11,7 +11,10 @@ import type {
   InspectorClientOptions,
   InspectorServerSettings,
 } from "../mcp/types.js";
-import { oauthAuthorizationParamsFromSettings } from "../mcp/serverList.js";
+import {
+  oauthAuthorizationParamsFromSettings,
+  oauthEndpointOverridesFromSettings,
+} from "../mcp/serverList.js";
 import { loadClientConfig } from "./config.js";
 import type { ClientConfig } from "./types.js";
 import {
@@ -74,6 +77,9 @@ export function buildRunnerClientAuthOptions(
   const serverAuthorizationParams = savedSettings
     ? oauthAuthorizationParamsFromSettings(savedSettings)
     : undefined;
+  const serverEndpointOverrides = savedSettings
+    ? oauthEndpointOverridesFromSettings(savedSettings)
+    : undefined;
 
   const oauthFromServer =
     savedSettings &&
@@ -81,6 +87,7 @@ export function buildRunnerClientAuthOptions(
       savedSettings.oauthClientSecret ||
       savedSettings.oauthScopes ||
       serverAuthorizationParams ||
+      serverEndpointOverrides ||
       savedSettings.enterpriseManaged)
       ? {
           ...(savedSettings.oauthClientId && {
@@ -95,6 +102,7 @@ export function buildRunnerClientAuthOptions(
           ...(serverAuthorizationParams && {
             authorizationParams: serverAuthorizationParams,
           }),
+          ...serverEndpointOverrides,
           ...(savedSettings.enterpriseManaged && {
             enterpriseManaged: true,
           }),
