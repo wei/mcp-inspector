@@ -875,7 +875,7 @@ export function ServerSettingsForm({
               </Stack>
               <ClearableTextInput
                 label="Authorization URL override"
-                description={`Leave blank to use the authorization_endpoint the authorization server's metadata advertises. Set it to point this server at a development or staging authorization server instead.${endpointOverrideEmaNote}`}
+                description={`Leave blank to use the authorization_endpoint the authorization server's metadata advertises. Set it to point this server at a development or staging authorization server instead. Endpoints only — the discovered issuer is unchanged, so an authorization server advertising a different issuer is rejected on callback (RFC 9207).${endpointOverrideEmaNote}`}
                 placeholder="https://staging.auth.example.com/authorize"
                 value={settings.oauthAuthorizationUrl ?? ""}
                 error={oauthEndpointUrlError(

@@ -282,6 +282,46 @@ describe("withOAuthEndpointOverrides", () => {
     await expect(response.text()).resolves.toBe("not json at all");
   });
 
+  // `application/x-ndjson` satisfies a naive `includes("json")` test, and the
+  // streamable-HTTP transport serves its long-lived server-push channel that way
+  // (see `isLongLivedStreamResponse`). Awaiting `.json()` on a clone of an
+  // unbounded stream never resolves, so the MCP connection would hang for as
+  // long as an override was configured. Regression test for PR #2037 review.
+  it("does not read an unbounded NDJSON stream", async () => {
+    // A body that never closes: if the wrapper reads it, this test times out.
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"jsonrpc":"2.0"}\n'));
+        // Deliberately never closed.
+      },
+    });
+    const original = new Response(stream, {
+      headers: { "content-type": "application/x-ndjson" },
+    });
+    const wrapped = withOAuthEndpointOverrides(passThrough(original), () => ({
+      tokenUrl: STAGING_TOKEN,
+    }));
+    await expect(wrapped("https://mcp.example.com/mcp")).resolves.toBe(
+      original,
+    );
+    await original.body?.cancel();
+  });
+
+  it("ignores content-type parameters when deciding a body is JSON", async () => {
+    const wrapped = withOAuthEndpointOverrides(
+      passThrough(
+        new Response(JSON.stringify(METADATA), {
+          headers: { "content-type": "application/json; charset=utf-8" },
+        }),
+      ),
+      () => ({ tokenUrl: STAGING_TOKEN }),
+    );
+    const response = await wrapped("https://as.example.com/x");
+    await expect(response.json()).resolves.toMatchObject({
+      token_endpoint: STAGING_TOKEN,
+    });
+  });
+
   // Fetch forbids a body on 204/205, so rebuilding one would throw. A JSON
   // content-type on an empty response is unusual but legal, and it must not
   // take down an unrelated transport request.

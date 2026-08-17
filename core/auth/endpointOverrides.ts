@@ -22,7 +22,7 @@
  * sees both is the `fetchFn` the SDK uses for discovery, so the override is
  * applied to the metadata document in flight.
  *
- * Three consequences worth knowing:
+ * Four consequences worth knowing:
  *
  * - **A metadata document is required.** When discovery returns nothing, the SDK
  *   falls back to `/authorize` and `/token` on the authorization server's origin
@@ -36,6 +36,17 @@
  *   suppresses the overrides when the server is enterprise-managed. This mirrors
  *   `redirectToExternalAuthorization` skipping the custom authorization
  *   parameters (#2018).
+ * - **They redirect endpoints, they do not re-point the issuer.** `issuer` is
+ *   left exactly as discovery returned it, deliberately: it is the authorization
+ *   server's *identity*, and it is what RFC 9207 / SEP-2352 check the callback's
+ *   `iss` against to defend against an authorization-server mix-up. So these
+ *   overrides fit alternate endpoints of the same logical issuer (a staging
+ *   deployment fronting the same issuer, a local proxy). Aim one at an
+ *   authorization server that advertises a *different* issuer and the callback
+ *   is rejected as an issuer mismatch before the code is redeemed — which is the
+ *   mix-up defense working. Suppressing that check to make the override "work"
+ *   would trade a real security property for a debugging convenience, so the
+ *   limit is documented rather than removed.
  * - **The Network tab shows the patched document.** The wrapper is applied to the
  *   base fetch, inside the request tracker, so what the tab renders is the
  *   metadata as the flow consumed it. That is the useful reading: it explains why
@@ -185,6 +196,27 @@ export function applyOAuthEndpointOverrides(
   return patched;
 }
 
+/**
+ * Whether a `content-type` names a **whole JSON document** — something that can
+ * be read to completion.
+ *
+ * This must be an exact media-type match, not a substring test for "json". The
+ * streamable-HTTP transport's long-lived server-push channel can be served as
+ * `application/x-ndjson` (see `isLongLivedStreamResponse` in
+ * `core/mcp/fetchTracking.ts`), which is an unbounded stream: awaiting `.json()`
+ * on a clone of it would never resolve, and since this wrapper awaits before
+ * returning, the MCP connection would hang for as long as an override is
+ * configured. Metadata documents are plain `application/json`, so the narrow
+ * test loses nothing. The `+json` structured suffix is accepted for the same
+ * reason it exists — it names a concrete document, not a stream.
+ */
+function isJsonDocumentResponse(contentType: string | null): boolean {
+  if (!contentType) return false;
+  // Strip parameters (`; charset=utf-8`) and compare the media type itself.
+  const mediaType = contentType.split(";")[0].trim().toLowerCase();
+  return mediaType === "application/json" || mediaType.endsWith("+json");
+}
+
 /** Rebuild a response around a replacement body, preserving status/headers. */
 function responseWithBody(response: Response, body: string): Response {
   const headers = new Headers(response.headers);
@@ -237,8 +269,8 @@ export function withOAuthEndpointOverrides(
     const overrides = resolveOverrides();
     if (!overrides) return response;
     if (!response.ok) return response;
-    const contentType = response.headers.get("content-type") ?? "";
-    if (!contentType.toLowerCase().includes("json")) return response;
+    if (!isJsonDocumentResponse(response.headers.get("content-type")))
+      return response;
 
     // Read through a clone so every path that does NOT patch can return the
     // caller's own `Response`, untouched. Rebuilding unconditionally would drop
