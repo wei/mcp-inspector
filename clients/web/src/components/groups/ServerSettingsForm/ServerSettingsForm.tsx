@@ -226,10 +226,22 @@ const ClearStoredOAuthHint = Text.withProps({
 
 function KeyValueRows({
   items,
+  entityLabel,
   onChange,
   onRemove,
 }: {
   items: { key: string; value: string }[];
+  /**
+   * Singular noun for one row ("header", "environment variable", …). Used only
+   * to build each control's `aria-label`: the section heading and the "Key" /
+   * "Value" placeholders are not programmatically associated with the inputs,
+   * so without it an assistive technology cannot tell one section's key box
+   * from another's, and every remove button announces only "X". The row number
+   * rides along because two rows can carry the same key — mid-edit, or a
+   * duplicate a server persisted — and a key-only name would leave both rows'
+   * controls indistinguishable, which is the thing this exists to prevent.
+   */
+  entityLabel: string;
   onChange: (index: number, key: string, value: string) => void;
   onRemove: (index: number) => void;
 }) {
@@ -242,31 +254,50 @@ function KeyValueRows({
 
   return (
     <>
-      {items.map((item, index) => (
-        <Group key={index} grow>
-          <ClearableTextInput
-            placeholder="Key"
-            value={item.key}
-            onChange={(e) => onChange(index, e.currentTarget.value, item.value)}
-            rightSection={
-              item.key ? (
-                <ClearButton onClick={() => onChange(index, "", item.value)} />
-              ) : null
-            }
-          />
-          <ClearableTextInput
-            placeholder="Value"
-            value={item.value}
-            onChange={(e) => onChange(index, item.key, e.currentTarget.value)}
-            rightSection={
-              item.value ? (
-                <ClearButton onClick={() => onChange(index, item.key, "")} />
-              ) : null
-            }
-          />
-          <RemoveIcon onClick={() => onRemove(index)}>X</RemoveIcon>
-        </Group>
-      ))}
+      {items.map((item, index) => {
+        const key = item.key.trim();
+        const rowLabel = key ? `${key}, row ${index + 1}` : `row ${index + 1}`;
+        return (
+          <Group key={index} grow>
+            <ClearableTextInput
+              placeholder="Key"
+              aria-label={`${entityLabel} name, ${rowLabel}`}
+              value={item.key}
+              onChange={(e) =>
+                onChange(index, e.currentTarget.value, item.value)
+              }
+              rightSection={
+                item.key ? (
+                  <ClearButton
+                    aria-label={`Clear ${entityLabel} name, ${rowLabel}`}
+                    onClick={() => onChange(index, "", item.value)}
+                  />
+                ) : null
+              }
+            />
+            <ClearableTextInput
+              placeholder="Value"
+              aria-label={`${entityLabel} value, ${rowLabel}`}
+              value={item.value}
+              onChange={(e) => onChange(index, item.key, e.currentTarget.value)}
+              rightSection={
+                item.value ? (
+                  <ClearButton
+                    aria-label={`Clear ${entityLabel} value, ${rowLabel}`}
+                    onClick={() => onChange(index, item.key, "")}
+                  />
+                ) : null
+              }
+            />
+            <RemoveIcon
+              aria-label={`Remove ${entityLabel}, ${rowLabel}`}
+              onClick={() => onRemove(index)}
+            >
+              X
+            </RemoveIcon>
+          </Group>
+        );
+      })}
     </>
   );
 }
@@ -651,6 +682,7 @@ export function ServerSettingsForm({
               ) : (
                 <KeyValueRows
                   items={settings.env}
+                  entityLabel="environment variable"
                   onChange={onEnvChange}
                   onRemove={onRemoveEnv}
                 />
@@ -666,9 +698,11 @@ export function ServerSettingsForm({
           <Stack gap="md">
             <Group justify="space-between">
               <HintText>
-                Headers sent with every HTTP request to this server. If OAuth is
-                configured below, the `Authorization` header is owned by the
-                OAuth flow and any value set here is ignored.
+                Headers sent with every HTTP request to this server. A custom
+                `Authorization` header takes precedence over an OAuth access
+                token — the SDK transports apply these headers last — so remove
+                it once OAuth is configured, or the flow's token never gets
+                sent.
               </HintText>
               <AddButton onClick={onAddHeader}>+ Add Header</AddButton>
             </Group>
@@ -677,6 +711,7 @@ export function ServerSettingsForm({
             ) : (
               <KeyValueRows
                 items={settings.headers}
+                entityLabel="header"
                 onChange={onHeaderChange}
                 onRemove={onRemoveHeader}
               />
@@ -700,6 +735,7 @@ export function ServerSettingsForm({
             ) : (
               <KeyValueRows
                 items={settings.metadata}
+                entityLabel="metadata entry"
                 onChange={onMetadataChange}
                 onRemove={onRemoveMetadata}
               />

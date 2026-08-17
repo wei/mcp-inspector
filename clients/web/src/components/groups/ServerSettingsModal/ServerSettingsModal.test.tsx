@@ -276,8 +276,11 @@ describe("ServerSettingsModal", () => {
       />,
     );
     await user.click(screen.getByRole("button", { name: "Custom Headers" }));
-    const removeButtons = screen.getAllByRole("button", { name: "X" });
-    await user.click(removeButtons[0]);
+    await user.click(
+      screen.getByRole("button", {
+        name: "Remove header, Authorization, row 1",
+      }),
+    );
     expect(onSettingsChange).toHaveBeenCalledWith({
       ...initialSettings,
       headers: [],
@@ -342,10 +345,13 @@ describe("ServerSettingsModal", () => {
       />,
     );
     await user.click(screen.getByRole("button", { name: "Request Metadata" }));
-    const removeButtons = screen.getAllByRole("button", { name: "X" });
-    // After expanding metadata, both header and metadata X buttons exist;
-    // the metadata X is the last one.
-    await user.click(removeButtons[removeButtons.length - 1]);
+    // Both the header and metadata rows have a remove button; each is named
+    // for the row it belongs to, so no positional guess is needed.
+    await user.click(
+      screen.getByRole("button", {
+        name: "Remove metadata entry, userId, row 1",
+      }),
+    );
     expect(onSettingsChange).toHaveBeenCalledWith({
       ...initialSettings,
       metadata: [],
@@ -810,8 +816,11 @@ describe("ServerSettingsModal", () => {
       await user.click(
         screen.getByRole("button", { name: "Environment Variables" }),
       );
-      const removeButtons = screen.getAllByRole("button", { name: "X" });
-      await user.click(removeButtons[removeButtons.length - 1]);
+      await user.click(
+        screen.getByRole("button", {
+          name: "Remove environment variable, A, row 1",
+        }),
+      );
       expect(onSettingsChange).toHaveBeenCalledWith({
         ...emptySettings,
         env: [],
