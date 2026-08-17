@@ -5,6 +5,10 @@ import { InspectorClient } from "@inspector/core/mcp/index.js";
 import { AuthRecoveryRequiredError } from "@inspector/core/auth/challenge.js";
 import type { ReadResourceResult } from "@modelcontextprotocol/client";
 import { uriTemplateToForm } from "../utils/uriTemplateToForm.js";
+import {
+  hasRequiredValues,
+  requiredGroups,
+} from "@inspector/core/mcp/uriTemplate.js";
 import { ScrollView, type ScrollViewRef } from "ink-scroll-view";
 
 // Helper to extract error message from various error types
@@ -132,6 +136,29 @@ export function ResourceTestModal({
 
   const handleFormSubmit = async (values: Record<string, string>) => {
     if (!inspectorClient || !template) return;
+
+    // RFC 6570 keeps a required expression satisfied by any ONE of its names,
+    // so `{a,b}` cannot be expressed with ink-form's per-field `required` flag
+    // and its members are left optional there. Without this check the TUI would
+    // submit `{a,b}` completely blank -- dropping the expression and reading a
+    // different resource -- while the web panel blocks the same request (#1919).
+    const groups = requiredGroups(template.uriTemplate);
+    if (!hasRequiredValues(groups, values)) {
+      const unmet = groups
+        .filter(
+          (names) => !names.some((name) => (values[name] ?? "").length > 0),
+        )
+        .map((names) => names.join(" or "));
+      setResult({
+        input: values,
+        output: null,
+        error: `Missing required template variable(s): ${unmet.join(", ")}`,
+        duration: 0,
+        uri: template.uriTemplate,
+      });
+      setState("results");
+      return;
+    }
 
     setState("loading");
     const startTime = Date.now();

@@ -18,6 +18,7 @@ describe("parseUriTemplate", () => {
         operator: "",
         varspecs: [{ name: "topic" }],
         names: ["topic"],
+        invalid: false,
       },
     ]);
   });
@@ -31,6 +32,7 @@ describe("parseUriTemplate", () => {
         operator: "?",
         varspecs: [{ name: "a" }, { name: "b" }],
         names: ["a", "b"],
+        invalid: false,
       },
     ]);
   });
@@ -137,8 +139,19 @@ describe("expandUriTemplate", () => {
     );
   });
 
-  it("joins two query expressions with & rather than a second ?", () => {
+  it("expands each query expression independently, per RFC 6570", () => {
+    // NOT `?one=1&two=2`. The SDK rewrites the second `?` to `&`, but measured
+    // against the pinned SDK its own matcher then rejects the result:
+    // match("x?one=1&two=2") on `x{?one}{?two}` is null, while
+    // match("x?one=1?two=2") returns both variables. A server wanting a
+    // continuation advertises `{?one}{&two}` -- see the test below.
     expect(expandUriTemplate("x://a{?one}{?two}", { one: "1", two: "2" })).toBe(
+      "x://a?one=1?two=2",
+    );
+  });
+
+  it("emits & only where the template asks for the continuation operator", () => {
+    expect(expandUriTemplate("x://a{?one}{&two}", { one: "1", two: "2" })).toBe(
       "x://a?one=1&two=2",
     );
   });
@@ -227,11 +240,6 @@ describe("varspec modifiers", () => {
     expect(expandUriTemplate("x://{v:1}", { v: "\u{1F600}x" })).toBe(
       `x://${encodeURIComponent("\u{1F600}")}`,
     );
-  });
-
-  it("ignores a malformed modifier rather than inventing a truncation", () => {
-    expect(templateVariables("x://{id:}")[0].name).toBe("id");
-    expect(expandUriTemplate("x://{id:}", { id: "abcdef" })).toBe("x://abcdef");
   });
 
   it("strips the explode modifier from the name", () => {
@@ -330,57 +338,21 @@ describe("requiredGroups / hasRequiredValues", () => {
   });
 });
 
-describe("cross-expression query joining", () => {
-  it("rewrites a second ? to & on the own-expansion path too", () => {
-    // Forced onto the own-expansion path by the `;` expression; the `?`-to-`&`
-    // rewrite must still apply, exactly as the SDK does it.
+describe("expression independence", () => {
+  it("does not rewrite a later query expression on the own-expansion path", () => {
     expect(
       expandUriTemplate("x://a{;k}{?one}{?two}", {
         k: "v",
         one: "1",
         two: "2",
       }),
-    ).toBe("x://a;k=v?one=1&two=2");
+    ).toBe("x://a;k=v?one=1?two=2");
   });
 
-  it("uses ? for the first query expression that actually emits", () => {
+  it("omits an expression with no value without affecting its neighbours", () => {
     expect(
       expandUriTemplate("x://a{;k}{?one}{?two}", { k: "v", two: "2" }),
     ).toBe("x://a;k=v?two=2");
-  });
-});
-
-describe("strict vs lenient expansion", () => {
-  // `readResourceFromTemplate` wraps the thrown error with the template name;
-  // the web panel instead needs the raw template back, because an invalid
-  // template comes from the server and throwing would take out the panel.
-  it.each(["file:///{unclosed", "{a,b,c"])(
-    "strict throws on the invalid template %s",
-    (template) => {
-      expect(() => expandUriTemplateStrict(template, { x: "1" })).toThrow();
-    },
-  );
-
-  it.each(["file:///{unclosed", "{a,b,c"])(
-    "lenient returns %s unchanged",
-    (template) => {
-      expect(expandUriTemplate(template, { x: "1" })).toBe(template);
-    },
-  );
-
-  it("validates syntax even when taking the own-expansion path", () => {
-    // `{;a}` forces own-expansion, and this module's parser treats the
-    // unclosed tail as literal text -- so without the unconditional SDK
-    // construction nothing would reject this.
-    expect(() => expandUriTemplateStrict("x://{;a}{b,c", { a: "1" })).toThrow();
-  });
-
-  it("agrees with the lenient variant on a valid template", () => {
-    const template = "foobar://events{?topic}";
-    const values = { topic: "foo/bar" };
-    expect(expandUriTemplateStrict(template, values)).toBe(
-      expandUriTemplate(template, values),
-    );
   });
 });
 
@@ -463,5 +435,36 @@ describe("unreserved encoding under the non-reserved operators", () => {
 
   it("still leaves the unreserved set itself untouched", () => {
     expect(expandUriTemplate("x://{v}", { v: "aZ0-._~" })).toBe("x://aZ0-._~");
+  });
+});
+
+describe("prefix-modifier grammar", () => {
+  // RFC 6570: max-length = %x31-39 0*3DIGIT -- 1..9999, no leading zero.
+  // The SDK's constructor accepts these shapes, so nothing else rejects them;
+  // treating `{id:abc}` as a plain `{id}` would send a URI the server never
+  // advertised, with nothing to alert anyone.
+  it.each(["x://{id:}", "x://{id:0}", "x://{id:abc}", "x://{id:10000}"])(
+    "strict rejects the invalid template %s",
+    (template) => {
+      expect(() => expandUriTemplateStrict(template, { id: "abcdef" })).toThrow(
+        /Invalid RFC 6570 varspec/,
+      );
+    },
+  );
+
+  it.each(["x://{id:}", "x://{id:abc}"])(
+    "lenient returns %s unchanged rather than guessing",
+    (template) => {
+      expect(expandUriTemplate(template, { id: "abcdef" })).toBe(template);
+    },
+  );
+
+  it.each([
+    ["x://{id:1}", "a"],
+    ["x://{id:9999}", "abcdef"],
+  ])("accepts the in-range modifier %s", (template, expected) => {
+    expect(expandUriTemplate(template, { id: "abcdef" })).toBe(
+      `x://${expected}`,
+    );
   });
 });

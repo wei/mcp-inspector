@@ -1,11 +1,16 @@
 /**
  * RFC 6570 URI Template parsing and expansion, shared by every client (#1919).
  *
- * This lives in `core/` rather than in a client so the web Resources form, the
- * TUI, and the CLI cannot disagree about what a template means. Every one of
- * them derives its form fields from {@link templateVariables} and expands
- * through {@link expandUriTemplate} — the web panel directly, the TUI and CLI
- * via `InspectorClient.readResourceFromTemplate`.
+ * This lives in `core/` rather than in a client so the web Resources form and
+ * the TUI cannot disagree about what a template means. Both derive their form
+ * fields from {@link templateVariables} and expand through
+ * {@link expandUriTemplate} — the web panel directly, the TUI via
+ * `InspectorClient.readResourceFromTemplate`.
+ *
+ * The **CLI is deliberately not a consumer**: it has no template form, and its
+ * `resources/read` passes the already-expanded `--uri` straight to
+ * `readResource` (see `clients/cli/src/handlers/run-method.ts`). Nothing here
+ * runs for it.
  *
  * ## Why this is not simply `new UriTemplate(t).expand(v)`
  *
@@ -86,6 +91,12 @@ interface TemplateExpression {
   varspecs: VarSpec[];
   /** Bare variable names, `*` and any `:length` modifier stripped. */
   names: string[];
+  /**
+   * True when a varspec carried a modifier that is not valid RFC 6570. Strict
+   * expansion rejects the template; discovery stays lenient so the panel can
+   * still render something rather than going blank.
+   */
+  invalid: boolean;
 }
 
 export type TemplatePart = TemplateLiteral | TemplateExpression;
@@ -108,8 +119,23 @@ export interface TemplateVariable {
   required: boolean;
 }
 
-/** Parses one varspec (`id`, `id*`, `id:3`) into a name and optional prefix. */
-function parseVarSpec(raw: string): VarSpec | null {
+/**
+ * RFC 6570's `max-length` production: `%x31-39 0*3DIGIT` — 1 to 9999, no
+ * leading zero. `{id:}`, `{id:0}`, `{id:abc}` and `{id:10000}` are all invalid
+ * *templates*, not templates with an ignorable modifier.
+ */
+const MAX_LENGTH_GRAMMAR = /^[1-9][0-9]{0,3}$/;
+
+/**
+ * Parses one varspec (`id`, `id*`, `id:3`) into a name and optional prefix.
+ *
+ * Returns `null` for an empty varspec (a stray comma) and `"invalid"` for one
+ * whose modifier does not match the grammar. The two are distinguished because
+ * the first is ignorable and the second must fail the template: silently
+ * treating `{id:abc}` as `{id}` would send a URI that does not match what the
+ * server advertised, with nothing to alert anyone.
+ */
+function parseVarSpec(raw: string): VarSpec | null | "invalid" {
   // The explode modifier is stripped rather than honored: it only changes how
   // a list or map value is joined, and every value reaching this module is a
   // single string.
@@ -120,13 +146,9 @@ function parseVarSpec(raw: string): VarSpec | null {
   if (colon === -1) return { name: spec };
 
   const name = spec.slice(0, colon);
-  const length = Number(spec.slice(colon + 1));
-  // A malformed modifier (`{id:}`, `{id:abc}`) is not a valid varspec; keep the
-  // name and ignore the modifier rather than inventing a truncation.
-  if (name.length === 0) return null;
-  return Number.isInteger(length) && length > 0
-    ? { name, maxLength: length }
-    : { name };
+  const modifier = spec.slice(colon + 1);
+  if (name.length === 0 || !MAX_LENGTH_GRAMMAR.test(modifier)) return "invalid";
+  return { name, maxLength: Number(modifier) };
 }
 
 /**
@@ -159,17 +181,17 @@ export function parseUriTemplate(uriTemplate: string): TemplatePart[] {
     }
     const body = uriTemplate.slice(i + 1, end);
     const operator = OPERATORS.find((op) => body.startsWith(op)) ?? "";
-    const varspecs = body
-      .slice(operator.length)
-      .split(",")
-      .map(parseVarSpec)
-      .filter((spec): spec is VarSpec => spec !== null);
+    const parsed = body.slice(operator.length).split(",").map(parseVarSpec);
+    const varspecs = parsed.filter(
+      (spec): spec is VarSpec => spec !== null && spec !== "invalid",
+    );
     parts.push({
       kind: "expression",
       source: uriTemplate.slice(i, end + 1),
       operator,
       varspecs,
       names: varspecs.map((spec) => spec.name),
+      invalid: parsed.includes("invalid"),
     });
     i = end + 1;
   }
@@ -375,30 +397,31 @@ function expandExpression(
 }
 
 /**
- * Expands a whole parsed template, mirroring the SDK's `expand` — including its
- * rule that a second query expression switches its leading `?` to `&`.
+ * Expands a whole parsed template.
+ *
+ * Each expression is expanded **independently**, which is what RFC 6570
+ * specifies — expansion carries no cross-expression state. The SDK instead
+ * tracks whether a query expression has already emitted and rewrites a later
+ * `{?two}`'s leading `?` to `&`. That looks friendlier and is wrong: measured
+ * against the pinned SDK, `x{?one}{?two}` expands to `x?one=1&two=2`, and
+ * `UriTemplate.match` on that same template *rejects* it — `match("x?one=1&two=2")`
+ * is `null`, while `match("x?one=1?two=2")` returns both variables. So the
+ * rewrite emits a URI the advertised template cannot match, which is precisely
+ * the failure #1919 is about, one level up.
+ *
+ * A server that wants a continuation advertises it: `{?one}{&two}` expands to
+ * `x?one=1&two=2` and matches. Producing that shape is the server's choice to
+ * declare, not ours to infer.
  */
 export function expandParts(
   parts: TemplatePart[],
   values: Record<string, string>,
 ): string {
-  let result = "";
-  let hasQueryParam = false;
-
-  for (const part of parts) {
-    if (part.kind === "literal") {
-      result += part.text;
-      continue;
-    }
-    const expanded = expandExpression(part, values);
-    if (!expanded) continue;
-
-    const isQuery = part.operator === "?" || part.operator === "&";
-    result += isQuery && hasQueryParam ? `&${expanded.slice(1)}` : expanded;
-    if (isQuery) hasQueryParam = true;
-  }
-
-  return result;
+  return parts
+    .map((part) =>
+      part.kind === "literal" ? part.text : expandExpression(part, values),
+    )
+    .join("");
 }
 
 /**
@@ -406,29 +429,33 @@ export function expandParts(
  * each value according to its operator, and omitting expressions whose
  * variables were left blank. **Throws** on a template that is not valid.
  *
- * Templates the SDK handles correctly still go through the SDK, so the two
- * cannot drift on the ordinary path; only a template containing at least one
- * expression from the table above is expanded here instead. That is a
- * whole-template switch rather than a per-expression splice so the `?`-to-`&`
- * rewrite always sees every expression that actually produced output.
+ * Every expression is expanded by {@link expandParts}; the SDK's `UriTemplate`
+ * is constructed only because that is what rejects an unclosed expression, and
+ * callers such as `readResourceFromTemplate` wrap the error it throws. Its own
+ * `expand` is deliberately unused — see the module comment for the five shapes
+ * it gets wrong.
  *
- * The SDK template is constructed *before* choosing a path, and unconditionally:
- * that construction is what validates the syntax and throws `Unclosed template
- * expression`, and callers such as `readResourceFromTemplate` wrap that error.
- * Skipping it on the own-expansion path would silently accept a template like
- * `{;a}{b,c` — this module's parser treats the unclosed tail as literal text,
- * so nothing else would object.
+ * Its constructor is not a complete validator either: it accepts `{id:abc}`,
+ * whose modifier is not RFC 6570's `max-length` production. Treating that as a
+ * plain `{id}` would send a URI the server never advertised, so the owned
+ * parser's verdict is checked too.
  */
 export function expandUriTemplateStrict(
   uriTemplate: string,
   values: Record<string, string>,
 ): string {
   const defined = definedValues(values);
-  // Constructed purely to validate: this is what throws `Unclosed template
-  // expression`, and callers such as `readResourceFromTemplate` wrap that
-  // error. Its `expand` is deliberately not used — see the module comment.
   new UriTemplate(uriTemplate);
-  return expandParts(parseUriTemplate(uriTemplate), defined);
+  const parts = parseUriTemplate(uriTemplate);
+  const bad = parts.find((part) => part.kind === "expression" && part.invalid);
+  if (bad) {
+    throw new Error(
+      `Invalid RFC 6570 varspec in "${uriTemplate}": ${
+        bad.kind === "expression" ? bad.source : ""
+      } — a prefix modifier must be 1-9999 with no leading zero.`,
+    );
+  }
+  return expandParts(parts, defined);
 }
 
 /**

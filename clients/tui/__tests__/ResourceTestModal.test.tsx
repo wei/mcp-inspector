@@ -77,6 +77,53 @@ const renderAndSubmit = async (
 };
 
 describe("ResourceTestModal", () => {
+  // RFC 6570 keeps a required expression satisfied by any ONE of its names, so
+  // `{a,b}` cannot be expressed with ink-form's per-field `required` flag and
+  // its members are left optional there. Without the modal's own group check
+  // the TUI would submit blank -- dropping the expression and reading a
+  // different resource -- while the web panel blocks the same request (#1919).
+  describe("required-group validation", () => {
+    it("refuses to submit when no name in a required group has a value", async () => {
+      const read = vi.fn();
+      const { onClose, unmount } = await renderAndSubmit(
+        fakeClient(read),
+        makeTemplate({ uriTemplate: "x://{a,b}" }),
+        { a: "", b: "" },
+      );
+      expect(read).not.toHaveBeenCalled();
+      expect(onClose).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it("submits once any one name in the group has a value", async () => {
+      const read = vi.fn().mockResolvedValue({
+        result: { contents: [] },
+        expandedUri: "x://only-a",
+      });
+      const { unmount } = await renderAndSubmit(
+        fakeClient(read),
+        makeTemplate({ uriTemplate: "x://{a,b}" }),
+        { a: "only-a", b: "" },
+      );
+      expect(read).toHaveBeenCalledWith("x://{a,b}", { a: "only-a", b: "" });
+      unmount();
+    });
+
+    it("does not block a template whose only expression is omittable", async () => {
+      const read = vi.fn().mockResolvedValue({
+        result: { contents: [] },
+        expandedUri: "x://events",
+      });
+      const { unmount } = await renderAndSubmit(
+        fakeClient(read),
+        makeTemplate({ uriTemplate: "x://events{?topic}" }),
+        { topic: "" },
+      );
+      expect(read).toHaveBeenCalled();
+      unmount();
+    });
+  });
+
   it("renders the form initially without invoking the client", async () => {
     const read = vi.fn();
     const api = render(

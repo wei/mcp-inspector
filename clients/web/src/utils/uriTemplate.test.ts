@@ -35,10 +35,12 @@ describe("previewUriTemplate", () => {
     expect(previewUriTemplate("x://a{?one,two}", {})).toBe("x://a{?one,two}");
   });
 
-  it("still rewrites the second ? to & when both query expressions resolve", () => {
+  it("expands each query expression independently, matching the submit", () => {
+    // Not `?one=1&two=2` -- see the expander's tests: the SDK's own matcher
+    // rejects that for this template. The preview must show what will be sent.
     expect(
       previewUriTemplate("x://a{?one}{?two}", { one: "1", two: "2" }),
-    ).toBe("x://a?one=1&two=2");
+    ).toBe("x://a?one=1?two=2");
   });
 
   it("restores a deferred expression that follows a resolved query expression", () => {

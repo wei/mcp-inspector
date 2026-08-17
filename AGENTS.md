@@ -74,10 +74,12 @@ v2/main/
 │   ├── logging/                        # Silent pino logger singleton
 │   ├── mcp/                            # InspectorClient runtime + state stores
 │   │                                   #   (uriTemplate.ts: RFC 6570 parse/classify/expand.
-│   │                                   #   The ONE expander for every client — the web
-│   │                                   #   Resources form and readResourceFromTemplate
-│   │                                   #   (TUI + CLI) — and every client derives its FORM
-│   │                                   #   FIELDS from it too (clients/tui uriTemplateToForm),
+│   │                                   #   The ONE expander for the web Resources form and
+│   │                                   #   readResourceFromTemplate (TUI); the CLI is NOT a
+│   │                                   #   consumer — it has no template form and passes an
+│   │                                   #   already-expanded --uri to readResource. Both
+│   │                                   #   consumers derive their FORM FIELDS from it too
+│   │                                   #   (clients/tui uriTemplateToForm),
 │   │                                   #   which is what makes the sharing real: a form
 │   │                                   #   submits under the names it rendered, so a mangled
 │   │                                   #   name silently drops the value at expansion. The

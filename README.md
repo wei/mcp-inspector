@@ -249,7 +249,7 @@ Open the Resources tab and pick **events_by_topic**, then enter `foo/bar`. The r
 
 > The plain `foobar://events` resource is registered deliberately, not as filler. The SDK's `UriTemplate.match()` compiles `{?topic}` to a **required** `\?topic=([^&]+)`, so a template alone cannot serve the blank read — `match("foobar://events")` returns `null`. A real server exposes the unfiltered collection as its own resource; the showcase does the same so that step actually resolves.
 
-All three clients expand through one shared helper, [`core/mcp/uriTemplate.ts`](./core/mcp/uriTemplate.ts) — the web Resources form directly, the TUI and CLI via `InspectorClient.readResourceFromTemplate` — and all three derive their **form fields** from its parser too, which is the half that makes the sharing real: a form submits values under the names it rendered, so a parser that mangles a name silently drops the value at expansion time.
+The web client and the TUI expand through one shared helper, [`core/mcp/uriTemplate.ts`](./core/mcp/uriTemplate.ts) — the web Resources form directly, the TUI via `InspectorClient.readResourceFromTemplate` — and both derive their **form fields** from its parser too, which is the half that makes the sharing real: a form submits values under the names it rendered, so a parser that mangles a name silently drops the value at expansion time. (The CLI is not a consumer: it has no template form, and its `resources/read` passes the already-expanded `--uri` straight through.)
 
 The SDK's `UriTemplate` is still used, but only to *validate* a template (constructing it is what rejects an unclosed expression). Its expander is not, because it is incomplete in five ways — each measured against the pinned SDK, not inferred:
 
