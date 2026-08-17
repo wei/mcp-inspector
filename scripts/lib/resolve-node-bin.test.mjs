@@ -17,7 +17,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveNodeBin } from "./resolve-node-bin.mjs";
+import { localSearchDirs, resolveNodeBin } from "./resolve-node-bin.mjs";
 
 const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -145,6 +145,53 @@ test("resolves a package whose `exports` hides ./package.json", () => {
     assert.ok(existsSync(entry), `resolved entry does not exist: ${entry}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("localSearchDirs keeps only node_modules on fromDir's ancestor chain", () => {
+  // `require.resolve.paths()` appends Node's GLOBAL FOLDERS and any NODE_PATH
+  // entries. Honouring those would break the guarantee this module exists for
+  // — that the spawned tsc/vite is the REPO-PINNED one — by letting a globally
+  // installed TypeScript stand in for a missing repo install, measuring the
+  // programs with the wrong compiler instead of failing actionably.
+  const from = path.join(path.sep, "repo", "clients", "web");
+  const kept = [
+    path.join(from, "node_modules"),
+    path.join(path.sep, "repo", "clients", "node_modules"),
+    path.join(path.sep, "repo", "node_modules"),
+    path.join(path.sep, "node_modules"),
+  ];
+  const dropped = [
+    path.join(path.sep, "home", "dev", ".node_modules"),
+    path.join(path.sep, "home", "dev", ".node_libraries"),
+    path.join(path.sep, "usr", "local", "lib", "node"),
+    // A NODE_PATH entry off the chain — a real node_modules, just not ours.
+    path.join(path.sep, "opt", "shared", "node_modules"),
+  ];
+  assert.deepEqual(localSearchDirs([...kept, ...dropped], from), kept);
+});
+
+test("a package visible only outside the ancestor chain is not resolved", () => {
+  // The end-to-end form of the above: `ghostpkg` exists on disk, but under a
+  // sibling tree rather than an ancestor of `fromDir`.
+  const outside = fixtureDir(
+    { name: "elsewherepkg", bin: { elsewhere: "bin/e.js" } },
+    { createBinFile: true },
+  );
+  const consumer = mkdtempSync(path.join(tmpdir(), "resolve-node-bin-from-"));
+  try {
+    writeFileSync(
+      path.join(consumer, "package.json"),
+      JSON.stringify({ name: "consumer" }),
+      "utf8",
+    );
+    assert.throws(
+      () => resolveNodeBin("elsewherepkg", "elsewhere", consumer),
+      /cannot find elsewherepkg/,
+    );
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+    rmSync(consumer, { recursive: true, force: true });
   }
 });
 

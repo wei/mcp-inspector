@@ -69,15 +69,46 @@ export function resolveNodeBin(pkg, binName, fromDir) {
  * installed and perfectly spawnable — a false "not installed" that would send
  * someone to `npm install` for a package already on disk. `resolve.paths()`
  * gives the search dirs without consulting `exports` at all.
+ *
+ * Its list is then filtered to the `node_modules` directories on `fromDir`'s
+ * own ancestor chain, because `resolve.paths()` also appends Node's GLOBAL
+ * FOLDERS (`$HOME/.node_modules`, `$HOME/.node_libraries`, `$PREFIX/lib/node`)
+ * and any `NODE_PATH` entries. Accepting those would quietly break the
+ * guarantee this module exists to keep — that the spawned tsc/vite is the
+ * REPO-PINNED one, exactly as `npx --no-install` promised. A missing repo
+ * install would then find a globally installed TypeScript and measure the
+ * programs with the wrong compiler, instead of failing with the actionable
+ * "run npm install" this helper is supposed to produce.
  */
 function resolveManifest(pkg, fromDir) {
   const require = createRequire(path.join(fromDir, "package.json"));
   // `resolve.paths` returns null only for builtins, which have no bin to find.
-  for (const dir of require.resolve.paths(pkg) ?? []) {
+  for (const dir of localSearchDirs(
+    require.resolve.paths(pkg) ?? [],
+    fromDir,
+  )) {
     const candidate = path.join(dir, ...pkg.split("/"), "package.json");
     if (existsSync(candidate)) return candidate;
   }
   throw new Error(`cannot find ${pkg} from ${fromDir}`);
+}
+
+/**
+ * The subset of `resolve.paths()` that is a `node_modules` directory sitting
+ * directly under `fromDir` or one of its ancestors — i.e. the local walk, with
+ * Node's global folders and `NODE_PATH` dropped. Exported for its own test.
+ */
+export function localSearchDirs(dirs, fromDir) {
+  const ancestors = new Set();
+  for (let dir = path.resolve(fromDir); ; dir = path.dirname(dir)) {
+    ancestors.add(dir);
+    if (dir === path.dirname(dir)) break;
+  }
+  return dirs.filter(
+    (dir) =>
+      path.basename(dir) === "node_modules" &&
+      ancestors.has(path.dirname(path.resolve(dir))),
+  );
 }
 
 /** `@scope/name` → `name`; an unscoped name is returned unchanged. */

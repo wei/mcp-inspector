@@ -44,6 +44,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { hasExited, removeSafe, stopChild } from "./lib/child-cleanup.mjs";
+import { winShellArgs } from "./lib/win-shell-args.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const testServer = join(
@@ -98,21 +99,13 @@ function step(message) {
   console.log(`\npack:verify — ${message}`);
 }
 
-// Windows needs `shell: true` to start the `npm`/`npx` `.cmd` shims at all
-// (#1939), and with a shell Node hands the argv to `cmd.exe` as ONE
-// space-joined string — so an argument holding a path with a space is split
-// into two. That is not hypothetical here: every generated path in this file
-// lives under `tmpdir()`, which on Windows sits beneath the user profile and
-// so contains a space whenever the account name does. Quote each argument
-// that needs it; `cmd.exe` (and the CRT parser behind it) strips the quotes
-// back off, so the child sees exactly the argument we passed.
+// This script keeps `shell: true` on Windows because its children are `npm` and
+// `npx` — the two commands `resolve-node-bin.mjs` deliberately cannot replace
+// (see the note at the top of `lib/win-shell-args.mjs`) — plus the installed
+// `.bin` shim. The shell then re-parses the argv, so every generated path we
+// pass has to be quoted for `cmd.exe`.
 const WIN_SHELL = process.platform === "win32";
-function shellArgs(args) {
-  if (!WIN_SHELL) return args;
-  return args.map((arg) =>
-    /[\s&|<>^"]/.test(arg) ? `"${arg.replace(/"/g, '""')}"` : arg,
-  );
-}
+const shellArgs = (args) => winShellArgs(args);
 
 /** Run a command to completion, inheriting stdio. Returns the exit status. */
 function runInherit(command, args, cwd = repoRoot) {
