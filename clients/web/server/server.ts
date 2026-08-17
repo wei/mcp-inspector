@@ -125,7 +125,13 @@ export async function startHonoServer(
         sandboxUrl ?? undefined,
       );
       if (config.autoOpen) {
-        open(url);
+        // A headless or otherwise browser-less host rejects here. The server
+        // is already listening and the banner above printed the URL, so warn
+        // and carry on rather than letting the rejection escape this
+        // synchronous listen callback and take the process down.
+        open(url).catch((err: unknown) => {
+          console.warn("Could not open a browser automatically:", err);
+        });
       }
     },
   );

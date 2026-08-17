@@ -114,7 +114,12 @@ export function honoMiddlewarePlugin(config: WebServerConfig): Plugin {
         );
 
         if (config.autoOpen) {
-          open(url);
+          // Same as the prod server: a browser-less host rejects, the dev
+          // server is already up, and the banner above printed the URL — so
+          // warn rather than let the rejection escape this sync helper.
+          open(url).catch((err: unknown) => {
+            console.warn("Could not open a browser automatically:", err);
+          });
         }
       };
 

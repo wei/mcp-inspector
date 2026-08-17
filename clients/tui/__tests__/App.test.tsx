@@ -661,6 +661,35 @@ describe("App (foundation)", () => {
     expect(h.disconnect).toHaveBeenCalled();
   });
 
+  it("surfaces a disconnect failure instead of floating the rejection", async () => {
+    // 'd' is a key handler, so it cannot await handleDisconnect — the handler
+    // has to own the failure itself or it escapes as an unhandled rejection
+    // and fails the whole run from somewhere else (#1959).
+    // There is nothing to assert on screen — the message only renders once the
+    // client reports `status: "error"`, which a rejected disconnect does not
+    // do. The assertion is the run itself: vitest fails on an unhandled
+    // rejection, so this test passing is the proof the catch owns it.
+    h.ctrl.status = "connected";
+    h.disconnect.mockRejectedValue(new Error("discfail"));
+    const { stdin } = await mount(oneStdio());
+    stdin.write("d");
+    await tick();
+    await tick();
+    expect(h.disconnect).toHaveBeenCalled();
+  });
+
+  it("owns a non-Error disconnect rejection too", async () => {
+    // The catch stringifies a non-Error rejection rather than reading
+    // `.message` off it; a throw here would escape the same way.
+    h.ctrl.status = "connected";
+    h.disconnect.mockRejectedValue("plainstring");
+    const { stdin } = await mount(oneStdio());
+    stdin.write("d");
+    await tick();
+    await tick();
+    expect(h.disconnect).toHaveBeenCalled();
+  });
+
   it("switches tabs via accelerator keys", async () => {
     const r = await mount(stdioServer());
     await press(r, ["t"]); // tools tab (server is auto-selected)

@@ -207,7 +207,9 @@ describe("tui tsup config", () => {
     // the double cast is bridging a real structural gap, not hiding a mismatch.
     // A hook the patch called but the stub lacks fails as undefined here rather
     // than passing silently.
-    inkFormLabelPatch.setup(
+    // esbuild types `setup` as `void | Promise<void>`; await it so the
+    // assertions below can't run before an async setup has registered.
+    await inkFormLabelPatch.setup(
       build as unknown as Parameters<typeof inkFormLabelPatch.setup>[0],
     );
 

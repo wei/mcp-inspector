@@ -887,8 +887,15 @@ function App({
   // Disconnect handler
   const handleDisconnect = useCallback(async () => {
     if (!selectedServer) return;
-    await disconnectInspector();
-    // InspectorClient will update status automatically, and data is preserved
+    try {
+      await disconnectInspector();
+      // InspectorClient will update status automatically, and data is preserved
+    } catch (err) {
+      // Nothing above this catches: the only caller is the key handler, which
+      // cannot await. Surface the failure the same way handleConnect does
+      // rather than letting it escape as an unhandled rejection.
+      setConnectError(err instanceof Error ? err.message : String(err));
+    }
   }, [selectedServer, disconnectInspector]);
 
   const handleClearOAuth = useCallback(async () => {
@@ -1428,12 +1435,15 @@ function App({
         input.toLowerCase() === "c" &&
         (inspectorStatus === "disconnected" || inspectorStatus === "error")
       ) {
-        handleConnect();
+        // Both handlers own their failures internally (each ends in a catch
+        // that surfaces the message), so there is nothing left for a key
+        // handler — which cannot await — to do with the promise.
+        void handleConnect();
       } else if (
         input.toLowerCase() === "d" &&
         (inspectorStatus === "connected" || inspectorStatus === "connecting")
       ) {
-        handleDisconnect();
+        void handleDisconnect();
       }
     }
   });
