@@ -143,6 +143,57 @@ describe("RFC 6570 resource templates over the wire (#1919)", () => {
     expect(result.contents[0]?.uri).toBe(uri);
   });
 
+  // The tests above expand with the helper and then call `readResource`, which
+  // leaves `InspectorClient.readResourceFromTemplate` -- the API the TUI drives
+  // and the one this PR rewired -- unproven: they pass whether or not that
+  // method still uses the SDK's expander. These drive it end to end with a
+  // value that the two expanders disagree about, so reverting the wiring fails
+  // here rather than silently.
+  it("expands and reads a simple expression through readResourceFromTemplate", async () => {
+    const connected = await connectToShowcase();
+    const invocation = await connected.readResourceFromTemplate(
+      "foobar://events/{topic}",
+      { topic: "foo/bar" },
+    );
+    expect(invocation.expandedUri).toBe("foobar://events/foo%2Fbar");
+    expect(invocation.result.contents[0]?.uri).toBe(invocation.expandedUri);
+  });
+
+  it("encodes a sub-delim the SDK's expander leaves bare", async () => {
+    const connected = await connectToShowcase();
+    // Verified by reverting the wiring: `encodeURIComponent` does encode `/`,
+    // so `foo/bar` alone does NOT distinguish the two expanders -- the SDK
+    // handles that case correctly and #1919 was the web panel's own string
+    // substitution. `!` is where they differ: it is a sub-delim, which RFC 6570
+    // requires encoded and `encodeURIComponent` leaves alone, so the SDK
+    // expander returns `foobar://events/a!b` and fails this assertion.
+    const invocation = await connected.readResourceFromTemplate(
+      "foobar://events/{topic}",
+      { topic: "a!b" },
+    );
+    expect(invocation.expandedUri).toBe("foobar://events/a%21b");
+    expect(invocation.result.contents[0]?.uri).toBe(invocation.expandedUri);
+  });
+
+  it("expands and reads a query expression through readResourceFromTemplate", async () => {
+    const connected = await connectToShowcase();
+    const invocation = await connected.readResourceFromTemplate(
+      "foobar://events{?topic}",
+      { topic: "foo/bar" },
+    );
+    expect(invocation.expandedUri).toBe("foobar://events?topic=foo%2Fbar");
+    expect(invocation.result.contents[0]?.uri).toBe(invocation.expandedUri);
+  });
+
+  it("refuses the malformed template through readResourceFromTemplate", async () => {
+    const connected = await connectToShowcase();
+    await expect(
+      connected.readResourceFromTemplate("foobar://events/{topic:abc}", {
+        topic: "news",
+      }),
+    ).rejects.toThrow(/Invalid RFC 6570 varspec/);
+  });
+
   it("resolves the base URI a blank query expression expands to", async () => {
     const connected = await connectToShowcase();
     // RFC 6570 drops the whole expression when the variable is *undefined*, so

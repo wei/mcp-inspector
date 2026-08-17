@@ -1,5 +1,6 @@
 /**
- * RFC 6570 URI Template parsing and expansion, shared by every client (#1919).
+ * RFC 6570 URI Template parsing and expansion, shared by the web and TUI
+ * clients (#1919).
  *
  * This lives in `core/` rather than in a client so the web Resources form and
  * the TUI cannot disagree about what a template means. Both derive their form
@@ -710,8 +711,15 @@ export function expandUriTemplateStrict(
 }
 
 /**
- * The pinned SDK's per-value ceiling, enforced here because this module no
- * longer calls `UriTemplate.expand` — which is where that check lived.
+ * The pinned SDK's per-value ceiling (`MAX_VARIABLE_LENGTH`, 1e6), enforced
+ * here because this module no longer calls `UriTemplate.expand` — which is
+ * where that check lived.
+ *
+ * It is the only guard that moved. Auditing the rest of the SDK's expander
+ * against what this replaced: the template-length (1e6), expression-count
+ * (1e4) and variable-name-length (1e6) limits all live in `parse()`, which
+ * runs from the **constructor** — and {@link expandUriTemplateStrict} still
+ * constructs a `UriTemplate`, so those remain enforced by it.
  */
 const MAX_VALUE_LENGTH = 1_000_000;
 
