@@ -66,11 +66,11 @@ describe("ServerConfigModal", () => {
     await user.click(screen.getByRole("button", { name: /^Add$/ }));
 
     await waitFor(() => expect(props.onSubmit).toHaveBeenCalledOnce());
-    expect(props.onSubmit).toHaveBeenCalledWith("alpha", {
-      type: "stdio",
-      command: "node",
-      args: ["x.js", "--port=3000"],
-    });
+    expect(props.onSubmit).toHaveBeenCalledWith(
+      "alpha",
+      { type: "stdio", command: "node", args: ["x.js", "--port=3000"] },
+      [],
+    );
   });
 
   it("requires a command for stdio submission", async () => {
@@ -117,7 +117,7 @@ describe("ServerConfigModal", () => {
     expect(screen.queryByLabelText(/^Command/)).not.toBeInTheDocument();
   });
 
-  it("submits an sse config with just the url (headers move to the settings form)", async () => {
+  it("submits an sse config with just the url and no headers", async () => {
     const user = userEvent.setup({ delay: null });
     const props = base();
     renderWithMantine(
@@ -133,10 +133,11 @@ describe("ServerConfigModal", () => {
     await user.click(screen.getByRole("button", { name: /^Save$/ }));
 
     await waitFor(() => expect(props.onSubmit).toHaveBeenCalledOnce());
-    expect(props.onSubmit).toHaveBeenCalledWith("remote", {
-      type: "sse",
-      url: "https://x.test/sse",
-    });
+    expect(props.onSubmit).toHaveBeenCalledWith(
+      "remote",
+      { type: "sse", url: "https://x.test/sse" },
+      [],
+    );
   });
 
   it("submits a streamable-http config", async () => {
@@ -152,10 +153,11 @@ describe("ServerConfigModal", () => {
     );
     await user.click(screen.getByRole("button", { name: /^Save$/ }));
     await waitFor(() => expect(props.onSubmit).toHaveBeenCalledOnce());
-    expect(props.onSubmit).toHaveBeenCalledWith("http-srv", {
-      type: "streamable-http",
-      url: "https://x.test/mcp",
-    });
+    expect(props.onSubmit).toHaveBeenCalledWith(
+      "http-srv",
+      { type: "streamable-http", url: "https://x.test/mcp" },
+      [],
+    );
   });
 
   it("loads the url from a streamable-http config", () => {
@@ -275,11 +277,11 @@ describe("ServerConfigModal", () => {
     await user.click(screen.getByRole("button", { name: /^Add$/ }));
 
     await waitFor(() => expect(props.onSubmit).toHaveBeenCalledOnce());
-    expect(props.onSubmit).toHaveBeenCalledWith("alpha", {
-      type: "stdio",
-      command: "node",
-      cwd: "/tmp/cwd",
-    });
+    expect(props.onSubmit).toHaveBeenCalledWith(
+      "alpha",
+      { type: "stdio", command: "node", cwd: "/tmp/cwd" },
+      [],
+    );
   });
 
   it("clears the Server ID field via its Clear button", async () => {
@@ -469,5 +471,145 @@ describe("ServerConfigModal", () => {
     renderWithMantine(<ServerConfigModal {...props} />);
     await user.click(screen.getByRole("button", { name: /Cancel/ }));
     expect(props.onClose).toHaveBeenCalledOnce();
+  });
+
+  describe("custom headers (#1915)", () => {
+    it("hides the headers section for stdio", () => {
+      renderWithMantine(<ServerConfigModal {...base()} />);
+      expect(screen.queryByText("Custom headers")).not.toBeInTheDocument();
+    });
+
+    // Every keystroke re-renders the whole modal, and this case types four
+    // fields, so it runs several times slower under the coverage project's v8
+    // instrumentation than in a plain unit run — enough to trip the 5s default.
+    // The extra ceiling is headroom for the instrumented run, not a hang guard.
+    const TYPING_HEAVY_TIMEOUT_MS = 20000;
+
+    it(
+      "submits headers added on the manual add form",
+      async () => {
+        const user = userEvent.setup({ delay: null });
+        const props = base();
+        // Seeded on the http transport rather than driven through the
+        // Transport select — that select has its own test above, and walking
+        // its combobox here only added to the cost described above.
+        renderWithMantine(
+          <ServerConfigModal
+            {...props}
+            initialConfig={{ type: "streamable-http", url: "" }}
+          />,
+        );
+
+        await user.type(screen.getByLabelText(/Server ID/i), "remote");
+        await user.type(screen.getByLabelText(/^URL/), "https://x.test/mcp");
+
+        await user.click(screen.getByRole("button", { name: "+ Add Header" }));
+        await user.type(
+          screen.getByRole("textbox", { name: /header name, row 1/ }),
+          "Cookie",
+        );
+        await user.type(
+          screen.getByRole("textbox", { name: /header value, Cookie/ }),
+          "branch=feature-x",
+        );
+        await user.click(screen.getByRole("button", { name: /^Add$/ }));
+
+        await waitFor(() => expect(props.onSubmit).toHaveBeenCalledOnce());
+        expect(props.onSubmit).toHaveBeenCalledWith(
+          "remote",
+          { type: "streamable-http", url: "https://x.test/mcp" },
+          [{ key: "Cookie", value: "branch=feature-x" }],
+        );
+      },
+      TYPING_HEAVY_TIMEOUT_MS,
+    );
+
+    it("pre-populates the rows from initialHeaders and submits an edit", async () => {
+      const user = userEvent.setup({ delay: null });
+      const props = base();
+      renderWithMantine(
+        <ServerConfigModal
+          {...props}
+          mode="edit"
+          initialId="remote"
+          initialConfig={{ type: "sse", url: "https://x.test/sse" }}
+          initialHeaders={[{ key: "X-Env", value: "dev" }]}
+        />,
+      );
+
+      const valueInput = screen.getByRole("textbox", {
+        name: /header value, X-Env/,
+      });
+      expect(valueInput).toHaveValue("dev");
+      await user.type(valueInput, "-2");
+      await user.click(screen.getByRole("button", { name: /^Save$/ }));
+
+      await waitFor(() => expect(props.onSubmit).toHaveBeenCalledOnce());
+      expect(props.onSubmit).toHaveBeenCalledWith(
+        "remote",
+        { type: "sse", url: "https://x.test/sse" },
+        [{ key: "X-Env", value: "dev-2" }],
+      );
+    });
+
+    it("drops blank-key rows and removes a row on X", async () => {
+      const user = userEvent.setup({ delay: null });
+      const props = base();
+      renderWithMantine(
+        <ServerConfigModal
+          {...props}
+          mode="edit"
+          initialId="remote"
+          initialConfig={{ type: "sse", url: "https://x.test/sse" }}
+          initialHeaders={[
+            { key: "Keep", value: "1" },
+            { key: "Drop", value: "2" },
+          ]}
+        />,
+      );
+
+      // An empty row is the form's "still typing" placeholder — it must not
+      // reach the caller.
+      await user.click(screen.getByRole("button", { name: "+ Add Header" }));
+      // Editing one row of several must leave its siblings untouched.
+      await user.type(
+        screen.getByRole("textbox", { name: "header value, Keep" }),
+        "9",
+      );
+      await user.click(
+        screen.getByRole("button", { name: "Remove header, Drop" }),
+      );
+      await user.click(screen.getByRole("button", { name: /^Save$/ }));
+
+      await waitFor(() => expect(props.onSubmit).toHaveBeenCalledOnce());
+      expect(props.onSubmit).toHaveBeenCalledWith(
+        "remote",
+        { type: "sse", url: "https://x.test/sse" },
+        [{ key: "Keep", value: "19" }],
+      );
+    });
+
+    it("submits no headers for stdio even when initialHeaders is set", async () => {
+      const user = userEvent.setup({ delay: null });
+      const props = base();
+      renderWithMantine(
+        <ServerConfigModal
+          {...props}
+          mode="edit"
+          initialId="local"
+          initialConfig={{ type: "stdio", command: "node" }}
+          initialHeaders={[{ key: "X-Env", value: "dev" }]}
+        />,
+      );
+
+      await user.click(screen.getByRole("button", { name: /^Save$/ }));
+
+      await waitFor(() => expect(props.onSubmit).toHaveBeenCalledOnce());
+      expect(props.onSubmit).toHaveBeenCalledWith(
+        "local",
+        { type: "stdio", command: "node" },
+        [],
+      );
+    });
   });
 });

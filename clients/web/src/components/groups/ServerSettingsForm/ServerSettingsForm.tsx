@@ -13,6 +13,7 @@ import {
   TextInput,
 } from "@mantine/core";
 import { ClearButton } from "../../elements/ClearButton/ClearButton";
+import { KeyValueRows } from "../../elements/KeyValueRows/KeyValueRows";
 import type { ProtocolEra } from "@modelcontextprotocol/client";
 import type {
   InspectorServerSettings,
@@ -222,53 +223,6 @@ const ClearStoredOAuthHint = Text.withProps({
   flex: 1,
   miw: "12rem",
 });
-
-function KeyValueRows({
-  items,
-  onChange,
-  onRemove,
-}: {
-  items: { key: string; value: string }[];
-  onChange: (index: number, key: string, value: string) => void;
-  onRemove: (index: number) => void;
-}) {
-  /* v8 ignore next 3 -- unreachable: every caller guards with `length === 0`
-     and renders an EmptyHint instead, so KeyValueRows is only mounted with
-     a non-empty list. */
-  if (items.length === 0) {
-    return null;
-  }
-
-  return (
-    <>
-      {items.map((item, index) => (
-        <Group key={index} grow>
-          <ClearableTextInput
-            placeholder="Key"
-            value={item.key}
-            onChange={(e) => onChange(index, e.currentTarget.value, item.value)}
-            rightSection={
-              item.key ? (
-                <ClearButton onClick={() => onChange(index, "", item.value)} />
-              ) : null
-            }
-          />
-          <ClearableTextInput
-            placeholder="Value"
-            value={item.value}
-            onChange={(e) => onChange(index, item.key, e.currentTarget.value)}
-            rightSection={
-              item.value ? (
-                <ClearButton onClick={() => onChange(index, item.key, "")} />
-              ) : null
-            }
-          />
-          <RemoveIcon onClick={() => onRemove(index)}>X</RemoveIcon>
-        </Group>
-      ))}
-    </>
-  );
-}
 
 // Reserved-key rejection is inline per row (#2018): the reason is passed as the
 // key input's `error` **string**, so Mantine renders it in the input's own error
@@ -641,6 +595,7 @@ export function ServerSettingsForm({
               ) : (
                 <KeyValueRows
                   items={settings.env}
+                  entityLabel="environment variable"
                   onChange={onEnvChange}
                   onRemove={onRemoveEnv}
                 />
@@ -667,6 +622,7 @@ export function ServerSettingsForm({
             ) : (
               <KeyValueRows
                 items={settings.headers}
+                entityLabel="header"
                 onChange={onHeaderChange}
                 onRemove={onRemoveHeader}
               />
@@ -690,6 +646,7 @@ export function ServerSettingsForm({
             ) : (
               <KeyValueRows
                 items={settings.metadata}
+                entityLabel="metadata entry"
                 onChange={onMetadataChange}
                 onRemove={onRemoveMetadata}
               />

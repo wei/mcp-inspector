@@ -19,8 +19,8 @@ function InteractiveRender(args: ServerConfigModalProps) {
             args.onClose();
             updateArgs({ opened: false });
           }}
-          onSubmit={async (id, config) => {
-            await args.onSubmit(id, config);
+          onSubmit={async (id, config, headers) => {
+            await args.onSubmit(id, config, headers);
             updateArgs({ opened: false });
           }}
         />
@@ -134,7 +134,39 @@ export const EditSse: Story = {
     const body = within(canvasElement.ownerDocument.body);
     const dialog = within(await findDialog(body, "Edit server"));
     await expect(await dialog.findByLabelText(/^URL/)).toBeInTheDocument();
-    // Headers are no longer entered here — they live in ServerSettingsForm.
-    await expect(dialog.queryByLabelText(/Headers/i)).toBeNull();
+    // The headers editor starts collapsed to a bare "+ Add Header" control
+    // when the server has none stored.
+    await expect(
+      dialog.getByRole("button", { name: "+ Add Header" }),
+    ).toBeInTheDocument();
+    await expect(
+      dialog.queryAllByRole("textbox", { name: /header name/ }),
+    ).toHaveLength(0);
+  },
+};
+
+// Custom headers on the manual form (#1915) — the reason the field exists is a
+// cookie routing requests to one developer's branch on a shared dev server.
+export const EditSseWithHeaders: Story = {
+  args: {
+    mode: "edit",
+    initialId: "remote",
+    initialConfig: sseConfig,
+    initialHeaders: [{ key: "Cookie", value: "branch=feature-x" }],
+    existingIds: [],
+  },
+  play: async ({ canvasElement }) => {
+    const body = within(canvasElement.ownerDocument.body);
+    const dialog = within(await findDialog(body, "Edit server"));
+    const value = (await dialog.findByRole("textbox", {
+      name: "header value, Cookie",
+    })) as HTMLInputElement;
+    await expect(value.value).toBe("branch=feature-x");
+
+    // Adding a row appends an empty pair, named by position until it is keyed.
+    await userEvent.click(dialog.getByRole("button", { name: "+ Add Header" }));
+    await expect(
+      await dialog.findByRole("textbox", { name: "header name, row 2" }),
+    ).toBeInTheDocument();
   },
 };

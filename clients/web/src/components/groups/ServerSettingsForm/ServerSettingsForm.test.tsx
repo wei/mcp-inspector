@@ -329,8 +329,9 @@ describe("ServerSettingsForm", () => {
         expandedSections={["headers"]}
       />,
     );
-    const removeButtons = screen.getAllByRole("button", { name: "X" });
-    await user.click(removeButtons[0]);
+    await user.click(
+      screen.getByRole("button", { name: "Remove header, Authorization" }),
+    );
     expect(onRemoveHeader).toHaveBeenCalledWith(0);
   });
 
@@ -351,8 +352,9 @@ describe("ServerSettingsForm", () => {
     await user.type(valueInput, "Z");
     expect(onMetadataChange).toHaveBeenCalled();
 
-    const removeButtons = screen.getAllByRole("button", { name: "X" });
-    await user.click(removeButtons[0]);
+    await user.click(
+      screen.getByRole("button", { name: "Remove metadata entry, userId" }),
+    );
     expect(onRemoveMetadata).toHaveBeenCalledWith(0);
   });
 
@@ -676,9 +678,13 @@ describe("ServerSettingsForm", () => {
       await user.type(keyInput, "2");
       expect(onEnvChange).toHaveBeenLastCalledWith(0, "API_KEY2", "secret");
 
-      // The remove ("X") button sits alongside the row's key/value inputs.
-      const removeButtons = screen.getAllByRole("button", { name: "X" });
-      await user.click(removeButtons[removeButtons.length - 1]!);
+      // The remove button sits alongside the row's key/value inputs; its
+      // accessible name identifies which row it belongs to.
+      await user.click(
+        screen.getByRole("button", {
+          name: "Remove environment variable, API_KEY",
+        }),
+      );
       expect(onRemoveEnv).toHaveBeenCalledWith(0);
     });
   });

@@ -29,11 +29,28 @@ export interface UseServersResult {
   loading: boolean;
   error: string | undefined;
   refresh: () => Promise<void>;
-  addServer: (id: string, config: MCPServerConfig) => Promise<void>;
+  /**
+   * `settings` is optional: omitted, no settings node is persisted for the new
+   * entry. Passed, it is written alongside the config in the same POST — the
+   * add form needs this to carry custom headers, which live on `settings`
+   * rather than on the transport config (#1915).
+   */
+  addServer: (
+    id: string,
+    config: MCPServerConfig,
+    settings?: InspectorServerSettings,
+  ) => Promise<void>;
+  /**
+   * `settings` is optional and asymmetric with `addServer`'s: **omitting** it
+   * tells the backend to preserve the entry's existing settings node, so a
+   * config-only save cannot silently wipe persisted headers / metadata / OAuth
+   * credentials. Pass a full settings object to replace it.
+   */
   updateServer: (
     originalId: string,
     newId: string,
     config: MCPServerConfig,
+    settings?: InspectorServerSettings,
   ) => Promise<void>;
   /**
    * Patch only the `settings` node on an existing server entry, leaving the
@@ -202,11 +219,17 @@ export function useServers(opts: UseServersOptions): UseServersResult {
   }, [base, authToken, doFetch, refreshInternal]);
 
   const addServer = useCallback(
-    async (id: string, config: MCPServerConfig): Promise<void> => {
+    async (
+      id: string,
+      config: MCPServerConfig,
+      settings?: InspectorServerSettings,
+    ): Promise<void> => {
       const res = await doFetch(`${base}/api/servers`, {
         method: "POST",
         headers: buildHeaders(authToken, true),
-        body: JSON.stringify({ id, config }),
+        // `settings` is omitted from the body when undefined (JSON.stringify
+        // drops undefined values), which the route reads as "no settings node".
+        body: JSON.stringify({ id, config, settings }),
       });
       if (!res.ok) {
         throw new Error(await readErrorMessage(res));
@@ -235,18 +258,21 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       originalId: string,
       newId: string,
       config: MCPServerConfig,
+      settings?: InspectorServerSettings,
     ): Promise<void> => {
-      // `settings` is intentionally omitted from the body. The backend route
-      // treats omission as "preserve the existing settings node on disk", so
-      // a config-only save (e.g. ServerConfigModal) cannot silently wipe
-      // persisted headers / metadata / OAuth credentials. To explicitly
-      // clear settings, send `settings: null`.
+      // With `settings` undefined, `JSON.stringify` drops the key entirely and
+      // the backend route treats that omission as "preserve the existing
+      // settings node on disk" — so a config-only save cannot silently wipe
+      // persisted headers / metadata / OAuth credentials. A caller editing a
+      // field that lives on settings (e.g. ServerConfigModal's custom headers)
+      // passes the full settings object it wants written. To explicitly clear
+      // settings, send `settings: null`.
       const res = await doFetch(
         `${base}/api/servers/${encodeURIComponent(originalId)}`,
         {
           method: "PUT",
           headers: buildHeaders(authToken, true),
-          body: JSON.stringify({ id: newId, config }),
+          body: JSON.stringify({ id: newId, config, settings }),
         },
       );
       if (!res.ok) {

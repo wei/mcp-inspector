@@ -123,6 +123,93 @@ describe("useServers", () => {
     });
   });
 
+  it("addServer persists a settings node when one is supplied (#1915)", async () => {
+    const { result } = renderHook(() =>
+      useServers({ baseUrl: "http://test.local", fetchFn: h.fetchFn }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await act(async () => {
+      // The manual add form carries custom headers here — they live on
+      // `settings`, not on the transport config.
+      await result.current.addServer(
+        "remote",
+        { type: "streamable-http", url: "https://x.test/mcp" },
+        {
+          headers: [{ key: "Cookie", value: "branch=feature-x" }],
+          env: [],
+          metadata: [],
+          connectionTimeout: 0,
+          requestTimeout: 0,
+          taskTtl: 60000,
+          maxFetchRequests: 1000,
+          roots: [],
+        },
+      );
+    });
+
+    await waitFor(() => {
+      const added = result.current.servers.find((srv) => srv.id === "remote");
+      expect(added?.settings?.headers).toEqual([
+        { key: "Cookie", value: "branch=feature-x" },
+      ]);
+    });
+    const stored = readConfig(h.configPath).mcpServers
+      .remote as unknown as Record<string, unknown>;
+    expect(stored.headers).toEqual({ Cookie: "branch=feature-x" });
+  });
+
+  it("updateServer replaces the settings node when one is supplied (#1915)", async () => {
+    writeFileSync(
+      h.configPath,
+      JSON.stringify({
+        mcpServers: {
+          alpha: {
+            type: "streamable-http",
+            url: "https://x.test/mcp",
+            headers: { "X-Old": "1" },
+            metadata: [{ key: "trace", value: "abc" }],
+          },
+        },
+      }),
+    );
+
+    const { result } = renderHook(() =>
+      useServers({ baseUrl: "http://test.local", fetchFn: h.fetchFn }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await act(async () => {
+      // Editing headers in ServerConfigModal sends the whole settings node,
+      // so the caller is responsible for carrying the untouched fields
+      // (here: metadata) forward.
+      await result.current.updateServer(
+        "alpha",
+        "alpha",
+        { type: "streamable-http", url: "https://x.test/mcp" },
+        {
+          headers: [{ key: "X-New", value: "2" }],
+          env: [],
+          metadata: [{ key: "trace", value: "abc" }],
+          connectionTimeout: 0,
+          requestTimeout: 0,
+          taskTtl: 60000,
+          maxFetchRequests: 1000,
+          roots: [],
+        },
+      );
+    });
+
+    await waitFor(() => {
+      expect(result.current.servers[0]?.settings?.headers).toEqual([
+        { key: "X-New", value: "2" },
+      ]);
+    });
+    expect(result.current.servers[0]?.settings?.metadata).toEqual([
+      { key: "trace", value: "abc" },
+    ]);
+  });
+
   it("importSource returns a result for a known source type", async () => {
     const { result } = renderHook(() =>
       useServers({ baseUrl: "http://test.local", fetchFn: h.fetchFn }),
