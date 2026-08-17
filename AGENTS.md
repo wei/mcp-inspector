@@ -73,24 +73,22 @@ v2/main/
 │   │                                   #   a nullable field entirely — #1928/#2015)
 │   ├── logging/                        # Silent pino logger singleton
 │   ├── mcp/                            # InspectorClient runtime + state stores
-│   │                                   #   (uriTemplate.ts: RFC 6570 parse/classify/expand
-│   │                                   #   shared by the web Resources form and
-│   │                                   #   readResourceFromTemplate (TUI + CLI), so the
-│   │                                   #   clients cannot drift on what a template means;
-│   │                                   #   delegates to the SDK's UriTemplate for what it
-│   │                                   #   gets right, and takes over a whole template
-│   │                                   #   containing any of the three shapes it does not:
-│   │                                   #   `{a,b}` (raw-joined, unencoded, prefix dropped),
-│   │                                   #   `{;id}` (operator absent from its list), and
-│   │                                   #   `{id:3}` (prefix modifier folded into the name),
-│   │                                   #   and `{+v}`/`{#v}` (encodeURI mangles reserved
-│   │                                   #   `[`/`]` and double-encodes pct-triplets). The `;`
-│   │                                   #   and `:N` cases would render form fields literally
-│   │                                   #   labelled `;id` / `id:3`. Requiredness is per
-│   │                                   #   EXPRESSION, not per variable — requiredGroups +
-│   │                                   #   hasRequiredValues: `{a,b}` with only `a` filled is
-│   │                                   #   expandable, and a name recurring across
-│   │                                   #   expressions needs each group checked — #1919;
+│   │                                   #   (uriTemplate.ts: RFC 6570 parse/classify/expand.
+│   │                                   #   The ONE expander for every client — the web
+│   │                                   #   Resources form and readResourceFromTemplate
+│   │                                   #   (TUI + CLI) — and every client derives its FORM
+│   │                                   #   FIELDS from it too (clients/tui uriTemplateToForm),
+│   │                                   #   which is what makes the sharing real: a form
+│   │                                   #   submits under the names it rendered, so a mangled
+│   │                                   #   name silently drops the value at expansion. The
+│   │                                   #   SDK's UriTemplate is used only to VALIDATE; its
+│   │                                   #   expander is wrong for `{a,b}` (raw-joined),
+│   │                                   #   `{;id}` (operator missing), `{id:3}` (modifier in
+│   │                                   #   the name), `{+v}`/`{#v}` (encodeURI mangles `[`/`]`
+│   │                                   #   and double-encodes pct-triplets), and `{v}`
+│   │                                   #   (encodeURIComponent leaves `!'()*` bare).
+│   │                                   #   Requiredness is per EXPRESSION, not per variable —
+│   │                                   #   requiredGroups + hasRequiredValues — #1919;
 │   │                                   #   modernTaskSchemas.ts: SEP-2663 modern Tasks
 │   │                                   #   extension wire schemas + normalize/handle helpers,
 │   │                                   #   used by the raw-wire tasks/* channel — #1631;

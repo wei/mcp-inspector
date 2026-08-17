@@ -249,20 +249,21 @@ Open the Resources tab and pick **events_by_topic**, then enter `foo/bar`. The r
 
 > The plain `foobar://events` resource is registered deliberately, not as filler. The SDK's `UriTemplate.match()` compiles `{?topic}` to a **required** `\?topic=([^&]+)`, so a template alone cannot serve the blank read — `match("foobar://events")` returns `null`. A real server exposes the unfiltered collection as its own resource; the showcase does the same so that step actually resolves.
 
-All three clients expand through one shared helper, [`core/mcp/uriTemplate.ts`](./core/mcp/uriTemplate.ts) — the web Resources form directly, the TUI and CLI via `InspectorClient.readResourceFromTemplate` — so they cannot disagree about what a template means. It delegates to the SDK's `UriTemplate` for every expression the SDK handles correctly, and takes over any template containing one of the three shapes it does not (each measured against the pinned SDK, not inferred):
+All three clients expand through one shared helper, [`core/mcp/uriTemplate.ts`](./core/mcp/uriTemplate.ts) — the web Resources form directly, the TUI and CLI via `InspectorClient.readResourceFromTemplate` — and all three derive their **form fields** from its parser too, which is the half that makes the sharing real: a form submits values under the names it rendered, so a parser that mangles a name silently drops the value at expansion time.
 
-| Shape | SDK behavior | Correct |
-| --- | --- | --- |
-| `{a,b}` | `foo/bar,q` — raw-joined, unencoded, operator prefix dropped | `foo%2Fbar,q` |
-| `{;id}` | `""` — the `;` operator is not in its list, so the variable parses as `;id` | `;id=7` |
-| `{id:3}` | `""` — the prefix modifier is folded into the name, giving `id:3` | `abc` |
-| `{+v}` / `{#v}` | `encodeURI` mangles reserved `[`/`]` (`[::1]` → `%5B::1%5D`) and double-encodes pct-triplets (`%2F` → `%252F`) | `[::1]`, `%2F` |
+The SDK's `UriTemplate` is still used, but only to *validate* a template (constructing it is what rejects an unclosed expression). Its expander is not, because it is incomplete in five ways — each measured against the pinned SDK, not inferred:
 
-The `;` and `:3` rows matter beyond the URI: a form has to *name* the variables it asks the user to fill, so on the SDK's parse it would render fields literally labelled `;id` and `id:3`. The `+`/`#` row is silent corruption rather than over-escaping — an IPv6 literal or an already-encoded path arrives at the server altered. Takeover is per **template**, not per expression, so the cross-expression `?`-to-`&` rewrite always sees every expression that actually emitted.
+| Shape | SDK behavior |
+| --- | --- |
+| `{a,b}` | raw-joins the values — no encoding, operator prefix dropped |
+| `{;id}` | `;` is missing from its operator list, so the variable parses as `;id` |
+| `{id:3}` | the prefix modifier is folded into the name, giving `id:3` |
+| `{+v}` / `{#v}` | `encodeURI` mangles reserved `[`/`]` (`[::1]` → `%5B::1%5D`) and double-encodes pct-triplets (`%2F` → `%252F`) |
+| `{v}` | `encodeURIComponent` leaves the sub-delims `!'()*` bare, which RFC 6570 requires encoded |
 
-Requiredness is likewise a property of the **expression**, not the variable: RFC 6570 drops undefined names from a multi-name expression, so `{a,b}` with only `a` filled is expandable and the form must not block it. `requiredGroups` returns one entry per non-omittable expression and `hasRequiredValues` asks that each be satisfied by any one of its names — which a per-variable flag cannot express once a name recurs across expressions.
+The `;` and `:3` rows are the ones a user sees directly: on the SDK's parse the form renders fields literally labelled `;id` and `id:3`. The `+`/`#` row is silent corruption rather than over-escaping — an IPv6 literal or an already-encoded path arrives at the server altered.
 
-One consequence worth knowing when writing a test server: the SDK's **matcher** has the mirrored gaps (`partToRegExp` emits a single capture for `{a,b}` and knows no `;`), so an SDK-backed server cannot round-trip those templates whatever the client sends. Emitting a spec-correct URI is the half the client controls; the unit tests cover those shapes directly rather than through a showcase server.
+Requiredness is a property of the **expression**, not the variable: RFC 6570 drops undefined names from a multi-name expression, so `{a,b}` with only `a` filled is expandable and a form must not block it. `requiredGroups` returns one entry per non-omittable expression and `hasRequiredValues` asks that each be satisfied by any one of its names — which no per-variable flag can express once a name recurs across expressions (`{a,b}{a,c}` is satisfied by filling `b` and `c`).
 
 #### Advertised extensions
 

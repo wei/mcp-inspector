@@ -253,9 +253,18 @@ export function ResourceTemplatePanel({
           // required multi-name expression no single field is mandatory either
           // -- any one of them satisfies it -- so say which, rather than
           // marking each one required and blocking valid input.
-          const sharedGroup = groups.find(
-            (names) => names.length > 1 && names.includes(varName),
+          // A name can sit in a singleton required group *and* a shared one
+          // (`x://{a}/{a,b}`). The singleton demands this exact field, so the
+          // "any one of" hint would contradict the disabled submit button --
+          // suppress it and let the field read as plainly required.
+          const individuallyRequired = groups.some(
+            (names) => names.length === 1 && names[0] === varName,
           );
+          const sharedGroup = individuallyRequired
+            ? undefined
+            : groups.find(
+                (names) => names.length > 1 && names.includes(varName),
+              );
           const description = !required
             ? "Optional"
             : sharedGroup

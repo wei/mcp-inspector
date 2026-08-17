@@ -432,3 +432,36 @@ describe("allow-reserved encoding under + and #", () => {
     );
   });
 });
+
+describe("unreserved encoding under the non-reserved operators", () => {
+  // `encodeURIComponent` leaves the sub-delims !'()* bare, but RFC 6570 only
+  // allows *unreserved* characters through for these operators.
+  it.each([
+    ["", "x://"],
+    [".", "x://a."],
+    ["/", "x://a/"],
+  ])("encodes !'()* under the %s operator", (operator, prefix) => {
+    const base = operator === "" ? "x://" : "x://a";
+    expect(
+      expandUriTemplate(`${base}{${operator}v}`, { v: "a!b'c(d)e*f" }),
+    ).toBe(`${prefix}a%21b%27c%28d%29e%2Af`);
+  });
+
+  it("encodes them in a named (query) expression too", () => {
+    expect(expandUriTemplate("x://a{?v}", { v: "a!b" })).toBe("x://a?v=a%21b");
+  });
+
+  it("encodes them in a matrix expression too", () => {
+    expect(expandUriTemplate("x://a{;v}", { v: "a!b" })).toBe("x://a;v=a%21b");
+  });
+
+  it("leaves them alone under + and #, where reserved characters are allowed", () => {
+    expect(expandUriTemplate("x://{+v}", { v: "a!b'c(d)e*f" })).toBe(
+      "x://a!b'c(d)e*f",
+    );
+  });
+
+  it("still leaves the unreserved set itself untouched", () => {
+    expect(expandUriTemplate("x://{v}", { v: "aZ0-._~" })).toBe("x://aZ0-._~");
+  });
+});

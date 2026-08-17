@@ -2,32 +2,32 @@
  * RFC 6570 URI Template parsing and expansion, shared by every client (#1919).
  *
  * This lives in `core/` rather than in a client so the web Resources form, the
- * TUI, and the CLI cannot disagree about what a template means: the form calls
- * {@link templateVariables} / {@link expandUriTemplate} directly, and the TUI
- * and CLI reach the same code through `InspectorClient.readResourceFromTemplate`.
+ * TUI, and the CLI cannot disagree about what a template means. Every one of
+ * them derives its form fields from {@link templateVariables} and expands
+ * through {@link expandUriTemplate} — the web panel directly, the TUI and CLI
+ * via `InspectorClient.readResourceFromTemplate`.
  *
  * ## Why this is not simply `new UriTemplate(t).expand(v)`
  *
- * Expansion is delegated to the SDK's `UriTemplate` for every expression it
- * handles correctly — which is the overwhelmingly common case, and keeping it
- * there means we cannot drift from the SDK on the ordinary path. But its parser
- * and expander are incomplete in three ways that a *form* makes visible,
- * because a form has to name the variables it is asking the user to fill in.
- * Each was measured against the pinned SDK, not inferred:
+ * The SDK's `UriTemplate` is still used, but only to *validate* a template —
+ * constructing it is what rejects an unclosed expression. Its expander is not,
+ * because it is incomplete in ways a form makes visible: a form has to *name*
+ * the variables it asks the user to fill in, so a parser that mangles a name
+ * produces a field nobody can use. Each of these was measured against the
+ * pinned SDK, not inferred:
  *
- * | Shape        | SDK `variableNames` | SDK expansion                     | Correct        |
- * | ------------ | ------------------- | --------------------------------- | -------------- |
- * | `{a,b}`      | `["a","b"]`         | `foo/bar,q` — unencoded, no prefix| `foo%2Fbar,q`  |
- * | `{;id}`      | `[";id"]`           | `""` — operator unknown           | `;id=7`        |
- * | `{id:3}`     | `["id:3"]`          | `""` — modifier folded into name  | `abc`          |
+ * | Shape            | SDK behavior                                              |
+ * | ---------------- | --------------------------------------------------------- |
+ * | `{a,b}`          | raw-joins the values — no encoding, operator prefix dropped |
+ * | `{;id}`          | `;` is not in its operator list, so the variable is `;id`  |
+ * | `{id:3}`         | the prefix modifier is folded into the name, giving `id:3` |
+ * | `{+v}` / `{#v}`  | `encodeURI` mangles reserved `[`/`]` and double-encodes `%` |
+ * | `{v}`            | `encodeURIComponent` leaves the sub-delims `!'()*` bare     |
  *
- * For the last two the damage is not just a wrong URI: the form would render
- * fields literally labelled `;id` and `id:3`, which the user cannot fill in
- * usefully. So this module parses varspecs properly and, **when a template
- * contains any expression the SDK gets wrong, expands that whole template
- * itself** in {@link expandParts} rather than splicing corrected fragments into
- * a template the SDK then re-expands — splicing would leave the SDK's
- * cross-expression `?`-to-`&` rewrite unaware of the fragments we resolved.
+ * An earlier revision delegated the shapes the SDK got right and took over only
+ * the rest. That split is gone: once the encoders themselves differed, the two
+ * paths would have encoded the *same value* differently depending on whether
+ * the expression happened to carry a modifier. One expander, one set of rules.
  */
 
 import { UriTemplate } from "@modelcontextprotocol/client";
@@ -287,11 +287,36 @@ function encodeAllowReserved(value: string): string {
     .join("");
 }
 
+/**
+ * Percent-encodes everything outside RFC 3986's *unreserved* set, which is what
+ * every operator except `+` and `#` calls for.
+ *
+ * `encodeURIComponent` alone is not that set: it leaves `!`, `'`, `(`, `)` and
+ * `*` unescaped. Those are sub-delims, not unreserved, so RFC 6570 requires
+ * them encoded for simple, label, path, matrix and query expansion. They are
+ * substituted afterwards rather than hand-rolled, so `encodeURIComponent` still
+ * does the UTF-8 work for everything else.
+ */
+const FORCE_ENCODED: Record<string, string> = {
+  "!": "%21",
+  "'": "%27",
+  "(": "%28",
+  ")": "%29",
+  "*": "%2A",
+};
+
+function encodeUnreserved(value: string): string {
+  return encodeURIComponent(value).replace(
+    /[!'()*]/g,
+    (char) => FORCE_ENCODED[char],
+  );
+}
+
 /** Encodes one value for its operator: reserved characters survive `+` and `#`. */
 function encodeValue(value: string, operator: string): string {
   return operator === "+" || operator === "#"
     ? encodeAllowReserved(value)
-    : encodeURIComponent(value);
+    : encodeUnreserved(value);
 }
 
 /**
@@ -307,33 +332,6 @@ function renderValue(value: string, spec: VarSpec, operator: string): string {
       ? value
       : Array.from(value).slice(0, spec.maxLength).join("");
   return encodeValue(truncated, operator);
-}
-
-/**
- * True for an expression the SDK would get wrong, and which this module must
- * therefore expand itself. See the table in the module comment.
- */
-function needsOwnExpansion(part: TemplatePart): boolean {
-  if (part.kind !== "expression") return false;
-  return (
-    // Multi-name, non-query: the SDK raw-joins, skipping encoding and prefix.
-    (part.varspecs.length > 1 &&
-      part.operator !== "?" &&
-      part.operator !== "&") ||
-    // The SDK has no `;` operator at all.
-    part.operator === ";" ||
-    // The SDK encodes `+`/`#` values with `encodeURI`, which mangles reserved
-    // `[`/`]` and double-encodes existing pct-triplets — see
-    // `encodeAllowReserved`. Taken over even for a single name so both paths
-    // agree on what these operators mean.
-    part.operator === "+" ||
-    part.operator === "#" ||
-    // The SDK folds everything after a `:` into the variable name. Keyed on the
-    // raw source rather than on a parsed `maxLength` so a *malformed* modifier
-    // (`{id:}`, `{id:abc}`) is caught too: this module drops the modifier and
-    // looks up `id`, while the SDK would look up `id:` and find nothing.
-    part.source.includes(":")
-  );
 }
 
 /** Expands one expression per RFC 6570. Returns "" if no name has a value. */
@@ -426,11 +424,11 @@ export function expandUriTemplateStrict(
   values: Record<string, string>,
 ): string {
   const defined = definedValues(values);
-  const sdkTemplate = new UriTemplate(uriTemplate);
-  const parts = parseUriTemplate(uriTemplate);
-  return parts.some(needsOwnExpansion)
-    ? expandParts(parts, defined)
-    : sdkTemplate.expand(defined);
+  // Constructed purely to validate: this is what throws `Unclosed template
+  // expression`, and callers such as `readResourceFromTemplate` wrap that
+  // error. Its `expand` is deliberately not used — see the module comment.
+  new UriTemplate(uriTemplate);
+  return expandParts(parseUriTemplate(uriTemplate), defined);
 }
 
 /**
