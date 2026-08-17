@@ -138,9 +138,12 @@ describe("primeAndHoldSseStream (#1999)", () => {
 
     s.finishWrite();
     s.abort();
+    // Hono guards re-entry itself, but the helper must not depend on that —
+    // so drive the listener a second time directly.
+    s.abort();
     await withinTick(held);
-    // Hono guards re-entry itself, but the helper must not depend on that.
     expect(cleanups).toBe(1);
+    expect(s.closes).toBe(1);
   });
 
   it("does not reject when cleanup's own close loses the race", async () => {

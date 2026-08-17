@@ -147,8 +147,15 @@ export async function primeAndHoldSseStream(
   stream: PrimableSseStream,
   cleanup: () => void,
 ): Promise<void> {
+  let done = false;
   const aborted = new Promise<void>((resolve) => {
     stream.onAbort(() => {
+      // Hono's `abort()` guards its own re-entry, but the guard belongs here
+      // too: this helper's contract is exactly-once teardown, and running a
+      // caller's cleanup twice would double-delete a subscriber that has
+      // since been re-added by a reconnect.
+      if (done) return;
+      done = true;
       cleanup();
       closeAbortedStream(stream);
       resolve();
