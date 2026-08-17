@@ -641,6 +641,44 @@ describe("unmetRequiredGroups", () => {
   });
 });
 
+describe("prefix modifier truncation", () => {
+  // RFC 6570 2.4.1 counts characters, and says a pct-encoded triplet counts as
+  // ONE. Truncating by code point cut the sixth triplet in half -- measured
+  // before the fix, `{+v:5}` over "%61%62%63%64%65%66" produced "x%61%256",
+  // because the orphaned "%6" was no longer a triplet and its `%` was then
+  // (correctly) encoded. A byte the caller never asked for.
+  it.each([
+    ["+", "x{+v:5}", "x%61%62%63%64%65"],
+    ["#", "x{#v:5}", "x#%61%62%63%64%65"],
+  ])("keeps pct-triplets whole under %s", (_op, template, expected) => {
+    expect(expandUriTemplate(template, { v: "%61%62%63%64%65%66" })).toBe(
+      expected,
+    );
+  });
+
+  it("counts a triplet as three characters where the encoder escapes it", () => {
+    // Under a non-reserved operator `%` is escaped anyway (`%61` -> `%2561`),
+    // so the three characters really are three and grouping them would
+    // mis-count the prefix.
+    expect(expandUriTemplate("x/{v:3}", { v: "%61%62" })).toBe("x/%2561");
+  });
+
+  it("truncates by code point, not UTF-16 code unit", () => {
+    // An astral character is one character; `slice` would cut the surrogate
+    // pair in half and yield a lone surrogate.
+    expect(
+      expandUriTemplate("x/{v:2}", { v: "\u{1F600}\u{1F601}\u{1F602}" }),
+    ).toBe("x/%F0%9F%98%80%F0%9F%98%81");
+    expect(expandUriTemplate("x{+v:2}", { v: "\u{1F600}\u{1F601}" })).toBe(
+      "x%F0%9F%98%80%F0%9F%98%81",
+    );
+  });
+
+  it("leaves a value shorter than the prefix untouched", () => {
+    expect(expandUriTemplate("x{+v:9}", { v: "%61%62" })).toBe("x%61%62");
+  });
+});
+
 describe("a value defined as the empty string", () => {
   // RFC 6570 distinguishes an *undefined* variable (the expression is omitted)
   // from one defined as "". The expander used to collapse the two, which made

@@ -434,25 +434,56 @@ function encodeUnreserved(value: string): string {
   );
 }
 
+/**
+ * The two operators whose expansion preserves RFC 3986 *reserved* characters
+ * and existing pct-triplets rather than encoding them (RFC 6570 §3.2.3, §3.2.4).
+ */
+function allowsReserved(operator: string): boolean {
+  return operator === "+" || operator === "#";
+}
+
 /** Encodes one value for its operator: reserved characters survive `+` and `#`. */
 function encodeValue(value: string, operator: string): string {
-  return operator === "+" || operator === "#"
+  return allowsReserved(operator)
     ? encodeAllowReserved(value)
     : encodeUnreserved(value);
 }
 
 /**
+ * Splits a value into the units a prefix modifier counts.
+ *
+ * RFC 6570 §2.4.1 counts *characters*, and is explicit that "a pct-encoded
+ * triplet counts as a single character" — so `{+v:5}` over `%61%62%63%64%65%66`
+ * must stop after five whole triplets. Splitting on code points alone cut the
+ * sixth in half, and the trailing `%6` was then no longer a triplet, so
+ * `encodeAllowReserved` correctly encoded its `%`: the value went out as
+ * `%61%256`, a byte the server never asked for.
+ *
+ * Triplets are units only under `+` and `#`. Everywhere else the encoder
+ * escapes a `%` anyway (`%61` becomes `%2561`), so the three characters are
+ * three characters and grouping them would mis-count the prefix.
+ *
+ * The `u` flag makes the alternation match by code point, so an astral
+ * character is one unit rather than a surrogate pair that truncation could
+ * split — the reason `Array.from` was used here in the first place.
+ */
+function prefixUnits(value: string, operator: string): string[] {
+  if (!allowsReserved(operator)) return Array.from(value);
+  return value.match(/%[0-9A-Fa-f]{2}|[\s\S]/gu) ?? [];
+}
+
+/**
  * Applies a prefix modifier, then encodes.
  *
- * Truncation is by *code point* (`Array.from`), not by `slice`: RFC 6570 counts
- * the prefix in characters, and `String.prototype.slice` counts UTF-16 code
- * units, so it can cut an astral character in half and yield a lone surrogate.
+ * Truncation counts the units {@link prefixUnits} defines rather than using
+ * `String.prototype.slice`, which counts UTF-16 code units and so can cut an
+ * astral character in half and yield a lone surrogate.
  */
 function renderValue(value: string, spec: VarSpec, operator: string): string {
   const truncated =
     spec.maxLength === undefined
       ? value
-      : Array.from(value).slice(0, spec.maxLength).join("");
+      : prefixUnits(value, operator).slice(0, spec.maxLength).join("");
   return encodeValue(truncated, operator);
 }
 
