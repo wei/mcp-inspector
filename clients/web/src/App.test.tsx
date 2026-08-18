@@ -579,6 +579,8 @@ import {
 import * as McpIndex from "@inspector/core/mcp/index.js";
 import * as FetchLogModule from "@inspector/core/mcp/state/fetchRequestLogState.js";
 import { useManagedRequestorTasks } from "@inspector/core/react/useManagedRequestorTasks.js";
+import { useManagedTools } from "@inspector/core/react/useManagedTools.js";
+import { usePagedTools } from "@inspector/core/react/usePagedTools.js";
 import { useMessageLog } from "@inspector/core/react/useMessageLog.js";
 import { useInspectorClient } from "@inspector/core/react/useInspectorClient.js";
 import { useSettingsDraft } from "@inspector/core/react/useSettingsDraft.js";
@@ -2420,5 +2422,158 @@ describe("App paginated list pagination toggle (#1721)", () => {
       paginatedLists?: boolean;
     };
     expect(lastPush?.paginatedLists).toBeFalsy();
+  });
+});
+
+// A background command runs through `runCommandInBackground`, which owns the
+// rejection. Before #2049 the 17 `void runWithCommandAuthRecovery(...)` sites
+// had no handler, so any non-auth failure of the wrapped operation became an
+// unhandled rejection in the browser — invisible to the type-aware
+// no-floating-promises rule (`void` is its sanctioned suppression) and fatal to
+// `smoke:web:browser`, which hard-fails on exactly that signal.
+describe("App background command rejections (#2049)", () => {
+  const LIST_FAILURE = new Error("list boom");
+
+  /**
+   * Record process-level unhandled rejections for the duration of a test.
+   * Asserting on the captured list — rather than relying on vitest failing the
+   * whole run — is what attributes a regression to this test rather than to
+   * whichever file happened to be running when the rejection surfaced.
+   */
+  const captureUnhandledRejections = () => {
+    const seen: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      seen.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    return {
+      seen,
+      stop: () => {
+        process.off("unhandledRejection", onUnhandled);
+      },
+    };
+  };
+
+  // Node reports an unhandled rejection at the end of the turn, so drain the
+  // macrotask queue before asserting that none was reported.
+  const settleRejections = async () => {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  };
+
+  beforeEach(() => {
+    clientInstances.length = 0;
+    notificationsMock.show.mockClear();
+  });
+
+  afterEach(() => {
+    // Restore the module defaults the other blocks render against.
+    vi.mocked(useManagedTools).mockReturnValue({
+      tools: [{ name: "get_acts", inputSchema: { type: "object" } }],
+      error: null,
+      listChanged: false,
+      refresh: vi.fn().mockResolvedValue([]),
+      clearListChanged: clearToolsListChangedSpy,
+    });
+    vi.mocked(usePagedTools).mockReturnValue({
+      tools: [],
+      nextCursor: undefined,
+      pageCount: 0,
+      error: null,
+      loadPage: vi.fn(() =>
+        Promise.resolve({ tools: [], nextCursor: undefined }),
+      ),
+      clear: vi.fn(),
+    });
+  });
+
+  const connect = async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+    return user;
+  };
+
+  it("does not leak an unhandled rejection when an all-pages Refresh fails", async () => {
+    vi.mocked(useManagedTools).mockReturnValue({
+      tools: [],
+      error: LIST_FAILURE,
+      listChanged: false,
+      refresh: vi.fn().mockRejectedValue(LIST_FAILURE),
+      clearListChanged: clearToolsListChangedSpy,
+    });
+    const rejections = captureUnhandledRejections();
+    try {
+      const user = await connect();
+      await user.click(screen.getByText("refresh-tools"));
+      await settleRejections();
+      expect(rejections.seen).toEqual([]);
+    } finally {
+      rejections.stop();
+    }
+    // The panel already renders the failure with a Retry, so no toast is added
+    // on top of it — that is the whole reason this site swallows the rejection.
+    expect(notificationsMock.show).not.toHaveBeenCalled();
+  });
+
+  it("does not leak an unhandled rejection when a paginated Refresh or Load-next-page fails", async () => {
+    vi.mocked(usePagedTools).mockReturnValue({
+      tools: [],
+      // A cursor is what makes Load-next-page actually fetch.
+      nextCursor: "cursor-1",
+      pageCount: 1,
+      error: LIST_FAILURE,
+      loadPage: vi.fn().mockRejectedValue(LIST_FAILURE),
+      clear: vi.fn(),
+    });
+    const rejections = captureUnhandledRejections();
+    try {
+      const user = await connect();
+      // Flipping the mode drives its own page-1 load, which fails too.
+      await user.click(screen.getByText("paginated-on"));
+      await waitFor(() =>
+        expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true"),
+      );
+      await user.click(screen.getByText("refresh-tools"));
+      await user.click(screen.getByText("load-more-tools"));
+      await settleRejections();
+      expect(rejections.seen).toEqual([]);
+    } finally {
+      rejections.stop();
+    }
+  });
+
+  it("toasts a set-log-level failure instead of leaking it", async () => {
+    const rejections = captureUnhandledRejections();
+    try {
+      const user = await connect();
+      // Single assertion: the fake client IS an EventTarget, so narrowing it
+      // to that intersection needs no `as unknown as` detour.
+      const client = clientInstances[0] as EventTarget & {
+        setLoggingLevel: ReturnType<typeof vi.fn>;
+      };
+      client.setLoggingLevel.mockRejectedValueOnce(new Error("no logging"));
+
+      await user.click(screen.getByText("set-level"));
+
+      await waitFor(() =>
+        expect(notificationsMock.show).toHaveBeenCalledWith(
+          expect.objectContaining({
+            title: "Failed to set log level",
+            message: "no logging",
+            color: "red",
+          }),
+        ),
+      );
+      await settleRejections();
+      expect(rejections.seen).toEqual([]);
+    } finally {
+      rejections.stop();
+    }
   });
 });
