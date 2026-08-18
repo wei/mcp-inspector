@@ -1031,18 +1031,21 @@ function App() {
     tools: pagedTools,
     nextCursor: pagedToolsCursor,
     pageCount: pagedToolsPageCount,
+    error: pagedToolsLoadError,
     loadPage: loadToolsPage,
   } = usePagedTools(inspectorClient, pagedToolsState);
   const {
     prompts: pagedPrompts,
     nextCursor: pagedPromptsCursor,
     pageCount: pagedPromptsPageCount,
+    error: pagedPromptsLoadError,
     loadPage: loadPromptsPage,
   } = usePagedPrompts(inspectorClient, pagedPromptsState);
   const {
     resources: pagedResources,
     nextCursor: pagedResourcesCursor,
     pageCount: pagedResourcesPageCount,
+    error: pagedResourcesLoadError,
     loadPage: loadResourcesPage,
   } = usePagedResources(inspectorClient, pagedResourcesState);
   // The active server's persisted paginated setting drives the display mode.
@@ -1073,9 +1076,11 @@ function App() {
     paginated: paginatedLists,
     managedItems: managedTools,
     managedRefresh: refreshTools,
+    managedError: toolsLoadError,
     pagedItems: pagedTools,
     pagedNextCursor: pagedToolsCursor,
     pagedPageCount: pagedToolsPageCount,
+    pagedError: pagedToolsLoadError,
     loadPage: loadToolsPage,
   });
   const promptsPagination = usePaginatedList({
@@ -1083,9 +1088,11 @@ function App() {
     paginated: paginatedLists,
     managedItems: managedPrompts,
     managedRefresh: refreshPrompts,
+    managedError: promptsLoadError,
     pagedItems: pagedPrompts,
     pagedNextCursor: pagedPromptsCursor,
     pagedPageCount: pagedPromptsPageCount,
+    pagedError: pagedPromptsLoadError,
     loadPage: loadPromptsPage,
   });
   const resourcesPagination = usePaginatedList({
@@ -1093,9 +1100,11 @@ function App() {
     paginated: paginatedLists,
     managedItems: managedResources,
     managedRefresh: refreshResources,
+    managedError: resourcesLoadError,
     pagedItems: pagedResources,
     pagedNextCursor: pagedResourcesCursor,
     pagedPageCount: pagedResourcesPageCount,
+    pagedError: pagedResourcesLoadError,
     loadPage: loadResourcesPage,
   });
   const tools = toolsPagination.items;
@@ -4407,9 +4416,11 @@ function App() {
           toolsListChanged={toolsListChanged}
           promptsListChanged={promptsListChanged}
           resourcesListChanged={resourcesListChanged}
-          toolsLoadError={toolsLoadError}
-          promptsLoadError={promptsLoadError}
-          resourcesLoadError={resourcesLoadError ?? resourceTemplatesLoadError}
+          toolsLoadError={toolsPagination.error}
+          promptsLoadError={promptsPagination.error}
+          resourcesLoadError={
+            resourcesPagination.error ?? resourceTemplatesLoadError
+          }
           subscriptions={subscriptions}
           subscriptionStreamState={subscriptionStreamState}
           logs={logs}

@@ -6,7 +6,7 @@ import type {
 } from "../mcp/state/managedResourceTemplatesState.js";
 import type { ResourceTemplateType as ResourceTemplate } from "@modelcontextprotocol/client";
 import type { TypedEventGeneric } from "../mcp/typedEventTarget.js";
-import { useManagedListError } from "./useManagedListError.js";
+import { useListError } from "./useListError.js";
 
 export interface UseManagedResourceTemplatesResult {
   /**
@@ -57,7 +57,7 @@ export function useManagedResourceTemplates(
     };
   }, [managedResourceTemplatesState]);
 
-  const error = useManagedListError(managedResourceTemplatesState);
+  const error = useListError(managedResourceTemplatesState);
 
   const refresh = useCallback(async (): Promise<ResourceTemplate[]> => {
     if (!managedResourceTemplatesState || !client) return [];

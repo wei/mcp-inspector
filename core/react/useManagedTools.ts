@@ -4,7 +4,7 @@ import type { ManagedToolsState } from "../mcp/state/managedToolsState.js";
 import type { ManagedToolsStateEventMap } from "../mcp/state/managedToolsState.js";
 import type { Tool } from "@modelcontextprotocol/client";
 import type { TypedEventGeneric } from "../mcp/typedEventTarget.js";
-import { useManagedListError } from "./useManagedListError.js";
+import { useListError } from "./useListError.js";
 
 export interface UseManagedToolsResult {
   /**
@@ -72,7 +72,7 @@ export function useManagedTools(
     };
   }, [managedToolsState]);
 
-  const error = useManagedListError(managedToolsState);
+  const error = useListError(managedToolsState);
 
   const refresh = useCallback(async (): Promise<Tool[]> => {
     if (!managedToolsState || !client) return [];

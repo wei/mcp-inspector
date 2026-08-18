@@ -1,35 +1,46 @@
 import { useCallback, useSyncExternalStore } from "react";
-import type { ManagedListEventMap } from "../mcp/state/managedListState.js";
 import type { TypedEventGeneric } from "../mcp/typedEventTarget.js";
 
 /**
- * The slice of a managed list state this hook needs. Declared structurally
- * rather than as `ManagedListState<T, M>` so the four list hooks can share it
- * without threading their item type through — the error is the same shape for
- * all of them.
+ * The single event both list-state families expose for this. Declared here
+ * rather than imported from either so the hook depends on neither: the managed
+ * (aggregate) states and the paged states each carry an `errorChange` of this
+ * shape, and this is the whole contract the hook needs.
  */
-export interface ManagedListErrorSource {
+interface ListErrorEventMap {
+  errorChange: Error | null;
+}
+
+/**
+ * The slice of a list state this hook needs. Declared structurally rather than
+ * as a concrete state class so every list hook can share it without threading
+ * its item type through — the error is the same shape for all of them.
+ */
+export interface ListErrorSource {
   getError(): Error | null;
   addEventListener(
     type: "errorChange",
     listener: (
-      event: TypedEventGeneric<ManagedListEventMap, "errorChange">,
+      event: TypedEventGeneric<ListErrorEventMap, "errorChange">,
     ) => void,
   ): void;
   removeEventListener(
     type: "errorChange",
     listener: (
-      event: TypedEventGeneric<ManagedListEventMap, "errorChange">,
+      event: TypedEventGeneric<ListErrorEventMap, "errorChange">,
     ) => void,
   ): void;
 }
 
 /**
- * Subscribe to a managed list state's last-fetch error (#1953).
+ * Subscribe to a list state's last-fetch error (#1953, #1998).
  *
- * Shared by the four `useManaged*` hooks so a list load that fails — including
- * the connect-time one, which has no caller to await it — reaches the UI
- * instead of only the console. `null` means the last fetch succeeded.
+ * Shared by the four `useManaged*` hooks and the three `usePaged*` hooks so a
+ * list load that fails — including the connect-time one, which has no caller
+ * to await it — reaches the UI instead of only the console. `null` means the
+ * last fetch succeeded. Both families need it because the paged stores are the
+ * display source in paginated mode, where the managed stores deliberately
+ * never fetch (#1998).
  *
  * Built on `useSyncExternalStore` rather than the `useState` + `useEffect`
  * subscribe pattern the sibling hooks use. Re-syncing state from the `state`
@@ -44,9 +55,7 @@ export interface ManagedListErrorSource {
  * which it is: it returns the stored `Error` instance itself (or `null`), never
  * a fresh object.
  */
-export function useManagedListError(
-  state: ManagedListErrorSource | null,
-): Error | null {
+export function useListError(state: ListErrorSource | null): Error | null {
   const subscribe = useCallback(
     (onStoreChange: () => void) => {
       if (!state) return () => {};

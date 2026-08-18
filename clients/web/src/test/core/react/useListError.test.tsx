@@ -2,12 +2,12 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import { FakeInspectorClient } from "@inspector/core/mcp/__tests__/fakeInspectorClient";
 import { ManagedToolsState } from "@inspector/core/mcp/state/managedToolsState";
-import { useManagedListError } from "@inspector/core/react/useManagedListError";
+import { useListError } from "@inspector/core/react/useListError";
 
 // The shared subscription behind the four `useManaged*` hooks' `error` field
 // (#1953). Exercised through ManagedToolsState — any managed list would do,
 // since the error lives entirely in the shared base.
-describe("useManagedListError", () => {
+describe("useListError", () => {
   let client: FakeInspectorClient;
   let state: ManagedToolsState;
   const boom = new Error("Invalid result for tools/list: ttlMs required");
@@ -21,12 +21,12 @@ describe("useManagedListError", () => {
   });
 
   it("returns null when there is no state", () => {
-    const { result } = renderHook(() => useManagedListError(null));
+    const { result } = renderHook(() => useListError(null));
     expect(result.current).toBeNull();
   });
 
   it("returns null before any load fails", () => {
-    const { result } = renderHook(() => useManagedListError(state));
+    const { result } = renderHook(() => useListError(state));
     expect(result.current).toBeNull();
   });
 
@@ -34,12 +34,12 @@ describe("useManagedListError", () => {
     client.listAllTools.mockRejectedValueOnce(boom);
     await expect(state.refresh()).rejects.toThrow(boom);
 
-    const { result } = renderHook(() => useManagedListError(state));
+    const { result } = renderHook(() => useListError(state));
     expect(result.current).toBe(boom);
   });
 
   it("updates when the state dispatches errorChange", async () => {
-    const { result } = renderHook(() => useManagedListError(state));
+    const { result } = renderHook(() => useListError(state));
 
     client.listAllTools.mockRejectedValueOnce(boom);
     await act(async () => {
@@ -51,7 +51,7 @@ describe("useManagedListError", () => {
   it("clears when a later load succeeds", async () => {
     client.listAllTools.mockRejectedValueOnce(boom);
     await expect(state.refresh()).rejects.toThrow(boom);
-    const { result } = renderHook(() => useManagedListError(state));
+    const { result } = renderHook(() => useListError(state));
     expect(result.current).toBe(boom);
 
     await act(async () => {
@@ -65,7 +65,7 @@ describe("useManagedListError", () => {
     await expect(state.refresh()).rejects.toThrow(boom);
 
     const { result, rerender } = renderHook(
-      ({ s }: { s: ManagedToolsState | null }) => useManagedListError(s),
+      ({ s }: { s: ManagedToolsState | null }) => useListError(s),
       { initialProps: { s: state as ManagedToolsState | null } },
     );
     expect(result.current).toBe(boom);
@@ -75,7 +75,7 @@ describe("useManagedListError", () => {
   });
 
   it("unsubscribes on unmount", async () => {
-    const { unmount } = renderHook(() => useManagedListError(state));
+    const { unmount } = renderHook(() => useListError(state));
     unmount();
 
     client.listAllTools.mockRejectedValueOnce(boom);
@@ -98,7 +98,7 @@ describe("useManagedListError", () => {
     const other = new ManagedToolsState(client, 0);
 
     const { result, rerender } = renderHook(
-      ({ s }: { s: ManagedToolsState }) => useManagedListError(s),
+      ({ s }: { s: ManagedToolsState }) => useListError(s),
       { initialProps: { s: state } },
     );
     expect(result.current).toBe(boom);
