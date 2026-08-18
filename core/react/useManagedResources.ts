@@ -6,7 +6,7 @@ import type {
 } from "../mcp/state/managedResourcesState.js";
 import type { Resource } from "@modelcontextprotocol/client";
 import type { TypedEventGeneric } from "../mcp/typedEventTarget.js";
-import { useManagedListError } from "./useManagedListError.js";
+import { useListError } from "./useListError.js";
 
 export interface UseManagedResourcesResult {
   /**
@@ -83,7 +83,7 @@ export function useManagedResources(
     };
   }, [managedResourcesState]);
 
-  const error = useManagedListError(managedResourcesState);
+  const error = useListError(managedResourcesState);
 
   const refresh = useCallback(async (): Promise<Resource[]> => {
     if (!managedResourcesState || !client) return [];
