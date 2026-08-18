@@ -2552,7 +2552,9 @@ describe("App background command rejections (#2049)", () => {
     const rejections = captureUnhandledRejections();
     try {
       const user = await connect();
-      const client = clientInstances[0] as unknown as {
+      // Single assertion: the fake client IS an EventTarget, so narrowing it
+      // to that intersection needs no `as unknown as` detour.
+      const client = clientInstances[0] as EventTarget & {
         setLoggingLevel: ReturnType<typeof vi.fn>;
       };
       client.setLoggingLevel.mockRejectedValueOnce(new Error("no logging"));
