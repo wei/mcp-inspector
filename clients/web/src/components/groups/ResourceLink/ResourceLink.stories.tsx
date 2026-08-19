@@ -45,10 +45,12 @@ export const Static: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    expect(canvas.getByText(URI)).toBeInTheDocument();
+    await expect(canvas.getByText(URI)).toBeInTheDocument();
     // Copy button is present; there's no expand control in the static card.
-    expect(canvas.getByRole("button", { name: "Copy" })).toBeInTheDocument();
-    expect(
+    await expect(
+      canvas.getByRole("button", { name: "Copy" }),
+    ).toBeInTheDocument();
+    await expect(
       canvas.queryByRole("button", { name: /^Expand resource/ }),
     ).not.toBeInTheDocument();
   },

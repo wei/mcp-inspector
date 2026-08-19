@@ -9,7 +9,6 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
-import open from "open";
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
@@ -22,6 +21,7 @@ import type { WebServerConfig } from "./web-server-config.js";
 import {
   webServerConfigToInitialPayload,
   printServerBanner,
+  openBrowser,
 } from "./web-server-config.js";
 import type { WebServerHandle } from "./types.js";
 
@@ -125,7 +125,9 @@ export async function startHonoServer(
         sandboxUrl ?? undefined,
       );
       if (config.autoOpen) {
-        open(url);
+        // Never a bare `open(url)`: this callback is synchronous, so a
+        // rejection would escape it. See openBrowser.
+        openBrowser(url);
       }
     },
   );

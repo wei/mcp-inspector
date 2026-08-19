@@ -12,6 +12,7 @@ import type {
 } from "./composable-test-server.js";
 import {
   createEchoTool,
+  createNullableFieldsTool,
   createGetEnvTool,
   createAddTool,
   createGetSumTool,
@@ -28,6 +29,7 @@ import {
   createMrtrSamplingTool,
   createMrtrLoopTool,
   createMrtrEdgeCaseTool,
+  createMrtrEmptyResultTool,
   createCollectUrlElicitationTool,
   createUrlElicitationFormTool,
   createSendNotificationTool,
@@ -61,6 +63,8 @@ import {
   createFileResourceTemplate,
   createUserResourceTemplate,
   createNumberedResourceTemplates,
+  createRfc6570ResourceTemplates,
+  createRfc6570BaseResource,
   createSimplePrompt,
   createArgsPrompt,
   createNumberedPrompts,
@@ -91,6 +95,9 @@ function resolveToolPreset(
   switch (name) {
     case "echo":
       return createEchoTool();
+    case "record_shipment":
+    case "nullable_fields":
+      return createNullableFieldsTool();
     case "get-env":
     case "get_env":
       return createGetEnvTool();
@@ -147,6 +154,8 @@ function resolveToolPreset(
       return createMrtrLoopTool();
     case "mrtr_edge":
       return createMrtrEdgeCaseTool();
+    case "mrtr_empty":
+      return createMrtrEmptyResultTool();
     case "collect_url_elicitation":
       return createCollectUrlElicitationTool();
     case "url_elicitation_form":
@@ -238,6 +247,8 @@ function resolveResourcePreset(
       return createNumberedResources(Number(get("count")) || 3);
     case "mcp_app_demo_widget":
       return createMcpAppDemoResource();
+    case "rfc6570_base":
+      return createRfc6570BaseResource();
     default:
       throw new Error(`Unknown resource preset: ${name}`);
   }
@@ -256,6 +267,8 @@ function resolveResourceTemplatePreset(
       return createUserResourceTemplate();
     case "numbered_resource_templates":
       return createNumberedResourceTemplates(Number(get("count")) || 3);
+    case "rfc6570_templates":
+      return createRfc6570ResourceTemplates();
     default:
       throw new Error(`Unknown resource template preset: ${name}`);
   }

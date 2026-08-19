@@ -144,6 +144,76 @@ describe("useInspectorClient", () => {
     expect(result.current.excludedTools).toEqual([]);
   });
 
+  it("subscribes to malformedListItemsChange and updates (#1909)", () => {
+    const client = new FakeInspectorClient();
+    const { result } = renderHook(() => useInspectorClient(client));
+    expect(result.current.malformedListItems).toEqual([]);
+    const malformed = [
+      {
+        method: "resources/templates/list",
+        index: 1,
+        label: "array_annotations",
+        reason: "annotations: Invalid input (expected object)",
+      },
+    ];
+    act(() => {
+      client.setMalformedListItems(malformed);
+    });
+    expect(result.current.malformedListItems).toEqual(malformed);
+  });
+
+  it("seeds malformedListItems from the client it is given (#1909)", () => {
+    // A client that already salvaged before this hook mounted (a screen opened
+    // after the connect-time list load) must show the report immediately.
+    const client = new FakeInspectorClient({ status: "connected" });
+    const malformed = [
+      { method: "tools/list", index: 0, reason: "name: expected string" },
+    ];
+    client.setMalformedListItems(malformed);
+    const { result } = renderHook(() => useInspectorClient(client));
+    expect(result.current.malformedListItems).toEqual(malformed);
+  });
+
+  it("resets malformedListItems to [] when client becomes null (#1909)", () => {
+    const client = new FakeInspectorClient({ status: "connected" });
+    client.setMalformedListItems([
+      { method: "tools/list", index: 0, reason: "name: expected string" },
+    ]);
+    const { result, rerender } = renderHook(({ c }) => useInspectorClient(c), {
+      initialProps: { c: client as FakeInspectorClient | null },
+    });
+    expect(result.current.malformedListItems.length).toBe(1);
+    rerender({ c: null });
+    expect(result.current.malformedListItems).toEqual([]);
+  });
+
+  it("re-seeds malformedListItems on a client swap, not the old server's (#1909)", () => {
+    const first = new FakeInspectorClient({ status: "connected" });
+    first.setMalformedListItems([
+      { method: "tools/list", index: 0, reason: "name: expected string" },
+    ]);
+    const second = new FakeInspectorClient({ status: "connected" });
+    const { result, rerender } = renderHook(({ c }) => useInspectorClient(c), {
+      initialProps: { c: first as FakeInspectorClient },
+    });
+    expect(result.current.malformedListItems).toHaveLength(1);
+    rerender({ c: second });
+    expect(result.current.malformedListItems).toEqual([]);
+  });
+
+  it("stops listening for malformedListItemsChange after unmount (#1909)", () => {
+    const client = new FakeInspectorClient({ status: "connected" });
+    const { result, unmount } = renderHook(() => useInspectorClient(client));
+    unmount();
+    act(() => {
+      client.setMalformedListItems([
+        { method: "tools/list", index: 0, reason: "name: expected string" },
+      ]);
+    });
+    // A listener left attached would update state on an unmounted tree.
+    expect(result.current.malformedListItems).toEqual([]);
+  });
+
   it("resets protocolEra / discoverResult to defaults when client becomes null", () => {
     const client = new FakeInspectorClient({
       status: "connected",

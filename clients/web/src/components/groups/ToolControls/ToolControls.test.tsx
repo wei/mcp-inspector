@@ -83,7 +83,7 @@ describe("ToolControls", () => {
       <ToolControls {...baseProps} onSelectTool={onSelectTool} />,
     );
     await user.click(screen.getByText("git_status"));
-    expect(onSelectTool).toHaveBeenCalledWith("git_status");
+    expect(onSelectTool).toHaveBeenCalledWith("2:git_status");
   });
 
   it("does not invoke onSelectTool when the already-selected tool is clicked", async () => {
@@ -92,12 +92,46 @@ describe("ToolControls", () => {
     renderWithMantine(
       <ToolControls
         {...baseProps}
-        selectedName="git_status"
+        selectedKey="2:git_status"
         onSelectTool={onSelectTool}
       />,
     );
     await user.click(screen.getByText("git_status"));
     expect(onSelectTool).not.toHaveBeenCalled();
+  });
+
+  it("selects each copy of a duplicated tool name independently", async () => {
+    // A `tools/list` may repeat a name. Selection is keyed by row identity, so
+    // selecting the first copy must leave the second clickable and unhighlighted
+    // (#2001 — with a name-keyed selection both highlighted and neither of the
+    // later copies could be opened).
+    const user = userEvent.setup();
+    const onSelectTool = vi.fn();
+    const duplicated: Tool[] = [
+      { name: "get_weather", inputSchema: { type: "object" } },
+      { name: "echo", inputSchema: { type: "object" } },
+      { name: "get_weather", inputSchema: { type: "object" } },
+    ];
+    renderWithMantine(
+      <ToolControls
+        {...baseProps}
+        tools={duplicated}
+        selectedKey="0:get_weather"
+        onSelectTool={onSelectTool}
+      />,
+    );
+    const rows = screen.getAllByText("get_weather");
+    expect(rows).toHaveLength(2);
+    // Only the selected row carries the highlight background.
+    const highlighted = rows
+      .map((row) => row.closest("button"))
+      .filter((button) => button?.style.background !== "");
+    expect(highlighted).toHaveLength(1);
+    expect(highlighted[0]).toBe(rows[0]?.closest("button"));
+
+    // The second copy is still clickable, and reports its own row key.
+    await user.click(rows[1] as HTMLElement);
+    expect(onSelectTool).toHaveBeenCalledWith("2:get_weather");
   });
 
   it("does not show the list-changed indicator when listChanged is false", () => {

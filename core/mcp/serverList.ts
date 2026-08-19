@@ -164,6 +164,9 @@ type StoredInspectorFields = Pick<
  * Convert a stored stdio `env` record into the controlled key/value rows the
  * settings form edits, preserving the object's key insertion order. Empty when
  * absent. Inverse of `envPairsToRecord`.
+ *
+ * The transform is generic key/value, so the OAuth authorization-parameters
+ * record (#2018) reuses it rather than growing a second copy.
  */
 export function envRecordToPairs(
   env: Record<string, string> | undefined,
@@ -176,6 +179,9 @@ export function envRecordToPairs(
  * with an empty/whitespace key (the form lets users leave a new row blank
  * mid-edit). Inverse of `envRecordToPairs`. Used by the `/api/servers` PUT
  * write-through that maps `settings.env` back onto `config.env`.
+ *
+ * Generic key/value like its inverse, so the OAuth authorization-parameters
+ * rows (#2018) collapse through it too.
  */
 export function envPairsToRecord(
   pairs: { key: string; value: string }[],
@@ -186,6 +192,110 @@ export function envPairsToRecord(
     out[key] = value;
   }
   return out;
+}
+
+/**
+ * Validate a server's `oauth.authorizationParams` as it comes off disk, or
+ * `undefined` when there is nothing usable. (#2018)
+ *
+ * `StoredMCPServer` types this as `Record<string, string>`, but that is a
+ * compile-time promise a hand-edited `mcp.json` does not keep — and only the web
+ * client's `/api/servers` route checks it, while the CLI and TUI read the file
+ * directly. Without this, `authorizationParams: "oops"` enumerates as the
+ * character-indexed pairs `0=o, 1=o, …` and `{ audience: 5 }` reaches
+ * `URLSearchParams.set`, which stringifies it — either way the Inspector sends
+ * query parameters the user never wrote. Each rejection warns, following
+ * `cleanRoots` above, which guards the same class for `roots`.
+ */
+export function cleanAuthorizationParams(
+  params: Record<string, string> | undefined,
+): Record<string, string> | undefined {
+  if (params === undefined) return undefined;
+  // Keep: unreachable per the parameter type, reachable from disk.
+  if (typeof params !== "object" || params === null || Array.isArray(params)) {
+    console.warn(
+      "Ignoring `oauth.authorizationParams`: expected an object of string values, got",
+      Array.isArray(params) ? "array" : typeof params,
+    );
+    return undefined;
+  }
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(params)) {
+    if (typeof value !== "string") {
+      console.warn(
+        `Dropping \`oauth.authorizationParams.${key}\`: expected a string value, got ${typeof value}.`,
+      );
+      continue;
+    }
+    if (key.trim() === "") continue;
+    out[key] = value;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * Collapse a server's custom authorization-parameter rows into the record the
+ * `InspectorClientOptions.oauth.authorizationParams` option takes, or
+ * `undefined` when nothing survives (no rows, or every row blank-keyed). Shared
+ * by the web (`App.tsx`) and Node (`buildRunnerClientAuthOptions`) paths so both
+ * derive the option identically. (#2018)
+ */
+export function oauthAuthorizationParamsFromSettings(
+  settings: Pick<InspectorServerSettings, "oauthAuthorizationParams">,
+): Record<string, string> | undefined {
+  if (!settings.oauthAuthorizationParams) return undefined;
+  const record = envPairsToRecord(settings.oauthAuthorizationParams);
+  return Object.keys(record).length > 0 ? record : undefined;
+}
+
+/**
+ * Validate one of a server's `oauth` endpoint overrides as it comes off disk,
+ * or `undefined` when there is nothing usable. (#1906)
+ *
+ * Same reasoning as `cleanAuthorizationParams` above: `StoredMCPServer` types
+ * these as `string`, but that is a compile-time promise a hand-edited file does
+ * not keep, and the CLI/TUI read `mcp.json` directly. A non-string reaches
+ * `oauthEndpointOverridesFromSettings`, which calls `.trim()` on it — so without
+ * this the whole server list fails to load. URL *validity* is not checked here;
+ * that happens where the override is applied, so a typo drops one field with a
+ * warning instead of anything louder.
+ */
+export function cleanEndpointOverride(
+  value: string | undefined,
+  field: "authorizationUrl" | "tokenUrl",
+): string | undefined {
+  if (value === undefined) return undefined;
+  // Keep: unreachable per the parameter type, reachable from disk.
+  if (typeof value !== "string") {
+    console.warn(
+      `Ignoring \`oauth.${field}\`: expected a string, got ${typeof value}.`,
+    );
+    return undefined;
+  }
+  return value.trim() || undefined;
+}
+
+/**
+ * Collapse a server's endpoint-override fields into the
+ * `InspectorClientOptions.oauth` sub-shape, or `undefined` when neither is set.
+ * Shared by the web (`App.tsx`) and Node (`buildRunnerClientAuthOptions`) paths
+ * so both derive the option identically. The values are passed through as
+ * typed; validation (absolute http(s) URL) happens once at the point of use, in
+ * `core/auth/endpointOverrides.ts`. (#1906)
+ */
+export function oauthEndpointOverridesFromSettings(
+  settings: Pick<
+    InspectorServerSettings,
+    "oauthAuthorizationUrl" | "oauthTokenUrl"
+  >,
+): { authorizationUrl?: string; tokenUrl?: string } | undefined {
+  const authorizationUrl = settings.oauthAuthorizationUrl?.trim();
+  const tokenUrl = settings.oauthTokenUrl?.trim();
+  if (!authorizationUrl && !tokenUrl) return undefined;
+  return {
+    ...(authorizationUrl && { authorizationUrl }),
+    ...(tokenUrl && { tokenUrl }),
+  };
 }
 
 /**
@@ -286,6 +396,32 @@ export function storedFieldsToInspectorSettings(
   if (stored.oauth?.clientSecret)
     settings.oauthClientSecret = stored.oauth.clientSecret;
   if (stored.oauth?.scopes) settings.oauthScopes = stored.oauth.scopes;
+  // Optional record with no default; carried through only when the file has a
+  // non-empty object, so an absent/empty field reads back as unset and the
+  // write side then omits it — keeping a byte-stable round-trip. Sanitized
+  // rather than trusted: only the web client's `/api/servers` route validates
+  // this field, while the CLI/TUI read `mcp.json` straight off disk. (#2018)
+  const authorizationParams = cleanAuthorizationParams(
+    stored.oauth?.authorizationParams,
+  );
+  if (authorizationParams) {
+    settings.oauthAuthorizationParams = envRecordToPairs(authorizationParams);
+  }
+  // Truthiness drops empty strings like the credential fields above, so a
+  // cleared field reads back as unset rather than as an empty override. The
+  // `string` type is a compile-time promise a hand-edited `mcp.json` does not
+  // keep, and only the web client's `/api/servers` route checks it — the CLI and
+  // TUI read the file directly and then call `.trim()` on these in
+  // `oauthEndpointOverridesFromSettings`, so a non-string would crash the server
+  // load. Sanitized like `authorizationParams` above rather than trusted.
+  // (#1906)
+  const authorizationUrl = cleanEndpointOverride(
+    stored.oauth?.authorizationUrl,
+    "authorizationUrl",
+  );
+  if (authorizationUrl) settings.oauthAuthorizationUrl = authorizationUrl;
+  const tokenUrl = cleanEndpointOverride(stored.oauth?.tokenUrl, "tokenUrl");
+  if (tokenUrl) settings.oauthTokenUrl = tokenUrl;
   if (stored.oauth?.onInsufficientScope) {
     settings.oauthOnInsufficientScope = stored.oauth.onInsufficientScope;
   }
@@ -395,6 +531,22 @@ export function inspectorSettingsToStoredFields(
   if (settings.oauthClientSecret)
     oauthFields.clientSecret = settings.oauthClientSecret;
   if (settings.oauthScopes) oauthFields.scopes = settings.oauthScopes;
+  // Blank-key rows (a row the user added but never filled in) are dropped, so
+  // an all-blank list writes nothing — matching the read side's omit-on-empty.
+  if (settings.oauthAuthorizationParams) {
+    const authParams = envPairsToRecord(settings.oauthAuthorizationParams);
+    if (Object.keys(authParams).length > 0) {
+      oauthFields.authorizationParams = authParams;
+    }
+  }
+  // Empty/blank reads back as unset (above), so a cleared field writes nothing
+  // and the file diff stays minimal for servers that never set one. (#1906)
+  if (settings.oauthAuthorizationUrl?.trim()) {
+    oauthFields.authorizationUrl = settings.oauthAuthorizationUrl.trim();
+  }
+  if (settings.oauthTokenUrl?.trim()) {
+    oauthFields.tokenUrl = settings.oauthTokenUrl.trim();
+  }
   if (settings.oauthOnInsufficientScope) {
     oauthFields.onInsufficientScope = settings.oauthOnInsufficientScope;
   }
@@ -602,18 +754,13 @@ export function extractSecretsFromStored(
 
   if (stored.oauth?.clientSecret) {
     secrets[SECRET_FIELD_OAUTH_CLIENT_SECRET] = stored.oauth.clientSecret;
-    const restOauth: {
-      clientId?: string;
-      scopes?: string;
-      enterpriseManaged?: boolean;
-    } = {};
-    if (stored.oauth.clientId !== undefined)
-      restOauth.clientId = stored.oauth.clientId;
-    if (stored.oauth.scopes !== undefined)
-      restOauth.scopes = stored.oauth.scopes;
-    if (stored.oauth.enterpriseManaged === true) {
-      restOauth.enterpriseManaged = true;
-    }
+    // Keep every OAuth field except the one secret, rather than enumerating the
+    // non-secret ones. An allow-list here is a standing trap: it silently drops
+    // any field added to `oauth` afterwards, and it had already done so —
+    // `onInsufficientScope` was lost whenever a server carried both a client
+    // secret and a non-default SEP-2350 policy. Subtracting the secret instead
+    // means a future field is preserved by construction. (#2018)
+    const { clientSecret: _clientSecret, ...restOauth } = stored.oauth;
     if (Object.keys(restOauth).length > 0) {
       stripped.oauth = restOauth;
     } else {

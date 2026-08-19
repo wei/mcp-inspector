@@ -47,6 +47,21 @@ import {
   rootRunsClientValidate,
   tokenize,
 } from "./lib/npm-scripts.mjs";
+// The `tsc --listFilesOnly` machinery lives in `lib/` because
+// `verify-dep-lockstep` measures the same programs for a different question
+// (#1965) — one implementation, so the two guards can't disagree about what a
+// program contains. `tscEntry` (the #1939 Windows-safe tsc resolver) comes from
+// the same module so the `--showConfig` pass below spawns tsc the same way the
+// listings do.
+import {
+  clientTsconfigReferences,
+  isDisablingFlag,
+  isTsc,
+  projectSourceFiles,
+  resolveLeafProjects,
+  tscEntry,
+  typecheckProjects,
+} from "./lib/tsc-program.mjs";
 
 const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -69,15 +84,6 @@ const EXEMPT = new Map();
 // a real gap. There are no client `.mts`/`.cts` today; this pre-empts one.
 export const isRequiredSource = (rel) =>
   /\.(ts|tsx|mts|cts)$/.test(rel) && !/\.d\.(ts|mts|cts)$/.test(rel);
-
-// Match `tsc` by token basename so a path-invoked binary (`node_modules/.bin/
-// tsc`, `./node_modules/.bin/tsc.cmd`) counts, not just the bare `tsc` token.
-export const isTsc = (t) => /(?:^|[\\/])tsc(?:\.(?:cmd|exe|ps1))?$/.test(t);
-
-// A flag that makes a `tsc` pass list files without type-checking them (so it
-// gates nothing). Case-insensitive — tsc's own option parsing is. Shared by the
-// `typecheck`-script path and the reference (`tsc -b`) path.
-export const isDisablingFlag = (t) => /^--(noCheck|listFilesOnly)$/i.test(t);
 
 /**
  * Whether a tracked test file is matched by one of the `test:scripts` command's
@@ -257,51 +263,6 @@ export function testScriptProblems(scripts, testFiles) {
 }
 
 /**
- * The `references` paths declared in the tsconfig at repo-relative `tsconfigRel`
- * (a `tsc -b` solution config), or `[]` if it has none / isn't readable. Paths
- * are as written (relative to that tsconfig's own directory).
- */
-export function parseTsconfigReferences(raw) {
-  try {
-    // Tolerate JSONC — block AND line comments + trailing commas (tsconfig
-    // allows all; block comments are in fact the style of every other tsconfig
-    // here). Block comments are stripped first so a `//` inside one doesn't
-    // survive; a `//` inside a string value (e.g. an `https://` URL) is a
-    // theoretical false strip this guard's tsconfigs never hit.
-    const cfg = JSON.parse(
-      raw
-        .replace(/\/\*[\s\S]*?\*\//g, "")
-        .replace(/\/\/.*$/gm, "")
-        .replace(/,(\s*[}\]])/g, "$1"),
-    );
-    return Array.isArray(cfg.references)
-      ? cfg.references.map((r) => r?.path).filter((p) => typeof p === "string")
-      : [];
-  } catch {
-    return [];
-  }
-}
-
-export function tsconfigReferences(tsconfigRel) {
-  try {
-    return parseTsconfigReferences(
-      readFileSync(path.join(repoRoot, tsconfigRel), "utf8"),
-    );
-  } catch {
-    return []; // unreadable file (e.g. a directory / missing path)
-  }
-}
-
-/**
- * The `references` in a client's root `tsconfig.json`. Non-empty for a `tsc -b`
- * client (like `clients/web`, which has no `typecheck` script) — this guard
- * enrolls it through these instead of exempting the whole tree.
- */
-export function clientTsconfigReferences(clientDir) {
-  return tsconfigReferences(path.posix.join(clientDir, "tsconfig.json"));
-}
-
-/**
  * How the client's `validate` runs `tsc -b` (the pass that typechecks a
  * reference client): `"ok"` (a real `tsc -b`), `"neutered"` (a `tsc -b` carrying
  * `--noCheck`/`--listFilesOnly` — lists files but checks nothing, the same hole
@@ -389,64 +350,6 @@ function nodeClients() {
 }
 
 /**
- * The tsconfig projects a client's `typecheck` names, harvested from **every**
- * script reachable from `typecheck` (not just the one string) so a delegating
- * `typecheck` (`npm run typecheck:src && …`) still counts — matching how
- * `verify-format-coverage.mjs` harvests globs across reachable scripts. Splits
- * each script on `&&`/`||`/`;` so a flag on one command doesn't leak onto
- * another. Each `tsc` command's project comes from `-p`/`--project` (or a
- * `-b`/`--build` path); a `tsc` command with **no** project flag resolves the
- * implicit `./tsconfig.json` (tsc's own default), so that idiomatic form counts
- * too. Returns `{ projects, neutered }`: `neutered` names any project whose own
- * command carries `--noCheck`/`--nocheck` or `--listFilesOnly` (matched
- * case-insensitively — tsc's option parsing is) — a pass that lists files
- * without type-checking them, which would otherwise satisfy the guard while
- * checking nothing. The config-file form (`noCheck` set in the tsconfig) is
- * caught separately by {@link projectDisablesChecking}.
- *
- * A harvested `tsc -b` **solution config** (`"files": []` + `references`) lists
- * nothing itself; {@link projectFiles} expands it to its references, so this
- * form is measured whether it reaches here (a `typecheck: "tsc -b"`) or the
- * dedicated reference path (`clients/web`, which declares no `typecheck`).
- *
- * Minor limitations, all unreachable with the plain `-p --noEmit` passes here:
- * the implicit-`./tsconfig.json` fallback assumes **no file operands** (`tsc
- * <file>` ignores the config and checks only that file, but would be credited
- * the whole config's file list); the `--noCheck`/`--listFilesOnly` detection
- * ignores a following boolean, so the contrived explicit `--noCheck false`
- * (checking *on*) is still treated as disabling; and the `&&`/`||`/`;` split
- * runs before tokenizing, so a quoted operator inside an arg would split
- * mid-token (project paths carry none of those).
- */
-export function typecheckProjects(scripts) {
-  const projects = [];
-  const neutered = [];
-  const isFlag = (t) => t.startsWith("-");
-  const isProjectFlag = (t) => ["-p", "--project", "-b", "--build"].includes(t);
-  for (const name of reachableScripts(scripts, "typecheck")) {
-    const cmd = scripts?.[name];
-    if (typeof cmd !== "string") continue;
-    for (const segment of cmd.split(/&&|\|\||;/)) {
-      const tokens = tokenize(segment);
-      if (!tokens.some(isTsc)) continue; // only tsc commands name projects
-      const disabling = tokens.find(isDisablingFlag);
-      // A project path follows `-p`/`--project`/`-b`/`--build`; a tsc command
-      // with none uses the implicit `./tsconfig.json` (tsc's own default).
-      const named = [];
-      for (let i = 0; i < tokens.length; i++)
-        if (isProjectFlag(tokens[i]) && tokens[i + 1] && !isFlag(tokens[i + 1]))
-          named.push(tokens[i + 1]);
-      if (named.length === 0) named.push("tsconfig.json");
-      for (const project of named) {
-        if (disabling) neutered.push({ project, flag: disabling });
-        else projects.push(project);
-      }
-    }
-  }
-  return { projects, neutered };
-}
-
-/**
  * Whether the tsconfig `project` sets `noCheck` (which disables type-checking as
  * thoroughly as the CLI flag, but can't be seen in the `typecheck` script
  * string). `tsc --showConfig` emits the merged compilerOptions, surfacing a
@@ -456,8 +359,8 @@ export function typecheckProjects(scripts) {
 function projectDisablesChecking(clientDir, project) {
   try {
     const out = execFileSync(
-      "npx",
-      ["--no-install", "tsc", "-p", project, "--showConfig"],
+      process.execPath,
+      [tscEntry(clientDir), "-p", project, "--showConfig"],
       { cwd: path.join(repoRoot, clientDir), encoding: "utf8" },
     );
     return JSON.parse(out)?.compilerOptions?.noCheck === true;
@@ -466,116 +369,11 @@ function projectDisablesChecking(clientDir, project) {
   }
 }
 
-/**
- * Repo-relative POSIX paths of the files ONE project (no reference expansion)
- * typechecks. Absolute paths outside the repo root (lib.d.ts) and anything under
- * `node_modules` are dropped; the aliased `core/` + `test-servers/` sources stay
- * in the set but are harmless — the set is only ever queried with client-relative
- * paths. Cached: `resolveLeafProjects` and `projectFiles` both list a project.
- */
-const rawFilesCache = new Map();
-function rawProjectFiles(clientDir, project) {
-  const key = `${clientDir}|${project}`;
-  const cached = rawFilesCache.get(key);
-  if (cached) return cached;
-  const absClient = path.join(repoRoot, clientDir);
-  let stdout;
-  try {
-    stdout = execFileSync(
-      "npx",
-      ["--no-install", "tsc", "-p", project, "--listFilesOnly"],
-      { cwd: absClient, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-    );
-  } catch (err) {
-    // `--listFilesOnly` doesn't type-check, but a config error (an unreadable or
-    // malformed tsconfig) still exits non-zero while printing the resolved file
-    // list; keep stdout so a broken config doesn't mask a coverage gap. Echo the
-    // diagnostic — since this guard runs before any client's own `typecheck`,
-    // it's the first place a bad `-p` config surfaces, and without the reason
-    // the resulting "file in no project" report is misleading. tsc prints config
-    // errors (`error TS…`) to stdout, so scan both streams for them.
-    stdout = typeof err.stdout === "string" ? err.stdout : "";
-    const streams =
-      stdout + "\n" + (typeof err.stderr === "string" ? err.stderr : "");
-    const diagnostic = streams
-      .split("\n")
-      .filter((l) => /error TS\d+/.test(l))
-      .join("\n")
-      .trim();
-    console.warn(
-      `verify:typecheck-coverage — \`tsc -p ${project}\` (in ${clientDir}) exited non-zero:\n${diagnostic || "(no diagnostic captured)"}\n`,
-    );
-  }
-  const covered = new Set();
-  for (const line of stdout.split("\n")) {
-    const abs = line.trim();
-    if (!abs) continue;
-    const rel = path.relative(repoRoot, abs);
-    if (rel.startsWith("..") || rel.includes("node_modules")) continue;
-    covered.add(rel.split(path.sep).join("/"));
-  }
-  rawFilesCache.set(key, covered);
-  return covered;
-}
-
-/**
- * The repo-relative tsconfig FILE a `clientDir`-relative `project` entry names.
- * A directory-form entry (`{ "path": "./packages/a" }`, or `tsc -p src`) means
- * `<dir>/tsconfig.json` — tsc's own rule.
- */
-export function projectConfigFile(clientDir, project) {
-  const projectRel = path.posix.join(clientDir, project);
-  return projectRel.endsWith(".json")
-    ? projectRel
-    : path.posix.join(projectRel, "tsconfig.json");
-}
-
-/**
- * A `references` entry `ref` (written relative to `fromConfigFile`'s own
- * directory) as a `clientDir`-relative project path, the form the rest of the
- * graph walk uses.
- */
-export function refToProject(clientDir, fromConfigFile, ref) {
-  return path.posix.relative(
-    clientDir,
-    path.posix.join(path.posix.dirname(fromConfigFile), ref),
-  );
-}
-
-/**
- * The leaf tsconfig projects `project` resolves to (paths relative to
- * `clientDir`): itself if it lists files (or has no `references`), else its
- * `references` expanded recursively. A `tsc -b` **solution config** (`{"files":
- * [], "references": […]}`) lists nothing under `--listFilesOnly`, so this is how
- * it's reduced to the real projects — and doing it here (not just inside
- * `projectFiles`) is what lets BOTH coverage and the non-inertness check follow
- * the same graph, so a `noCheck` in a *referenced* project is caught no matter
- * which enrollment path harvested the solution.
- */
-export function resolveLeafProjects(clientDir, project, seen = new Set()) {
-  if (seen.has(project)) return [];
-  seen.add(project);
-  // Lists files → a real leaf. (An empty set is a solution config, or a config
-  // that errored — either way the reference expansion below is the right next
-  // step: a broken config yields no references too.)
-  if (rawProjectFiles(clientDir, project).size > 0) return [project];
-  const configFile = projectConfigFile(clientDir, project);
-  const refs = tsconfigReferences(configFile);
-  if (refs.length === 0) return [project]; // no files, no refs — itself
-  return refs.flatMap((ref) =>
-    resolveLeafProjects(
-      clientDir,
-      refToProject(clientDir, configFile, ref),
-      seen,
-    ),
-  );
-}
-
 /** Repo-relative files a project covers, following a solution config's references. */
 function projectFiles(clientDir, project) {
   const covered = new Set();
   for (const leaf of resolveLeafProjects(clientDir, project))
-    for (const f of rawProjectFiles(clientDir, leaf)) covered.add(f);
+    for (const f of projectSourceFiles(clientDir, leaf)) covered.add(f);
   return covered;
 }
 

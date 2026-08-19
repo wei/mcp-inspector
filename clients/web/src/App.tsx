@@ -63,6 +63,8 @@ import { ManagedRequestorTasksState } from "@inspector/core/mcp/state/managedReq
 import { ResourceSubscriptionsState } from "@inspector/core/mcp/state/resourceSubscriptionsState.js";
 import {
   cleanRoots,
+  oauthAuthorizationParamsFromSettings,
+  oauthEndpointOverridesFromSettings,
   serializeMcpConfig,
 } from "@inspector/core/mcp/serverList.js";
 import type { ClientConfig } from "@inspector/core/client/types.js";
@@ -163,6 +165,7 @@ import {
 import { buildExportFilename, downloadJsonFile } from "./lib/downloadFile";
 import { INSPECTOR_SERVERS_TAB } from "./utils/inspectorTabs";
 import { enrichProtocolEntries } from "./utils/correlateTransportErrors";
+import { visibleMalformedListItems } from "./utils/malformedListReport";
 import {
   parseDeepLink,
   deepLinkConfigEquals,
@@ -990,6 +993,7 @@ function App() {
     protocolEra,
     discoverResult,
     excludedTools,
+    malformedListItems,
     lastError,
   } = useInspectorClient(inspectorClient);
   const {
@@ -1027,18 +1031,21 @@ function App() {
     tools: pagedTools,
     nextCursor: pagedToolsCursor,
     pageCount: pagedToolsPageCount,
+    error: pagedToolsLoadError,
     loadPage: loadToolsPage,
   } = usePagedTools(inspectorClient, pagedToolsState);
   const {
     prompts: pagedPrompts,
     nextCursor: pagedPromptsCursor,
     pageCount: pagedPromptsPageCount,
+    error: pagedPromptsLoadError,
     loadPage: loadPromptsPage,
   } = usePagedPrompts(inspectorClient, pagedPromptsState);
   const {
     resources: pagedResources,
     nextCursor: pagedResourcesCursor,
     pageCount: pagedResourcesPageCount,
+    error: pagedResourcesLoadError,
     loadPage: loadResourcesPage,
   } = usePagedResources(inspectorClient, pagedResourcesState);
   // The active server's persisted paginated setting drives the display mode.
@@ -1055,15 +1062,25 @@ function App() {
     setPaginatedListsOverride(null);
   }, [persistedPaginatedLists, activeServerId]);
   const paginatedLists = paginatedListsOverride ?? persistedPaginatedLists;
+  // The malformed-entry report is written by the aggregate walk's salvage. In
+  // paginated mode the tools/prompts/resources panels render the paged stores
+  // instead, which never write or clear it — so it would linger above a page it
+  // does not describe. See `visibleMalformedListItems` (#1909 + #1721).
+  const shownMalformedListItems = useMemo(
+    () => visibleMalformedListItems(malformedListItems, paginatedLists),
+    [malformedListItems, paginatedLists],
+  );
   const connected = connectionStatus === "connected";
   const toolsPagination = usePaginatedList({
     connected,
     paginated: paginatedLists,
     managedItems: managedTools,
     managedRefresh: refreshTools,
+    managedError: toolsLoadError,
     pagedItems: pagedTools,
     pagedNextCursor: pagedToolsCursor,
     pagedPageCount: pagedToolsPageCount,
+    pagedError: pagedToolsLoadError,
     loadPage: loadToolsPage,
   });
   const promptsPagination = usePaginatedList({
@@ -1071,9 +1088,11 @@ function App() {
     paginated: paginatedLists,
     managedItems: managedPrompts,
     managedRefresh: refreshPrompts,
+    managedError: promptsLoadError,
     pagedItems: pagedPrompts,
     pagedNextCursor: pagedPromptsCursor,
     pagedPageCount: pagedPromptsPageCount,
+    pagedError: pagedPromptsLoadError,
     loadPage: loadPromptsPage,
   });
   const resourcesPagination = usePaginatedList({
@@ -1081,9 +1100,11 @@ function App() {
     paginated: paginatedLists,
     managedItems: managedResources,
     managedRefresh: refreshResources,
+    managedError: resourcesLoadError,
     pagedItems: pagedResources,
     pagedNextCursor: pagedResourcesCursor,
     pagedPageCount: pagedResourcesPageCount,
+    pagedError: pagedResourcesLoadError,
     loadPage: loadResourcesPage,
   });
   const tools = toolsPagination.items;
@@ -2045,6 +2066,46 @@ function App() {
     [inspectorClient, activeServerId, handleCommandScopedAuthRecovery],
   );
 
+  /**
+   * Fire-and-forget form of {@link runWithCommandAuthRecovery}, for a command
+   * whose caller has nothing to await (a click handler, a mode toggle).
+   *
+   * The wrapper rethrows anything that is not an `AuthRecoveryRequiredError`,
+   * so a bare `void runWithCommandAuthRecovery(...)` turns every non-auth
+   * failure — a transport error, a rejected `tools/list` — into an unhandled
+   * rejection in the browser (#2049). Routing every background command through
+   * here is what keeps a new call site from reintroducing that gap by
+   * omission: there is no `void` to forget.
+   *
+   * `errorTitle` picks the reporting, and the choice is per call site:
+   *
+   * - **Omit it** when the operation's own state already renders the failure —
+   *   the list loads, whose managed/paged stores record the error and whose
+   *   panel shows it with a Retry. A toast there would only duplicate what the
+   *   user is already looking at, so the rejection is swallowed deliberately.
+   * - **Pass one** when nothing else records the failure, and the user would
+   *   otherwise see the command silently do nothing.
+   */
+  const runCommandInBackground = useCallback(
+    (
+      operation: () => Promise<unknown>,
+      source: StepUpSource,
+      errorTitle?: string,
+    ): void => {
+      void runWithCommandAuthRecovery(operation, source).catch(
+        (err: unknown) => {
+          if (!errorTitle) return;
+          notifications.show({
+            title: errorTitle,
+            message: err instanceof Error ? err.message : String(err),
+            color: "red",
+          });
+        },
+      );
+    },
+    [runWithCommandAuthRecovery],
+  );
+
   const resumePendingReauth = useCallback(
     async (pending: PendingReauth) => {
       if (reauthResumeInProgressRef.current) {
@@ -2301,11 +2362,19 @@ function App() {
               .map((m) => [m.key, m.value]),
           )
         : undefined;
+      const serverAuthorizationParams = savedSettings
+        ? oauthAuthorizationParamsFromSettings(savedSettings)
+        : undefined;
+      const serverEndpointOverrides = savedSettings
+        ? oauthEndpointOverridesFromSettings(savedSettings)
+        : undefined;
       const oauthFromServer =
         savedSettings &&
         (savedSettings.oauthClientId ||
           savedSettings.oauthClientSecret ||
           savedSettings.oauthScopes ||
+          serverAuthorizationParams ||
+          serverEndpointOverrides ||
           savedSettings.enterpriseManaged)
           ? {
               ...(savedSettings.oauthClientId && {
@@ -2317,6 +2386,10 @@ function App() {
               ...(savedSettings.oauthScopes && {
                 scope: savedSettings.oauthScopes,
               }),
+              ...(serverAuthorizationParams && {
+                authorizationParams: serverAuthorizationParams,
+              }),
+              ...serverEndpointOverrides,
               ...(savedSettings.enterpriseManaged && {
                 enterpriseManaged: true,
               }),
@@ -3136,17 +3209,17 @@ function App() {
   // drops the previous tool's result — the result panel renders `toolCallState`
   // regardless of selection, so without this a stale result would linger under
   // the newly-selected tool (which has no result of its own yet). Search and
-  // form edits keep `selectedToolName` unchanged, so they leave the result be.
-  // Depends on `selectedToolName` only (not the whole `toolsUi`), so a search
+  // form edits keep `selectedToolKey` unchanged, so they leave the result be.
+  // Depends on `selectedToolKey` only (not the whole `toolsUi`), so a search
   // keystroke doesn't churn the callback identity.
   const onToolsUiChange = useCallback(
     (next: ToolsUiState) => {
-      if (next.selectedToolName !== toolsUi.selectedToolName) {
+      if (next.selectedToolKey !== toolsUi.selectedToolKey) {
         setToolCallState(undefined);
       }
       setToolsUi(next);
     },
-    [toolsUi.selectedToolName],
+    [toolsUi.selectedToolKey],
   );
 
   // --- MCP Apps handlers. Unlike onCallTool (which feeds the Tools panel),
@@ -3441,12 +3514,16 @@ function App() {
     (level: LoggingLevel) => {
       setCurrentLogLevel(level);
       if (!inspectorClient) return;
-      void runWithCommandAuthRecovery(
+      // Nothing else records a `logging/setLevel` failure, and the optimistic
+      // level above already moved — so report it, or the selector would sit on
+      // a level the server never accepted with no explanation.
+      runCommandInBackground(
         () => inspectorClient.setLoggingLevel(level),
         "ambient",
+        "Failed to set log level",
       );
     },
-    [inspectorClient, runWithCommandAuthRecovery],
+    [inspectorClient, runCommandInBackground],
   );
 
   // Modern era (#1629): no request is sent — the client stores the level and
@@ -3469,51 +3546,39 @@ function App() {
       // (the managed state lit it on `list_changed`; nothing else clears it in
       // paginated mode) (#1721).
       clearToolsListChanged();
-      void runWithCommandAuthRecovery(
-        () => toolsPagination.onRefresh(),
-        "ambient",
-      );
+      runCommandInBackground(() => toolsPagination.onRefresh(), "ambient");
     } else {
-      void runWithCommandAuthRecovery(() => refreshTools(), "ambient");
+      runCommandInBackground(() => refreshTools(), "ambient");
     }
   }, [
     paginatedLists,
     toolsPagination,
     refreshTools,
     clearToolsListChanged,
-    runWithCommandAuthRecovery,
+    runCommandInBackground,
   ]);
   const onRefreshPrompts = useCallback(() => {
     if (paginatedLists) {
       clearPromptsListChanged();
-      void runWithCommandAuthRecovery(
-        () => promptsPagination.onRefresh(),
-        "ambient",
-      );
+      runCommandInBackground(() => promptsPagination.onRefresh(), "ambient");
     } else {
-      void runWithCommandAuthRecovery(() => refreshPrompts(), "ambient");
+      runCommandInBackground(() => refreshPrompts(), "ambient");
     }
   }, [
     paginatedLists,
     promptsPagination,
     refreshPrompts,
     clearPromptsListChanged,
-    runWithCommandAuthRecovery,
+    runCommandInBackground,
   ]);
   const onRefreshResources = useCallback(() => {
     if (paginatedLists) {
       clearResourcesListChanged();
-      void runWithCommandAuthRecovery(
-        () => resourcesPagination.onRefresh(),
-        "ambient",
-      );
+      runCommandInBackground(() => resourcesPagination.onRefresh(), "ambient");
       // Resource templates always use the managed (aggregate) path.
-      void runWithCommandAuthRecovery(
-        () => refreshResourceTemplates(),
-        "ambient",
-      );
+      runCommandInBackground(() => refreshResourceTemplates(), "ambient");
     } else {
-      void runWithCommandAuthRecovery(async () => {
+      runCommandInBackground(async () => {
         await refreshResources();
         await refreshResourceTemplates();
       }, "ambient");
@@ -3524,7 +3589,7 @@ function App() {
     refreshResources,
     refreshResourceTemplates,
     clearResourcesListChanged,
-    runWithCommandAuthRecovery,
+    runCommandInBackground,
   ]);
   // The per-list sidebar toggle edits the server-wide `paginatedLists` setting:
   // optimistic override for an instant flip, live push so the managed state's
@@ -3548,22 +3613,13 @@ function App() {
         // Wrap in ambient auth recovery so a mid-session 401 triggers re-auth
         // rather than surfacing raw, matching the all-pages refresh path.
         if (value) {
-          void runWithCommandAuthRecovery(
-            () => loadToolsPage(undefined),
-            "ambient",
-          );
-          void runWithCommandAuthRecovery(
-            () => loadPromptsPage(undefined),
-            "ambient",
-          );
-          void runWithCommandAuthRecovery(
-            () => loadResourcesPage(undefined),
-            "ambient",
-          );
+          runCommandInBackground(() => loadToolsPage(undefined), "ambient");
+          runCommandInBackground(() => loadPromptsPage(undefined), "ambient");
+          runCommandInBackground(() => loadResourcesPage(undefined), "ambient");
         } else {
-          void runWithCommandAuthRecovery(() => refreshTools(), "ambient");
-          void runWithCommandAuthRecovery(() => refreshPrompts(), "ambient");
-          void runWithCommandAuthRecovery(() => refreshResources(), "ambient");
+          runCommandInBackground(() => refreshTools(), "ambient");
+          runCommandInBackground(() => refreshPrompts(), "ambient");
+          runCommandInBackground(() => refreshResources(), "ambient");
         }
       }
       void updateServerSettings(activeServerId, next).catch((err: unknown) => {
@@ -3592,34 +3648,24 @@ function App() {
       refreshTools,
       refreshPrompts,
       refreshResources,
-      runWithCommandAuthRecovery,
+      runCommandInBackground,
     ],
   );
   // Wrap Load-next-page in ambient auth recovery too, so a paginated
   // paginated fetch that hits a 401 recovers like the all-pages path (#1721).
   const onLoadMoreTools = useCallback(
-    () =>
-      void runWithCommandAuthRecovery(
-        () => toolsPagination.onLoadMore(),
-        "ambient",
-      ),
-    [toolsPagination, runWithCommandAuthRecovery],
+    () => runCommandInBackground(() => toolsPagination.onLoadMore(), "ambient"),
+    [toolsPagination, runCommandInBackground],
   );
   const onLoadMorePrompts = useCallback(
     () =>
-      void runWithCommandAuthRecovery(
-        () => promptsPagination.onLoadMore(),
-        "ambient",
-      ),
-    [promptsPagination, runWithCommandAuthRecovery],
+      runCommandInBackground(() => promptsPagination.onLoadMore(), "ambient"),
+    [promptsPagination, runCommandInBackground],
   );
   const onLoadMoreResources = useCallback(
     () =>
-      void runWithCommandAuthRecovery(
-        () => resourcesPagination.onLoadMore(),
-        "ambient",
-      ),
-    [resourcesPagination, runWithCommandAuthRecovery],
+      runCommandInBackground(() => resourcesPagination.onLoadMore(), "ambient"),
+    [resourcesPagination, runCommandInBackground],
   );
   const toolsPaginationControls: ListPaginationControlsProps = {
     paginated: toolsPagination.paginated,
@@ -3643,16 +3689,12 @@ function App() {
     onLoadMore: onLoadMoreResources,
   };
   const onRefreshTasks = useCallback(() => {
-    void runWithCommandAuthRecovery(() => refreshTasks(), "ambient")?.catch(
-      (err: unknown) => {
-        notifications.show({
-          title: "Failed to refresh tasks",
-          message: err instanceof Error ? err.message : String(err),
-          color: "red",
-        });
-      },
+    runCommandInBackground(
+      () => refreshTasks(),
+      "ambient",
+      "Failed to refresh tasks",
     );
-  }, [refreshTasks, runWithCommandAuthRecovery]);
+  }, [refreshTasks, runCommandInBackground]);
 
   const onClearLogs = useCallback(() => {
     if (!messageLogState) return;
@@ -4376,15 +4418,18 @@ function App() {
           latencyMs={latencyMs}
           tools={tools}
           excludedTools={excludedTools}
+          malformedListItems={shownMalformedListItems}
           prompts={prompts}
           resources={resources}
           resourceTemplates={resourceTemplates}
           toolsListChanged={toolsListChanged}
           promptsListChanged={promptsListChanged}
           resourcesListChanged={resourcesListChanged}
-          toolsLoadError={toolsLoadError}
-          promptsLoadError={promptsLoadError}
-          resourcesLoadError={resourcesLoadError ?? resourceTemplatesLoadError}
+          toolsLoadError={toolsPagination.error}
+          promptsLoadError={promptsPagination.error}
+          resourcesLoadError={
+            resourcesPagination.error ?? resourceTemplatesLoadError
+          }
           subscriptions={subscriptions}
           subscriptionStreamState={subscriptionStreamState}
           logs={logs}

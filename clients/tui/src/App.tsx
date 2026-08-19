@@ -170,6 +170,17 @@ function App({
     pendingStepUpRef.current = pendingStepUp;
   }, [pendingStepUp]);
   const [connectError, setConnectError] = useState<string | null>(null);
+  // Monotonic token for in-flight disconnects — see handleDisconnect.
+  const disconnectAttemptRef = useRef(0);
+  // A failed disconnect is deliberately NOT folded into `connectError`. That
+  // one is only rendered by InfoTab when the status is "error", which a
+  // rejected disconnect leaves untouched (the status stays "connected"), so
+  // the message would never be seen — and it feeds
+  // `connectError ?? inspectorLastError`, where a stale value would go on
+  // masking a later, real connection error. This renders in the header
+  // regardless of status and is cleared on the next connect/disconnect
+  // attempt and on a server switch.
+  const [disconnectError, setDisconnectError] = useState<string | null>(null);
   const oauthInProgressRef = useRef(false);
   const callbackServerRef = useRef<OAuthCallbackServer | null>(null);
   const selectedServerRef = useRef<string | null>(null);
@@ -434,6 +445,13 @@ function App({
   useEffect(() => {
     setOauthStatus("idle");
     setOauthMessage(null);
+    // The header banner is server-scoped, so a failure from the server we just
+    // left must not be read as this one's. Clearing is not enough: a switch
+    // away and back (A → B → A) would leave both the attempt token and the
+    // server name matching again, so the stale rejection would land on the
+    // re-selected A. Retiring the token on every switch is what closes that.
+    disconnectAttemptRef.current++;
+    setDisconnectError(null);
     const stepUp = pendingStepUpRef.current;
     if (stepUp && selectedServer && stepUp.serverName !== selectedServer) {
       setPendingStepUp(null);
@@ -757,6 +775,10 @@ function App({
     if (!selectedServer || !selectedInspectorClient || !selectedServerConfig) {
       return;
     }
+    // A connect attempt supersedes whatever the last disconnect reported —
+    // including one still in flight, which is what the counter bump retires.
+    disconnectAttemptRef.current++;
+    setDisconnectError(null);
 
     const finishConnect = async () => {
       await connectInspector();
@@ -887,8 +909,31 @@ function App({
   // Disconnect handler
   const handleDisconnect = useCallback(async () => {
     if (!selectedServer) return;
-    await disconnectInspector();
-    // InspectorClient will update status automatically, and data is preserved
+    // Claim this attempt before awaiting. A disconnect can still be in flight
+    // when the user switches servers or presses 'd' again, and it is the
+    // *stale* one that usually rejects — so the catch below must be able to
+    // tell "my failure" from "one that has since been superseded", or server
+    // A's error lands in server B's header. `handleConnect` bumps the same
+    // counter for the same reason.
+    const attempt = ++disconnectAttemptRef.current;
+    const attemptServer = selectedServer;
+    // Clear first, so a retry that succeeds leaves no stale message behind.
+    setDisconnectError(null);
+    try {
+      await disconnectInspector();
+      // InspectorClient will update status automatically, and data is preserved
+    } catch (err) {
+      // Nothing above this catches: the only caller is the key handler, which
+      // cannot await, so without this the rejection escapes unhandled. A
+      // superseded one is still owned here — just not published.
+      if (
+        disconnectAttemptRef.current !== attempt ||
+        selectedServerRef.current !== attemptServer
+      ) {
+        return;
+      }
+      setDisconnectError(err instanceof Error ? err.message : String(err));
+    }
   }, [selectedServer, disconnectInspector]);
 
   const handleClearOAuth = useCallback(async () => {
@@ -1428,12 +1473,15 @@ function App({
         input.toLowerCase() === "c" &&
         (inspectorStatus === "disconnected" || inspectorStatus === "error")
       ) {
-        handleConnect();
+        // Both handlers own their failures internally (each ends in a catch
+        // that surfaces the message), so there is nothing left for a key
+        // handler — which cannot await — to do with the promise.
+        void handleConnect();
       } else if (
         input.toLowerCase() === "d" &&
         (inspectorStatus === "connected" || inspectorStatus === "connecting")
       ) {
-        handleDisconnect();
+        void handleDisconnect();
       }
     }
   });
@@ -1615,6 +1663,11 @@ function App({
               {oauthStatus === "error" && oauthMessage && (
                 <Box marginTop={1}>
                   <Text color="red">OAuth: {oauthMessage}</Text>
+                </Box>
+              )}
+              {disconnectError && (
+                <Box marginTop={1}>
+                  <Text color="red">Disconnect failed: {disconnectError}</Text>
                 </Box>
               )}
             </Box>

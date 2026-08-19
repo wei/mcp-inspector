@@ -6,6 +6,7 @@ import {
   type ReactNode,
   type Ref,
 } from "react";
+import type { MalformedListItem } from "@inspector/core/mcp";
 import type { DeepLink, DeepLinkParseStatus } from "../../../utils/deepLink";
 import {
   AppShell,
@@ -418,6 +419,11 @@ export interface InspectorViewProps {
   /** Tools excluded from `tools/list` for invalid `x-mcp-header` annotations
    * (SEP-2243); shown in the Tools sidebar with the reason (#1632). */
   excludedTools?: ExcludedTool[];
+  /**
+   * Entries dropped from a list result as malformed, across every list method.
+   * Each list panel filters for its own and warns about them (#1909).
+   */
+  malformedListItems?: MalformedListItem[];
   prompts: Prompt[];
   resources: Resource[];
   resourceTemplates: ResourceTemplate[];
@@ -632,6 +638,7 @@ export function InspectorView({
   latencyMs,
   tools,
   excludedTools = [],
+  malformedListItems = [],
   prompts,
   resources,
   resourceTemplates,
@@ -1365,6 +1372,7 @@ export function InspectorView({
               <ToolsScreen
                 tools={tools}
                 excludedTools={excludedTools}
+                malformedListItems={malformedListItems}
                 callState={toolCallState}
                 ui={toolsUi}
                 listChanged={toolsListChanged}
@@ -1405,6 +1413,7 @@ export function InspectorView({
             <ScreenStage active={activeTab === "Prompts"}>
               <PromptsScreen
                 prompts={prompts}
+                malformedListItems={malformedListItems}
                 getPromptState={getPromptState}
                 ui={promptsUi}
                 listChanged={promptsListChanged}
@@ -1421,6 +1430,7 @@ export function InspectorView({
             <ScreenStage active={activeTab === "Resources"}>
               <ResourcesScreen
                 resources={resources}
+                malformedListItems={malformedListItems}
                 templates={resourceTemplates}
                 subscriptions={subscriptions}
                 subscriptionStreamState={subscriptionStreamState}

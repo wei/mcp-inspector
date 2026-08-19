@@ -20,6 +20,7 @@ import { serve } from "@hono/node-server";
 import type { ServerType } from "@hono/node-server";
 import type pinoType from "pino";
 import {
+  closeAbortedStream,
   createRemoteApp,
   requestIdForSendWait,
   mcpParamHeadersOnly,
@@ -701,6 +702,58 @@ describe("server.ts supplemental coverage", () => {
         await stop(h);
       }
     });
+
+    // #2018 — authorizationParams must be a string record; a hand-edited file
+    // with anything else drops the whole `oauth` node rather than feeding
+    // non-string values to the authorize-URL merge.
+    it("drops oauth whose authorizationParams is not a string record", async () => {
+      const h = await start({
+        seedConfig: JSON.stringify({
+          mcpServers: {
+            srv: {
+              type: "streamable-http",
+              url: "https://x.test/mcp",
+              oauth: { authorizationParams: { kc_idp_hint: 5 } },
+            },
+          },
+        }),
+      });
+      try {
+        const res = await fetch(`${h.baseUrl}/api/servers`);
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as {
+          mcpServers: Record<string, Record<string, unknown>>;
+        };
+        expect(body.mcpServers.srv).not.toHaveProperty("oauth");
+      } finally {
+        await stop(h);
+      }
+    });
+
+    it("keeps a well-formed authorizationParams record on read", async () => {
+      const h = await start({
+        seedConfig: JSON.stringify({
+          mcpServers: {
+            srv: {
+              type: "streamable-http",
+              url: "https://x.test/mcp",
+              oauth: { authorizationParams: { kc_idp_hint: "corp" } },
+            },
+          },
+        }),
+      });
+      try {
+        const res = await fetch(`${h.baseUrl}/api/servers`);
+        const body = (await res.json()) as {
+          mcpServers: Record<string, Record<string, unknown>>;
+        };
+        expect(body.mcpServers.srv?.oauth).toEqual({
+          authorizationParams: { kc_idp_hint: "corp" },
+        });
+      } finally {
+        await stop(h);
+      }
+    });
   });
 
   describe("plaintext-secret migration over a mixed config", () => {
@@ -1053,6 +1106,39 @@ describe("server.ts supplemental coverage", () => {
       } finally {
         await stop(h);
       }
+    });
+  });
+  describe("closeAbortedStream", () => {
+    it("owns a rejected close instead of letting it go unhandled", async () => {
+      // The whole reason the helper exists. Both SSE `onAbort` listeners run
+      // after the peer is already gone, so `close()` can lose the race and
+      // reject — and Hono invokes abort subscribers with a bare
+      // `subscriber()`, so nothing upstream would catch it. A regression here
+      // does not fail at the call site; it fails the whole vitest run from
+      // wherever the rejection happens to surface.
+      const rejected = Promise.reject(new Error("peer already gone"));
+      const unhandled: unknown[] = [];
+      const onUnhandled = (err: unknown) => unhandled.push(err);
+      process.on("unhandledRejection", onUnhandled);
+      try {
+        expect(closeAbortedStream({ close: () => rejected })).toBeUndefined();
+        // An unhandledRejection fires on a later macrotask, not this one.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      } finally {
+        process.off("unhandledRejection", onUnhandled);
+      }
+      expect(unhandled).toEqual([]);
+    });
+
+    it("returns without waiting on a close that resolves", async () => {
+      let closed = false;
+      closeAbortedStream({
+        close: async () => {
+          closed = true;
+        },
+      });
+      await Promise.resolve();
+      expect(closed).toBe(true);
     });
   });
 });

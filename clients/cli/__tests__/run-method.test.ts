@@ -258,18 +258,29 @@ describe("runMethod", () => {
       );
       expect(stdout.trim().split("\n")).toHaveLength(2);
 
+      // Invoke only the SIGINT handler consumeMethodOutcome registers, rather
+      // than broadcasting `process.emit("SIGINT")` process-wide: `atomically`
+      // (loaded via core's store-io) pulls in `when-exit`, whose module-level
+      // `process.once("SIGINT")` handler re-raises the signal with
+      // `process.kill(process.pid, "SIGINT")` — on Windows an unconditional
+      // TerminateProcess that kills the vitest worker fork mid-run (#1941).
+      const listenersBefore = new Set(process.listeners("SIGINT"));
       const streamPromise = consumeMethodOutcome(
         {
           kind: "stream",
           label: "t",
           start: (write) => {
             write({ hi: true });
-            queueMicrotask(() => process.emit("SIGINT"));
             return () => {};
           },
         },
         {},
       );
+      const added = process
+        .listeners("SIGINT")
+        .filter((listener) => !listenersBefore.has(listener));
+      expect(added).toHaveLength(1);
+      for (const listener of added) listener("SIGINT");
       await streamPromise;
       expect(stdout).toContain('"hi":true');
     } finally {

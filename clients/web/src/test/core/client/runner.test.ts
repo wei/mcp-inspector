@@ -86,6 +86,84 @@ describe("runner client auth options", () => {
     expect(opts.oauth?.clientId).toBe("resource-client");
   });
 
+  // #2018 — the CLI/TUI leg picks the authorization parameters up from the same
+  // per-server settings the web leg reads, so all three clients agree.
+  it("buildRunnerClientAuthOptions forwards custom authorization params", () => {
+    const settings: InspectorServerSettings = {
+      oauthAuthorizationParams: [
+        { key: "kc_idp_hint", value: "corp" },
+        { key: "", value: "dropped" },
+      ],
+      requestTimeout: 0,
+      connectionTimeout: 0,
+      taskTtl: 60000,
+      maxFetchRequests: 10,
+      autoRefreshOnListChanged: false,
+      metadata: [],
+      headers: [],
+      env: [],
+      roots: [],
+    };
+    const opts = buildRunnerClientAuthOptions({}, settings);
+    expect(opts.oauth?.authorizationParams).toEqual({ kc_idp_hint: "corp" });
+  });
+
+  it("buildRunnerClientAuthOptions ignores all-blank authorization param rows", () => {
+    const settings: InspectorServerSettings = {
+      oauthAuthorizationParams: [{ key: "  ", value: "x" }],
+      requestTimeout: 0,
+      connectionTimeout: 0,
+      taskTtl: 60000,
+      maxFetchRequests: 10,
+      autoRefreshOnListChanged: false,
+      metadata: [],
+      headers: [],
+      env: [],
+      roots: [],
+    };
+    expect(buildRunnerClientAuthOptions({}, settings)).toEqual({});
+  });
+
+  // #1906 — the CLI/TUI leg reads the endpoint overrides from the same
+  // per-server settings the web leg does.
+  it("buildRunnerClientAuthOptions forwards the endpoint overrides", () => {
+    const settings: InspectorServerSettings = {
+      oauthAuthorizationUrl: "https://staging.example.com/authorize",
+      oauthTokenUrl: "https://staging.example.com/token",
+      requestTimeout: 0,
+      connectionTimeout: 0,
+      taskTtl: 60000,
+      maxFetchRequests: 10,
+      autoRefreshOnListChanged: false,
+      metadata: [],
+      headers: [],
+      env: [],
+      roots: [],
+    };
+    const opts = buildRunnerClientAuthOptions({}, settings);
+    expect(opts.oauth?.authorizationUrl).toBe(
+      "https://staging.example.com/authorize",
+    );
+    expect(opts.oauth?.tokenUrl).toBe("https://staging.example.com/token");
+  });
+
+  it("buildRunnerClientAuthOptions ignores blank endpoint overrides", () => {
+    const settings: InspectorServerSettings = {
+      oauthAuthorizationUrl: "   ",
+      oauthTokenUrl: "",
+      requestTimeout: 0,
+      connectionTimeout: 0,
+      taskTtl: 60000,
+      maxFetchRequests: 10,
+      autoRefreshOnListChanged: false,
+      metadata: [],
+      headers: [],
+      env: [],
+      roots: [],
+    };
+    expect(buildRunnerClientAuthOptions({}, settings)).toEqual({});
+  });
+
   it("buildRunnerClientAuthOptions returns no oauth when nothing supplies it", () => {
     expect(buildRunnerClientAuthOptions({})).toEqual({});
   });
