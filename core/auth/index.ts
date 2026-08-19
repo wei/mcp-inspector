@@ -27,6 +27,25 @@ export { ensureCimdClientRegistration } from "./cimd.js";
 export { mcpAuth, type McpAuthOptions, type McpAuthResult } from "./mcpAuth.js";
 export { computeScopeUnion, isStrictScopeSuperset } from "./scopes.js";
 
+// Custom authorization-request parameters (#2018)
+export {
+  RESERVED_AUTHORIZATION_PARAMS,
+  isReservedAuthorizationParam,
+  authorizationParamKeyError,
+  applyAuthorizationParams,
+} from "./authorizationParams.js";
+export type { ReservedAuthorizationParam } from "./authorizationParams.js";
+
+// Authorization/token endpoint overrides (#1906)
+export {
+  oauthEndpointUrlError,
+  normalizeOAuthEndpointOverrides,
+  isAuthorizationServerMetadata,
+  applyOAuthEndpointOverrides,
+  withOAuthEndpointOverrides,
+} from "./endpointOverrides.js";
+export type { OAuthEndpointOverrides } from "./endpointOverrides.js";
+
 // Storage
 export type {
   OAuthStorage,

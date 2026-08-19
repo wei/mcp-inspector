@@ -163,6 +163,39 @@ export function createEchoTool(): ToolDefinition {
 }
 
 /**
+ * Create a "record_shipment" tool whose arguments are all **nullable** — the
+ * shape Zod's `.nullish()` / `.nullable()` compiles to, where the real type
+ * sits inside `anyOf: [<branch>, { type: "null" }]` rather than at the top
+ * level.
+ *
+ * `direction` is the case from #1928: a nullable *enum*, whose `enum` keyword
+ * lives on the surviving branch. Before the fix nothing in the tool-call form
+ * matched such a field, so it fell through to the raw-JSON textarea and
+ * re-escaped its own value on every keystroke. The other three cover the
+ * remaining scalar branches so a regression in one is visible next to a
+ * working sibling.
+ */
+export function createNullableFieldsTool(): ToolDefinition {
+  return {
+    name: "record_shipment",
+    description:
+      "Record a shipment. Every argument is optional AND explicitly nullable (Zod .nullish()), so each compiles to an anyOf union with a null branch.",
+    inputSchema: {
+      direction: z
+        .enum(["envio", "recebimento"])
+        .nullish()
+        .describe("Direction of the shipment (nullable enum — #1928)"),
+      reference: z.string().nullish().describe("Free-text reference"),
+      quantity: z.number().int().nullish().describe("Number of packages"),
+      express: z.boolean().nullish().describe("Ship express"),
+    },
+    handler: async (params: Record<string, unknown>) => {
+      return toToolResult(JSON.stringify(params, null, 2));
+    },
+  };
+}
+
+/**
  * Create a "get-env" tool matching @modelcontextprotocol/server-everything.
  * Returns the server process environment as pretty-printed JSON text.
  */
@@ -718,6 +751,50 @@ export function createMrtrEdgeCaseTool(): ToolDefinition {
           }),
         },
       });
+    },
+  };
+}
+
+/**
+ * An MRTR tool whose FINAL (complete) result carries an empty `content` array
+ * and no `structuredContent` — a legal `CallToolResult` that renders nothing.
+ *
+ * This is the shape behind #1860: the sequence completes (the Protocol tab shows
+ * the conversation COMPLETE), a real result is stored, and the Results panel had
+ * no way to say so — it fell through to the same "No results yet" placeholder it
+ * shows before anything has run, so a successful call read as a call that never
+ * happened. Kept as an MRTR tool rather than a plain one because the multi-round
+ * case is where the ambiguity actually misleads: the user has answered prompts
+ * and watched rounds complete, so "no results yet" is flatly contradicted by
+ * what they just did.
+ */
+export function createMrtrEmptyResultTool(): ToolDefinition {
+  return {
+    name: "mrtr_empty",
+    description:
+      "MRTR tool that completes with an empty result (no content, no structuredContent).",
+    inputSchema: {},
+    handler: async (
+      _params: Record<string, unknown>,
+      _context?: TestServerContext,
+      extra?: HandlerExtra,
+    ) => {
+      if (extra?.inputResponses?.ack === undefined) {
+        return inputRequired({
+          inputRequests: {
+            ack: inputRequired.elicit({
+              message: "Acknowledge to finish (the result will be empty)",
+              requestedSchema: {
+                type: "object",
+                properties: { ack: { type: "boolean", title: "Acknowledge" } },
+                required: ["ack"],
+              },
+            }),
+          },
+          requestState: `mrtr-empty:${++mrtrMintCount}`,
+        });
+      }
+      return { content: [] } satisfies CallToolResult;
     },
   };
 }
@@ -1439,6 +1516,92 @@ export function createFileResourceTemplate(
     complete: completionCallback,
     list: listCallback,
   };
+}
+
+/**
+ * Resource templates that exercise RFC 6570 expansion (#1919).
+ *
+ * `events_by_topic` is the simple `{topic}` expression from the issue: a `/`,
+ * `?`, `#` or space in the value MUST be percent-encoded, or the URI gains a
+ * path segment and a conforming matcher rejects it. `events_by_query` is the
+ * `{?topic}` form, which the web client could not even render an input for.
+ *
+ * Both handlers echo the URI they were matched against plus the variables the
+ * server decoded, so the round-trip is visible in the read result.
+ */
+/**
+ * The plain `foobar://events` resource that a blank `{?topic}` read lands on.
+ *
+ * Registering it is not decoration. RFC 6570 omits a query expression whose
+ * variable is undefined, so leaving `topic` blank legitimately requests the
+ * unfiltered collection -- but the SDK's own matcher cannot serve that from the
+ * template: `UriTemplate.partToRegExp` compiles `{?topic}` to a **required**
+ * `\?topic=([^&]+)`, so `match("foobar://events")` returns null and the read
+ * would 404. A real server would expose the collection as its own resource;
+ * this fixture does the same so the showcase's "read it blank" step works.
+ */
+export function createRfc6570BaseResource(): ResourceDefinition {
+  return {
+    uri: "foobar://events",
+    name: "events",
+    description: "All events - what a blank `{?topic}` read resolves to",
+    mimeType: "application/json",
+    text: JSON.stringify({ collection: "events", filtered: false }, null, 2),
+  };
+}
+
+export function createRfc6570ResourceTemplates(): ResourceTemplateDefinition[] {
+  const echo =
+    (label: string) => async (uri: URL, params: Record<string, unknown>) => ({
+      contents: [
+        {
+          uri: uri.toString(),
+          mimeType: "application/json",
+          text: JSON.stringify(
+            { template: label, matchedUri: uri.toString(), variables: params },
+            null,
+            2,
+          ),
+        },
+      ],
+    });
+
+  return [
+    {
+      name: "events_by_topic",
+      uriTemplate: "foobar://events/{topic}",
+      description:
+        "Simple expression - a reserved character in `topic` must be percent-encoded",
+      inputSchema: { topic: z.string().describe("Topic name") },
+      handler: echo("foobar://events/{topic}"),
+    },
+    {
+      name: "events_by_query",
+      uriTemplate: "foobar://events{?topic}",
+      description:
+        "Query expression - optional, and omitted entirely when `topic` is blank",
+      inputSchema: { topic: z.string().describe("Topic name") },
+      handler: echo("foobar://events{?topic}"),
+    },
+    {
+      // A template no client can honor: `abc` is not RFC 6570's `max-length`
+      // production (`%x31-39 0*3DIGIT`), so `{topic:abc}` is a malformed
+      // *template* rather than one with an ignorable modifier. The SDK's
+      // `UriTemplate` constructor accepts it, which is exactly why the
+      // Inspector checks the grammar itself and refuses the read -- guessing
+      // `{topic}` would send a URI this server never advertised.
+      //
+      // The handler is therefore unreachable through the Inspector by design.
+      // It is registered anyway so the template appears in
+      // `resources/templates/list`, which is what puts the refusal on screen.
+      name: "events_malformed",
+      uriTemplate: "foobar://events/{topic:abc}",
+      description:
+        "Malformed template - an out-of-grammar prefix modifier; the read is withheld",
+      inputSchema: { topic: z.string().describe("Topic name") },
+      handler: echo("foobar://events/{topic:abc}"),
+    },
+  ];
 }
 
 /**

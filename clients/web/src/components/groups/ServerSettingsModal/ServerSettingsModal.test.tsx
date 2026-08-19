@@ -276,8 +276,11 @@ describe("ServerSettingsModal", () => {
       />,
     );
     await user.click(screen.getByRole("button", { name: "Custom Headers" }));
-    const removeButtons = screen.getAllByRole("button", { name: "X" });
-    await user.click(removeButtons[0]);
+    await user.click(
+      screen.getByRole("button", {
+        name: "Remove header, Authorization, row 1",
+      }),
+    );
     expect(onSettingsChange).toHaveBeenCalledWith({
       ...initialSettings,
       headers: [],
@@ -342,10 +345,13 @@ describe("ServerSettingsModal", () => {
       />,
     );
     await user.click(screen.getByRole("button", { name: "Request Metadata" }));
-    const removeButtons = screen.getAllByRole("button", { name: "X" });
-    // After expanding metadata, both header and metadata X buttons exist;
-    // the metadata X is the last one.
-    await user.click(removeButtons[removeButtons.length - 1]);
+    // Both the header and metadata rows have a remove button; each is named
+    // for the row it belongs to, so no positional guess is needed.
+    await user.click(
+      screen.getByRole("button", {
+        name: "Remove metadata entry, userId, row 1",
+      }),
+    );
     expect(onSettingsChange).toHaveBeenCalledWith({
       ...initialSettings,
       metadata: [],
@@ -440,8 +446,79 @@ describe("ServerSettingsModal", () => {
       oauthClientId: "",
       oauthClientSecret: "",
       oauthScopes: "",
+      oauthAuthorizationParams: [],
       enterpriseManaged: true,
     });
+  });
+
+  // #1906 — a typed endpoint override lands on the settings; clearing it
+  // persists `undefined` rather than an empty string, so "cleared" and "never
+  // set" are the same state on disk.
+  it("persists a typed endpoint override, and clears it back to undefined", async () => {
+    const user = userEvent.setup();
+    const onSettingsChange = vi.fn();
+    const { rerender } = renderWithMantine(
+      <ServerSettingsModal
+        opened
+        settings={emptySettings}
+        serverType="streamable-http"
+        isStdio={false}
+        onClose={vi.fn()}
+        onSettingsChange={onSettingsChange}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "OAuth Settings" }));
+    await user.type(
+      screen.getByRole("textbox", { name: /Token URL override/i }),
+      "h",
+    );
+    expect(onSettingsChange).toHaveBeenCalledWith(
+      expect.objectContaining({ oauthTokenUrl: "h" }),
+    );
+
+    onSettingsChange.mockClear();
+    rerender(
+      <ServerSettingsModal
+        opened
+        settings={{
+          ...emptySettings,
+          oauthTokenUrl: "https://staging.test/token",
+        }}
+        serverType="streamable-http"
+        isStdio={false}
+        onClose={vi.fn()}
+        onSettingsChange={onSettingsChange}
+      />,
+    );
+    const clearButtons = screen.getAllByRole("button", { name: /clear/i });
+    await user.click(clearButtons[clearButtons.length - 1]);
+    expect(onSettingsChange).toHaveBeenCalledWith(
+      expect.objectContaining({ oauthTokenUrl: undefined }),
+    );
+  });
+
+  // #2018 — the authorization-parameter rows ride the same onOAuthChange
+  // callback, so the modal folds them onto the settings object.
+  it("persists an added authorization-parameter row onto the settings", async () => {
+    const user = userEvent.setup();
+    const onSettingsChange = vi.fn();
+    renderWithMantine(
+      <ServerSettingsModal
+        opened
+        settings={emptySettings}
+        serverType="streamable-http"
+        isStdio={false}
+        onClose={vi.fn()}
+        onSettingsChange={onSettingsChange}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "OAuth Settings" }));
+    await user.click(screen.getByRole("button", { name: "+ Add Parameter" }));
+    expect(onSettingsChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        oauthAuthorizationParams: [{ key: "", value: "" }],
+      }),
+    );
   });
 
   it("calls onSettingsChange with a blank row when adding a root", async () => {
@@ -739,8 +816,11 @@ describe("ServerSettingsModal", () => {
       await user.click(
         screen.getByRole("button", { name: "Environment Variables" }),
       );
-      const removeButtons = screen.getAllByRole("button", { name: "X" });
-      await user.click(removeButtons[removeButtons.length - 1]);
+      await user.click(
+        screen.getByRole("button", {
+          name: "Remove environment variable, A, row 1",
+        }),
+      );
       expect(onSettingsChange).toHaveBeenCalledWith({
         ...emptySettings,
         env: [],

@@ -100,6 +100,73 @@ import { ZodError } from "zod";
 const SSE_PRIMING_COMMENT = ":\n\n";
 
 /**
+ * Close an SSE stream from inside an `onAbort` listener, discarding the
+ * rejection.
+ *
+ * `close()` is async and the peer is, by definition, already gone here — a
+ * write that loses the race rejects with nothing left to recover. The listener
+ * itself cannot own the promise either: Hono's `abort()` invokes subscribers
+ * with a bare `subscriber()` (`hono/utils/stream`), so a promise *returned*
+ * from the listener is floated by Hono rather than awaited, turning an
+ * `async` listener into the same unhandled rejection one layer up. Swallowing
+ * it here is the only place the rejection has an owner.
+ */
+export function closeAbortedStream(stream: { close(): Promise<void> }): void {
+  stream.close().catch(() => {});
+}
+
+/** The slice of Hono's `StreamingApi` the SSE prime-and-hold helper needs. */
+export interface PrimableSseStream {
+  write(input: string): Promise<unknown>;
+  onAbort(listener: () => void): void;
+  close(): Promise<void>;
+}
+
+/**
+ * Prime an SSE stream, then hold the handler open until the client aborts,
+ * running `cleanup` exactly once when it does.
+ *
+ * The registration order is the whole point (#1999). Hono's `onAbort` is a
+ * plain push onto a subscriber array with **no already-aborted replay**, and
+ * `abort()` fires only the subscribers registered at that moment
+ * (`hono/utils/stream`). Priming is an `await`, so a listener registered
+ * *after* it never runs if the client disconnects while that write is in
+ * flight — leaving the caller's subscriber/consumer installed forever and the
+ * handler parked on a promise nothing will resolve.
+ *
+ * So the listener goes in before the first `await`, and the same one both
+ * cleans up and releases the hold. Note this must not be inlined back into a
+ * caller in a way that reintroduces an `await` ahead of the registration —
+ * priming itself cannot move earlier, because callers deliberately install
+ * their subscriber before the first bytes go out (see GET /api/servers/events).
+ *
+ * `cleanup` runs inside Hono's bare `subscriber()` call, so it must be
+ * synchronous and must not throw — a rejection there has no owner.
+ */
+export async function primeAndHoldSseStream(
+  stream: PrimableSseStream,
+  cleanup: () => void,
+): Promise<void> {
+  let done = false;
+  const aborted = new Promise<void>((resolve) => {
+    stream.onAbort(() => {
+      // Hono's `abort()` guards its own re-entry, but the guard belongs here
+      // too: this helper's contract is exactly-once teardown, and running a
+      // caller's cleanup twice would double-delete a subscriber that has
+      // since been re-added by a reconnect.
+      if (done) return;
+      done = true;
+      cleanup();
+      closeAbortedStream(stream);
+      resolve();
+    });
+  });
+
+  await stream.write(SSE_PRIMING_COMMENT);
+  await aborted;
+}
+
+/**
  * Shape of the initial config returned by GET /api/config (defaults for client).
  */
 export interface InitialConfigPayload {
@@ -839,6 +906,10 @@ export function createRemoteApp(
       // drained the queued stderr + the transport_error event. Yield once
       // so the writeSSE writes flush, then return — closing the stream and
       // surfacing the real error instead of a bare 404 / silent hang.
+      //
+      // This branch needs no abort listener despite its `await`: it performs
+      // the same teardown unconditionally on the way out, so a disconnect
+      // during the yield changes nothing.
       if (session.isTransportDead()) {
         await new Promise((resolve) => setTimeout(resolve, 0));
         session.clearEventConsumer();
@@ -848,28 +919,17 @@ export function createRemoteApp(
 
       // Prime only after the consumer is registered, so nothing observable
       // to the client happens before this stream can actually report
-      // events. See SSE_PRIMING_COMMENT.
-      await stream.write(SSE_PRIMING_COMMENT);
-
-      stream.onAbort(() => {
+      // events. See SSE_PRIMING_COMMENT. The disconnect cleanup is
+      // registered ahead of that priming write and the stream is then held
+      // open until the client aborts — see primeAndHoldSseStream (#1999).
+      await primeAndHoldSseStream(stream, () => {
         // Client disconnected - clear event consumer
         const shouldCleanup = session.clearEventConsumer();
-        stream.close();
 
         // If transport is dead and no client connected, cleanup session
         if (shouldCleanup || session.isTransportDead()) {
           sessions.delete(sessionId);
         }
-      });
-
-      // Keep the stream open until the client disconnects. Hono's streamSSE
-      // closes the stream when this callback returns, so we must not return
-      // until the connection is aborted.
-      await new Promise<void>((resolve) => {
-        stream.onAbort(() => {
-          // Cleanup happens in onAbort handler above
-          resolve();
-        });
       });
     });
   });
@@ -1130,12 +1190,30 @@ export function createRemoteApp(
     clientId?: string;
     clientSecret?: string;
     scopes?: string;
+    authorizationParams?: Record<string, string>;
+    authorizationUrl?: string;
+    tokenUrl?: string;
     enterpriseManaged?: boolean;
   } => {
     if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
     const o = v as Record<string, unknown>;
-    for (const k of ["clientId", "clientSecret", "scopes"] as const) {
+    for (const k of [
+      "clientId",
+      "clientSecret",
+      "scopes",
+      // #1906 — shape only; the values are validated as absolute http(s) URLs
+      // where they're applied (core/auth/endpointOverrides.ts), so a typo drops
+      // one field with a warning instead of dropping the whole `oauth` block.
+      "authorizationUrl",
+      "tokenUrl",
+    ] as const) {
       if (o[k] !== undefined && typeof o[k] !== "string") return false;
+    }
+    if (
+      o.authorizationParams !== undefined &&
+      !isStringRecord(o.authorizationParams)
+    ) {
+      return false;
     }
     if (
       o.enterpriseManaged !== undefined &&
@@ -1248,7 +1326,7 @@ export function createRemoteApp(
       if ("oauth" in valObj && !isOauthObject(valObj.oauth)) {
         logWarn(
           { route: "/api/servers", id, droppedKey: "oauth" },
-          "Dropping malformed `oauth` field — expected `{ clientId?, clientSecret?, scopes?, enterpriseManaged? }`.",
+          "Dropping malformed `oauth` field — expected `{ clientId?, clientSecret?, scopes?, authorizationParams?, authorizationUrl?, tokenUrl?, enterpriseManaged?, onInsufficientScope? }`.",
         );
         delete valObj.oauth;
       }
@@ -1515,10 +1593,26 @@ export function createRemoteApp(
       "oauthClientId",
       "oauthClientSecret",
       "oauthScopes",
+      // #1906 — string-shaped on the wire; URL validity is checked where the
+      // override is applied, not here.
+      "oauthAuthorizationUrl",
+      "oauthTokenUrl",
     ] as const) {
       if (obj[optional] !== undefined && typeof obj[optional] !== "string") {
         return { ok: false, error: `settings.${optional} must be a string` };
       }
+    }
+    // Optional on the wire (older clients won't send it); when present it must
+    // be the same `{ key, value }` row shape the headers/metadata lists use.
+    if (
+      obj.oauthAuthorizationParams !== undefined &&
+      !isKvArray(obj.oauthAuthorizationParams)
+    ) {
+      return {
+        ok: false,
+        error:
+          "settings.oauthAuthorizationParams must be an array of { key, value }",
+      };
     }
     if (
       obj.enterpriseManaged !== undefined &&
@@ -1634,6 +1728,24 @@ export function createRemoteApp(
     }
     if (typeof obj.oauthScopes === "string" && obj.oauthScopes !== "") {
       value.oauthScopes = obj.oauthScopes;
+    }
+    // Carried through with its blank rows intact — the omit-on-empty filtering
+    // happens on the way to disk (inspectorSettingsToStoredFields), matching
+    // how the headers/metadata rows are handled. (#2018)
+    if (isKvArray(obj.oauthAuthorizationParams)) {
+      value.oauthAuthorizationParams = obj.oauthAuthorizationParams;
+    }
+    // Empty-string coerces to absent like the credential fields above: the form
+    // emits `""` when a user clears the input, and an empty override on disk
+    // would read back as a configured-but-blank endpoint. (#1906)
+    if (
+      typeof obj.oauthAuthorizationUrl === "string" &&
+      obj.oauthAuthorizationUrl !== ""
+    ) {
+      value.oauthAuthorizationUrl = obj.oauthAuthorizationUrl;
+    }
+    if (typeof obj.oauthTokenUrl === "string" && obj.oauthTokenUrl !== "") {
+      value.oauthTokenUrl = obj.oauthTokenUrl;
     }
     if (obj.enterpriseManaged === true) {
       value.enterpriseManaged = true;
@@ -2429,20 +2541,15 @@ export function createRemoteApp(
       // registered and the watcher started: callers treat the arrival of
       // this stream's first bytes as proof they are subscribed, so priming
       // first would hand out that proof across an `await`, before the
-      // watcher exists, and drop an edit made in the gap.
-      await stream.write(SSE_PRIMING_COMMENT);
-
-      stream.onAbort(() => {
+      // watcher exists, and drop an edit made in the gap. The unsubscribe is
+      // nonetheless registered *before* that write, and the stream is held
+      // open until the client aborts — see primeAndHoldSseStream (#1999).
+      await primeAndHoldSseStream(stream, () => {
         serverEventSubscribers.delete(send);
+        // Voided rather than awaited: this runs inside Hono's synchronous
+        // abort subscriber, which cannot await. maybeStopWatcher owns its
+        // own failures (it swallows a close() that throws).
         void maybeStopWatcher();
-        stream.close();
-      });
-
-      // Hono closes the stream the moment this callback returns, so hold the
-      // promise open until the client aborts. Cleanup happens in the
-      // onAbort handler registered above.
-      await new Promise<void>((resolve) => {
-        stream.onAbort(() => resolve());
       });
     });
   });

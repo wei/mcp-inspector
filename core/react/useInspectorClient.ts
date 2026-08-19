@@ -11,6 +11,7 @@ import type {
   DiscoverResult,
 } from "@modelcontextprotocol/client";
 import type { ExcludedTool } from "../mcp/types.js";
+import type { MalformedListItem } from "../mcp/listSalvage.js";
 
 // Module-scope frozen object so the `?? EMPTY_CLIENT_CAPABILITIES`
 // fallback below doesn't return a fresh literal on every render —
@@ -44,6 +45,12 @@ export interface UseInspectorClientResult {
    * connections and before connect (#1632).
    */
   excludedTools: ExcludedTool[];
+  /**
+   * Entries the Inspector dropped from a list result because they failed the
+   * spec schema for their primitive. Empty against a conforming server; a
+   * non-empty set means that list rendered without them (#1909).
+   */
+  malformedListItems: MalformedListItem[];
   /**
    * Message from the most recent mid-session transport failure (the client's
    * `error` event — stdio crash, SSE drop, HTTP 5xx). Stays set until the next
@@ -97,6 +104,9 @@ export function useInspectorClient(
   const [excludedTools, setExcludedTools] = useState<ExcludedTool[]>(
     inspectorClient?.getExcludedTools() ?? [],
   );
+  const [malformedListItems, setMalformedListItems] = useState<
+    MalformedListItem[]
+  >(inspectorClient?.getMalformedListItems() ?? []);
   const [lastError, setLastError] = useState<string | undefined>(undefined);
 
   useEffect(() => {
@@ -109,6 +119,7 @@ export function useInspectorClient(
       setProtocolEra(undefined);
       setDiscoverResult(undefined);
       setExcludedTools([]);
+      setMalformedListItems([]);
       setLastError(undefined);
       return;
     }
@@ -121,6 +132,7 @@ export function useInspectorClient(
     setProtocolEra(inspectorClient.getProtocolEra());
     setDiscoverResult(inspectorClient.getDiscoverResult());
     setExcludedTools(inspectorClient.getExcludedTools());
+    setMalformedListItems(inspectorClient.getMalformedListItems());
     setLastError(undefined);
 
     const onStatusChange = (event: TypedEvent<"statusChange">) => {
@@ -156,6 +168,11 @@ export function useInspectorClient(
     ) => {
       setDiscoverResult(event.detail);
     };
+    const onMalformedListItemsChange = (
+      event: TypedEvent<"malformedListItemsChange">,
+    ) => {
+      setMalformedListItems(event.detail);
+    };
     const onExcludedToolsChange = (
       event: TypedEvent<"excludedToolsChange">,
     ) => {
@@ -185,6 +202,10 @@ export function useInspectorClient(
     inspectorClient.addEventListener(
       "excludedToolsChange",
       onExcludedToolsChange,
+    );
+    inspectorClient.addEventListener(
+      "malformedListItemsChange",
+      onMalformedListItemsChange,
     );
 
     return () => {
@@ -218,6 +239,10 @@ export function useInspectorClient(
         "excludedToolsChange",
         onExcludedToolsChange,
       );
+      inspectorClient.removeEventListener(
+        "malformedListItemsChange",
+        onMalformedListItemsChange,
+      );
     };
   }, [inspectorClient]);
 
@@ -247,6 +272,7 @@ export function useInspectorClient(
     protocolEra,
     discoverResult,
     excludedTools,
+    malformedListItems,
     lastError,
     appRendererClient: inspectorClient?.getAppRendererClient() ?? null,
     connect,

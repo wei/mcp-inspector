@@ -24,6 +24,7 @@ import { mkdtempSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { removeSafe } from "./lib/child-cleanup.mjs";
+import { resolveNodeBin } from "./lib/resolve-node-bin.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const launcher = join(repoRoot, "clients", "launcher", "build", "index.js");
@@ -44,10 +45,18 @@ function fail(message) {
 function ensureTestServer() {
   if (existsSync(testServer)) return;
   console.log("smoke:tui — building test-servers (missing build output)...");
-  const r = spawnSync("npx", ["tsc", "-p", "test-servers", "--noCheck"], {
-    cwd: repoRoot,
-    stdio: "inherit",
-  });
+  // The root-installed tsc, run via this Node — `npx` is a `.cmd` shim on
+  // Windows that a shell-free spawnSync can't start (ENOENT — #1939).
+  const r = spawnSync(
+    process.execPath,
+    [
+      resolveNodeBin("typescript", "tsc", repoRoot),
+      "-p",
+      "test-servers",
+      "--noCheck",
+    ],
+    { cwd: repoRoot, stdio: "inherit" },
+  );
   if (r.status !== 0 || !existsSync(testServer)) {
     fail(
       "could not build the stdio test server (test-servers/build/test-server-stdio.js). " +

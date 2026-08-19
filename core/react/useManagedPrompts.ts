@@ -6,7 +6,7 @@ import type {
 } from "../mcp/state/managedPromptsState.js";
 import type { Prompt } from "@modelcontextprotocol/client";
 import type { TypedEventGeneric } from "../mcp/typedEventTarget.js";
-import { useManagedListError } from "./useManagedListError.js";
+import { useListError } from "./useListError.js";
 
 export interface UseManagedPromptsResult {
   /**
@@ -72,7 +72,7 @@ export function useManagedPrompts(
     };
   }, [managedPromptsState]);
 
-  const error = useManagedListError(managedPromptsState);
+  const error = useListError(managedPromptsState);
 
   const refresh = useCallback(async (): Promise<Prompt[]> => {
     if (!managedPromptsState || !client) return [];

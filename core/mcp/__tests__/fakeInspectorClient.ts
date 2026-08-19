@@ -38,6 +38,7 @@ import type {
   ExcludedTool,
 } from "../types.js";
 import { INACTIVE_SUBSCRIPTION_STREAM_STATE } from "../types.js";
+import type { MalformedListItem } from "../listSalvage.js";
 import type { JsonValue } from "../../json/jsonUtils.js";
 
 type ListResult<TKey extends string, TItem> = {
@@ -280,6 +281,18 @@ export class FakeInspectorClient
   setExcludedTools(excluded: ExcludedTool[]): void {
     this.excludedTools = excluded;
     this.dispatchTypedEvent("excludedToolsChange", excluded);
+  }
+
+  private malformedListItems: MalformedListItem[] = [];
+
+  getMalformedListItems(): MalformedListItem[] {
+    return this.malformedListItems;
+  }
+
+  /** Test helper: set the malformed-entry set and emit the change (#1909). */
+  setMalformedListItems(malformed: MalformedListItem[]): void {
+    this.malformedListItems = malformed;
+    this.dispatchTypedEvent("malformedListItemsChange", malformed);
   }
 
   getDiscoverResult(): DiscoverResult | undefined {

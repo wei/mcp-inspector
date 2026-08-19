@@ -96,6 +96,23 @@ export function buildTabUiSnapshot(
   };
 }
 
+/**
+ * A snapshot written before #2001 carries `selectedToolName` (a tool's name)
+ * where {@link ToolsUiState} now expects `selectedToolKey` (its `index:name`
+ * row identity). A snapshot only lives for the length of one OAuth redirect,
+ * so this matters exactly when the app is upgraded mid-redirect — and the name
+ * cannot be mapped to a row key here, since the tools list is fetched after
+ * reconnect, long after restore. So the stale selection is dropped rather than
+ * carried as a stray field that would be re-serialized on the next redirect;
+ * the rest of the tab state (search text, form values) is restored intact and
+ * the screen opens on its "select a tool" placeholder.
+ */
+function normalizeToolsUi(value: unknown): ToolsUiState {
+  const ui = { ...((value as ToolsUiState | undefined) ?? EMPTY_TOOLS_UI) };
+  delete (ui as ToolsUiState & { selectedToolName?: string }).selectedToolName;
+  return ui;
+}
+
 export function restoreTabUiFromSnapshot(
   tabUi: Partial<Record<InspectorTabId, unknown>> | undefined,
   setters: TabUiSetters,
@@ -110,9 +127,7 @@ export function restoreTabUiFromSnapshot(
     const value = tabUi[tabId];
     switch (tabId) {
       case "Tools":
-        setters.setToolsUi(
-          (value as ToolsUiState | undefined) ?? EMPTY_TOOLS_UI,
-        );
+        setters.setToolsUi(normalizeToolsUi(value));
         break;
       case "Prompts":
         setters.setPromptsUi(

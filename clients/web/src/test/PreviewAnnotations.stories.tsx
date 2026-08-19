@@ -69,25 +69,27 @@ type Story = StoryObj<typeof Button>;
 export const ProjectAnnotationsApplied: Story = {
   play: async ({ canvasElement, parameters }) => {
     const canvas = within(canvasElement);
-    expect(canvas.getByRole("button", { name: "Themed" })).toBeInTheDocument();
+    await expect(
+      canvas.getByRole("button", { name: "Themed" }),
+    ).toBeInTheDocument();
 
     const root = getComputedStyle(document.documentElement);
 
     // `MantineProvider` (the `./preview` decorator) injects the theme's CSS
     // variables onto `:root`. No provider, no variables.
-    expect(root.getPropertyValue("--mantine-primary-color-filled").trim()).toBe(
-      expectedPrimaryColor(),
-    );
+    await expect(
+      root.getPropertyValue("--mantine-primary-color-filled").trim(),
+    ).toBe(expectedPrimaryColor());
 
     // `--inspector-brand-primary` is defined in `App.css`, which only reaches
     // the story through `./preview`'s stylesheet import — and it resolves
     // *through* the Mantine variable above, so this covers both layers.
-    expect(root.getPropertyValue("--inspector-brand-primary").trim()).toBe(
-      expectedPrimaryColor(),
-    );
+    await expect(
+      root.getPropertyValue("--inspector-brand-primary").trim(),
+    ).toBe(expectedPrimaryColor());
 
     // The preview `parameters` merged into the story context — the same channel
     // that carries `a11y: { test: "error" }` to the a11y addon.
-    expect(parameters.a11y).toMatchObject({ test: "error" });
+    await expect(parameters.a11y).toMatchObject({ test: "error" });
   },
 };

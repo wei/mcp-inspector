@@ -8,6 +8,7 @@ import {
   Stack,
   Text,
 } from "@mantine/core";
+import type { MalformedListItem } from "@inspector/core/mcp";
 import type {
   ProtocolEra,
   ReadResourceResult,
@@ -58,6 +59,11 @@ export interface ResourcesScreenProps {
   onUiChange: (next: ResourcesUiState) => void;
   onRefreshList: () => void;
   /** A failed list load, rendered above the sidebar list (#1953). */
+  /**
+   * Entries dropped from this screen's list result(s) as malformed; the list
+   * panel warns about them above the list (#1909).
+   */
+  malformedListItems?: MalformedListItem[];
   loadError?: Error | null;
   /** Pagination controls rendered in the sidebar (#1721). */
   pagination: ListPaginationControlsProps;
@@ -172,6 +178,7 @@ export function ResourcesScreen({
   subscriptionsSupported = true,
   onUiChange,
   onRefreshList,
+  malformedListItems,
   loadError,
   pagination,
   onReadResource,
@@ -329,6 +336,7 @@ export function ResourcesScreen({
             listChanged={listChanged}
             onRefreshList={onRefreshList}
             loadError={loadError}
+            malformedListItems={malformedListItems}
             pagination={pagination}
             onSearchChange={(value) => onUiChange({ ...ui, search: value })}
             onOpenSectionsChange={(value) =>

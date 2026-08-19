@@ -31,6 +31,21 @@ const fullClientCaps: ClientCapabilities = {
   experimental: {},
 };
 
+// The glyphs `CapabilityItem` renders beside each capability label.
+const SUPPORTED_MARK = "✓";
+const UNSUPPORTED_MARK = "✗";
+
+/**
+ * Read the ✓/✗ a capability row is showing. The mark is the label's preceding
+ * sibling inside the row `Group`, so asserting on it — rather than on the
+ * label's mere presence — is what distinguishes "supported" from "listed".
+ */
+function capabilityMark(label: string): string | undefined {
+  return (
+    screen.getByText(label).previousElementSibling?.textContent ?? undefined
+  );
+}
+
 describe("ConnectionInfoContent", () => {
   it("renders server implementation fields under the heading", () => {
     renderWithMantine(
@@ -179,6 +194,96 @@ describe("ConnectionInfoContent", () => {
     expect(screen.getByText("Resources")).toBeInTheDocument();
     expect(screen.getByText("Roots")).toBeInTheDocument();
     expect(screen.getByText("Sampling")).toBeInTheDocument();
+  });
+
+  it("marks Tasks supported on a modern connection that advertises the tasks extension (#1887)", () => {
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={{
+          ...fullResult,
+          capabilities: {
+            ...fullResult.capabilities,
+            // SEP-2663: no top-level `tasks` key — support is the extension.
+            extensions: { "io.modelcontextprotocol/tasks": {} },
+          },
+        }}
+        clientCapabilities={fullClientCaps}
+        transport="streamable-http"
+        protocolEra="modern"
+      />,
+    );
+    expect(capabilityMark("Tasks")).toBe(SUPPORTED_MARK);
+  });
+
+  it("still marks Tasks unsupported on a modern connection without the extension (#1887)", () => {
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={fullResult}
+        clientCapabilities={fullClientCaps}
+        transport="streamable-http"
+        protocolEra="modern"
+      />,
+    );
+    expect(capabilityMark("Tasks")).toBe(UNSUPPORTED_MARK);
+  });
+
+  it("does not read the tasks extension on a legacy connection (#1887)", () => {
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={{
+          ...fullResult,
+          capabilities: {
+            ...fullResult.capabilities,
+            extensions: { "io.modelcontextprotocol/tasks": {} },
+          },
+        }}
+        clientCapabilities={fullClientCaps}
+        transport="streamable-http"
+        protocolEra="legacy"
+      />,
+    );
+    // Legacy tasks support is `capabilities.tasks`, which this server omits —
+    // an extension key alone must not turn the row green.
+    expect(capabilityMark("Tasks")).toBe(UNSUPPORTED_MARK);
+  });
+
+  it("marks Tasks supported on a legacy connection from capabilities.tasks", () => {
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={{
+          ...fullResult,
+          capabilities: {
+            ...fullResult.capabilities,
+            // `ServerTasksCapability`'s sub-capabilities are objects, not
+            // booleans — `{}` is the "supported, no sub-options" shape.
+            tasks: { list: {}, cancel: {} },
+          },
+        }}
+        clientCapabilities={fullClientCaps}
+        transport="streamable-http"
+        protocolEra="legacy"
+      />,
+    );
+    expect(capabilityMark("Tasks")).toBe(SUPPORTED_MARK);
+  });
+
+  it("does not extension-promote a capability other than tasks (#1887)", () => {
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={{
+          ...fullResult,
+          capabilities: {
+            tools: { listChanged: true },
+            extensions: { "io.modelcontextprotocol/ui": {} },
+          },
+        }}
+        clientCapabilities={fullClientCaps}
+        transport="streamable-http"
+        protocolEra="modern"
+      />,
+    );
+    expect(capabilityMark("Prompts")).toBe(UNSUPPORTED_MARK);
+    expect(capabilityMark("Tasks")).toBe(UNSUPPORTED_MARK);
   });
 
   it("renders instructions when present", () => {
@@ -473,6 +578,95 @@ describe("ConnectionInfoContent", () => {
     expect(screen.queryByText("Auth URL")).not.toBeInTheDocument();
     expect(screen.queryByText("Scopes")).not.toBeInTheDocument();
     expect(screen.queryByText("Access Token")).not.toBeInTheDocument();
+    expect(screen.queryByText("ID Token")).not.toBeInTheDocument();
+  });
+
+  it("renders the ID Token row when the token set carries one", () => {
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={fullResult}
+        clientCapabilities={fullClientCaps}
+        transport="streamable-http"
+        oauth={{
+          protocol: "standard",
+          authorized: true,
+          accessToken: "token-123",
+          idToken: "id-token-456",
+        }}
+      />,
+    );
+    expect(screen.getByText("Access Token")).toBeInTheDocument();
+    expect(screen.getByText("ID Token")).toBeInTheDocument();
+    expect(screen.getByText("id-token-456")).toBeInTheDocument();
+  });
+
+  it("gives the two token rows' controls distinct accessible names", () => {
+    // Both rows carry a copy control, and both tokens here are JWTs so both
+    // carry a decode toggle. Screen-reader button navigation has only the
+    // accessible name to go on, so the four must not collide (#2019 review).
+    const jwt = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ1c2VyIn0.";
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={fullResult}
+        clientCapabilities={fullClientCaps}
+        transport="streamable-http"
+        oauth={{
+          protocol: "standard",
+          authorized: true,
+          accessToken: jwt,
+          idToken: jwt,
+        }}
+      />,
+    );
+
+    const names = screen
+      .getAllByRole("button")
+      .map((button) => button.getAttribute("aria-label") ?? button.textContent)
+      .filter((name): name is string => Boolean(name));
+    expect(new Set(names).size).toBe(names.length);
+
+    for (const name of [
+      "Copy Access Token",
+      "Copy ID Token",
+      "Decode JWT for Access Token",
+      "Decode JWT for ID Token",
+    ]) {
+      expect(screen.getByRole("button", { name })).toBeInTheDocument();
+    }
+  });
+
+  it("renders the ID Token row on its own when there is no access token", () => {
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={fullResult}
+        clientCapabilities={fullClientCaps}
+        transport="streamable-http"
+        oauth={{
+          protocol: "standard",
+          authorized: true,
+          idToken: "id-token-456",
+        }}
+      />,
+    );
+    expect(screen.queryByText("Access Token")).not.toBeInTheDocument();
+    expect(screen.getByText("ID Token")).toBeInTheDocument();
+  });
+
+  it("omits the ID Token row when only an access token is present", () => {
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={fullResult}
+        clientCapabilities={fullClientCaps}
+        transport="streamable-http"
+        oauth={{
+          protocol: "standard",
+          authorized: true,
+          accessToken: "token-123",
+        }}
+      />,
+    );
+    expect(screen.getByText("Access Token")).toBeInTheDocument();
+    expect(screen.queryByText("ID Token")).not.toBeInTheDocument();
   });
 
   it("does not render OAuth section when oauth prop is omitted", () => {

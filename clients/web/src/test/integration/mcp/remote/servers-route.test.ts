@@ -449,6 +449,122 @@ describe("/api/servers routes", () => {
       });
     });
 
+    // #2018 — the authorization-parameter rows travel as a pair array on the
+    // wire and land as a record under `oauth` on disk, mirroring `headers`.
+    it("persists custom authorization params under oauth on POST", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "authparams",
+          config: { type: "streamable-http", url: "https://x.test/mcp" },
+          settings: {
+            headers: [],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+            oauthAuthorizationParams: [
+              { key: "kc_idp_hint", value: "corp" },
+              { key: "", value: "dropped" },
+            ],
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const stored = readConfig(h.configPath).mcpServers.authparams;
+      expect(stored?.oauth).toEqual({
+        authorizationParams: { kc_idp_hint: "corp" },
+      });
+    });
+
+    it("rejects a malformed oauthAuthorizationParams payload", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "badauthparams",
+          config: { type: "streamable-http", url: "https://x.test/mcp" },
+          settings: {
+            headers: [],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+            oauthAuthorizationParams: { kc_idp_hint: "corp" },
+          },
+        }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    // #1906 — the endpoint overrides travel as plain strings and land under
+    // `oauth` on disk beside the credentials.
+    it("persists the oauth endpoint overrides on POST", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "endpointoverrides",
+          config: { type: "streamable-http", url: "https://x.test/mcp" },
+          settings: {
+            headers: [],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+            oauthAuthorizationUrl: "https://staging.test/authorize",
+            oauthTokenUrl: "https://staging.test/token",
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+      const stored = readConfig(h.configPath).mcpServers.endpointoverrides;
+      expect(stored?.oauth).toEqual({
+        authorizationUrl: "https://staging.test/authorize",
+        tokenUrl: "https://staging.test/token",
+      });
+    });
+
+    it("drops an empty oauth endpoint override rather than writing it", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "blankoverrides",
+          config: { type: "streamable-http", url: "https://x.test/mcp" },
+          settings: {
+            headers: [],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+            oauthAuthorizationUrl: "",
+            oauthTokenUrl: "",
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+      expect(
+        readConfig(h.configPath).mcpServers.blankoverrides,
+      ).not.toHaveProperty("oauth");
+    });
+
+    it("rejects a non-string oauthTokenUrl payload", async () => {
+      const res = await fetch(`${h.baseUrl}/api/servers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: "badtokenurl",
+          config: { type: "streamable-http", url: "https://x.test/mcp" },
+          settings: {
+            headers: [],
+            metadata: [],
+            connectionTimeout: 0,
+            requestTimeout: 0,
+            oauthTokenUrl: 42,
+          },
+        }),
+      });
+      expect(res.status).toBe(400);
+    });
+
     it("updates Inspector-extension fields at the top level on PUT", async () => {
       writeFileSync(
         h.configPath,

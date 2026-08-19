@@ -7,6 +7,7 @@ import type {
 } from "../mcp/state/pagedResourcesState.js";
 import type { Resource } from "@modelcontextprotocol/client";
 import type { TypedEventGeneric } from "../mcp/typedEventTarget.js";
+import { useListError } from "./useListError.js";
 
 export interface UsePagedResourcesResult {
   resources: Resource[];
@@ -14,6 +15,12 @@ export interface UsePagedResourcesResult {
   nextCursor?: string;
   /** Pages loaded since the last reset (page 1 = 1). */
   pageCount: number;
+  /**
+   * The last page load's failure, or `null` when it succeeded. In paginated
+   * mode this store is the display source, so this — not the managed
+   * store's error — is what the panel renders (#1998).
+   */
+  error: Error | null;
   loadPage: (
     cursor?: string,
     metadata?: Record<string, string>,
@@ -78,6 +85,8 @@ export function usePagedResources(
     };
   }, [pagedResourcesState]);
 
+  const error = useListError(pagedResourcesState);
+
   const loadPage = useCallback(
     async (
       cursor?: string,
@@ -95,5 +104,5 @@ export function usePagedResources(
     pagedResourcesState?.clear();
   }, [pagedResourcesState]);
 
-  return { resources, nextCursor, pageCount, loadPage, clear };
+  return { resources, nextCursor, pageCount, error, loadPage, clear };
 }

@@ -7,6 +7,7 @@ import type {
 } from "../mcp/state/pagedToolsState.js";
 import type { Tool } from "@modelcontextprotocol/client";
 import type { TypedEventGeneric } from "../mcp/typedEventTarget.js";
+import { useListError } from "./useListError.js";
 
 export interface UsePagedToolsResult {
   tools: Tool[];
@@ -14,6 +15,12 @@ export interface UsePagedToolsResult {
   nextCursor?: string;
   /** Pages loaded since the last reset (page 1 = 1). */
   pageCount: number;
+  /**
+   * The last page load's failure, or `null` when it succeeded. In paginated
+   * mode this store is the display source, so this — not the managed
+   * store's error — is what the panel renders (#1998).
+   */
+  error: Error | null;
   loadPage: (cursor?: string) => Promise<LoadPageResult>;
   clear: () => void;
 }
@@ -68,6 +75,8 @@ export function usePagedTools(
     };
   }, [pagedToolsState]);
 
+  const error = useListError(pagedToolsState);
+
   const loadPage = useCallback(
     async (cursor?: string): Promise<LoadPageResult> => {
       if (!pagedToolsState || !client) {
@@ -82,5 +91,5 @@ export function usePagedTools(
     pagedToolsState?.clear();
   }, [pagedToolsState]);
 
-  return { tools, nextCursor, pageCount, loadPage, clear };
+  return { tools, nextCursor, pageCount, error, loadPage, clear };
 }

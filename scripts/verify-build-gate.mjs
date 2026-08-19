@@ -32,6 +32,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveNodeBin } from "./lib/resolve-node-bin.mjs";
 
 const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -80,6 +81,20 @@ function fail(message, detail) {
 // Escape a literal for safe interpolation into a RegExp.
 function escapeRegExp(literal) {
   return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// The repo-pinned Vite's JS entry, resolved from clients/web — the old `npx
+// --no-install` guarantee (never a registry fetch) — and spawned via this Node,
+// since `npx` is a `.cmd` shim on Windows that a shell-free spawnSync can't
+// start (ENOENT — #1939). Resolved up front, BEFORE the probe is injected, so a
+// missing install fails actionably without ever touching src/main.tsx.
+let viteEntry;
+try {
+  viteEntry = resolveNodeBin("vite", "vite", webDir);
+} catch (err) {
+  fail(
+    `cannot resolve \`vite\` from clients/web (${err.message}) — run \`npm install\` at the repo root first`,
+  );
 }
 
 // Write the captured original to a backup and fail — the honest remedy when the
@@ -229,15 +244,14 @@ try {
   console.log(
     "verify:build-gate: running a real `vite build` with a node:fs probe (takes a minute)…",
   );
-  // `--no-install` pins to the locally installed (repo-pinned) Vite: the whole
-  // point is proving the message-keyed gate fires against THIS Vite, so `npx`
-  // must never silently fetch a different version from the registry when
-  // clients/web/node_modules is missing/partial. A missing local bin then
-  // surfaces via the `result.error` check below. `timeout` bounds a hung build:
-  // spawnSync sets `result.error` (ETIMEDOUT) on timeout, so the same branch
-  // reports it — otherwise a hang would burn to the GitHub job's 360-min default
-  // with no output (this step captures rather than inherits stdio).
-  result = spawnSync("npx", ["--no-install", "vite", "build"], {
+  // `viteEntry` (resolved above) pins to the locally installed (repo-pinned)
+  // Vite: the whole point is proving the message-keyed gate fires against THIS
+  // Vite, so nothing may silently fetch a different version from the registry
+  // when clients/web/node_modules is missing/partial. `timeout` bounds a hung
+  // build: spawnSync sets `result.error` (ETIMEDOUT) on timeout, so that branch
+  // below reports it — otherwise a hang would burn to the GitHub job's 360-min
+  // default with no output (this step captures rather than inherits stdio).
+  result = spawnSync(process.execPath, [viteEntry, "build"], {
     cwd: webDir,
     encoding: "utf8",
     timeout: 10 * 60_000,
@@ -266,7 +280,7 @@ if (afterRestore !== original) {
   );
 }
 
-// A spawn failure (e.g. `npx` missing) leaves `status` null with no output —
+// A spawn failure (or the timeout above) leaves `status` null with no output —
 // surface it as itself rather than falling through to the "not via the gate"
 // diagnosis, which would send someone chasing a build regression that isn't real.
 if (result.error) {

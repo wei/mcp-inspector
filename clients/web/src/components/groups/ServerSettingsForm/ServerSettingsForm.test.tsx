@@ -8,12 +8,15 @@ import {
   type ServerSettingsSection,
 } from "./ServerSettingsForm";
 
-/** Find the "Clear" button living in the rightSection of `input`'s field. */
+/** Find the clear button living in the rightSection of `input`'s field. The
+ *  name is a prefix match because a KeyValueRows field names its clear button
+ *  for the row it belongs to ("Clear header name, Cookie, row 1"), while a standalone
+ *  field keeps the bare "Clear". */
 function clearButtonFor(input: HTMLElement): HTMLElement {
   const root =
     input.closest('[class*="mantine-TextInput-root"]') ??
     input.closest('[class*="Input-wrapper"]');
-  return within(root as HTMLElement).getByRole("button", { name: "Clear" });
+  return within(root as HTMLElement).getByRole("button", { name: /^Clear/ });
 }
 
 const emptySettings: InspectorServerSettings = {
@@ -329,8 +332,11 @@ describe("ServerSettingsForm", () => {
         expandedSections={["headers"]}
       />,
     );
-    const removeButtons = screen.getAllByRole("button", { name: "X" });
-    await user.click(removeButtons[0]);
+    await user.click(
+      screen.getByRole("button", {
+        name: "Remove header, Authorization, row 1",
+      }),
+    );
     expect(onRemoveHeader).toHaveBeenCalledWith(0);
   });
 
@@ -351,8 +357,11 @@ describe("ServerSettingsForm", () => {
     await user.type(valueInput, "Z");
     expect(onMetadataChange).toHaveBeenCalled();
 
-    const removeButtons = screen.getAllByRole("button", { name: "X" });
-    await user.click(removeButtons[0]);
+    await user.click(
+      screen.getByRole("button", {
+        name: "Remove metadata entry, userId, row 1",
+      }),
+    );
     expect(onRemoveMetadata).toHaveBeenCalledWith(0);
   });
 
@@ -676,9 +685,13 @@ describe("ServerSettingsForm", () => {
       await user.type(keyInput, "2");
       expect(onEnvChange).toHaveBeenLastCalledWith(0, "API_KEY2", "secret");
 
-      // The remove ("X") button sits alongside the row's key/value inputs.
-      const removeButtons = screen.getAllByRole("button", { name: "X" });
-      await user.click(removeButtons[removeButtons.length - 1]!);
+      // The remove button sits alongside the row's key/value inputs; its
+      // accessible name identifies which row it belongs to.
+      await user.click(
+        screen.getByRole("button", {
+          name: "Remove environment variable, API_KEY, row 1",
+        }),
+      );
       expect(onRemoveEnv).toHaveBeenCalledWith(0);
     });
   });
@@ -700,8 +713,370 @@ describe("ServerSettingsForm", () => {
       clientId: "a",
       clientSecret: "",
       scopes: "",
+      authorizationParams: [],
+      authorizationUrl: "",
+      tokenUrl: "",
       enterpriseManaged: false,
     });
+  });
+
+  // #2018 — custom authorization-request parameters.
+  it("shows the empty hint for authorization parameters when none are set", () => {
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={emptySettings}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.getByText("Additional authorization parameters"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("No additional parameters configured"),
+    ).toBeInTheDocument();
+  });
+
+  it("adds an authorization-parameter row through onOAuthChange", async () => {
+    const user = userEvent.setup();
+    const onOAuthChange = vi.fn();
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        onOAuthChange={onOAuthChange}
+        settings={emptySettings}
+        expandedSections={["oauth"]}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "+ Add Parameter" }));
+    expect(onOAuthChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        authorizationParams: [{ key: "", value: "" }],
+      }),
+    );
+  });
+
+  it("edits and removes an authorization-parameter row", async () => {
+    const user = userEvent.setup();
+    const onOAuthChange = vi.fn();
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        onOAuthChange={onOAuthChange}
+        settings={{
+          ...emptySettings,
+          oauthAuthorizationParams: [{ key: "kc_idp_hint", value: "corp" }],
+        }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    const valueInput = screen.getByDisplayValue("corp");
+    await user.type(valueInput, "x");
+    expect(onOAuthChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        authorizationParams: [{ key: "kc_idp_hint", value: "corpx" }],
+      }),
+    );
+
+    onOAuthChange.mockClear();
+    const removeButton = screen
+      .getAllByRole("button")
+      .find((b) => b.textContent === "X");
+    await user.click(removeButton as HTMLElement);
+    expect(onOAuthChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ authorizationParams: [] }),
+    );
+  });
+
+  it("clears an authorization-parameter key via its Clear button", async () => {
+    const user = userEvent.setup();
+    const onOAuthChange = vi.fn();
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        onOAuthChange={onOAuthChange}
+        settings={{
+          ...emptySettings,
+          oauthAuthorizationParams: [{ key: "kc_idp_hint", value: "corp" }],
+        }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    await user.click(clearButtonFor(screen.getByDisplayValue("kc_idp_hint")));
+    expect(onOAuthChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        authorizationParams: [{ key: "", value: "corp" }],
+      }),
+    );
+
+    onOAuthChange.mockClear();
+    await user.click(clearButtonFor(screen.getByDisplayValue("corp")));
+    expect(onOAuthChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        authorizationParams: [{ key: "kc_idp_hint", value: "" }],
+      }),
+    );
+  });
+
+  it("rejects a reserved authorization-parameter key inline and with a warning", () => {
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{
+          ...emptySettings,
+          oauthAuthorizationParams: [{ key: "state", value: "spoofed" }],
+        }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.getByText(
+        '"state" is set by the authorization flow and cannot be overridden.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Reserved parameters ignored")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("state")).toHaveAttribute(
+      "aria-invalid",
+      "true",
+    );
+  });
+
+  // #2018 — the section heading and the placeholders are not programmatically
+  // associated with these inputs, so each control carries its own aria-label and
+  // the reserved-key reason is the input's `error` string (which Mantine wires
+  // to the input via aria-describedby) rather than free-standing text.
+  it("gives each authorization-parameter control an accessible name", () => {
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{
+          ...emptySettings,
+          oauthAuthorizationParams: [{ key: "kc_idp_hint", value: "corp" }],
+        }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.getByRole("textbox", {
+        name: "Authorization parameter name, kc_idp_hint",
+      }),
+    ).toHaveValue("kc_idp_hint");
+    expect(
+      screen.getByRole("textbox", {
+        name: "Authorization parameter value, kc_idp_hint",
+      }),
+    ).toHaveValue("corp");
+    expect(
+      screen.getByRole("button", {
+        name: "Remove authorization parameter kc_idp_hint",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("falls back to a row number in the accessible name when the key is blank", () => {
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{
+          ...emptySettings,
+          oauthAuthorizationParams: [{ key: "", value: "" }],
+        }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.getByRole("textbox", {
+        name: "Authorization parameter name, row 1",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  // The reason must reach assistive tech through the input, not just as text on
+  // the page: Mantine emits the `error` string with an id the input references.
+  it("associates the reserved-key reason with the key input", () => {
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{
+          ...emptySettings,
+          oauthAuthorizationParams: [{ key: "state", value: "spoofed" }],
+        }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    const keyInput = screen.getByRole("textbox", {
+      name: "Authorization parameter name, state",
+    });
+    const describedBy = keyInput.getAttribute("aria-describedby");
+    expect(describedBy).toBeTruthy();
+    const reason = describedBy
+      ?.split(" ")
+      .map((id) => document.getElementById(id)?.textContent ?? "")
+      .join(" ");
+    expect(reason).toContain(
+      '"state" is set by the authorization flow and cannot be overridden.',
+    );
+  });
+
+  // #2018 — the EMA leg authorizes against the enterprise IdP, a different
+  // authorization server, and deliberately sends none of these parameters. The
+  // description has to say so, or the form shows a configured value as active
+  // when it will not be sent.
+  it("warns that authorization parameters are unused under enterprise-managed auth", () => {
+    const { rerender } = renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{ ...emptySettings, enterpriseManaged: true }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.getByText(/Not sent while Enterprise-managed authorization is on/),
+    ).toBeInTheDocument();
+
+    rerender(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{ ...emptySettings, enterpriseManaged: false }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.queryByText(
+        /Not sent while Enterprise-managed authorization is on/,
+      ),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not flag a blank authorization-parameter row as reserved", () => {
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{
+          ...emptySettings,
+          oauthAuthorizationParams: [{ key: "", value: "" }],
+        }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.queryByText("Reserved parameters ignored"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("pluralizes the reserved-parameter warning for multiple keys", () => {
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{
+          ...emptySettings,
+          oauthAuthorizationParams: [
+            { key: "state", value: "x" },
+            { key: "scope", value: "y" },
+          ],
+        }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(screen.getByText(/state, scope are set/)).toBeInTheDocument();
+  });
+
+  // #1906 — the endpoint overrides ride the same `onOAuthChange` callback as
+  // the rest of the Authorization section.
+  it("invokes onOAuthChange when an endpoint override is typed", async () => {
+    const user = userEvent.setup();
+    const onOAuthChange = vi.fn();
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        onOAuthChange={onOAuthChange}
+        settings={emptySettings}
+        expandedSections={["oauth"]}
+      />,
+    );
+    await user.type(
+      screen.getByRole("textbox", { name: /Authorization URL override/i }),
+      "h",
+    );
+    expect(onOAuthChange).toHaveBeenCalledWith(
+      expect.objectContaining({ authorizationUrl: "h" }),
+    );
+
+    onOAuthChange.mockClear();
+    await user.type(
+      screen.getByRole("textbox", { name: /Token URL override/i }),
+      "h",
+    );
+    expect(onOAuthChange).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenUrl: "h" }),
+    );
+  });
+
+  it("says the endpoint overrides are unused under enterprise-managed auth", () => {
+    const { rerender } = renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{ ...emptySettings, enterpriseManaged: true }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.getAllByText(
+        /Not applied while Enterprise-managed authorization is on/,
+      ),
+    ).toHaveLength(2);
+
+    rerender(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{ ...emptySettings, enterpriseManaged: false }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.queryByText(
+        /Not applied while Enterprise-managed authorization is on/,
+      ),
+    ).not.toBeInTheDocument();
+  });
+
+  it("flags an endpoint override that is not an absolute http(s) URL", () => {
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{
+          ...emptySettings,
+          oauthAuthorizationUrl: "/authorize",
+          oauthTokenUrl: "https://staging.test/token",
+        }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.getByText('"/authorize" is not an absolute URL.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/is not an http\(s\) URL/)).toBeNull();
+  });
+
+  it("clears an endpoint override through its clear button", async () => {
+    const user = userEvent.setup();
+    const onOAuthChange = vi.fn();
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        onOAuthChange={onOAuthChange}
+        settings={{
+          ...emptySettings,
+          oauthTokenUrl: "https://staging.test/token",
+        }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    const clearButtons = screen.getAllByRole("button", { name: /clear/i });
+    await user.click(clearButtons[clearButtons.length - 1]);
+    expect(onOAuthChange).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenUrl: "" }),
+    );
   });
 
   it("invokes onOAuthChange with the chosen insufficient-scope policy (SEP-2350)", async () => {
@@ -744,6 +1119,9 @@ describe("ServerSettingsForm", () => {
       clientId: "",
       clientSecret: "",
       scopes: "",
+      authorizationParams: [],
+      authorizationUrl: "",
+      tokenUrl: "",
       enterpriseManaged: true,
     });
   });
@@ -848,6 +1226,9 @@ describe("ServerSettingsForm", () => {
       clientId: "",
       clientSecret: "z",
       scopes: "",
+      authorizationParams: [],
+      authorizationUrl: "",
+      tokenUrl: "",
       enterpriseManaged: false,
     });
   });
@@ -1121,12 +1502,12 @@ describe("ServerSettingsForm", () => {
     expect(
       within(
         keyInput.closest('[class*="Input-wrapper"]') as HTMLElement,
-      ).queryByRole("button", { name: "Clear" }),
+      ).queryByRole("button", { name: /^Clear/ }),
     ).toBeNull();
     expect(
       within(
         valueInput.closest('[class*="Input-wrapper"]') as HTMLElement,
-      ).queryByRole("button", { name: "Clear" }),
+      ).queryByRole("button", { name: /^Clear/ }),
     ).toBeNull();
   });
 
@@ -1149,12 +1530,12 @@ describe("ServerSettingsForm", () => {
     expect(
       within(
         uriInput.closest('[class*="Input-wrapper"]') as HTMLElement,
-      ).queryByRole("button", { name: "Clear" }),
+      ).queryByRole("button", { name: /^Clear/ }),
     ).toBeNull();
     expect(
       within(
         nameInput.closest('[class*="Input-wrapper"]') as HTMLElement,
-      ).queryByRole("button", { name: "Clear" }),
+      ).queryByRole("button", { name: /^Clear/ }),
     ).toBeNull();
     // Typing into the URI threads the empty name through (`root.name ?? ""`).
     await user.type(uriInput, "f");
