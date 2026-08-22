@@ -879,6 +879,32 @@ describe("acquireLock", () => {
     await release();
   });
 
+  it("stops heartbeating a lock that is no longer ours", async () => {
+    // After a steal, the directory belongs to someone else. Continuing to
+    // touch it would keep *their* lock looking alive after they died, which
+    // turns a stale lock into an unbreakable one.
+    const target = path.join(tmpDir, "stolen.json");
+    const lockDir = `${target}.lock`;
+    const release = await acquireLock(target, { heartbeatMs: 10 });
+    // Someone judges us dead and takes it.
+    await fs.writeFile(
+      path.join(lockDir, "owner"),
+      JSON.stringify({ token: "thief", pid: process.pid, host: os.hostname() }),
+      "utf-8",
+    );
+    const afterSteal = new Date(Date.now() - 30_000);
+    await fs.utimes(lockDir, afterSteal, afterSteal);
+    // Give the heartbeat several chances to (wrongly) refresh it.
+    await new Promise((r) => setTimeout(r, 80));
+    const mtime = (await fs.stat(lockDir)).mtimeMs;
+    expect(Date.now() - mtime).toBeGreaterThan(1_000);
+    // And our release leaves their lock alone, since the token no longer
+    // matches.
+    await release();
+    expect(existsSync(lockDir)).toBe(true);
+    await fs.rm(lockDir, { recursive: true, force: true });
+  });
+
   it("cleans up and reports when it cannot stamp ownership", async () => {
     // mkdir succeeded, the owner write did not. Returning a no-op release
     // here would enter the critical section unlocked *and* leave the

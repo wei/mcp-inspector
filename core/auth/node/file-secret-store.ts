@@ -336,10 +336,25 @@ export async function acquireLock(
       // never keeps the process alive on its own — the interval is a
       // side-channel, not work anyone is waiting for.
       const heartbeat = setInterval(() => {
-        const now = new Date();
-        void fs.utimes(lockDir, now, now).catch(() => {
-          // Lock already released or stolen; the release below copes.
-        });
+        // Confirm the lock is still ours before refreshing it. If it was
+        // stolen (only possible when we looked dead, or across hosts where
+        // the pid check cannot apply), the directory now belongs to someone
+        // else — and touching it would keep *their* lock looking alive after
+        // they died, which is how a stale lock becomes an unbreakable one.
+        void (async () => {
+          try {
+            const held = parseOwner(await fs.readFile(ownerFile, "utf-8"));
+            if (held?.token !== token) {
+              clearInterval(heartbeat);
+              return;
+            }
+            const now = new Date();
+            await fs.utimes(lockDir, now, now);
+          } catch {
+            // Released, stolen, or unreadable. The release below copes, and
+            // there is nothing useful to do from a timer.
+          }
+        })();
       }, heartbeatMs);
       heartbeat.unref?.();
       return async () => {
