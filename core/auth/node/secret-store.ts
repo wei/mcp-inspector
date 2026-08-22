@@ -337,6 +337,20 @@ export interface SecretStore {
    * absent, which is correct for stores whose reads cannot fail.
    */
   getStrict?(serverId: string, field: string): Promise<string | null>;
+  /**
+   * Read several of one server's fields in a single pass.
+   *
+   * Optional, and purely a performance seam: {@link secretStoreGetMany}
+   * falls back to a parallel `get` per field, which is what the keychain
+   * wants anyway (independent native round-trips).
+   *
+   * It exists for `FileSecretStore`, where the shape is inverted — every
+   * `get` reads and decrypts the *whole* file, so N fields cost N scrypt
+   * derivations, serialized behind the store's own queue. The rehydration
+   * callers ask for one server's fields at a time, so a per-server bulk read
+   * turns that back into one.
+   */
+  getMany?(serverId: string, fields: string[]): Promise<Record<string, string>>;
   set(serverId: string, field: string, value: string): Promise<void>;
   /** No-op if no entry exists. */
   delete(serverId: string, field: string): Promise<void>;
@@ -512,6 +526,29 @@ export async function secretStoreGetStrict(
   return store.getStrict
     ? store.getStrict(serverId, field)
     : store.get(serverId, field);
+}
+
+/**
+ * Read several fields of one server, using the store's bulk path when it has
+ * one. Returns only the fields that are present, matching the callers that
+ * merge the result into a stored config.
+ */
+export async function secretStoreGetMany(
+  store: SecretStore,
+  serverId: string,
+  fields: string[],
+): Promise<Record<string, string>> {
+  if (store.getMany) return store.getMany(serverId, fields);
+  const entries = await Promise.all(
+    fields.map(
+      async (field) => [field, await store.get(serverId, field)] as const,
+    ),
+  );
+  const out: Record<string, string> = {};
+  for (const [field, value] of entries) {
+    if (value !== null) out[field] = value;
+  }
+  return out;
 }
 
 export async function secretStoreIsDurable(

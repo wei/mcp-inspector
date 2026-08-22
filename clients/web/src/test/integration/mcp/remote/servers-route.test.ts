@@ -2674,6 +2674,37 @@ describe("plaintext migration against a session-scoped store (#1950)", () => {
     expect(readFileSync(configPath, "utf-8")).toBe(before);
   });
 
+  it("aborts the migration when the keychain read fails, preserving mcp.json", async () => {
+    // The keychain-wins lookup used the tolerant `get`, so an unreadable
+    // keychain read as "nothing there" — and the write that followed would
+    // put the older plaintext over a newer keychain value before the disk
+    // copy was stripped.
+    let wrote = false;
+    const flaky: SecretStore = {
+      get: async () => null,
+      getStrict: async () => {
+        throw new KeychainUnavailableError(new Error("temporarily down"));
+      },
+      set: async () => {
+        wrote = true;
+      },
+      delete: async () => {},
+      deleteAllForServer: async () => {},
+    };
+    const { app } = createRemoteApp({
+      dangerouslyOmitAuth: true,
+      mcpConfigPath: configPath,
+      initialConfig: { defaultEnvironment: {} },
+      secretStore: flaky,
+    });
+    const before = readFileSync(configPath, "utf-8");
+
+    const res = await app.request(new Request("http://test/api/servers"));
+    expect(res.status).toBe(200);
+    expect(wrote).toBe(false);
+    expect(readFileSync(configPath, "utf-8")).toBe(before);
+  });
+
   it("still strips it against a durable store, so the guard is the difference", async () => {
     // The control: same config, same request, a store that outlives the
     // process — and the migration does what it always did.

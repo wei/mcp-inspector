@@ -792,6 +792,34 @@ export class FileSecretStore implements SecretStore {
     return run;
   }
 
+  /**
+   * One read and one derivation for a whole server's fields.
+   *
+   * The reason this exists: `get` reads and decrypts the entire file, and
+   * the rehydration callers ask field by field — so an encrypted catalog
+   * paid N scrypt derivations per server, serialized behind this store's own
+   * queue, every time the server list was loaded. Tolerant like `get`: an
+   * unreadable store yields no fields rather than throwing.
+   */
+  async getMany(
+    serverId: string,
+    fields: string[],
+  ): Promise<Record<string, string>> {
+    let map: Record<string, string> | null;
+    try {
+      map = await this.serialize(() => this.readMap());
+    } catch {
+      return {};
+    }
+    if (!map) return {};
+    const out: Record<string, string> = {};
+    for (const field of fields) {
+      const value = map[buildAccount(serverId, field)];
+      if (value !== undefined) out[field] = value;
+    }
+    return out;
+  }
+
   async get(serverId: string, field: string): Promise<string | null> {
     try {
       const map = await this.serialize(() => this.readMap());
@@ -870,6 +898,10 @@ export class FileSecretStore implements SecretStore {
 /**
  * Best-effort permission repair for a pre-existing secrets file.
  *
+ * A no-op in effect on Windows, where `chmod` cannot express "owner only"
+ * — {@link readSecretFilePermissions} reports `unknown` there rather than
+ * interpreting the synthetic mode bits.
+ *
  * `writeStoreFile` writes through `atomically`, which creates a temp file
  * with `mode: 0o600` and renames it over the destination — so every *write*
  * re-establishes the mode regardless of what the old file had. What it
@@ -911,6 +943,17 @@ export async function readSecretFilePermissions(
   filePath: string,
 ): Promise<SecretFilePermissionState> {
   try {
+    // Windows does not model POSIX modes. `stat` still returns *something*
+    // — synthetic bits derived from the read-only attribute — and reading
+    // them as a permission statement produces a confident falsehood either
+    // way: "0666 — not owner-only" about a file the ACL may well restrict,
+    // or "owner-only" about one it does not. The real answer lives in the
+    // ACL, which this does not inspect, so the honest report is that we did
+    // not check.
+    if (process.platform === "win32") {
+      await fs.stat(filePath); // still distinguishes absent from present
+      return { state: "unknown", detail: "not checked on Windows" };
+    }
     const mode = (await fs.stat(filePath)).mode & 0o777;
     if (mode === 0o600) return { state: "ok" };
     return { state: "loose", mode };

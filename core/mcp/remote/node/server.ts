@@ -65,6 +65,8 @@ import { RemoteSession } from "./remote-session.js";
 import { createRemoteAuthProvider } from "./tokenAuthProvider.js";
 import { API_SERVER_ENV_VARS } from "../constants.js";
 import {
+  secretStoreGetMany,
+  secretStoreGetStrict,
   secretStoreIsDurable,
   SecretStoreUnavailableError,
   type SecretStore,
@@ -1899,16 +1901,11 @@ export function createRemoteApp(
     id: string,
     fields: string[],
   ): Promise<Record<string, string>> => {
-    const values = await Promise.all(
-      fields.map(
-        async (field) => [field, await secretStore.get(id, field)] as const,
-      ),
-    );
-    const out: Record<string, string> = {};
-    for (const [field, v] of values) {
-      if (v !== null) out[field] = v;
-    }
-    return out;
+    // One pass per server rather than one per field — see
+    // `secretStoreGetMany`. Unchanged for the keychain (still independent
+    // parallel round-trips); for the file store it is the difference between
+    // one decryption and one per field.
+    return secretStoreGetMany(secretStore, id, fields);
   };
 
   // Cheap structural check used by the GET handler to decide whether
@@ -1954,7 +1951,13 @@ export function createRemoteApp(
           continue;
         }
         for (const [field, value] of Object.entries(secrets)) {
-          const existing = await secretStore.get(id, field);
+          // Strict: `get` maps an unreadable store to `null`, and this
+          // branch *writes* on `null` — so a transient keychain read
+          // failure would let the older plaintext value overwrite a newer
+          // keychain one, and the disk copy would then be stripped. A throw
+          // is a `SecretStoreUnavailableError`, which the catch below turns
+          // into "abandon the migration and keep mcp.json as it is".
+          const existing = await secretStoreGetStrict(secretStore, id, field);
           if (existing === null) {
             await secretStore.set(id, field, value);
           }
@@ -1982,7 +1985,7 @@ export function createRemoteApp(
         if (fileLogger) {
           fileLogger.warn(
             { err: err.message },
-            "Keychain unavailable; skipping plaintext-secret migration on this read. Existing mcp.json plaintext values are preserved.",
+            "Secret store unavailable; skipping plaintext-secret migration on this read. Existing mcp.json plaintext values are preserved.",
           );
         }
         // Partial-migration semantics: if `set` threw partway through

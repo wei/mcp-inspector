@@ -545,6 +545,45 @@ describe("defaultSecretFilePath", () => {
   });
 });
 
+describe("DeferredSecretStore forwards the optional seams", () => {
+  // This is what `defaultSecretStore()` returns, so a seam it drops is a
+  // seam that does not exist in production — however well the tests that
+  // inject a concrete store behave.
+  it("forwards getStrict rather than degrading to the tolerant get", async () => {
+    process.env.MCP_INSPECTOR_SECRET_FILE = path.join(tmpDir, "secrets.json");
+    process.env.MCP_INSPECTOR_SECRET_STORE = "file";
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await loadWithProbe(false);
+    const store = mod.defaultSecretStore();
+    expect(typeof store.getStrict).toBe("function");
+
+    const { secretStoreGetStrict } =
+      await import("@inspector/core/auth/node/secret-store.js");
+    // The file store's strict read is its ordinary read; the point here is
+    // that the call reaches the target at all.
+    expect(await secretStoreGetStrict(store, "srv", "env:A")).toBe(null);
+    await store.set("srv", "env:A", "1");
+    expect(await secretStoreGetStrict(store, "srv", "env:A")).toBe("1");
+  });
+
+  it("forwards getMany", async () => {
+    process.env.MCP_INSPECTOR_SECRET_FILE = path.join(tmpDir, "secrets.json");
+    process.env.MCP_INSPECTOR_SECRET_STORE = "file";
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await loadWithProbe(false);
+    const store = mod.defaultSecretStore();
+    await store.set("srv", "env:A", "1");
+    await store.set("srv", "env:B", "2");
+
+    const { secretStoreGetMany } =
+      await import("@inspector/core/auth/node/secret-store.js");
+    expect(await secretStoreGetMany(store, "srv", ["env:A", "env:B"])).toEqual({
+      "env:A": "1",
+      "env:B": "2",
+    });
+  });
+});
+
 describe("absorbFileSecretsIntoKeyring", () => {
   // The transition: a box without libsecret falls back to a file, the user
   // saves secrets there, then installs libsecret. Without a hand-off the next

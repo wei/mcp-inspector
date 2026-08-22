@@ -3,6 +3,7 @@
  */
 
 import {
+  secretStoreGetStrict,
   secretStoreIsDurable,
   SecretStoreUnavailableError,
   type SecretStore,
@@ -45,7 +46,13 @@ async function migrateClientPlaintextSecret(
   if (!value) return config;
 
   try {
-    const existing = await secretStore.get(
+    // Strict: `get` answers `null` for an unreadable store as well as a
+    // missing entry, and the branch below *writes* on `null` — so a
+    // transient failure would overwrite a newer stored secret with the older
+    // `client.json` copy, inverting keychain-wins. A throw is caught below
+    // and leaves the plaintext file untouched for the next attempt.
+    const existing = await secretStoreGetStrict(
+      secretStore,
       CLIENT_KEYCHAIN_ID,
       SECRET_FIELD_IDP_CLIENT_SECRET,
     );

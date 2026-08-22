@@ -452,6 +452,50 @@ describe("tightenSecretFilePermissions", () => {
     expect((await fs.stat(filePath())).mode & 0o777).toBe(0o600);
   });
 
+  it("declines to interpret Windows' synthetic mode bits", async () => {
+    // Windows does not model POSIX modes. `stat` still returns bits, and
+    // reading them as a permission statement is a confident falsehood either
+    // way — "0666 — not owner-only" about a file the ACL may restrict, or
+    // "owner-only" about one it does not. The ACL is the real answer and this
+    // does not inspect it.
+    const store = new FileSecretStore({ filePath: filePath() });
+    await store.set("alpha", "env:A", "1");
+    const real = process.platform;
+    Object.defineProperty(process, "platform", {
+      value: "win32",
+      configurable: true,
+    });
+    try {
+      expect(await readSecretFilePermissions(filePath())).toEqual({
+        state: "unknown",
+        detail: "not checked on Windows",
+      });
+    } finally {
+      Object.defineProperty(process, "platform", {
+        value: real,
+        configurable: true,
+      });
+    }
+  });
+
+  it("still reports absent on Windows when there is no file", async () => {
+    const real = process.platform;
+    Object.defineProperty(process, "platform", {
+      value: "win32",
+      configurable: true,
+    });
+    try {
+      expect(
+        await readSecretFilePermissions(path.join(tmpDir, "nope.json")),
+      ).toEqual({ state: "absent" });
+    } finally {
+      Object.defineProperty(process, "platform", {
+        value: real,
+        configurable: true,
+      });
+    }
+  });
+
   it("reports unknown, not absent, when an existing file cannot be inspected", async () => {
     // Collapsing every stat failure into "absent" is what made it dangerous:
     // the descriptor then omits the warning and the footer states mode 0600
@@ -699,6 +743,84 @@ async function writeEncryptedFixtureWithPayload(
     "utf-8",
   );
 }
+
+describe("getMany", () => {
+  it("returns a server's fields from a single read", async () => {
+    const store = new FileSecretStore({
+      filePath: filePath(),
+      passphrase: "hunter2",
+    });
+    await store.set("srv", SECRET_FIELD_OAUTH_CLIENT_SECRET, "s1");
+    await store.set("srv", "env:TOKEN", "s2");
+    await store.set("other", "env:TOKEN", "nope");
+
+    expect(
+      await store.getMany("srv", [
+        SECRET_FIELD_OAUTH_CLIENT_SECRET,
+        "env:TOKEN",
+        "env:ABSENT",
+      ]),
+    ).toEqual({ [SECRET_FIELD_OAUTH_CLIENT_SECRET]: "s1", "env:TOKEN": "s2" });
+  });
+
+  it("derives the key once for the whole set, not once per field", async () => {
+    // The reason the seam exists: `get` reads and decrypts the *entire* file,
+    // so rehydrating field-by-field cost one scrypt derivation per field,
+    // serialized behind this store's queue. Counting derivations is the
+    // measurement that matters — scrypt is the expensive part, deliberately
+    // so.
+    const store = new FileSecretStore({
+      filePath: filePath(),
+      passphrase: "hunter2",
+    });
+    await store.set("srv", "env:A", "1");
+    await store.set("srv", "env:B", "2");
+    await store.set("srv", "env:C", "3");
+
+    let derivations = 0;
+    vi.resetModules();
+    vi.doMock("node:crypto", async () => {
+      const actual =
+        await vi.importActual<typeof import("node:crypto")>("node:crypto");
+      return {
+        ...actual,
+        default: actual,
+        scrypt: (...args: Parameters<typeof actual.scrypt>) => {
+          derivations += 1;
+          return actual.scrypt(...args);
+        },
+      };
+    });
+    try {
+      const mod =
+        await import("@inspector/core/auth/node/file-secret-store.js");
+      const fresh = new mod.FileSecretStore({
+        filePath: filePath(),
+        passphrase: "hunter2",
+      });
+
+      await fresh.getMany("srv", ["env:A", "env:B", "env:C"]);
+      expect(derivations).toBe(1);
+
+      // And the shape it replaced, for contrast: three fields, three
+      // derivations.
+      derivations = 0;
+      await fresh.get("srv", "env:A");
+      await fresh.get("srv", "env:B");
+      await fresh.get("srv", "env:C");
+      expect(derivations).toBe(3);
+    } finally {
+      vi.doUnmock("node:crypto");
+      vi.resetModules();
+    }
+  });
+
+  it("is tolerant like get: an unreadable store yields no fields", async () => {
+    await fs.writeFile(filePath(), "{ not json", "utf-8");
+    const store = new FileSecretStore({ filePath: filePath() });
+    expect(await store.getMany("srv", ["env:A"])).toEqual({});
+  });
+});
 
 describe("payload shape validation", () => {
   // GCM proves who wrote the bytes, not what shape they parse to, and the

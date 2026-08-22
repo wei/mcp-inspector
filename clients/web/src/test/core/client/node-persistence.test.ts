@@ -63,6 +63,35 @@ describe("client node-persistence", () => {
     ).toBe("plain");
   });
 
+  it("aborts rather than overwriting when the keychain read fails", async () => {
+    // The keychain-wins lookup used the tolerant `get`, which maps an
+    // unreadable store to `null` — and the branch below writes on `null`. So
+    // a transient read failure let the older client.json copy overwrite a
+    // newer stored secret, and the disk copy was then stripped.
+    const filePath = await makeTmpFile(
+      JSON.stringify(configWithPlaintextSecret),
+    );
+    let wrote = false;
+    const flaky: SecretStore = {
+      get: async () => null,
+      getStrict: async () => {
+        throw new KeychainUnavailableError(new Error("temporarily down"));
+      },
+      set: async () => {
+        wrote = true;
+      },
+      delete: async () => {},
+      deleteAllForServer: async () => {},
+    };
+
+    const loaded = await readClientConfigStore(filePath, flaky);
+
+    expect(wrote).toBe(false);
+    // The plaintext survives for the next attempt.
+    expect(readFileSync(filePath, "utf-8")).toContain("plain");
+    expect(loaded.enterpriseManagedAuth?.idp.clientSecret).toBe("plain");
+  });
+
   it("keeps the plaintext on disk when the store is session-scoped", async () => {
     // The container fallback. Migrating here would delete a secret that
     // survives restarts and keep only a copy that dies with the process —

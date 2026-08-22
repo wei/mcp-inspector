@@ -58,6 +58,7 @@ import {
   KeyringSecretStore,
   parseAccount,
   probeKeyringAvailable,
+  secretStoreGetMany,
   secretStoreGetStrict,
   secretStoreIsDurable,
   SessionSecretStore,
@@ -614,6 +615,21 @@ class DeferredSecretStore implements SecretStore {
   }
   async isDurable(): Promise<boolean> {
     return secretStoreIsDurable(await this.target());
+  }
+  /**
+   * Forwarded, and its absence was a real defect rather than an omission:
+   * this is the store production actually uses, so a `secretStoreGetStrict`
+   * call against it fell through to the tolerant `get` and the strictness
+   * existed only in tests that injected a concrete store.
+   */
+  async getStrict(serverId: string, field: string): Promise<string | null> {
+    return secretStoreGetStrict(await this.target(), serverId, field);
+  }
+  async getMany(
+    serverId: string,
+    fields: string[],
+  ): Promise<Record<string, string>> {
+    return secretStoreGetMany(await this.target(), serverId, fields);
   }
   async get(serverId: string, field: string): Promise<string | null> {
     return (await this.target()).get(serverId, field);
