@@ -62,10 +62,8 @@ describe("SecretStorageFooter", () => {
   it("warns that an in-memory store loses secrets on exit", () => {
     renderWithMantine(<SecretStorageFooter info={memory} />);
     const band = screen.getByTestId("secret-storage-footer");
-    expect(band).toHaveTextContent("Secrets: Memory (this session only)");
-    expect(
-      screen.getByText(/lost when the Inspector exits/),
-    ).toBeInTheDocument();
+    expect(band).toHaveTextContent("Secrets: Memory (this session only):");
+    expect(screen.getByText(/lost on exit/)).toBeInTheDocument();
     expect(band).toHaveAttribute("data-tone", "warn");
   });
 

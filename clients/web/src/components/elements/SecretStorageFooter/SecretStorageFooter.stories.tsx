@@ -80,10 +80,10 @@ export const InMemory: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const band = await canvas.findByTestId("secret-storage-footer");
-    await expect(band).toHaveTextContent("Secrets: Memory (this session only)");
-    await expect(
-      canvas.getByText(/lost when the Inspector exits/),
-    ).toBeInTheDocument();
+    await expect(band).toHaveTextContent(
+      "Secrets: Memory (this session only):",
+    );
+    await expect(canvas.getByText(/lost on exit/)).toBeInTheDocument();
   },
 };
 

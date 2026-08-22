@@ -144,9 +144,14 @@ export function SecretStorageFooter({ info }: SecretStorageFooterProps) {
           `.withProps()` rule, and it takes `color` as a prop rather than a
           style. */}
       <Icon size={ICON_SIZE} color={color} aria-hidden />
+      {/* The colon lives here rather than in `secretStorageLabel`, because the
+          label is also used on its own — by `secretStorageSummary` for the
+          startup banner, where a trailing colon before " at <path>" would be
+          wrong. It appears only when something follows it. */}
       <FooterLabel c={color}>
         <FooterLabelPrefix>Secrets:</FooterLabelPrefix>{" "}
         {secretStorageLabel(info)}
+        {detail ? ":" : ""}
       </FooterLabel>
       {detail && <FooterDetail c={color}>{detail}</FooterDetail>}
     </FooterBand>

@@ -77,7 +77,7 @@ describe("secretStorageCaveat", () => {
 
   it("names the loss for memory", () => {
     expect(secretStorageCaveat(memory)).toContain(
-      "lost when the Inspector exits",
+      "lost on exit",
     );
   });
 
@@ -127,7 +127,7 @@ describe("secretStorageCaveat", () => {
     // Defensive ordering: `plaintext` is meaningless for memory, and the
     // durability loss is the more consequential of the two statements.
     expect(secretStorageCaveat({ ...memory, plaintext: true })).toContain(
-      "lost when the Inspector exits",
+      "lost on exit",
     );
   });
 });

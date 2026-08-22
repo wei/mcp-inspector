@@ -121,14 +121,14 @@ export function secretStorageTone(info: SecretStorageInfo): SecretStorageTone {
 
 /**
  * One sentence of consequence, or undefined when there is none worth
- * saying. Consequence, not mechanism: "will be lost when the Inspector
- * exits" is what a user can act on; "uses an in-memory Map" is not.
+ * saying. Consequence, not mechanism: "lost on exit" is what a user can
+ * act on; "uses an in-memory Map" is not.
  */
 export function secretStorageCaveat(
   info: SecretStorageInfo,
 ): string | undefined {
   if (info.kind === "memory") {
-    return "Secrets are not written anywhere and are lost when the Inspector exits.";
+    return "Secrets are not written anywhere and are lost on exit.";
   }
   // The permission problem outranks the encryption one when both hold: a
   // file other users can read is a live exposure, while "unencrypted" is a

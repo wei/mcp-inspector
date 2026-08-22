@@ -18,6 +18,7 @@
  * which is what makes them worth exporting.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -27,6 +28,10 @@ import {
   parseSecretStoreEnv,
   warnAboutSecretStorage,
 } from "@inspector/core/auth/node/secret-store-selection.js";
+import {
+  InMemorySecretStore,
+  type SecretStore,
+} from "@inspector/core/auth/node/secret-store.js";
 import type { SecretStorageInfo } from "@inspector/core/auth/secret-storage-info.js";
 
 const ENV_KEYS = [
@@ -384,7 +389,7 @@ describe("warnAboutSecretStorage", () => {
     expect(output).toContain("MCP_INSPECTOR_SECRET_STORE");
     // The lossy-store caveat rides along — this is the "loud" half of
     // "automatic fallback with a loud banner".
-    expect(output).toContain("lost when the Inspector exits");
+    expect(output).toContain("lost on exit");
   });
 
   it("warns about an unencrypted file even when it was explicitly chosen", () => {
@@ -537,6 +542,107 @@ describe("defaultSecretFilePath", () => {
     expect(mod.defaultSecretFilePath()).toBe(
       path.join(tmpDir, "elsewhere.json"),
     );
+  });
+});
+
+describe("absorbFileSecretsIntoKeyring", () => {
+  // The transition: a box without libsecret falls back to a file, the user
+  // saves secrets there, then installs libsecret. Without a hand-off the next
+  // run selects the keychain and every saved value silently disappears —
+  // still on disk, but read by nothing.
+  async function seedFile(secrets: Record<string, string>): Promise<string> {
+    const filePath = path.join(tmpDir, "secrets.json");
+    await fs.writeFile(
+      filePath,
+      JSON.stringify({ version: 1, encryption: "none", secrets }),
+      "utf-8",
+    );
+    return filePath;
+  }
+
+  it("moves the file's secrets into the keychain and removes the file", async () => {
+    const filePath = await seedFile({ "srv:oauthClientSecret": "from-file" });
+    process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await loadWithProbe(true);
+    const keyring = new InMemorySecretStore();
+
+    await mod.absorbFileSecretsIntoKeyring(keyring);
+
+    expect(await keyring.get("srv", "oauthClientSecret")).toBe("from-file");
+    expect(existsSync(filePath)).toBe(false);
+  });
+
+  it("lets the keychain win on conflict", async () => {
+    // The file's copy is the older one by construction — it was written while
+    // the keychain was unreachable.
+    const filePath = await seedFile({ "srv:oauthClientSecret": "from-file" });
+    process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await loadWithProbe(true);
+    const keyring = new InMemorySecretStore();
+    await keyring.set("srv", "oauthClientSecret", "already-here");
+
+    await mod.absorbFileSecretsIntoKeyring(keyring);
+
+    expect(await keyring.get("srv", "oauthClientSecret")).toBe("already-here");
+  });
+
+  it("leaves the file alone when the keychain write fails", async () => {
+    // A partial hand-off must not delete the source: the next run retries and
+    // the keychain-wins rule absorbs whatever already made it across.
+    const filePath = await seedFile({ "srv:oauthClientSecret": "from-file" });
+    process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await loadWithProbe(true);
+    const failing: SecretStore = {
+      get: async () => null,
+      set: async () => {
+        throw new Error("keychain exploded");
+      },
+      delete: async () => {},
+      deleteAllForServer: async () => {},
+    };
+
+    await mod.absorbFileSecretsIntoKeyring(failing);
+
+    expect(existsSync(filePath)).toBe(true);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("left in place"));
+  });
+
+  it("does not delete a file it cannot read", async () => {
+    // An undecryptable file is not an empty one. Deleting it here would lose
+    // exactly the values this whole hand-off exists to preserve.
+    const filePath = path.join(tmpDir, "secrets.json");
+    process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
+    process.env.MCP_INSPECTOR_SECRET_KEY = "right-key";
+    const seeded = await loadWithProbe(false);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await new (
+      await import("@inspector/core/auth/node/file-secret-store.js")
+    ).FileSecretStore({ filePath, passphrase: "right-key" }).set(
+      "srv",
+      "oauthClientSecret",
+      "encrypted",
+    );
+    void seeded;
+
+    delete process.env.MCP_INSPECTOR_SECRET_KEY;
+    const mod = await loadWithProbe(true);
+    const keyring = new InMemorySecretStore();
+
+    await mod.absorbFileSecretsIntoKeyring(keyring);
+
+    expect(existsSync(filePath)).toBe(true);
+    expect(await keyring.get("srv", "oauthClientSecret")).toBe(null);
+  });
+
+  it("is a no-op when there is no file", async () => {
+    process.env.MCP_INSPECTOR_SECRET_FILE = path.join(tmpDir, "absent.json");
+    const mod = await loadWithProbe(true);
+    const keyring = new InMemorySecretStore();
+    await mod.absorbFileSecretsIntoKeyring(keyring);
+    expect(existsSync(path.join(tmpDir, "absent.json"))).toBe(false);
   });
 });
 
