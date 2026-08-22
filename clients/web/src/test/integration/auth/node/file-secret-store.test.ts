@@ -15,6 +15,7 @@ import * as path from "node:path";
 import {
   acquireLock,
   FileSecretStore,
+  SecretFileLockTimeoutError,
   SecretFileKeyMismatchError,
   tightenSecretFilePermissions,
 } from "@inspector/core/auth/node/file-secret-store.js";
@@ -676,14 +677,100 @@ describe("acquireLock", () => {
     await release();
   });
 
-  it("proceeds unlocked rather than failing when the lock cannot be created", async () => {
-    // A path whose parent does not exist: mkdir fails with ENOENT, not
-    // EEXIST. Refusing to write here would deny a real user a real secret to
-    // prevent a race with a second process that may not exist.
-    const release = await acquireLock(
-      path.join(tmpDir, "no-such-dir", "secrets.json"),
-    );
+  it("creates the parent directory so a first write is locked too", async () => {
+    // The first run has no secrets directory yet — `writeStoreFile` creates
+    // it later. Without creating it here, mkdir failed ENOENT and the lock
+    // was skipped, so two processes' *first* writes could both proceed
+    // unlocked and overwrite each other. First writes are exactly when two
+    // processes are most likely to start together.
+    const target = path.join(tmpDir, "no-such-dir", "secrets.json");
+    const release = await acquireLock(target);
+    // A real lock was taken: a second acquisition must not be handed out.
+    let secondTaken = false;
+    void acquireLock(target).then((r) => {
+      secondTaken = true;
+      return r();
+    });
+    await new Promise((r) => setTimeout(r, 60));
+    expect(secondTaken).toBe(false);
     await release();
+  });
+
+  it("releases only a lock it still owns", async () => {
+    // A holder whose work outran the stale threshold must not delete the
+    // next owner's lock on its way out — that would drop a third writer into
+    // a section two processes believed they held.
+    const target = path.join(tmpDir, "owned.json");
+    const lockDir = `${target}.lock`;
+    const release = await acquireLock(target);
+    // Simulate a steal: someone judged us stale, removed our lock, and took
+    // their own.
+    await fs.rm(lockDir, { recursive: true, force: true });
+    await fs.mkdir(lockDir);
+    await fs.writeFile(path.join(lockDir, "owner"), "someone-else", "utf-8");
+    await release();
+    // Their lock is untouched.
+    expect(await fs.readFile(path.join(lockDir, "owner"), "utf-8")).toBe(
+      "someone-else",
+    );
+    await fs.rm(lockDir, { recursive: true, force: true });
+  });
+
+  it("fails the mutation rather than writing past a live holder", async () => {
+    // Falling through to an unlocked write under contention would be the
+    // worst possible moment for it: another writer is provably active. `set`
+    // is allowed to hard-fail, so this surfaces as the documented 503.
+    //
+    // The holder heartbeats faster than it goes stale, so the waiter can
+    // never mistake it for dead and must time out instead.
+    const target = path.join(tmpDir, "contended.json");
+    const timings = {
+      staleMs: 400,
+      timeoutMs: 250,
+      heartbeatMs: 50,
+      pollMs: 10,
+    };
+    const release = await acquireLock(target, timings);
+    try {
+      await expect(acquireLock(target, timings)).rejects.toBeInstanceOf(
+        SecretFileLockTimeoutError,
+      );
+    } finally {
+      await release();
+    }
+  });
+
+  it("does not steal from a holder that is merely slow", async () => {
+    // The heartbeat is what separates "dead" from "slow". Without it a
+    // holder on a slow filesystem loses its lock mid-section and the lost
+    // update comes straight back — so the waiter here must time out rather
+    // than acquire, even though it waits well past the stale threshold.
+    const target = path.join(tmpDir, "slow.json");
+    const release = await acquireLock(target, {
+      staleMs: 120,
+      timeoutMs: 60_000,
+      heartbeatMs: 20,
+      pollMs: 10,
+    });
+    try {
+      let stolen = false;
+      void acquireLock(target, {
+        staleMs: 120,
+        timeoutMs: 400,
+        pollMs: 10,
+      })
+        .then((r) => {
+          stolen = true;
+          return r();
+        })
+        .catch(() => {
+          // Timed out, which is the expected outcome.
+        });
+      await new Promise((r) => setTimeout(r, 500));
+      expect(stolen).toBe(false);
+    } finally {
+      await release();
+    }
   });
 
   it("serializes concurrent writers through two independent store instances", async () => {

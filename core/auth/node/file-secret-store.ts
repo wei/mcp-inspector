@@ -60,6 +60,7 @@
 
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { readStoreFile, writeStoreFile } from "../../storage/store-io.js";
 import {
   SecretStoreUnavailableError,
@@ -201,12 +202,49 @@ function decodeParts(
  * lock exists to close.
  */
 const LOCK_STALE_MS = 10_000;
-/** Total time to wait for a lock before giving up and reporting it. */
-const LOCK_TIMEOUT_MS = 5_000;
+/**
+ * How long to wait for a live lock. Deliberately longer than
+ * {@link LOCK_STALE_MS}, so a waiter always outlives the point at which the
+ * holder becomes stealable — with the shorter value it used to have, a
+ * waiter gave up before it could ever steal an abandoned lock, which is the
+ * one case the stealing exists for.
+ */
+const LOCK_TIMEOUT_MS = 15_000;
 const LOCK_POLL_MS = 25;
+/**
+ * How often a holder touches its lock to prove it is alive.
+ *
+ * Comfortably under {@link LOCK_STALE_MS} so a live holder is never judged
+ * stale, which is what makes the two mechanisms coherent: staleness then
+ * means *dead*, not merely *slow*. Without the heartbeat, a holder on a
+ * slow filesystem — or one whose scrypt derivation ran long — has its lock
+ * stolen while it is still inside the critical section, reinstating exactly
+ * the lost update the lock exists to prevent.
+ */
+const LOCK_HEARTBEAT_MS = 3_000;
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Thrown when a lock is held by someone else for longer than
+ * {@link LOCK_TIMEOUT_MS}.
+ *
+ * A timeout must **fail the mutation**, never fall through and write
+ * anyway: proceeding unlocked past a live holder is precisely the
+ * lost-update the lock exists to prevent, and doing it under contention —
+ * the one moment another writer is provably active — would be the worst
+ * possible time. `set` is allowed to hard-fail by the store contract, so
+ * this surfaces as the documented 503 and the user retries.
+ */
+export class SecretFileLockTimeoutError extends SecretStoreUnavailableError {
+  constructor(filePath: string) {
+    super(
+      `Timed out waiting for another process to finish writing the secrets file at ${filePath}. Another Inspector may be busy; try again.`,
+    );
+    this.name = "SecretFileLockTimeoutError";
+  }
+}
 
 /**
  * Take an exclusive, cross-process lock on `filePath`.
@@ -215,56 +253,112 @@ const sleep = (ms: number): Promise<void> =>
  * fails with `EEXIST` on every POSIX filesystem and on Windows, and it
  * needs no `O_EXCL` open-flag juggling. Returns the release function.
  *
- * **Stale locks are stolen, and that is not optional.** A container killed
- * with SIGKILL leaves the directory behind, and a lock that can only be
- * released by a cooperative exit would make one `docker kill` brick secret
- * writes permanently — turning a rare lost-write race into a permanent
- * outage, which is a strictly worse failure. Staleness is judged by the
- * directory's mtime.
+ * **Ownership is stamped, not assumed.** The holder writes a random token
+ * inside the lock directory and release only removes a lock still carrying
+ * that token. Without it, a holder whose work outran the stale threshold
+ * would delete the *next* owner's lock on its way out, letting a third
+ * writer into a critical section two processes believed they held — a
+ * rarer and much more confusing corruption than the one being prevented.
  *
- * Never throws for lock-infrastructure reasons alone. If the lock cannot
- * be created at all (a read-only mount, a filesystem without mkdir
- * semantics we can rely on), the caller proceeds unlocked: the in-process
- * queue still protects the common single-process case, and refusing to
- * write would deny a real user a real secret in order to prevent a race
- * with a second process that may not exist.
+ * **Stale locks are stolen, and that is not optional.** A container killed
+ * with SIGKILL leaves the directory behind, and a lock that only a
+ * cooperative exit can release would make one `docker kill` brick secret
+ * writes permanently — turning a rare lost write into a permanent outage,
+ * which is strictly worse. Staleness is judged by the directory's mtime,
+ * which a live holder refreshes on a heartbeat — so "stale" means the
+ * holder is *dead*, never merely slow. That distinction is what keeps the
+ * stealing from reinstating the very race the lock prevents.
+ *
+ * Throws {@link SecretFileLockTimeoutError} when another holder keeps it
+ * past the timeout. The *only* path that proceeds unlocked is a filesystem
+ * that cannot create the lock at all (a read-only mount, an exotic
+ * filesystem) — there, refusing would deny every write on a box where the
+ * single-process case is still perfectly safe, and a genuinely unwritable
+ * location fails at the write itself with a better message than a lock
+ * error would give.
  */
+/**
+ * Timing policy, overridable so the tests can exercise contention,
+ * staleness, and timeout without spending the real intervals. Production
+ * callers pass nothing and get the constants above.
+ */
+export interface LockTimings {
+  staleMs?: number;
+  timeoutMs?: number;
+  heartbeatMs?: number;
+  pollMs?: number;
+}
+
 export async function acquireLock(
   filePath: string,
+  timings: LockTimings = {},
 ): Promise<() => Promise<void>> {
+  const staleMs = timings.staleMs ?? LOCK_STALE_MS;
+  const timeoutMs = timings.timeoutMs ?? LOCK_TIMEOUT_MS;
+  const heartbeatMs = timings.heartbeatMs ?? LOCK_HEARTBEAT_MS;
+  const pollMs = timings.pollMs ?? LOCK_POLL_MS;
   const lockDir = `${filePath}.lock`;
+  const ownerFile = `${lockDir}/owner`;
+  const token = crypto.randomBytes(16).toString("hex");
   const noop = async (): Promise<void> => {};
-  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
+
+  // The parent must exist before the lock can. On a first run it does not —
+  // `writeStoreFile` creates it later — so without this the very first write
+  // of every process failed with ENOENT and proceeded unlocked, meaning two
+  // first writes could both bypass the lock, read an empty map, and overwrite
+  // each other. The first write is exactly when two processes are most likely
+  // to start together.
+  try {
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+  } catch {
+    // Unwritable parent. The mkdir below will fail too, and the write after
+    // it will fail with a message about the actual problem.
+  }
 
   for (;;) {
     try {
       await fs.mkdir(lockDir, { recursive: false });
+      await fs.writeFile(ownerFile, token, "utf-8");
+      // Prove liveness for as long as we hold it. `unref` so a held lock
+      // never keeps the process alive on its own — the interval is a
+      // side-channel, not work anyone is waiting for.
+      const heartbeat = setInterval(() => {
+        const now = new Date();
+        void fs.utimes(lockDir, now, now).catch(() => {
+          // Lock already released or stolen; the release below copes.
+        });
+      }, heartbeatMs);
+      heartbeat.unref?.();
       return async () => {
+        clearInterval(heartbeat);
         try {
-          await fs.rmdir(lockDir);
+          // Release only what we still own. A lock judged stale and stolen
+          // now belongs to someone else, and removing it would drop them
+          // into a race with whoever comes next.
+          const held = await fs.readFile(ownerFile, "utf-8");
+          if (held !== token) return;
+          await fs.rm(lockDir, { recursive: true, force: true });
         } catch {
-          // Already gone — another process judged us stale and stole it.
-          // Nothing to undo, and nothing the caller can act on.
+          // Already gone, or unreadable. Either way there is nothing to
+          // release and nothing the caller can act on.
         }
       };
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
-      if (code !== "EEXIST") {
-        // Not "someone else holds it" — the lock itself is unavailable.
-        // Proceed unlocked rather than failing the write; see above.
-        return noop;
-      }
+      if (code !== "EEXIST") return noop; // cannot lock here at all — see above
       try {
         const held = (await fs.stat(lockDir)).mtimeMs;
-        if (Date.now() - held > LOCK_STALE_MS) {
-          await fs.rmdir(lockDir);
+        if (Date.now() - held > staleMs) {
+          await fs.rm(lockDir, { recursive: true, force: true });
           continue;
         }
       } catch {
         // The holder released it between our mkdir and our stat. Retry.
       }
-      if (Date.now() >= deadline) return noop;
-      await sleep(LOCK_POLL_MS);
+      if (Date.now() >= deadline)
+        throw new SecretFileLockTimeoutError(filePath);
+      await sleep(pollMs);
     }
   }
 }

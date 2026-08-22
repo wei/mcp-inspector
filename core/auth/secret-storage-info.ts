@@ -63,6 +63,16 @@ export interface SecretStorageInfo {
    */
   pendingEncryption?: boolean;
   /**
+   * Octal mode of the secrets file when it is **not** `0600` and could not
+   * be tightened — a file owned by another user, or on a read-only mount.
+   *
+   * Carried into the descriptor rather than left in a startup log line
+   * because the caveat below states the mode as fact, at the point where a
+   * user types a secret. On such a box that statement was simply untrue,
+   * and the browser had no way to know.
+   */
+  looseMode?: number;
+  /**
    * True when secrets outlive the process. False only for `memory`, and
    * it is the *promise* being made rather than an implementation detail:
    * an in-memory store is honest precisely because it never claims
@@ -103,6 +113,9 @@ export type SecretStorageTone = "neutral" | "warn";
 export function secretStorageTone(info: SecretStorageInfo): SecretStorageTone {
   if (info.kind === "memory") return "warn";
   if (info.plaintext) return "warn";
+  // An encrypted file that anyone can read is still worth flagging: the
+  // passphrase is the only thing standing between a reader and the values.
+  if (info.looseMode !== undefined) return "warn";
   return "neutral";
 }
 
@@ -116,6 +129,13 @@ export function secretStorageCaveat(
 ): string | undefined {
   if (info.kind === "memory") {
     return "Secrets are not written anywhere and are lost when the Inspector exits.";
+  }
+  // The permission problem outranks the encryption one when both hold: a
+  // file other users can read is a live exposure, while "unencrypted" is a
+  // property of a file only its owner can open.
+  if (info.looseMode !== undefined) {
+    const mode = info.looseMode.toString(8).padStart(4, "0");
+    return `The secrets file is mode ${mode}, not 0600, and could not be tightened — anyone who can read it can read the secrets in it.`;
   }
   if (info.plaintext) {
     return info.pendingEncryption

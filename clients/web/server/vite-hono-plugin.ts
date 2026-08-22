@@ -86,6 +86,11 @@ export function honoMiddlewarePlugin(config: WebServerConfig): Plugin {
         sandboxUrl: sandboxController.getUrl() ?? undefined,
         logger: config.logger,
         initialConfig: webServerConfigToInitialPayload(config, secretStorage),
+        // The startup value above is what the banner printed; the route
+        // re-resolves per request, because the first write under a newly-set
+        // passphrase encrypts a pre-existing plaintext file and a captured
+        // descriptor would keep reporting the old state until a restart.
+        secretStorageResolver: getSecretStorageInfo,
       });
 
       // Expose the resolved token to `transformIndexHtml`. Left empty when

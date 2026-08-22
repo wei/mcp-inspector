@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   InMemorySecretStore,
+  SessionSecretStore,
   KeychainUnavailableError,
   SECRET_FIELD_IDP_CLIENT_SECRET,
   type SecretStore,
@@ -60,6 +61,23 @@ describe("client node-persistence", () => {
     expect(
       await secretStore.get(CLIENT_KEYCHAIN_ID, SECRET_FIELD_IDP_CLIENT_SECRET),
     ).toBe("plain");
+  });
+
+  it("keeps the plaintext on disk when the store is session-scoped", async () => {
+    // The container fallback. Migrating here would delete a secret that
+    // survives restarts and keep only a copy that dies with the process —
+    // and it happens on an ordinary read, so merely loading the app would
+    // do it. The session still works: the value is loaded into the store.
+    const filePath = await makeTmpFile(
+      JSON.stringify(configWithPlaintextSecret),
+    );
+    const secretStore = new SessionSecretStore();
+
+    const loaded = await readClientConfigStore(filePath, secretStore);
+
+    expect(loaded.enterpriseManagedAuth?.idp.clientSecret).toBe("plain");
+    // The disk copy is deliberately left alone.
+    expect(readFileSync(filePath, "utf-8")).toContain("plain");
   });
 
   it("does not overwrite an existing keychain secret during migration", async () => {

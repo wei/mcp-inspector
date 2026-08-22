@@ -3,6 +3,7 @@
  */
 
 import {
+  secretStoreIsDurable,
   SecretStoreUnavailableError,
   type SecretStore,
 } from "../auth/node/secret-store.js";
@@ -55,6 +56,14 @@ async function migrateClientPlaintextSecret(
         value,
       );
     }
+    // Only strip the plaintext once it is somewhere that outlives us.
+    // Against a session-scoped store (the container fallback added in
+    // #1950) this migration would trade a secret that survives restarts
+    // for one that dies with the process — and it runs on an ordinary
+    // read, so merely loading the app would destroy it. The value is
+    // still loaded into the store above, so this session behaves
+    // normally; only the delete is withheld.
+    if (!(await secretStoreIsDurable(secretStore))) return config;
     await writeStoreFile(filePath, serializeStore(stripped));
     return stripped;
   } catch (err) {

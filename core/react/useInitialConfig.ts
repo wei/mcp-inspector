@@ -98,6 +98,29 @@ function usableSecretStorage(value: unknown): SecretStorageInfo | undefined {
   if (v.kind === "file") {
     if (typeof v.path !== "string" || v.path === "") return undefined;
     if (typeof v.plaintext !== "boolean") return undefined;
+    // Optional, so absent is fine — but a *present* value must be a real
+    // boolean. `pendingEncryption: "false"` is a truthy string, and the
+    // footer would read it as "already re-encrypting" and print advice that
+    // is the opposite of the truth.
+    if (
+      v.pendingEncryption !== undefined &&
+      typeof v.pendingEncryption !== "boolean"
+    ) {
+      return undefined;
+    }
+    if (v.looseMode !== undefined && typeof v.looseMode !== "number") {
+      return undefined;
+    }
+  } else if (
+    // File-only fields on a keychain or memory descriptor mean the payload
+    // was not built by a backend we understand. Rejecting is cheap and the
+    // alternative is rendering a mixture of two stores' answers.
+    v.path !== undefined ||
+    v.plaintext !== undefined ||
+    v.pendingEncryption !== undefined ||
+    v.looseMode !== undefined
+  ) {
+    return undefined;
   }
   return value as SecretStorageInfo;
 }

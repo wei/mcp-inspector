@@ -333,6 +333,22 @@ describe("warnAboutSecretStorage", () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
+  it("announces a fallback with no cause to name", () => {
+    // `detail` is optional — an explicitly configured store has no keychain
+    // error behind it, and the banner must not print an empty error line.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    warnAboutSecretStorage({
+      kind: "file",
+      reason: "fallback",
+      durable: true,
+      path: "/x/secrets.json",
+      plaintext: false,
+    });
+    const printed = warn.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(printed).toContain("fell back from the OS keychain");
+    expect(printed).not.toContain("Keychain error:");
+  });
+
   it("announces a fallback, names the cause, and points at the override", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     warnAboutSecretStorage({
@@ -500,6 +516,59 @@ describe("defaultSecretFilePath", () => {
     expect(mod.defaultSecretFilePath()).toBe(
       path.join(tmpDir, "elsewhere.json"),
     );
+  });
+});
+
+describe("the descriptor reports a mode it could not tighten", () => {
+  it("carries looseMode into the descriptor and warns once at selection", async () => {
+    // The warning alone was not enough: the caveat under the secret field
+    // states the mode as fact, and on this box that statement was untrue
+    // while the browser had no way to know.
+    const filePath = path.join(tmpDir, "secrets.json");
+    process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
+    process.env.MCP_INSPECTOR_SECRET_STORE = "file";
+    await fs.writeFile(
+      filePath,
+      JSON.stringify({ version: 1, encryption: "none", secrets: {} }),
+      "utf-8",
+    );
+    await fs.chmod(filePath, 0o644);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => {
+      const actual =
+        await vi.importActual<typeof import("node:fs/promises")>(
+          "node:fs/promises",
+        );
+      return {
+        ...actual,
+        default: actual,
+        chmod: vi.fn(() =>
+          Promise.reject(new Error("EPERM: operation not permitted")),
+        ),
+      };
+    });
+    vi.doMock("@inspector/core/auth/node/secret-store.js", async () => {
+      const actual = await vi.importActual<
+        typeof import("@inspector/core/auth/node/secret-store.js")
+      >("@inspector/core/auth/node/secret-store.js");
+      return {
+        ...actual,
+        probeKeyringAvailable: vi.fn(async () => ({ available: true })),
+      };
+    });
+    try {
+      const mod =
+        await import("@inspector/core/auth/node/secret-store-selection.js");
+      const info = await mod.getSecretStorageInfo();
+      expect(info.looseMode).toBe(0o644);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("0644"));
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.doUnmock("@inspector/core/auth/node/secret-store.js");
+      vi.resetModules();
+    }
   });
 });
 

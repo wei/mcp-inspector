@@ -275,6 +275,26 @@ describe("useInitialConfig", () => {
       expect(result.current.secretStorage).toEqual(info);
     });
 
+    it("passes through the optional file fields when they are well-typed", async () => {
+      const info = {
+        kind: "file",
+        reason: "fallback",
+        durable: true,
+        plaintext: true,
+        path: "/home/node/.mcp-inspector/secrets.json",
+        pendingEncryption: true,
+        looseMode: 0o644,
+      };
+      const fetchFn = vi
+        .fn()
+        .mockResolvedValue(jsonResponse({ secretStorage: info }));
+      const { result } = renderHook(() =>
+        useInitialConfig({ baseUrl: "http://test.local", fetchFn }),
+      );
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.secretStorage).toEqual(info);
+    });
+
     it("is undefined on a backend that omits the field", async () => {
       const fetchFn = vi.fn().mockResolvedValue(jsonResponse({}));
       const { result } = renderHook(() =>
@@ -309,6 +329,42 @@ describe("useInitialConfig", () => {
       [
         "a descriptor with a non-boolean durable",
         { kind: "memory", reason: "fallback", durable: "no" },
+      ],
+      [
+        // The truthy-string trap: the footer would read this as "already
+        // re-encrypting" and print advice that is the opposite of the truth.
+        "a stringly-typed pendingEncryption",
+        {
+          kind: "file",
+          reason: "fallback",
+          durable: true,
+          plaintext: true,
+          path: "/x",
+          pendingEncryption: "false",
+        },
+      ],
+      [
+        "a non-numeric looseMode",
+        {
+          kind: "file",
+          reason: "fallback",
+          durable: true,
+          plaintext: true,
+          path: "/x",
+          looseMode: "644",
+        },
+      ],
+      [
+        // File-only fields on a non-file kind mean the payload was not built
+        // by a backend we understand; rendering a mixture of two stores'
+        // answers is worse than rendering nothing.
+        "file fields on a memory descriptor",
+        {
+          kind: "memory",
+          reason: "fallback",
+          durable: false,
+          plaintext: true,
+        },
       ],
     ])("rejects %s", async (_label, value) => {
       const fetchFn = vi

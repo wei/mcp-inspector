@@ -301,6 +301,24 @@ const PROBE_ACCOUNT = "__inspector:probe";
  * be lost.
  */
 export interface SecretStore {
+  /**
+   * Do values written here outlive the process?
+   *
+   * Optional, and **absent means durable** — every store that predates
+   * #1950 is, and a custom one is far more likely to be backed by
+   * something than by RAM.
+   *
+   * It exists because the *migrations* need it. Both of them (mcp.json in
+   * `server.ts`, client.json in `client/node-persistence.ts`) lift a
+   * plaintext secret off disk, write it to this store, and then strip it
+   * from the file — a safe trade only while "written to the store" is at
+   * least as durable as "left on disk". `InMemorySecretStore` used to be
+   * a test double only, so that held by construction; making it a
+   * production fallback broke it, and a plain `GET /api/servers` on an
+   * unmounted container would have moved a user's existing secrets into
+   * RAM and lost them at exit.
+   */
+  isDurable?(): Promise<boolean>;
   get(serverId: string, field: string): Promise<string | null>;
   set(serverId: string, field: string, value: string): Promise<void>;
   /** No-op if no entry exists. */
@@ -439,6 +457,21 @@ export class KeyringSecretStore implements SecretStore {
  * server factory. Mirrors the keyring contract exactly so swapping it
  * in/out doesn't change behavior beyond persistence.
  */
+/**
+ * Is `store` durable? Absent `isDurable` means yes — see the interface.
+ *
+ * A free function rather than a required method so the existing test
+ * doubles (and any third-party implementation) keep compiling, while the
+ * one store that is *not* durable has to say so explicitly. Defaulting the
+ * other way would make every double silently non-durable and quietly
+ * disable the migrations they exist to exercise.
+ */
+export async function secretStoreIsDurable(
+  store: SecretStore,
+): Promise<boolean> {
+  return store.isDurable ? store.isDurable() : true;
+}
+
 export class InMemorySecretStore implements SecretStore {
   private readonly map = new Map<string, string>();
 
@@ -459,5 +492,28 @@ export class InMemorySecretStore implements SecretStore {
     for (const key of [...this.map.keys()]) {
       if (key.startsWith(prefix)) this.map.delete(key);
     }
+  }
+}
+
+/**
+ * The in-memory store as a **production** choice — the fallback for a
+ * container with no keychain and nothing durable mounted (#1950).
+ *
+ * Behaviorally identical to {@link InMemorySecretStore}; it exists to
+ * answer `isDurable()` with `false`, and that one bit is load-bearing.
+ * Both migrations (mcp.json, client.json) lift a plaintext secret off
+ * disk, write it to the store, and then delete it from the file — safe
+ * only while the store outlives the process. Against a session-scoped
+ * store that trade destroys the secret, and it runs on an ordinary read,
+ * so merely opening the app would do it.
+ *
+ * Kept as a separate class rather than a flag on the base so the test
+ * suite's many `new InMemorySecretStore()` doubles keep standing in for a
+ * *working keychain*, which is what they are there to be. Only the code
+ * that deliberately chooses RAM in production says so.
+ */
+export class SessionSecretStore extends InMemorySecretStore {
+  async isDurable(): Promise<boolean> {
+    return false;
   }
 }

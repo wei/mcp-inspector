@@ -103,6 +103,26 @@ describe("secretStorageCaveat", () => {
     expect(caveat).not.toContain("MCP_INSPECTOR_SECRET_KEY");
   });
 
+  it("reports a mode it could not tighten, ahead of the encryption caveat", () => {
+    // A file other users can read is a live exposure; "unencrypted" is a
+    // property of a file only its owner can open. When both hold, the
+    // permission problem is the one to say out loud.
+    const loose: SecretStorageInfo = { ...plaintextFile, looseMode: 0o644 };
+    expect(secretStorageTone(loose)).toBe("warn");
+    expect(secretStorageCaveat(loose)).toContain("0644");
+    expect(secretStorageCaveat(loose)).not.toContain(
+      "MCP_INSPECTOR_SECRET_KEY",
+    );
+  });
+
+  it("warns about a loose mode even on an encrypted file", () => {
+    // The passphrase is then the only thing between a reader and the values,
+    // which is worth saying rather than rendering the quiet neutral state.
+    const loose: SecretStorageInfo = { ...encryptedFile, looseMode: 0o640 };
+    expect(secretStorageTone(loose)).toBe("warn");
+    expect(secretStorageCaveat(loose)).toContain("0640");
+  });
+
   it("prefers the memory caveat when a memory store somehow carries the flag", () => {
     // Defensive ordering: `plaintext` is meaningless for memory, and the
     // durability loss is the more consequential of the two statements.

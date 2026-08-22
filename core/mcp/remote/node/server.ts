@@ -65,6 +65,7 @@ import { RemoteSession } from "./remote-session.js";
 import { createRemoteAuthProvider } from "./tokenAuthProvider.js";
 import { API_SERVER_ENV_VARS } from "../constants.js";
 import {
+  secretStoreIsDurable,
   SecretStoreUnavailableError,
   type SecretStore,
 } from "../../../auth/node/secret-store.js";
@@ -260,6 +261,15 @@ export interface RemoteServerOptions {
    * runners.
    */
   secretStore?: SecretStore;
+  /**
+   * Re-resolve the secret-storage descriptor for each `GET /api/config`.
+   *
+   * A function rather than a value because the answer changes while the
+   * process runs (see the route). Optional: a backend that doesn't supply
+   * one falls back to whatever `initialConfig` carried, which is what the
+   * tests and any embedder that doesn't care get.
+   */
+  secretStorageResolver?: () => Promise<SecretStorageInfo | undefined>;
 }
 
 export interface CreateRemoteAppResult {
@@ -662,10 +672,22 @@ export function createRemoteApp(
     app.use("*", createAuthMiddleware(authToken));
   }
 
-  app.get("/api/config", (c) => {
+  app.get("/api/config", async (c) => {
+    // `secretStorage` is re-resolved per request, not taken from the
+    // startup payload. It describes bytes on disk that this very process
+    // changes — the first `set` under a newly-set passphrase encrypts a
+    // pre-existing plaintext file — so a value captured at boot would keep
+    // telling every page load "still unencrypted" until a restart. That is
+    // stale in the safe direction, but stale about the single fact this
+    // field exists to state, which makes re-reading a small file per config
+    // fetch (once per page load) the obviously right trade.
+    const secretStorage = options.secretStorageResolver
+      ? await options.secretStorageResolver()
+      : options.initialConfig?.secretStorage;
     const payload = {
       ...options.initialConfig,
       writable,
+      ...(secretStorage ? { secretStorage } : {}),
       ...(options.sandboxUrl ? { sandboxUrl: options.sandboxUrl } : {}),
     };
     return c.json(payload);
@@ -1918,6 +1940,12 @@ export function createRemoteApp(
   ): Promise<{ migrated: MCPConfig; changed: boolean }> => {
     let changed = false;
     const next: MCPConfig = { mcpServers: {} };
+    const durable = await secretStoreIsDurable(secretStore);
+    if (!durable && fileLogger) {
+      fileLogger.warn(
+        "Secrets are kept in memory for this session, so plaintext values in mcp.json are left on disk rather than migrated away. They would otherwise be lost when the Inspector exits.",
+      );
+    }
     try {
       for (const [id, stored] of Object.entries(config.mcpServers)) {
         const { stripped, secrets } = extractSecretsFromStored(stored);
@@ -1934,6 +1962,17 @@ export function createRemoteApp(
           // (id, field); keep the keychain authoritative and drop the
           // plaintext from disk. This handles the case where a user has
           // edited mcp.json by hand after the original migration.
+        }
+        // Only strip the plaintext once it is somewhere that outlives us.
+        // Against a session-scoped store (the container fallback added in
+        // #1950) this would trade a secret that survives restarts for one
+        // that dies with the process — and it runs on an ordinary GET, so
+        // merely opening the app would destroy it. The values are still
+        // loaded into the store above, so this session behaves normally;
+        // only the disk delete is withheld.
+        if (!durable) {
+          next.mcpServers[id] = stored;
+          continue;
         }
         next.mcpServers[id] = stripped;
         changed = true;

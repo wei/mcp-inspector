@@ -52,9 +52,10 @@ import {
   tightenSecretFilePermissions,
 } from "./file-secret-store.js";
 import {
-  InMemorySecretStore,
   KeyringSecretStore,
   probeKeyringAvailable,
+  secretStoreIsDurable,
+  SessionSecretStore,
   type SecretStore,
 } from "./secret-store.js";
 
@@ -248,8 +249,12 @@ async function buildStore(
     };
   }
   if (kind === "memory") {
+    // `SessionSecretStore`, not the bare `InMemorySecretStore` the tests
+    // use: it reports `isDurable() === false`, which is what stops the
+    // mcp.json / client.json migrations from stripping a plaintext secret
+    // off disk in exchange for a copy that dies with this process.
     return {
-      store: new InMemorySecretStore(),
+      store: new SessionSecretStore(),
       info: { kind, reason, durable: false, detail },
     };
   }
@@ -293,11 +298,16 @@ async function describeFileStore(
 ): Promise<SecretStorageInfo> {
   const onDisk = await store.readOnDiskEncryption();
   const plaintext = onDisk === null ? !store.encrypted : onDisk === "none";
+  // Re-checked here rather than captured at selection, for the same reason
+  // the encryption state is: the mode can change under a running process,
+  // and this descriptor is what the browser renders as fact.
+  const perms = await tightenSecretFilePermissions(filePath);
   return {
     kind,
     reason,
     path: filePath,
     plaintext,
+    ...(perms.state === "loose" ? { looseMode: perms.mode } : {}),
     // Only meaningful while the two disagree; omitted otherwise so the
     // payload does not carry a flag that says nothing.
     ...(plaintext && store.encrypted ? { pendingEncryption: true } : {}),
@@ -413,6 +423,9 @@ export async function getSecretStorageInfo(): Promise<SecretStorageInfo> {
 class DeferredSecretStore implements SecretStore {
   private async target(): Promise<SecretStore> {
     return (await resolveSecretStore()).store;
+  }
+  async isDurable(): Promise<boolean> {
+    return secretStoreIsDurable(await this.target());
   }
   async get(serverId: string, field: string): Promise<string | null> {
     return (await this.target()).get(serverId, field);
