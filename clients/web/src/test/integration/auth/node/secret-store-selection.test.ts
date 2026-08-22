@@ -882,10 +882,19 @@ describe("the descriptor reports a mode it could not verify", () => {
 });
 
 describe("the descriptor reports a mode it could not tighten", () => {
-  it("carries looseMode into the descriptor and warns once at selection", async () => {
-    // The warning alone was not enough: the caveat under the secret field
-    // states the mode as fact, and on this box that statement was untrue
-    // while the browser had no way to know.
+  it("carries looseMode into the descriptor, and the caveat states the mode", async () => {
+    // Reaching this state at all requires the chmod to *fail*: as the file's
+    // owner you cannot stage it, because `tightenSecretFilePermissions`
+    // repairs a 0644 file to 0600 during selection and the descriptor then
+    // correctly reports owner-only. It is only real for a file owned by
+    // another user or on a read-only mount — hence the mocked chmod, which
+    // is standing in for a privilege we cannot drop inside a test.
+    //
+    // The warning is asserted through the *caveat* path deliberately.
+    // Selection used to warn here too, and that line was removed in round 7
+    // for being encryption-blind and duplicating this one — so asserting the
+    // caveat text is what keeps this test pinned to the surviving mechanism
+    // rather than passing on whichever line happens to mention the mode.
     const filePath = path.join(tmpDir, "secrets.json");
     process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
     process.env.MCP_INSPECTOR_SECRET_STORE = "file";
@@ -925,7 +934,13 @@ describe("the descriptor reports a mode it could not tighten", () => {
         await import("@inspector/core/auth/node/secret-store-selection.js");
       const info = await mod.getSecretStorageInfo();
       expect(info.looseMode).toBe(0o644);
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining("0644"));
+      // The plaintext wording, in full: this file is unencrypted, so a
+      // reader really does get the secrets.
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "mode 0644, not 0600, and could not be tightened — anyone who can read it can read the secrets in it",
+        ),
+      );
     } finally {
       vi.doUnmock("node:fs/promises");
       vi.doUnmock("@inspector/core/auth/node/secret-store.js");
