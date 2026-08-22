@@ -134,4 +134,43 @@ describe("SecretStorageFooter", () => {
     expect(band).not.toHaveTextContent("Owner-only");
     expect(band).toHaveAttribute("data-tone", "warn");
   });
+
+  it("says an unreadable file is unreadable, not encrypted", async () => {
+    // The descriptor omits `plaintext` here, and the band must not read a
+    // default out of that absence.
+    renderWithMantine(
+      <SecretStorageFooter
+        info={{
+          kind: "file",
+          reason: "fallback",
+          durable: true,
+          path: "/home/node/.mcp-inspector/secrets.json",
+          encryptionUnknown: "not valid JSON",
+        }}
+      />,
+    );
+    const band = screen.getByTestId("secret-storage-footer");
+    expect(band).toHaveTextContent("Unreadable file.");
+    expect(band).toHaveTextContent("Saving a secret will fail.");
+    expect(band).not.toHaveTextContent("Encrypted file");
+    expect(band).toHaveAttribute("data-tone", "warn");
+  });
+
+  it("does not claim a loose-mode encrypted file exposes its secrets", async () => {
+    renderWithMantine(
+      <SecretStorageFooter
+        info={{
+          kind: "file",
+          reason: "fallback",
+          durable: true,
+          plaintext: false,
+          path: "/home/node/.mcp-inspector/secrets.json",
+          looseMode: 0o644,
+        }}
+      />,
+    );
+    const band = screen.getByTestId("secret-storage-footer");
+    expect(band).toHaveTextContent("Mode 0644 — not owner-only.");
+    expect(band).toHaveAttribute("data-tone", "warn");
+  });
 });

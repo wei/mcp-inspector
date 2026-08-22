@@ -320,6 +320,23 @@ export interface SecretStore {
    */
   isDurable?(): Promise<boolean>;
   get(serverId: string, field: string): Promise<string | null>;
+  /**
+   * Like {@link get}, but **throws** when the store cannot be read instead
+   * of answering `null`.
+   *
+   * `get` is deliberately tolerant — an unreachable keychain and an absent
+   * entry are the same answer to a caller that just wants to render a form.
+   * That tolerance is wrong for exactly one caller: a migration that treats
+   * `null` as proof of absence and then *writes*. A transient read failure
+   * would look like "nothing there", and the write would overwrite a newer
+   * keychain value with an older file copy — silently inverting the
+   * keychain-wins rule the migration exists to honor.
+   *
+   * Optional, so existing implementations (and test doubles) keep
+   * compiling; {@link secretStoreGetStrict} falls back to `get` when it is
+   * absent, which is correct for stores whose reads cannot fail.
+   */
+  getStrict?(serverId: string, field: string): Promise<string | null>;
   set(serverId: string, field: string, value: string): Promise<void>;
   /** No-op if no entry exists. */
   delete(serverId: string, field: string): Promise<void>;
@@ -370,6 +387,21 @@ export interface SecretStore {
  *    one the first version of this contract actually handled.
  */
 export class KeyringSecretStore implements SecretStore {
+  /**
+   * The intolerant read. Same lookup as {@link get}, minus the catch — a
+   * keychain that cannot answer must not be reported as an empty one to a
+   * caller that is about to write based on the answer.
+   */
+  async getStrict(serverId: string, field: string): Promise<string | null> {
+    const keyring = await loadKeyring();
+    if (!keyring.ok) throw new KeychainUnavailableError(keyring.err);
+    const entry = new keyring.mod.AsyncEntry(
+      SERVICE_NAME,
+      buildAccount(serverId, field),
+    );
+    return (await entry.getPassword()) ?? null;
+  }
+
   async get(serverId: string, field: string): Promise<string | null> {
     try {
       const keyring = await loadKeyring();
@@ -466,6 +498,22 @@ export class KeyringSecretStore implements SecretStore {
  * other way would make every double silently non-durable and quietly
  * disable the migrations they exist to exercise.
  */
+/**
+ * Read `store` intolerantly: throw rather than answer `null` when the store
+ * itself cannot be read. Falls back to `get` for a store that does not
+ * distinguish the two, which is right for the in-memory and file stores —
+ * neither can fail in a way that masquerades as absence.
+ */
+export async function secretStoreGetStrict(
+  store: SecretStore,
+  serverId: string,
+  field: string,
+): Promise<string | null> {
+  return store.getStrict
+    ? store.getStrict(serverId, field)
+    : store.get(serverId, field);
+}
+
 export async function secretStoreIsDurable(
   store: SecretStore,
 ): Promise<boolean> {

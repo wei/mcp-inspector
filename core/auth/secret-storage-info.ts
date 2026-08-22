@@ -84,6 +84,18 @@ export interface SecretStorageInfo {
    */
   permissionsUnknown?: string;
   /**
+   * Set when the secrets file exists but its envelope could not be read —
+   * corrupt JSON, or a format written by a newer Inspector. Carries the
+   * reason.
+   *
+   * Mutually exclusive with a meaningful {@link plaintext}: the whole point
+   * is that the encryption state was never established, so neither "File
+   * (encrypted)" nor "File (unencrypted)" may be claimed. `set` will refuse
+   * such a file rather than overwrite it, so this is also a live warning
+   * about writes, not only a description.
+   */
+  encryptionUnknown?: string;
+  /**
    * True when secrets outlive the process. False only for `memory`, and
    * it is the *promise* being made rather than an implementation detail:
    * an in-memory store is honest precisely because it never claims
@@ -106,6 +118,7 @@ export function secretStorageLabel(info: SecretStorageInfo): string {
     case "keyring":
       return "OS keychain";
     case "file":
+      if (info.encryptionUnknown !== undefined) return "File (unreadable)";
       return info.plaintext ? "File (unencrypted)" : "File (encrypted)";
     case "memory":
       return "Memory (this session only)";
@@ -130,6 +143,9 @@ export function secretStorageTone(info: SecretStorageInfo): SecretStorageTone {
   // Unverified is not the same as fine. The quiet tone here would read as a
   // confirmation we never made.
   if (info.permissionsUnknown !== undefined) return "warn";
+  // A file we cannot read is one we cannot write either — a warning about
+  // the next save, not just about the past.
+  if (info.encryptionUnknown !== undefined) return "warn";
   return "neutral";
 }
 
@@ -149,13 +165,24 @@ export function secretStorageCaveat(
   // property of a file only its owner can open.
   if (info.looseMode !== undefined) {
     const mode = info.looseMode.toString(8).padStart(4, "0");
-    return `The secrets file is mode ${mode}, not 0600, and could not be tightened — anyone who can read it can read the secrets in it.`;
+    // The consequence differs by encryption, and overstating it is its own
+    // kind of wrong: a reader of an *encrypted* file gets ciphertext, not
+    // secrets. Saying otherwise trains people to discount the warning on the
+    // occasion it is literally true.
+    return info.plaintext === false
+      ? `The secrets file is mode ${mode}, not 0600, and could not be tightened — others can copy it, and the passphrase is then the only thing protecting its contents.`
+      : `The secrets file is mode ${mode}, not 0600, and could not be tightened — anyone who can read it can read the secrets in it.`;
   }
   // Ordered with the permission problems, above encryption, for the same
   // reason: not knowing whether others can read the file is a question about
   // exposure, and it should not be answered by a reassuring silence.
   if (info.permissionsUnknown !== undefined) {
     return `The secrets file's permissions could not be checked (${info.permissionsUnknown}), so it is not known whether others can read it.`;
+  }
+  // An unreadable envelope outranks the encryption caveats below, which all
+  // presuppose we know which mode the file is in.
+  if (info.encryptionUnknown !== undefined) {
+    return `The secrets file could not be read (${info.encryptionUnknown}). Saving a secret will fail rather than overwrite it.`;
   }
   if (info.plaintext) {
     return info.pendingEncryption

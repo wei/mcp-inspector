@@ -97,7 +97,16 @@ function usableSecretStorage(value: unknown): SecretStorageInfo | undefined {
   if (typeof v.durable !== "boolean") return undefined;
   if (v.kind === "file") {
     if (typeof v.path !== "string" || v.path === "") return undefined;
-    if (typeof v.plaintext !== "boolean") return undefined;
+    // Exactly one of the two must be present: either we know the encryption
+    // state, or we know we could not read it. A descriptor carrying neither
+    // (or both) was not built by a backend we understand, and the footer
+    // would have to invent the missing half.
+    const knowsEncryption = typeof v.plaintext === "boolean";
+    const knowsItCannotRead = typeof v.encryptionUnknown === "string";
+    if (knowsEncryption === knowsItCannotRead) return undefined;
+    if (v.encryptionUnknown !== undefined && !knowsItCannotRead) {
+      return undefined;
+    }
     // Optional, so absent is fine — but a *present* value must be a real
     // boolean. `pendingEncryption: "false"` is a truthy string, and the
     // footer would read it as "already re-encrypting" and print advice that
@@ -125,7 +134,8 @@ function usableSecretStorage(value: unknown): SecretStorageInfo | undefined {
     v.plaintext !== undefined ||
     v.pendingEncryption !== undefined ||
     v.looseMode !== undefined ||
-    v.permissionsUnknown !== undefined
+    v.permissionsUnknown !== undefined ||
+    v.encryptionUnknown !== undefined
   ) {
     return undefined;
   }

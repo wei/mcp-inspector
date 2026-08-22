@@ -456,7 +456,7 @@ async function canSteal(
   } catch {
     // No stamp to consult; fall through to the time-only answer.
   }
-  if (!owner || owner.host !== os.hostname() || typeof owner.pid !== "number") {
+  if (!owner || owner.host !== os.hostname() || owner.pid === undefined) {
     return true;
   }
   return !processIsAlive(owner.pid);
@@ -475,7 +475,8 @@ function processIsAlive(pid: number): boolean {
 
 interface LockOwner {
   token: string;
-  pid: number;
+  /** Absent when the stamp carried no usable (positive) pid. */
+  pid?: number;
   host: string;
 }
 
@@ -487,14 +488,30 @@ function parseOwner(raw: string): LockOwner | null {
     const { token, pid, host } = parsed as Partial<LockOwner>;
     if (typeof token !== "string") return null;
     return {
+      // Only a *positive* pid is usable. `-1` and `0` are wildcards to
+      // `process.kill` — `kill(-1, 0)` asks about every process this user
+      // can signal and answers "alive" for almost any host, which would make
+      // a garbled stamp permanently unstealable. Anything else is recorded
+      // as absent so the caller falls back to the mtime.
+      pid: typeof pid === "number" && pid > 0 ? pid : undefined,
       token,
-      pid: typeof pid === "number" ? pid : -1,
       host: String(host),
     };
   } catch {
     return null;
   }
 }
+
+/**
+ * What the secrets file's envelope says, or why it could not be read.
+ * `absent` is "nothing written yet"; `unreadable` is "there is a file and
+ * we cannot tell" — two very different things to say to a user.
+ */
+export type SecretFileEncryptionState =
+  | { state: "absent" }
+  | { state: "plaintext" }
+  | { state: "encrypted" }
+  | { state: "unreadable"; detail: string };
 
 export interface FileSecretStoreOptions {
   /** Absolute path of the secrets file. */
@@ -550,20 +567,36 @@ export class FileSecretStore implements SecretStore {
    * Reads the envelope only. It never decrypts, so it needs no passphrase
    * and answers correctly even when the key is wrong or missing — which is
    * also a state the UI has to describe rather than throw on.
+   *
+   * `absent` and `unreadable` are kept apart deliberately. Collapsing them
+   * (as a bare `null` did) means an existing file that is corrupt, or
+   * written in an envelope this build does not know, is reported as "no
+   * file yet" — and the descriptor then falls back to the configured write
+   * policy, so a passphrase-configured install claims "Encrypted file"
+   * about a file whose encryption state was never established and which
+   * `set` is in fact about to refuse.
    */
-  async readOnDiskEncryption(): Promise<SecretFile["encryption"] | null> {
+  async readOnDiskEncryption(): Promise<SecretFileEncryptionState> {
+    let raw: string | null;
     try {
-      const raw = await readStoreFile(this.filePath);
-      if (raw === null) return null;
+      raw = await readStoreFile(this.filePath);
+    } catch (err) {
+      return {
+        state: "unreadable",
+        detail: err instanceof Error ? err.message : String(err),
+      };
+    }
+    if (raw === null) return { state: "absent" };
+    try {
       const parsed = JSON.parse(raw) as SecretFile;
-      return parsed.encryption === "none" || parsed.encryption === CIPHER
-        ? parsed.encryption
-        : null;
+      if (parsed.encryption === "none") return { state: "plaintext" };
+      if (parsed.encryption === CIPHER) return { state: "encrypted" };
+      return {
+        state: "unreadable",
+        detail: `unsupported envelope (encryption="${String(parsed.encryption)}", version=${String(parsed.version)})`,
+      };
     } catch {
-      // Absent, unreadable, or not JSON. "Unknown" is the honest answer, and
-      // the caller falls back to reporting the configured policy — the only
-      // thing that is knowable about a file nobody can read.
-      return null;
+      return { state: "unreadable", detail: "not valid JSON" };
     }
   }
 

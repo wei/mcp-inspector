@@ -57,6 +57,7 @@ import {
   KeyringSecretStore,
   parseAccount,
   probeKeyringAvailable,
+  secretStoreGetStrict,
   secretStoreIsDurable,
   SessionSecretStore,
   type SecretStore,
@@ -334,7 +335,14 @@ async function describeFileStore(
   detail?: string,
 ): Promise<SecretStorageInfo> {
   const onDisk = await store.readOnDiskEncryption();
-  const plaintext = onDisk === null ? !store.encrypted : onDisk === "none";
+  // `absent` is the only state where falling back to the configured write
+  // policy is honest — the first write will create the file in exactly that
+  // mode. `unreadable` must not: the encryption state was never established,
+  // and reporting the policy there would claim "Encrypted file" about a file
+  // `set` is about to refuse.
+  const unreadable = onDisk.state === "unreadable" ? onDisk.detail : undefined;
+  const plaintext =
+    onDisk.state === "absent" ? !store.encrypted : onDisk.state === "plaintext";
   // Re-checked here rather than captured at selection, for the same reason
   // the encryption state is: the mode can change under a running process,
   // and this descriptor is what the browser renders as fact. The *read-only*
@@ -346,12 +354,17 @@ async function describeFileStore(
     kind,
     reason,
     path: filePath,
-    plaintext,
+    // Omitted entirely when the envelope could not be read, so no consumer
+    // can read a default out of it.
+    ...(unreadable === undefined ? { plaintext } : {}),
+    ...(unreadable !== undefined ? { encryptionUnknown: unreadable } : {}),
     ...(perms.state === "loose" ? { looseMode: perms.mode } : {}),
     ...(perms.state === "unknown" ? { permissionsUnknown: perms.detail } : {}),
     // Only meaningful while the two disagree; omitted otherwise so the
     // payload does not carry a flag that says nothing.
-    ...(plaintext && store.encrypted ? { pendingEncryption: true } : {}),
+    ...(unreadable === undefined && plaintext && store.encrypted
+      ? { pendingEncryption: true }
+      : {}),
     durable: true,
     detail,
   };
@@ -481,7 +494,17 @@ export async function absorbFileSecretsIntoKeyring(
     for (const [account, value] of Object.entries(entries)) {
       const parsed = parseAccount(account);
       if (!parsed) continue;
-      const existing = await keyring.get(parsed.serverId, parsed.field);
+      // Strict: `get` answers `null` for an unreadable keychain as well as
+      // for a missing entry, and this branch *writes* on `null`. A transient
+      // read failure would therefore overwrite a newer keychain value with
+      // the older file copy — the exact inversion of the keychain-wins rule
+      // this migration is built on. A throw here aborts the hand-off and
+      // leaves the file in place, so the next run retries.
+      const existing = await secretStoreGetStrict(
+        keyring,
+        parsed.serverId,
+        parsed.field,
+      );
       if (existing === null) {
         await keyring.set(parsed.serverId, parsed.field, value);
       }

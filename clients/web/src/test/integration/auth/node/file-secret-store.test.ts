@@ -484,6 +484,33 @@ describe("tightenSecretFilePermissions", () => {
     }
   });
 
+  it("names an errno-less stat failure rather than printing undefined", async () => {
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => {
+      const actual =
+        await vi.importActual<typeof import("node:fs/promises")>(
+          "node:fs/promises",
+        );
+      // No `code` property — a rejection shaped unlike an errno error.
+      return {
+        ...actual,
+        default: actual,
+        stat: vi.fn(() => Promise.reject(new Error("something odd"))),
+      };
+    });
+    try {
+      const mod =
+        await import("@inspector/core/auth/node/file-secret-store.js");
+      expect(await mod.readSecretFilePermissions(filePath())).toEqual({
+        state: "unknown",
+        detail: "unknown error",
+      });
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  });
+
   it("readSecretFilePermissions reports the mode without changing it", async () => {
     // The descriptor is rebuilt on every GET /api/config, so the function it
     // calls must not chmod — once per page load, on a file another process
@@ -560,25 +587,40 @@ describe("readOnDiskEncryption", () => {
       passphrase: "hunter2",
     });
     expect(withKey.encrypted).toBe(true);
-    expect(await withKey.readOnDiskEncryption()).toBe("none");
+    expect(await withKey.readOnDiskEncryption()).toEqual({
+      state: "plaintext",
+    });
 
     await withKey.set("alpha", "env:A", "1");
-    expect(await withKey.readOnDiskEncryption()).toBe("aes-256-gcm");
+    expect(await withKey.readOnDiskEncryption()).toEqual({
+      state: "encrypted",
+    });
   });
 
-  it("answers null for an absent, unparseable, or unrecognized file", async () => {
+  it("keeps 'no file yet' apart from 'there is a file and we cannot read it'", async () => {
+    // Collapsing these is what let a passphrase-configured install claim
+    // "Encrypted file" about a corrupt file `set` was about to refuse: the
+    // descriptor falls back to the write policy on `absent`, which is only
+    // honest when the first write really will create the file that way.
     const store = new FileSecretStore({ filePath: filePath() });
-    expect(await store.readOnDiskEncryption()).toBe(null);
+    expect(await store.readOnDiskEncryption()).toEqual({ state: "absent" });
 
     await fs.writeFile(filePath(), "{not json", "utf-8");
-    expect(await store.readOnDiskEncryption()).toBe(null);
+    expect(await store.readOnDiskEncryption()).toEqual({
+      state: "unreadable",
+      detail: "not valid JSON",
+    });
 
     await fs.writeFile(
       filePath(),
       JSON.stringify({ version: 1, encryption: "rot13" }),
       "utf-8",
     );
-    expect(await store.readOnDiskEncryption()).toBe(null);
+    const unsupported = await store.readOnDiskEncryption();
+    expect(unsupported.state).toBe("unreadable");
+    expect(
+      unsupported.state === "unreadable" ? unsupported.detail : "",
+    ).toMatch(/unsupported envelope/);
   });
 
   it("needs no passphrase — it reads the envelope, never the payload", async () => {
@@ -589,7 +631,9 @@ describe("readOnDiskEncryption", () => {
     });
     await writer.set("alpha", SECRET_FIELD_OAUTH_CLIENT_SECRET, "shh");
     const keyless = new FileSecretStore({ filePath: filePath() });
-    expect(await keyless.readOnDiskEncryption()).toBe("aes-256-gcm");
+    expect(await keyless.readOnDiskEncryption()).toEqual({
+      state: "encrypted",
+    });
   });
 });
 
@@ -871,6 +915,51 @@ describe("acquireLock", () => {
       path.join(lockDir, "owner"),
       // A pid that cannot be running: `kill(0)` answers ESRCH.
       JSON.stringify({ token: "gone", pid: 2 ** 31 - 1, host: os.hostname() }),
+      "utf-8",
+    );
+    const old = new Date(Date.now() - 60_000);
+    await fs.utimes(lockDir, old, old);
+
+    const release = await acquireLock(target, {
+      staleMs: 50,
+      timeoutMs: 2_000,
+      pollMs: 10,
+    });
+    await release();
+  });
+
+  it.each([
+    ["not JSON at all", "{ not json"],
+    ["JSON that is not an object", '"just-a-string"'],
+    ["an object with no token", JSON.stringify({ pid: 1, host: "h" })],
+  ])("steals a stale lock whose owner stamp is %s", async (_label, stamp) => {
+    // An unusable stamp cannot answer the liveness question, so the mtime is
+    // all there is — and stealing on it is right, because the alternative is
+    // a lock nothing can ever break.
+    const target = path.join(tmpDir, `stamp-${_label.length}.json`);
+    const lockDir = `${target}.lock`;
+    await fs.mkdir(lockDir, { recursive: true });
+    await fs.writeFile(path.join(lockDir, "owner"), stamp, "utf-8");
+    const old = new Date(Date.now() - 60_000);
+    await fs.utimes(lockDir, old, old);
+
+    const release = await acquireLock(target, {
+      staleMs: 50,
+      timeoutMs: 2_000,
+      pollMs: 10,
+    });
+    await release();
+  });
+
+  it("steals a stale lock whose stamp carries no usable pid", async () => {
+    // A stamp with a non-numeric pid names no process to ask about, so it
+    // cannot vouch for the holder being alive.
+    const target = path.join(tmpDir, "nopid.json");
+    const lockDir = `${target}.lock`;
+    await fs.mkdir(lockDir, { recursive: true });
+    await fs.writeFile(
+      path.join(lockDir, "owner"),
+      JSON.stringify({ token: "t", pid: "not-a-number", host: os.hostname() }),
       "utf-8",
     );
     const old = new Date(Date.now() - 60_000);

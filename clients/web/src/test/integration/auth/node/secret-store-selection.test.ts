@@ -634,6 +634,63 @@ describe("absorbFileSecretsIntoKeyring", () => {
     expect(await keyring.get("srv", "oauthClientSecret")).toBe(null);
   });
 
+  it("aborts rather than overwriting when the keychain read fails", async () => {
+    // `get` answers null for an unreachable keychain as well as a missing
+    // entry, and the hand-off *writes* on null — so a transient read failure
+    // would replace a newer keychain value with the older file copy, exactly
+    // inverting the keychain-wins rule. The strict read turns that into a
+    // throw, which leaves the file in place for the next run.
+    const filePath = await seedFile({ "srv:oauthClientSecret": "from-file" });
+    process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await loadWithProbe(true);
+
+    let wrote = false;
+    const flaky: SecretStore = {
+      get: async () => null,
+      getStrict: async () => {
+        throw new Error("keychain temporarily unavailable");
+      },
+      set: async () => {
+        wrote = true;
+      },
+      delete: async () => {},
+      deleteAllForServer: async () => {},
+    };
+
+    await mod.absorbFileSecretsIntoKeyring(flaky);
+
+    expect(wrote).toBe(false);
+    expect(existsSync(filePath)).toBe(true);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("left in place"));
+  });
+
+  it("uses the strict read when the store offers one", async () => {
+    // And when it answers "present", the keychain still wins.
+    const filePath = await seedFile({ "srv:oauthClientSecret": "from-file" });
+    process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await loadWithProbe(true);
+
+    let wrote = false;
+    const store: SecretStore = {
+      // Deliberately disagrees with `getStrict` so the test proves which one
+      // the migration consults.
+      get: async () => null,
+      getStrict: async () => "already-here",
+      set: async () => {
+        wrote = true;
+      },
+      delete: async () => {},
+      deleteAllForServer: async () => {},
+    };
+
+    await mod.absorbFileSecretsIntoKeyring(store);
+
+    expect(wrote).toBe(false);
+    expect(existsSync(filePath)).toBe(false);
+  });
+
   it("is a no-op for a file that holds no entries", async () => {
     // An empty map is not a hand-off. Deleting the file here would be
     // harmless but pointless; the interesting part is that it does not warn
@@ -685,6 +742,47 @@ describe("absorbFileSecretsIntoKeyring", () => {
     const keyring = new InMemorySecretStore();
     await mod.absorbFileSecretsIntoKeyring(keyring);
     expect(existsSync(path.join(tmpDir, "absent.json"))).toBe(false);
+  });
+});
+
+describe("the descriptor refuses to guess an unreadable file's encryption", () => {
+  it("reports encryptionUnknown instead of falling back to the write policy", async () => {
+    // With a passphrase configured, the old fallback claimed "File
+    // (encrypted)" about a file whose envelope had never been parsed — and
+    // which `set` was about to refuse rather than overwrite.
+    const filePath = path.join(tmpDir, "secrets.json");
+    process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
+    process.env.MCP_INSPECTOR_SECRET_STORE = "file";
+    process.env.MCP_INSPECTOR_SECRET_KEY = "hunter2";
+    await fs.writeFile(filePath, "{ not json", "utf-8");
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const mod = await loadWithProbe(false);
+    const info = await mod.getSecretStorageInfo();
+
+    expect(info.encryptionUnknown).toBe("not valid JSON");
+    // No half-answer left for a consumer to read a default out of.
+    expect(info.plaintext).toBeUndefined();
+    expect(info.pendingEncryption).toBeUndefined();
+
+    const { secretStorageLabel, secretStorageCaveat, secretStorageTone } =
+      await import("@inspector/core/auth/secret-storage-info.js");
+    expect(secretStorageLabel(info)).toBe("File (unreadable)");
+    expect(secretStorageTone(info)).toBe("warn");
+    expect(secretStorageCaveat(info)).toMatch(/Saving a secret will fail/);
+  });
+
+  it("still uses the write policy when there is genuinely no file", async () => {
+    // The control: `absent` is the one state where reporting the policy is
+    // honest, because the first write really will create it that way.
+    process.env.MCP_INSPECTOR_SECRET_FILE = path.join(tmpDir, "none.json");
+    process.env.MCP_INSPECTOR_SECRET_STORE = "file";
+    process.env.MCP_INSPECTOR_SECRET_KEY = "hunter2";
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await loadWithProbe(false);
+    const info = await mod.getSecretStorageInfo();
+    expect(info.encryptionUnknown).toBeUndefined();
+    expect(info.plaintext).toBe(false);
   });
 });
 

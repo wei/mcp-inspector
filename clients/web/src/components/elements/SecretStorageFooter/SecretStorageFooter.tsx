@@ -159,6 +159,11 @@ function footerMessage(info: SecretStorageInfo): string {
       ? `${secretStorageLabel(info)}: ${caveat}`
       : secretStorageLabel(info);
   }
+  // "Unreadable" rather than guessing a mode: the envelope could not be
+  // parsed, so neither "Plaintext" nor "Encrypted" is a claim we can make.
+  if (info.encryptionUnknown !== undefined) {
+    return "Unreadable file. Saving a secret will fail.";
+  }
   const encryption = info.plaintext ? "Plaintext" : "Encrypted";
   const permissions = filePermissionsSentence(info);
   return `${encryption} file. ${permissions}`;
@@ -174,7 +179,11 @@ function footerMessage(info: SecretStorageInfo): string {
 function footerTooltip(info: SecretStorageInfo): string | undefined {
   if (info.kind !== "file" || !info.path) return undefined;
   const parts: string[] = [];
-  if (info.plaintext) {
+  if (info.encryptionUnknown !== undefined) {
+    parts.push(
+      `The file could not be read (${info.encryptionUnknown}), so its contents are unknown and saving a secret will fail rather than overwrite it.`,
+    );
+  } else if (info.plaintext) {
     // Advice that can actually clear the condition: someone who has already
     // set the passphrase is waiting on the next write, not on themselves.
     parts.push(
@@ -184,8 +193,13 @@ function footerTooltip(info: SecretStorageInfo): string | undefined {
     );
   }
   if (info.looseMode !== undefined) {
+    // Encryption-aware: a reader of an encrypted file gets ciphertext, not
+    // secrets. Claiming otherwise overstates the exposure, and a warning
+    // that cries wolf is discounted on the occasion it is literally true.
     parts.push(
-      `Mode ${formatMode(info.looseMode)} could not be tightened to 0600 — anyone who can read the file can read the secrets in it.`,
+      info.plaintext === false
+        ? `Mode ${formatMode(info.looseMode)} could not be tightened to 0600 — others can copy the file, and the passphrase is then the only thing protecting its contents.`
+        : `Mode ${formatMode(info.looseMode)} could not be tightened to 0600 — anyone who can read the file can read the secrets in it.`,
     );
   } else if (info.permissionsUnknown !== undefined) {
     parts.push(

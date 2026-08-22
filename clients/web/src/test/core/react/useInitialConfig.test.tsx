@@ -296,6 +296,26 @@ describe("useInitialConfig", () => {
       expect(result.current.secretStorage).toEqual(info);
     });
 
+    it("passes through a descriptor that reports an unreadable file", async () => {
+      // `plaintext` is legitimately absent here; the guard must accept that
+      // shape rather than requiring a field the backend cannot honestly set.
+      const info = {
+        kind: "file",
+        reason: "fallback",
+        durable: true,
+        path: "/home/node/.mcp-inspector/secrets.json",
+        encryptionUnknown: "not valid JSON",
+      };
+      const fetchFn = vi
+        .fn()
+        .mockResolvedValue(jsonResponse({ secretStorage: info }));
+      const { result } = renderHook(() =>
+        useInitialConfig({ baseUrl: "http://test.local", fetchFn }),
+      );
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.secretStorage).toEqual(info);
+    });
+
     it("is undefined on a backend that omits the field", async () => {
       const fetchFn = vi.fn().mockResolvedValue(jsonResponse({}));
       const { result } = renderHook(() =>
@@ -353,6 +373,33 @@ describe("useInitialConfig", () => {
           plaintext: true,
           path: "/x",
           looseMode: "644",
+        },
+      ],
+      [
+        // Neither half of the encryption question answered.
+        "a file descriptor with neither plaintext nor encryptionUnknown",
+        { kind: "file", reason: "fallback", durable: true, path: "/x" },
+      ],
+      [
+        // Both answered, which is contradictory — the state was either read
+        // or it wasn't.
+        "a file descriptor with both plaintext and encryptionUnknown",
+        {
+          kind: "file",
+          reason: "fallback",
+          durable: true,
+          path: "/x",
+          plaintext: true,
+          encryptionUnknown: "not valid JSON",
+        },
+      ],
+      [
+        "encryptionUnknown on a memory descriptor",
+        {
+          kind: "memory",
+          reason: "fallback",
+          durable: false,
+          encryptionUnknown: "not valid JSON",
         },
       ],
       [

@@ -121,6 +121,38 @@ describe("secretStorageCaveat", () => {
     expect(secretStorageCaveat(loose)).toContain("0640");
   });
 
+  it("does not overstate exposure for an encrypted file with a loose mode", () => {
+    // A reader of an encrypted file gets ciphertext, not secrets. Saying
+    // otherwise trains people to discount the warning on the occasion it is
+    // literally true.
+    const loose: SecretStorageInfo = { ...encryptedFile, looseMode: 0o644 };
+    const caveat = secretStorageCaveat(loose);
+    expect(caveat).toContain("0644");
+    expect(caveat).toContain("passphrase is then the only thing");
+    expect(caveat).not.toContain("can read the secrets in it");
+  });
+
+  it("keeps the blunt wording for a plaintext file with a loose mode", () => {
+    const loose: SecretStorageInfo = { ...plaintextFile, looseMode: 0o644 };
+    expect(secretStorageCaveat(loose)).toContain("can read the secrets in it");
+  });
+
+  it("says a file it could not read is unreadable, and warns about the next save", () => {
+    const unreadable: SecretStorageInfo = {
+      kind: "file",
+      reason: "fallback",
+      durable: true,
+      path: "/x/secrets.json",
+      encryptionUnknown: "not valid JSON",
+    };
+    // Neither "encrypted" nor "unencrypted" is a claim we can make here.
+    expect(secretStorageLabel(unreadable)).toBe("File (unreadable)");
+    expect(secretStorageTone(unreadable)).toBe("warn");
+    expect(secretStorageCaveat(unreadable)).toMatch(
+      /could not be read \(not valid JSON\)\. Saving a secret will fail/,
+    );
+  });
+
   it("prefers the memory caveat when a memory store somehow carries the flag", () => {
     // Defensive ordering: `plaintext` is meaningless for memory, and the
     // durability loss is the more consequential of the two statements.
