@@ -356,7 +356,23 @@ export class FileSecretStore implements SecretStore {
           detail: `format version ${String(parsed.version)}, expected ${FORMAT_VERSION}`,
         };
       }
-      if (parsed.encryption === "none") return { state: "plaintext" };
+      if (parsed.encryption === "none") {
+        // Symmetry with the encrypted branch: a `secrets` that is not a
+        // string map is refused by `readMap`, so returning "plaintext" here
+        // describes a healthy store whose next save is guaranteed to fail —
+        // `{ "encryption": "none", "secrets": [] }` being the easy case to
+        // hand-write. The encrypted branch was tightened in round 12 and this
+        // one was left behind.
+        try {
+          asSecretMap(parsed.secrets ?? {}, this.filePath);
+        } catch (err) {
+          return {
+            state: "unreadable",
+            detail: err instanceof Error ? err.message : String(err),
+          };
+        }
+        return { state: "plaintext" };
+      }
       if (parsed.encryption === CIPHER) {
         // Naming the cipher is not the same as being openable, and a partial
         // check is its own trap: three dot-separated strings satisfy

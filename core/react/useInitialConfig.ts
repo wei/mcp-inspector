@@ -33,7 +33,7 @@
  * after unmount or a re-fetch is dropped rather than overwriting current state.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { SecretStorageInfo } from "../auth/secret-storage-info.js";
 
 export interface UseInitialConfigOptions {
@@ -56,6 +56,21 @@ export interface UseInitialConfigResult {
   secretStorage: SecretStorageInfo | undefined;
   /** True while the initial fetch is in flight. */
   loading: boolean;
+  /**
+   * Re-fetch the payload.
+   *
+   * Exists for `secretStorage`, which is the one field here that describes
+   * state *this app changes*. Saving a secret under a newly-set passphrase
+   * re-encrypts the file, so the descriptor the backend would serve now
+   * differs from the one fetched at mount — and without a way to ask again,
+   * the footer keeps saying "Plaintext file" for the rest of the session,
+   * about a file that is no longer plaintext. The backend already re-derives
+   * the descriptor per request; this is the client half of that.
+   *
+   * Safe to call at any time: the GET is idempotent, and a response that
+   * arrives after unmount is dropped.
+   */
+  refresh: () => void;
 }
 
 /** Minimal shape we read from the `/api/config` payload. */
@@ -207,5 +222,21 @@ export function useInitialConfig(
     };
   }, [load]);
 
-  return { version, sandboxUrl, writable, secretStorage, loading };
+  // A manual re-fetch shares `load`'s cancellation contract, but has no
+  // effect teardown to key off — so it tracks its own liveness through a ref
+  // that the unmount effect flips. Without that, a refresh fired just before
+  // unmount would still call `setState` on a dead component.
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+
+  const refresh = useCallback(() => {
+    void load(() => !alive.current);
+  }, [load]);
+
+  return { version, sandboxUrl, writable, secretStorage, loading, refresh };
 }

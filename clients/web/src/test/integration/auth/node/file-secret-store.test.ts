@@ -1094,6 +1094,32 @@ describe("readOnDiskEncryption rejects an envelope it could not open", () => {
   });
 });
 
+describe("readOnDiskEncryption validates the plaintext payload too", () => {
+  it("reports unreadable for a plaintext file whose secrets are not a map", async () => {
+    // The encrypted branch was tightened in round 12 and this one was left
+    // behind, so `{ "encryption": "none", "secrets": [] }` — trivial to
+    // hand-write — described a healthy plaintext store whose next save
+    // `readMap` refuses.
+    await fs.writeFile(
+      filePath(),
+      JSON.stringify({ version: 1, encryption: "none", secrets: [] }),
+      "utf-8",
+    );
+    const store = new FileSecretStore({ filePath: filePath() });
+    const state = await store.readOnDiskEncryption();
+    expect(state.state).toBe("unreadable");
+    expect(state.state === "unreadable" ? state.detail : "").toMatch(
+      /does not hold a secret map/,
+    );
+  });
+
+  it("still reports plaintext for a file this build actually wrote", async () => {
+    const store = new FileSecretStore({ filePath: filePath() });
+    await store.set("srv", "env:A", "1");
+    expect(await store.readOnDiskEncryption()).toEqual({ state: "plaintext" });
+  });
+});
+
 describe("readOnDiskEncryption accepts a real envelope", () => {
   it("still reports encrypted for a file this build actually wrote", async () => {
     // The negative cases above are only meaningful next to this: tightening

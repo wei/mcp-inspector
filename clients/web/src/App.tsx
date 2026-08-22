@@ -742,6 +742,7 @@ function App() {
     writable: serverListWritable,
     version: inspectorVersion,
     secretStorage,
+    refresh: refreshInitialConfig,
   } = useInitialConfig({
     baseUrl: configBaseUrl,
     authToken: getAuthToken(),
@@ -3994,7 +3995,16 @@ function App() {
     targetId: settingsModalTargetId,
     resolveInitial: (id) =>
       servers.find((s) => s.id === id)?.settings ?? EMPTY_SETTINGS,
-    onPersist: updateServerSettings,
+    onPersist: async (id: string, settings: InspectorServerSettings) => {
+      await updateServerSettings(id, settings);
+      // The saved settings may include an OAuth client secret or a stdio
+      // `env:` value, and writing one can change what the secrets file *is*
+      // — the first save under a newly-set passphrase re-encrypts a
+      // pre-existing plaintext file. The backend re-derives the descriptor
+      // per request, so ask again; otherwise the footer keeps reporting the
+      // state from page load for the rest of the session (#1950 review r14).
+      refreshInitialConfig();
+    },
     // Surface failures via toast — the modal usually closes
     // immediately on user dismiss, so a silent fail-on-flush would
     // leave the user thinking their last edits saved when they
@@ -4026,6 +4036,10 @@ function App() {
         authToken: getAuthToken(),
       });
       setClientConfig(next);
+      // Same reason as the server-settings persist: this can carry the
+      // enterprise IdP client secret, and that write is what flips a
+      // pending-encryption file to encrypted.
+      refreshInitialConfig();
     },
     onError: (err) => {
       notifications.show({

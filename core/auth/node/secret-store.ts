@@ -540,9 +540,16 @@ export class KeyringSecretStore implements SecretStore {
  */
 /**
  * Read `store` intolerantly: throw rather than answer `null` when the store
- * itself cannot be read. Falls back to `get` for a store that does not
- * distinguish the two, which is right for the in-memory and file stores —
- * neither can fail in a way that masquerades as absence.
+ * itself cannot be read.
+ *
+ * Falls back to `get` only for stores that genuinely cannot fail that way —
+ * in practice `InMemorySecretStore`, whose reads are a `Map` lookup. It is
+ * **not** a safe fallback for the file store: `FileSecretStore.get`
+ * deliberately converts filesystem, format and key failures to `null`, which
+ * is exactly the masquerade this helper exists to prevent, and is why that
+ * store implements `getStrict` itself. The fallback stays because the seam is
+ * optional and third-party/test doubles must keep compiling — not because
+ * `get` is equivalent for anything that can fail.
  */
 export async function secretStoreGetStrict(
   store: SecretStore,

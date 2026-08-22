@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { useInitialConfig } from "@inspector/core/react/useInitialConfig";
 
 function jsonResponse(body: unknown, ok = true): Response {
@@ -467,6 +467,55 @@ describe("useInitialConfig", () => {
       );
       await waitFor(() => expect(result.current.loading).toBe(false));
       expect(result.current.secretStorage).toBeUndefined();
+    });
+  });
+
+  describe("refresh (#1950 review r14)", () => {
+    it("re-fetches on demand so a descriptor this app changed is not stale", async () => {
+      // The lazy encryption upgrade: the first save under a newly-set
+      // passphrase re-encrypts a pre-existing plaintext file. `/api/config`
+      // re-derives per request, but without a refresh the page keeps the
+      // descriptor it fetched at mount and the footer says "Plaintext file"
+      // for the rest of the session about a file that no longer is.
+      let plaintext = true;
+      const fetchFn = vi.fn().mockImplementation(() =>
+        Promise.resolve(
+          jsonResponse({
+            secretStorage: {
+              kind: "file",
+              reason: "fallback",
+              durable: true,
+              plaintext,
+              path: "/tmp/secrets.json",
+            },
+          }),
+        ),
+      );
+
+      const { result } = renderHook(() =>
+        useInitialConfig({ baseUrl: "http://test.local", fetchFn }),
+      );
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.secretStorage?.plaintext).toBe(true);
+
+      plaintext = false; // the upgrading write happens
+      act(() => result.current.refresh());
+      await waitFor(() =>
+        expect(result.current.secretStorage?.plaintext).toBe(false),
+      );
+      expect(fetchFn).toHaveBeenCalledTimes(2);
+    });
+
+    it("drops a refresh that resolves after unmount", async () => {
+      const fetchFn = vi.fn().mockResolvedValue(jsonResponse({}));
+      const { result, unmount } = renderHook(() =>
+        useInitialConfig({ baseUrl: "http://test.local", fetchFn }),
+      );
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      const refresh = result.current.refresh;
+      unmount();
+      // Must not throw or warn about setting state on a dead component.
+      expect(() => refresh()).not.toThrow();
     });
   });
 });
