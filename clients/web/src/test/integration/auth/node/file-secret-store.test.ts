@@ -8,6 +8,7 @@
  * agree with any of those without them being true.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { existsSync } from "node:fs";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -15,6 +16,7 @@ import * as path from "node:path";
 import {
   acquireLock,
   FileSecretStore,
+  readSecretFilePermissions,
   SecretFileLockTimeoutError,
   SecretFileKeyMismatchError,
   tightenSecretFilePermissions,
@@ -450,6 +452,21 @@ describe("tightenSecretFilePermissions", () => {
     expect((await fs.stat(filePath())).mode & 0o777).toBe(0o600);
   });
 
+  it("readSecretFilePermissions reports the mode without changing it", async () => {
+    // The descriptor is rebuilt on every GET /api/config, so the function it
+    // calls must not chmod — once per page load, on a file another process
+    // may be mid-write on. The repair belongs at startup.
+    const store = new FileSecretStore({ filePath: filePath() });
+    await store.set("alpha", "env:A", "1");
+    await fs.chmod(filePath(), 0o644);
+    expect(await readSecretFilePermissions(filePath())).toEqual({
+      state: "loose",
+      mode: 0o644,
+    });
+    // Still 0644 — reading did not quietly repair it.
+    expect((await fs.stat(filePath())).mode & 0o777).toBe(0o644);
+  });
+
   it("reports absent, not a failure, for a file that doesn't exist yet", async () => {
     // The first-run case. Nothing to tighten and nothing to warn about —
     // `writeStoreFile` creates the file 0600.
@@ -684,16 +701,21 @@ describe("acquireLock", () => {
     // unlocked and overwrite each other. First writes are exactly when two
     // processes are most likely to start together.
     const target = path.join(tmpDir, "no-such-dir", "secrets.json");
-    const release = await acquireLock(target);
+    const release = await acquireLock(target, { pollMs: 10 });
     // A real lock was taken: a second acquisition must not be handed out.
     let secondTaken = false;
-    void acquireLock(target).then((r) => {
+    // Held, not floated: an acquisition still running when the test ends
+    // would race `afterEach` removing the temp directory.
+    const second = acquireLock(target, { pollMs: 10 }).then((r) => {
       secondTaken = true;
-      return r();
+      return r;
     });
     await new Promise((r) => setTimeout(r, 60));
     expect(secondTaken).toBe(false);
     await release();
+    await (
+      await second
+    )();
   });
 
   it("releases only a lock it still owns", async () => {
@@ -754,22 +776,145 @@ describe("acquireLock", () => {
     });
     try {
       let stolen = false;
-      void acquireLock(target, {
+      // Held and settled below rather than floated, so the waiter cannot
+      // still be running when `afterEach` removes the temp directory.
+      const waiter = acquireLock(target, {
         staleMs: 120,
         timeoutMs: 400,
         pollMs: 10,
       })
-        .then((r) => {
+        .then(async (r) => {
           stolen = true;
-          return r();
+          await r();
         })
         .catch(() => {
           // Timed out, which is the expected outcome.
         });
-      await new Promise((r) => setTimeout(r, 500));
+      await waiter;
       expect(stolen).toBe(false);
     } finally {
       await release();
+    }
+  });
+
+  it("does not steal a stale lock whose owner process is still alive", async () => {
+    // An old mtime means the holder has not heartbeated lately, and there are
+    // two very different reasons: it died, or it is alive but not running —
+    // SIGSTOPed, event-loop-blocked, or on a machine that suspended. Taking
+    // the lock on elapsed time alone would pull it out from under a live
+    // critical section, which is the lost update the lock exists to prevent.
+    const target = path.join(tmpDir, "suspended.json");
+    const lockDir = `${target}.lock`;
+    await fs.mkdir(lockDir, { recursive: true });
+    // Stamp it with *this* process, which is definitionally alive, and age it
+    // well past stale — the shape of a suspended holder.
+    await fs.writeFile(
+      path.join(lockDir, "owner"),
+      JSON.stringify({
+        token: "someone",
+        pid: process.pid,
+        host: os.hostname(),
+      }),
+      "utf-8",
+    );
+    const old = new Date(Date.now() - 60_000);
+    await fs.utimes(lockDir, old, old);
+
+    await expect(
+      acquireLock(target, { staleMs: 50, timeoutMs: 150, pollMs: 10 }),
+    ).rejects.toBeInstanceOf(SecretFileLockTimeoutError);
+    // Their lock survives the attempt.
+    expect(existsSync(lockDir)).toBe(true);
+    await fs.rm(lockDir, { recursive: true, force: true });
+  });
+
+  it("steals a stale lock whose owner process is gone", async () => {
+    // The case the stealing exists for. A pid that no longer resolves is a
+    // dead holder, and refusing to break its lock would turn one killed
+    // container into permanently broken secret writes.
+    const target = path.join(tmpDir, "dead.json");
+    const lockDir = `${target}.lock`;
+    await fs.mkdir(lockDir, { recursive: true });
+    await fs.writeFile(
+      path.join(lockDir, "owner"),
+      // A pid that cannot be running: `kill(0)` answers ESRCH.
+      JSON.stringify({ token: "gone", pid: 2 ** 31 - 1, host: os.hostname() }),
+      "utf-8",
+    );
+    const old = new Date(Date.now() - 60_000);
+    await fs.utimes(lockDir, old, old);
+
+    const release = await acquireLock(target, {
+      staleMs: 50,
+      timeoutMs: 2_000,
+      pollMs: 10,
+    });
+    await release();
+  });
+
+  it("steals a stale lock stamped by another machine", async () => {
+    // A shared filesystem: we cannot ask this host about that host's pid, so
+    // the mtime is all there is. Refusing would make a lock nothing can ever
+    // break.
+    const target = path.join(tmpDir, "remote.json");
+    const lockDir = `${target}.lock`;
+    await fs.mkdir(lockDir, { recursive: true });
+    await fs.writeFile(
+      path.join(lockDir, "owner"),
+      JSON.stringify({
+        token: "elsewhere",
+        pid: process.pid,
+        host: "some-other-host",
+      }),
+      "utf-8",
+    );
+    const old = new Date(Date.now() - 60_000);
+    await fs.utimes(lockDir, old, old);
+
+    const release = await acquireLock(target, {
+      staleMs: 50,
+      timeoutMs: 2_000,
+      pollMs: 10,
+    });
+    await release();
+  });
+
+  it("cleans up and reports when it cannot stamp ownership", async () => {
+    // mkdir succeeded, the owner write did not. Returning a no-op release
+    // here would enter the critical section unlocked *and* leave the
+    // directory behind, so every later writer queues behind an orphan nobody
+    // can deliberately release.
+    const target = path.join(tmpDir, "unstampable.json");
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => {
+      const actual =
+        await vi.importActual<typeof import("node:fs/promises")>(
+          "node:fs/promises",
+        );
+      return {
+        ...actual,
+        default: actual,
+        writeFile: vi.fn((p: string, ...rest: unknown[]) =>
+          String(p).endsWith(`${path.sep}owner`)
+            ? Promise.reject(new Error("ENOSPC: no space left on device"))
+            : (actual.writeFile as (...a: unknown[]) => Promise<void>)(
+                p,
+                ...rest,
+              ),
+        ),
+      };
+    });
+    try {
+      const mod =
+        await import("@inspector/core/auth/node/file-secret-store.js");
+      await expect(mod.acquireLock(target)).rejects.toThrow(
+        /Could not initialize the lock/,
+      );
+      // And nothing is left obstructing the next writer.
+      expect(existsSync(`${target}.lock`)).toBe(false);
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
     }
   });
 

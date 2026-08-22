@@ -135,6 +135,7 @@ describe("isContainer", () => {
    */
   async function loadWithFs(opts: {
     dockerenv?: boolean;
+    containerenv?: boolean;
     cgroup?: string | Error;
   }) {
     vi.resetModules();
@@ -142,8 +143,11 @@ describe("isContainer", () => {
       const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
       return {
         ...actual,
-        existsSync: (p: string) =>
-          p === "/.dockerenv" ? !!opts.dockerenv : actual.existsSync(p),
+        existsSync: (p: string) => {
+          if (p === "/.dockerenv") return !!opts.dockerenv;
+          if (p === "/run/.containerenv") return !!opts.containerenv;
+          return actual.existsSync(p);
+        },
         readFileSync: (p: string, enc?: unknown) => {
           if (p === "/proc/1/cgroup") {
             if (opts.cgroup instanceof Error) throw opts.cgroup;
@@ -170,6 +174,23 @@ describe("isContainer", () => {
 
   it("is true when /.dockerenv exists", async () => {
     const mod = await loadWithFs({ dockerenv: true });
+    expect(mod.isContainer()).toBe(true);
+  });
+
+  it("is true when Podman's /run/.containerenv exists", async () => {
+    // Rootless Podman has no `/.dockerenv`, and its cgroup line often does
+    // not contain the literal "podman" either — this file is the signal that
+    // is reliably there. Missing it classified the container as a host, so a
+    // keychain-less box wrote a "durable" file into the ephemeral layer.
+    const mod = await loadWithFs({ containerenv: true });
+    expect(mod.isContainer()).toBe(true);
+  });
+
+  it("is true for a libpod cgroup path", async () => {
+    // What Podman actually writes: `/machine.slice/libpod-<id>.scope`.
+    const mod = await loadWithFs({
+      cgroup: "0::/machine.slice/libpod-3f2a.scope\n",
+    });
     expect(mod.isContainer()).toBe(true);
   });
 

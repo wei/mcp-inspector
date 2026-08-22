@@ -60,6 +60,7 @@
 
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { readStoreFile, writeStoreFile } from "../../storage/store-io.js";
 import {
@@ -300,6 +301,10 @@ export async function acquireLock(
   const lockDir = `${filePath}.lock`;
   const ownerFile = `${lockDir}/owner`;
   const token = crypto.randomBytes(16).toString("hex");
+  // The stamp a would-be thief consults before taking this lock: the token
+  // proves ownership on release, the pid and host let a waiter ask the OS
+  // whether we are still alive rather than inferring it from elapsed time.
+  const owner: LockOwner = { token, pid: process.pid, host: os.hostname() };
   const noop = async (): Promise<void> => {};
   const deadline = Date.now() + timeoutMs;
 
@@ -317,9 +322,16 @@ export async function acquireLock(
   }
 
   for (;;) {
+    let created = false;
     try {
       await fs.mkdir(lockDir, { recursive: false });
-      await fs.writeFile(ownerFile, token, "utf-8");
+      created = true;
+      // Stamp ownership before entering the section. If this fails the lock
+      // exists but says nothing about who holds it, so nobody could ever
+      // release it deliberately and every later writer would queue behind an
+      // orphan until it aged out. Clean up and report, rather than proceeding
+      // unlocked *and* leaving the obstruction behind.
+      await fs.writeFile(ownerFile, JSON.stringify(owner), "utf-8");
       // Prove liveness for as long as we hold it. `unref` so a held lock
       // never keeps the process alive on its own — the interval is a
       // side-channel, not work anyone is waiting for.
@@ -336,8 +348,8 @@ export async function acquireLock(
           // Release only what we still own. A lock judged stale and stolen
           // now belongs to someone else, and removing it would drop them
           // into a race with whoever comes next.
-          const held = await fs.readFile(ownerFile, "utf-8");
-          if (held !== token) return;
+          const held = parseOwner(await fs.readFile(ownerFile, "utf-8"));
+          if (held?.token !== token) return;
           await fs.rm(lockDir, { recursive: true, force: true });
         } catch {
           // Already gone, or unreadable. Either way there is nothing to
@@ -346,20 +358,105 @@ export async function acquireLock(
       };
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
+      if (created) {
+        // We made the directory and then failed to stamp it. Ours to remove.
+        await fs.rm(lockDir, { recursive: true, force: true }).catch(() => {});
+        throw new SecretStoreUnavailableError(
+          `Could not initialize the lock for the secrets file at ${filePath}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
       if (code !== "EEXIST") return noop; // cannot lock here at all — see above
-      try {
-        const held = (await fs.stat(lockDir)).mtimeMs;
-        if (Date.now() - held > staleMs) {
-          await fs.rm(lockDir, { recursive: true, force: true });
-          continue;
-        }
-      } catch {
-        // The holder released it between our mkdir and our stat. Retry.
+      if (await canSteal(lockDir, ownerFile, staleMs)) {
+        await fs.rm(lockDir, { recursive: true, force: true }).catch(() => {});
+        continue;
       }
       if (Date.now() >= deadline)
         throw new SecretFileLockTimeoutError(filePath);
       await sleep(pollMs);
     }
+  }
+}
+
+/**
+ * May this waiter take a lock it found already held?
+ *
+ * Elapsed wall time alone does not answer that. An old mtime means the
+ * holder has not run its heartbeat lately, and there are two very different
+ * reasons for that: it died, or it is *alive but not running* — SIGSTOPed,
+ * starved by a blocked event loop, or on a machine that suspended. Expiring
+ * on time alone treats those identically and takes the lock out from under a
+ * live critical section, which is the lost update the lock exists to
+ * prevent, now arrived at through the machinery meant to prevent it.
+ *
+ * So the mtime only opens the question, and the owner stamp answers it: on
+ * the same host, ask the operating system whether that pid is still there.
+ * `kill(pid, 0)` sends no signal — it is the standard existence probe.
+ * `EPERM` counts as alive (the process exists; it just isn't ours), so a
+ * holder running as another user is never stolen from.
+ *
+ * The stamp is not always usable — a lock written by a different machine
+ * over a shared filesystem, or one whose owner file is missing or corrupt.
+ * There the mtime is all there is, and stealing on it is still right: the
+ * alternative is a lock nothing can ever break, which turns one dead process
+ * into a permanent outage.
+ */
+async function canSteal(
+  lockDir: string,
+  ownerFile: string,
+  staleMs: number,
+): Promise<boolean> {
+  let held: number;
+  try {
+    held = (await fs.stat(lockDir)).mtimeMs;
+  } catch {
+    // Released between our mkdir and our stat — retry rather than steal.
+    return false;
+  }
+  if (Date.now() - held <= staleMs) return false;
+
+  let owner: LockOwner | null = null;
+  try {
+    owner = parseOwner(await fs.readFile(ownerFile, "utf-8"));
+  } catch {
+    // No stamp to consult; fall through to the time-only answer.
+  }
+  if (!owner || owner.host !== os.hostname() || typeof owner.pid !== "number") {
+    return true;
+  }
+  return !processIsAlive(owner.pid);
+}
+
+/** Does this pid exist? `kill(pid, 0)` is the probe; it sends no signal. */
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM means it exists and belongs to someone else — still alive.
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+interface LockOwner {
+  token: string;
+  pid: number;
+  host: string;
+}
+
+/** Parse an owner stamp, tolerating anything that isn't one. */
+function parseOwner(raw: string): LockOwner | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const { token, pid, host } = parsed as Partial<LockOwner>;
+    if (typeof token !== "string") return null;
+    return {
+      token,
+      pid: typeof pid === "number" ? pid : -1,
+      host: String(host),
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -696,9 +793,24 @@ export async function tightenSecretFilePermissions(
   }
   // Verify rather than assume. The chmod above is best-effort, but the UI and
   // the README both state the file is 0600 — so a file we failed to tighten
-  // (owned by another user, on a read-only mount) must be *reported*, not
-  // quietly described as protected. This is the one place that can tell the
-  // difference, because it is the only one that looks at the file.
+  // (owned by another user, on a read-only mount) must be reported, not
+  // quietly described as protected.
+  return readSecretFilePermissions(filePath);
+}
+
+/**
+ * Read the file's permission state **without touching it**.
+ *
+ * The read-only half of {@link tightenSecretFilePermissions}, split out
+ * because the descriptor is rebuilt on every `GET /api/config` and a
+ * function whose job is to *describe* must not chmod as a side effect —
+ * once per page load, on a file another process may be mid-write on. The
+ * repair belongs at startup, where it happens once and its outcome is
+ * announced; from then on the question is only "what is the mode now".
+ */
+export async function readSecretFilePermissions(
+  filePath: string,
+): Promise<SecretFilePermissionState> {
   try {
     const mode = (await fs.stat(filePath)).mode & 0o777;
     if (mode === 0o600) return { state: "ok" };
@@ -711,7 +823,8 @@ export async function tightenSecretFilePermissions(
 }
 
 /**
- * Outcome of {@link tightenSecretFilePermissions}: the file is `0600`
+ * Outcome of {@link tightenSecretFilePermissions} and
+ * {@link readSecretFilePermissions}: the file is `0600`
  * (`ok`), does not exist yet (`absent`), or exists with a wider mode we
  * could not fix (`loose`) — the only case anyone needs to hear about.
  */

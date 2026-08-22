@@ -49,6 +49,7 @@ import {
 } from "../secret-storage-info.js";
 import {
   FileSecretStore,
+  readSecretFilePermissions,
   tightenSecretFilePermissions,
 } from "./file-secret-store.js";
 import {
@@ -132,13 +133,26 @@ export function defaultSecretFilePath(): string {
 export function isContainer(): boolean {
   if (process.env.KUBERNETES_SERVICE_HOST) return true;
   try {
-    if (fsSync.existsSync("/.dockerenv")) return true;
+    // `/.dockerenv` is Docker's marker; `/run/.containerenv` is Podman's
+    // equivalent and is the only one a rootless Podman container reliably
+    // has. Missing it classified such a container as a host, which is the
+    // wrong way round to be wrong: the fallback then writes a file into the
+    // ephemeral writable layer and calls it durable.
+    if (
+      fsSync.existsSync("/.dockerenv") ||
+      fsSync.existsSync("/run/.containerenv")
+    ) {
+      return true;
+    }
   } catch {
     // A sandboxed / restricted filesystem. Fall through to the cgroup read.
   }
   try {
     const cgroup = fsSync.readFileSync("/proc/1/cgroup", "utf-8");
-    return /\b(docker|containerd|kubepods|podman|lxc)\b/.test(cgroup);
+    // `libpod` is what Podman actually writes into cgroup paths
+    // (`/machine.slice/libpod-<id>.scope`); the literal string "podman"
+    // often does not appear at all.
+    return /\b(docker|containerd|kubepods|podman|libpod|lxc)\b/.test(cgroup);
   } catch {
     // Not Linux, or /proc is not mounted. Not a container as far as we know.
     return false;
@@ -300,8 +314,11 @@ async function describeFileStore(
   const plaintext = onDisk === null ? !store.encrypted : onDisk === "none";
   // Re-checked here rather than captured at selection, for the same reason
   // the encryption state is: the mode can change under a running process,
-  // and this descriptor is what the browser renders as fact.
-  const perms = await tightenSecretFilePermissions(filePath);
+  // and this descriptor is what the browser renders as fact. The *read-only*
+  // half deliberately — describing must not chmod, least of all once per
+  // page load on a file another process may be mid-write on. The repair
+  // happens once, at selection.
+  const perms = await readSecretFilePermissions(filePath);
   return {
     kind,
     reason,
