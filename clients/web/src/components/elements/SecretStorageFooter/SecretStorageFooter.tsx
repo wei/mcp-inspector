@@ -47,6 +47,22 @@ const FooterLabel = Text.withProps({
   variant: "nowrap",
 });
 
+// "Secrets:" carries the heavier weight so the band reads as a labelled fact
+// rather than as one run of prose — the eye lands on what the line is about
+// before reading which store it names.
+//
+// A `span` inside the label rather than a sibling in the `Group`: `Text`
+// renders a `<p>`, so a nested one would be a `<p>` inside a `<p>` (invalid,
+// and the browser would close the outer paragraph early), and a sibling would
+// take the Group's `gap` and sit too far from the value it labels. `inherit`
+// keeps it at the label's own size and line height instead of Mantine's `Text`
+// defaults.
+const FooterLabelPrefix = Text.withProps({
+  span: true,
+  inherit: true,
+  fw: 700,
+});
+
 // The detail — a path, or the caveat sentence — is the part allowed to lose
 // characters, since the label before it carries the answer.
 //
@@ -128,7 +144,10 @@ export function SecretStorageFooter({ info }: SecretStorageFooterProps) {
           `.withProps()` rule, and it takes `color` as a prop rather than a
           style. */}
       <Icon size={ICON_SIZE} color={color} aria-hidden />
-      <FooterLabel c={color}>Secrets: {secretStorageLabel(info)}</FooterLabel>
+      <FooterLabel c={color}>
+        <FooterLabelPrefix>Secrets:</FooterLabelPrefix>{" "}
+        {secretStorageLabel(info)}
+      </FooterLabel>
       {detail && <FooterDetail c={color}>{detail}</FooterDetail>}
     </FooterBand>
   );

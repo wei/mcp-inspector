@@ -920,9 +920,11 @@ describe("ServerSettingsModal", () => {
           }}
         />,
       );
-      expect(
-        screen.getByText("Secrets: Memory (this session only)"),
-      ).toBeInTheDocument();
+      // Full-text assertion: the "Secrets:" prefix is its own `<span>`, which
+      // `getByText`'s direct-text-node matching would not see as one string.
+      expect(screen.getByTestId("secret-storage-footer")).toHaveTextContent(
+        "Secrets: Memory (this session only)",
+      );
     });
 
     it("renders no footer when the backend didn't report a store", () => {

@@ -25,25 +25,25 @@ const memory: SecretStorageInfo = {
 describe("SecretStorageFooter", () => {
   it("names the keychain with no caveat and no warning tone", () => {
     renderWithMantine(<SecretStorageFooter info={keyring} />);
-    expect(screen.getByText("Secrets: OS keychain")).toBeInTheDocument();
-    expect(screen.getByTestId("secret-storage-footer")).toHaveAttribute(
-      "data-tone",
-      "neutral",
-    );
+    // Asserted on the band's full text rather than with `getByText`: the
+    // "Secrets:" prefix is its own `<span>`, and testing-library matches a
+    // string against an element's *direct* text nodes only, so the label now
+    // reads as two fragments even though it renders as one line.
+    const band = screen.getByTestId("secret-storage-footer");
+    expect(band).toHaveTextContent("Secrets: OS keychain");
+    expect(band).toHaveAttribute("data-tone", "neutral");
   });
 
   it("shows the path for an encrypted file, quietly", () => {
     // Nothing is wrong here, so the band must not shout — the path is the
     // useful part and the tone stays neutral.
     renderWithMantine(<SecretStorageFooter info={encryptedFile} />);
-    expect(screen.getByText("Secrets: File (encrypted)")).toBeInTheDocument();
+    const band = screen.getByTestId("secret-storage-footer");
+    expect(band).toHaveTextContent("Secrets: File (encrypted)");
     expect(
       screen.getByText("/home/node/.mcp-inspector/secrets.json"),
     ).toBeInTheDocument();
-    expect(screen.getByTestId("secret-storage-footer")).toHaveAttribute(
-      "data-tone",
-      "neutral",
-    );
+    expect(band).toHaveAttribute("data-tone", "neutral");
   });
 
   it("renders the plaintext caveat inline, not only on hover", () => {
@@ -51,28 +51,22 @@ describe("SecretStorageFooter", () => {
     // to hover to discover is not a warning. The caveat takes the visible
     // slot, displacing the path (which stays in the tooltip).
     renderWithMantine(<SecretStorageFooter info={plaintextFile} />);
-    expect(screen.getByText("Secrets: File (unencrypted)")).toBeInTheDocument();
+    const band = screen.getByTestId("secret-storage-footer");
+    expect(band).toHaveTextContent("Secrets: File (unencrypted)");
     expect(
       screen.getByText(/Set MCP_INSPECTOR_SECRET_KEY to encrypt them/),
     ).toBeInTheDocument();
-    expect(screen.getByTestId("secret-storage-footer")).toHaveAttribute(
-      "data-tone",
-      "warn",
-    );
+    expect(band).toHaveAttribute("data-tone", "warn");
   });
 
   it("warns that an in-memory store loses secrets on exit", () => {
     renderWithMantine(<SecretStorageFooter info={memory} />);
-    expect(
-      screen.getByText("Secrets: Memory (this session only)"),
-    ).toBeInTheDocument();
+    const band = screen.getByTestId("secret-storage-footer");
+    expect(band).toHaveTextContent("Secrets: Memory (this session only)");
     expect(
       screen.getByText(/lost when the Inspector exits/),
     ).toBeInTheDocument();
-    expect(screen.getByTestId("secret-storage-footer")).toHaveAttribute(
-      "data-tone",
-      "warn",
-    );
+    expect(band).toHaveAttribute("data-tone", "warn");
   });
 
   it("renders nothing when the backend didn't report a store", () => {

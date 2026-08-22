@@ -492,13 +492,11 @@ describe("ClientSettingsModal", () => {
           }}
         />,
       );
-      expect(
-        screen.getByText("Secrets: File (unencrypted)"),
-      ).toBeInTheDocument();
-      expect(screen.getByTestId("secret-storage-footer")).toHaveAttribute(
-        "data-tone",
-        "warn",
-      );
+      // Full-text assertion: the "Secrets:" prefix is its own `<span>`, which
+      // `getByText`'s direct-text-node matching would not see as one string.
+      const band = screen.getByTestId("secret-storage-footer");
+      expect(band).toHaveTextContent("Secrets: File (unencrypted)");
+      expect(band).toHaveAttribute("data-tone", "warn");
     });
 
     it("renders no footer when the backend didn't report a store", () => {

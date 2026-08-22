@@ -22,13 +22,11 @@ type Story = StoryObj<typeof SecretStorageFooter>;
 export const Keychain: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(
-      await canvas.findByText("Secrets: OS keychain"),
-    ).toBeInTheDocument();
-    await expect(canvas.getByTestId("secret-storage-footer")).toHaveAttribute(
-      "data-tone",
-      "neutral",
-    );
+    // Asserted on the band's full text: the "Secrets:" prefix is its own
+    // `<span>`, which a `findByText` string match would not see as one string.
+    const band = await canvas.findByTestId("secret-storage-footer");
+    await expect(band).toHaveTextContent("Secrets: OS keychain");
+    await expect(band).toHaveAttribute("data-tone", "neutral");
   },
 };
 
@@ -46,9 +44,8 @@ export const EncryptedFile: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(
-      await canvas.findByText("Secrets: File (encrypted)"),
-    ).toBeInTheDocument();
+    const band = await canvas.findByTestId("secret-storage-footer");
+    await expect(band).toHaveTextContent("Secrets: File (encrypted)");
     await expect(
       canvas.getByText("/home/node/.mcp-inspector/secrets.json"),
     ).toBeInTheDocument();
@@ -70,13 +67,9 @@ export const UnencryptedFile: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(
-      await canvas.findByText("Secrets: File (unencrypted)"),
-    ).toBeInTheDocument();
-    await expect(canvas.getByTestId("secret-storage-footer")).toHaveAttribute(
-      "data-tone",
-      "warn",
-    );
+    const band = await canvas.findByTestId("secret-storage-footer");
+    await expect(band).toHaveTextContent("Secrets: File (unencrypted)");
+    await expect(band).toHaveAttribute("data-tone", "warn");
   },
 };
 
@@ -86,9 +79,8 @@ export const InMemory: Story = {
   args: { info: { kind: "memory", reason: "fallback", durable: false } },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(
-      await canvas.findByText("Secrets: Memory (this session only)"),
-    ).toBeInTheDocument();
+    const band = await canvas.findByTestId("secret-storage-footer");
+    await expect(band).toHaveTextContent("Secrets: Memory (this session only)");
     await expect(
       canvas.getByText(/lost when the Inspector exits/),
     ).toBeInTheDocument();
