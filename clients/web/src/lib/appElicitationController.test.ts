@@ -108,6 +108,33 @@ describe("AppElicitationController (#1854)", () => {
     expect(controller.getEntries()).toHaveLength(0);
   });
 
+  it("failAll drops every entry so a renderer cannot outlive its connection", async () => {
+    // The host calls this when the InspectorClient is replaced: the bridge
+    // factory resolves its client at call time, so an entry left queued could
+    // otherwise rebuild against the NEXT connection and answer through a
+    // different server.
+    const controller = new AppElicitationController();
+    const listener = vi.fn();
+    const first = request(controller, "a");
+    const second = request(controller, "b");
+    controller.subscribe(listener);
+
+    controller.failAll(new Error("connection replaced"));
+
+    await expect(first).rejects.toThrow(/connection replaced/);
+    await expect(second).rejects.toThrow(/connection replaced/);
+    expect(controller.getEntries()).toHaveLength(0);
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it("failAll on an empty queue notifies nobody", () => {
+    const controller = new AppElicitationController();
+    const listener = vi.fn();
+    controller.subscribe(listener);
+    controller.failAll(new Error("nothing to drop"));
+    expect(listener).not.toHaveBeenCalled();
+  });
+
   it("stops notifying an unsubscribed listener", () => {
     const controller = new AppElicitationController();
     const listener = vi.fn();

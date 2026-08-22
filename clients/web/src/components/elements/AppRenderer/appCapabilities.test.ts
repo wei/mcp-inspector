@@ -70,6 +70,30 @@ describe("appCapabilities (#1854)", () => {
     expect(appAdvertisesElicitation(bridge)).toBe(false);
   });
 
+  it("ignores frames that are not shaped like ui/initialize at all", () => {
+    // The frame comes from sandboxed view code, so nothing about its shape is
+    // guaranteed — a non-object, or an initialize with no params, must not
+    // throw on the way through to the bridge's own handler.
+    const bridge = makeBridge({});
+    const { transport, inner } = makeTransport();
+    observeAppCapabilities(bridge, transport);
+    transport.onmessage?.("not-a-frame" as unknown as JSONRPCMessage);
+    transport.onmessage?.(null as unknown as JSONRPCMessage);
+    transport.onmessage?.({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "ui/initialize",
+    } as unknown as JSONRPCMessage);
+    transport.onmessage?.({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "ui/initialize",
+      params: null,
+    } as unknown as JSONRPCMessage);
+    expect(appAdvertisesElicitation(bridge)).toBe(false);
+    expect(inner).toHaveBeenCalledTimes(4);
+  });
+
   it("keeps bridges independent", () => {
     const a = makeBridge({});
     const b = makeBridge({});

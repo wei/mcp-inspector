@@ -850,6 +850,20 @@ function App() {
     },
     [appElicitationController],
   );
+  // Request ownership must not cross connections. `elicitationBridgeFactory`
+  // resolves its client at call time, so an entry queued by a previous
+  // InspectorClient would otherwise be able to rebuild against the NEXT one and
+  // read (or answer) through a different server. Core aborts its own pending
+  // app requests during teardown, but that teardown is awaited asynchronously
+  // while the swap here is synchronous — so drop them on the swap instead of
+  // racing it. The one client alive at a time owns every live entry.
+  useEffect(() => {
+    return () => {
+      appElicitationController.failAll(
+        new Error("Connection replaced before the app answered"),
+      );
+    };
+  }, [appElicitationController, inspectorClient]);
 
   const [managedToolsState, setManagedToolsState] =
     useState<ManagedToolsState | null>(null);

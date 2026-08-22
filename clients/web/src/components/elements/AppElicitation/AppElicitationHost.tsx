@@ -226,11 +226,12 @@ function AppElicitationFrame({
       {/* `aria-label` and the `data-*` attributes go on the CONTENT (the
           role="dialog" element), not the Root — the Root is only a portal
           wrapper, so a name placed there never reaches the dialog. Named per
-          request rather than per prompt: two concurrent elicitations can carry
-          the same message, and two identically-named dialogs are what
-          `landmark-unique` rejects. */}
+          request rather than per prompt or per app: two concurrent
+          elicitations can be for the SAME app URI with the SAME message, and
+          only the request id tells those two dialogs apart — for
+          `landmark-unique` and for anyone navigating by screen reader. */}
       <Modal.Content
-        aria-label={`Elicitation rendered by ${entry.resourceUri}`}
+        aria-label={`Elicitation ${entry.requestId} — ${entry.params.message} — rendered by ${entry.resourceUri}`}
         data-app-elicitation-status={status}
         data-testid="app-elicitation"
       >

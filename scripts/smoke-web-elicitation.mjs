@@ -60,6 +60,9 @@ const PORT = process.env.SMOKE_WEB_ELICIT_PORT ?? "6296";
 const TOKEN = "smoke-web-elicit-token";
 const TOOL = "app_choose_option";
 const SHOT_DIR = process.env.SMOKE_SCREENSHOT_DIR;
+// The async half of the uncaught-crash class. Kept identical to
+// smoke-web-browser.mjs / smoke-web-app.mjs.
+const FATAL_CONSOLE = /^Uncaught\b|Failed to fetch dynamically imported module/;
 
 const servers = [];
 let browser = null;
@@ -235,10 +238,20 @@ try {
     viewport: { width: 1280, height: 900 },
   });
 
+  // Uncaught *synchronous* page errors, and their *async* twin (an unhandled
+  // rejection or a failed dynamic import), which Chromium reports on the
+  // console channel instead. Both are hard failures; every other console error
+  // is only a diagnostic, so benign font/React noise cannot flake CI. Same
+  // split as smoke:web:browser and smoke:web:app, which document it at length.
   const pageErrors = [];
+  const consoleErrors = [];
   page.on("pageerror", (err) =>
     pageErrors.push(err instanceof Error ? err.message : String(err)),
   );
+  page.on("console", (msg) => {
+    if (msg.type() === "error") consoleErrors.push(msg.text());
+  });
+  const fatalConsole = () => consoleErrors.filter((m) => FATAL_CONSOLE.test(m));
 
   const drive = async () => {
     // ── 1. Negotiated: the server's app answers the elicitation ────────────
@@ -304,11 +317,24 @@ try {
   try {
     await Promise.race([web.whenChildExits(), drive()]);
   } catch (err) {
+    const diagnostics = [
+      ...pageErrors,
+      ...fatalConsole().map((m) => `console: ${m}`),
+    ];
     await fail(
       `${err instanceof Error ? err.message : String(err)}${
-        pageErrors.length ? ` — page errors: ${pageErrors.join("; ")}` : ""
+        diagnostics.length
+          ? ` — page diagnostics: ${diagnostics.join("; ")}`
+          : ""
       }`,
     );
+  }
+
+  // A drive that reached all of its assertions still fails if the page threw on
+  // the way: without this the smoke prints OK over a broken bundle.
+  const fatal = [...pageErrors, ...fatalConsole()];
+  if (fatal.length > 0) {
+    await fail(`page logged uncaught error(s): ${fatal.join("; ")}`);
   }
 
   console.log("smoke:web:elicit OK — app-rendered and native paths both drive");

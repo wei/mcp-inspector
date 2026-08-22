@@ -158,6 +158,33 @@ describe("createAppBridgeFactory", () => {
     }
   });
 
+  it("does not advertise hostCapabilities.elicitation by default (#1854)", async () => {
+    // An App-tool frame is never handed an elicitation, so claiming the host
+    // capability there would tell those apps something untrue about the host.
+    const factory = createAppBridgeFactory({
+      getClient: () => fakeClient,
+      readResource: vi.fn(),
+    });
+    await factory(makeIframe(), { kind: "tool", tool });
+    expect(bridgeInstances[0].ctorArgs[2]).not.toHaveProperty("elicitation");
+  });
+
+  it("advertises hostCapabilities.elicitation when opted in (#1854)", async () => {
+    // The value reaches the AppBridge CONSTRUCTOR, which is what the bridge
+    // echoes in its `ui/initialize` response — an app reads it there to decide
+    // whether this host will forward an elicitation to it at all.
+    const factory = createAppBridgeFactory({
+      advertiseElicitation: true,
+      getClient: () => fakeClient,
+      readResource: vi.fn(),
+    });
+    await factory(makeIframe(), {
+      kind: "resource",
+      resourceUri: "ui://demo/pick.html",
+    });
+    expect(bridgeInstances[0].ctorArgs[2]).toMatchObject({ elicitation: {} });
+  });
+
   it("on sandboxready, reads the UI resource, wraps the html with the per-app CSP, and echoes the approved sandbox config", async () => {
     const readResource = vi.fn().mockResolvedValue(
       uiResource("<h1>weather</h1>", {

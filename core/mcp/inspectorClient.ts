@@ -585,6 +585,17 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   private appElicitationSeq = 0;
   /**
+   * Per-instance prefix for {@link appElicitationSeq}.
+   *
+   * A counter alone is not enough: a host may hold ONE renderer across
+   * replacement clients (the web client rebuilds its `InspectorClient` on a
+   * settings change), and every fresh instance would otherwise mint
+   * `app-elicitation-1` for its first request. Settling that id would then
+   * resolve — or discard — whichever connection's request the host happened to
+   * be keying.
+   */
+  private readonly appElicitationPrefix = `app-elicitation-${globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)}`;
+  /**
    * Abort controllers for app-rendered elicitations still awaiting an answer.
    * Aborted alongside the native pending queue on disconnect, so a rendered app
    * cannot outlive the connection that asked for it.
@@ -1755,7 +1766,12 @@ export class InspectorClient extends InspectorClientEventTarget {
   private clearAndAnnouncePendingPeerRequests(): void {
     if (
       this.pendingSamples.length === 0 &&
-      this.pendingElicitations.length === 0
+      this.pendingElicitations.length === 0 &&
+      // App-rendered elicitations (#1854) are not in either array — they live in
+      // the host's renderer — so an emptiness check that ignores them lets a
+      // mid-session close (the `onclose` route, which reaches teardown only
+      // through here) leave a modal open for a connection that is gone.
+      this.activeAppElicitations.size === 0
     ) {
       return;
     }
@@ -2946,7 +2962,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     this.activeAppElicitations.add(controller);
     try {
       const result = await renderer({
-        requestId: `app-elicitation-${++this.appElicitationSeq}`,
+        requestId: `${this.appElicitationPrefix}-${++this.appElicitationSeq}`,
         resourceUri,
         params: request.params,
         signal: controller.signal,

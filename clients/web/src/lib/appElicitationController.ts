@@ -96,4 +96,20 @@ export class AppElicitationController {
   fail(requestId: string, error: Error): void {
     this.take(requestId)?.reject(error);
   }
+
+  /**
+   * Drop every queued request at once.
+   *
+   * For the host's "these entries no longer belong to the live connection"
+   * moment (a replaced `InspectorClient`): a renderer that outlived its client
+   * would rebuild against the *next* one and could read or answer through a
+   * different server.
+   */
+  failAll(error: Error): void {
+    const dropped = this.entries;
+    if (dropped.length === 0) return;
+    this.entries = [];
+    this.emit();
+    for (const entry of dropped) entry.reject(error);
+  }
 }

@@ -215,7 +215,7 @@ describe("appElicitation negotiation (#1854)", () => {
           params,
           null as unknown as ElicitResult,
         ),
-      ).toMatch(/non-object/);
+      ).toMatch(/invalid elicitation result/);
     });
 
     it("rejects an unknown action", () => {
@@ -223,7 +223,19 @@ describe("appElicitation negotiation (#1854)", () => {
         validateAppElicitResult(provider, params, {
           action: "maybe",
         } as unknown as ElicitResult),
-      ).toMatch(/unknown elicitation action/);
+      ).toMatch(/invalid elicitation result/);
+    });
+
+    it("rejects a decline whose content the standard result forbids", () => {
+      // Checking `action` alone would wave this through: `ElicitResult` permits
+      // only primitives and string arrays in `content`, so a nested object
+      // would reach the server as a result it can legitimately reject.
+      expect(
+        validateAppElicitResult(provider, params, {
+          action: "decline",
+          content: { x: {} },
+        } as unknown as ElicitResult),
+      ).toMatch(/invalid elicitation result/);
     });
 
     it("rejects an accept with no usable content", () => {
@@ -237,7 +249,7 @@ describe("appElicitation negotiation (#1854)", () => {
           action: "accept",
           content: [] as unknown as Record<string, never>,
         } as ElicitResult),
-      ).toMatch(/without a content object/);
+      ).toMatch(/invalid elicitation result|without a content object/);
     });
 
     it("rejects content that does not match the requested schema", () => {

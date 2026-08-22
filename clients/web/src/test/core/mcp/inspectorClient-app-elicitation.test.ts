@@ -405,6 +405,38 @@ describe("app-rendered elicitation routing (#1854)", () => {
     });
   });
 
+  describe("request-scoped ids", () => {
+    it("mints ids that are unique across client instances, not just within one", async () => {
+      // A host may hold ONE renderer across replacement clients (the web client
+      // rebuilds its InspectorClient on a settings change). A per-client
+      // counter alone would give each new client's first request the same id,
+      // and settling it would resolve the wrong server's request.
+      const ids: string[] = [];
+      const renderer: AppElicitationRenderer = async (request) => {
+        ids.push(request.requestId);
+        return { action: "cancel" };
+      };
+      const first = new ElicitTransport();
+      const clientA = await connectClient({
+        transport: first,
+        appElicitation: renderer,
+      });
+      await first.elicit(40, appParams());
+      await clientA.disconnect();
+
+      const second = new ElicitTransport();
+      const clientB = await connectClient({
+        transport: second,
+        appElicitation: renderer,
+      });
+      await second.elicit(41, appParams());
+      await clientB.disconnect();
+
+      expect(ids).toHaveLength(2);
+      expect(ids[0]).not.toBe(ids[1]);
+    });
+  });
+
   describe("teardown", () => {
     it("aborts a pending app elicitation on disconnect", async () => {
       const transport = new ElicitTransport();
@@ -425,6 +457,32 @@ describe("app-rendered elicitation routing (#1854)", () => {
       await vi.waitFor(() => expect(aborted).toBe(true));
       // An aborted request must NOT resurface in the native queue: the user
       // abandoned it, and the connection it belonged to is gone.
+      expect(client.getPendingElicitations()).toHaveLength(0);
+    });
+
+    it("aborts a pending app elicitation on a mid-session transport close", async () => {
+      // The `onclose` route reaches teardown only through
+      // `clearAndAnnouncePendingPeerRequests`, whose emptiness check used to
+      // look at the native queues alone — so a lone app elicitation survived a
+      // dropped connection and left its modal on screen.
+      const transport = new ElicitTransport();
+      let aborted = false;
+      const client = await connectClient({
+        transport,
+        appElicitation: (request) =>
+          new Promise<ElicitResult>((_resolve, reject) => {
+            request.signal.addEventListener("abort", () => {
+              aborted = true;
+              reject(new Error("aborted"));
+            });
+          }),
+      });
+      void transport.elicit(31, appParams()).catch(() => {});
+      await vi.waitFor(() => expect(aborted).toBe(false));
+
+      transport.onclose?.();
+
+      await vi.waitFor(() => expect(aborted).toBe(true));
       expect(client.getPendingElicitations()).toHaveLength(0);
     });
   });

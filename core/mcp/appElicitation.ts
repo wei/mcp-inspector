@@ -6,6 +6,7 @@ import type {
   jsonSchemaValidator,
   ServerCapabilities,
 } from "@modelcontextprotocol/client";
+import { ElicitResultSchema } from "@modelcontextprotocol/core";
 import { MCP_APP_MIME_TYPE, UI_EXTENSION_KEY } from "./extensions.js";
 
 /**
@@ -149,8 +150,13 @@ export function isFormElicitation(params: ElicitRequest["params"]): boolean {
   return mode === undefined || mode === "form";
 }
 
-/** The three actions a completed elicitation may report. */
-const ELICIT_ACTIONS = ["accept", "decline", "cancel"] as const;
+/**
+ * The result contract a completed elicitation must satisfy — the standard MCP
+ * one, not a hand-rolled subset. Checking `action` by hand would accept, for
+ * instance, `{ action: "decline", content: { x: {} } }`, whose content the
+ * schema forbids, and hand the server a result it can reject.
+ */
+const ELICIT_RESULT_ERROR = "App returned an invalid elicitation result";
 
 /**
  * Validates what an app returned before it is handed back to the server.
@@ -170,16 +176,13 @@ export function validateAppElicitResult(
   params: ElicitRequest["params"],
   result: ElicitResult,
 ): string | undefined {
-  if (typeof result !== "object" || result === null) {
-    return "App returned a non-object elicitation result";
-  }
-  const action = (result as { action?: unknown }).action;
-  if (!ELICIT_ACTIONS.includes(action as (typeof ELICIT_ACTIONS)[number])) {
-    return `App returned an unknown elicitation action: ${JSON.stringify(action)}`;
+  const parsed = ElicitResultSchema.safeParse(result);
+  if (!parsed.success) {
+    return `${ELICIT_RESULT_ERROR}: ${parsed.error.issues[0]?.message ?? "does not match ElicitResult"}`;
   }
   // decline / cancel carry no content — they are complete as they stand.
-  if (action !== "accept") return undefined;
-  const content = (result as { content?: unknown }).content;
+  if (parsed.data.action !== "accept") return undefined;
+  const content = parsed.data.content;
   if (
     typeof content !== "object" ||
     content === null ||

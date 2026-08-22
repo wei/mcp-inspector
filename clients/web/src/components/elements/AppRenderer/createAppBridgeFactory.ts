@@ -8,7 +8,7 @@ import type {
   McpUiHostCapabilities,
   McpUiResourceMeta,
 } from "@modelcontextprotocol/ext-apps/app-bridge";
-import type { Client, Transport } from "@modelcontextprotocol/client";
+import type { Client } from "@modelcontextprotocol/client";
 import type {
   EmbeddedResource,
   Implementation,
@@ -373,7 +373,7 @@ export function createAppBridgeFactory(
     // Record the view's raw `ui/initialize` capabilities before the bridge's
     // own schema strips the keys it predates (#1854). Must follow `connect`,
     // which is what installs the handler this wraps.
-    observeAppCapabilities(bridge, transport as unknown as Transport);
+    observeAppCapabilities(bridge, transport);
     return bridge;
   };
 }
