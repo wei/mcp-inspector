@@ -14,7 +14,7 @@ export const ThemeGroup = Group.extend({
     return {};
   },
   styles: (_theme, props) => {
-    // `secretStorageFooter` is the permanent band at the bottom of the
+    // `stickyModalFooter` is the permanent band at the bottom of the
     // Client/Server Settings modals naming where secrets are stored (#1950).
     // Flat properties, so they belong here rather than in App.css.
     //
@@ -27,7 +27,11 @@ export const ThemeGroup = Group.extend({
     // this is supposed to be, so it sticks to the bottom edge instead, with
     // the same opaque body background and z-index the sticky header uses so
     // content passes underneath rather than through it.
-    if (props.variant === "secretStorageFooter") {
+    // Structural, not domain: this says "a band pinned to the bottom of a
+    // modal", which is all the theme layer should know. What the band *means*
+    // — that it names where your secrets go — belongs to `SecretStorageFooter`,
+    // the element that owns those semantics.
+    if (props.variant === "stickyModalFooter") {
       return {
         root: {
           position: "sticky",

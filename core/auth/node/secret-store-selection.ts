@@ -145,44 +145,92 @@ export function isContainer(): boolean {
 }
 
 /**
- * Is `dir` — or the nearest existing ancestor of it — a mount point?
+ * Nearest ancestor of `dir` that actually exists.
  *
- * The test is `st_dev`: a mount is exactly the case where a directory sits
- * on a different device from its parent. That is what makes this work
- * regardless of *what* was mounted (named volume, bind mount, tmpfs) and
- * without parsing `/proc/mounts`, whose format and container-namespace
- * visibility vary.
+ * The directory usually does not exist on a first run — `~/.mcp-inspector`
+ * is created on demand — so every check below has to ask about the closest
+ * thing that does. A volume mounted *at* the target path exists by
+ * definition, so the common positive case needs no walk at all.
+ */
+function nearestExisting(dir: string): string | null {
+  let current = path.resolve(dir);
+  while (!fsSync.existsSync(current)) {
+    const parent = path.dirname(current);
+    /* v8 ignore next -- @preserve: the walk can only run out of ancestors if
+       the filesystem root itself does not exist, which would mean the process
+       has no cwd to have resolved against. Kept as the loop's termination
+       guard rather than trusting that invariant. */
+    if (parent === current) return null;
+    current = parent;
+  }
+  return current;
+}
+
+/**
+ * Mount points visible to this process, from `/proc/self/mountinfo`, or
+ * `null` where that file cannot be read (macOS, Windows, a `/proc`-less
+ * container).
  *
- * It walks to the nearest existing ancestor because the directory usually
- * does not exist yet on a first run — `~/.mcp-inspector` is created on
- * demand. A volume mounted *at* that path exists by definition, so the
- * common positive case is found immediately; the walk is what keeps the
- * common negative case from being answered by a missing-file error.
+ * Field 5 of each line is the mount point, with spaces escaped as `\040`.
+ * `/` is dropped: in a container that is the writable layer, which is
+ * exactly what the durability question is asking *against*.
+ */
+function readMountPoints(): string[] | null {
+  try {
+    return fsSync
+      .readFileSync("/proc/self/mountinfo", "utf-8")
+      .split("\n")
+      .map((line) => line.split(" ")[4])
+      .filter((point): point is string => Boolean(point))
+      .map((point) => point.replace(/\\040/g, " "))
+      .filter((point) => point !== "/");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Does `dir` live on something mounted over the root filesystem?
  *
- * `/` is its own parent and is trivially a "mount", so the loop stops
- * there and reports false: the container's root filesystem is the writable
- * layer this whole check exists to distinguish *against*.
+ * Two mechanisms, because either one alone gets a realistic case wrong.
+ *
+ * **`/proc/self/mountinfo` first**, where it exists. It answers the question
+ * actually being asked — "is this path *under* a mount" — rather than the
+ * narrower "is this path *itself* a mount". The difference is a real
+ * container layout: mounting a volume at `/home/node` leaves
+ * `/home/node/.mcp-inspector` an ordinary subdirectory sharing its parent's
+ * device, so a device-boundary test answers "not mounted" and demotes a
+ * durable setup to session-only `memory`. Reading the mount table also sees
+ * a bind mount that happens to come from the same device, which no `st_dev`
+ * comparison can.
+ *
+ * **The `st_dev` comparison as the fallback**, and against `/` rather than
+ * against the immediate parent — so a subdirectory of a mount is still
+ * recognized. Outside a container this barely matters (the fallback there is
+ * `file` either way); it matters in a `/proc`-less container, where being
+ * wrong costs durability.
+ *
+ * Errors answer `false`, keeping the fallback conservative — `memory` in a
+ * container — which never promises to keep a secret it then loses.
  */
 export function isOnMountPoint(dir: string): boolean {
   try {
-    let current = path.resolve(dir);
-    // Walk up to the first path that exists.
-    while (!fsSync.existsSync(current)) {
-      const parent = path.dirname(current);
-      /* v8 ignore next -- @preserve: the walk can only run out of ancestors
-         if the filesystem root itself does not exist, which would mean the
-         process has no cwd to have resolved against. Kept as the loop's
-         termination guard rather than trusting that invariant. */
-      if (parent === current) return false;
-      current = parent;
+    const current = nearestExisting(dir);
+    if (current === null) return false;
+
+    const mounts = readMountPoints();
+    if (mounts !== null) {
+      return mounts.some(
+        (point) => current === point || current.startsWith(`${point}/`),
+      );
     }
+
     const parent = path.dirname(current);
-    if (parent === current) return false; // reached `/`
-    return fsSync.statSync(current).dev !== fsSync.statSync(parent).dev;
+    if (parent === current) return false; // `dir` resolved to the root itself
+    return fsSync.statSync(current).dev !== fsSync.statSync("/").dev;
   } catch {
     // Permission denied, a racing unmount, or a platform where `dev` is not
-    // meaningful. "Not a mount" keeps the fallback on the conservative side
-    // (memory in a container), which never loses a secret it promised to keep.
+    // meaningful.
     return false;
   }
 }
@@ -207,32 +255,54 @@ async function buildStore(
   }
   const filePath = defaultSecretFilePath();
   const store = new FileSecretStore({ filePath });
-  // Repair a loosened mode on a pre-existing file before anything reads or
-  // writes it. Fire-and-forget: it is a best-effort tightening (it swallows
-  // every failure), and blocking selection on a chmod would make an
-  // unwritable file a startup problem rather than a `set`-time one.
-  void tightenSecretFilePermissions(filePath);
-  // Report the FILE, not the intent. `store.encrypted` is what the next write
-  // will do; a file already on disk in the clear stays readable until that
-  // write happens, and saying "File (encrypted)" in the meantime is the one
-  // false reassurance this footer must never give. With no file yet (or one we
-  // cannot parse) the policy is all there is to report, and it is then
-  // accurate — the first write creates the file in that mode.
+  // Repair a loosened mode on a pre-existing file, and — unlike before —
+  // *verify* the result. The UI and the README both state the file is 0600,
+  // so a file we could not tighten (owned by another user, on a read-only
+  // mount) has to be reported rather than quietly described as protected.
+  const perms = await tightenSecretFilePermissions(filePath);
+  if (perms.state === "loose") {
+    console.warn(
+      `[mcp-inspector] The secrets file at ${filePath} is mode ${perms.mode.toString(8).padStart(4, "0")}, not 0600, and could not be tightened. Anyone who can read it can read the secrets in it.`,
+    );
+  }
+  return {
+    store,
+    info: await describeFileStore(store, filePath, kind, reason, detail),
+  };
+}
+
+/**
+ * Build the descriptor for a file store by *looking at the file*.
+ *
+ * `store.encrypted` is what the next write will do; a file already on disk in
+ * the clear stays readable until that write happens, and saying "File
+ * (encrypted)" in the meantime is the one false reassurance this whole
+ * subsystem exists not to give. With no file yet (or one we cannot parse) the
+ * policy is all there is to report, and it is then accurate — the first write
+ * creates the file in that mode.
+ *
+ * Split out from `buildStore` so it can be re-run: this is a property of a
+ * file that changes underneath us, not a property of the selection.
+ */
+async function describeFileStore(
+  store: FileSecretStore,
+  filePath: string,
+  kind: SecretStoreKind,
+  reason: SecretStorageInfo["reason"],
+  detail?: string,
+): Promise<SecretStorageInfo> {
   const onDisk = await store.readOnDiskEncryption();
   const plaintext = onDisk === null ? !store.encrypted : onDisk === "none";
   return {
-    store,
-    info: {
-      kind,
-      reason,
-      path: filePath,
-      plaintext,
-      // Only meaningful while the two disagree; omitted otherwise so the
-      // payload does not carry a flag that says nothing.
-      ...(plaintext && store.encrypted ? { pendingEncryption: true } : {}),
-      durable: true,
-      detail,
-    },
+    kind,
+    reason,
+    path: filePath,
+    plaintext,
+    // Only meaningful while the two disagree; omitted otherwise so the
+    // payload does not carry a flag that says nothing.
+    ...(plaintext && store.encrypted ? { pendingEncryption: true } : {}),
+    durable: true,
+    detail,
   };
 }
 
@@ -305,9 +375,28 @@ export function resolveSecretStore(): Promise<ResolvedSecretStore> {
   return resolved;
 }
 
-/** The active store's descriptor — for the banner and `GET /api/config`. */
+/**
+ * The active store's descriptor — for the banner and `GET /api/config`.
+ *
+ * The *selection* is cached, deliberately (see {@link resolveSecretStore}).
+ * The descriptor is not, for the file store: `plaintext` and
+ * `pendingEncryption` describe bytes on disk that this very process
+ * changes. Cache them and the first `set` under a newly-set passphrase
+ * encrypts the file while every subsequent `/api/config` keeps serving
+ * "still unencrypted" until a restart — stale in the safe direction, but
+ * stale about the one fact this surface exists to state. Re-deriving costs
+ * one read of a small file per config fetch, which is once per page load.
+ */
 export async function getSecretStorageInfo(): Promise<SecretStorageInfo> {
-  return (await resolveSecretStore()).info;
+  const { store, info } = await resolveSecretStore();
+  if (info.kind !== "file" || !(store instanceof FileSecretStore)) return info;
+  return describeFileStore(
+    store,
+    store.filePath,
+    "file",
+    info.reason,
+    info.detail,
+  );
 }
 
 /**

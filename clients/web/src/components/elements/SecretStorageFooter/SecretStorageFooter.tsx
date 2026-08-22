@@ -32,7 +32,7 @@ export interface SecretStorageFooterProps {
 // header, body and footer as one. `nowrap` keeps it to one line at any modal
 // width; the truncating detail text on the right absorbs a narrow modal.
 const FooterBand = Group.withProps({
-  variant: "secretStorageFooter",
+  variant: "stickyModalFooter",
   h: SECRET_STORAGE_FOOTER_HEIGHT,
   px: "md",
   gap: 6,

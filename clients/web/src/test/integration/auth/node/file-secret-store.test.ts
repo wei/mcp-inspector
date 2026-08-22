@@ -7,11 +7,13 @@
  * not contain the plaintext — and a mocked filesystem can be made to
  * agree with any of those without them being true.
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+  acquireLock,
   FileSecretStore,
   SecretFileKeyMismatchError,
   tightenSecretFilePermissions,
@@ -447,10 +449,52 @@ describe("tightenSecretFilePermissions", () => {
     expect((await fs.stat(filePath())).mode & 0o777).toBe(0o600);
   });
 
-  it("is a no-op for a file that doesn't exist yet (the first-run case)", async () => {
+  it("reports absent, not a failure, for a file that doesn't exist yet", async () => {
+    // The first-run case. Nothing to tighten and nothing to warn about —
+    // `writeStoreFile` creates the file 0600.
     await expect(
       tightenSecretFilePermissions(path.join(tmpDir, "nope.json")),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ state: "absent" });
+  });
+
+  it("reports a mode it could not fix, instead of claiming 0600", async () => {
+    // The case the caller has to hear about: the docs and the footer both say
+    // the file is 0600, so a file we failed to tighten must be surfaced rather
+    // than silently described as protected.
+    //
+    // Driven through a fresh module whose `chmod` rejects — a test cannot
+    // readily own a file it lacks permission to chmod, and vitest cannot spy
+    // on a `node:fs/promises` export because the ESM namespace is not
+    // configurable.
+    const store = new FileSecretStore({ filePath: filePath() });
+    await store.set("alpha", "env:A", "1");
+    await fs.chmod(filePath(), 0o644);
+
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => {
+      const actual =
+        await vi.importActual<typeof import("node:fs/promises")>(
+          "node:fs/promises",
+        );
+      return {
+        ...actual,
+        default: actual,
+        chmod: vi.fn(() =>
+          Promise.reject(new Error("EPERM: operation not permitted")),
+        ),
+      };
+    });
+    try {
+      const mod =
+        await import("@inspector/core/auth/node/file-secret-store.js");
+      expect(await mod.tightenSecretFilePermissions(filePath())).toEqual({
+        state: "loose",
+        mode: 0o644,
+      });
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
   });
 });
 
@@ -496,5 +540,181 @@ describe("readOnDiskEncryption", () => {
     await writer.set("alpha", SECRET_FIELD_OAUTH_CLIENT_SECRET, "shh");
     const keyless = new FileSecretStore({ filePath: filePath() });
     expect(await keyless.readOnDiskEncryption()).toBe("aes-256-gcm");
+  });
+});
+
+/**
+ * Write a genuinely-encrypted secrets file whose decrypted payload is
+ * `payload` — including payloads the store would never produce.
+ *
+ * Hand-rolled against the documented format rather than driven through the
+ * store, because the whole point is to reach a state the store's own writer
+ * cannot create: an authentic ciphertext (right passphrase, valid GCM tag)
+ * carrying the wrong shape. Anything less would test the key check instead
+ * of the shape check.
+ */
+async function writeEncryptedFixtureWithPayload(
+  payload: unknown,
+  passphrase: string,
+): Promise<void> {
+  const salt = crypto.randomBytes(16);
+  const kdf = {
+    algorithm: "scrypt",
+    salt: salt.toString("base64"),
+    N: 16384,
+    r: 8,
+    p: 1,
+  };
+  const key: Buffer = await new Promise((resolve, reject) => {
+    crypto.scrypt(
+      passphrase,
+      salt,
+      32,
+      { N: kdf.N, r: kdf.r, p: kdf.p },
+      (err, k) => (err ? reject(err) : resolve(k)),
+    );
+  });
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const body = Buffer.concat([
+    cipher.update(JSON.stringify(payload), "utf-8"),
+    cipher.final(),
+  ]);
+  const data = [iv, cipher.getAuthTag(), body]
+    .map((b) => b.toString("base64"))
+    .join(".");
+  await fs.writeFile(
+    filePath(),
+    JSON.stringify({ version: 1, encryption: "aes-256-gcm", kdf, data }),
+    "utf-8",
+  );
+}
+
+describe("payload shape validation", () => {
+  // GCM proves who wrote the bytes, not what shape they parse to, and the
+  // plaintext branch proves nothing at all — so neither may be cast.
+  it("refuses a plaintext file whose secrets field is an array", async () => {
+    // The array is the case a cast cannot survive: it passes `typeof
+    // "object"`, takes the named assignment, and then `JSON.stringify` drops
+    // every named property — so `set` would resolve having written a file
+    // without the secret it was handed.
+    await fs.writeFile(
+      filePath(),
+      JSON.stringify({ version: 1, encryption: "none", secrets: [] }),
+      "utf-8",
+    );
+    const store = new FileSecretStore({ filePath: filePath() });
+    await expect(store.set("alpha", "env:A", "1")).rejects.toThrow(/an array/);
+    expect(await store.get("alpha", "env:A")).toBe(null);
+  });
+
+  it("refuses a plaintext file holding a non-string value", async () => {
+    await fs.writeFile(
+      filePath(),
+      JSON.stringify({
+        version: 1,
+        encryption: "none",
+        secrets: { "alpha:env:A": { nested: true } },
+      }),
+      "utf-8",
+    );
+    const store = new FileSecretStore({ filePath: filePath() });
+    await expect(store.set("alpha", "env:B", "1")).rejects.toThrow(
+      /non-string value for "alpha:env:A"/,
+    );
+  });
+
+  it("refuses an authentic ciphertext that decodes to the wrong shape", async () => {
+    // Encrypted with the right passphrase, so it decrypts cleanly and the
+    // refusal can only come from the shape check. It must NOT surface as a key
+    // mismatch, which would send the user to fix a passphrase that is working.
+    await writeEncryptedFixtureWithPayload([], "hunter2");
+    const store = new FileSecretStore({
+      filePath: filePath(),
+      passphrase: "hunter2",
+    });
+    expect(await store.get("alpha", "env:A")).toBe(null);
+    const err = await store
+      .set("alpha", "env:A", "1")
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SecretStoreUnavailableError);
+    expect(err).not.toBeInstanceOf(SecretFileKeyMismatchError);
+    expect((err as Error).message).toMatch(/an array/);
+  });
+});
+
+describe("acquireLock", () => {
+  it("excludes a second holder while the first is live", async () => {
+    const target = path.join(tmpDir, "locked.json");
+    const release = await acquireLock(target);
+    let secondTaken = false;
+    const second = acquireLock(target).then((r) => {
+      secondTaken = true;
+      return r;
+    });
+    // Still held: the waiter must not have been let through.
+    await new Promise((r) => setTimeout(r, 60));
+    expect(secondTaken).toBe(false);
+    await release();
+    await (
+      await second
+    )();
+    expect(secondTaken).toBe(true);
+  });
+
+  it("steals a lock left behind by a killed process", async () => {
+    // A container killed with SIGKILL leaves the directory. A lock only a
+    // clean exit can release would turn that into permanently broken writes —
+    // strictly worse than the race it prevents.
+    const target = path.join(tmpDir, "stale.json");
+    const lockDir = `${target}.lock`;
+    await fs.mkdir(lockDir);
+    const old = new Date(Date.now() - 60_000);
+    await fs.utimes(lockDir, old, old);
+    const release = await acquireLock(target);
+    await release();
+  });
+
+  it("proceeds unlocked rather than failing when the lock cannot be created", async () => {
+    // A path whose parent does not exist: mkdir fails with ENOENT, not
+    // EEXIST. Refusing to write here would deny a real user a real secret to
+    // prevent a race with a second process that may not exist.
+    const release = await acquireLock(
+      path.join(tmpDir, "no-such-dir", "secrets.json"),
+    );
+    await release();
+  });
+
+  it("serializes concurrent writers through two independent store instances", async () => {
+    // Two `FileSecretStore` objects have separate in-process queues, so this
+    // is the cross-process race in miniature: without the file lock the second
+    // write drops the first one's entry.
+    const target = path.join(tmpDir, "shared.json");
+    const a = new FileSecretStore({ filePath: target });
+    const b = new FileSecretStore({ filePath: target });
+    await Promise.all([
+      a.set("alpha", "env:A", "1"),
+      b.set("alpha", "env:B", "2"),
+    ]);
+    expect(await a.get("alpha", "env:A")).toBe("1");
+    expect(await a.get("alpha", "env:B")).toBe("2");
+  });
+});
+
+describe("tightenSecretFilePermissions reports what it could not fix", () => {
+  it("says absent when there is no file yet", async () => {
+    expect(await tightenSecretFilePermissions(filePath())).toEqual({
+      state: "absent",
+    });
+  });
+
+  it("says ok once the file is 0600", async () => {
+    const store = new FileSecretStore({ filePath: filePath() });
+    await store.set("alpha", "env:A", "1");
+    await fs.chmod(filePath(), 0o644);
+    expect(await tightenSecretFilePermissions(filePath())).toEqual({
+      state: "ok",
+    });
   });
 });

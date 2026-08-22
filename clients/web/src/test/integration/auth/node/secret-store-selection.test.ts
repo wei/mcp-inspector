@@ -221,6 +221,105 @@ describe("isOnMountPoint", () => {
   });
 });
 
+describe("isOnMountPoint via /proc/self/mountinfo", () => {
+  /**
+   * Load the module with a synthetic mount table, so the container layouts
+   * that matter can be exercised on a developer's laptop. `existsSync` is
+   * stubbed alongside it because the paths in these tables do not exist here.
+   */
+  async function loadWithMounts(mountinfo: string | null, existing: string[]) {
+    vi.resetModules();
+    vi.doMock("node:fs", async () => {
+      const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+      return {
+        ...actual,
+        existsSync: (p: string) => existing.includes(p),
+        readFileSync: (p: string, enc?: unknown) => {
+          if (p === "/proc/self/mountinfo") {
+            if (mountinfo === null) throw new Error("ENOENT");
+            return mountinfo;
+          }
+          return actual.readFileSync(p, enc as never);
+        },
+      };
+    });
+    return import("@inspector/core/auth/node/secret-store-selection.js");
+  }
+
+  afterEach(() => {
+    vi.doUnmock("node:fs");
+    vi.resetModules();
+  });
+
+  // Field 5 is the mount point; the rest is real mountinfo shape.
+  const line = (point: string) =>
+    `36 35 0:32 / ${point} rw,relatime - overlay overlay rw`;
+
+  it("sees a directory that IS the mount point", async () => {
+    const mod = await loadWithMounts(
+      [line("/"), line("/home/node/.mcp-inspector")].join("\n"),
+      ["/home/node/.mcp-inspector"],
+    );
+    expect(mod.isOnMountPoint("/home/node/.mcp-inspector")).toBe(true);
+  });
+
+  it("sees a directory INSIDE a mounted volume", async () => {
+    // The case a device-boundary test gets wrong: the volume is at
+    // /home/node, so .mcp-inspector is an ordinary subdirectory sharing its
+    // parent's device. Judging it unmounted demotes a durable setup to
+    // session-only memory.
+    const mod = await loadWithMounts(
+      [line("/"), line("/home/node")].join("\n"),
+      ["/home/node/.mcp-inspector"],
+    );
+    expect(mod.isOnMountPoint("/home/node/.mcp-inspector")).toBe(true);
+  });
+
+  it("is false on the container's writable layer", async () => {
+    // Only `/` is mounted, and `/` is deliberately excluded — it is the
+    // writable layer this question exists to distinguish against.
+    const mod = await loadWithMounts(line("/"), ["/home/node/.mcp-inspector"]);
+    expect(mod.isOnMountPoint("/home/node/.mcp-inspector")).toBe(false);
+  });
+
+  it("does not mistake a sibling prefix for a parent mount", async () => {
+    // `/home/node-2` starts with `/home/node` as a string but is not under
+    // it, which is why the check appends the separator.
+    const mod = await loadWithMounts(
+      [line("/"), line("/home/node")].join("\n"),
+      ["/home/node-2/.mcp-inspector"],
+    );
+    expect(mod.isOnMountPoint("/home/node-2/.mcp-inspector")).toBe(false);
+  });
+
+  it("decodes a space-escaped mount point", async () => {
+    const mod = await loadWithMounts(
+      [line("/"), line("/mnt/my\\040volume")].join("\n"),
+      ["/mnt/my volume/secrets"],
+    );
+    expect(mod.isOnMountPoint("/mnt/my volume/secrets")).toBe(true);
+  });
+
+  it("answers from the nearest existing ancestor, not the missing leaf", async () => {
+    // First run: the secrets directory has not been created inside the
+    // mounted volume yet.
+    const mod = await loadWithMounts(
+      [line("/"), line("/home/node")].join("\n"),
+      ["/home/node"],
+    );
+    expect(mod.isOnMountPoint("/home/node/.mcp-inspector")).toBe(true);
+  });
+
+  it("falls back to the device comparison where mountinfo is unreadable", async () => {
+    // macOS, Windows, or a /proc-less container. The fallback compares
+    // against `/` rather than the immediate parent, so a subdirectory of a
+    // mount is still recognized — but a real path is needed for `stat`, so
+    // this only asserts it does not throw and answers the ordinary case.
+    const mod = await loadWithMounts(null, [tmpDir]);
+    expect(mod.isOnMountPoint(tmpDir)).toBe(false);
+  });
+});
+
 describe("warnAboutSecretStorage", () => {
   const base: SecretStorageInfo = {
     kind: "keyring",
@@ -450,6 +549,43 @@ describe("the descriptor reports the file, not the write policy", () => {
     const info = await after.getSecretStorageInfo();
     expect(info.plaintext).toBe(false);
     expect(info.pendingEncryption).toBeUndefined();
+  });
+
+  it("stops saying unencrypted once this process performs the upgrading write", async () => {
+    // The staleness trap: the selection is cached for the process, so a
+    // descriptor cached alongside it would keep serving "still unencrypted"
+    // from `/api/config` for the rest of the session — describing bytes this
+    // very process had just changed.
+    const filePath = path.join(tmpDir, "secrets.json");
+    process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
+    process.env.MCP_INSPECTOR_SECRET_STORE = "file";
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const plain = await loadWithProbe(false);
+    await plain.defaultSecretStore().set("alpha", "env:A", "1");
+
+    process.env.MCP_INSPECTOR_SECRET_KEY = "hunter2";
+    const mod = await loadWithProbe(false);
+
+    // Same module instance throughout — this is one running process.
+    expect((await mod.getSecretStorageInfo()).plaintext).toBe(true);
+    await mod.defaultSecretStore().set("alpha", "env:B", "2");
+    const after = await mod.getSecretStorageInfo();
+    expect(after.plaintext).toBe(false);
+    expect(after.pendingEncryption).toBeUndefined();
+  });
+
+  it("keeps returning the same store while re-deriving the descriptor", async () => {
+    // The selection itself must stay cached — the banner, /api/config, and
+    // the store doing the writing have to agree on *which* store it is.
+    process.env.MCP_INSPECTOR_SECRET_FILE = path.join(tmpDir, "secrets.json");
+    process.env.MCP_INSPECTOR_SECRET_STORE = "file";
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await loadWithProbe(false);
+    const first = await mod.resolveSecretStore();
+    const second = await mod.resolveSecretStore();
+    expect(second.store).toBe(first.store);
+    expect((await mod.getSecretStorageInfo()).kind).toBe("file");
   });
 
   it("falls back to the write policy when there is no file yet", async () => {

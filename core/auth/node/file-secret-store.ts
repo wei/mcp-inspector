@@ -123,6 +123,37 @@ const buildAccount = (serverId: string, field: string): string =>
   `${serverId}:${field}`;
 
 /**
+ * Assert that a decoded payload really is a `Record<string, string>`.
+ *
+ * Neither branch of {@link FileSecretStore.readMap} can trust its input: the
+ * plaintext `secrets` field is whatever the file says, and a decrypted
+ * payload only proves the *bytes* were authentic — GCM verifies who wrote
+ * them, not what shape they parse to.
+ *
+ * An array is the case that shows why a cast is not enough. `[]` passes
+ * `typeof === "object"`, so `map[account] = value` assigns a named property
+ * to it, and `JSON.stringify` then drops every named property of an array —
+ * so `set` resolves successfully having written a file that does not contain
+ * the secret it was given. Silent loss on the one operation whose entire
+ * contract is that it does not lose things.
+ */
+function asSecretMap(value: unknown, filePath: string): Record<string, string> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new SecretStoreUnavailableError(
+      `The secrets file at ${filePath} does not hold a secret map (found ${Array.isArray(value) ? "an array" : typeof value}). Refusing to write, which would replace it. Move the file aside to start over.`,
+    );
+  }
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof entry !== "string") {
+      throw new SecretStoreUnavailableError(
+        `The secrets file at ${filePath} holds a non-string value for "${key}". Refusing to write, which would replace it. Move the file aside to start over.`,
+      );
+    }
+  }
+  return { ...(value as Record<string, string>) };
+}
+
+/**
  * Thrown when a file was written encrypted and the current passphrase
  * cannot open it. A distinct type so `set` can refuse with advice that
  * fits, instead of the generic "could not write" that would send someone
@@ -159,6 +190,83 @@ function decodeParts(
     tag: Buffer.from(tag, "base64"),
     body: Buffer.from(body, "base64"),
   };
+}
+
+/**
+ * How long a lock may be held before another process treats it as
+ * abandoned. Generous next to the work it guards (a read, one scrypt
+ * derivation, an atomic write — single-digit milliseconds), because the
+ * cost of being wrong is asymmetric: waiting a second too long is
+ * invisible, while stealing a live lock reintroduces the very race the
+ * lock exists to close.
+ */
+const LOCK_STALE_MS = 10_000;
+/** Total time to wait for a lock before giving up and reporting it. */
+const LOCK_TIMEOUT_MS = 5_000;
+const LOCK_POLL_MS = 25;
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Take an exclusive, cross-process lock on `filePath`.
+ *
+ * `mkdir` is the primitive rather than a lock *file*: it is atomic and
+ * fails with `EEXIST` on every POSIX filesystem and on Windows, and it
+ * needs no `O_EXCL` open-flag juggling. Returns the release function.
+ *
+ * **Stale locks are stolen, and that is not optional.** A container killed
+ * with SIGKILL leaves the directory behind, and a lock that can only be
+ * released by a cooperative exit would make one `docker kill` brick secret
+ * writes permanently — turning a rare lost-write race into a permanent
+ * outage, which is a strictly worse failure. Staleness is judged by the
+ * directory's mtime.
+ *
+ * Never throws for lock-infrastructure reasons alone. If the lock cannot
+ * be created at all (a read-only mount, a filesystem without mkdir
+ * semantics we can rely on), the caller proceeds unlocked: the in-process
+ * queue still protects the common single-process case, and refusing to
+ * write would deny a real user a real secret in order to prevent a race
+ * with a second process that may not exist.
+ */
+export async function acquireLock(
+  filePath: string,
+): Promise<() => Promise<void>> {
+  const lockDir = `${filePath}.lock`;
+  const noop = async (): Promise<void> => {};
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+
+  for (;;) {
+    try {
+      await fs.mkdir(lockDir, { recursive: false });
+      return async () => {
+        try {
+          await fs.rmdir(lockDir);
+        } catch {
+          // Already gone — another process judged us stale and stole it.
+          // Nothing to undo, and nothing the caller can act on.
+        }
+      };
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "EEXIST") {
+        // Not "someone else holds it" — the lock itself is unavailable.
+        // Proceed unlocked rather than failing the write; see above.
+        return noop;
+      }
+      try {
+        const held = (await fs.stat(lockDir)).mtimeMs;
+        if (Date.now() - held > LOCK_STALE_MS) {
+          await fs.rmdir(lockDir);
+          continue;
+        }
+      } catch {
+        // The holder released it between our mkdir and our stat. Retry.
+      }
+      if (Date.now() >= deadline) return noop;
+      await sleep(LOCK_POLL_MS);
+    }
+  }
 }
 
 export interface FileSecretStoreOptions {
@@ -285,7 +393,7 @@ export class FileSecretStore implements SecretStore {
       // lands the file really is still readable, which is why
       // `readOnDiskEncryption` exists — the descriptor must report the file,
       // not the intent.
-      return { ...(parsed.secrets ?? {}) };
+      return asSecretMap(parsed.secrets ?? {}, this.filePath);
     }
 
     if (parsed.encryption !== CIPHER || !parsed.kdf || !parsed.data) {
@@ -306,8 +414,12 @@ export class FileSecretStore implements SecretStore {
         decipher.update(parts.body),
         decipher.final(),
       ]).toString("utf-8");
-      return JSON.parse(plain) as Record<string, string>;
-    } catch {
+      return asSecretMap(JSON.parse(plain), this.filePath);
+    } catch (err) {
+      // A shape refusal is about the *contents*, not the key — it decrypted
+      // fine. Rethrowing it as a key mismatch would send the user to fix a
+      // passphrase that is working.
+      if (err instanceof SecretStoreUnavailableError) throw err;
       // GCM authentication failure is what a wrong passphrase looks like, and
       // it is indistinguishable from a tampered/corrupt file — both mean "this
       // key does not open this file", which is what the message says.
@@ -351,6 +463,31 @@ export class FileSecretStore implements SecretStore {
     await writeStoreFile(this.filePath, `${JSON.stringify(file, null, 2)}\n`);
   }
 
+  /**
+   * Run `fn` with the file to itself across *processes* as well.
+   *
+   * The in-process queue is necessary and not sufficient: a durable secrets
+   * file is shared state, and a second Inspector on the same box — a CLI run
+   * beside a web session is the ordinary case, not a contrived one — reads
+   * the same "before" map and then atomically replaces the file, dropping
+   * whatever the first process had just added. Both writes report success;
+   * one secret is simply gone.
+   *
+   * Only mutations take the lock. Reads deliberately do not: `writeStoreFile`
+   * is atomic (write-temp-then-rename), so a concurrent reader sees either the
+   * old file or the new one and never a torn one, and making every `get`
+   * contend on a lock would put a filesystem round-trip in front of the
+   * request path for no correctness gain.
+   */
+  private async withFileLock<T>(fn: () => Promise<T>): Promise<T> {
+    const release = await acquireLock(this.filePath);
+    try {
+      return await fn();
+    } finally {
+      await release();
+    }
+  }
+
   /** Run `fn` with the file to itself, so concurrent callers can't lose writes. */
   private serialize<T>(fn: () => Promise<T>): Promise<T> {
     const run = this.queue.then(fn);
@@ -380,27 +517,29 @@ export class FileSecretStore implements SecretStore {
   }
 
   async set(serverId: string, field: string, value: string): Promise<void> {
-    await this.serialize(async () => {
-      let map: Record<string, string>;
-      try {
-        map = (await this.readMap()) ?? {};
-      } catch (err) {
-        // Already a typed refusal (unreadable file / key mismatch) — rethrow
-        // rather than re-wrapping, so the specific advice survives.
-        if (err instanceof SecretStoreUnavailableError) throw err;
-        throw new SecretStoreUnavailableError(
-          `Could not read the secrets file at ${this.filePath}: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-      map[buildAccount(serverId, field)] = value;
-      try {
-        await this.writeMap(map);
-      } catch (err) {
-        throw new SecretStoreUnavailableError(
-          `Could not write the secrets file at ${this.filePath}: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    });
+    await this.serialize(() =>
+      this.withFileLock(async () => {
+        let map: Record<string, string>;
+        try {
+          map = (await this.readMap()) ?? {};
+        } catch (err) {
+          // Already a typed refusal (unreadable file / key mismatch) —
+          // rethrow rather than re-wrapping, so the specific advice survives.
+          if (err instanceof SecretStoreUnavailableError) throw err;
+          throw new SecretStoreUnavailableError(
+            `Could not read the secrets file at ${this.filePath}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        map[buildAccount(serverId, field)] = value;
+        try {
+          await this.writeMap(map);
+        } catch (err) {
+          throw new SecretStoreUnavailableError(
+            `Could not write the secrets file at ${this.filePath}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }),
+    );
   }
 
   async delete(serverId: string, field: string): Promise<void> {
@@ -419,17 +558,20 @@ export class FileSecretStore implements SecretStore {
    */
   private async deleteWhere(match: (key: string) => boolean): Promise<void> {
     try {
-      await this.serialize(async () => {
-        const map = await this.readMap();
-        if (!map) return;
-        const keys = Object.keys(map).filter(match);
-        if (keys.length === 0) return;
-        for (const key of keys) delete map[key];
-        // An emptied map keeps the file rather than unlinking it: its presence
-        // is what records which encryption mode this install settled on, so a
-        // later write can't silently switch modes on the user.
-        await this.writeMap(map);
-      });
+      await this.serialize(() =>
+        this.withFileLock(async () => {
+          const map = await this.readMap();
+          if (!map) return;
+          const keys = Object.keys(map).filter(match);
+          if (keys.length === 0) return;
+          for (const key of keys) delete map[key];
+          // An emptied map keeps the file rather than unlinking it: its
+          // presence is what records which encryption mode this install
+          // settled on, so a later write can't silently switch modes on the
+          // user.
+          await this.writeMap(map);
+        }),
+      );
     } catch {
       // Intentionally silent — see the doc comment above.
     }
@@ -450,11 +592,36 @@ export class FileSecretStore implements SecretStore {
  */
 export async function tightenSecretFilePermissions(
   filePath: string,
-): Promise<void> {
+): Promise<SecretFilePermissionState> {
   try {
     await fs.chmod(filePath, 0o600);
   } catch {
     // Non-existent (the common case — nothing written yet), read-only mount,
-    // or a platform without POSIX modes. Nothing actionable here.
+    // or a platform without POSIX modes. The verification below decides
+    // whether that mattered.
+  }
+  // Verify rather than assume. The chmod above is best-effort, but the UI and
+  // the README both state the file is 0600 — so a file we failed to tighten
+  // (owned by another user, on a read-only mount) must be *reported*, not
+  // quietly described as protected. This is the one place that can tell the
+  // difference, because it is the only one that looks at the file.
+  try {
+    const mode = (await fs.stat(filePath)).mode & 0o777;
+    if (mode === 0o600) return { state: "ok" };
+    return { state: "loose", mode };
+  } catch {
+    // No file yet — the common first run. `writeStoreFile` creates it 0600,
+    // so there is nothing to warn about.
+    return { state: "absent" };
   }
 }
+
+/**
+ * Outcome of {@link tightenSecretFilePermissions}: the file is `0600`
+ * (`ok`), does not exist yet (`absent`), or exists with a wider mode we
+ * could not fix (`loose`) — the only case anyone needs to hear about.
+ */
+export type SecretFilePermissionState =
+  | { state: "ok" }
+  | { state: "absent" }
+  | { state: "loose"; mode: number };
