@@ -127,6 +127,28 @@ const formatMode = (mode: number): string => mode.toString(8).padStart(4, "0");
  * and the underlying facts still come from the shared helpers, which is
  * what keeps them from disagreeing about anything that matters.
  */
+/**
+ * How the band describes the file's permissions.
+ *
+ * Three states, not two, and the third is the point: "Owner-only
+ * permissions." is a claim of *fact*, so it may only be made when the mode
+ * was actually read and found to be 0600. `looseMode` says we looked and it
+ * was wrong; `permissionsUnknown` says we could not look at all. Treating
+ * the second like the first — which a plain `looseMode === undefined` test
+ * does — makes the footer assert owner-only having verified nothing, which
+ * is the failure this band exists to prevent, arrived at by omission rather
+ * than by error.
+ */
+function filePermissionsSentence(info: SecretStorageInfo): string {
+  if (info.looseMode !== undefined) {
+    return `Mode ${formatMode(info.looseMode)} — not owner-only.`;
+  }
+  if (info.permissionsUnknown !== undefined) {
+    return "Permissions could not be checked.";
+  }
+  return "Owner-only permissions.";
+}
+
 function footerMessage(info: SecretStorageInfo): string {
   if (info.kind === "keyring") return secretStorageLabel(info);
   if (info.kind === "memory") {
@@ -143,10 +165,7 @@ function footerMessage(info: SecretStorageInfo): string {
   // is something else and could not be tightened, and saying "owner-only"
   // there would be the footer asserting the opposite of what is true — the
   // one failure this whole band exists to prevent.
-  const permissions =
-    info.looseMode === undefined
-      ? "Owner-only permissions."
-      : `Mode ${formatMode(info.looseMode)} — not owner-only.`;
+  const permissions = filePermissionsSentence(info);
   return `${encryption} file. ${permissions}`;
 }
 
@@ -172,6 +191,10 @@ function footerTooltip(info: SecretStorageInfo): string | undefined {
   if (info.looseMode !== undefined) {
     parts.push(
       `Mode ${formatMode(info.looseMode)} could not be tightened to 0600 — anyone who can read the file can read the secrets in it.`,
+    );
+  } else if (info.permissionsUnknown !== undefined) {
+    parts.push(
+      `The file's permissions could not be read (${info.permissionsUnknown}), so it is not known whether others can read it.`,
     );
   }
   parts.push("Click to copy file path");

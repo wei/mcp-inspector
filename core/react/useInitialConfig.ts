@@ -111,6 +111,12 @@ function usableSecretStorage(value: unknown): SecretStorageInfo | undefined {
     if (v.looseMode !== undefined && typeof v.looseMode !== "number") {
       return undefined;
     }
+    if (
+      v.permissionsUnknown !== undefined &&
+      typeof v.permissionsUnknown !== "string"
+    ) {
+      return undefined;
+    }
   } else if (
     // File-only fields on a keychain or memory descriptor mean the payload
     // was not built by a backend we understand. Rejecting is cheap and the
@@ -118,7 +124,8 @@ function usableSecretStorage(value: unknown): SecretStorageInfo | undefined {
     v.path !== undefined ||
     v.plaintext !== undefined ||
     v.pendingEncryption !== undefined ||
-    v.looseMode !== undefined
+    v.looseMode !== undefined ||
+    v.permissionsUnknown !== undefined
   ) {
     return undefined;
   }

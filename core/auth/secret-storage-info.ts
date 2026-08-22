@@ -73,6 +73,17 @@ export interface SecretStorageInfo {
    */
   looseMode?: number;
   /**
+   * Set when the secrets file exists and its mode could not be read at all
+   * — `EACCES` on the containing directory, or a filesystem with no POSIX
+   * modes. Carries the errno so the message can say why.
+   *
+   * Distinct from {@link looseMode}, and the distinction matters: that one
+   * says "we looked and it is wrong", this one says "we could not look".
+   * Collapsing the second into silence is what let the footer keep stating
+   * mode 0600 as fact having verified nothing.
+   */
+  permissionsUnknown?: string;
+  /**
    * True when secrets outlive the process. False only for `memory`, and
    * it is the *promise* being made rather than an implementation detail:
    * an in-memory store is honest precisely because it never claims
@@ -116,6 +127,9 @@ export function secretStorageTone(info: SecretStorageInfo): SecretStorageTone {
   // An encrypted file that anyone can read is still worth flagging: the
   // passphrase is the only thing standing between a reader and the values.
   if (info.looseMode !== undefined) return "warn";
+  // Unverified is not the same as fine. The quiet tone here would read as a
+  // confirmation we never made.
+  if (info.permissionsUnknown !== undefined) return "warn";
   return "neutral";
 }
 
@@ -136,6 +150,12 @@ export function secretStorageCaveat(
   if (info.looseMode !== undefined) {
     const mode = info.looseMode.toString(8).padStart(4, "0");
     return `The secrets file is mode ${mode}, not 0600, and could not be tightened — anyone who can read it can read the secrets in it.`;
+  }
+  // Ordered with the permission problems, above encryption, for the same
+  // reason: not knowing whether others can read the file is a question about
+  // exposure, and it should not be answered by a reassuring silence.
+  if (info.permissionsUnknown !== undefined) {
+    return `The secrets file's permissions could not be checked (${info.permissionsUnknown}), so it is not known whether others can read it.`;
   }
   if (info.plaintext) {
     return info.pendingEncryption

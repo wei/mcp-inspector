@@ -382,8 +382,29 @@ export async function acquireLock(
       }
       if (code !== "EEXIST") return noop; // cannot lock here at all — see above
       if (await canSteal(lockDir, ownerFile, staleMs)) {
-        await fs.rm(lockDir, { recursive: true, force: true }).catch(() => {});
-        continue;
+        // Claim the stale lock by *renaming* it, not by removing it.
+        //
+        // `rm` is not an election: two waiters can both judge the same lock
+        // stale, and by the time the second one runs, the first may already
+        // have removed it and created a fresh lock of its own — which the
+        // second then deletes, and both enter the section together. That is
+        // the lost update, reached through the takeover meant to prevent it.
+        //
+        // `rename` is atomic and single-winner: exactly one waiter moves the
+        // directory aside, and the losers get ENOENT and fall through to
+        // retry against whatever the winner does next. The unique
+        // destination (our token) also means two winners of *different*
+        // stale locks cannot collide.
+        const claimed = `${lockDir}.stale-${token}`;
+        try {
+          await fs.rename(lockDir, claimed);
+          await fs.rm(claimed, { recursive: true, force: true });
+          continue;
+        } catch {
+          // Lost the election, or the rename failed outright. Either way,
+          // fall through to the deadline check rather than looping — a
+          // takeover that can never succeed must time out, not spin.
+        }
       }
       if (Date.now() >= deadline)
         throw new SecretFileLockTimeoutError(filePath);
@@ -566,6 +587,25 @@ export class FileSecretStore implements SecretStore {
    * throw for "there is a file and we cannot read it" — which must never be
    * flattened into an empty map, or `set` would cheerfully overwrite it.
    */
+  /**
+   * Every secret in the file, keyed by `${serverId}:${field}` — `null` when
+   * there is no file.
+   *
+   * Exists for one caller: the hand-off performed when a keychain becomes
+   * available on a box that had been falling back to a file (see
+   * `absorbFileSecretsIntoKeyring`). Nothing in the normal request path
+   * enumerates secrets, and deliberately so — this is the widest possible
+   * read of the store and it should stay a one-purpose seam rather than a
+   * general convenience.
+   *
+   * Throws for the same reasons `get` swallows: an unreadable or
+   * undecryptable file must not present as "no secrets", because the caller
+   * would conclude there was nothing to migrate and move on.
+   */
+  async readAll(): Promise<Record<string, string> | null> {
+    return this.serialize(() => this.readMap());
+  }
+
   private async readMap(): Promise<Record<string, string> | null> {
     const raw = await readStoreFile(this.filePath);
     if (raw === null) return null;
@@ -830,10 +870,19 @@ export async function readSecretFilePermissions(
     const mode = (await fs.stat(filePath)).mode & 0o777;
     if (mode === 0o600) return { state: "ok" };
     return { state: "loose", mode };
-  } catch {
-    // No file yet — the common first run. `writeStoreFile` creates it 0600,
-    // so there is nothing to warn about.
-    return { state: "absent" };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      // No file yet — the common first run. `writeStoreFile` creates it
+      // 0600, so there is nothing to warn about.
+      return { state: "absent" };
+    }
+    // The file exists and we could not inspect it (EACCES on the directory,
+    // a permission-less filesystem). Collapsing this into "absent" is what
+    // makes it dangerous: the descriptor then omits the warning and the
+    // footer goes on stating mode 0600 as fact, having verified nothing.
+    // "Unknown" is the honest third answer.
+    return { state: "unknown", detail: code ?? "unknown error" };
   }
 }
 
@@ -846,4 +895,6 @@ export async function readSecretFilePermissions(
 export type SecretFilePermissionState =
   | { state: "ok" }
   | { state: "absent" }
-  | { state: "loose"; mode: number };
+  | { state: "loose"; mode: number }
+  /** The file is there and its mode could not be read — see above. */
+  | { state: "unknown"; detail: string };

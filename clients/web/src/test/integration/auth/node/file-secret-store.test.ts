@@ -452,6 +452,38 @@ describe("tightenSecretFilePermissions", () => {
     expect((await fs.stat(filePath())).mode & 0o777).toBe(0o600);
   });
 
+  it("reports unknown, not absent, when an existing file cannot be inspected", async () => {
+    // Collapsing every stat failure into "absent" is what made it dangerous:
+    // the descriptor then omits the warning and the footer states mode 0600
+    // as fact, having verified nothing.
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => {
+      const actual =
+        await vi.importActual<typeof import("node:fs/promises")>(
+          "node:fs/promises",
+        );
+      const denied = Object.assign(new Error("EACCES: permission denied"), {
+        code: "EACCES",
+      });
+      return {
+        ...actual,
+        default: actual,
+        stat: vi.fn(() => Promise.reject(denied)),
+      };
+    });
+    try {
+      const mod =
+        await import("@inspector/core/auth/node/file-secret-store.js");
+      expect(await mod.readSecretFilePermissions(filePath())).toEqual({
+        state: "unknown",
+        detail: "EACCES",
+      });
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  });
+
   it("readSecretFilePermissions reports the mode without changing it", async () => {
     // The descriptor is rebuilt on every GET /api/config, so the function it
     // calls must not chmod — once per page load, on a file another process
@@ -903,6 +935,40 @@ describe("acquireLock", () => {
     await release();
     expect(existsSync(lockDir)).toBe(true);
     await fs.rm(lockDir, { recursive: true, force: true });
+  });
+
+  it("elects a single winner when two waiters find the same stale lock", async () => {
+    // `rm`-then-`mkdir` is not an election: both waiters judge the lock
+    // stale, the first removes it and takes a fresh one, and the second then
+    // removes *that* — putting both inside the section at once, which is the
+    // lost update the takeover exists to prevent. The rename is atomic, so
+    // exactly one waiter can claim a given stale lock.
+    const target = path.join(tmpDir, "elected.json");
+    const lockDir = `${target}.lock`;
+    await fs.mkdir(lockDir, { recursive: true });
+    await fs.writeFile(
+      path.join(lockDir, "owner"),
+      // A pid that cannot be running, so both waiters agree it is stale.
+      JSON.stringify({ token: "dead", pid: 2 ** 31 - 1, host: os.hostname() }),
+      "utf-8",
+    );
+    const old = new Date(Date.now() - 60_000);
+    await fs.utimes(lockDir, old, old);
+
+    let inside = 0;
+    let maxInside = 0;
+    const timings = { staleMs: 50, timeoutMs: 10_000, pollMs: 5 };
+    const run = async () => {
+      const release = await acquireLock(target, timings);
+      inside += 1;
+      maxInside = Math.max(maxInside, inside);
+      await new Promise((r) => setTimeout(r, 40));
+      inside -= 1;
+      await release();
+    };
+    await Promise.all([run(), run()]);
+    // Never two holders at once.
+    expect(maxInside).toBe(1);
   });
 
   it("cleans up and reports when it cannot stamp ownership", async () => {

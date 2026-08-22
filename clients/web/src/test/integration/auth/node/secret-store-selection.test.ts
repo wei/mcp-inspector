@@ -612,29 +612,71 @@ describe("absorbFileSecretsIntoKeyring", () => {
 
   it("does not delete a file it cannot read", async () => {
     // An undecryptable file is not an empty one. Deleting it here would lose
-    // exactly the values this whole hand-off exists to preserve.
+    // exactly the values this hand-off exists to preserve.
     const filePath = path.join(tmpDir, "secrets.json");
     process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
-    process.env.MCP_INSPECTOR_SECRET_KEY = "right-key";
-    const seeded = await loadWithProbe(false);
     vi.spyOn(console, "warn").mockImplementation(() => {});
-    await new (
-      await import("@inspector/core/auth/node/file-secret-store.js")
-    ).FileSecretStore({ filePath, passphrase: "right-key" }).set(
+
+    const { FileSecretStore } =
+      await import("@inspector/core/auth/node/file-secret-store.js");
+    await new FileSecretStore({ filePath, passphrase: "right-key" }).set(
       "srv",
       "oauthClientSecret",
       "encrypted",
     );
-    void seeded;
 
-    delete process.env.MCP_INSPECTOR_SECRET_KEY;
+    // The passphrase is gone by the time the keychain reappears.
+    const mod = await loadWithProbe(true);
+    const keyring = new InMemorySecretStore();
+    await mod.absorbFileSecretsIntoKeyring(keyring);
+
+    expect(existsSync(filePath)).toBe(true);
+    expect(await keyring.get("srv", "oauthClientSecret")).toBe(null);
+  });
+
+  it("is a no-op for a file that holds no entries", async () => {
+    // An empty map is not a hand-off. Deleting the file here would be
+    // harmless but pointless; the interesting part is that it does not warn
+    // about a migration that never happened.
+    const filePath = await seedFile({});
+    process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await loadWithProbe(true);
+    await mod.absorbFileSecretsIntoKeyring(new InMemorySecretStore());
+    expect(existsSync(filePath)).toBe(true);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("skips an entry whose account key is malformed", async () => {
+    // A hand-edited file can carry a key that is not `serverId:field`. It
+    // cannot be addressed through the store API, so it is passed over rather
+    // than guessed at — but it must not abort the entries around it.
+    const filePath = await seedFile({
+      "no-separator": "orphan",
+      "srv:oauthClientSecret": "from-file",
+    });
+    process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
+    vi.spyOn(console, "warn").mockImplementation(() => {});
     const mod = await loadWithProbe(true);
     const keyring = new InMemorySecretStore();
 
     await mod.absorbFileSecretsIntoKeyring(keyring);
 
-    expect(existsSync(filePath)).toBe(true);
-    expect(await keyring.get("srv", "oauthClientSecret")).toBe(null);
+    expect(await keyring.get("srv", "oauthClientSecret")).toBe("from-file");
+  });
+
+  it("runs the hand-off for an explicitly configured keyring too", async () => {
+    // `MCP_INSPECTOR_SECRET_STORE=keyring` reaches the keychain by a
+    // different path than the probe does, and a leftover file is just as
+    // invisible either way.
+    const filePath = await seedFile({ "srv:oauthClientSecret": "from-file" });
+    process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
+    process.env.MCP_INSPECTOR_SECRET_STORE = "keyring";
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await loadWithProbe(false);
+    // Resolving is what triggers it, via the configured branch.
+    await mod.resolveSecretStore();
+    expect(existsSync(filePath)).toBe(false);
   });
 
   it("is a no-op when there is no file", async () => {
@@ -643,6 +685,59 @@ describe("absorbFileSecretsIntoKeyring", () => {
     const keyring = new InMemorySecretStore();
     await mod.absorbFileSecretsIntoKeyring(keyring);
     expect(existsSync(path.join(tmpDir, "absent.json"))).toBe(false);
+  });
+});
+
+describe("the descriptor reports a mode it could not verify", () => {
+  it("carries permissionsUnknown when the file exists but cannot be inspected", async () => {
+    // The third state. Without it an unverifiable mode fell into the same
+    // branch as a verified 0600, and the footer claimed owner-only
+    // permissions having read nothing.
+    const filePath = path.join(tmpDir, "secrets.json");
+    process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
+    process.env.MCP_INSPECTOR_SECRET_STORE = "file";
+    await fs.writeFile(
+      filePath,
+      JSON.stringify({ version: 1, encryption: "none", secrets: {} }),
+      "utf-8",
+    );
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => {
+      const actual =
+        await vi.importActual<typeof import("node:fs/promises")>(
+          "node:fs/promises",
+        );
+      const denied = Object.assign(new Error("EACCES: permission denied"), {
+        code: "EACCES",
+      });
+      return {
+        ...actual,
+        default: actual,
+        stat: vi.fn(() => Promise.reject(denied)),
+      };
+    });
+    vi.doMock("@inspector/core/auth/node/secret-store.js", async () => {
+      const actual = await vi.importActual<
+        typeof import("@inspector/core/auth/node/secret-store.js")
+      >("@inspector/core/auth/node/secret-store.js");
+      return {
+        ...actual,
+        probeKeyringAvailable: vi.fn(async () => ({ available: true })),
+      };
+    });
+    try {
+      const mod =
+        await import("@inspector/core/auth/node/secret-store-selection.js");
+      const info = await mod.getSecretStorageInfo();
+      expect(info.permissionsUnknown).toBe("EACCES");
+      expect(info.looseMode).toBeUndefined();
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.doUnmock("@inspector/core/auth/node/secret-store.js");
+      vi.resetModules();
+    }
   });
 });
 

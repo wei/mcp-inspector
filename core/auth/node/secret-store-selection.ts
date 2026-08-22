@@ -40,6 +40,7 @@
  */
 
 import * as fsSync from "node:fs";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
   type SecretStorageInfo,
@@ -54,6 +55,7 @@ import {
 } from "./file-secret-store.js";
 import {
   KeyringSecretStore,
+  parseAccount,
   probeKeyringAvailable,
   secretStoreIsDurable,
   SessionSecretStore,
@@ -186,10 +188,31 @@ function nearestExisting(dir: string): string | null {
  * `null` where that file cannot be read (macOS, Windows, a `/proc`-less
  * container).
  *
- * Field 5 of each line is the mount point, with spaces escaped as `\040`.
- * `/` is dropped: in a container that is the writable layer, which is
- * exactly what the durability question is asking *against*.
+ * Field 5 of each line is the mount point, octal-escaped. `/` is dropped:
+ * in a container that is the writable layer, which is exactly what the
+ * durability question is asking *against*.
  */
+/**
+ * Undo the kernel's octal escaping of a mountinfo path.
+ *
+ * The field is space-delimited, so `show_mountinfo` escapes anything that
+ * would break parsing — space (`\040`), tab (`\011`), newline (`\012`) and
+ * the backslash itself (`\134`). Decoding only the space left a mounted
+ * path containing any of the others compared in its escaped form, so it
+ * matched nothing, and a genuinely mounted volume read as the container's
+ * writable layer: `memory` selected, persistence silently lost on a box
+ * that had arranged for it.
+ *
+ * Handled as one general `\ooo` pass rather than four literals, since the
+ * escaping rule is octal-in-general and a future addition would otherwise
+ * reintroduce exactly this bug.
+ */
+function unescapeMountPoint(point: string): string {
+  return point.replace(/\\(\d{3})/g, (_match, octal: string) =>
+    String.fromCharCode(parseInt(octal, 8)),
+  );
+}
+
 function readMountPoints(): string[] | null {
   try {
     return fsSync
@@ -197,7 +220,7 @@ function readMountPoints(): string[] | null {
       .split("\n")
       .map((line) => line.split(" ")[4])
       .filter((point): point is string => Boolean(point))
-      .map((point) => point.replace(/\\040/g, " "))
+      .map(unescapeMountPoint)
       .filter((point) => point !== "/");
   } catch {
     return null;
@@ -325,6 +348,7 @@ async function describeFileStore(
     path: filePath,
     plaintext,
     ...(perms.state === "loose" ? { looseMode: perms.mode } : {}),
+    ...(perms.state === "unknown" ? { permissionsUnknown: perms.detail } : {}),
     // Only meaningful while the two disagree; omitted otherwise so the
     // payload does not carry a flag that says nothing.
     ...(plaintext && store.encrypted ? { pendingEncryption: true } : {}),
@@ -385,11 +409,18 @@ export function resolveSecretStore(): Promise<ResolvedSecretStore> {
     const configured = parseSecretStoreEnv(process.env[SECRET_STORE_ENV]);
     if (configured) {
       const result = await buildStore(configured, "configured");
+      if (configured === "keyring") {
+        await absorbFileSecretsIntoKeyring(result.store);
+      }
       warnAboutSecretStorage(result.info);
       return result;
     }
     const probe = await probeKeyringAvailable();
-    if (probe.available) return buildStore("keyring", "default");
+    if (probe.available) {
+      const result = await buildStore("keyring", "default");
+      await absorbFileSecretsIntoKeyring(result.store);
+      return result;
+    }
 
     const kind = chooseFallbackKind({
       container: isContainer(),
@@ -400,6 +431,78 @@ export function resolveSecretStore(): Promise<ResolvedSecretStore> {
     return result;
   })();
   return resolved;
+}
+
+/**
+ * Hand a leftover secrets file over to the keychain, once one exists.
+ *
+ * The transition this closes: a box with no libsecret falls back to
+ * `secrets.json` and the user saves an OAuth client secret there. They
+ * install libsecret. The next run probes successfully, selects the keychain
+ * — and every value they saved becomes invisible, because nothing reads the
+ * file any more. The data is still on disk, which makes it worse rather
+ * than better: nothing looks broken, the secrets have simply gone, and the
+ * file sits there as an unexplained leftover.
+ *
+ * The rules are the ones the two existing plaintext migrations already use,
+ * for consistency rather than novelty:
+ *
+ * - **The keychain wins on conflict.** An account already present there is
+ *   left alone; the file's value is treated as the older copy.
+ * - **The file is removed only on complete success.** A partial hand-off
+ *   leaves it exactly as it was, so the next run retries and the
+ *   keychain-wins rule silently absorbs whatever already made it across.
+ * - **An unreadable file is not an empty one.** If it cannot be decrypted
+ *   (the passphrase changed, or is now unset) this reports and returns
+ *   rather than deleting it — the whole point is not to lose the values.
+ *
+ * Never throws. A keychain that fails mid-hand-off leaves the file intact,
+ * which is the safe state, and the user still gets a working session.
+ */
+export async function absorbFileSecretsIntoKeyring(
+  keyring: SecretStore,
+): Promise<void> {
+  const filePath = defaultSecretFilePath();
+  if (!fsSync.existsSync(filePath)) return;
+
+  const file = new FileSecretStore({ filePath });
+  let entries: Record<string, string> | null;
+  try {
+    entries = await file.readAll();
+  } catch (err) {
+    console.warn(
+      `\n[mcp-inspector] The OS keychain is available again, but the secrets file at ${filePath} could not be read, so its contents were left there: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return;
+  }
+  if (!entries || Object.keys(entries).length === 0) return;
+
+  try {
+    for (const [account, value] of Object.entries(entries)) {
+      const parsed = parseAccount(account);
+      if (!parsed) continue;
+      const existing = await keyring.get(parsed.serverId, parsed.field);
+      if (existing === null) {
+        await keyring.set(parsed.serverId, parsed.field, value);
+      }
+    }
+  } catch (err) {
+    console.warn(
+      `\n[mcp-inspector] Could not move the secrets file at ${filePath} into the OS keychain, so it has been left in place: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return;
+  }
+
+  try {
+    await fs.rm(filePath, { force: true });
+    console.warn(
+      `\n[mcp-inspector] The OS keychain is available again. Secrets kept in ${filePath} while it was not have been moved into the keychain, and the file has been removed.`,
+    );
+  } catch {
+    // Every value is in the keychain; only the now-redundant file remains.
+    // Not worth failing startup over, and the keychain-wins rule makes the
+    // next attempt harmless.
+  }
 }
 
 /**

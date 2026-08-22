@@ -284,6 +284,7 @@ describe("useInitialConfig", () => {
         path: "/home/node/.mcp-inspector/secrets.json",
         pendingEncryption: true,
         looseMode: 0o644,
+        permissionsUnknown: "EACCES",
       };
       const fetchFn = vi
         .fn()
@@ -352,6 +353,50 @@ describe("useInitialConfig", () => {
           plaintext: true,
           path: "/x",
           looseMode: "644",
+        },
+      ],
+      [
+        "a non-string permissionsUnknown",
+        {
+          kind: "file",
+          reason: "fallback",
+          durable: true,
+          plaintext: true,
+          path: "/x",
+          permissionsUnknown: true,
+        },
+      ],
+      [
+        // Each file-only field is rejected on its own, so no single one can
+        // slip through on the back of the others being absent.
+        "permissionsUnknown on a keyring descriptor",
+        {
+          kind: "keyring",
+          reason: "default",
+          durable: true,
+          permissionsUnknown: "EACCES",
+        },
+      ],
+      [
+        "looseMode on a keyring descriptor",
+        { kind: "keyring", reason: "default", durable: true, looseMode: 0o644 },
+      ],
+      [
+        "pendingEncryption on a memory descriptor",
+        {
+          kind: "memory",
+          reason: "fallback",
+          durable: false,
+          pendingEncryption: true,
+        },
+      ],
+      [
+        "a path on a memory descriptor",
+        {
+          kind: "memory",
+          reason: "fallback",
+          durable: false,
+          path: "/x/secrets.json",
         },
       ],
       [

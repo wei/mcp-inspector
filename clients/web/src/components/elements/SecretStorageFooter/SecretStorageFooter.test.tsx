@@ -112,4 +112,26 @@ describe("SecretStorageFooter", () => {
     renderWithMantine(<SecretStorageFooter info={undefined} />);
     expect(screen.queryByTestId("secret-storage-footer")).toBeNull();
   });
+
+  it("says the permissions could not be checked rather than claiming owner-only", async () => {
+    // The third permission state. Falling into the verified-0600 branch here
+    // would have the band assert owner-only having read nothing — the same
+    // bug as claiming 0600 in the caveat, one layer up.
+    renderWithMantine(
+      <SecretStorageFooter
+        info={{
+          kind: "file",
+          reason: "fallback",
+          durable: true,
+          plaintext: true,
+          path: "/home/node/.mcp-inspector/secrets.json",
+          permissionsUnknown: "EACCES",
+        }}
+      />,
+    );
+    const band = screen.getByTestId("secret-storage-footer");
+    expect(band).toHaveTextContent("Permissions could not be checked.");
+    expect(band).not.toHaveTextContent("Owner-only");
+    expect(band).toHaveAttribute("data-tone", "warn");
+  });
 });
