@@ -61,8 +61,18 @@ import {
 /** Env var naming an explicit store, bypassing the probe entirely. */
 export const SECRET_STORE_ENV = "MCP_INSPECTOR_SECRET_STORE";
 
-/** Env var overriding the secrets file location. */
+/** Env var overriding the secrets file location outright. */
 export const SECRET_FILE_ENV = "MCP_INSPECTOR_SECRET_FILE";
+
+/**
+ * Env var relocating the Inspector's durable state directory. Already
+ * honored by the web backend for OAuth tokens and `client.json`; the
+ * secrets file follows it for the same reason, and because the mount check
+ * below asks whether *that* directory survives. A container mounting only
+ * the configured storage directory would otherwise be judged unmounted,
+ * fall back to `memory`, and lose secrets the user had arranged to keep.
+ */
+export const STORAGE_DIR_ENV = "MCP_STORAGE_DIR";
 
 const KINDS: SecretStoreKind[] = ["keyring", "file", "memory"];
 
@@ -89,10 +99,16 @@ export function parseSecretStoreEnv(
   return undefined;
 }
 
-/** Default secrets file: beside the catalog, in `~/.mcp-inspector`. */
+/**
+ * Default secrets file: `MCP_INSPECTOR_SECRET_FILE` if named outright,
+ * otherwise `secrets.json` in the configured storage directory, otherwise
+ * beside the catalog in `~/.mcp-inspector`.
+ */
 export function defaultSecretFilePath(): string {
   const override = process.env[SECRET_FILE_ENV]?.trim();
   if (override) return path.resolve(override);
+  const storageDir = process.env[STORAGE_DIR_ENV]?.trim();
+  if (storageDir) return path.resolve(storageDir, "secrets.json");
   const homeDir = process.env.HOME || process.env.USERPROFILE || ".";
   return path.join(homeDir, ".mcp-inspector", "secrets.json");
 }
@@ -172,11 +188,11 @@ export function isOnMountPoint(dir: string): boolean {
 }
 
 /** Build the store named by `kind`, plus the descriptor that explains it. */
-function buildStore(
+async function buildStore(
   kind: SecretStoreKind,
   reason: SecretStorageInfo["reason"],
   detail?: string,
-): ResolvedSecretStore {
+): Promise<ResolvedSecretStore> {
   if (kind === "keyring") {
     return {
       store: new KeyringSecretStore(),
@@ -196,13 +212,24 @@ function buildStore(
   // every failure), and blocking selection on a chmod would make an
   // unwritable file a startup problem rather than a `set`-time one.
   void tightenSecretFilePermissions(filePath);
+  // Report the FILE, not the intent. `store.encrypted` is what the next write
+  // will do; a file already on disk in the clear stays readable until that
+  // write happens, and saying "File (encrypted)" in the meantime is the one
+  // false reassurance this footer must never give. With no file yet (or one we
+  // cannot parse) the policy is all there is to report, and it is then
+  // accurate — the first write creates the file in that mode.
+  const onDisk = await store.readOnDiskEncryption();
+  const plaintext = onDisk === null ? !store.encrypted : onDisk === "none";
   return {
     store,
     info: {
       kind,
       reason,
       path: filePath,
-      plaintext: !store.encrypted,
+      plaintext,
+      // Only meaningful while the two disagree; omitted otherwise so the
+      // payload does not carry a flag that says nothing.
+      ...(plaintext && store.encrypted ? { pendingEncryption: true } : {}),
       durable: true,
       detail,
     },
@@ -260,7 +287,7 @@ export function resolveSecretStore(): Promise<ResolvedSecretStore> {
   resolved ??= (async (): Promise<ResolvedSecretStore> => {
     const configured = parseSecretStoreEnv(process.env[SECRET_STORE_ENV]);
     if (configured) {
-      const result = buildStore(configured, "configured");
+      const result = await buildStore(configured, "configured");
       warnAboutSecretStorage(result.info);
       return result;
     }
@@ -271,7 +298,7 @@ export function resolveSecretStore(): Promise<ResolvedSecretStore> {
       container: isContainer(),
       mounted: isOnMountPoint(path.dirname(defaultSecretFilePath())),
     });
-    const result = buildStore(kind, "fallback", probe.detail);
+    const result = await buildStore(kind, "fallback", probe.detail);
     warnAboutSecretStorage(result.info);
     return result;
   })();

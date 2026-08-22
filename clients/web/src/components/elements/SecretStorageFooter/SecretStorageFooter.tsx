@@ -66,6 +66,15 @@ const FooterDetail = Text.withProps({
   flex: 1,
 });
 
+// `multiline` + a fixed width so the sentence wraps instead of forming a
+// tooltip wider than the modal it explains. Only the `label` is dynamic.
+const CaveatTooltip = Tooltip.withProps({
+  multiline: true,
+  w: 320,
+  position: "top",
+  withArrow: true,
+});
+
 const ICON_SIZE = 14;
 
 /**
@@ -129,11 +138,5 @@ export function SecretStorageFooter({ info }: SecretStorageFooterProps) {
   const tip = [caveat, info.path].filter(Boolean).join(" ");
   if (!tip) return band;
 
-  return (
-    // `multiline` + a width so the sentence wraps instead of forming a tooltip
-    // wider than the modal it explains.
-    <Tooltip label={tip} multiline w={320} position="top" withArrow>
-      {band}
-    </Tooltip>
-  );
+  return <CaveatTooltip label={tip}>{band}</CaveatTooltip>;
 }

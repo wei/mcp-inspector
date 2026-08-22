@@ -33,6 +33,7 @@ const ENV_KEYS = [
   "MCP_INSPECTOR_SECRET_STORE",
   "MCP_INSPECTOR_SECRET_FILE",
   "MCP_INSPECTOR_SECRET_KEY",
+  "MCP_STORAGE_DIR",
   "KUBERNETES_SERVICE_HOST",
 ];
 
@@ -380,5 +381,87 @@ describe("defaultSecretFilePath", () => {
     expect(mod.defaultSecretFilePath()).toContain(
       path.join(".mcp-inspector", "secrets.json"),
     );
+  });
+
+  it("follows MCP_STORAGE_DIR when no explicit file is named", async () => {
+    // The variable that already relocates OAuth tokens and client.json. A
+    // container mounting only that directory must not be judged unmounted and
+    // demoted to `memory` — the user arranged for exactly this directory to
+    // survive.
+    process.env.MCP_STORAGE_DIR = tmpDir;
+    const mod = await loadWithProbe(true);
+    expect(mod.defaultSecretFilePath()).toBe(path.join(tmpDir, "secrets.json"));
+  });
+
+  it("lets an explicit MCP_INSPECTOR_SECRET_FILE outrank MCP_STORAGE_DIR", async () => {
+    // Naming the file outright is the more specific statement of the two.
+    process.env.MCP_STORAGE_DIR = tmpDir;
+    process.env.MCP_INSPECTOR_SECRET_FILE = path.join(tmpDir, "elsewhere.json");
+    const mod = await loadWithProbe(true);
+    expect(mod.defaultSecretFilePath()).toBe(
+      path.join(tmpDir, "elsewhere.json"),
+    );
+  });
+});
+
+describe("the descriptor reports the file, not the write policy", () => {
+  it("says plaintext while a pre-existing plaintext file is only *going* to be encrypted", async () => {
+    // The transitional state: the passphrase is set, so the next write will
+    // encrypt, but the bytes on disk are still readable. Reporting "File
+    // (encrypted)" here is the one false reassurance this subsystem exists to
+    // avoid.
+    const filePath = path.join(tmpDir, "secrets.json");
+    process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
+    process.env.MCP_INSPECTOR_SECRET_STORE = "file";
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const plain = await loadWithProbe(false);
+    await plain.defaultSecretStore().set("alpha", "env:A", "1");
+
+    // Same file, now with a passphrase configured.
+    process.env.MCP_INSPECTOR_SECRET_KEY = "hunter2";
+    const withKey = await loadWithProbe(false);
+    const info = await withKey.getSecretStorageInfo();
+    expect(info.plaintext).toBe(true);
+    expect(info.pendingEncryption).toBe(true);
+
+    // And the advice changes with it: telling someone to set a passphrase
+    // they have already set is worse than saying nothing.
+    const { secretStorageCaveat, secretStorageLabel } =
+      await import("@inspector/core/auth/secret-storage-info.js");
+    expect(secretStorageLabel(info)).toBe("File (unencrypted)");
+    expect(secretStorageCaveat(info)).toMatch(/next time a secret is saved/);
+  });
+
+  it("says encrypted once the upgrading write has actually landed", async () => {
+    const filePath = path.join(tmpDir, "secrets.json");
+    process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
+    process.env.MCP_INSPECTOR_SECRET_STORE = "file";
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const plain = await loadWithProbe(false);
+    await plain.defaultSecretStore().set("alpha", "env:A", "1");
+
+    process.env.MCP_INSPECTOR_SECRET_KEY = "hunter2";
+    const withKey = await loadWithProbe(false);
+    await withKey.defaultSecretStore().set("alpha", "env:B", "2");
+
+    const after = await loadWithProbe(false);
+    const info = await after.getSecretStorageInfo();
+    expect(info.plaintext).toBe(false);
+    expect(info.pendingEncryption).toBeUndefined();
+  });
+
+  it("falls back to the write policy when there is no file yet", async () => {
+    // Nothing on disk to describe, and the policy is then accurate: the first
+    // write creates the file in exactly that mode.
+    process.env.MCP_INSPECTOR_SECRET_FILE = path.join(tmpDir, "absent.json");
+    process.env.MCP_INSPECTOR_SECRET_STORE = "file";
+    process.env.MCP_INSPECTOR_SECRET_KEY = "hunter2";
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await loadWithProbe(false);
+    const info = await mod.getSecretStorageInfo();
+    expect(info.plaintext).toBe(false);
+    expect(info.pendingEncryption).toBeUndefined();
   });
 });

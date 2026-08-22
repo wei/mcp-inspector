@@ -225,6 +225,31 @@ describe("FileSecretStore failure handling", () => {
     );
   });
 
+  it("refuses a file written by a newer format version", async () => {
+    // Readable as far as the plaintext branch is concerned, which is the trap:
+    // accepting it means the next write rewrites it as version 1 and silently
+    // drops whatever the newer format added. Same refusal the encrypted branch
+    // already gives, so the answer doesn't depend on which mode the newer
+    // writer happened to choose.
+    await fs.writeFile(
+      filePath(),
+      JSON.stringify({
+        version: 2,
+        encryption: "none",
+        secrets: { "a:b": "1" },
+      }),
+      "utf-8",
+    );
+    const store = new FileSecretStore({ filePath: filePath() });
+    expect(await store.get("a", "b")).toBe(null);
+    await expect(store.set("a", "b", "2")).rejects.toThrow(/version 2/);
+    // The bytes are still there — nothing was destroyed to answer the write.
+    const raw = JSON.parse(await fs.readFile(filePath(), "utf-8")) as {
+      version: number;
+    };
+    expect(raw.version).toBe(2);
+  });
+
   it("delete stays silent on a file it cannot decrypt", async () => {
     await writeEncryptedFixture();
     const store = new FileSecretStore({
@@ -246,12 +271,31 @@ describe("FileSecretStore failure handling", () => {
     expect(await store.get("alpha", "env:A")).toBe(null);
   });
 
-  it("set reports a file written in a format this build doesn't know", async () => {
+  it("set reports a file written by a newer format version", async () => {
     // The forward-compat case: a newer Inspector's file, opened by an older
     // one. Refusing beats truncating it to the entries we happen to parse.
+    // The version is checked before the encryption mode, so this is the
+    // message even though the cipher is also unrecognized — the version is
+    // the more actionable of the two ("upgrade"), and it is the reason the
+    // file is unreadable regardless of what the cipher turned out to be.
     await fs.writeFile(
       filePath(),
       JSON.stringify({ version: 99, encryption: "chacha20-poly1305" }),
+      "utf-8",
+    );
+    const store = new FileSecretStore({ filePath: filePath() });
+    await expect(store.set("alpha", "env:A", "1")).rejects.toThrow(
+      /format version 99/,
+    );
+  });
+
+  it("set reports an unrecognized cipher at a version it does understand", async () => {
+    // The other half: a file this build's version check accepts, whose
+    // encryption mode it has no code for. A different failure with different
+    // advice, so it must not collapse into the version message.
+    await fs.writeFile(
+      filePath(),
+      JSON.stringify({ version: 1, encryption: "chacha20-poly1305" }),
       "utf-8",
     );
     const store = new FileSecretStore({ filePath: filePath() });
@@ -407,5 +451,50 @@ describe("tightenSecretFilePermissions", () => {
     await expect(
       tightenSecretFilePermissions(path.join(tmpDir, "nope.json")),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("readOnDiskEncryption", () => {
+  it("reports what the file is, not what the store would write", async () => {
+    // The whole reason it exists: these two disagree for a full session after
+    // a passphrase is added to an install that already has a plaintext file.
+    const plain = new FileSecretStore({ filePath: filePath() });
+    await plain.set("alpha", SECRET_FIELD_OAUTH_CLIENT_SECRET, "shh");
+
+    const withKey = new FileSecretStore({
+      filePath: filePath(),
+      passphrase: "hunter2",
+    });
+    expect(withKey.encrypted).toBe(true);
+    expect(await withKey.readOnDiskEncryption()).toBe("none");
+
+    await withKey.set("alpha", "env:A", "1");
+    expect(await withKey.readOnDiskEncryption()).toBe("aes-256-gcm");
+  });
+
+  it("answers null for an absent, unparseable, or unrecognized file", async () => {
+    const store = new FileSecretStore({ filePath: filePath() });
+    expect(await store.readOnDiskEncryption()).toBe(null);
+
+    await fs.writeFile(filePath(), "{not json", "utf-8");
+    expect(await store.readOnDiskEncryption()).toBe(null);
+
+    await fs.writeFile(
+      filePath(),
+      JSON.stringify({ version: 1, encryption: "rot13" }),
+      "utf-8",
+    );
+    expect(await store.readOnDiskEncryption()).toBe(null);
+  });
+
+  it("needs no passphrase — it reads the envelope, never the payload", async () => {
+    // A store whose key is wrong still has to be describable in the UI.
+    const writer = new FileSecretStore({
+      filePath: filePath(),
+      passphrase: "right-key",
+    });
+    await writer.set("alpha", SECRET_FIELD_OAUTH_CLIENT_SECRET, "shh");
+    const keyless = new FileSecretStore({ filePath: filePath() });
+    expect(await keyless.readOnDiskEncryption()).toBe("aes-256-gcm");
   });
 });

@@ -87,6 +87,22 @@ describe("secretStorageCaveat", () => {
     expect(caveat).toContain("MCP_INSPECTOR_SECRET_KEY");
   });
 
+  it("changes the advice once a passphrase is set but not yet applied", () => {
+    // Telling someone to set MCP_INSPECTOR_SECRET_KEY when they already have
+    // is advice that cannot clear the condition. The condition here is the
+    // pending write, so that is what the sentence names — while the verdict
+    // (still unencrypted, still a warning) stays exactly the same.
+    const pending: SecretStorageInfo = {
+      ...plaintextFile,
+      pendingEncryption: true,
+    };
+    expect(secretStorageTone(pending)).toBe("warn");
+    expect(secretStorageLabel(pending)).toBe("File (unencrypted)");
+    const caveat = secretStorageCaveat(pending);
+    expect(caveat).toContain("next time a secret is saved");
+    expect(caveat).not.toContain("MCP_INSPECTOR_SECRET_KEY");
+  });
+
   it("prefers the memory caveat when a memory store somehow carries the flag", () => {
     // Defensive ordering: `plaintext` is meaningless for memory, and the
     // durability loss is the more consequential of the two statements.

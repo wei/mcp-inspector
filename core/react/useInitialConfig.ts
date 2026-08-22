@@ -71,14 +71,33 @@ interface ConfigPayload {
  *
  * The footer states, in the UI, where a user's secret is about to go, so a
  * malformed or partial descriptor must render as "unknown" rather than as a
- * confident half-answer — the `kind` alone is what every label and tone
- * derives from, so it is the field the check turns on.
+ * confident half-answer.
+ *
+ * Every field the footer reads is checked, not just `kind`. A partial
+ * `{ kind: "file" }` would otherwise pass, and because a missing `plaintext`
+ * is falsy it would render as the quiet, neutral *encrypted* file — the
+ * single most misleading thing this component can say, produced by the
+ * absence of information rather than by any claim the backend made. Each
+ * kind's own required fields are checked for the same reason: a file store
+ * with no `path` cannot answer the question a file store exists to answer.
  */
 function usableSecretStorage(value: unknown): SecretStorageInfo | undefined {
   if (typeof value !== "object" || value === null) return undefined;
-  const kind = (value as { kind?: unknown }).kind;
-  if (kind !== "keyring" && kind !== "file" && kind !== "memory") {
+  const v = value as Record<string, unknown>;
+  if (v.kind !== "keyring" && v.kind !== "file" && v.kind !== "memory") {
     return undefined;
+  }
+  if (
+    v.reason !== "configured" &&
+    v.reason !== "default" &&
+    v.reason !== "fallback"
+  ) {
+    return undefined;
+  }
+  if (typeof v.durable !== "boolean") return undefined;
+  if (v.kind === "file") {
+    if (typeof v.path !== "string" || v.path === "") return undefined;
+    if (typeof v.plaintext !== "boolean") return undefined;
   }
   return value as SecretStorageInfo;
 }

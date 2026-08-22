@@ -289,6 +289,27 @@ describe("useInitialConfig", () => {
       ["null", null],
       ["an unknown kind", { kind: "vault", durable: true }],
       ["a missing kind", { durable: true, path: "/x" }],
+      // The dangerous one: `kind` alone passed the old check, and a missing
+      // `plaintext` is falsy, so it rendered as the quiet *encrypted* file —
+      // the most misleading thing this footer can say, produced by the absence
+      // of information rather than by anything the backend claimed.
+      ["a file descriptor with nothing but a kind", { kind: "file" }],
+      [
+        "a file descriptor missing its path",
+        { kind: "file", reason: "fallback", durable: true, plaintext: false },
+      ],
+      [
+        "a file descriptor missing plaintext",
+        { kind: "file", reason: "fallback", durable: true, path: "/x" },
+      ],
+      [
+        "a descriptor with an unknown reason",
+        { kind: "keyring", reason: "vibes", durable: true },
+      ],
+      [
+        "a descriptor with a non-boolean durable",
+        { kind: "memory", reason: "fallback", durable: "no" },
+      ],
     ])("rejects %s", async (_label, value) => {
       const fetchFn = vi
         .fn()

@@ -32,8 +32,16 @@
  *
  * **Key.** `MCP_INSPECTOR_SECRET_KEY` is a passphrase, not a key: it is
  * stretched with scrypt against a per-file random salt stored beside the
- * ciphertext. That means a short, memorable value is safe to use, and it
- * means the same passphrase produces a different key for a different file.
+ * ciphertext, so the same passphrase produces a different key for a
+ * different file and a precomputed table buys an attacker nothing.
+ *
+ * That is **not** a licence to use a short, memorable one. The salt
+ * defeats precomputation; it does nothing against guessing, and the cost
+ * parameters below are deliberately cheap (a few milliseconds, since the
+ * derivation runs on every read and write). Anyone who steals
+ * `secrets.json` can therefore try candidate passphrases quickly and
+ * offline. Use a high-entropy value — generated, not chosen — the same as
+ * you would for any other credential.
  *
  * **Availability contract — identical to `KeyringSecretStore`'s**, because
  * callers must not have to know which store they got. `get` is tolerant
@@ -183,9 +191,45 @@ export class FileSecretStore implements SecretStore {
     this.passphrase = raw && raw.trim() ? raw : undefined;
   }
 
-  /** True when this store encrypts. Drives the `plaintext` descriptor flag. */
+  /**
+   * True when the *next write* will encrypt. This is the configured policy,
+   * not the state of the file — see {@link readOnDiskEncryption}, which is
+   * what the user-facing descriptor is built from.
+   */
   get encrypted(): boolean {
     return this.passphrase !== undefined;
+  }
+
+  /**
+   * What the file on disk is *currently* written as — `null` when there is
+   * no file yet, or when it cannot be read or parsed.
+   *
+   * Separate from {@link encrypted} because the two genuinely disagree for a
+   * whole session: adding `MCP_INSPECTOR_SECRET_KEY` to an install that
+   * already has a plaintext file flips `encrypted` to true immediately,
+   * while the bytes stay readable until the next `set`. A descriptor built
+   * from the policy would tell that user "File (encrypted)" while their
+   * existing secrets sat in the clear — the precise reassurance this whole
+   * subsystem exists not to give.
+   *
+   * Reads the envelope only. It never decrypts, so it needs no passphrase
+   * and answers correctly even when the key is wrong or missing — which is
+   * also a state the UI has to describe rather than throw on.
+   */
+  async readOnDiskEncryption(): Promise<SecretFile["encryption"] | null> {
+    try {
+      const raw = await readStoreFile(this.filePath);
+      if (raw === null) return null;
+      const parsed = JSON.parse(raw) as SecretFile;
+      return parsed.encryption === "none" || parsed.encryption === CIPHER
+        ? parsed.encryption
+        : null;
+    } catch {
+      // Absent, unreadable, or not JSON. "Unknown" is the honest answer, and
+      // the caller falls back to reporting the configured policy — the only
+      // thing that is knowable about a file nobody can read.
+      return null;
+    }
   }
 
   private async deriveKey(kdf: KdfParams): Promise<Buffer> {
@@ -221,10 +265,26 @@ export class FileSecretStore implements SecretStore {
       );
     }
 
+    // Version first, before either branch. A `{ version: 2, encryption:
+    // "none" }` file is readable as far as the plaintext branch is concerned,
+    // but reading it means the next write rewrites it as version 1 — silently
+    // discarding whatever fields version 2 added. That is exactly the
+    // destroy-to-satisfy-an-additive-request case the encrypted branch already
+    // refuses, so it gets the same answer rather than a different one that
+    // happens to depend on which encryption mode the newer writer chose.
+    if (parsed.version !== FORMAT_VERSION) {
+      throw new SecretStoreUnavailableError(
+        `The secrets file at ${this.filePath} declares format version ${String(parsed.version)}, but this Inspector only understands version ${FORMAT_VERSION}. It was probably written by a newer Inspector; upgrade, or move the file aside to start over.`,
+      );
+    }
+
     if (parsed.encryption === "none") {
       // A plaintext file read by a store that now has a passphrase is fine and
       // deliberately not an error: the next write re-encrypts it, so setting
-      // the env var upgrades an existing file in place.
+      // the env var upgrades an existing file in place. Until that write
+      // lands the file really is still readable, which is why
+      // `readOnDiskEncryption` exists — the descriptor must report the file,
+      // not the intent.
       return { ...(parsed.secrets ?? {}) };
     }
 

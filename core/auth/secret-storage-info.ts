@@ -42,12 +42,26 @@ export interface SecretStorageInfo {
    */
   path?: string;
   /**
-   * True when a file-backed store is writing secrets in the clear (no
-   * `MCP_INSPECTOR_SECRET_KEY`). Always false for the other kinds — a
-   * keychain is opaque to us and RAM is not "at rest" in the sense this
-   * flag is about.
+   * True when the secrets file is *currently* in the clear. Read off the
+   * file's own envelope rather than off whether a passphrase is
+   * configured, because those two disagree for a whole session: adding
+   * `MCP_INSPECTOR_SECRET_KEY` to an install that already has a plaintext
+   * file makes the next write encrypt, while the existing bytes stay
+   * readable until then. Reporting the intent would tell that user their
+   * secrets were encrypted while they were not.
+   *
+   * Always false for the other kinds — a keychain is opaque to us and RAM
+   * is not "at rest" in the sense this flag is about.
    */
   plaintext?: boolean;
+  /**
+   * True in exactly the transitional state above: `plaintext` is still
+   * true, but a passphrase is set and the next write will encrypt. It
+   * changes the *advice* rather than the verdict — "set a passphrase" is
+   * the wrong thing to tell someone who already has, so the caveat says
+   * what will actually clear the condition.
+   */
+  pendingEncryption?: boolean;
   /**
    * True when secrets outlive the process. False only for `memory`, and
    * it is the *promise* being made rather than an implementation detail:
@@ -104,7 +118,9 @@ export function secretStorageCaveat(
     return "Secrets are not written anywhere and are lost when the Inspector exits.";
   }
   if (info.plaintext) {
-    return "Secrets are stored unencrypted (file mode 0600). Set MCP_INSPECTOR_SECRET_KEY to encrypt them.";
+    return info.pendingEncryption
+      ? "Existing secrets in this file are still unencrypted (file mode 0600). They are re-encrypted the next time a secret is saved."
+      : "Secrets are stored unencrypted (file mode 0600). Set MCP_INSPECTOR_SECRET_KEY to encrypt them.";
   }
   return undefined;
 }
