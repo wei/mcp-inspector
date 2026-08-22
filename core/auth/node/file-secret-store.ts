@@ -94,6 +94,8 @@ const FORMAT_VERSION = 1;
 const CIPHER = "aes-256-gcm";
 const KEY_BYTES = 32;
 const IV_BYTES = 12;
+/** AES-GCM authentication tag length, in bytes. */
+const GCM_TAG_BYTES = 16;
 /** scrypt defaults. `N` is the only one that meaningfully costs time; 2^14
  * derives in a few milliseconds, which is invisible next to the file I/O it
  * accompanies and is derived once per read/write rather than per secret. */
@@ -235,6 +237,48 @@ export type SecretFileEncryptionState =
   | { state: "encrypted" }
   | { state: "unreadable"; detail: string };
 
+/** A positive, finite integer? */
+const isPositiveInt = (v: unknown): v is number =>
+  typeof v === "number" && Number.isInteger(v) && v > 0;
+
+/**
+ * Why this encrypted envelope could not be opened, or `null` if it can.
+ *
+ * Everything `readMap` needs before it reaches `createDecipheriv`, checked
+ * in the same order it would fail: the parts, then their sizes, then the
+ * derivation parameters. `scrypt` validates its own cost parameters
+ * *synchronously*, so `N: 3` throws out of the derivation rather than
+ * arriving as a decrypt failure — which is why they are checked here rather
+ * than left to the cipher.
+ */
+function encryptedEnvelopeProblem(parsed: SecretFile): string | null {
+  if (!parsed.kdf || typeof parsed.data !== "string") {
+    return "encrypted envelope is missing its kdf or data";
+  }
+  const parts = decodeParts(parsed.data);
+  if (!parts) return "encrypted payload is not iv.tag.ciphertext";
+  if (parts.iv.length !== IV_BYTES) {
+    return `initialization vector is ${parts.iv.length} bytes, expected ${IV_BYTES}`;
+  }
+  if (parts.tag.length !== GCM_TAG_BYTES) {
+    return `authentication tag is ${parts.tag.length} bytes, expected ${GCM_TAG_BYTES}`;
+  }
+  if (parts.body.length === 0) return "ciphertext is empty";
+  const { algorithm, salt, N, r, p } = parsed.kdf;
+  if (algorithm !== "scrypt") return `unsupported kdf "${String(algorithm)}"`;
+  if (typeof salt !== "string" || Buffer.from(salt, "base64").length === 0) {
+    return "kdf salt is missing or not base64";
+  }
+  // `N` must be a power of two greater than 1; node rejects anything else.
+  if (!isPositiveInt(N) || N < 2 || (N & (N - 1)) !== 0) {
+    return `kdf N is ${String(N)}, which is not a power of two above 1`;
+  }
+  if (!isPositiveInt(r) || !isPositiveInt(p)) {
+    return `kdf r/p are ${String(r)}/${String(p)}, which are not positive integers`;
+  }
+  return null;
+}
+
 export interface FileSecretStoreOptions {
   /** Absolute path of the secrets file. */
   filePath: string;
@@ -313,23 +357,14 @@ export class FileSecretStore implements SecretStore {
       }
       if (parsed.encryption === "none") return { state: "plaintext" };
       if (parsed.encryption === CIPHER) {
-        // Naming the cipher is not the same as being openable. An envelope
-        // with no `kdf`/`data` — or a `data` that is not the three-part
-        // payload — is refused by `readMap`, so reporting it as "encrypted"
-        // gives the quiet, reassuring footer for a file whose very next save
-        // is guaranteed to fail. Check the shape the decryptor requires.
-        if (!parsed.kdf || typeof parsed.data !== "string") {
-          return {
-            state: "unreadable",
-            detail: "encrypted envelope is missing its kdf or data",
-          };
-        }
-        if (!decodeParts(parsed.data)) {
-          return {
-            state: "unreadable",
-            detail: "encrypted payload is not iv.tag.ciphertext",
-          };
-        }
+        // Naming the cipher is not the same as being openable, and a partial
+        // check is its own trap: three dot-separated strings satisfy
+        // `decodeParts` while an empty tag, a 4-byte IV or `N: 3` still make
+        // every decrypt throw. Reporting "encrypted" then gives the quiet,
+        // reassuring footer to a file whose very next save is guaranteed to
+        // fail, which is the one thing this state exists to prevent.
+        const problem = encryptedEnvelopeProblem(parsed);
+        if (problem) return { state: "unreadable", detail: problem };
         return { state: "encrypted" };
       }
       return {
@@ -509,23 +544,32 @@ export class FileSecretStore implements SecretStore {
    * someone wrote between our write and our read — so re-apply onto what
    * they left and try again.
    *
-   * The comparison is over the **whole map**, not just the entry we touched,
-   * and that is the entire reason this works. Checking only our own key
-   * passes in precisely the case that loses data: our entry is present, and
-   * it is the *other* writer's that is gone. Trace two writers A and B from
-   * the same `M0` — A writes `MA`, B writes `MB` and clobbers A's entry. B
-   * verifies and sees `M2 === MB`, correctly: B did nothing wrong. A
-   * verifies, sees `M2 !== MA`, re-applies onto `MB`, and writes again. Both
-   * entries survive, and the writer that was clobbered is the one that
-   * repairs it.
+   * The comparison is over the **whole map**, not just the entry we touched.
+   * Checking only our own key would pass in precisely the case that loses
+   * data: our entry is present, and it is the *other* writer's that is gone.
+   * When the verify does fire, the writer that was clobbered is the one that
+   * repairs it — A writes `MA`, B writes `MB` over it, B verifies `MB`
+   * correctly, A verifies, sees `M2 !== MA`, re-applies onto `MB`.
    *
-   * **The residual window, stated plainly rather than left to be
-   * rediscovered:** a process that crashes between its write and its
-   * verifying read cannot notice it was clobbered, and nothing else will.
-   * That is strictly narrower than the lock's failure — which lost updates
-   * with every participant alive and well — and unlike the lock it needs no
-   * primitive Node lacks. It is not mutual exclusion and this file does not
-   * claim to provide it.
+   * **This is not mutual exclusion, and the gap is wider than a crash.**
+   * The verify only catches a clobber that has already landed. Order the
+   * same two writers as write-A, verify-A, write-B, verify-B and both
+   * succeed while A's entry is gone: A's verify ran before B's write, so
+   * there was nothing yet to see, and B did nothing wrong. Nothing detects
+   * it afterwards. A crash between write and verify is one instance of the
+   * same shape, not the whole of it — an earlier version of this comment
+   * said otherwise, which understated it.
+   *
+   * What that buys, stated without overselling: two processes must write the
+   * same file within the window between one's write and its read-back, and
+   * the loss is one secret that reported success. The lock this replaced
+   * lost updates in a *wider* set of interleavings, with every participant
+   * alive, and could not be closed without a primitive Node does not expose
+   * (`renameat2(RENAME_EXCHANGE)`); this costs ~220 fewer lines and converges
+   * in every interleaving where the clobber lands before the verify. If the
+   * residual matters for a deployment, the answer is a real lock — an
+   * OS-backed one from a dedicated library — not another hand-rolled
+   * election.
    *
    * Reads deliberately do not participate: `writeStoreFile` is atomic
    * (write-temp-then-rename), so a reader sees either the old file or the

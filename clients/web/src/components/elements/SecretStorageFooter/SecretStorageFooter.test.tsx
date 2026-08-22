@@ -106,6 +106,36 @@ describe("SecretStorageFooter", () => {
     expect(band).toHaveAttribute("data-tone", "warn");
   });
 
+  it("does not claim exposure in the tooltip when encryption is unknown", async () => {
+    // Mirrors `secretStorageCaveat`: `plaintext` is absent alongside
+    // `encryptionUnknown`, and a two-way `!== false` test would assert that
+    // a reader gets the secrets out of a file we could not even classify.
+    // The claim lives in the *tooltip*, so that is what this hovers to read
+    // — the visible line reports the unreadable envelope, which is a
+    // different (and also correct) statement.
+    const user = userEvent.setup();
+    renderWithMantine(
+      <SecretStorageFooter
+        info={{
+          ...plaintextFile,
+          plaintext: undefined,
+          looseMode: 0o644,
+          encryptionUnknown: "not valid JSON",
+        }}
+      />,
+    );
+    const band = screen.getByTestId("secret-storage-footer");
+    expect(band).toHaveAttribute("data-tone", "warn");
+
+    // The tooltip's target is the copy button, not the band around it.
+    await user.hover(screen.getByRole("button", { name: /Copy secrets file/ }));
+    const tip = await screen.findByText(/Mode 0644 could not be tightened/);
+    expect(tip).toHaveTextContent("could not determine");
+    expect(tip).not.toHaveTextContent(
+      "anyone who can read the file can read the secrets in it",
+    );
+  });
+
   it("renders nothing when the backend didn't report a store", () => {
     // A guessed answer under a secret field is worse than no answer, so the
     // unknown case is silence rather than a default.

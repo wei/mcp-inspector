@@ -936,6 +936,50 @@ describe("readOnDiskEncryption rejects an envelope it could not open", () => {
       },
       "encrypted payload is not iv.tag.ciphertext",
     ],
+    // Three dot-separated strings are not enough: each of these satisfies a
+    // part-count check and still makes every decrypt throw, so reporting
+    // "encrypted" would hand the quiet footer to a file whose next save is
+    // guaranteed to fail.
+    [
+      "an initialization vector of the wrong length",
+      {
+        version: 1,
+        encryption: "aes-256-gcm",
+        kdf: { algorithm: "scrypt", salt: "AAAA", N: 16384, r: 8, p: 1 },
+        data: `${Buffer.alloc(4).toString("base64")}.${Buffer.alloc(16).toString("base64")}.${Buffer.alloc(8).toString("base64")}`,
+      },
+      "initialization vector is 4 bytes, expected 12",
+    ],
+    [
+      "an authentication tag of the wrong length",
+      {
+        version: 1,
+        encryption: "aes-256-gcm",
+        kdf: { algorithm: "scrypt", salt: "AAAA", N: 16384, r: 8, p: 1 },
+        data: `${Buffer.alloc(12).toString("base64")}.${Buffer.alloc(3).toString("base64")}.${Buffer.alloc(8).toString("base64")}`,
+      },
+      "authentication tag is 3 bytes, expected 16",
+    ],
+    [
+      "a KDF cost parameter node would reject",
+      {
+        version: 1,
+        encryption: "aes-256-gcm",
+        kdf: { algorithm: "scrypt", salt: "AAAA", N: 3, r: 8, p: 1 },
+        data: `${Buffer.alloc(12).toString("base64")}.${Buffer.alloc(16).toString("base64")}.${Buffer.alloc(8).toString("base64")}`,
+      },
+      "kdf N is 3, which is not a power of two above 1",
+    ],
+    [
+      "an unsupported KDF",
+      {
+        version: 1,
+        encryption: "aes-256-gcm",
+        kdf: { algorithm: "pbkdf2", salt: "AAAA", N: 16384, r: 8, p: 1 },
+        data: `${Buffer.alloc(12).toString("base64")}.${Buffer.alloc(16).toString("base64")}.${Buffer.alloc(8).toString("base64")}`,
+      },
+      'unsupported kdf "pbkdf2"',
+    ],
   ])("reports unreadable for %s", async (_label, envelope, detail) => {
     await fs.writeFile(filePath(), JSON.stringify(envelope), "utf-8");
     const store = new FileSecretStore({ filePath: filePath() });
@@ -943,6 +987,19 @@ describe("readOnDiskEncryption rejects an envelope it could not open", () => {
       state: "unreadable",
       detail,
     });
+  });
+});
+
+describe("readOnDiskEncryption accepts a real envelope", () => {
+  it("still reports encrypted for a file this build actually wrote", async () => {
+    // The negative cases above are only meaningful next to this: tightening
+    // the validation must not start rejecting the files we produce.
+    const store = new FileSecretStore({
+      filePath: filePath(),
+      passphrase: "hunter2",
+    });
+    await store.set("srv", "env:A", "1");
+    expect(await store.readOnDiskEncryption()).toEqual({ state: "encrypted" });
   });
 });
 
@@ -1017,6 +1074,15 @@ describe("concurrent writers (no lock, optimistic verify-and-retry)", () => {
   // queue and writing through one from inside a queued section would
   // deadlock on it.
   const clobberAfterEveryWrite = (store: FileSecretStore): void => {
+    // Double cast, justified per the repo's TypeScript rules. The property
+    // reached is `private`, so no single cast expresses it. What makes it
+    // safe is that the asserted shape is `writeMap`'s real signature: the
+    // replacement is checked against it, so a rename or a signature change
+    // fails this line rather than silently leaving the stub detached and the
+    // test passing for the wrong reason. The alternative — a production
+    // injection seam — would add API surface existing only for this test,
+    // and would let the real write path drift from the tested one, which is
+    // precisely what this test exists to catch.
     const inner = store as unknown as {
       writeMap: (m: Record<string, string>) => Promise<void>;
     };

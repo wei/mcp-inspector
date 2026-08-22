@@ -169,6 +169,15 @@ export function secretStorageCaveat(
     // kind of wrong: a reader of an *encrypted* file gets ciphertext, not
     // secrets. Saying otherwise trains people to discount the warning on the
     // occasion it is literally true.
+    // Three cases, not two. With `encryptionUnknown` set, `plaintext` is
+    // absent — and `!== false` then lands on the plaintext wording, which
+    // asserts that a reader gets the secrets. The envelope may well hold
+    // ciphertext; we simply could not tell. Claiming the worse of two
+    // unknowns is still claiming something we did not establish, which is
+    // the failure this descriptor exists to avoid.
+    if (info.encryptionUnknown !== undefined) {
+      return `The secrets file is mode ${mode}, not 0600, and could not be tightened — others can copy it, and whether that exposes the secrets depends on encryption this build could not determine (${info.encryptionUnknown}).`;
+    }
     return info.plaintext === false
       ? `The secrets file is mode ${mode}, not 0600, and could not be tightened — others can copy it, and the passphrase is then the only thing protecting its contents.`
       : `The secrets file is mode ${mode}, not 0600, and could not be tightened — anyone who can read it can read the secrets in it.`;

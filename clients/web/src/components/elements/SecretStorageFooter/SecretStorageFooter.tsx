@@ -197,9 +197,16 @@ function footerTooltip(info: SecretStorageInfo): string | undefined {
     // secrets. Claiming otherwise overstates the exposure, and a warning
     // that cries wolf is discounted on the occasion it is literally true.
     parts.push(
-      info.plaintext === false
-        ? `Mode ${formatMode(info.looseMode)} could not be tightened to 0600 — others can copy the file, and the passphrase is then the only thing protecting its contents.`
-        : `Mode ${formatMode(info.looseMode)} could not be tightened to 0600 — anyone who can read the file can read the secrets in it.`,
+      // Three cases, mirroring `secretStorageCaveat`. With
+      // `encryptionUnknown` set, `plaintext` is absent and `!== false` would
+      // land on the "anyone can read the secrets" wording — asserting an
+      // exposure we did not establish, since the envelope may hold
+      // ciphertext we simply could not classify.
+      info.encryptionUnknown !== undefined
+        ? `Mode ${formatMode(info.looseMode)} could not be tightened to 0600 — others can copy the file, and whether that exposes the secrets depends on encryption this build could not determine (${info.encryptionUnknown}).`
+        : info.plaintext === false
+          ? `Mode ${formatMode(info.looseMode)} could not be tightened to 0600 — others can copy the file, and the passphrase is then the only thing protecting its contents.`
+          : `Mode ${formatMode(info.looseMode)} could not be tightened to 0600 — anyone who can read the file can read the secrets in it.`,
     );
   } else if (info.permissionsUnknown !== undefined) {
     parts.push(

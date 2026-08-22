@@ -113,6 +113,27 @@ describe("secretStorageCaveat", () => {
     );
   });
 
+  it("does not claim exposure when the encryption state is unknown", () => {
+    // `looseMode` with `encryptionUnknown` leaves `plaintext` absent, and a
+    // `!== false` test then lands on the plaintext wording — asserting that
+    // a reader gets the secrets. The envelope may hold ciphertext; we could
+    // not classify it. Claiming the worse of two unknowns is still claiming
+    // something we never established.
+    const loose: SecretStorageInfo = {
+      kind: "file",
+      reason: "fallback",
+      durable: true,
+      looseMode: 0o644,
+      encryptionUnknown: "not valid JSON",
+      path: "/tmp/secrets.json",
+    };
+    const caveat = secretStorageCaveat(loose);
+    expect(secretStorageTone(loose)).toBe("warn");
+    expect(caveat).toContain("0644");
+    expect(caveat).toContain("could not determine");
+    expect(caveat).not.toContain("anyone who can read it can read the secrets");
+  });
+
   it("warns about a loose mode even on an encrypted file", () => {
     // The passphrase is then the only thing between a reader and the values,
     // which is worth saying rather than rendering the quiet neutral state.
