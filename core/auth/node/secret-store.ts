@@ -407,13 +407,25 @@ export class KeyringSecretStore implements SecretStore {
    * caller that is about to write based on the answer.
    */
   async getStrict(serverId: string, field: string): Promise<string | null> {
-    const keyring = await loadKeyring();
-    if (!keyring.ok) throw new KeychainUnavailableError(keyring.err);
-    const entry = new keyring.mod.AsyncEntry(
-      SERVICE_NAME,
-      buildAccount(serverId, field),
-    );
-    return (await entry.getPassword()) ?? null;
+    try {
+      const keyring = await loadKeyring();
+      if (!keyring.ok) throw new KeychainUnavailableError(keyring.err);
+      const entry = new keyring.mod.AsyncEntry(
+        SERVICE_NAME,
+        buildAccount(serverId, field),
+      );
+      return (await entry.getPassword()) ?? null;
+    } catch (err) {
+      // "Strict" means the caller learns the read failed — not that it
+      // learns in a form it cannot handle. Both plaintext migrations keep
+      // their source file only when they catch `SecretStoreUnavailableError`;
+      // a raw binding error escaping here sails past that and turns
+      // `GET /api/servers` (or client-config loading) into a 500 instead of
+      // an abandoned migration. Same wrapping `set` already does, for the
+      // same reason.
+      if (err instanceof KeychainUnavailableError) throw err;
+      throw new KeychainUnavailableError(err);
+    }
   }
 
   async get(serverId: string, field: string): Promise<string | null> {

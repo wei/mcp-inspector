@@ -772,35 +772,58 @@ describe("absorbFileSecretsIntoKeyring", () => {
     );
   });
 
-  it("holds the file lock for the whole hand-off", async () => {
-    // Read → copy → delete must be one transaction. Another Inspector
-    // completing a `set` between the read and the delete would have its
-    // brand-new secret removed without ever being copied — a write that
-    // reported success and then vanished.
+  it("declines to delete a file that changed while the hand-off ran", async () => {
+    // Read → copy → delete is no longer one transaction: the store dropped
+    // its cross-process lock in favour of optimistic writes, so another
+    // Inspector can complete a `set` between the read and the delete. That
+    // entry has not been copied, so deleting the file would discard a write
+    // that reported success. The hand-off re-reads immediately before the
+    // delete and backs off when the contents moved.
+    const filePath = await seedFile({ "srv:oauthClientSecret": "from-file" });
+    process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await loadWithProbe(true);
+
+    // Stand in for the other Inspector: write to the file *during* the copy,
+    // which is exactly the window the old lock covered.
+    const keyring = new InMemorySecretStore();
+    const { FileSecretStore } =
+      await import("@inspector/core/auth/node/file-secret-store.js");
+    const original = keyring.set.bind(keyring);
+    let intruded = false;
+    keyring.set = async (id: string, field: string, value: string) => {
+      await original(id, field, value);
+      if (!intruded) {
+        intruded = true;
+        await new FileSecretStore({ filePath }).set("other", "env:LATE", "z");
+      }
+    };
+
+    await mod.absorbFileSecretsIntoKeyring(keyring);
+
+    // The file survives, and so does the entry that arrived late.
+    expect(existsSync(filePath)).toBe(true);
+    expect(
+      await new FileSecretStore({ filePath }).get("other", "env:LATE"),
+    ).toBe("z");
+    expect(warn.mock.calls.flat().join("\n")).toMatch(
+      /changed while that ran, so it has been left in place/,
+    );
+  });
+
+  it("deletes the file when nothing changed under it", async () => {
+    // The ordinary path: no concurrent writer, so the comparison matches and
+    // the now-redundant file goes away.
     const filePath = await seedFile({ "srv:oauthClientSecret": "from-file" });
     process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const mod = await loadWithProbe(true);
 
-    const { acquireLock } =
-      await import("@inspector/core/auth/node/file-secret-store.js");
-    // Hold the lock as the "other process" would.
-    const release = await acquireLock(filePath, { heartbeatMs: 20 });
-    let finished = false;
-    const handOff = mod
-      .absorbFileSecretsIntoKeyring(new InMemorySecretStore())
-      .then(() => {
-        finished = true;
-      });
+    const keyring = new InMemorySecretStore();
+    await mod.absorbFileSecretsIntoKeyring(keyring);
 
-    await new Promise((r) => setTimeout(r, 120));
-    // Blocked on us, not steaming ahead and deleting the file.
-    expect(finished).toBe(false);
-    expect(existsSync(filePath)).toBe(true);
-
-    await release();
-    await handOff;
-    expect(finished).toBe(true);
+    expect(existsSync(filePath)).toBe(false);
+    expect(await keyring.get("srv", "oauthClientSecret")).toBe("from-file");
   });
 
   it("runs the hand-off for an explicitly configured keyring too", async () => {

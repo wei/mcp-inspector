@@ -8,16 +8,13 @@
  * agree with any of those without them being true.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { existsSync } from "node:fs";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
-  acquireLock,
   FileSecretStore,
   readSecretFilePermissions,
-  SecretFileLockTimeoutError,
   SecretFileKeyMismatchError,
   tightenSecretFilePermissions,
 } from "@inspector/core/auth/node/file-secret-store.js";
@@ -876,380 +873,188 @@ describe("payload shape validation", () => {
   });
 });
 
-describe("acquireLock", () => {
-  it("excludes a second holder while the first is live", async () => {
-    const target = path.join(tmpDir, "locked.json");
-    const release = await acquireLock(target);
-    let secondTaken = false;
-    const second = acquireLock(target).then((r) => {
-      secondTaken = true;
-      return r;
+describe("getStrict (round 9)", () => {
+  it("returns the value like get does when the file is readable", async () => {
+    const store = new FileSecretStore({ filePath: filePath() });
+    await store.set("srv", "env:A", "1");
+    expect(await store.getStrict("srv", "env:A")).toBe("1");
+    expect(await store.getStrict("srv", "env:MISSING")).toBe(null);
+  });
+
+  it("throws where get would answer null, so a migration cannot write over a newer value", async () => {
+    // The whole point of the seam: `get` maps an unreadable store to `null`,
+    // and both plaintext migrations *write* on `null` and then delete the
+    // disk copy. Falling back to `get` here left that inversion open on the
+    // very store the seam was added for.
+    const writer = new FileSecretStore({
+      filePath: filePath(),
+      passphrase: "right-key",
     });
-    // Still held: the waiter must not have been let through.
-    await new Promise((r) => setTimeout(r, 60));
-    expect(secondTaken).toBe(false);
-    await release();
-    await (
-      await second
-    )();
-    expect(secondTaken).toBe(true);
-  });
+    await writer.set("srv", "env:A", "1");
 
-  it("steals a lock left behind by a killed process", async () => {
-    // A container killed with SIGKILL leaves the directory. A lock only a
-    // clean exit can release would turn that into permanently broken writes —
-    // strictly worse than the race it prevents.
-    const target = path.join(tmpDir, "stale.json");
-    const lockDir = `${target}.lock`;
-    await fs.mkdir(lockDir);
-    const old = new Date(Date.now() - 60_000);
-    await fs.utimes(lockDir, old, old);
-    const release = await acquireLock(target);
-    await release();
-  });
-
-  it("creates the parent directory so a first write is locked too", async () => {
-    // The first run has no secrets directory yet — `writeStoreFile` creates
-    // it later. Without creating it here, mkdir failed ENOENT and the lock
-    // was skipped, so two processes' *first* writes could both proceed
-    // unlocked and overwrite each other. First writes are exactly when two
-    // processes are most likely to start together.
-    const target = path.join(tmpDir, "no-such-dir", "secrets.json");
-    const release = await acquireLock(target, { pollMs: 10 });
-    // A real lock was taken: a second acquisition must not be handed out.
-    let secondTaken = false;
-    // Held, not floated: an acquisition still running when the test ends
-    // would race `afterEach` removing the temp directory.
-    const second = acquireLock(target, { pollMs: 10 }).then((r) => {
-      secondTaken = true;
-      return r;
+    const wrongKey = new FileSecretStore({
+      filePath: filePath(),
+      passphrase: "wrong-key",
     });
-    await new Promise((r) => setTimeout(r, 60));
-    expect(secondTaken).toBe(false);
-    await release();
-    await (
-      await second
-    )();
-  });
-
-  it("releases only a lock it still owns", async () => {
-    // A holder whose work outran the stale threshold must not delete the
-    // next owner's lock on its way out — that would drop a third writer into
-    // a section two processes believed they held.
-    const target = path.join(tmpDir, "owned.json");
-    const lockDir = `${target}.lock`;
-    const release = await acquireLock(target);
-    // Simulate a steal: someone judged us stale, removed our lock, and took
-    // their own.
-    await fs.rm(lockDir, { recursive: true, force: true });
-    await fs.mkdir(lockDir);
-    await fs.writeFile(path.join(lockDir, "owner"), "someone-else", "utf-8");
-    await release();
-    // Their lock is untouched.
-    expect(await fs.readFile(path.join(lockDir, "owner"), "utf-8")).toBe(
-      "someone-else",
+    expect(await wrongKey.get("srv", "env:A")).toBe(null);
+    await expect(wrongKey.getStrict("srv", "env:A")).rejects.toBeInstanceOf(
+      SecretFileKeyMismatchError,
     );
-    await fs.rm(lockDir, { recursive: true, force: true });
   });
 
-  it("fails the mutation rather than writing past a live holder", async () => {
-    // Falling through to an unlocked write under contention would be the
-    // worst possible moment for it: another writer is provably active. `set`
-    // is allowed to hard-fail, so this surfaces as the documented 503.
-    //
-    // The holder heartbeats faster than it goes stale, so the waiter can
-    // never mistake it for dead and must time out instead.
-    const target = path.join(tmpDir, "contended.json");
-    const timings = {
-      staleMs: 400,
-      timeoutMs: 250,
-      heartbeatMs: 50,
-      pollMs: 10,
-    };
-    const release = await acquireLock(target, timings);
-    try {
-      await expect(acquireLock(target, timings)).rejects.toBeInstanceOf(
-        SecretFileLockTimeoutError,
-      );
-    } finally {
-      await release();
-    }
-  });
-
-  it("does not steal from a holder that is merely slow", async () => {
-    // The heartbeat is what separates "dead" from "slow". Without it a
-    // holder on a slow filesystem loses its lock mid-section and the lost
-    // update comes straight back — so the waiter here must time out rather
-    // than acquire, even though it waits well past the stale threshold.
-    const target = path.join(tmpDir, "slow.json");
-    const release = await acquireLock(target, {
-      staleMs: 120,
-      timeoutMs: 60_000,
-      heartbeatMs: 20,
-      pollMs: 10,
+  it("wraps a filesystem failure as SecretStoreUnavailableError", async () => {
+    // Not a typed refusal — a raw ENOTDIR — which must still arrive as
+    // something the migrations' catch recognises.
+    const blocker = path.join(tmpDir, "blocker");
+    await fs.writeFile(blocker, "x", "utf-8");
+    const store = new FileSecretStore({
+      filePath: path.join(blocker, "secrets.json"),
     });
-    try {
-      let stolen = false;
-      // Held and settled below rather than floated, so the waiter cannot
-      // still be running when `afterEach` removes the temp directory.
-      const waiter = acquireLock(target, {
-        staleMs: 120,
-        timeoutMs: 400,
-        pollMs: 10,
-      })
-        .then(async (r) => {
-          stolen = true;
-          await r();
-        })
-        .catch(() => {
-          // Timed out, which is the expected outcome.
-        });
-      await waiter;
-      expect(stolen).toBe(false);
-    } finally {
-      await release();
-    }
-  });
-
-  it("does not steal a stale lock whose owner process is still alive", async () => {
-    // An old mtime means the holder has not heartbeated lately, and there are
-    // two very different reasons: it died, or it is alive but not running —
-    // SIGSTOPed, event-loop-blocked, or on a machine that suspended. Taking
-    // the lock on elapsed time alone would pull it out from under a live
-    // critical section, which is the lost update the lock exists to prevent.
-    const target = path.join(tmpDir, "suspended.json");
-    const lockDir = `${target}.lock`;
-    await fs.mkdir(lockDir, { recursive: true });
-    // Stamp it with *this* process, which is definitionally alive, and age it
-    // well past stale — the shape of a suspended holder.
-    await fs.writeFile(
-      path.join(lockDir, "owner"),
-      JSON.stringify({
-        token: "someone",
-        pid: process.pid,
-        host: os.hostname(),
-      }),
-      "utf-8",
+    await expect(store.getStrict("srv", "env:A")).rejects.toBeInstanceOf(
+      SecretStoreUnavailableError,
     );
-    const old = new Date(Date.now() - 60_000);
-    await fs.utimes(lockDir, old, old);
-
-    await expect(
-      acquireLock(target, { staleMs: 50, timeoutMs: 150, pollMs: 10 }),
-    ).rejects.toBeInstanceOf(SecretFileLockTimeoutError);
-    // Their lock survives the attempt.
-    expect(existsSync(lockDir)).toBe(true);
-    await fs.rm(lockDir, { recursive: true, force: true });
   });
+});
 
-  it("steals a stale lock whose owner process is gone", async () => {
-    // The case the stealing exists for. A pid that no longer resolves is a
-    // dead holder, and refusing to break its lock would turn one killed
-    // container into permanently broken secret writes.
-    const target = path.join(tmpDir, "dead.json");
-    const lockDir = `${target}.lock`;
-    await fs.mkdir(lockDir, { recursive: true });
-    await fs.writeFile(
-      path.join(lockDir, "owner"),
-      // A pid that cannot be running: `kill(0)` answers ESRCH.
-      JSON.stringify({ token: "gone", pid: 2 ** 31 - 1, host: os.hostname() }),
-      "utf-8",
-    );
-    const old = new Date(Date.now() - 60_000);
-    await fs.utimes(lockDir, old, old);
-
-    const release = await acquireLock(target, {
-      staleMs: 50,
-      timeoutMs: 2_000,
-      pollMs: 10,
-    });
-    await release();
-  });
-
+describe("readOnDiskEncryption rejects an envelope it could not open", () => {
+  // Naming the cipher is not the same as being openable, and reporting
+  // "encrypted" for a file whose next save is guaranteed to fail is the
+  // quiet, reassuring footer arriving for the worst case.
   it.each([
-    ["not JSON at all", "{ not json"],
-    ["JSON that is not an object", '"just-a-string"'],
-    ["an object with no token", JSON.stringify({ pid: 1, host: "h" })],
-  ])("steals a stale lock whose owner stamp is %s", async (_label, stamp) => {
-    // An unusable stamp cannot answer the liveness question, so the mtime is
-    // all there is — and stealing on it is right, because the alternative is
-    // a lock nothing can ever break.
-    const target = path.join(tmpDir, `stamp-${_label.length}.json`);
-    const lockDir = `${target}.lock`;
-    await fs.mkdir(lockDir, { recursive: true });
-    await fs.writeFile(path.join(lockDir, "owner"), stamp, "utf-8");
-    const old = new Date(Date.now() - 60_000);
-    await fs.utimes(lockDir, old, old);
-
-    const release = await acquireLock(target, {
-      staleMs: 50,
-      timeoutMs: 2_000,
-      pollMs: 10,
+    [
+      "no kdf or data",
+      { version: 1, encryption: "aes-256-gcm" },
+      "encrypted envelope is missing its kdf or data",
+    ],
+    [
+      "data that is not iv.tag.ciphertext",
+      {
+        version: 1,
+        encryption: "aes-256-gcm",
+        kdf: { algorithm: "scrypt", salt: "AAAA", N: 16384, r: 8, p: 1 },
+        data: "only-one-part",
+      },
+      "encrypted payload is not iv.tag.ciphertext",
+    ],
+  ])("reports unreadable for %s", async (_label, envelope, detail) => {
+    await fs.writeFile(filePath(), JSON.stringify(envelope), "utf-8");
+    const store = new FileSecretStore({ filePath: filePath() });
+    expect(await store.readOnDiskEncryption()).toEqual({
+      state: "unreadable",
+      detail,
     });
-    await release();
+  });
+});
+
+describe("concurrent writers (no lock, optimistic verify-and-retry)", () => {
+  // The lock these replace was removed after three review rounds each found
+  // a real race in it; the last needed a compare-and-swap on a directory
+  // entry that Node does not expose. The store now lets writers collide and
+  // makes the loser notice — so these assert convergence, which is the
+  // property that actually matters, rather than mutual exclusion, which it
+  // no longer claims.
+
+  it("two stores racing set on one file keep both entries", async () => {
+    // The classic lost update: both read the same map, both write. Whichever
+    // lands second clobbers the other's entry — and the clobbered writer's
+    // verifying read is what catches it and re-applies.
+    const a = new FileSecretStore({ filePath: filePath() });
+    const b = new FileSecretStore({ filePath: filePath() });
+    await Promise.all([a.set("srv", "env:A", "1"), b.set("srv", "env:B", "2")]);
+
+    const reader = new FileSecretStore({ filePath: filePath() });
+    expect(await reader.get("srv", "env:A")).toBe("1");
+    expect(await reader.get("srv", "env:B")).toBe("2");
   });
 
-  it("steals a stale lock whose stamp carries no usable pid", async () => {
-    // A stamp with a non-numeric pid names no process to ask about, so it
-    // cannot vouch for the holder being alive.
-    const target = path.join(tmpDir, "nopid.json");
-    const lockDir = `${target}.lock`;
-    await fs.mkdir(lockDir, { recursive: true });
-    await fs.writeFile(
-      path.join(lockDir, "owner"),
-      JSON.stringify({ token: "t", pid: "not-a-number", host: os.hostname() }),
-      "utf-8",
+  it("keeps every entry when many independent stores write at once", async () => {
+    // Independent instances, so the in-process queue does not serialize them
+    // for us — each is its own writer with its own view of the file.
+    const stores = Array.from(
+      { length: 8 },
+      () => new FileSecretStore({ filePath: filePath() }),
     );
-    const old = new Date(Date.now() - 60_000);
-    await fs.utimes(lockDir, old, old);
+    await Promise.all(stores.map((s, i) => s.set("srv", `env:K${i}`, `v${i}`)));
 
-    const release = await acquireLock(target, {
-      staleMs: 50,
-      timeoutMs: 2_000,
-      pollMs: 10,
-    });
-    await release();
-  });
-
-  it("steals a stale lock stamped by another machine", async () => {
-    // A shared filesystem: we cannot ask this host about that host's pid, so
-    // the mtime is all there is. Refusing would make a lock nothing can ever
-    // break.
-    const target = path.join(tmpDir, "remote.json");
-    const lockDir = `${target}.lock`;
-    await fs.mkdir(lockDir, { recursive: true });
-    await fs.writeFile(
-      path.join(lockDir, "owner"),
-      JSON.stringify({
-        token: "elsewhere",
-        pid: process.pid,
-        host: "some-other-host",
-      }),
-      "utf-8",
-    );
-    const old = new Date(Date.now() - 60_000);
-    await fs.utimes(lockDir, old, old);
-
-    const release = await acquireLock(target, {
-      staleMs: 50,
-      timeoutMs: 2_000,
-      pollMs: 10,
-    });
-    await release();
-  });
-
-  it("stops heartbeating a lock that is no longer ours", async () => {
-    // After a steal, the directory belongs to someone else. Continuing to
-    // touch it would keep *their* lock looking alive after they died, which
-    // turns a stale lock into an unbreakable one.
-    const target = path.join(tmpDir, "stolen.json");
-    const lockDir = `${target}.lock`;
-    const release = await acquireLock(target, { heartbeatMs: 10 });
-    // Someone judges us dead and takes it.
-    await fs.writeFile(
-      path.join(lockDir, "owner"),
-      JSON.stringify({ token: "thief", pid: process.pid, host: os.hostname() }),
-      "utf-8",
-    );
-    const afterSteal = new Date(Date.now() - 30_000);
-    await fs.utimes(lockDir, afterSteal, afterSteal);
-    // Give the heartbeat several chances to (wrongly) refresh it.
-    await new Promise((r) => setTimeout(r, 80));
-    const mtime = (await fs.stat(lockDir)).mtimeMs;
-    expect(Date.now() - mtime).toBeGreaterThan(1_000);
-    // And our release leaves their lock alone, since the token no longer
-    // matches.
-    await release();
-    expect(existsSync(lockDir)).toBe(true);
-    await fs.rm(lockDir, { recursive: true, force: true });
-  });
-
-  it("elects a single winner when two waiters find the same stale lock", async () => {
-    // `rm`-then-`mkdir` is not an election: both waiters judge the lock
-    // stale, the first removes it and takes a fresh one, and the second then
-    // removes *that* — putting both inside the section at once, which is the
-    // lost update the takeover exists to prevent. The rename is atomic, so
-    // exactly one waiter can claim a given stale lock.
-    const target = path.join(tmpDir, "elected.json");
-    const lockDir = `${target}.lock`;
-    await fs.mkdir(lockDir, { recursive: true });
-    await fs.writeFile(
-      path.join(lockDir, "owner"),
-      // A pid that cannot be running, so both waiters agree it is stale.
-      JSON.stringify({ token: "dead", pid: 2 ** 31 - 1, host: os.hostname() }),
-      "utf-8",
-    );
-    const old = new Date(Date.now() - 60_000);
-    await fs.utimes(lockDir, old, old);
-
-    let inside = 0;
-    let maxInside = 0;
-    const timings = { staleMs: 50, timeoutMs: 10_000, pollMs: 5 };
-    const run = async () => {
-      const release = await acquireLock(target, timings);
-      inside += 1;
-      maxInside = Math.max(maxInside, inside);
-      await new Promise((r) => setTimeout(r, 40));
-      inside -= 1;
-      await release();
-    };
-    await Promise.all([run(), run()]);
-    // Never two holders at once.
-    expect(maxInside).toBe(1);
-  });
-
-  it("cleans up and reports when it cannot stamp ownership", async () => {
-    // mkdir succeeded, the owner write did not. Returning a no-op release
-    // here would enter the critical section unlocked *and* leave the
-    // directory behind, so every later writer queues behind an orphan nobody
-    // can deliberately release.
-    const target = path.join(tmpDir, "unstampable.json");
-    vi.resetModules();
-    vi.doMock("node:fs/promises", async () => {
-      const actual =
-        await vi.importActual<typeof import("node:fs/promises")>(
-          "node:fs/promises",
-        );
-      return {
-        ...actual,
-        default: actual,
-        writeFile: vi.fn((p: string, ...rest: unknown[]) =>
-          String(p).endsWith(`${path.sep}owner`)
-            ? Promise.reject(new Error("ENOSPC: no space left on device"))
-            : (actual.writeFile as (...a: unknown[]) => Promise<void>)(
-                p,
-                ...rest,
-              ),
-        ),
-      };
-    });
-    try {
-      const mod =
-        await import("@inspector/core/auth/node/file-secret-store.js");
-      await expect(mod.acquireLock(target)).rejects.toThrow(
-        /Could not initialize the lock/,
-      );
-      // And nothing is left obstructing the next writer.
-      expect(existsSync(`${target}.lock`)).toBe(false);
-    } finally {
-      vi.doUnmock("node:fs/promises");
-      vi.resetModules();
+    const reader = new FileSecretStore({ filePath: filePath() });
+    for (let i = 0; i < stores.length; i++) {
+      expect(await reader.get("srv", `env:K${i}`)).toBe(`v${i}`);
     }
   });
 
-  it("serializes concurrent writers through two independent store instances", async () => {
-    // Two `FileSecretStore` objects have separate in-process queues, so this
-    // is the cross-process race in miniature: without the file lock the second
-    // write drops the first one's entry.
-    const target = path.join(tmpDir, "shared.json");
-    const a = new FileSecretStore({ filePath: target });
-    const b = new FileSecretStore({ filePath: target });
+  it("converges when the racing writers are encrypted", async () => {
+    // Same property with a scrypt derivation inside every attempt, which is
+    // where the window is widest.
+    const opts = { filePath: filePath(), passphrase: "hunter2" };
+    const a = new FileSecretStore(opts);
+    const b = new FileSecretStore(opts);
+    await Promise.all([a.set("srv", "env:A", "1"), b.set("srv", "env:B", "2")]);
+
+    const reader = new FileSecretStore(opts);
+    expect(await reader.get("srv", "env:A")).toBe("1");
+    expect(await reader.get("srv", "env:B")).toBe("2");
+  });
+
+  it("a racing delete and set both land", async () => {
+    const store = new FileSecretStore({ filePath: filePath() });
+    await store.set("srv", "env:OLD", "x");
+
+    const a = new FileSecretStore({ filePath: filePath() });
+    const b = new FileSecretStore({ filePath: filePath() });
     await Promise.all([
-      a.set("alpha", "env:A", "1"),
-      b.set("alpha", "env:B", "2"),
+      a.delete("srv", "env:OLD"),
+      b.set("srv", "env:NEW", "y"),
     ]);
-    expect(await a.get("alpha", "env:A")).toBe("1");
-    expect(await a.get("alpha", "env:B")).toBe("2");
+
+    const reader = new FileSecretStore({ filePath: filePath() });
+    expect(await reader.get("srv", "env:OLD")).toBe(null);
+    expect(await reader.get("srv", "env:NEW")).toBe("y");
+  });
+
+  // A writer that never wins. Simulated by replacing the file *behind* the
+  // store immediately after each write — with a raw `fs` write rather than a
+  // second store, because every store on this path now shares one in-process
+  // queue and writing through one from inside a queued section would
+  // deadlock on it.
+  const clobberAfterEveryWrite = (store: FileSecretStore): void => {
+    const inner = store as unknown as {
+      writeMap: (m: Record<string, string>) => Promise<void>;
+    };
+    const realWrite = inner.writeMap.bind(store);
+    let n = 0;
+    inner.writeMap = async (map: Record<string, string>) => {
+      await realWrite(map);
+      await fs.writeFile(
+        filePath(),
+        JSON.stringify({
+          version: 1,
+          encryption: "none",
+          secrets: { "srv:env:INTRUDER": `v${n++}` },
+        }),
+        "utf-8",
+      );
+    };
+  };
+
+  it("reports non-convergence instead of silently dropping the value", async () => {
+    // Returning after N attempts would reintroduce the silent loss with
+    // extra steps, so this must reject — and say which value was not saved.
+    const store = new FileSecretStore({ filePath: filePath() });
+    clobberAfterEveryWrite(store);
+
+    await expect(store.set("srv", "env:MINE", "1")).rejects.toThrow(
+      /kept overwriting it/,
+    );
+  });
+
+  it("a non-convergent delete stays silent, per the interface contract", async () => {
+    // `delete` reports nothing by contract — only `set` hard-fails — so a
+    // delete that cannot converge must still resolve rather than throw.
+    const store = new FileSecretStore({ filePath: filePath() });
+    await store.set("srv", "env:A", "1");
+    clobberAfterEveryWrite(store);
+
+    await expect(store.delete("srv", "env:A")).resolves.toBeUndefined();
   });
 });
 

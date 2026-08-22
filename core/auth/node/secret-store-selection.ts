@@ -49,7 +49,6 @@ import {
   secretStorageSummary,
 } from "../secret-storage-info.js";
 import {
-  acquireLock,
   FileSecretStore,
   readSecretFilePermissions,
   tightenSecretFilePermissions,
@@ -481,30 +480,27 @@ export async function absorbFileSecretsIntoKeyring(
   if (!fsSync.existsSync(filePath)) return;
 
   const file = new FileSecretStore({ filePath });
-  // The whole read → copy → delete sequence runs under the same cross-process
-  // lock every mutation takes. Without it, another Inspector completing a
-  // `set` between our read and our delete has its brand-new secret removed
-  // and never copied — a write that reported success and then vanished,
-  // which is precisely the loss the lock exists to prevent, arrived at
-  // through the migration meant to preserve things.
-  let release: (() => Promise<void>) | undefined;
-  try {
-    release = await acquireLock(filePath);
-  } catch (err) {
-    console.warn(
-      `\n[mcp-inspector] Could not lock the secrets file at ${filePath} to move it into the OS keychain, so it has been left in place: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return;
-  }
-  try {
-    await handOffUnderLock(file, filePath, keyring);
-  } finally {
-    await release();
-  }
+  await handOff(file, filePath, keyring);
 }
 
-/** The hand-off body. Split out so the lock's release is unmissable. */
-async function handOffUnderLock(
+/**
+ * The hand-off body: read the file, copy every entry into the keychain,
+ * then delete the file.
+ *
+ * **The delete is conditional, because there is no lock.** The store's
+ * mutations are optimistic (see `FileSecretStore.mutate`), so another
+ * Inspector can complete a `set` between our read and our delete — and
+ * removing the file then discards a secret whose write reported success,
+ * which is the exact loss this migration exists to prevent. So the
+ * contents are re-read immediately before the delete and compared against
+ * what was copied; if they differ, the new entries are copied too and the
+ * comparison is made again.
+ *
+ * Bounded, and it declines to delete rather than looping forever: leaving
+ * the file in place costs nothing (the keychain-wins rule makes the next
+ * run idempotent) while deleting it on a stale comparison costs a secret.
+ */
+async function handOff(
   file: FileSecretStore,
   filePath: string,
   keyring: SecretStore,
@@ -562,6 +558,33 @@ async function handOffUnderLock(
     return;
   }
 
+  // Re-read immediately before deleting. Everything above is now in the
+  // keychain, but the file is written without a lock, so another Inspector
+  // may have added an entry since — and that entry has not been copied.
+  // Deleting on a stale read is how a `set` that reported success loses its
+  // value.
+  let latest: Record<string, string> | null;
+  try {
+    latest = await file.readAll();
+  } catch {
+    // Unreadable now, readable a moment ago: something changed it in a way
+    // this passphrase cannot open. Leave it — the copies are safe in the
+    // keychain and the file is the only record of whatever arrived.
+    console.warn(
+      `\n[mcp-inspector] Secrets from ${filePath} were copied into the OS keychain, but the file changed while that ran and can no longer be read, so it has been left in place.`,
+    );
+    return;
+  }
+  if (latest && !sameSecrets(entries, latest)) {
+    // Leave it for the next run rather than looping here: leaving the file
+    // costs nothing (keychain-wins makes the retry idempotent) while
+    // deleting it on a stale comparison costs a secret.
+    console.warn(
+      `\n[mcp-inspector] Secrets from ${filePath} were copied into the OS keychain, but the file changed while that ran, so it has been left in place and will be moved on the next run.`,
+    );
+    return;
+  }
+
   try {
     await fs.rm(filePath, { force: true });
     console.warn(
@@ -572,6 +595,18 @@ async function handOffUnderLock(
     // Not worth failing startup over, and the keychain-wins rule makes the
     // next attempt harmless.
   }
+}
+
+/** Do two secret maps hold exactly the same entries? */
+function sameSecrets(
+  a: Record<string, string>,
+  b: Record<string, string>,
+): boolean {
+  const ak = Object.keys(a);
+  if (ak.length !== Object.keys(b).length) return false;
+  return ak.every(
+    (k) => Object.prototype.hasOwnProperty.call(b, k) && a[k] === b[k],
+  );
 }
 
 /**

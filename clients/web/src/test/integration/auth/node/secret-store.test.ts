@@ -378,6 +378,43 @@ describe("KeyringSecretStore (mocked native bindings)", () => {
     });
   });
 
+  describe("getStrict wraps its failures (round 9)", () => {
+    // "Strict" must mean the caller *learns* the read failed, in a form it
+    // can act on. Both plaintext migrations keep their source file only when
+    // they catch `SecretStoreUnavailableError`; a raw binding error escaping
+    // here sails past that and 500s `GET /api/servers` instead of abandoning
+    // the migration.
+    it("returns the value when the keychain answers", async () => {
+      await store.set("alpha", SECRET_FIELD_OAUTH_CLIENT_SECRET, "shh");
+      expect(
+        await store.getStrict("alpha", SECRET_FIELD_OAUTH_CLIENT_SECRET),
+      ).toBe("shh");
+    });
+
+    it("throws the typed error when the read itself fails", async () => {
+      keyringMocks.failures.getThrows = true;
+      await expect(
+        store.getStrict("alpha", SECRET_FIELD_OAUTH_CLIENT_SECRET),
+      ).rejects.toBeInstanceOf(KeychainUnavailableError);
+    });
+
+    it("throws the typed error when AsyncEntry construction fails", async () => {
+      // #1848's shape: the platform store is unreachable, and it is the
+      // constructor that says so.
+      keyringMocks.failures.constructorThrows = true;
+      await expect(
+        store.getStrict("alpha", SECRET_FIELD_OAUTH_CLIENT_SECRET),
+      ).rejects.toBeInstanceOf(KeychainUnavailableError);
+    });
+
+    it("still answers null for a genuinely absent entry", async () => {
+      // Strictness is about the *store* failing, not about absence.
+      expect(
+        await store.getStrict("alpha", SECRET_FIELD_OAUTH_CLIENT_SECRET),
+      ).toBe(null);
+    });
+  });
+
   describe("probeKeyringAvailable (#1950)", () => {
     // The input to the automatic-fallback policy. It has to answer "is the
     // keychain *usable*", not "did the package import" — the container that

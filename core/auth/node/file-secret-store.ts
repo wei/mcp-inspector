@@ -60,7 +60,6 @@
 
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import { readStoreFile, writeStoreFile } from "../../storage/store-io.js";
 import {
@@ -195,311 +194,34 @@ function decodeParts(
 }
 
 /**
- * How long a lock may be held before another process treats it as
- * abandoned. Generous next to the work it guards (a read, one scrypt
- * derivation, an atomic write — single-digit milliseconds), because the
- * cost of being wrong is asymmetric: waiting a second too long is
- * invisible, while stealing a live lock reintroduces the very race the
- * lock exists to close.
- */
-const LOCK_STALE_MS = 10_000;
-/**
- * How long to wait for a live lock. Deliberately longer than
- * {@link LOCK_STALE_MS}, so a waiter always outlives the point at which the
- * holder becomes stealable — with the shorter value it used to have, a
- * waiter gave up before it could ever steal an abandoned lock, which is the
- * one case the stealing exists for.
- */
-const LOCK_TIMEOUT_MS = 15_000;
-const LOCK_POLL_MS = 25;
-/**
- * How often a holder touches its lock to prove it is alive.
+ * How many times a mutation will re-apply itself before giving up.
  *
- * Comfortably under {@link LOCK_STALE_MS} so a live holder is never judged
- * stale, which is what makes the two mechanisms coherent: staleness then
- * means *dead*, not merely *slow*. Without the heartbeat, a holder on a
- * slow filesystem — or one whose scrypt derivation ran long — has its lock
- * stolen while it is still inside the critical section, reinstating exactly
- * the lost update the lock exists to prevent.
+ * Each attempt is a full read-modify-write plus a verifying read, so the
+ * bound is on *rounds lost to another writer*, not on retries of a failing
+ * operation. Two Inspector processes writing the same file at the same
+ * instant is already rare; losing five consecutive rounds to one means
+ * something other than ordinary contention is happening, and reporting that
+ * is more honest than looping.
  */
-const LOCK_HEARTBEAT_MS = 3_000;
-
-const sleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms));
+const MAX_WRITE_ATTEMPTS = 5;
 
 /**
- * Thrown when a lock is held by someone else for longer than
- * {@link LOCK_TIMEOUT_MS}.
+ * In-process mutation queues, one per resolved secrets-file path.
  *
- * A timeout must **fail the mutation**, never fall through and write
- * anyway: proceeding unlocked past a live holder is precisely the
- * lost-update the lock exists to prevent, and doing it under contention —
- * the one moment another writer is provably active — would be the worst
- * possible time. `set` is allowed to hard-fail by the store contract, so
- * this surfaces as the documented 503 and the user retries.
+ * Process-wide rather than per-store: see `FileSecretStore.serialize`.
  */
-export class SecretFileLockTimeoutError extends SecretStoreUnavailableError {
-  constructor(filePath: string) {
-    super(
-      `Timed out waiting for another process to finish writing the secrets file at ${filePath}. Another Inspector may be busy; try again.`,
-    );
-    this.name = "SecretFileLockTimeoutError";
-  }
-}
+const fileQueues = new Map<string, Promise<unknown>>();
 
-/**
- * Take an exclusive, cross-process lock on `filePath`.
- *
- * `mkdir` is the primitive rather than a lock *file*: it is atomic and
- * fails with `EEXIST` on every POSIX filesystem and on Windows, and it
- * needs no `O_EXCL` open-flag juggling. Returns the release function.
- *
- * **Ownership is stamped, not assumed.** The holder writes a random token
- * inside the lock directory and release only removes a lock still carrying
- * that token. Without it, a holder whose work outran the stale threshold
- * would delete the *next* owner's lock on its way out, letting a third
- * writer into a critical section two processes believed they held — a
- * rarer and much more confusing corruption than the one being prevented.
- *
- * **Stale locks are stolen, and that is not optional.** A container killed
- * with SIGKILL leaves the directory behind, and a lock that only a
- * cooperative exit can release would make one `docker kill` brick secret
- * writes permanently — turning a rare lost write into a permanent outage,
- * which is strictly worse. Staleness is judged by the directory's mtime,
- * which a live holder refreshes on a heartbeat — so "stale" means the
- * holder is *dead*, never merely slow. That distinction is what keeps the
- * stealing from reinstating the very race the lock prevents.
- *
- * Throws {@link SecretFileLockTimeoutError} when another holder keeps it
- * past the timeout. The *only* path that proceeds unlocked is a filesystem
- * that cannot create the lock at all (a read-only mount, an exotic
- * filesystem) — there, refusing would deny every write on a box where the
- * single-process case is still perfectly safe, and a genuinely unwritable
- * location fails at the write itself with a better message than a lock
- * error would give.
- */
-/**
- * Timing policy, overridable so the tests can exercise contention,
- * staleness, and timeout without spending the real intervals. Production
- * callers pass nothing and get the constants above.
- */
-export interface LockTimings {
-  staleMs?: number;
-  timeoutMs?: number;
-  heartbeatMs?: number;
-  pollMs?: number;
-}
-
-export async function acquireLock(
-  filePath: string,
-  timings: LockTimings = {},
-): Promise<() => Promise<void>> {
-  const staleMs = timings.staleMs ?? LOCK_STALE_MS;
-  const timeoutMs = timings.timeoutMs ?? LOCK_TIMEOUT_MS;
-  const heartbeatMs = timings.heartbeatMs ?? LOCK_HEARTBEAT_MS;
-  const pollMs = timings.pollMs ?? LOCK_POLL_MS;
-  const lockDir = `${filePath}.lock`;
-  const ownerFile = `${lockDir}/owner`;
-  const token = crypto.randomBytes(16).toString("hex");
-  // The stamp a would-be thief consults before taking this lock: the token
-  // proves ownership on release, the pid and host let a waiter ask the OS
-  // whether we are still alive rather than inferring it from elapsed time.
-  const owner: LockOwner = { token, pid: process.pid, host: os.hostname() };
-  const noop = async (): Promise<void> => {};
-  const deadline = Date.now() + timeoutMs;
-
-  // The parent must exist before the lock can. On a first run it does not —
-  // `writeStoreFile` creates it later — so without this the very first write
-  // of every process failed with ENOENT and proceeded unlocked, meaning two
-  // first writes could both bypass the lock, read an empty map, and overwrite
-  // each other. The first write is exactly when two processes are most likely
-  // to start together.
-  try {
-    await fs.mkdir(path.dirname(filePath), { recursive: true });
-  } catch {
-    // Unwritable parent. The mkdir below will fail too, and the write after
-    // it will fail with a message about the actual problem.
-  }
-
-  for (;;) {
-    let created = false;
-    try {
-      await fs.mkdir(lockDir, { recursive: false });
-      created = true;
-      // Stamp ownership before entering the section. If this fails the lock
-      // exists but says nothing about who holds it, so nobody could ever
-      // release it deliberately and every later writer would queue behind an
-      // orphan until it aged out. Clean up and report, rather than proceeding
-      // unlocked *and* leaving the obstruction behind.
-      await fs.writeFile(ownerFile, JSON.stringify(owner), "utf-8");
-      // Prove liveness for as long as we hold it. `unref` so a held lock
-      // never keeps the process alive on its own — the interval is a
-      // side-channel, not work anyone is waiting for.
-      const heartbeat = setInterval(() => {
-        // Confirm the lock is still ours before refreshing it. If it was
-        // stolen (only possible when we looked dead, or across hosts where
-        // the pid check cannot apply), the directory now belongs to someone
-        // else — and touching it would keep *their* lock looking alive after
-        // they died, which is how a stale lock becomes an unbreakable one.
-        void (async () => {
-          try {
-            const held = parseOwner(await fs.readFile(ownerFile, "utf-8"));
-            if (held?.token !== token) {
-              clearInterval(heartbeat);
-              return;
-            }
-            const now = new Date();
-            await fs.utimes(lockDir, now, now);
-          } catch {
-            // Released, stolen, or unreadable. The release below copes, and
-            // there is nothing useful to do from a timer.
-          }
-        })();
-      }, heartbeatMs);
-      heartbeat.unref?.();
-      return async () => {
-        clearInterval(heartbeat);
-        try {
-          // Release only what we still own. A lock judged stale and stolen
-          // now belongs to someone else, and removing it would drop them
-          // into a race with whoever comes next.
-          const held = parseOwner(await fs.readFile(ownerFile, "utf-8"));
-          if (held?.token !== token) return;
-          await fs.rm(lockDir, { recursive: true, force: true });
-        } catch {
-          // Already gone, or unreadable. Either way there is nothing to
-          // release and nothing the caller can act on.
-        }
-      };
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (created) {
-        // We made the directory and then failed to stamp it. Ours to remove.
-        await fs.rm(lockDir, { recursive: true, force: true }).catch(() => {});
-        throw new SecretStoreUnavailableError(
-          `Could not initialize the lock for the secrets file at ${filePath}: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-      if (code !== "EEXIST") return noop; // cannot lock here at all — see above
-      if (await canSteal(lockDir, ownerFile, staleMs)) {
-        // Claim the stale lock by *renaming* it, not by removing it.
-        //
-        // `rm` is not an election: two waiters can both judge the same lock
-        // stale, and by the time the second one runs, the first may already
-        // have removed it and created a fresh lock of its own — which the
-        // second then deletes, and both enter the section together. That is
-        // the lost update, reached through the takeover meant to prevent it.
-        //
-        // `rename` is atomic and single-winner: exactly one waiter moves the
-        // directory aside, and the losers get ENOENT and fall through to
-        // retry against whatever the winner does next. The unique
-        // destination (our token) also means two winners of *different*
-        // stale locks cannot collide.
-        const claimed = `${lockDir}.stale-${token}`;
-        try {
-          await fs.rename(lockDir, claimed);
-          await fs.rm(claimed, { recursive: true, force: true });
-          continue;
-        } catch {
-          // Lost the election, or the rename failed outright. Either way,
-          // fall through to the deadline check rather than looping — a
-          // takeover that can never succeed must time out, not spin.
-        }
-      }
-      if (Date.now() >= deadline)
-        throw new SecretFileLockTimeoutError(filePath);
-      await sleep(pollMs);
-    }
-  }
-}
-
-/**
- * May this waiter take a lock it found already held?
- *
- * Elapsed wall time alone does not answer that. An old mtime means the
- * holder has not run its heartbeat lately, and there are two very different
- * reasons for that: it died, or it is *alive but not running* — SIGSTOPed,
- * starved by a blocked event loop, or on a machine that suspended. Expiring
- * on time alone treats those identically and takes the lock out from under a
- * live critical section, which is the lost update the lock exists to
- * prevent, now arrived at through the machinery meant to prevent it.
- *
- * So the mtime only opens the question, and the owner stamp answers it: on
- * the same host, ask the operating system whether that pid is still there.
- * `kill(pid, 0)` sends no signal — it is the standard existence probe.
- * `EPERM` counts as alive (the process exists; it just isn't ours), so a
- * holder running as another user is never stolen from.
- *
- * The stamp is not always usable — a lock written by a different machine
- * over a shared filesystem, or one whose owner file is missing or corrupt.
- * There the mtime is all there is, and stealing on it is still right: the
- * alternative is a lock nothing can ever break, which turns one dead process
- * into a permanent outage.
- */
-async function canSteal(
-  lockDir: string,
-  ownerFile: string,
-  staleMs: number,
-): Promise<boolean> {
-  let held: number;
-  try {
-    held = (await fs.stat(lockDir)).mtimeMs;
-  } catch {
-    // Released between our mkdir and our stat — retry rather than steal.
-    return false;
-  }
-  if (Date.now() - held <= staleMs) return false;
-
-  let owner: LockOwner | null = null;
-  try {
-    owner = parseOwner(await fs.readFile(ownerFile, "utf-8"));
-  } catch {
-    // No stamp to consult; fall through to the time-only answer.
-  }
-  if (!owner || owner.host !== os.hostname() || owner.pid === undefined) {
-    return true;
-  }
-  return !processIsAlive(owner.pid);
-}
-
-/** Does this pid exist? `kill(pid, 0)` is the probe; it sends no signal. */
-function processIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    // EPERM means it exists and belongs to someone else — still alive.
-    return (err as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
-interface LockOwner {
-  token: string;
-  /** Absent when the stamp carried no usable (positive) pid. */
-  pid?: number;
-  host: string;
-}
-
-/** Parse an owner stamp, tolerating anything that isn't one. */
-function parseOwner(raw: string): LockOwner | null {
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== "object" || parsed === null) return null;
-    const { token, pid, host } = parsed as Partial<LockOwner>;
-    if (typeof token !== "string") return null;
-    return {
-      // Only a *positive* pid is usable. `-1` and `0` are wildcards to
-      // `process.kill` — `kill(-1, 0)` asks about every process this user
-      // can signal and answers "alive" for almost any host, which would make
-      // a garbled stamp permanently unstealable. Anything else is recorded
-      // as absent so the caller falls back to the mtime.
-      pid: typeof pid === "number" && pid > 0 ? pid : undefined,
-      token,
-      host: String(host),
-    };
-  } catch {
-    return null;
-  }
+/** Do two secret maps hold exactly the same entries? */
+function sameMap(
+  a: Record<string, string>,
+  b: Record<string, string>,
+): boolean {
+  const ak = Object.keys(a);
+  if (ak.length !== Object.keys(b).length) return false;
+  return ak.every(
+    (k) => Object.prototype.hasOwnProperty.call(b, k) && a[k] === b[k],
+  );
 }
 
 /**
@@ -527,16 +249,6 @@ export interface FileSecretStoreOptions {
 export class FileSecretStore implements SecretStore {
   readonly filePath: string;
   private readonly passphrase: string | undefined;
-  /**
-   * Serializes read-modify-write cycles within this process. `writeStoreFile`
-   * already makes each individual write atomic and ordered, but that is not
-   * enough here: two concurrent `set`s would each read the same "before" map
-   * and the second write would drop the first one's entry. The route handlers
-   * write a server's fields with `Promise.all`, so this is the ordinary path,
-   * not a race that needs contriving.
-   */
-  private queue: Promise<unknown> = Promise.resolve();
-
   constructor(options: FileSecretStoreOptions) {
     this.filePath = options.filePath;
     const raw = options.passphrase ?? process.env[SECRET_KEY_ENV];
@@ -600,7 +312,26 @@ export class FileSecretStore implements SecretStore {
         };
       }
       if (parsed.encryption === "none") return { state: "plaintext" };
-      if (parsed.encryption === CIPHER) return { state: "encrypted" };
+      if (parsed.encryption === CIPHER) {
+        // Naming the cipher is not the same as being openable. An envelope
+        // with no `kdf`/`data` — or a `data` that is not the three-part
+        // payload — is refused by `readMap`, so reporting it as "encrypted"
+        // gives the quiet, reassuring footer for a file whose very next save
+        // is guaranteed to fail. Check the shape the decryptor requires.
+        if (!parsed.kdf || typeof parsed.data !== "string") {
+          return {
+            state: "unreadable",
+            detail: "encrypted envelope is missing its kdf or data",
+          };
+        }
+        if (!decodeParts(parsed.data)) {
+          return {
+            state: "unreadable",
+            detail: "encrypted payload is not iv.tag.ciphertext",
+          };
+        }
+        return { state: "encrypted" };
+      }
       return {
         state: "unreadable",
         detail: `unsupported envelope (encryption="${String(parsed.encryption)}", version=${String(parsed.version)})`,
@@ -762,33 +493,126 @@ export class FileSecretStore implements SecretStore {
    * whatever the first process had just added. Both writes report success;
    * one secret is simply gone.
    *
-   * Only mutations take the lock. Reads deliberately do not: `writeStoreFile`
-   * is atomic (write-temp-then-rename), so a concurrent reader sees either the
-   * old file or the new one and never a torn one, and making every `get`
-   * contend on a lock would put a filesystem round-trip in front of the
-   * request path for no correctness gain.
+   * Apply a mutation to the file, and confirm it survived.
+   *
+   * **There is no cross-process lock.** There was one — a `mkdir` election
+   * with an owner stamp, a heartbeat and a stale-takeover — and three
+   * consecutive review rounds found a real race in it. The last one is
+   * unfixable with what Node exposes: claiming a stale lock needs
+   * compare-and-swap on a directory entry (`renameat2(RENAME_EXCHANGE)`),
+   * and without it a waiter that loses the race can still move the winner's
+   * *fresh* lock aside and enter alongside it.
+   *
+   * So this does the opposite: it lets writers collide and makes the loser
+   * notice. Read `M0`, apply the mutation to get `M1`, write it, then read
+   * back `M2`. If `M2` equals `M1` nothing interleaved. If it does not,
+   * someone wrote between our write and our read — so re-apply onto what
+   * they left and try again.
+   *
+   * The comparison is over the **whole map**, not just the entry we touched,
+   * and that is the entire reason this works. Checking only our own key
+   * passes in precisely the case that loses data: our entry is present, and
+   * it is the *other* writer's that is gone. Trace two writers A and B from
+   * the same `M0` — A writes `MA`, B writes `MB` and clobbers A's entry. B
+   * verifies and sees `M2 === MB`, correctly: B did nothing wrong. A
+   * verifies, sees `M2 !== MA`, re-applies onto `MB`, and writes again. Both
+   * entries survive, and the writer that was clobbered is the one that
+   * repairs it.
+   *
+   * **The residual window, stated plainly rather than left to be
+   * rediscovered:** a process that crashes between its write and its
+   * verifying read cannot notice it was clobbered, and nothing else will.
+   * That is strictly narrower than the lock's failure — which lost updates
+   * with every participant alive and well — and unlike the lock it needs no
+   * primitive Node lacks. It is not mutual exclusion and this file does not
+   * claim to provide it.
+   *
+   * Reads deliberately do not participate: `writeStoreFile` is atomic
+   * (write-temp-then-rename), so a reader sees either the old file or the
+   * new one, never a torn one.
    */
-  private async withFileLock<T>(fn: () => Promise<T>): Promise<T> {
-    const release = await acquireLock(this.filePath);
-    try {
-      return await fn();
-    } finally {
-      await release();
+  private async mutate(
+    apply: (map: Record<string, string>) => Record<string, string> | null,
+  ): Promise<void> {
+    for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt++) {
+      let current: Record<string, string>;
+      try {
+        current = (await this.readMap()) ?? {};
+      } catch (err) {
+        // Already a typed refusal (unreadable file / key mismatch) —
+        // rethrow rather than re-wrapping, so the specific advice survives.
+        if (err instanceof SecretStoreUnavailableError) throw err;
+        throw new SecretStoreUnavailableError(
+          `Could not read the secrets file at ${this.filePath}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      const next = apply(current);
+      // `null` means "nothing to do" — a delete that matched no entry. No
+      // write, so nothing to verify.
+      if (next === null) return;
+      try {
+        await this.writeMap(next);
+      } catch (err) {
+        throw new SecretStoreUnavailableError(
+          `Could not write the secrets file at ${this.filePath}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      let observed: Record<string, string>;
+      try {
+        observed = (await this.readMap()) ?? {};
+      } catch {
+        // We wrote successfully and cannot read it back — most likely
+        // another writer replaced it with something this passphrase cannot
+        // open. Retrying would not help and claiming success would be a
+        // guess, so fall through to the non-convergence error below.
+        continue;
+      }
+      if (sameMap(next, observed)) return;
+      // Someone wrote between our write and our read. Loop: `apply` runs
+      // again against what they left.
     }
+    throw new SecretStoreUnavailableError(
+      `Could not write the secrets file at ${this.filePath}: another process kept overwriting it (gave up after ${MAX_WRITE_ATTEMPTS} attempts). Its secrets are intact; the value you just entered was not saved.`,
+    );
   }
 
-  /** Run `fn` with the file to itself, so concurrent callers can't lose writes. */
+  /**
+   * Run `fn` with the file to itself, so concurrent callers can't lose
+   * writes.
+   *
+   * Keyed on the **resolved path, process-wide** rather than on this
+   * instance. Two `FileSecretStore`s pointing at one file are ordinary —
+   * the resolved store holds one and `absorbFileSecretsIntoKeyring`
+   * constructs another — and a per-instance queue does not order them
+   * against each other at all. They then race in-process, which the
+   * optimistic verify is only *supposed* to catch for writers in different
+   * processes: both read the same map, both write, and whichever verifies
+   * before the other's write lands sees its own value and returns happy.
+   * Measured, not theorised — two instances racing `set` lost an entry on
+   * the first run of the convergence test below.
+   *
+   * So the in-process case is made correct by construction here, and the
+   * verify-and-retry in {@link mutate} covers what this cannot see: a
+   * second Inspector process.
+   */
   private serialize<T>(fn: () => Promise<T>): Promise<T> {
-    const run = this.queue.then(fn);
+    const key = path.resolve(this.filePath);
+    const run = (fileQueues.get(key) ?? Promise.resolve()).then(fn);
     // Swallow on the chain only — the returned promise still rejects, so a
     // failed `set` surfaces to its caller while a later `set` is not poisoned
     // by it. This assignment is also why `this.queue` needs no `.catch()` of
     // its own above: it is only ever `Promise.resolve()` or an
     // already-swallowed promise, so it cannot reject.
-    this.queue = run.then(
+    const settled = run.then(
       () => {},
       () => {},
     );
+    fileQueues.set(key, settled);
+    // Drop the entry once it is the tail, so a long-lived process does not
+    // accumulate one resolved promise per file it has ever touched.
+    void settled.then(() => {
+      if (fileQueues.get(key) === settled) fileQueues.delete(key);
+    });
     return run;
   }
 
@@ -820,6 +644,32 @@ export class FileSecretStore implements SecretStore {
     return out;
   }
 
+  /**
+   * The intolerant read — same lookup as {@link get}, minus the catch.
+   *
+   * Without this, `secretStoreGetStrict` fell back to `get` for the file
+   * store and turned every read failure into `null`. Both plaintext
+   * migrations *write* on `null` and then strip the disk copy, so a
+   * transient read error that cleared before the write let an older
+   * on-disk value replace a newer stored one — the same inversion the
+   * strict seam was introduced to prevent, still open on the store the
+   * seam was introduced for.
+   */
+  async getStrict(serverId: string, field: string): Promise<string | null> {
+    try {
+      const map = await this.serialize(() => this.readMap());
+      return map?.[buildAccount(serverId, field)] ?? null;
+    } catch (err) {
+      // Typed refusals (key mismatch, unsupported envelope) already carry
+      // the advice that fits; anything else is a filesystem failure that
+      // must still reach the caller as something it knows to catch.
+      if (err instanceof SecretStoreUnavailableError) throw err;
+      throw new SecretStoreUnavailableError(
+        `Could not read the secrets file at ${this.filePath}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
   async get(serverId: string, field: string): Promise<string | null> {
     try {
       const map = await this.serialize(() => this.readMap());
@@ -835,27 +685,10 @@ export class FileSecretStore implements SecretStore {
 
   async set(serverId: string, field: string, value: string): Promise<void> {
     await this.serialize(() =>
-      this.withFileLock(async () => {
-        let map: Record<string, string>;
-        try {
-          map = (await this.readMap()) ?? {};
-        } catch (err) {
-          // Already a typed refusal (unreadable file / key mismatch) —
-          // rethrow rather than re-wrapping, so the specific advice survives.
-          if (err instanceof SecretStoreUnavailableError) throw err;
-          throw new SecretStoreUnavailableError(
-            `Could not read the secrets file at ${this.filePath}: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-        map[buildAccount(serverId, field)] = value;
-        try {
-          await this.writeMap(map);
-        } catch (err) {
-          throw new SecretStoreUnavailableError(
-            `Could not write the secrets file at ${this.filePath}: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-      }),
+      this.mutate((map) => ({
+        ...map,
+        [buildAccount(serverId, field)]: value,
+      })),
     );
   }
 
@@ -876,17 +709,16 @@ export class FileSecretStore implements SecretStore {
   private async deleteWhere(match: (key: string) => boolean): Promise<void> {
     try {
       await this.serialize(() =>
-        this.withFileLock(async () => {
-          const map = await this.readMap();
-          if (!map) return;
+        this.mutate((map) => {
           const keys = Object.keys(map).filter(match);
-          if (keys.length === 0) return;
-          for (const key of keys) delete map[key];
+          if (keys.length === 0) return null;
+          const next = { ...map };
+          for (const key of keys) delete next[key];
           // An emptied map keeps the file rather than unlinking it: its
           // presence is what records which encryption mode this install
           // settled on, so a later write can't silently switch modes on the
           // user.
-          await this.writeMap(map);
+          return next;
         }),
       );
     } catch {

@@ -689,7 +689,13 @@ export function createRemoteApp(
     const payload = {
       ...options.initialConfig,
       writable,
-      ...(secretStorage ? { secretStorage } : {}),
+      // Assigned unconditionally, not spread-when-truthy. The resolver's
+      // contract is that `undefined` means "not known right now", and a
+      // conditional spread leaves the *startup* descriptor from
+      // `initialConfig` standing in its place — so a store that became
+      // undescribable would keep serving a stale, confident answer. Setting
+      // it to `undefined` is what clears it; `c.json` omits the key.
+      secretStorage,
       ...(options.sandboxUrl ? { sandboxUrl: options.sandboxUrl } : {}),
     };
     return c.json(payload);
