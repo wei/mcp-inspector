@@ -118,16 +118,6 @@ const ICON_SIZE = 14;
 const formatMode = (mode: number): string => mode.toString(8).padStart(4, "0");
 
 /**
- * The visible statement, per store.
- *
- * Deliberately not built from `secretStorageLabel` for the file case: that
- * label is parenthetical ("File (unencrypted)") because the startup banner
- * appends " at <path>" to it, and the footer wants a sentence instead. The
- * two surfaces have different shapes, so each phrases its own; the *tone*
- * and the underlying facts still come from the shared helpers, which is
- * what keeps them from disagreeing about anything that matters.
- */
-/**
  * How the band describes the file's permissions.
  *
  * Three states, not two, and the third is the point: "Owner-only
@@ -149,6 +139,16 @@ function filePermissionsSentence(info: SecretStorageInfo): string {
   return "Owner-only permissions.";
 }
 
+/**
+ * The visible statement, per store.
+ *
+ * Deliberately not built from `secretStorageLabel` for the file case: that
+ * label is parenthetical ("File (unencrypted)") because the startup banner
+ * appends " at <path>" to it, and the footer wants a sentence instead. The
+ * two surfaces have different shapes, so each phrases its own; the *tone*
+ * and the underlying facts still come from the shared helpers, which is
+ * what keeps them from disagreeing about anything that matters.
+ */
 function footerMessage(info: SecretStorageInfo): string {
   if (info.kind === "keyring") return secretStorageLabel(info);
   if (info.kind === "memory") {
@@ -160,11 +160,6 @@ function footerMessage(info: SecretStorageInfo): string {
       : secretStorageLabel(info);
   }
   const encryption = info.plaintext ? "Plaintext" : "Encrypted";
-  // "Owner-only permissions." is a claim of fact, so it is only made when the
-  // mode was actually verified as 0600. `looseMode` is set precisely when it
-  // is something else and could not be tightened, and saying "owner-only"
-  // there would be the footer asserting the opposite of what is true — the
-  // one failure this whole band exists to prevent.
   const permissions = filePermissionsSentence(info);
   return `${encryption} file. ${permissions}`;
 }
