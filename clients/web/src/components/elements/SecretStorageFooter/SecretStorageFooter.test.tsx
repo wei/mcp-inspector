@@ -1,4 +1,5 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import userEvent from "@testing-library/user-event";
 import type { SecretStorageInfo } from "@inspector/core/auth/secret-storage-info.js";
 import { renderWithMantine, screen } from "../../../test/renderWithMantine";
 import { SecretStorageFooter } from "./SecretStorageFooter";
@@ -34,29 +35,67 @@ describe("SecretStorageFooter", () => {
     expect(band).toHaveAttribute("data-tone", "neutral");
   });
 
-  it("shows the path for an encrypted file, quietly", () => {
-    // Nothing is wrong here, so the band must not shout — the path is the
-    // useful part and the tone stays neutral.
+  it("states an encrypted file quietly, and offers its path for copying", () => {
+    // Nothing is wrong here, so the band must not shout. The path is no longer
+    // printed on the band — it goes to the clipboard — so the accessible name
+    // is where it stays readable.
     renderWithMantine(<SecretStorageFooter info={encryptedFile} />);
     const band = screen.getByTestId("secret-storage-footer");
-    expect(band).toHaveTextContent("Secrets: File (encrypted)");
-    expect(
-      screen.getByText("/home/node/.mcp-inspector/secrets.json"),
-    ).toBeInTheDocument();
+    expect(band).toHaveTextContent(
+      "Secrets: Encrypted file. Owner-only permissions.",
+    );
     expect(band).toHaveAttribute("data-tone", "neutral");
+    expect(
+      screen.getByRole("button", {
+        name: "Copy secrets file path: /home/node/.mcp-inspector/secrets.json",
+      }),
+    ).toBeInTheDocument();
   });
 
-  it("renders the plaintext caveat inline, not only on hover", () => {
-    // This is the "loud banner" decision made concrete: a warning you have
-    // to hover to discover is not a warning. The caveat takes the visible
-    // slot, displacing the path (which stays in the tooltip).
+  it("says a plaintext file is plaintext, in the warning tone", () => {
+    // The "loud warning" decision made concrete: the state is on the band
+    // itself, not hidden behind a hover.
     renderWithMantine(<SecretStorageFooter info={plaintextFile} />);
     const band = screen.getByTestId("secret-storage-footer");
-    expect(band).toHaveTextContent("Secrets: File (unencrypted)");
-    expect(
-      screen.getByText(/Set MCP_INSPECTOR_SECRET_KEY to encrypt them/),
-    ).toBeInTheDocument();
+    expect(band).toHaveTextContent(
+      "Secrets: Plaintext file. Owner-only permissions.",
+    );
     expect(band).toHaveAttribute("data-tone", "warn");
+  });
+
+  it("copies the path on click", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    // happy-dom has no clipboard; define one so the copy path is exercised
+    // rather than merely not throwing.
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+    renderWithMantine(<SecretStorageFooter info={plaintextFile} />);
+    await user.click(screen.getByRole("button", { name: /Copy secrets file/ }));
+    expect(writeText).toHaveBeenCalledWith(
+      "/home/node/.mcp-inspector/secrets.json",
+    );
+  });
+
+  it("is inert for a store with no file to point at", () => {
+    // A keychain or in-memory store has no path, so there is nothing to copy
+    // and the band must not pretend to be a control.
+    renderWithMantine(<SecretStorageFooter info={keyring} />);
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  it("declines to claim owner-only permissions when the mode says otherwise", () => {
+    // The one assertion the band must never get wrong: `looseMode` is set
+    // exactly when 0600 could not be reached, so "Owner-only permissions."
+    // there would state the opposite of the truth.
+    renderWithMantine(
+      <SecretStorageFooter info={{ ...plaintextFile, looseMode: 0o644 }} />,
+    );
+    const band = screen.getByTestId("secret-storage-footer");
+    expect(band).toHaveTextContent("Mode 0644 — not owner-only.");
+    expect(band).not.toHaveTextContent("Owner-only permissions.");
   });
 
   it("warns that an in-memory store loses secrets on exit", () => {

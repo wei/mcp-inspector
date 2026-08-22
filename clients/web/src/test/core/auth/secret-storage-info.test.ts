@@ -76,9 +76,7 @@ describe("secretStorageCaveat", () => {
   });
 
   it("names the loss for memory", () => {
-    expect(secretStorageCaveat(memory)).toContain(
-      "lost on exit",
-    );
+    expect(secretStorageCaveat(memory)).toContain("lost on exit");
   });
 
   it("names the fix for an unencrypted file, not just the problem", () => {

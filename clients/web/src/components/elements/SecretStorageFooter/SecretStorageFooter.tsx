@@ -1,4 +1,11 @@
-import { Group, Text, Tooltip } from "@mantine/core";
+import type { ReactNode } from "react";
+import {
+  CopyButton,
+  Group,
+  Text,
+  Tooltip,
+  UnstyledButton,
+} from "@mantine/core";
 import { TbAlertTriangle, TbDeviceDesktop, TbLock } from "react-icons/tb";
 import {
   secretStorageCaveat,
@@ -34,17 +41,50 @@ export interface SecretStorageFooterProps {
 const FooterBand = Group.withProps({
   variant: "stickyModalFooter",
   h: SECRET_STORAGE_FOOTER_HEIGHT,
-  px: "md",
-  gap: 6,
+  gap: 0,
   align: "center",
   wrap: "nowrap",
   w: "100%",
 });
 
-const FooterLabel = Text.withProps({
+// The icon + message row. Carries the horizontal padding (rather than the band)
+// so that when the row is a copy button it covers the band edge to edge — a
+// click target with dead margins is a click target people miss.
+const FooterRow = Group.withProps({
+  h: "100%",
+  w: "100%",
+  px: "md",
+  gap: 6,
+  align: "center",
+  wrap: "nowrap",
+});
+
+// The whole strip becomes the copy affordance for a file-backed store. An
+// `UnstyledButton` rather than a click handler on the Group: this is a real
+// action, so it needs to be reachable by keyboard and announced as a button.
+const CopyTarget = UnstyledButton.withProps({
+  h: "100%",
+  w: "100%",
+});
+
+// The whole statement, prefix included, as one clamped line.
+//
+// `lineClamp` rather than `truncate`, and the difference is load-bearing.
+// `Modal.Content` sizes its scroll container to its children's **max-content**
+// width, and `truncate` sets `white-space: nowrap`, whose max-content is the
+// entire sentence — so the band grew the container to 770px inside a 620px
+// modal and the *form above it* got clipped at the right edge (measured).
+// Clamped text still wraps internally, so its max-content is merely its
+// longest word, and the container stays the modal's width; the clamp then
+// keeps it to the one line this 32px band has room for. `miw: 0` + `flex: 1`
+// let it shrink to the leftover space rather than to its content.
+const FooterMessage = Text.withProps({
   size: "xs",
   fw: 500,
-  variant: "nowrap",
+  lineClamp: 1,
+  miw: 0,
+  flex: 1,
+  ta: "left",
 });
 
 // "Secrets:" carries the heavier weight so the band reads as a labelled fact
@@ -63,25 +103,6 @@ const FooterLabelPrefix = Text.withProps({
   fw: 700,
 });
 
-// The detail — a path, or the caveat sentence — is the part allowed to lose
-// characters, since the label before it carries the answer.
-//
-// `lineClamp` rather than `truncate`, and the difference is load-bearing.
-// `Modal.Content` sizes its scroll container to its children's **max-content**
-// width, and `truncate` sets `white-space: nowrap`, whose max-content is the
-// entire sentence — so the band grew the container to 770px inside a 620px
-// modal and the *form above it* got clipped at the right edge (measured).
-// Clamped text still wraps internally, so its max-content is merely its
-// longest word, and the container stays the modal's width; the clamp then
-// keeps it to the one line this 32px band has room for. `miw: 0` + `flex: 1`
-// let it shrink to the leftover space rather than to its content.
-const FooterDetail = Text.withProps({
-  size: "xs",
-  lineClamp: 1,
-  miw: 0,
-  flex: 1,
-});
-
 // `multiline` + a fixed width so the sentence wraps instead of forming a
 // tooltip wider than the modal it explains. Only the `label` is dynamic.
 const CaveatTooltip = Tooltip.withProps({
@@ -92,6 +113,70 @@ const CaveatTooltip = Tooltip.withProps({
 });
 
 const ICON_SIZE = 14;
+
+/** Octal mode, as `stat` would print it (`0644`). */
+const formatMode = (mode: number): string => mode.toString(8).padStart(4, "0");
+
+/**
+ * The visible statement, per store.
+ *
+ * Deliberately not built from `secretStorageLabel` for the file case: that
+ * label is parenthetical ("File (unencrypted)") because the startup banner
+ * appends " at <path>" to it, and the footer wants a sentence instead. The
+ * two surfaces have different shapes, so each phrases its own; the *tone*
+ * and the underlying facts still come from the shared helpers, which is
+ * what keeps them from disagreeing about anything that matters.
+ */
+function footerMessage(info: SecretStorageInfo): string {
+  if (info.kind === "keyring") return secretStorageLabel(info);
+  if (info.kind === "memory") {
+    // Derived rather than restated — memory's consequence is the caveat, and
+    // the banner prints the same sentence.
+    const caveat = secretStorageCaveat(info);
+    return caveat
+      ? `${secretStorageLabel(info)}: ${caveat}`
+      : secretStorageLabel(info);
+  }
+  const encryption = info.plaintext ? "Plaintext" : "Encrypted";
+  // "Owner-only permissions." is a claim of fact, so it is only made when the
+  // mode was actually verified as 0600. `looseMode` is set precisely when it
+  // is something else and could not be tightened, and saying "owner-only"
+  // there would be the footer asserting the opposite of what is true — the
+  // one failure this whole band exists to prevent.
+  const permissions =
+    info.looseMode === undefined
+      ? "Owner-only permissions."
+      : `Mode ${formatMode(info.looseMode)} — not owner-only.`;
+  return `${encryption} file. ${permissions}`;
+}
+
+/**
+ * The hover text, per store. Undefined leaves the band without a tooltip.
+ *
+ * For a file-backed store it always ends with the copy hint, because the
+ * path is no longer shown on the band — it is in the clipboard instead, and
+ * an affordance nobody knows about is not one.
+ */
+function footerTooltip(info: SecretStorageInfo): string | undefined {
+  if (info.kind !== "file" || !info.path) return undefined;
+  const parts: string[] = [];
+  if (info.plaintext) {
+    // Advice that can actually clear the condition: someone who has already
+    // set the passphrase is waiting on the next write, not on themselves.
+    parts.push(
+      info.pendingEncryption
+        ? "Re-encrypted the next time a secret is saved."
+        : "Set MCP_INSPECTOR_SECRET_KEY to encrypt.",
+    );
+  }
+  if (info.looseMode !== undefined) {
+    parts.push(
+      `Mode ${formatMode(info.looseMode)} could not be tightened to 0600 — anyone who can read the file can read the secrets in it.`,
+    );
+  }
+  parts.push("Click to copy file path");
+  return parts.join(" ");
+}
 
 /**
  * The permanent "here is where your secrets go" strip at the bottom of the
@@ -121,46 +206,59 @@ const ICON_SIZE = 14;
 export function SecretStorageFooter({ info }: SecretStorageFooterProps) {
   if (!info) return null;
 
-  const caveat = secretStorageCaveat(info);
   const warn = secretStorageTone(info) === "warn";
   const color = warn
     ? "var(--inspector-warning-text)"
     : "var(--inspector-text-secondary)";
-  // The caveat wins the visible slot when there is one; otherwise the path,
-  // which only the (quiet) encrypted-file case has.
-  const detail = caveat ?? info.path;
   const Icon = warn
     ? TbAlertTriangle
     : info.kind === "keyring"
       ? TbDeviceDesktop
       : TbLock;
 
-  const band = (
-    <FooterBand
-      data-testid="secret-storage-footer"
-      data-tone={warn ? "warn" : "neutral"}
-    >
+  const row = (
+    <FooterRow>
       {/* A react-icons glyph, not a Mantine factory component — outside the
           `.withProps()` rule, and it takes `color` as a prop rather than a
           style. */}
       <Icon size={ICON_SIZE} color={color} aria-hidden />
-      {/* The colon lives here rather than in `secretStorageLabel`, because the
-          label is also used on its own — by `secretStorageSummary` for the
-          startup banner, where a trailing colon before " at <path>" would be
-          wrong. It appears only when something follows it. */}
-      <FooterLabel c={color}>
-        <FooterLabelPrefix>Secrets:</FooterLabelPrefix>{" "}
-        {secretStorageLabel(info)}
-        {detail ? ":" : ""}
-      </FooterLabel>
-      {detail && <FooterDetail c={color}>{detail}</FooterDetail>}
+      <FooterMessage c={color}>
+        <FooterLabelPrefix>Secrets:</FooterLabelPrefix> {footerMessage(info)}
+      </FooterMessage>
+    </FooterRow>
+  );
+
+  const tip = footerTooltip(info);
+  const band = (content: ReactNode) => (
+    <FooterBand
+      data-testid="secret-storage-footer"
+      data-tone={warn ? "warn" : "neutral"}
+    >
+      {content}
     </FooterBand>
   );
 
-  // Tooltip content: the caveat plus the path when both exist (the unencrypted
-  // file case), since the visible slot can only show one of them.
-  const tip = [caveat, info.path].filter(Boolean).join(" ");
-  if (!tip) return band;
+  // A keychain or in-memory store has no path, so there is nothing to copy and
+  // the band stays inert — no button, no tooltip beyond what it already shows.
+  if (!info.path) return band(row);
 
-  return <CaveatTooltip label={tip}>{band}</CaveatTooltip>;
+  return (
+    <CopyButton value={info.path} timeout={1500}>
+      {({ copied, copy }) =>
+        band(
+          <CaveatTooltip label={copied ? "Path copied" : tip}>
+            {/* The accessible name carries the path itself: a screen-reader
+                user gets no benefit from a clipboard they cannot inspect, so
+                the one place the location is still *readable* is here. */}
+            <CopyTarget
+              onClick={copy}
+              aria-label={`Copy secrets file path: ${info.path}`}
+            >
+              {row}
+            </CopyTarget>
+          </CaveatTooltip>,
+        )
+      }
+    </CopyButton>
+  );
 }

@@ -45,9 +45,15 @@ export const EncryptedFile: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const band = await canvas.findByTestId("secret-storage-footer");
-    await expect(band).toHaveTextContent("Secrets: File (encrypted)");
+    await expect(band).toHaveTextContent(
+      "Secrets: Encrypted file. Owner-only permissions.",
+    );
+    // The path is no longer printed on the band — it goes to the clipboard,
+    // and stays readable in the button's accessible name.
     await expect(
-      canvas.getByText("/home/node/.mcp-inspector/secrets.json"),
+      canvas.getByRole("button", {
+        name: "Copy secrets file path: /home/node/.mcp-inspector/secrets.json",
+      }),
     ).toBeInTheDocument();
   },
 };
@@ -68,7 +74,9 @@ export const UnencryptedFile: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const band = await canvas.findByTestId("secret-storage-footer");
-    await expect(band).toHaveTextContent("Secrets: File (unencrypted)");
+    await expect(band).toHaveTextContent(
+      "Secrets: Plaintext file. Owner-only permissions.",
+    );
     await expect(band).toHaveAttribute("data-tone", "warn");
   },
 };
