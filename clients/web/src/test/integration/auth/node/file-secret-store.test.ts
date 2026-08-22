@@ -767,12 +767,15 @@ describe("getMany", () => {
     await store.set("other", "env:TOKEN", "nope");
 
     expect(
-      await store.getMany("srv", [
-        SECRET_FIELD_OAUTH_CLIENT_SECRET,
-        "env:TOKEN",
-        "env:ABSENT",
+      await store.getMany([
+        {
+          serverId: "srv",
+          fields: [SECRET_FIELD_OAUTH_CLIENT_SECRET, "env:TOKEN", "env:ABSENT"],
+        },
       ]),
-    ).toEqual({ [SECRET_FIELD_OAUTH_CLIENT_SECRET]: "s1", "env:TOKEN": "s2" });
+    ).toEqual({
+      srv: { [SECRET_FIELD_OAUTH_CLIENT_SECRET]: "s1", "env:TOKEN": "s2" },
+    });
   });
 
   it("derives the key once for the whole set, not once per field", async () => {
@@ -811,7 +814,9 @@ describe("getMany", () => {
         passphrase: "hunter2",
       });
 
-      await fresh.getMany("srv", ["env:A", "env:B", "env:C"]);
+      await fresh.getMany([
+        { serverId: "srv", fields: ["env:A", "env:B", "env:C"] },
+      ]);
       expect(derivations).toBe(1);
 
       // And the shape it replaced, for contrast: three fields, three
@@ -827,10 +832,64 @@ describe("getMany", () => {
     }
   });
 
+  it("derives the key once for MANY SERVERS, not once per server", async () => {
+    // The finding this pins (round 13): a per-server seam did not fix the
+    // case it was written for. Both rehydration callers iterate servers, so
+    // 20 servers holding one secret each still paid 20 serialized
+    // derivations — the same stall, reached one server at a time.
+    vi.resetModules();
+    let derivations = 0;
+    vi.doMock("node:crypto", async () => {
+      const actual =
+        await vi.importActual<typeof import("node:crypto")>("node:crypto");
+      return {
+        ...actual,
+        default: actual,
+        scrypt: (...args: Parameters<typeof actual.scrypt>) => {
+          derivations++;
+          return actual.scrypt(...args);
+        },
+      };
+    });
+    try {
+      const mod =
+        await import("@inspector/core/auth/node/file-secret-store.js");
+      const seed = new mod.FileSecretStore({
+        filePath: filePath(),
+        passphrase: "hunter2",
+      });
+      for (const id of ["a", "b", "c", "d"]) {
+        await seed.set(id, "env:TOKEN", `v-${id}`);
+      }
+
+      derivations = 0;
+      const result = await seed.getMany(
+        ["a", "b", "c", "d"].map((serverId) => ({
+          serverId,
+          fields: ["env:TOKEN"],
+        })),
+      );
+      expect(derivations).toBe(1);
+      expect(result).toEqual({
+        a: { "env:TOKEN": "v-a" },
+        b: { "env:TOKEN": "v-b" },
+        c: { "env:TOKEN": "v-c" },
+        d: { "env:TOKEN": "v-d" },
+      });
+    } finally {
+      vi.doUnmock("node:crypto");
+      vi.resetModules();
+    }
+  });
+
   it("is tolerant like get: an unreadable store yields no fields", async () => {
     await fs.writeFile(filePath(), "{ not json", "utf-8");
     const store = new FileSecretStore({ filePath: filePath() });
-    expect(await store.getMany("srv", ["env:A"])).toEqual({});
+    expect(
+      await store.getMany([{ serverId: "srv", fields: ["env:A"] }]),
+    ).toEqual({
+      srv: {},
+    });
   });
 });
 
@@ -1131,7 +1190,9 @@ describe("descriptor and retry edge cases", () => {
 
   it("getMany answers empty for a file that does not exist yet", async () => {
     const store = new FileSecretStore({ filePath: filePath() });
-    expect(await store.getMany("srv", ["env:A", "env:B"])).toEqual({});
+    expect(
+      await store.getMany([{ serverId: "srv", fields: ["env:A", "env:B"] }]),
+    ).toEqual({ srv: {} });
   });
 });
 

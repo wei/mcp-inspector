@@ -253,13 +253,23 @@ describe("isOnMountPoint via /proc/self/mountinfo", () => {
    * that matter can be exercised on a developer's laptop. `existsSync` is
    * stubbed alongside it because the paths in these tables do not exist here.
    */
-  async function loadWithMounts(mountinfo: string | null, existing: string[]) {
+  async function loadWithMounts(
+    mountinfo: string | null,
+    existing: string[],
+    // Symlink targets, keyed by the link path. Absent entries resolve to
+    // themselves, which is what a non-symlinked path does.
+    links: Record<string, string> = {},
+  ) {
     vi.resetModules();
     vi.doMock("node:fs", async () => {
       const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
       return {
         ...actual,
         existsSync: (p: string) => existing.includes(p),
+        realpathSync: (p: string) => {
+          if (!existing.includes(p)) throw new Error("ENOENT");
+          return links[p] ?? p;
+        },
         readFileSync: (p: string, enc?: unknown) => {
           if (p === "/proc/self/mountinfo") {
             if (mountinfo === null) throw new Error("ENOENT");
@@ -280,6 +290,30 @@ describe("isOnMountPoint via /proc/self/mountinfo", () => {
   // Field 5 is the mount point; the rest is real mountinfo shape.
   const line = (point: string) =>
     `36 35 0:32 / ${point} rw,relatime - overlay overlay rw`;
+
+  it("follows a symlink into a mounted volume", async () => {
+    // Round 13: the comparison is a string prefix over a *lexical* path, so
+    // `~/.mcp-inspector -> /data/inspector` with `/data` mounted matched no
+    // mount point, read as the container's writable layer, and silently
+    // selected the session-only store on a box that had arranged for
+    // persistence — the failure being invisible is the whole problem.
+    const mod = await loadWithMounts(
+      line("/data"),
+      ["/home/node/.mcp-inspector", "/data/inspector"],
+      { "/home/node/.mcp-inspector": "/data/inspector" },
+    );
+    expect(mod.isOnMountPoint("/home/node/.mcp-inspector")).toBe(true);
+  });
+
+  it("still answers lexically when the path cannot be resolved", async () => {
+    // `realpathSync` throwing must not turn a mounted directory into an
+    // unmounted one — the lexical answer is correct whenever no symlink is
+    // involved, which is the overwhelming majority.
+    const mod = await loadWithMounts(line("/data"), ["/data/inspector"], {});
+    // `/data/inspector` exists but resolving it throws in this stub only for
+    // paths outside `existing`; this asserts the ordinary path still works.
+    expect(mod.isOnMountPoint("/data/inspector")).toBe(true);
+  });
 
   it("sees a directory that IS the mount point", async () => {
     const mod = await loadWithMounts(
@@ -577,10 +611,11 @@ describe("DeferredSecretStore forwards the optional seams", () => {
 
     const { secretStoreGetMany } =
       await import("@inspector/core/auth/node/secret-store.js");
-    expect(await secretStoreGetMany(store, "srv", ["env:A", "env:B"])).toEqual({
-      "env:A": "1",
-      "env:B": "2",
-    });
+    expect(
+      await secretStoreGetMany(store, [
+        { serverId: "srv", fields: ["env:A", "env:B"] },
+      ]),
+    ).toEqual({ srv: { "env:A": "1", "env:B": "2" } });
   });
 });
 

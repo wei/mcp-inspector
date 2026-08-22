@@ -64,6 +64,7 @@ import * as path from "node:path";
 import { readStoreFile, writeStoreFile } from "../../storage/store-io.js";
 import {
   SecretStoreUnavailableError,
+  type SecretBulkRequest,
   type SecretStore,
 } from "./secret-store.js";
 
@@ -683,29 +684,32 @@ export class FileSecretStore implements SecretStore {
   }
 
   /**
-   * One read and one derivation for a whole server's fields.
+   * One read and one derivation for an entire rehydration.
    *
-   * The reason this exists: `get` reads and decrypts the entire file, and
-   * the rehydration callers ask field by field — so an encrypted catalog
-   * paid N scrypt derivations per server, serialized behind this store's own
-   * queue, every time the server list was loaded. Tolerant like `get`: an
-   * unreadable store yields no fields rather than throwing.
+   * `get` reads and decrypts the whole file, so the cost is per *call*, not
+   * per field — which is why the batch has to span servers. A per-server
+   * version of this shipped first and left a 20-server catalog paying 20
+   * serialized derivations, the same stall it was written to remove.
+   * Tolerant like `get`: an unreadable store yields no fields for anyone
+   * rather than throwing.
    */
   async getMany(
-    serverId: string,
-    fields: string[],
-  ): Promise<Record<string, string>> {
+    requests: SecretBulkRequest[],
+  ): Promise<Record<string, Record<string, string>>> {
     let map: Record<string, string> | null;
     try {
       map = await this.serialize(() => this.readMap());
     } catch {
-      return {};
+      map = null;
     }
-    if (!map) return {};
-    const out: Record<string, string> = {};
-    for (const field of fields) {
-      const value = map[buildAccount(serverId, field)];
-      if (value !== undefined) out[field] = value;
+    const out: Record<string, Record<string, string>> = {};
+    for (const { serverId, fields } of requests) {
+      const found: Record<string, string> = {};
+      for (const field of fields) {
+        const value = map?.[buildAccount(serverId, field)];
+        if (value !== undefined) found[field] = value;
+      }
+      out[serverId] = found;
     }
     return out;
   }

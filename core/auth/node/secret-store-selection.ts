@@ -58,6 +58,7 @@ import {
   parseAccount,
   probeKeyringAvailable,
   secretStoreGetMany,
+  type SecretBulkRequest,
   secretStoreGetStrict,
   secretStoreIsDurable,
   SessionSecretStore,
@@ -255,8 +256,27 @@ function readMountPoints(): string[] | null {
  */
 export function isOnMountPoint(dir: string): boolean {
   try {
-    const current = nearestExisting(dir);
-    if (current === null) return false;
+    const nearest = nearestExisting(dir);
+    if (nearest === null) return false;
+    // Resolve symlinks before comparing. `nearestExisting` walks lexically,
+    // and the mountinfo comparison below is a string prefix — so a secrets
+    // directory that is a *symlink into* a mounted volume
+    // (`~/.mcp-inspector -> /data/inspector`, with `/data` mounted) never
+    // matches any mount point, reads as the writable layer, and silently
+    // selects the session-only store on a box that had arranged for
+    // persistence. `statSync` in the fallback below already follows links;
+    // this makes the primary path agree with it.
+    //
+    // Tolerant of its own failure: a path we cannot resolve (permissions, a
+    // racing unmount) is better compared lexically than not compared at all,
+    // since the lexical answer is what this did before and is correct
+    // whenever no symlink is involved.
+    let current = nearest;
+    try {
+      current = fsSync.realpathSync(nearest);
+    } catch {
+      // Keep the lexical path.
+    }
 
     const mounts = readMountPoints();
     if (mounts !== null) {
@@ -661,10 +681,9 @@ class DeferredSecretStore implements SecretStore {
     return secretStoreGetStrict(await this.target(), serverId, field);
   }
   async getMany(
-    serverId: string,
-    fields: string[],
-  ): Promise<Record<string, string>> {
-    return secretStoreGetMany(await this.target(), serverId, fields);
+    requests: SecretBulkRequest[],
+  ): Promise<Record<string, Record<string, string>>> {
+    return secretStoreGetMany(await this.target(), requests);
   }
   async get(serverId: string, field: string): Promise<string | null> {
     return (await this.target()).get(serverId, field);

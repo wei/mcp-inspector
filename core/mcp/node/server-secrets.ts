@@ -14,16 +14,22 @@ export async function rehydrateMcpConfigFromKeychain(
   config: MCPConfig,
   secretStore: SecretStore,
 ): Promise<MCPConfig> {
-  const out: MCPConfig = { mcpServers: {} };
-  await Promise.all(
-    Object.entries(config.mcpServers).map(async ([id, stored]) => {
-      const fields = expectedSecretFields(stored);
-      // One pass per server, not one per field. For the keychain this is the
-      // same parallel round-trips as before; for the file store it collapses
-      // N reads-and-decrypts into one (see `secretStoreGetMany`).
-      const secrets = await secretStoreGetMany(secretStore, id, fields);
-      out.mcpServers[id] = mergeSecretsIntoStored(stored, secrets);
-    }),
+  const entries = Object.entries(config.mcpServers);
+  // One pass for the *whole catalog*, not one per server and not one per
+  // field. For the keychain this is the same parallel round-trips as before;
+  // for the file store it collapses the entire rehydration into a single
+  // read-and-decrypt (see `secretStoreGetMany`). Batching per server instead
+  // left a 20-server catalog paying 20 serialized scrypt derivations.
+  const secrets = await secretStoreGetMany(
+    secretStore,
+    entries.map(([serverId, stored]) => ({
+      serverId,
+      fields: expectedSecretFields(stored),
+    })),
   );
+  const out: MCPConfig = { mcpServers: {} };
+  for (const [id, stored] of entries) {
+    out.mcpServers[id] = mergeSecretsIntoStored(stored, secrets[id] ?? {});
+  }
   return out;
 }

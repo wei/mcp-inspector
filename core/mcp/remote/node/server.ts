@@ -1907,11 +1907,13 @@ export function createRemoteApp(
     id: string,
     fields: string[],
   ): Promise<Record<string, string>> => {
-    // One pass per server rather than one per field — see
-    // `secretStoreGetMany`. Unchanged for the keychain (still independent
-    // parallel round-trips); for the file store it is the difference between
-    // one decryption and one per field.
-    return secretStoreGetMany(secretStore, id, fields);
+    // Single-server callers (rename, POST/PUT) go through the same batch
+    // seam with a one-element request. `rehydrateConfig` below batches the
+    // whole catalog instead — see `secretStoreGetMany`.
+    const many = await secretStoreGetMany(secretStore, [
+      { serverId: id, fields },
+    ]);
+    return many[id] ?? {};
   };
 
   // Cheap structural check used by the GET handler to decide whether
@@ -2014,11 +2016,22 @@ export function createRemoteApp(
   // the browser saw before the keychain split. Runs after migration in
   // the GET handler.
   const rehydrateConfig = async (config: MCPConfig): Promise<MCPConfig> => {
+    const entries = Object.entries(config.mcpServers);
+    // One batch for the whole catalog. The per-server loop this replaced
+    // was serial, so an encrypted file store paid one scrypt derivation per
+    // *server* on every `GET /api/servers` — a 20-server catalog spent the
+    // same ~450ms the bulk seam was introduced to remove, reached one
+    // server at a time instead of one field at a time.
+    const secrets = await secretStoreGetMany(
+      secretStore,
+      entries.map(([serverId, stored]) => ({
+        serverId,
+        fields: expectedSecretFields(stored),
+      })),
+    );
     const out: MCPConfig = { mcpServers: {} };
-    for (const [id, stored] of Object.entries(config.mcpServers)) {
-      const fields = expectedSecretFields(stored);
-      const secrets = await readKeychainEntriesFor(id, fields);
-      out.mcpServers[id] = mergeSecretsIntoStored(stored, secrets);
+    for (const [id, stored] of entries) {
+      out.mcpServers[id] = mergeSecretsIntoStored(stored, secrets[id] ?? {});
     }
     return out;
   };

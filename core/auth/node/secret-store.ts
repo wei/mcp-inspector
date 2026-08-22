@@ -300,6 +300,12 @@ const PROBE_ACCOUNT = "__inspector:probe";
  * routes turn into a 503 — because it is the only one where a value would
  * be lost.
  */
+/** One server's worth of a bulk read: which fields, for which server id. */
+export interface SecretBulkRequest {
+  serverId: string;
+  fields: string[];
+}
+
 export interface SecretStore {
   /**
    * Do values written here outlive the process?
@@ -338,19 +344,27 @@ export interface SecretStore {
    */
   getStrict?(serverId: string, field: string): Promise<string | null>;
   /**
-   * Read several of one server's fields in a single pass.
+   * Read many fields, across **many servers**, in a single pass.
    *
    * Optional, and purely a performance seam: {@link secretStoreGetMany}
    * falls back to a parallel `get` per field, which is what the keychain
    * wants anyway (independent native round-trips).
    *
    * It exists for `FileSecretStore`, where the shape is inverted — every
-   * `get` reads and decrypts the *whole* file, so N fields cost N scrypt
-   * derivations, serialized behind the store's own queue. The rehydration
-   * callers ask for one server's fields at a time, so a per-server bulk read
-   * turns that back into one.
+   * `get` reads and decrypts the *whole* file, so each call costs a scrypt
+   * derivation, serialized behind the store's own queue.
+   *
+   * **Cross-server, and that is the whole point.** A per-server version of
+   * this shipped first and did not fix the case it was written for: both
+   * rehydration callers iterate servers, so a catalog of 20 servers holding
+   * one secret each still paid 20 serialized derivations — the same stall,
+   * reached one server at a time instead of one field at a time. The unit
+   * that matters is "everything this rehydration needs", so that is the
+   * unit the seam takes.
    */
-  getMany?(serverId: string, fields: string[]): Promise<Record<string, string>>;
+  getMany?(
+    requests: SecretBulkRequest[],
+  ): Promise<Record<string, Record<string, string>>>;
   set(serverId: string, field: string, value: string): Promise<void>;
   /** No-op if no entry exists. */
   delete(serverId: string, field: string): Promise<void>;
@@ -541,25 +555,34 @@ export async function secretStoreGetStrict(
 }
 
 /**
- * Read several fields of one server, using the store's bulk path when it has
- * one. Returns only the fields that are present, matching the callers that
- * merge the result into a stored config.
+ * Read many servers' fields, using the store's bulk path when it has one.
+ *
+ * Returns a map keyed by server id, holding only the fields that are
+ * present — matching the callers, which merge each server's result into its
+ * stored config. The fallback issues every `get` in parallel, which is right
+ * for a keychain (independent native round-trips) and harmless for the
+ * in-memory store.
  */
 export async function secretStoreGetMany(
   store: SecretStore,
-  serverId: string,
-  fields: string[],
-): Promise<Record<string, string>> {
-  if (store.getMany) return store.getMany(serverId, fields);
-  const entries = await Promise.all(
-    fields.map(
-      async (field) => [field, await store.get(serverId, field)] as const,
-    ),
+  requests: SecretBulkRequest[],
+): Promise<Record<string, Record<string, string>>> {
+  if (store.getMany) return store.getMany(requests);
+  const out: Record<string, Record<string, string>> = {};
+  await Promise.all(
+    requests.map(async ({ serverId, fields }) => {
+      const entries = await Promise.all(
+        fields.map(
+          async (field) => [field, await store.get(serverId, field)] as const,
+        ),
+      );
+      const found: Record<string, string> = {};
+      for (const [field, value] of entries) {
+        if (value !== null) found[field] = value;
+      }
+      out[serverId] = found;
+    }),
   );
-  const out: Record<string, string> = {};
-  for (const [field, value] of entries) {
-    if (value !== null) out[field] = value;
-  }
   return out;
 }
 
