@@ -40,6 +40,9 @@ jobs:
       # force-moved tag would be an unreviewed code change inside a
       # secret-holding job. The trailing `# vX.Y.Z` comment is the form
       # Dependabot reads, so pinning costs us no upgrade automation. (#1882)
+
+      # This lookup exists only to answer "is the head in a fork?". The action
+      # below checks out the PR branch itself, so no `sha` is needed here.
       - name: Get PR details
         if: |
           (github.event_name == 'issue_comment' && github.event.issue.pull_request) ||
@@ -64,53 +67,52 @@ jobs:
 
             // A fork PR's head lives in a different repository — or in none at
             // all, if the fork was deleted after the PR was opened (`head.repo`
-            // is then null). Neither is ours to check out, so both count as a
+            // is then null). Neither is ours to run against, so both count as a
             // fork here and the steps below decline rather than guess.
             const headRepo = pr.data.head.repo?.full_name ?? null;
             const isFork = headRepo !== `${context.repo.owner}/${context.repo.repo}`;
 
-            core.setOutput('sha', pr.data.head.sha);
             core.setOutput('is_fork', String(isFork));
 
-      # A fork PR's head is untrusted code, and checking it out would put it in
-      # reach of a tool-enabled agent run holding ANTHROPIC_API_KEY. Reviewing
-      # the base tree instead would only trade that for a confident review of
-      # the wrong tree, so decline visibly and leave the reason in the run.
+      # A fork PR's head is untrusted code, and running a tool-enabled agent
+      # holding ANTHROPIC_API_KEY against it is what this declines. The gate is
+      # load-bearing even though we no longer check the head out ourselves:
+      # claude-code-action fetches a cross-repository head via
+      # `refs/pull/N/head` on its own (see `isCrossRepository` in its
+      # src/github/operations/branch.ts), so skipping the action is the only
+      # thing that keeps that code out of the workspace. Reviewing the base tree
+      # instead would only trade the problem for a confident review of the wrong
+      # tree, so decline visibly and leave the reason in the run.
       - name: Decline fork PR
         if: steps.pr.outcome == 'success' && steps.pr.outputs.is_fork == 'true'
         run: |
           {
             echo "### Claude Code declined this pull request"
             echo
-            echo "The head branch lives in a fork, so its code is not checked out and Claude is not run."
+            echo "The head branch lives in a fork, so Claude is not run against it."
             echo "Push the branch to this repository and re-trigger if a review is needed."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # No `repository:` — a same-repo head is all that reaches this step, and
-      # checkout defaults to `github.repository`, which no PR can influence.
-      - name: Checkout PR branch
-        if: steps.pr.outcome == 'success' && steps.pr.outputs.is_fork == 'false'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ steps.pr.outputs.sha }}
-          fetch-depth: 0
-
-      # `skipped` means the trigger was an issue or a non-PR comment, so there
-      # is no head to check out and the base tree is the right one. The lookup
-      # having *failed* is deliberately not included: this condition carries no
-      # status-check function, so GitHub applies an implicit `success()` and
-      # skips the step after a failed prior step anyway. Spelling out `skipped`
-      # keeps that from having to be re-derived by the next reader.
+      # Base ref only — no `ref:` input, so nothing a PR controls selects what
+      # is checked out. On a PR, claude-code-action then fetches and checks out
+      # the PR branch itself, which is why a second PR-head checkout here would
+      # be redundant. It was also the one thing keeping CodeQL's
+      # `actions/untrusted-checkout` alert open: the rule is syntactic and
+      # cannot see the `is_fork` gate, the job-level `author_association` check,
+      # or the repo's `collaborators_only` fork-PR policy. (#2069)
       - name: Checkout repository
-        if: steps.pr.outcome == 'skipped'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
       - name: Run Claude Code
-        # Runs only against a tree this workflow actually checked out: the base
-        # repo (non-PR trigger) or a same-repo PR head. A fork PR reaches here
-        # with `is_fork == 'true'` and both disjuncts false, so it is skipped.
+        # `skipped` means the trigger was an issue or a non-PR comment. A
+        # same-repo PR gives `is_fork == 'false'`. A fork PR reaches here with
+        # `is_fork == 'true'` and both disjuncts false, so it is skipped — and
+        # so the action never fetches its head. A *failed* lookup is excluded
+        # too: this condition carries no status-check function, so GitHub
+        # applies an implicit `success()` and skips the step after a failed
+        # prior step regardless of what the comparisons say.
         if: steps.pr.outcome == 'skipped' || steps.pr.outputs.is_fork == 'false'
         id: claude
         uses: anthropics/claude-code-action@5ef2e550a465a721f4f45e4a7d3c340c873e1dcc # v1.0.190
