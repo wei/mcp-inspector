@@ -3,7 +3,7 @@
  */
 
 import {
-  KeychainUnavailableError,
+  SecretStoreUnavailableError,
   type SecretStore,
 } from "../auth/node/secret-store.js";
 import { SECRET_FIELD_IDP_CLIENT_SECRET } from "../auth/secret-fields.js";
@@ -58,7 +58,7 @@ async function migrateClientPlaintextSecret(
     await writeStoreFile(filePath, serializeStore(stripped));
     return stripped;
   } catch (err) {
-    if (err instanceof KeychainUnavailableError) {
+    if (err instanceof SecretStoreUnavailableError) {
       return config;
     }
     throw err;

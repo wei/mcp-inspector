@@ -65,10 +65,10 @@ import { RemoteSession } from "./remote-session.js";
 import { createRemoteAuthProvider } from "./tokenAuthProvider.js";
 import { API_SERVER_ENV_VARS } from "../constants.js";
 import {
-  KeychainUnavailableError,
-  KeyringSecretStore,
+  SecretStoreUnavailableError,
   type SecretStore,
 } from "../../../auth/node/secret-store.js";
+import { defaultSecretStore } from "../../../auth/node/secret-store-selection.js";
 import {
   deleteClientConfigStore,
   readClientConfigStore,
@@ -76,6 +76,7 @@ import {
 } from "../../../client/node-persistence.js";
 import { formatClientConfigLoadError } from "../../../client/config-parse.js";
 import { envSecretField } from "../../../auth/secret-fields.js";
+import type { SecretStorageInfo } from "../../../auth/secret-storage-info.js";
 import { ZodError } from "zod";
 
 /**
@@ -189,6 +190,15 @@ export interface InitialConfigPayload {
    * a legacy backend that predates the field; the UI just shows nothing then.
    */
   version?: string;
+  /**
+   * Where secrets typed into this session end up (#1950): the OS keychain,
+   * a file, or memory. The browser cannot work this out for itself — the
+   * store lives entirely on the Node side — and it is what the permanent
+   * footer in the Client/Server Settings modals reports. Absent on a
+   * legacy backend, in which case the footer renders nothing rather than
+   * guessing "keychain", since a wrong answer here is worse than none.
+   */
+  secretStorage?: SecretStorageInfo;
 }
 
 export interface RemoteServerOptions {
@@ -243,9 +253,11 @@ export interface RemoteServerOptions {
   /**
    * Backend for per-server secret values that we keep out of mcp.json
    * (OAuth client secret, stdio env values). Defaults to a
-   * `KeyringSecretStore` that talks to the OS keychain via
-   * `@napi-rs/keyring`. Tests inject `InMemorySecretStore` so the suite
-   * doesn't need libsecret on Linux CI runners.
+   * store selected for this host — the OS keychain where one is
+   * reachable, otherwise the file or in-memory fallback chosen by
+   * `secret-store-selection.ts` (#1950). Tests inject
+   * `InMemorySecretStore` so the suite doesn't need libsecret on Linux CI
+   * runners.
    */
   secretStore?: SecretStore;
 }
@@ -490,8 +502,7 @@ export function createRemoteApp(
   const { logger: fileLogger, allowedOrigins } = options;
   const storageDir = options.storageDir ?? getDefaultStorageDir();
   const mcpConfigPath = options.mcpConfigPath ?? getDefaultMcpConfigPath();
-  const secretStore: SecretStore =
-    options.secretStore ?? new KeyringSecretStore();
+  const secretStore: SecretStore = options.secretStore ?? defaultSecretStore();
 
   // Read-only session support (#1481/#1483). `writable: false` rejects every
   // /api/servers mutation and suppresses the seed/migrate writes on read.
@@ -1830,9 +1841,11 @@ export function createRemoteApp(
   // Centralizes the "write the secrets in this entry to the keychain" and
   // "fetch all secrets for this entry from the keychain" steps so the
   // POST/PUT/DELETE/GET handlers stay readable. Each operation translates a
-  // `KeychainUnavailableError` from the underlying store into a Hono 503
-  // — the only realistic trigger is Linux without libsecret, and the user
-  // can install it without restarting.
+  // `SecretStoreUnavailableError` from the underlying store into a Hono
+  // 503 — a keychain the user can install without restarting (Linux
+  // without libsecret), or a secrets file we refuse to overwrite because
+  // the passphrase changed (#1950). Both are fixable outside the process,
+  // which is what makes 503 the right code rather than 500.
 
   // Same Promise.all reasoning as `readKeychainEntriesFor`: each set
   // is a native round-trip and there's no ordering requirement among
@@ -1896,7 +1909,7 @@ export function createRemoteApp(
   // knows whether to persist the cleanup.
   //
   // When the keychain is unavailable (Linux without libsecret), the
-  // first `secretStore.set` throws `KeychainUnavailableError`. We catch
+  // first `secretStore.set` throws `SecretStoreUnavailableError`. We catch
   // it and abandon the migration for this GET — the on-disk file stays
   // as-is so the user's secret isn't lost, and the next GET retries
   // (e.g. after the user installs libsecret).
@@ -1926,7 +1939,7 @@ export function createRemoteApp(
         changed = true;
       }
     } catch (err) {
-      if (err instanceof KeychainUnavailableError) {
+      if (err instanceof SecretStoreUnavailableError) {
         if (fileLogger) {
           fileLogger.warn(
             { err: err.message },
@@ -2016,7 +2029,7 @@ export function createRemoteApp(
     c: Context,
     err: unknown,
   ): Response | undefined => {
-    if (err instanceof KeychainUnavailableError) {
+    if (err instanceof SecretStoreUnavailableError) {
       return c.json({ error: err.message }, 503);
     }
     return undefined;
@@ -2182,7 +2195,7 @@ export function createRemoteApp(
         // goes to disk, the values go to the keychain.
         const { stripped, secrets } = extractSecretsFromStored(built);
         // Order: sweep → keychain → disk. The keychain write is the
-        // only step that can hard-fail (KeychainUnavailableError on
+        // only step that can hard-fail (SecretStoreUnavailableError on
         // `set`); doing it before the disk write means a 503 leaves no
         // disk entry behind, so a retry POST isn't trapped at 409. The
         // initial sweep handles the case where a previous DELETE failed
@@ -2439,7 +2452,7 @@ export function createRemoteApp(
         // disk file, then clean up obsolete keychain entries.
         //
         // - Keychain set is the only hard-fail step (it raises 503 on
-        //   `KeychainUnavailableError`). Doing it first means a failed
+        //   `SecretStoreUnavailableError`). Doing it first means a failed
         //   set leaves both disk and keychain in their pre-PUT state;
         //   the user retries and nothing is half-applied.
         // - The disk write happens after the keychain is fully primed,

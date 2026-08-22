@@ -30,7 +30,9 @@ inspector/
 │   ├── tui/          # TUI client (Ink + React, tsup bundle)
 │   └── launcher/     # Shared launcher — provides the `mcp-inspector` bin, dispatches to web/cli/tui
 ├── core/             # Shared code consumed via the `@inspector/core` alias (no package.json)
-│   ├── auth/         # OAuth: providers, discovery, storage, endpoint overrides, mid-session recovery (browser/node/remote backends)
+│   ├── auth/         # OAuth: providers, discovery, storage, endpoint overrides, mid-session recovery (browser/node/remote backends);
+│   │                 #   plus per-server secret storage — the keychain/file/memory SecretStore
+│   │                 #   implementations, the selection policy, and the descriptor the banner and UI report
 │   ├── client/       # Install-level client config (`client.json`): browser-safe parse/validate + Node load/save, remote backend, secrets
 │   ├── json/         # JSON + parameter/argument conversion utilities, and the nullable-union
 │   │                 #   schema collapse shared by the web and TUI form builders
@@ -454,6 +456,29 @@ docker run --rm -p 127.0.0.1:6274:6274 \
 ```
 
 The same volume also persists OAuth tokens and stored state, so an authorized server stays authorized across runs. Use `-e MCP_CATALOG_PATH=/some/other/path.json` to put the catalog somewhere else — mount a volume covering whatever directory you point it at. If you **bind-mount a host directory** instead of a named volume (`-v "$PWD/inspector-data:/home/node/.mcp-inspector"`), the directory keeps its host ownership, so on Linux add `--user "$(id -u):$(id -g)"` or `chown` it to uid `1000` — otherwise the non-root `node` user can't write and adding a server fails with `EACCES`.
+
+**Where secrets go, and how to make them survive (#1950).** The Inspector keeps the values it deliberately does *not* write to `mcp.json` — an OAuth client secret, an enterprise IdP client secret, each stdio `env:` value — in the **OS keychain**. A container has no keychain (the published image has no D-Bus session), so on startup the Inspector probes for one and falls back, saying so in the logs and in a permanent footer at the bottom of the Client Settings and Server Settings dialogs. Which fallback you get depends on whether the directory it would write to is going to survive:
+
+| Situation | Store | Secrets survive a restart? |
+| --- | --- | --- |
+| Keychain reachable (a normal desktop install) | OS keychain | Yes |
+| Container, **no volume** on `/home/node/.mcp-inspector` | Memory | No — session only |
+| Container **with** that volume, or any host without a keychain | `~/.mcp-inspector/secrets.json`, mode `0600` | Yes |
+
+So the same volume that keeps your server list also switches secrets from session-scoped to durable — nothing extra to configure. The in-memory default for an unmounted container is deliberate: a file in the writable layer is discarded by `--rm` and by every image update, and promising durability it can't deliver is worse than declining to.
+
+**A file-backed store is unencrypted unless you give it a key.** Set `MCP_INSPECTOR_SECRET_KEY` to any passphrase and the file is encrypted with AES-256-GCM (the passphrase is stretched with scrypt against a per-file random salt). Without it the file is still `0600`, but the values are readable to anyone who can read the file — which the startup log and the settings footer both say, every session, in a warning tone:
+
+```bash
+docker run --rm -p 127.0.0.1:6274:6274 \
+  -v mcp-inspector-data:/home/node/.mcp-inspector \
+  -e MCP_INSPECTOR_SECRET_KEY="$MY_PASSPHRASE" \
+  ghcr.io/modelcontextprotocol/inspector
+```
+
+Setting the passphrase later is safe — the next write upgrades an existing plaintext file in place. **Changing or losing it is not**: a file that can no longer be decrypted is read as empty and *refuses to be written*, rather than being silently replaced with a new one holding only your latest secret. Restore the original passphrase, or delete `secrets.json` and re-enter the values.
+
+Two env vars override the automatic choice: `MCP_INSPECTOR_SECRET_STORE=keyring|file|memory` picks the store outright, and `MCP_INSPECTOR_SECRET_FILE` moves the file.
 
 **Upgrading from an image before this fix?** Earlier images did not create `/home/node/.mcp-inspector`, so Docker created the volume's mount point as `root` and the non-root `node` user couldn't write to it. An **empty** volume repairs itself on the first run of a current image (Docker applies the image directory's ownership to an empty volume), but one that already has files in it keeps its old `root` ownership and still fails with `EACCES`. Fix it once:
 

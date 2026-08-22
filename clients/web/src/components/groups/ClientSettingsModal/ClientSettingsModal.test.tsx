@@ -471,4 +471,46 @@ describe("ClientSettingsModal", () => {
     );
     expect(screen.queryByText("Client Settings")).not.toBeInTheDocument();
   });
+
+  describe("secret-storage footer (#1950)", () => {
+    // This dialog holds the enterprise IdP client secret, so it states where
+    // that secret is about to land — permanently, and beside the field rather
+    // than in a startup banner nobody watching this screen ever saw.
+    it("names the active store and warns when the file is unencrypted", () => {
+      renderWithMantine(
+        <ClientSettingsModal
+          opened
+          settings={EMPTY_CLIENT_SETTINGS}
+          onClose={vi.fn()}
+          onSettingsChange={vi.fn()}
+          secretStorage={{
+            kind: "file",
+            reason: "fallback",
+            durable: true,
+            plaintext: true,
+            path: "/home/node/.mcp-inspector/secrets.json",
+          }}
+        />,
+      );
+      expect(
+        screen.getByText("Secrets: File (unencrypted)"),
+      ).toBeInTheDocument();
+      expect(screen.getByTestId("secret-storage-footer")).toHaveAttribute(
+        "data-tone",
+        "warn",
+      );
+    });
+
+    it("renders no footer when the backend didn't report a store", () => {
+      renderWithMantine(
+        <ClientSettingsModal
+          opened
+          settings={EMPTY_CLIENT_SETTINGS}
+          onClose={vi.fn()}
+          onSettingsChange={vi.fn()}
+        />,
+      );
+      expect(screen.queryByTestId("secret-storage-footer")).toBeNull();
+    });
+  });
 });

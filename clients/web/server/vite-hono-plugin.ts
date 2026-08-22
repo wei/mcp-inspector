@@ -18,6 +18,7 @@ import { createRemoteApp } from "../../../core/mcp/remote/node/server.ts";
 import { createSandboxController } from "./sandbox-controller.js";
 import { injectAuthToken } from "./inject-auth-token.js";
 import type { WebServerConfig } from "./web-server-config.js";
+import { getSecretStorageInfo } from "../../../core/auth/node/secret-store-selection.ts";
 import {
   webServerConfigToInitialPayload,
   printServerBanner,
@@ -66,6 +67,9 @@ export function honoMiddlewarePlugin(config: WebServerConfig): Plugin {
         allowedOrigins: config.allowedOrigins,
       });
       await sandboxController.start();
+      // Resolved before the API is built so `/api/config` and the banner
+      // report the same store (the selection itself is cached process-wide).
+      const secretStorage = await getSecretStorageInfo();
 
       const {
         app: honoApp,
@@ -81,7 +85,7 @@ export function honoMiddlewarePlugin(config: WebServerConfig): Plugin {
         allowedOrigins: config.allowedOrigins,
         sandboxUrl: sandboxController.getUrl() ?? undefined,
         logger: config.logger,
-        initialConfig: webServerConfigToInitialPayload(config),
+        initialConfig: webServerConfigToInitialPayload(config, secretStorage),
       });
 
       // Expose the resolved token to `transformIndexHtml`. Left empty when
@@ -111,6 +115,7 @@ export function honoMiddlewarePlugin(config: WebServerConfig): Plugin {
           actualPort,
           resolvedToken,
           sandboxUrl ?? undefined,
+          secretStorage,
         );
 
         if (config.autoOpen) {

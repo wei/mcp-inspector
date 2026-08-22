@@ -249,4 +249,55 @@ describe("useInitialConfig", () => {
     expect(result.current.version).toBeUndefined();
     expect(result.current.writable).toBe(true);
   });
+
+  describe("secretStorage (#1950)", () => {
+    // The footer under a secret field reads this, so the hook's job is to hand
+    // back only a descriptor it can vouch for. Every rejected shape must land
+    // on `undefined` — which the footer renders as nothing — rather than on a
+    // half-populated object that would render a confident wrong answer.
+    it("passes through a well-formed descriptor", async () => {
+      const info = {
+        kind: "file",
+        reason: "fallback",
+        durable: true,
+        plaintext: true,
+        path: "/home/node/.mcp-inspector/secrets.json",
+      };
+      const fetchFn = vi
+        .fn()
+        .mockResolvedValue(jsonResponse({ secretStorage: info }));
+
+      const { result } = renderHook(() =>
+        useInitialConfig({ baseUrl: "http://test.local", fetchFn }),
+      );
+
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.secretStorage).toEqual(info);
+    });
+
+    it("is undefined on a backend that omits the field", async () => {
+      const fetchFn = vi.fn().mockResolvedValue(jsonResponse({}));
+      const { result } = renderHook(() =>
+        useInitialConfig({ baseUrl: "http://test.local", fetchFn }),
+      );
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.secretStorage).toBeUndefined();
+    });
+
+    it.each([
+      ["a non-object", "keyring"],
+      ["null", null],
+      ["an unknown kind", { kind: "vault", durable: true }],
+      ["a missing kind", { durable: true, path: "/x" }],
+    ])("rejects %s", async (_label, value) => {
+      const fetchFn = vi
+        .fn()
+        .mockResolvedValue(jsonResponse({ secretStorage: value }));
+      const { result } = renderHook(() =>
+        useInitialConfig({ baseUrl: "http://test.local", fetchFn }),
+      );
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.secretStorage).toBeUndefined();
+    });
+  });
 });

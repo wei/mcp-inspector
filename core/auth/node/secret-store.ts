@@ -153,6 +153,28 @@ const buildAccount = (serverId: string, field: string): string =>
   `${serverId}:${field}`;
 
 /**
+ * Base type for "the active secret store cannot do this right now".
+ *
+ * Every store implementation hard-fails on `set` and only on `set` (see
+ * the {@link SecretStore} contract), and the API routes translate that
+ * one condition into a 503. Before #1950 there was only one store, so the
+ * routes could match on `KeychainUnavailableError` directly; now that a
+ * file-backed store can fail for entirely different reasons (an
+ * unreadable file, a changed passphrase) they match on this base instead,
+ * and a future store gets the same treatment by extending it rather than
+ * by every route learning its name.
+ *
+ * The message is the user-facing text — these are surfaced verbatim in
+ * the 503 body — so subclasses write advice, not diagnostics.
+ */
+export class SecretStoreUnavailableError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "SecretStoreUnavailableError";
+  }
+}
+
+/**
  * Thrown when the OS keychain is unavailable. Surfaced as a 503 by the
  * API handlers so the UI can show an actionable error rather than a
  * generic 500 — and "actionable" is the point: the causes need
@@ -168,7 +190,7 @@ const buildAccount = (serverId: string, field: string): string =>
  * - **It loads but exposes the wrong API** — a version or packaging
  *   mismatch (`KeyringModuleShapeError`). Also not a daemon problem.
  */
-export class KeychainUnavailableError extends Error {
+export class KeychainUnavailableError extends SecretStoreUnavailableError {
   constructor(cause: unknown) {
     const message = cause instanceof Error ? cause.message : String(cause);
     super(
@@ -198,10 +220,85 @@ const hintFor = (cause: unknown, message: string): string => {
 };
 
 /**
+ * Probe whether the OS keychain is actually usable, rather than merely
+ * importable.
+ *
+ * This is the input to the automatic-fallback policy in
+ * `secret-store-selection.ts`, and it deliberately does more than
+ * {@link loadKeyring}: on the container that motivated #1848 the package
+ * imports and shape-checks perfectly well, and the failure only appears
+ * when `AsyncEntry::new` tries to reach a Secret Service that isn't
+ * there. So the probe constructs an entry and performs a real read.
+ *
+ * A **read** and not a write, on purpose. A write would be the stronger
+ * signal — a keychain can in principle be readable and not writable — but
+ * it means depositing a value in the user's login keyring at every
+ * startup, for a store they may never use, that we would then have to
+ * clean up (and would leave behind if the process died between the two
+ * calls). Writing into someone's keychain uninvited to answer a question
+ * about our own configuration is not a trade worth making; a write that
+ * fails after a passing probe still surfaces as the documented 503.
+ *
+ * Never throws — the whole point is to answer a question, and a probe
+ * that could fail its caller would just move the crash it exists to
+ * prevent.
+ */
+export async function probeKeyringAvailable(): Promise<
+  { available: true } | { available: false; detail: string }
+> {
+  const keyring = await loadKeyring();
+  if (!keyring.ok) {
+    const err = keyring.err;
+    return {
+      available: false,
+      detail: err instanceof Error ? err.message : String(err),
+    };
+  }
+  try {
+    const entry = new keyring.mod.AsyncEntry(SERVICE_NAME, PROBE_ACCOUNT);
+    await entry.getPassword();
+    return { available: true };
+  } catch (err) {
+    return {
+      available: false,
+      detail: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/**
+ * Account used by {@link probeKeyringAvailable}. Namespaced under a server
+ * id that cannot collide with a real one (`:` is the account separator, so
+ * a real id never contains one) and never written — it only ever appears
+ * as the argument to a lookup that is expected to miss.
+ */
+const PROBE_ACCOUNT = "__inspector:probe";
+
+/**
  * Storage interface for the per-server secrets we lift off
- * `~/.mcp-inspector/mcp.json`. Implemented by `KeyringSecretStore` (the
- * production impl) and `InMemorySecretStore` (used in tests so the suite
- * doesn't require libsecret in CI).
+ * `~/.mcp-inspector/mcp.json`.
+ *
+ * Three implementations, selected per run by
+ * `secret-store-selection.ts` (#1950) and described to the user by the
+ * `SecretStorageInfo` it returns:
+ *
+ * - `KeyringSecretStore` — the OS keychain, and the default wherever one
+ *   is reachable.
+ * - `FileSecretStore` — `~/.mcp-inspector/secrets.json`, `0600`,
+ *   encrypted when `MCP_INSPECTOR_SECRET_KEY` is set. The fallback on a
+ *   host with no keychain, and on a container with a mounted volume.
+ * - `InMemorySecretStore` — the session-scoped store. Used by the test
+ *   suite (so CI needs no libsecret), and as the container fallback when
+ *   nothing durable is mounted, where it is the honest choice rather than
+ *   the degraded one: a file in the writable layer promises persistence
+ *   the next `docker run` will not honor.
+ *
+ * All three share one availability contract, which is what lets callers
+ * stay ignorant of which they got: `get` is tolerant (`null` on any
+ * failure), `delete` no-ops, and `set` is the only operation that
+ * hard-fails — throwing a {@link SecretStoreUnavailableError} the API
+ * routes turn into a 503 — because it is the only one where a value would
+ * be lost.
  */
 export interface SecretStore {
   get(serverId: string, field: string): Promise<string | null>;
