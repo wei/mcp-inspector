@@ -45,9 +45,12 @@ describe("SecretStorageFooter", () => {
       "Secrets: Encrypted file. Owner-only permissions.",
     );
     expect(band).toHaveAttribute("data-tone", "neutral");
+    // The accessible name must carry the *status* as well as the affordance:
+    // `aria-label` replaces descendant text, so labelling it only "Copy…"
+    // would announce the button and discard the warning the band exists for.
     expect(
       screen.getByRole("button", {
-        name: "Copy secrets file path: /home/node/.mcp-inspector/secrets.json",
+        name: "Secrets: Encrypted file. Owner-only permissions. Copy secrets file path: /home/node/.mcp-inspector/secrets.json",
       }),
     ).toBeInTheDocument();
   });
@@ -134,6 +137,19 @@ describe("SecretStorageFooter", () => {
     expect(tip).not.toHaveTextContent(
       "anyone who can read the file can read the secrets in it",
     );
+  });
+
+  it("announces the security status, not just the copy affordance", () => {
+    // The regression this pins: `aria-label` overrides the button's
+    // descendant text, so a screen-reader user heard "Copy secrets file
+    // path …" and lost "Plaintext file" entirely — the one sentence that
+    // should change their mind about typing a secret.
+    renderWithMantine(<SecretStorageFooter info={plaintextFile} />);
+    const button = screen.getByRole("button");
+    expect(button).toHaveAccessibleName(
+      /^Secrets: Plaintext file\. Owner-only permissions\./,
+    );
+    expect(button).toHaveAccessibleName(/Copy secrets file path/);
   });
 
   it("renders nothing when the backend didn't report a store", () => {

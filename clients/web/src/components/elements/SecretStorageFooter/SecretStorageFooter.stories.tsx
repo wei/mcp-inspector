@@ -52,7 +52,7 @@ export const EncryptedFile: Story = {
     // and stays readable in the button's accessible name.
     await expect(
       canvas.getByRole("button", {
-        name: "Copy secrets file path: /home/node/.mcp-inspector/secrets.json",
+        name: "Secrets: Encrypted file. Owner-only permissions. Copy secrets file path: /home/node/.mcp-inspector/secrets.json",
       }),
     ).toBeInTheDocument();
   },

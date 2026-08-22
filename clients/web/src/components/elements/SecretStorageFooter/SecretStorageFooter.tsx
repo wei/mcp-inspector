@@ -291,12 +291,19 @@ export function SecretStorageFooter({ info }: SecretStorageFooterProps) {
       {({ copied, copy }) =>
         band(
           <CaveatTooltip label={copied ? "Path copied" : tip}>
-            {/* The accessible name carries the path itself: a screen-reader
-                user gets no benefit from a clipboard they cannot inspect, so
-                the one place the location is still *readable* is here. */}
+            {/* The accessible name has to carry **both** halves. `aria-label`
+                replaces the button's descendant text, so labelling it only
+                "Copy secrets file path …" announced the affordance and threw
+                away the security status — "Plaintext file", "Unreadable
+                file", "not owner-only" — which is the entire reason this band
+                exists. The status leads, because it is the part a user needs
+                before deciding to type a secret; the path follows, since a
+                clipboard is no use to someone who cannot inspect it. Leading
+                with the visible text also keeps the accessible name a
+                superset of it (WCAG 2.5.3). */}
             <CopyTarget
               onClick={copy}
-              aria-label={`Copy secrets file path: ${info.path}`}
+              aria-label={`Secrets: ${footerMessage(info)} Copy secrets file path: ${info.path}`}
             >
               {row}
             </CopyTarget>

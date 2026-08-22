@@ -680,17 +680,32 @@ describe("readOnDiskEncryption", () => {
     );
   });
 
-  it("needs no passphrase — it reads the envelope, never the payload", async () => {
-    // A store whose key is wrong still has to be describable in the UI.
+  it("reports a file the current passphrase cannot open as unreadable, not encrypted", async () => {
+    // This asserted the opposite until round 12, and the reviewer was right
+    // to call it: structure is not access. A store with the wrong key — or
+    // none — reads `null` from every `get` and refuses every `set`, so
+    // describing the file as "encrypted" gives the quiet, healthy footer to
+    // precisely the state the unreadable one exists to warn about. The user
+    // then discovers it when their save fails.
     const writer = new FileSecretStore({
       filePath: filePath(),
       passphrase: "right-key",
     });
     await writer.set("alpha", SECRET_FIELD_OAUTH_CLIENT_SECRET, "shh");
-    const keyless = new FileSecretStore({ filePath: filePath() });
-    expect(await keyless.readOnDiskEncryption()).toEqual({
-      state: "encrypted",
-    });
+
+    for (const wrong of [
+      new FileSecretStore({ filePath: filePath() }),
+      new FileSecretStore({ filePath: filePath(), passphrase: "wrong-key" }),
+    ]) {
+      const state = await wrong.readOnDiskEncryption();
+      expect(state.state).toBe("unreadable");
+      expect(state.state === "unreadable" ? state.detail : "").toMatch(
+        /cannot be decrypted with the current MCP_INSPECTOR_SECRET_KEY/,
+      );
+    }
+
+    // And the store that *can* open it is still described as encrypted.
+    expect(await writer.readOnDiskEncryption()).toEqual({ state: "encrypted" });
   });
 });
 
@@ -971,6 +986,36 @@ describe("readOnDiskEncryption rejects an envelope it could not open", () => {
       "kdf N is 3, which is not a power of two above 1",
     ],
     [
+      "an empty ciphertext",
+      {
+        version: 1,
+        encryption: "aes-256-gcm",
+        kdf: { algorithm: "scrypt", salt: "AAAA", N: 16384, r: 8, p: 1 },
+        data: `${Buffer.alloc(12).toString("base64")}.${Buffer.alloc(16).toString("base64")}.`,
+      },
+      "ciphertext is empty",
+    ],
+    [
+      "a salt that is not base64",
+      {
+        version: 1,
+        encryption: "aes-256-gcm",
+        kdf: { algorithm: "scrypt", salt: "!!!", N: 16384, r: 8, p: 1 },
+        data: `${Buffer.alloc(12).toString("base64")}.${Buffer.alloc(16).toString("base64")}.${Buffer.alloc(8).toString("base64")}`,
+      },
+      "kdf salt is missing or not base64",
+    ],
+    [
+      "a non-positive KDF r",
+      {
+        version: 1,
+        encryption: "aes-256-gcm",
+        kdf: { algorithm: "scrypt", salt: "AAAA", N: 16384, r: 0, p: 1 },
+        data: `${Buffer.alloc(12).toString("base64")}.${Buffer.alloc(16).toString("base64")}.${Buffer.alloc(8).toString("base64")}`,
+      },
+      "kdf r/p are 0/1, which are not positive integers",
+    ],
+    [
       "an unsupported KDF",
       {
         version: 1,
@@ -1003,18 +1048,100 @@ describe("readOnDiskEncryption accepts a real envelope", () => {
   });
 });
 
-describe("concurrent writers (no lock, optimistic verify-and-retry)", () => {
-  // The lock these replace was removed after three review rounds each found
-  // a real race in it; the last needed a compare-and-swap on a directory
-  // entry that Node does not expose. The store now lets writers collide and
-  // makes the loser notice — so these assert convergence, which is the
-  // property that actually matters, rather than mutual exclusion, which it
-  // no longer claims.
+/**
+ * Write an entirely different map straight to disk, bypassing the store.
+ *
+ * This is the *only* way to model a second process here. `serialize` keys
+ * its queue on the resolved path, process-wide, so two `FileSecretStore`
+ * instances pointing at one file do **not** race — they take turns. An
+ * earlier version of these tests used two instances and believed it was
+ * exercising the retry; it was exercising the queue, and passed for a
+ * reason unrelated to the code under test.
+ */
+async function writeAsAnotherProcess(
+  target: string,
+  secrets: Record<string, string>,
+): Promise<void> {
+  await fs.writeFile(
+    target,
+    JSON.stringify({ version: 1, encryption: "none", secrets }),
+    "utf-8",
+  );
+}
 
-  it("two stores racing set on one file keep both entries", async () => {
-    // The classic lost update: both read the same map, both write. Whichever
-    // lands second clobbers the other's entry — and the clobbered writer's
-    // verifying read is what catches it and re-applies.
+/** Inject one external write between the store's write and its verify. */
+function injectOneExternalWrite(
+  store: FileSecretStore,
+  target: string,
+  secrets: Record<string, string>,
+): void {
+  // Double cast: `writeMap` is private, so no single cast reaches it. Safe
+  // because the asserted shape is its real signature — a rename or
+  // signature change fails this line rather than silently detaching the
+  // stub. See the note on `clobberAfterEveryWrite` below.
+  const inner = store as unknown as {
+    writeMap: (m: Record<string, string>) => Promise<void>;
+  };
+  const realWrite = inner.writeMap.bind(store);
+  let done = false;
+  inner.writeMap = async (map: Record<string, string>) => {
+    await realWrite(map);
+    if (done) return;
+    done = true;
+    await writeAsAnotherProcess(target, secrets);
+  };
+}
+
+describe("descriptor and retry edge cases", () => {
+  it("reports a decrypt that succeeds but yields the wrong shape", async () => {
+    // Authentic ciphertext, right passphrase, wrong payload — so `readMap`
+    // throws something that is *not* a key mismatch, and the descriptor must
+    // surface that reason rather than the passphrase advice.
+    await writeEncryptedFixtureWithPayload(["not", "a", "map"], "right-key");
+    const store = new FileSecretStore({
+      filePath: filePath(),
+      passphrase: "right-key",
+    });
+    const state = await store.readOnDiskEncryption();
+    expect(state.state).toBe("unreadable");
+    expect(state.state === "unreadable" ? state.detail : "").toMatch(
+      /does not hold a secret map/,
+    );
+  });
+
+  it("retries when the verifying read itself fails, then reports the unreadable file", async () => {
+    // The verify can fail rather than mismatch — another writer replacing the
+    // file with something unparseable. That is not a clobber to re-apply
+    // onto, so the attempt is abandoned and the next one reports the real
+    // problem instead of looping silently.
+    const store = new FileSecretStore({ filePath: filePath() });
+    const inner = store as unknown as {
+      writeMap: (m: Record<string, string>) => Promise<void>;
+    };
+    const realWrite = inner.writeMap.bind(store);
+    inner.writeMap = async (map: Record<string, string>) => {
+      await realWrite(map);
+      await fs.writeFile(filePath(), "{ not json", "utf-8");
+    };
+
+    await expect(store.set("srv", "env:A", "1")).rejects.toBeInstanceOf(
+      SecretStoreUnavailableError,
+    );
+  });
+
+  it("getMany answers empty for a file that does not exist yet", async () => {
+    const store = new FileSecretStore({ filePath: filePath() });
+    expect(await store.getMany("srv", ["env:A", "env:B"])).toEqual({});
+  });
+});
+
+describe("in-process mutations are serialized per path", () => {
+  // Not a race, and the tests must not claim to be one. `serialize` is keyed
+  // on the resolved path process-wide, so two instances on one file take
+  // turns — which is a real property worth pinning, because it is what makes
+  // the in-process case correct without relying on the optimistic retry.
+
+  it("two stores writing one file keep both entries", async () => {
     const a = new FileSecretStore({ filePath: filePath() });
     const b = new FileSecretStore({ filePath: filePath() });
     await Promise.all([a.set("srv", "env:A", "1"), b.set("srv", "env:B", "2")]);
@@ -1025,8 +1152,6 @@ describe("concurrent writers (no lock, optimistic verify-and-retry)", () => {
   });
 
   it("keeps every entry when many independent stores write at once", async () => {
-    // Independent instances, so the in-process queue does not serialize them
-    // for us — each is its own writer with its own view of the file.
     const stores = Array.from(
       { length: 8 },
       () => new FileSecretStore({ filePath: filePath() }),
@@ -1039,20 +1164,7 @@ describe("concurrent writers (no lock, optimistic verify-and-retry)", () => {
     }
   });
 
-  it("converges when the racing writers are encrypted", async () => {
-    // Same property with a scrypt derivation inside every attempt, which is
-    // where the window is widest.
-    const opts = { filePath: filePath(), passphrase: "hunter2" };
-    const a = new FileSecretStore(opts);
-    const b = new FileSecretStore(opts);
-    await Promise.all([a.set("srv", "env:A", "1"), b.set("srv", "env:B", "2")]);
-
-    const reader = new FileSecretStore(opts);
-    expect(await reader.get("srv", "env:A")).toBe("1");
-    expect(await reader.get("srv", "env:B")).toBe("2");
-  });
-
-  it("a racing delete and set both land", async () => {
+  it("orders a delete and a set on the same file", async () => {
     const store = new FileSecretStore({ filePath: filePath() });
     await store.set("srv", "env:OLD", "x");
 
@@ -1066,6 +1178,62 @@ describe("concurrent writers (no lock, optimistic verify-and-retry)", () => {
     const reader = new FileSecretStore({ filePath: filePath() });
     expect(await reader.get("srv", "env:OLD")).toBe(null);
     expect(await reader.get("srv", "env:NEW")).toBe("y");
+  });
+});
+
+describe("cross-process convergence (optimistic verify-and-retry)", () => {
+  // These drive the path the in-process queue cannot reach: a write landing
+  // between our write and our verifying read, as a second Inspector would
+  // produce it.
+
+  it("re-applies onto the other writer's result when the verify sees a mismatch", async () => {
+    const store = new FileSecretStore({ filePath: filePath() });
+    await store.set("srv", "env:EXISTING", "0");
+    injectOneExternalWrite(store, filePath(), {
+      "srv:env:OTHER": "from-another-process",
+    });
+
+    await store.set("srv", "env:MINE", "1");
+
+    // Our value survived *and* landed on top of theirs rather than replacing
+    // it — which is the whole claim: the clobbered writer repairs it.
+    const reader = new FileSecretStore({ filePath: filePath() });
+    expect(await reader.get("srv", "env:MINE")).toBe("1");
+    expect(await reader.get("srv", "env:OTHER")).toBe("from-another-process");
+  });
+
+  it("re-applies a delete against a concurrently rewritten file", async () => {
+    const store = new FileSecretStore({ filePath: filePath() });
+    await store.set("srv", "env:DOOMED", "x");
+    injectOneExternalWrite(store, filePath(), {
+      "srv:env:DOOMED": "x",
+      "srv:env:OTHER": "from-another-process",
+    });
+
+    await store.delete("srv", "env:DOOMED");
+
+    const reader = new FileSecretStore({ filePath: filePath() });
+    expect(await reader.get("srv", "env:DOOMED")).toBe(null);
+    expect(await reader.get("srv", "env:OTHER")).toBe("from-another-process");
+  });
+
+  it("converges through a scrypt derivation on every attempt", async () => {
+    // The encrypted path re-derives per attempt, which is where the retry is
+    // most expensive and the window widest.
+    const opts = { filePath: filePath(), passphrase: "hunter2" };
+    const store = new FileSecretStore(opts);
+    await store.set("srv", "env:EXISTING", "0");
+    // The intruder writes a *plaintext* envelope, as a differently
+    // configured process would; the store must still read it and re-apply.
+    injectOneExternalWrite(store, filePath(), {
+      "srv:env:OTHER": "from-another-process",
+    });
+
+    await store.set("srv", "env:MINE", "1");
+
+    const reader = new FileSecretStore(opts);
+    expect(await reader.get("srv", "env:MINE")).toBe("1");
+    expect(await reader.get("srv", "env:OTHER")).toBe("from-another-process");
   });
 
   // A writer that never wins. Simulated by replacing the file *behind* the

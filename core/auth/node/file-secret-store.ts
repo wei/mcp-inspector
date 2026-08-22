@@ -365,6 +365,28 @@ export class FileSecretStore implements SecretStore {
         // fail, which is the one thing this state exists to prevent.
         const problem = encryptedEnvelopeProblem(parsed);
         if (problem) return { state: "unreadable", detail: problem };
+        // Structure is not access. A well-formed envelope this passphrase
+        // cannot open reads as `null` from every `get` and refuses every
+        // `set` — so classifying it "encrypted" hands the quiet, healthy
+        // footer to the exact state the unreadable one promises to warn
+        // about, and the user finds out when their save fails. Authenticate
+        // it: decrypt and discard. Costs one scrypt derivation (~23ms) per
+        // descriptor build, which is once per `/api/config`, and buys the
+        // difference between describing the file and merely describing its
+        // shape.
+        try {
+          await this.readMap();
+        } catch (err) {
+          return {
+            state: "unreadable",
+            detail:
+              err instanceof SecretFileKeyMismatchError
+                ? `it cannot be decrypted with the current ${SECRET_KEY_ENV}`
+                : err instanceof Error
+                  ? err.message
+                  : String(err),
+          };
+        }
         return { state: "encrypted" };
       }
       return {
