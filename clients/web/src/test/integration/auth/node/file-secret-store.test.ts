@@ -623,6 +623,22 @@ describe("readOnDiskEncryption", () => {
     ).toMatch(/unsupported envelope/);
   });
 
+  it("calls a newer format version unreadable rather than usable", async () => {
+    // `readMap` refuses such a file, so describing it as a working plaintext
+    // or encrypted store would present it as fine while every save fails.
+    await fs.writeFile(
+      filePath(),
+      JSON.stringify({ version: 2, encryption: "none", secrets: {} }),
+      "utf-8",
+    );
+    const store = new FileSecretStore({ filePath: filePath() });
+    const state = await store.readOnDiskEncryption();
+    expect(state.state).toBe("unreadable");
+    expect(state.state === "unreadable" ? state.detail : "").toMatch(
+      /format version 2/,
+    );
+  });
+
   it("needs no passphrase — it reads the envelope, never the payload", async () => {
     // A store whose key is wrong still has to be describable in the UI.
     const writer = new FileSecretStore({

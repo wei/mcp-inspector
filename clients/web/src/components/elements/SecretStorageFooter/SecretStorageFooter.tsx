@@ -206,7 +206,12 @@ function footerTooltip(info: SecretStorageInfo): string | undefined {
       `The file's permissions could not be read (${info.permissionsUnknown}), so it is not known whether others can read it.`,
     );
   }
-  parts.push("Click to copy file path");
+  // The path itself, not just an offer to copy it. The band no longer prints
+  // it, and the accessible name carries it for screen-reader users — which
+  // left a sighted user unable to see *where* a custom destination points
+  // without copying it out to somewhere else first.
+  parts.push(info.path);
+  parts.push("Click to copy.");
   return parts.join(" ");
 }
 

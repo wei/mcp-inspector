@@ -49,6 +49,7 @@ import {
   secretStorageSummary,
 } from "../secret-storage-info.js";
 import {
+  acquireLock,
   FileSecretStore,
   readSecretFilePermissions,
   tightenSecretFilePermissions,
@@ -302,12 +303,12 @@ async function buildStore(
   // *verify* the result. The UI and the README both state the file is 0600,
   // so a file we could not tighten (owned by another user, on a read-only
   // mount) has to be reported rather than quietly described as protected.
-  const perms = await tightenSecretFilePermissions(filePath);
-  if (perms.state === "loose") {
-    console.warn(
-      `[mcp-inspector] The secrets file at ${filePath} is mode ${perms.mode.toString(8).padStart(4, "0")}, not 0600, and could not be tightened. Anyone who can read it can read the secrets in it.`,
-    );
-  }
+  // Repair only — the *reporting* belongs to the descriptor path, which
+  // knows whether the file is encrypted and so what the consequence
+  // actually is. This used to warn here too, in wording that claimed a
+  // reader could read the secrets even when the file was ciphertext, and
+  // duplicated the caveat `warnAboutSecretStorage` prints moments later.
+  await tightenSecretFilePermissions(filePath);
   return {
     store,
     info: await describeFileStore(store, filePath, kind, reason, detail),
@@ -479,6 +480,34 @@ export async function absorbFileSecretsIntoKeyring(
   if (!fsSync.existsSync(filePath)) return;
 
   const file = new FileSecretStore({ filePath });
+  // The whole read → copy → delete sequence runs under the same cross-process
+  // lock every mutation takes. Without it, another Inspector completing a
+  // `set` between our read and our delete has its brand-new secret removed
+  // and never copied — a write that reported success and then vanished,
+  // which is precisely the loss the lock exists to prevent, arrived at
+  // through the migration meant to preserve things.
+  let release: (() => Promise<void>) | undefined;
+  try {
+    release = await acquireLock(filePath);
+  } catch (err) {
+    console.warn(
+      `\n[mcp-inspector] Could not lock the secrets file at ${filePath} to move it into the OS keychain, so it has been left in place: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return;
+  }
+  try {
+    await handOffUnderLock(file, filePath, keyring);
+  } finally {
+    await release();
+  }
+}
+
+/** The hand-off body. Split out so the lock's release is unmissable. */
+async function handOffUnderLock(
+  file: FileSecretStore,
+  filePath: string,
+  keyring: SecretStore,
+): Promise<void> {
   let entries: Record<string, string> | null;
   try {
     entries = await file.readAll();
@@ -490,10 +519,19 @@ export async function absorbFileSecretsIntoKeyring(
   }
   if (!entries || Object.keys(entries).length === 0) return;
 
+  // A key that is not `serverId:field` cannot be addressed through the store
+  // API, so it cannot be copied — which makes the hand-off incomplete by
+  // definition, and an incomplete hand-off must not delete its source. It
+  // used to be skipped and the file removed anyway, discarding the value
+  // permanently to tidy up a file we had failed to fully migrate.
+  let complete = true;
   try {
     for (const [account, value] of Object.entries(entries)) {
       const parsed = parseAccount(account);
-      if (!parsed) continue;
+      if (!parsed) {
+        complete = false;
+        continue;
+      }
       // Strict: `get` answers `null` for an unreadable keychain as well as
       // for a missing entry, and this branch *writes* on `null`. A transient
       // read failure would therefore overwrite a newer keychain value with
@@ -512,6 +550,13 @@ export async function absorbFileSecretsIntoKeyring(
   } catch (err) {
     console.warn(
       `\n[mcp-inspector] Could not move the secrets file at ${filePath} into the OS keychain, so it has been left in place: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return;
+  }
+
+  if (!complete) {
+    console.warn(
+      `\n[mcp-inspector] Secrets from ${filePath} have been copied into the OS keychain, but at least one entry could not be read (its key is not in \`serverId:field\` form). The file has been left in place so nothing is lost.`,
     );
     return;
   }

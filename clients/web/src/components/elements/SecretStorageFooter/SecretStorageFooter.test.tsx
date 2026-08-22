@@ -173,4 +173,28 @@ describe("SecretStorageFooter", () => {
     expect(band).toHaveTextContent("Mode 0644 — not owner-only.");
     expect(band).toHaveAttribute("data-tone", "warn");
   });
+
+  it("puts the path in the tooltip, not just an offer to copy it", async () => {
+    // The band no longer prints the path and the accessible name carries it
+    // for screen-reader users, which left a sighted user unable to see where
+    // a custom destination points without copying it out somewhere else.
+    renderWithMantine(
+      <SecretStorageFooter
+        info={{
+          kind: "file",
+          reason: "fallback",
+          durable: true,
+          plaintext: false,
+          path: "/custom/place/secrets.json",
+        }}
+      />,
+    );
+    // Hover the control the tooltip is attached to, not the band around it.
+    await userEvent.hover(
+      screen.getByRole("button", { name: /Copy secrets file path/ }),
+    );
+    const tip = await screen.findByRole("tooltip");
+    expect(tip).toHaveTextContent("/custom/place/secrets.json");
+    expect(tip).toHaveTextContent("Click to copy.");
+  });
 });

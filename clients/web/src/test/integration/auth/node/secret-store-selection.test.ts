@@ -704,22 +704,64 @@ describe("absorbFileSecretsIntoKeyring", () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
-  it("skips an entry whose account key is malformed", async () => {
+  it("copies what it can but keeps the file when an entry is unmigratable", async () => {
     // A hand-edited file can carry a key that is not `serverId:field`. It
-    // cannot be addressed through the store API, so it is passed over rather
-    // than guessed at — but it must not abort the entries around it.
+    // cannot be addressed through the store API, so it cannot be copied —
+    // which makes the hand-off incomplete, and an incomplete hand-off must
+    // not delete its source. Removing the file anyway would discard that
+    // value permanently in order to tidy up a migration that had failed.
     const filePath = await seedFile({
       "no-separator": "orphan",
       "srv:oauthClientSecret": "from-file",
     });
     process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
-    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const mod = await loadWithProbe(true);
     const keyring = new InMemorySecretStore();
 
     await mod.absorbFileSecretsIntoKeyring(keyring);
 
+    // The migratable entry is across...
     expect(await keyring.get("srv", "oauthClientSecret")).toBe("from-file");
+    // ...and the orphan still exists on disk rather than being dropped.
+    expect(existsSync(filePath)).toBe(true);
+    expect(JSON.parse(await fs.readFile(filePath, "utf-8"))).toMatchObject({
+      secrets: { "no-separator": "orphan" },
+    });
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("left in place so nothing is lost"),
+    );
+  });
+
+  it("holds the file lock for the whole hand-off", async () => {
+    // Read → copy → delete must be one transaction. Another Inspector
+    // completing a `set` between the read and the delete would have its
+    // brand-new secret removed without ever being copied — a write that
+    // reported success and then vanished.
+    const filePath = await seedFile({ "srv:oauthClientSecret": "from-file" });
+    process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await loadWithProbe(true);
+
+    const { acquireLock } =
+      await import("@inspector/core/auth/node/file-secret-store.js");
+    // Hold the lock as the "other process" would.
+    const release = await acquireLock(filePath, { heartbeatMs: 20 });
+    let finished = false;
+    const handOff = mod
+      .absorbFileSecretsIntoKeyring(new InMemorySecretStore())
+      .then(() => {
+        finished = true;
+      });
+
+    await new Promise((r) => setTimeout(r, 120));
+    // Blocked on us, not steaming ahead and deleting the file.
+    expect(finished).toBe(false);
+    expect(existsSync(filePath)).toBe(true);
+
+    await release();
+    await handOff;
+    expect(finished).toBe(true);
   });
 
   it("runs the hand-off for an explicitly configured keyring too", async () => {

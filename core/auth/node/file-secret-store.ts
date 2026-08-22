@@ -589,6 +589,16 @@ export class FileSecretStore implements SecretStore {
     if (raw === null) return { state: "absent" };
     try {
       const parsed = JSON.parse(raw) as SecretFile;
+      // Version before mode, matching `readMap`. A version this build does
+      // not understand is refused there, so presenting such a file as a
+      // usable "plaintext" or "encrypted" store would describe it as working
+      // while every save fails.
+      if (parsed.version !== FORMAT_VERSION) {
+        return {
+          state: "unreadable",
+          detail: `format version ${String(parsed.version)}, expected ${FORMAT_VERSION}`,
+        };
+      }
       if (parsed.encryption === "none") return { state: "plaintext" };
       if (parsed.encryption === CIPHER) return { state: "encrypted" };
       return {
@@ -860,11 +870,12 @@ export class FileSecretStore implements SecretStore {
 /**
  * Best-effort permission repair for a pre-existing secrets file.
  *
- * `writeStoreFile` passes `mode: 0o600`, but a mode argument only applies
- * when the file is *created* — an atomic rename over a file someone made
- * `0644` by hand (or restored from a backup, or copied out of an image)
- * keeps the loose mode forever. Called once at store selection so the
- * guarantee the docs make is the guarantee on disk.
+ * `writeStoreFile` writes through `atomically`, which creates a temp file
+ * with `mode: 0o600` and renames it over the destination — so every *write*
+ * re-establishes the mode regardless of what the old file had. What it
+ * cannot fix is a file that is never written: one made `0644` by hand,
+ * restored from a backup, or copied out of an image is read at that mode
+ * indefinitely. Called once at store selection to close exactly that gap.
  *
  * Failures are swallowed: a file we cannot chmod is one we probably cannot
  * write either, and `set` is where that gets reported with context.
