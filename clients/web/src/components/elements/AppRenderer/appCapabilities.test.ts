@@ -19,12 +19,20 @@ function makeTransport(): {
   return { transport, inner };
 }
 
-function initializeFrame(appCapabilities: unknown): JSONRPCMessage {
+function initializeFrame(
+  appCapabilities: unknown,
+  overrides: Record<string, unknown> = {},
+): JSONRPCMessage {
   return {
     jsonrpc: "2.0",
     id: 1,
     method: "ui/initialize",
-    params: { appCapabilities },
+    params: {
+      protocolVersion: "2026-01-26",
+      appInfo: { name: "test-app", version: "1.0.0" },
+      appCapabilities,
+      ...overrides,
+    },
   } as unknown as JSONRPCMessage;
 }
 
@@ -92,6 +100,56 @@ describe("appCapabilities (#1854)", () => {
     } as unknown as JSONRPCMessage);
     expect(appAdvertisesElicitation(bridge)).toBe(false);
     expect(inner).toHaveBeenCalledTimes(4);
+  });
+
+  it("ignores a malformed initialize the bridge would reject", () => {
+    // Fail-closed: accepting one would let a view flip `elicitation` on with a
+    // frame that never negotiated anything, and the host would then forward a
+    // request the bridge does not consider negotiated.
+    const bridge = makeBridge({});
+    const { transport } = makeTransport();
+    observeAppCapabilities(bridge, transport);
+
+    // No protocolVersion.
+    transport.onmessage?.({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "ui/initialize",
+      params: { appInfo: { name: "a" }, appCapabilities: { elicitation: {} } },
+    } as unknown as JSONRPCMessage);
+    // No appInfo.
+    transport.onmessage?.({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "ui/initialize",
+      params: {
+        protocolVersion: "2026-01-26",
+        appCapabilities: { elicitation: {} },
+      },
+    } as unknown as JSONRPCMessage);
+    // A notification, not the handshake request.
+    transport.onmessage?.({
+      jsonrpc: "2.0",
+      method: "ui/initialize",
+      params: {
+        protocolVersion: "2026-01-26",
+        appInfo: { name: "a" },
+        appCapabilities: { elicitation: {} },
+      },
+    } as unknown as JSONRPCMessage);
+
+    expect(appAdvertisesElicitation(bridge)).toBe(false);
+  });
+
+  it("keeps the capabilities from the first handshake, not a later frame", () => {
+    // The bridge keeps what it accepted and ignores re-initialization; this
+    // gate has to agree, or a second frame could change what it reports.
+    const bridge = makeBridge({});
+    const { transport } = makeTransport();
+    observeAppCapabilities(bridge, transport);
+    transport.onmessage?.(initializeFrame({ availableDisplayModes: [] }));
+    transport.onmessage?.(initializeFrame({ elicitation: {} }));
+    expect(appAdvertisesElicitation(bridge)).toBe(false);
   });
 
   it("keeps bridges independent", () => {
