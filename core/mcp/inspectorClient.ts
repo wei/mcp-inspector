@@ -370,6 +370,16 @@ interface ToolCallRequest {
 // the count, and past the cap we give up (mark the stream ended) rather than
 // retry a persistently-failing re-list forever.
 /**
+ * A one-word name for a JSON value's type, for diagnostics that must not
+ * disclose the value itself.
+ */
+function describeJsonType(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+/**
  * Whether a `_meta.progressToken` value is one the protocol allows.
  *
  * The spec (and the SDK's `ProgressTokenSchema`,
@@ -1078,8 +1088,13 @@ export class InspectorClient extends InspectorClientEventTarget {
     // the request stays well-formed and simply asks for no progress. Warn,
     // because a silently dropped key the user typed is worse than a noisy one.
     if ("progressToken" in merged && !isProgressToken(merged.progressToken)) {
+      // Log the rejected value's *type*, never the value. `_meta` now carries
+      // arbitrary JSON, so an invalid `progressToken` can be an object holding
+      // credentials — and this logger is persisted by real clients (the TUI
+      // writes it to `~/.mcp-inspector/auth.log`). The type is what makes the
+      // warning actionable anyway; the value would only leak.
       this.logger.warn(
-        { progressToken: merged.progressToken },
+        { received: describeJsonType(merged.progressToken) },
         "Dropping `_meta.progressToken` — expected a string or an integer.",
       );
       delete merged.progressToken;

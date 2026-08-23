@@ -55,6 +55,7 @@ import type {
   FetchRequestEntryBase,
   RequestMetadata,
 } from "@inspector/core/mcp/types.js";
+import type { InspectorLogger } from "@inspector/core/logging/logger.js";
 import type { JsonValue } from "@inspector/core/json/jsonUtils.js";
 import type {
   TypedEvent,
@@ -1463,6 +1464,49 @@ describe("InspectorClient", () => {
         messageLogState.destroy();
       },
     );
+
+    it("warns with the rejected progressToken's type, never its value", async () => {
+      // This logger is persisted by real clients (the TUI writes it to
+      // `~/.mcp-inspector/auth.log`), and an invalid `progressToken` can now be
+      // an object holding credentials — so the warning must not echo it.
+      const warn = vi.fn();
+      const noop = () => {};
+      const logger: InspectorLogger = {
+        level: "warn",
+        fatal: noop,
+        error: noop,
+        warn,
+        info: noop,
+        debug: noop,
+        trace: noop,
+        silent: noop,
+        child: () => logger,
+      };
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode, logger },
+          progress: false,
+          defaultMetadata: {
+            progressToken: { accessToken: "sk-live-should-not-appear" },
+          },
+        },
+      );
+      await client.connect();
+      await client.listTools();
+
+      const call = warn.mock.calls.find((c) =>
+        String(c[1]).includes("progressToken"),
+      );
+      expect(call).toBeDefined();
+      expect(call![0]).toEqual({ received: "object" });
+      // Belt and braces: the secret must not appear anywhere in the record.
+      expect(JSON.stringify(warn.mock.calls)).not.toContain("sk-live");
+    });
 
     it.each([
       ["a string", "tok-1"],
