@@ -223,8 +223,9 @@ const { updateServerSettingsSpy } = vi.hoisted(() => ({
 
 // Same idea for the edit-modal rename path (#1914): the test needs to make the
 // PUT's *reload* fail, which only a spy it controls can do.
-const { updateServerSpy } = vi.hoisted(() => ({
+const { updateServerSpy, addServerSpy } = vi.hoisted(() => ({
   updateServerSpy: vi.fn(() => Promise.resolve()),
+  addServerSpy: vi.fn(() => Promise.resolve()),
 }));
 // Stable spy for the tools list-changed acknowledgement, so a test can assert
 // the paginated Refresh clears the indicator (#1721).
@@ -240,7 +241,7 @@ vi.mock("@inspector/core/react/useServers.js", async (importOriginal) => ({
   >()),
   useServers: vi.fn(() => ({
     servers: [SERVER_A],
-    addServer: vi.fn(),
+    addServer: addServerSpy,
     updateServer: updateServerSpy,
     updateServerSettings: updateServerSettingsSpy,
     removeServer: vi.fn(),
@@ -425,6 +426,8 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
     onRefreshTasks: () => void;
     onServerSettings: (id: string) => void;
     onServerEdit: (id: string) => void;
+    onServerAdd: () => void;
+    highlightedServerIds?: string[];
     onClearProtocol: () => void;
     onReplayProtocol: (id: string) => void;
     onTogglePinProtocol: (id: string) => void;
@@ -550,9 +553,14 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
       </button>
       <button onClick={() => props.onSetLogLevel("debug")}>set-level</button>
       <button onClick={() => props.onServerSettings("A")}>open-settings</button>
-      {/* The real server grid (and its Edit button) lives inside this mocked
-          view, so the edit modal is only reachable through its callback. */}
+      {/* The real server grid (and its Add / Edit controls) lives inside this
+          mocked view, so the config modal is only reachable through these
+          callbacks — and the highlight batch only observable through this prop. */}
       <button onClick={() => props.onServerEdit("A")}>edit-server</button>
+      <button onClick={() => props.onServerAdd()}>add-server</button>
+      <span data-testid="highlighted-servers">
+        {(props.highlightedServerIds ?? []).join(",") || "none"}
+      </span>
       <span data-testid="pinned-history">
         {Array.from(props.pinnedProtocolIds ?? []).join(",")}
       </span>
@@ -2481,12 +2489,11 @@ describe("App paginated list pagination toggle (#1721)", () => {
   });
 });
 
-// `onConfigSubmit` moves `activeServerId` to the new id only after
-// `updateServer` *resolves*. Once a failed list reload rejects, the rename is
-// still on disk — so without the catch-side `followRename` the active id stays
-// on the old one, and the next successful refresh leaves it pointing at a row
-// that no longer exists (#1914 review r2).
-describe("App edit rename with a failed list reload (#1914)", () => {
+// A post-write reload failure rejects *after* the write landed, so every piece
+// of state `onConfigSubmit` used to apply on the resolve path has to be applied
+// on the reject path too — the rename target and the highlight batch both
+// describe a row that really is on disk (#1914 review r2 / r3).
+describe("App config submit with a failed list reload (#1914)", () => {
   // Earlier describes install their own `useServers` return value, which
   // outlives them — so this block installs its own and puts the previous
   // implementation back, rather than trusting whatever leaked in.
@@ -2497,7 +2504,7 @@ describe("App edit rename with a failed list reload (#1914)", () => {
     loading: false,
     error: undefined,
     refresh: vi.fn().mockResolvedValue(undefined),
-    addServer: vi.fn().mockResolvedValue(undefined),
+    addServer: addServerSpy,
     updateServer: updateServerSpy,
     updateServerSettings: updateServerSettingsSpy,
     removeServer: vi.fn().mockResolvedValue(undefined),
@@ -2512,6 +2519,7 @@ describe("App edit rename with a failed list reload (#1914)", () => {
       ? () => vi.mocked(useServers).mockImplementation(previous)
       : undefined;
     updateServerSpy.mockClear();
+    addServerSpy.mockClear();
     updateServerSettingsSpy.mockClear();
     vi.mocked(useServers).mockReturnValue(serversResult(["A"]));
   });
@@ -2530,7 +2538,7 @@ describe("App edit rename with a failed list reload (#1914)", () => {
         "The server was saved, but the server list could not be reloaded: disk full",
       ),
     );
-    renderWithMantine(<App />);
+    const { rerender } = renderWithMantine(<App />);
     await user.click(screen.getByText("connect"));
     await waitFor(() => expect(clientInstances).toHaveLength(1));
 
@@ -2552,16 +2560,55 @@ describe("App edit rename with a failed list reload (#1914)", () => {
       await screen.findByText(/could not be reloaded: disk full/),
     ).toBeInTheDocument();
 
-    // Now let the row land, as a later successful refresh would, and read the
-    // active id back off the toggle.
+    // Now let the row land, as the SSE refresh the write itself triggers
+    // would. The modal's target ("A") is gone, so it closes rather than
+    // blanking its own form — `initialId`/`initialConfig` would go undefined
+    // and ServerConfigModal's reset would wipe the open form and the error
+    // it is showing (#1914 r3).
     vi.mocked(useServers).mockReturnValue(serversResult(["A-renamed"]));
-    await user.click(screen.getByRole("button", { name: "Cancel" }));
-    await user.click(screen.getByText("paginated-on"));
+    rerender(<App />);
+    await waitFor(() =>
+      expect(screen.queryByLabelText(/Server ID/)).not.toBeInTheDocument(),
+    );
 
+    // With the modal gone, read the active id back off the toggle.
+    await user.click(screen.getByText("paginated-on"));
     await waitFor(() =>
       expect(updateServerSettingsSpy).toHaveBeenCalledWith(
         "A-renamed",
         expect.objectContaining({ paginatedLists: true }),
+      ),
+    );
+  });
+
+  it("keeps a successful add in the highlight batch when the reload failed (#1914)", async () => {
+    // `addServerHighlighted` marked the new id only after `addServer`
+    // resolved. The row is on disk either way, so on a reload failure it has
+    // to be marked from the catch — the next successful refresh is what
+    // renders it, and it would otherwise arrive unhighlighted.
+    const user = userEvent.setup();
+    addServerSpy.mockRejectedValueOnce(
+      new ServerListReloadError(
+        "The server was added, but the server list could not be reloaded: disk full",
+      ),
+    );
+    renderWithMantine(<App />);
+    expect(screen.getByTestId("highlighted-servers")).toHaveTextContent("none");
+
+    await user.click(screen.getByText("add-server"));
+    await user.type(await screen.findByLabelText(/Server ID/), "brand-new");
+    await user.type(screen.getByLabelText(/^Command/), "node");
+    await user.click(screen.getByRole("button", { name: "Add" }));
+
+    await waitFor(() =>
+      expect(addServerSpy).toHaveBeenCalledWith("brand-new", expect.anything()),
+    );
+    expect(
+      await screen.findByText(/could not be reloaded: disk full/),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByTestId("highlighted-servers")).toHaveTextContent(
+        "brand-new",
       ),
     );
   });

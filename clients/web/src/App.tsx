@@ -113,6 +113,7 @@ import { usePagedTools } from "@inspector/core/react/usePagedTools.js";
 import { usePagedPrompts } from "@inspector/core/react/usePagedPrompts.js";
 import { usePagedResources } from "@inspector/core/react/usePagedResources.js";
 import { usePaginatedList } from "./hooks/usePaginatedList";
+import { useValueChange } from "./hooks/useValueChange";
 import type { ListPaginationControlsProps } from "./components/elements/ListPaginationControls/ListPaginationControls";
 import { useManagedResourceTemplates } from "@inspector/core/react/useManagedResourceTemplates.js";
 import { useManagedRequestorTasks } from "@inspector/core/react/useManagedRequestorTasks.js";
@@ -4140,6 +4141,30 @@ function App() {
     return servers.find((s) => s.id === configModal.targetId);
   }, [configModal, servers]);
 
+  // An edit/clone modal whose target has left the list can no longer render a
+  // coherent form: `initialId`/`initialConfig` go undefined, and
+  // ServerConfigModal's own `useValueChange` reset then blanks the open form
+  // *and* clears the error it is showing.
+  //
+  // Only reachable since #1914 made the modal stay open on a failed post-write
+  // reload: rename A → B, the PUT lands, the reload fails, and the modal sits
+  // there targeting A. The write itself is what triggers the backend's change
+  // broadcast, so the SSE-driven background refresh that lands B (and drops A)
+  // is the *likely* next event, not a remote one. Closing is right — the edit
+  // is on disk and the list now agrees — and it covers the ordinary case too,
+  // where an external mcp.json edit removes the server being edited.
+  //
+  // Adjusted during render rather than in an effect (see `useValueChange`), so
+  // no frame ever paints the blanked form.
+  useValueChange(
+    configModal?.mode === "add" || configModal?.targetId === undefined
+      ? true
+      : servers.some((s) => s.id === configModal.targetId),
+    (targetPresent) => {
+      if (!targetPresent) setConfigModal(null);
+    },
+  );
+
   const settingsModalTarget = useMemo(() => {
     if (!settingsModalTargetId) return undefined;
     return servers.find((s) => s.id === settingsModalTargetId);
@@ -4188,7 +4213,14 @@ function App() {
     // didn't (especially painful for the OAuth client secret).
     onError: (id, err) => {
       notifications.show({
-        title: `Failed to save settings for "${id}"`,
+        // A `ServerListReloadError` means the PUT landed and only reading the
+        // list back failed, so "Failed to save" would be false — and this
+        // toast is the user's only signal here, since the modal has usually
+        // closed by the time a flush rejects (#1914 r3).
+        title:
+          err instanceof ServerListReloadError
+            ? `Saved settings for "${id}", but the server list did not reload`
+            : `Failed to save settings for "${id}"`,
         message: err instanceof Error ? err.message : String(err),
         color: "red",
       });
