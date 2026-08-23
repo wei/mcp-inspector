@@ -132,33 +132,74 @@ export function useServers(opts: UseServersOptions): UseServersResult {
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | undefined>(undefined);
 
+  // The list read itself, throwing on failure. Every refresh path goes
+  // through it; they differ only in what they do with a rejection.
+  const loadServers = useCallback(async (): Promise<ServerEntry[]> => {
+    const res = await doFetch(`${base}/api/servers`, {
+      method: "GET",
+      headers: buildHeaders(authToken, false),
+    });
+    if (!res.ok) {
+      throw new Error(await readErrorMessage(res));
+    }
+    const body = (await res.json()) as MCPConfig;
+    return mcpConfigToServerEntries(body);
+  }, [base, authToken, doFetch]);
+
   // Inner refresh that the public `refresh` and the SSE-triggered background
   // refresh both share. `background` skips the loading-state toggle so
   // consumers rendering a spinner or skeleton don't flash on every external
   // mcp.json edit — the existing list stays on screen while the re-fetch
   // resolves. `error` is still reset / set either way so a real error
   // surfaces even from a background refresh.
+  //
+  // A failure is recorded in `error` and NOT rethrown: the two callers are
+  // the mount effect and the SSE loop, neither of which has anywhere to put
+  // a rejection. Post-write reloads use `refreshAfterWrite` instead.
   const refreshInternal = useCallback(
     async (background: boolean): Promise<void> => {
       if (!background) setLoading(true);
       setError(undefined);
       try {
-        const res = await doFetch(`${base}/api/servers`, {
-          method: "GET",
-          headers: buildHeaders(authToken, false),
-        });
-        if (!res.ok) {
-          throw new Error(await readErrorMessage(res));
-        }
-        const body = (await res.json()) as MCPConfig;
-        setServers(mcpConfigToServerEntries(body));
+        setServers(await loadServers());
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       } finally {
         if (!background) setLoading(false);
       }
     },
-    [base, authToken, doFetch],
+    [loadServers],
+  );
+
+  // Post-write reload, used by every mutator. Unlike `refreshInternal` it
+  // rethrows, because a mutator's caller learns that something went wrong
+  // only from a rejection — `ServerConfigModal` renders `submitError` for a
+  // thrown error and nothing else, so a successful POST followed by a failed
+  // GET closed the Add Server modal as though the whole thing had worked
+  // (#1914). The reported failure was silent for exactly this reason.
+  //
+  // The message says the write landed, because it did: only reading the list
+  // back failed. A bare "could not add server" would send the user straight
+  // into a retry that trips the duplicate-id check, which is the dead end the
+  // original report described.
+  const refreshAfterWrite = useCallback(
+    async (verb: string): Promise<void> => {
+      setLoading(true);
+      setError(undefined);
+      try {
+        setServers(await loadServers());
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        setError(message);
+        throw new Error(
+          `The server was ${verb}, but the server list could not be reloaded: ${message}`,
+          { cause: err },
+        );
+      } finally {
+        setLoading(false);
+      }
+    },
+    [loadServers],
   );
 
   const refresh = useCallback(
@@ -241,9 +282,9 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       if (!res.ok) {
         throw new Error(await readErrorMessage(res));
       }
-      await refresh();
+      await refreshAfterWrite("added");
     },
-    [base, authToken, doFetch, refresh],
+    [base, authToken, doFetch, refreshAfterWrite],
   );
 
   const importSource = useCallback(
@@ -282,9 +323,9 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       if (!res.ok) {
         throw new Error(await readErrorMessage(res));
       }
-      await refresh();
+      await refreshAfterWrite("saved");
     },
-    [base, authToken, doFetch, refresh],
+    [base, authToken, doFetch, refreshAfterWrite],
   );
 
   const updateServerSettings = useCallback(
@@ -307,9 +348,9 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       if (!res.ok) {
         throw new Error(await readErrorMessage(res));
       }
-      await refresh();
+      await refreshAfterWrite("saved");
     },
-    [base, authToken, doFetch, refresh],
+    [base, authToken, doFetch, refreshAfterWrite],
   );
 
   const removeServer = useCallback(
@@ -324,9 +365,9 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       if (!res.ok) {
         throw new Error(await readErrorMessage(res));
       }
-      await refresh();
+      await refreshAfterWrite("removed");
     },
-    [base, authToken, doFetch, refresh],
+    [base, authToken, doFetch, refreshAfterWrite],
   );
 
   const reorderServers = useCallback(

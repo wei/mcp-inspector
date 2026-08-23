@@ -1199,6 +1199,157 @@ describe("useServers", () => {
     }
   });
 
+  /**
+   * #1914 — a write that lands but whose list reload fails must reject.
+   *
+   * `ServerConfigModal` renders `submitError` only for something `onSubmit`
+   * threw, so while the post-write refresh swallowed its failure into the
+   * `error` state the Add Server modal closed as though nothing had gone
+   * wrong. That is the "silent failure" in the report: the POST succeeded,
+   * the GET 500'd, and the user saw neither the new row nor an error.
+   *
+   * `failGetAfterWrite` lets the seed load and the write itself through, then
+   * fails every subsequent list read — the shape a container with no
+   * reachable keychain produced before #1848.
+   */
+  function failGetAfterWrite(message: string): {
+    fetchFn: typeof fetch;
+    startFailing: () => void;
+  } {
+    let failing = false;
+    const fetchFn: typeof fetch = async (input, init) => {
+      const req =
+        input instanceof Request
+          ? input
+          : new Request(input as string | URL, init);
+      if (failing && req.method === "GET" && req.url.endsWith("/api/servers")) {
+        return new Response(JSON.stringify({ error: message }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return h.fetchFn(req);
+    };
+    return {
+      fetchFn,
+      startFailing: () => {
+        failing = true;
+      },
+    };
+  }
+
+  it("addServer rejects when the post-write list reload fails (#1914)", async () => {
+    const { fetchFn, startFailing } = failGetAfterWrite("keyring unavailable");
+    const { result } = renderHook(() =>
+      useServers({ baseUrl: "http://test.local", fetchFn }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    startFailing();
+    await act(async () => {
+      await expect(
+        result.current.addServer("alpha", { type: "stdio", command: "node" }),
+      ).rejects.toThrow(
+        /The server was added, but the server list could not be reloaded: keyring unavailable/,
+      );
+    });
+
+    // The write itself landed, and the message says so — a bare failure would
+    // send the user into a retry that trips the duplicate-id check.
+    expect(readConfig(h.configPath).mcpServers.alpha).toEqual({
+      type: "stdio",
+      command: "node",
+    });
+    // Still recorded in `error` for any list-level UI reading it.
+    await waitFor(() =>
+      expect(result.current.error).toBe("keyring unavailable"),
+    );
+    expect(result.current.loading).toBe(false);
+  });
+
+  it("updateServer rejects when the post-write list reload fails (#1914)", async () => {
+    const { fetchFn, startFailing } = failGetAfterWrite("disk full");
+    const { result } = renderHook(() =>
+      useServers({ baseUrl: "http://test.local", fetchFn }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const existing = result.current.servers[0]!.id;
+
+    startFailing();
+    await act(async () => {
+      await expect(
+        result.current.updateServer(existing, existing, {
+          type: "stdio",
+          command: "node",
+        }),
+      ).rejects.toThrow(
+        /The server was saved, but the server list could not be reloaded: disk full/,
+      );
+    });
+  });
+
+  it("updateServerSettings rejects when the post-write list reload fails (#1914)", async () => {
+    const { fetchFn, startFailing } = failGetAfterWrite("disk full");
+    const { result } = renderHook(() =>
+      useServers({ baseUrl: "http://test.local", fetchFn }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const existing = result.current.servers[0]!.id;
+
+    startFailing();
+    await act(async () => {
+      await expect(
+        result.current.updateServerSettings(existing, {
+          headers: [],
+          env: [],
+          metadata: [],
+          roots: [],
+          connectionTimeout: 5000,
+          requestTimeout: 30000,
+          taskTtl: 30000,
+          maxFetchRequests: 1000,
+          paginatedLists: true,
+        }),
+      ).rejects.toThrow(
+        /The server was saved, but the server list could not be reloaded: disk full/,
+      );
+    });
+  });
+
+  it("removeServer rejects when the post-write list reload fails (#1914)", async () => {
+    const { fetchFn, startFailing } = failGetAfterWrite("disk full");
+    const { result } = renderHook(() =>
+      useServers({ baseUrl: "http://test.local", fetchFn }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const existing = result.current.servers[0]!.id;
+
+    startFailing();
+    await act(async () => {
+      await expect(result.current.removeServer(existing)).rejects.toThrow(
+        /The server was removed, but the server list could not be reloaded: disk full/,
+      );
+    });
+    expect(readConfig(h.configPath).mcpServers[existing]).toBeUndefined();
+  });
+
+  it("a plain refresh() still resolves on a failed list read, recording the error (#1914)", async () => {
+    // The rethrow is scoped to post-write reloads. `refresh()` is awaited by
+    // the mount effect and the SSE loop, neither of which has anywhere to put
+    // a rejection, so it must keep swallowing into `error`.
+    const { fetchFn, startFailing } = failGetAfterWrite("keyring unavailable");
+    const { result } = renderHook(() =>
+      useServers({ baseUrl: "http://test.local", fetchFn }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    startFailing();
+    await act(async () => {
+      await expect(result.current.refresh()).resolves.toBeUndefined();
+    });
+    expect(result.current.error).toBe("keyring unavailable");
+  });
+
   it("uses DEFAULT_SEED_CONFIG keys on the first load (seed-write contract)", async () => {
     const { result } = renderHook(() =>
       useServers({ baseUrl: "http://test.local", fetchFn: h.fetchFn }),
