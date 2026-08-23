@@ -3769,6 +3769,10 @@ function App() {
       // server's rehydrated secrets, so it can trigger the pending
       // plaintext-to-encrypted upgrade even though the user only toggled
       // pagination (#1950 review r22).
+      // Announced before the request goes out, so two toggles in flight at once
+      // are ordered by when they were issued rather than by which one's list
+      // reload finished first (#2089).
+      const write = lastPersistedSettings.begin(activeServerId);
       void refreshingPersist(updateServerSettings, refreshInitialConfig)(
         activeServerId,
         next,
@@ -3778,7 +3782,7 @@ function App() {
           // whatever is written next, since the `servers` entry it was derived
           // from will keep describing the old value if the reload behind this
           // write — or any later one — fails (#2089).
-          lastPersistedSettings.record(activeServerId, next);
+          write.landed(next);
         })
         .catch((err: unknown) => {
           // Persist failed: revert the optimistic override and roll the live
@@ -4168,17 +4172,21 @@ function App() {
     // outside the coverage gate, so wiring written here is tested by nothing
     // (#1950 review r17).
     onPersist: async (id: string, value: InspectorServerSettings) => {
+      // Announced before the request, like the toggle's own write: the debounced
+      // flush can put two saves for one server in flight, and the later-issued
+      // one describes disk however the two happen to finish (#2089).
+      const write = lastPersistedSettings.begin(id);
       await refreshingPersist(updateServerSettings, refreshInitialConfig)(
         id,
         value,
       );
       // Recorded for the same reason the pagination toggle records its own
-      // write (#2089): this is what disk holds now, and the `servers` entry it
-      // was edited from will keep describing the previous value for as long as
-      // list reads keep failing. Both settings writers feed the same per-server
+      // write: this is what disk holds now, and the `servers` entry it was
+      // edited from will keep describing the previous value for as long as list
+      // reads keep failing. Both settings writers feed the same per-server
       // record, so a rollback in either takes the most recent write for that
       // server, not just the most recent write *of its own kind*.
-      lastPersistedSettings.record(id, value);
+      write.landed(value);
     },
     // Surface failures via toast — the modal usually closes
     // immediately on user dismiss, so a silent fail-on-flush would

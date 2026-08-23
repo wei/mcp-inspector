@@ -23,34 +23,50 @@ import type {
  * single slot would let a save on B discard the baseline a later failed write
  * on A still needs — reproducing the very bug this hook exists to prevent.
  *
- * A record is not trusted indefinitely. It is paired with the `servers` entry
- * for that server **as of when the write completed**, and is dropped once the
- * list carries a different entry object: a successful read rebuilds the list,
- * so a fresh object is the signal that the entry has caught up with — or been
- * overtaken by (an edit made outside the Inspector) — our write, and from there
- * the entry is authoritative again. The pairing is taken at completion rather
- * than at scheduling because a read that lands *while the write is in flight*
- * would otherwise be mistaken for one that happened after it.
+ * ## Which of two overlapping writes wins
+ *
+ * A write is announced with `begin` when it is *issued* and confirmed with
+ * `landed` when it completes, and a confirmation is ignored if a later-issued
+ * write for that server has already confirmed. Completion order cannot be used
+ * for this: `updateServerSettings` waits for a list read after its PUT, so an
+ * older write with a slow read can finish last and would otherwise overwrite
+ * the record with a value that is no longer on disk.
+ *
+ * Issue order is a proxy for disk order, not a proof of it — HTTP does not
+ * promise that two in-flight PUTs arrive in the order they were sent. It is the
+ * best signal available on this side: the backend serializes writes to the
+ * catalog, but neither the route nor `useServers` returns a revision the client
+ * could order by. If one is added later, this is where it replaces the counter.
+ *
+ * ## When a record stops being believed
+ *
+ * A record is paired with the `servers` entry for that server **as of when the
+ * write completed**, and is dropped once the list carries a different entry
+ * object: a successful read rebuilds the list, so a fresh object is the signal
+ * that the entry has caught up with — or been overtaken by (an edit made
+ * outside the Inspector) — our write, and from there the entry is authoritative
+ * again. The pairing is taken at completion rather than at issue because a read
+ * that lands *while the write is in flight* would otherwise be mistaken for one
+ * that happened after it.
  *
  * One case the client cannot decide is left: a background read whose response
  * was generated before the write landed but which arrives after it still looks
- * newer here, and the record is dropped in its favour. Ordering that reliably
- * needs a revision or ETag on `GET /api/servers` that `useServers` does not
- * expose today. What the fallback yields in that case is the freshest
- * successful read — the same value the rest of the UI renders from — rather
- * than an arbitrary one.
+ * newer here, and the record is dropped in its favour. That needs the same
+ * missing revision as above. What the fallback yields in that case is the
+ * freshest successful read — the same value the rest of the UI renders from —
+ * rather than an arbitrary one.
  *
  * The list and the records are held in refs rather than state deliberately:
  * nothing renders from either, they are read only inside callbacks at the
- * moment a write completes or fails, and holding them in state would re-render
- * the whole composition root on every settings save.
+ * moment a write is issued, completes, or fails, and holding them in state
+ * would re-render the whole composition root on every settings save.
  */
 export interface LastPersistedSettings {
   /**
-   * Record a settings write that reached disk. Call it when the write
-   * *completes*, not when it is issued.
+   * Announce a settings write for `serverId` at the moment it is **issued**.
+   * Confirm it with the returned handle once it completes.
    */
-  record: (serverId: string, written: InspectorServerSettings) => void;
+  begin: (serverId: string) => SettingsWrite;
   /**
    * The best available answer to "what is on disk for this server". Returns the
    * recorded write while the list still carries the entry that write was paired
@@ -61,6 +77,14 @@ export interface LastPersistedSettings {
     serverId: string,
     fallback: InspectorServerSettings,
   ) => InspectorServerSettings;
+}
+
+export interface SettingsWrite {
+  /**
+   * Record that this write reached disk. A no-op if a write issued after this
+   * one has already been confirmed for the same server.
+   */
+  landed: (written: InspectorServerSettings) => void;
 }
 
 interface WriteRecord {
@@ -75,23 +99,35 @@ export function useLastPersistedSettings(
   servers: ServerEntry[],
 ): LastPersistedSettings {
   const recordsRef = useRef<Map<string, WriteRecord>>(new Map());
-  // Read the list through a ref so `record` pairs with the entry as it stands
-  // when the write finishes, not the one captured when the write was issued.
-  // Mirrored in an effect rather than assigned during render: writing a ref
-  // mid-render is an error under `react-hooks/refs`, and the callbacks that
-  // read it all run from settled promises, long after the commit.
+  const nextSequenceRef = useRef(0);
+  // Highest issue order confirmed per server. Kept apart from the records so a
+  // record dropped by `resolve` can't be resurrected by a straggler that was
+  // issued earlier: the high-water mark outlives the record it produced.
+  const confirmedRef = useRef<Map<string, number>>(new Map());
+  // Read the list through a ref so a write pairs with the entry as it stands
+  // when it finishes, not the one captured when it was issued. Mirrored in an
+  // effect rather than assigned during render: writing a ref mid-render is an
+  // error under `react-hooks/refs`, and every reader runs from a settled
+  // promise or an event handler, long after the commit.
   const serversRef = useRef(servers);
   useEffect(() => {
     serversRef.current = servers;
   }, [servers]);
 
-  const record = useCallback(
-    (serverId: string, written: InspectorServerSettings) => {
-      const entry = serversRef.current.find((s) => s.id === serverId);
-      recordsRef.current.set(serverId, { written, entry });
-    },
-    [],
-  );
+  const begin = useCallback((serverId: string): SettingsWrite => {
+    const sequence = ++nextSequenceRef.current;
+    return {
+      landed: (written: InspectorServerSettings) => {
+        const confirmed = confirmedRef.current.get(serverId) ?? 0;
+        // A write issued after this one already reported; it describes disk
+        // more recently, whichever of the two happened to finish first.
+        if (confirmed > sequence) return;
+        confirmedRef.current.set(serverId, sequence);
+        const entry = serversRef.current.find((s) => s.id === serverId);
+        recordsRef.current.set(serverId, { written, entry });
+      },
+    };
+  }, []);
 
   const resolve = useCallback(
     (
@@ -114,5 +150,5 @@ export function useLastPersistedSettings(
     [],
   );
 
-  return { record, resolve };
+  return { begin, resolve };
 }
