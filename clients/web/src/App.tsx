@@ -4228,7 +4228,16 @@ function App() {
       // reads keep failing. Both settings writers feed the same per-server
       // record, so a rollback in either takes the most recent write for that
       // server, not just the most recent write *of its own kind*.
-      write.landed(value);
+      //
+      // And the reconciliation is shared too, for the mixed-writer overlap: a
+      // toggle failing while this save is in flight rolls the UI and the live
+      // client back to a baseline this save then replaces on disk, so a settled
+      // save has to re-apply itself exactly as a settled toggle does (#2089).
+      const settled = write.landed(value);
+      if (settled && activeServerIdRef.current === id) {
+        setPaginatedListsOverride(value.paginatedLists ?? false);
+        inspectorClient?.setServerSettings(value);
+      }
     },
     // Surface failures via toast — the modal usually closes
     // immediately on user dismiss, so a silent fail-on-flush would

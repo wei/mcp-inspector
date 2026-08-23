@@ -2577,6 +2577,53 @@ describe("App paginated list pagination toggle (#1721)", () => {
     expect(lastPush?.paginatedLists).toBe(true);
   });
 
+  it("re-applies a settled modal save after a toggle failed first (#2089)", async () => {
+    // The mixed-writer version of the order above: the modal's flush is in
+    // flight with `paginatedLists: true` when the sidebar toggle fails and
+    // rolls back to the stale entry's `false`. The modal save then lands, so it
+    // is the settled state — and it has to re-apply itself for the same reason
+    // the toggle does, or disk holds `true` while the UI and the live client
+    // sit on `false`.
+    const user = userEvent.setup();
+    let landModal: (() => void) | undefined;
+    const modalWrite = new Promise<void>((resolve) => {
+      landModal = resolve;
+    });
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+    if (!draftOptions) throw new Error("useSettingsDraft was never called");
+    updateServerSettingsSpy.mockImplementationOnce(() => modalWrite);
+    const persisted = draftOptions.onPersist("A", {
+      ...settingsWithRoots([]),
+      paginatedLists: true,
+    });
+
+    updateServerSettingsSpy.mockRejectedValueOnce(new Error("disk full"));
+    await user.click(screen.getByText("paginated-off"));
+    await waitFor(() =>
+      expect(screen.getByTestId("tools-paginated")).toHaveTextContent("false"),
+    );
+
+    await act(async () => {
+      landModal?.();
+      await persisted;
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true"),
+    );
+    const client = clientInstances[0] as EventTarget & {
+      setServerSettings: ReturnType<typeof vi.fn>;
+    };
+    const lastPush = client.setServerSettings.mock.calls.at(-1)?.[0] as {
+      paginatedLists?: boolean;
+    };
+    expect(lastPush?.paginatedLists).toBe(true);
+  });
+
   it("lets a successful list read supersede a concrete rollback override (#2089)", async () => {
     // A rollback sets the override to a value rather than clearing it, so the
     // effect that drops it cannot key on the persisted boolean alone: if a
