@@ -54,6 +54,7 @@ import {
   readSecretFilePermissions,
   tightenSecretFilePermissions,
 } from "./file-secret-store.js";
+import { withSecretFileLock } from "./file-lock.js";
 import {
   KeyringSecretStore,
   parseAccount,
@@ -532,51 +533,76 @@ export async function absorbFileSecretsIntoKeyring(
 ): Promise<void> {
   const filePath = defaultSecretFilePath();
 
-  // A crash between the claim and the delete leaves only
-  // `secrets.json.migrating-<pid>`. Checking the canonical path alone then
-  // reports "nothing to migrate", the keychain is selected, and every stored
-  // credential silently disappears — the claim protecting the delete having
-  // introduced a way to lose everything. Adopt any orphan first.
-  await recoverOrphanedSnapshots(filePath);
-
-  if (!fsSync.existsSync(filePath)) return;
-
-  // **Claim the file atomically before reading it.** Comparing its contents
-  // immediately before `rm` narrowed the window and could not close it: a
-  // writer that completes a `set` after the comparison and before the delete
-  // has its write verified, reports success, and then loses it — a *later*
-  // successful write destroyed, which is worse than the optimistic-write
-  // residual and, unlike that one, fixable here.
+  // Cheap, lock-free "is there anything at all to do". Taking the lock first
+  // would mean every startup on the overwhelmingly common path — a keychain
+  // is available and no file was ever written — creates and removes a lock
+  // directory, and on a box whose storage dir does not exist yet the lock
+  // cannot be created at all, so `withSecretFileLock` would warn about
+  // unprotected writes on every single run with nothing to protect.
   //
-  // `rename` is atomic and leaves the live path free. Everything after this
-  // point operates on a snapshot nobody else can reach, and a writer that
-  // recreates `secrets.json` in the meantime is simply untouched — its file
-  // is a different one, and the next run migrates it.
-  //
-  // The staged name carries the pid so two Inspectors starting together
-  // cannot claim the same destination; whichever wins the rename does the
-  // migration and the loser sees ENOENT and returns.
-  // A per-attempt nonce, not just the pid. `recoverOrphanedSnapshots`
-  // deliberately leaves an orphan in place when a live `secrets.json` also
-  // exists — and a pid-only name is reusable across restarts (pid 1 on every
-  // container start), so the next claim would `rename` straight over that
-  // orphan and permanently discard secrets it may uniquely hold.
-  const staged = `${filePath}.migrating-${process.pid}-${randomUUID()}`;
-  try {
-    await fs.rename(filePath, staged);
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT") {
-      // Only ENOENT means someone else claimed it. Anything else — EACCES on
-      // the directory, EROFS — leaves the file exactly where it is, and
-      // returning quietly would select the keychain while file-backed
-      // secrets sit there unreadable by anything, with nothing said.
-      console.warn(
-        `\n[mcp-inspector] Could not claim the secrets file at ${filePath} for migration into the OS keychain (${code ?? "unknown error"}), so it has been left in place. Its secrets are not visible to this session.`,
-      );
+  // Racy by construction, and that is fine: it can only be wrong by saying
+  // "nothing here" about a file created a moment later, which is a file the
+  // next run migrates — the same outcome as a writer that recreates the path
+  // after the claim below. Everything that *acts* re-checks under the lock.
+  if (!(await anythingToMigrate(filePath))) return;
+
+  // Orphan adoption and the claim below both move the live path around, so
+  // they run under the same cross-process lock a `set` takes (#2082) —
+  // otherwise a concurrent writer's atomic rename can land between the two
+  // and be adopted, claimed, or clobbered depending on the interleaving.
+  // The lock is released before the hand-off: that part reads a snapshot
+  // nobody else can reach, and holding it across a keychain round-trip per
+  // secret would block every writer for the duration of a migration.
+  const claimed = await withSecretFileLock(filePath, async () => {
+    // A crash between the claim and the delete leaves only
+    // `secrets.json.migrating-<pid>`. Checking the canonical path alone then
+    // reports "nothing to migrate", the keychain is selected, and every stored
+    // credential silently disappears — the claim protecting the delete having
+    // introduced a way to lose everything. Adopt any orphan first.
+    await recoverOrphanedSnapshots(filePath);
+
+    if (!fsSync.existsSync(filePath)) return null;
+
+    // **Claim the file atomically before reading it.** Comparing its contents
+    // immediately before `rm` narrowed the window and could not close it: a
+    // writer that completes a `set` after the comparison and before the delete
+    // has its write verified, reports success, and then loses it — a *later*
+    // successful write destroyed, which is worse than the optimistic-write
+    // residual and, unlike that one, fixable here.
+    //
+    // `rename` is atomic and leaves the live path free. Everything after this
+    // point operates on a snapshot nobody else can reach, and a writer that
+    // recreates `secrets.json` in the meantime is simply untouched — its file
+    // is a different one, and the next run migrates it.
+    //
+    // The staged name carries the pid so two Inspectors starting together
+    // cannot claim the same destination; whichever wins the rename does the
+    // migration and the loser sees ENOENT and returns.
+    // A per-attempt nonce, not just the pid. `recoverOrphanedSnapshots`
+    // deliberately leaves an orphan in place when a live `secrets.json` also
+    // exists — and a pid-only name is reusable across restarts (pid 1 on every
+    // container start), so the next claim would `rename` straight over that
+    // orphan and permanently discard secrets it may uniquely hold.
+    const staged = `${filePath}.migrating-${process.pid}-${randomUUID()}`;
+    try {
+      await fs.rename(filePath, staged);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") {
+        // Only ENOENT means someone else claimed it. Anything else — EACCES on
+        // the directory, EROFS — leaves the file exactly where it is, and
+        // returning quietly would select the keychain while file-backed
+        // secrets sit there unreadable by anything, with nothing said.
+        console.warn(
+          `\n[mcp-inspector] Could not claim the secrets file at ${filePath} for migration into the OS keychain (${code ?? "unknown error"}), so it has been left in place. Its secrets are not visible to this session.`,
+        );
+      }
+      return null;
     }
-    return;
-  }
+    return staged;
+  });
+  if (claimed === null) return;
+  const staged = claimed;
 
   const file = new FileSecretStore({ filePath: staged });
   // True only when every value reached the keychain *and* there was
@@ -622,6 +648,28 @@ export async function absorbFileSecretsIntoKeyring(
     console.warn(
       `\n[mcp-inspector] Could not restore ${staged} to ${filePath}; both files exist and the snapshot holds the secrets that were not migrated. Merge it by hand, or delete it once you have confirmed nothing is missing.`,
     );
+  }
+}
+
+/**
+ * Is there a `secrets.json`, or a snapshot orphaned by an interrupted
+ * migration, worth taking the lock for?
+ *
+ * One `readdir` rather than a `stat` of the canonical path: an orphan is the
+ * case where the live file is *absent* and there is still everything to
+ * migrate, so checking only `secrets.json` would skip the recovery that
+ * exists because skipping it loses every stored credential.
+ */
+async function anythingToMigrate(filePath: string): Promise<boolean> {
+  const base = path.basename(filePath);
+  try {
+    return (await fs.readdir(path.dirname(filePath))).some(
+      (name) => name === base || name.startsWith(`${base}.migrating-`),
+    );
+  } catch {
+    // No storage directory yet — the first run on a fresh install, and the
+    // path this check exists to keep quiet.
+    return false;
   }
 }
 

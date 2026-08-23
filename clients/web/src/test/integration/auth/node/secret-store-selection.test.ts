@@ -684,6 +684,49 @@ describe("absorbFileSecretsIntoKeyring", () => {
     return filePath;
   }
 
+  it("takes no lock when there is nothing to migrate (#2082)", async () => {
+    // The overwhelmingly common startup: a keychain is available and no file
+    // was ever written. Locking first would create and remove a lock
+    // directory on every run — and on a box whose storage directory does not
+    // exist yet the lock cannot be created at all, so the degrade path would
+    // warn about unprotected writes on every single run, with nothing to
+    // protect.
+    const filePath = path.join(tmpDir, "no-such-dir", "secrets.json");
+    process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await loadWithProbe(true);
+
+    await mod.absorbFileSecretsIntoKeyring(new InMemorySecretStore());
+
+    expect(warn).not.toHaveBeenCalled();
+    expect(existsSync(`${filePath}.lock`)).toBe(false);
+  });
+
+  it("still adopts an orphan when the live file is absent (#2082)", async () => {
+    // The fast path above must not be a `stat` of `secrets.json`: an
+    // interrupted migration leaves *only* the snapshot, which is precisely
+    // the case where there is everything to migrate and no live file.
+    const orphan = path.join(tmpDir, "secrets.json.migrating-123-abc");
+    await fs.writeFile(
+      orphan,
+      JSON.stringify({
+        version: 1,
+        encryption: "none",
+        secrets: { "srv:oauthClientSecret": "from-orphan" },
+      }),
+      "utf-8",
+    );
+    process.env.MCP_INSPECTOR_SECRET_FILE = path.join(tmpDir, "secrets.json");
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await loadWithProbe(true);
+    const keyring = new InMemorySecretStore();
+
+    await mod.absorbFileSecretsIntoKeyring(keyring);
+
+    expect(await keyring.get("srv", "oauthClientSecret")).toBe("from-orphan");
+    expect(existsSync(orphan)).toBe(false);
+  });
+
   it("moves the file's secrets into the keychain and removes the file", async () => {
     const filePath = await seedFile({ "srv:oauthClientSecret": "from-file" });
     process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
