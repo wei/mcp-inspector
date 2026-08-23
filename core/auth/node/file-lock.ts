@@ -35,6 +35,7 @@
  * underneath it, and says so once.
  */
 
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 // CJS-only package. A default import is the shape that survives every
 // bundler this repo runs core/ through (tsup for cli/tui, vite's SSR/node
@@ -140,6 +141,19 @@ export async function withSecretFileLock<T>(
   fn: () => Promise<T>,
 ): Promise<T> {
   const target = path.resolve(filePath);
+  // Create the parent directory before locking, not after. `writeStoreFile`
+  // creates it on the way to writing the secrets file, but that runs *inside*
+  // the locked section — so on a fresh install, where `~/.mcp-inspector` does
+  // not exist yet, `proper-lockfile` would fail `ENOENT` and every first save
+  // would degrade to an unlocked write with a warning. That is the one save
+  // most likely to be racing another: two Inspectors started together both
+  // reach it, and it is exactly the interleaving this lock exists to close.
+  //
+  // Failure is deliberately swallowed rather than reported here. A directory
+  // that cannot be created is the same condition as a lock that cannot be
+  // taken, and the catch below already says so with the right message — one
+  // that mentions the lock rather than a `mkdir` the caller never asked for.
+  await fs.mkdir(path.dirname(target), { recursive: true }).catch(() => {});
   let release: (() => Promise<void>) | undefined;
   try {
     release = await properLockfile.lock(target, {

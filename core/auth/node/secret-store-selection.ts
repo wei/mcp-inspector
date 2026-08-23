@@ -666,10 +666,18 @@ async function anythingToMigrate(filePath: string): Promise<boolean> {
     return (await fs.readdir(path.dirname(filePath))).some(
       (name) => name === base || name.startsWith(`${base}.migrating-`),
     );
-  } catch {
-    // No storage directory yet — the first run on a fresh install, and the
-    // path this check exists to keep quiet.
-    return false;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    // Only "there is no directory" proves there is nothing to migrate — the
+    // first run on a fresh install, and the path this check exists to keep
+    // quiet. Every other failure (EACCES, EPERM, EMFILE) means the directory
+    // is there and could not be *listed*, which is not the same as empty: a
+    // directory can deny listing while still permitting access to the known
+    // `secrets.json` path, so returning false would select the keychain and
+    // leave those secrets invisible with nothing said. Fall through instead
+    // and let the under-lock `existsSync` and claim decide, which is what
+    // happened before this fast path existed.
+    return code !== "ENOENT" && code !== "ENOTDIR";
   }
 }
 

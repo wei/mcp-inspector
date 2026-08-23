@@ -72,12 +72,32 @@ const warnings = (): string =>
 async function holdLockInChildProcess(
   target: string,
   holdMs: number,
+  /**
+   * Secrets the child writes *while holding the lock*, before it announces
+   * itself. A parent that honours the lock therefore reads a map that already
+   * contains them, which is what lets the caller assert on the merged result
+   * rather than only on timing.
+   */
+  writeWhileHeld?: Record<string, string>,
 ): Promise<{ ready: Promise<void>; done: Promise<void> }> {
   const script = `
     const lockfile = require(${JSON.stringify(LOCKFILE_MODULE)});
+    const fs = require("node:fs");
+    const path = require("node:path");
+    // A second Inspector reaches the lock through \`withSecretFileLock\`, which
+    // creates the storage directory first. Mirror that, or the fresh-install
+    // case below would be testing the child's omission rather than the parent.
+    fs.mkdirSync(path.dirname(${JSON.stringify(target)}), { recursive: true });
     lockfile
       .lock(${JSON.stringify(target)}, { realpath: false, stale: 10000 })
       .then(async (release) => {
+        const secrets = ${JSON.stringify(writeWhileHeld ?? null)};
+        if (secrets) {
+          fs.writeFileSync(
+            ${JSON.stringify(target)},
+            JSON.stringify({ version: 1, encryption: "none", secrets }),
+          );
+        }
         process.stdout.write("acquired\\n");
         await new Promise((r) => setTimeout(r, ${holdMs}));
         await release();
@@ -148,32 +168,83 @@ describe("withSecretFileLock across processes", () => {
     expect(warnings()).toBe("");
   });
 
-  it("serializes two FileSecretStores in different processes", async () => {
+  it("makes FileSecretStore.set wait on a lock another process holds", async () => {
     // The end-to-end shape from the issue: a CLI run beside a web session.
-    // The child holds the lock while the parent's `set` is in flight, so the
-    // parent's whole read-modify-write happens after the child is gone.
+    //
+    // Deliberately asserts that the parent's `set` has *not finished* while
+    // the child holds the lock. A test that only checks both keys survive
+    // afterwards passes with the lock removed from `mutate` entirely — the
+    // optimistic verify would repair the clobber and hide the regression.
+    // Not-yet-resolved is the observation only a real lock can produce.
     const target = filePath();
-    const store = new FileSecretStore({ filePath: target });
-    await store.set("srv", "env:FIRST", "1");
-
-    const { ready, done } = await holdLockInChildProcess(target, 300);
+    const { ready, done } = await holdLockInChildProcess(target, 700, {
+      "srv:env:FROM_CHILD": "1",
+    });
     await ready;
-    await store.set("srv", "env:SECOND", "2");
+
+    let settled = false;
+    const store = new FileSecretStore({ filePath: target });
+    const pending = store.set("srv", "env:FROM_PARENT", "2").then(() => {
+      settled = true;
+    });
+
+    // Comfortably inside the child's hold, and comfortably outside the few
+    // milliseconds an unlocked read-modify-write would take.
+    await new Promise((r) => setTimeout(r, 300));
+    expect(settled).toBe(false);
+
     await done;
+    await pending;
+
+    // Having waited, the parent read the map the child left, so its own entry
+    // landed *on top of* the child's rather than replacing it.
+    const reader = new FileSecretStore({ filePath: target });
+    expect(await reader.get("srv", "env:FROM_CHILD")).toBe("1");
+    expect(await reader.get("srv", "env:FROM_PARENT")).toBe("2");
+    expect(warnings()).toBe("");
+  }, 20_000);
+
+  it("creates the storage directory so the very first save is locked too", async () => {
+    // `writeStoreFile` creates the parent directory, but from *inside* the
+    // locked section — so without the `mkdir` in `withSecretFileLock` the
+    // first save on a fresh install fails `ENOENT` on the lock and degrades
+    // to an unlocked write. That is the save most likely to be racing
+    // another, since two Inspectors started together both reach it.
+    const target = path.join(tmpDir, "fresh-install", "secrets.json");
+    const { ready, done } = await holdLockInChildProcess(target, 700);
+    await ready;
+
+    let settled = false;
+    const store = new FileSecretStore({ filePath: target });
+    const pending = store.set("srv", "env:FIRST_EVER", "1").then(() => {
+      settled = true;
+    });
+
+    await new Promise((r) => setTimeout(r, 300));
+    expect(settled).toBe(false);
+
+    await done;
+    await pending;
 
     const reader = new FileSecretStore({ filePath: target });
-    expect(await reader.get("srv", "env:FIRST")).toBe("1");
-    expect(await reader.get("srv", "env:SECOND")).toBe("2");
+    expect(await reader.get("srv", "env:FIRST_EVER")).toBe("1");
+    // No degrade warning: the lock was genuinely held, not skipped.
+    expect(warnings()).toBe("");
   }, 20_000);
 });
 
 describe("withSecretFileLock degrades rather than failing", () => {
   it("runs the body anyway when the lock cannot be created, and says so once", async () => {
-    // A directory that does not exist stands in for every real variant —
+    // A path whose parent is a *file* stands in for every real variant —
     // read-only `$HOME`, a mount owned by another uid, a filesystem without
-    // `mkdir` semantics. This store exists for boxes where the usual
-    // mechanism is missing, so it must not gain a new way to be unavailable.
-    const target = path.join(tmpDir, "no-such-dir", "secrets.json");
+    // `mkdir` semantics — and unlike a permissions-based setup it fails the
+    // same way for root, so it cannot pass locally and flake in a container.
+    // Note a merely *missing* directory is no longer this case:
+    // `withSecretFileLock` creates it. This store exists for boxes where the
+    // usual mechanism is missing, so it must not gain a new way to be
+    // unavailable.
+    await fs.writeFile(path.join(tmpDir, "not-a-dir"), "", "utf-8");
+    const target = path.join(tmpDir, "not-a-dir", "secrets.json");
 
     let ran = 0;
     await withSecretFileLock(target, async () => {
