@@ -111,6 +111,7 @@ import { useMessageLog } from "@inspector/core/react/useMessageLog.js";
 import { useFetchRequestLog } from "@inspector/core/react/useFetchRequestLog.js";
 import { useStderrLog } from "@inspector/core/react/useStderrLog.js";
 import { useInitialConfig } from "@inspector/core/react/useInitialConfig.js";
+import { refreshingPersist } from "./utils/refreshingPersist";
 import { usePendingClientRequests } from "@inspector/core/react/usePendingClientRequests.js";
 import { InspectorView } from "./components/views/InspectorView/InspectorView";
 import type {
@@ -3995,16 +3996,14 @@ function App() {
     targetId: settingsModalTargetId,
     resolveInitial: (id) =>
       servers.find((s) => s.id === id)?.settings ?? EMPTY_SETTINGS,
-    onPersist: async (id: string, settings: InspectorServerSettings) => {
-      await updateServerSettings(id, settings);
-      // The saved settings may include an OAuth client secret or a stdio
-      // `env:` value, and writing one can change what the secrets file *is*
-      // — the first save under a newly-set passphrase re-encrypts a
-      // pre-existing plaintext file. The backend re-derives the descriptor
-      // per request, so ask again; otherwise the footer keeps reporting the
-      // state from page load for the rest of the session (#1950 review r14).
-      refreshInitialConfig();
-    },
+    // The saved settings may include an OAuth client secret or a stdio `env:`
+    // value, and writing one can change what the secrets file *is* — the first
+    // save under a newly-set passphrase re-encrypts a pre-existing plaintext
+    // file. `refreshingPersist` re-asks the backend afterwards; it is a named
+    // unit rather than an inline `await …; refresh()` because this file is
+    // outside the coverage gate, so wiring written here is tested by nothing
+    // (#1950 review r17).
+    onPersist: refreshingPersist(updateServerSettings, refreshInitialConfig),
     // Surface failures via toast — the modal usually closes
     // immediately on user dismiss, so a silent fail-on-flush would
     // leave the user thinking their last edits saved when they
@@ -4028,7 +4027,10 @@ function App() {
   } = useClientSettingsDraft({
     opened: clientSettingsOpen,
     resolveInitial: () => clientConfigToFormValues(clientConfig),
-    onPersist: async (values) => {
+    // Wrapped for the same reason as the server-settings persist above: this
+    // one can carry the enterprise IdP client secret, and that write is what
+    // flips a pending-encryption file to encrypted.
+    onPersist: refreshingPersist(async (values) => {
       if (!canPersistClientSettingsDraft(values)) return;
       const next = formValuesToClientConfig(values);
       await saveClientConfigRemote(next, {
@@ -4036,11 +4038,7 @@ function App() {
         authToken: getAuthToken(),
       });
       setClientConfig(next);
-      // Same reason as the server-settings persist: this can carry the
-      // enterprise IdP client secret, and that write is what flips a
-      // pending-encryption file to encrypted.
-      refreshInitialConfig();
-    },
+    }, refreshInitialConfig),
     onError: (err) => {
       notifications.show({
         title: "Failed to save client settings",

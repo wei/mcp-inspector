@@ -4,7 +4,7 @@
  * exercises the routes via real HTTP.
  */
 
-import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import {
   mkdtempSync,
   readFileSync,
@@ -2672,6 +2672,52 @@ describe("plaintext migration against a session-scoped store (#1950)", () => {
     ).toBe("must-survive");
     // But the durable copy is untouched.
     expect(readFileSync(configPath, "utf-8")).toBe(before);
+  });
+
+  it("warns only when something is actually preserved, and only once", async () => {
+    // The warning used to fire on every `/api/servers` read whenever the
+    // store was session-scoped — including for the default empty catalog,
+    // where "plaintext values are left on disk" is simply false, repeated on
+    // every list refresh. A log line that is usually untrue is one people
+    // learn to skip, which costs it the occasion it matters.
+    const warn = vi.fn();
+    const logger = {
+      warn,
+      info: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    } as unknown as Parameters<typeof createRemoteApp>[0]["logger"];
+    const sessionMessage = /kept in memory for this session/;
+
+    // A catalog with no plaintext secrets: nothing is being preserved.
+    const emptyPath = join(tempDir, "empty.json");
+    writeFileSync(emptyPath, JSON.stringify({ mcpServers: {} }));
+    const empty = createRemoteApp({
+      dangerouslyOmitAuth: true,
+      mcpConfigPath: emptyPath,
+      initialConfig: { defaultEnvironment: {} },
+      secretStore: new SessionSecretStore(),
+      logger,
+    });
+    await empty.app.request(new Request("http://test/api/servers"));
+    await empty.app.request(new Request("http://test/api/servers"));
+    expect(warn.mock.calls.flat().join(" ").match(sessionMessage)).toBeNull();
+
+    // And with a plaintext secret: said once, not once per read.
+    warn.mockClear();
+    const withSecret = createRemoteApp({
+      dangerouslyOmitAuth: true,
+      mcpConfigPath: configPath,
+      initialConfig: { defaultEnvironment: {} },
+      secretStore: new SessionSecretStore(),
+      logger,
+    });
+    await withSecret.app.request(new Request("http://test/api/servers"));
+    await withSecret.app.request(new Request("http://test/api/servers"));
+    const said = warn.mock.calls.filter((c: unknown[]) =>
+      sessionMessage.test(c.map(String).join(" ")),
+    );
+    expect(said).toHaveLength(1);
   });
 
   it("aborts the migration when the keychain read fails, preserving mcp.json", async () => {

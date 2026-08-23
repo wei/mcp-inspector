@@ -1940,17 +1940,28 @@ export function createRemoteApp(
   // it and abandon the migration for this GET — the on-disk file stays
   // as-is so the user's secret isn't lost, and the next GET retries
   // (e.g. after the user installs libsecret).
+  // Warned lazily, at most once per server instance, and only when there is
+  // actually something being preserved. Announcing it up front meant every
+  // `/api/servers` read on a session-scoped store logged that plaintext
+  // values were left on disk — including for the default empty catalog,
+  // where the statement is simply false, repeated on every list refresh.
+  // Hoisted out of the function so it is once per process rather than once
+  // per read.
+  let warnedSessionPreserved = false;
+
   const migratePlaintextSecrets = async (
     config: MCPConfig,
   ): Promise<{ migrated: MCPConfig; changed: boolean }> => {
     let changed = false;
     const next: MCPConfig = { mcpServers: {} };
     const durable = await secretStoreIsDurable(secretStore);
-    if (!durable && fileLogger) {
+    const warnSessionPreserved = () => {
+      if (warnedSessionPreserved || durable || !fileLogger) return;
+      warnedSessionPreserved = true;
       fileLogger.warn(
         "Secrets are kept in memory for this session, so plaintext values in mcp.json are left on disk rather than migrated away. They would otherwise be lost when the Inspector exits.",
       );
-    }
+    };
     try {
       for (const [id, stored] of Object.entries(config.mcpServers)) {
         const { stripped, secrets } = extractSecretsFromStored(stored);
@@ -1982,6 +1993,7 @@ export function createRemoteApp(
         // loaded into the store above, so this session behaves normally;
         // only the disk delete is withheld.
         if (!durable) {
+          warnSessionPreserved();
           next.mcpServers[id] = stored;
           continue;
         }

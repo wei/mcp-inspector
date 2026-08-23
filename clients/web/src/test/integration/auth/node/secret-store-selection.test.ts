@@ -582,6 +582,25 @@ describe("defaultSecretFilePath", () => {
     expect(path.isAbsolute(mod.defaultSecretFilePath())).toBe(true);
   });
 
+  it("is absolute even when HOME and USERPROFILE are both unset", async () => {
+    // A service started with a minimal environment has neither, and the
+    // `"."` fallback then yields a *relative* path — while
+    // `FileSecretStoreOptions.filePath` and the `SecretStorageInfo.path` the
+    // footer offers to copy both promise an absolute one. A copied location
+    // that means nothing without knowing the process's cwd is not a location.
+    const savedHome = process.env.HOME;
+    const savedProfile = process.env.USERPROFILE;
+    delete process.env.HOME;
+    delete process.env.USERPROFILE;
+    try {
+      const mod = await loadWithProbe(true);
+      expect(path.isAbsolute(mod.defaultSecretFilePath())).toBe(true);
+    } finally {
+      if (savedHome !== undefined) process.env.HOME = savedHome;
+      if (savedProfile !== undefined) process.env.USERPROFILE = savedProfile;
+    }
+  });
+
   it("defaults to ~/.mcp-inspector/secrets.json", async () => {
     const mod = await loadWithProbe(true);
     expect(mod.defaultSecretFilePath()).toContain(

@@ -117,7 +117,13 @@ export function defaultSecretFilePath(): string {
   const storageDir = process.env[STORAGE_DIR_ENV]?.trim();
   if (storageDir) return path.resolve(storageDir, "secrets.json");
   const homeDir = process.env.HOME || process.env.USERPROFILE || ".";
-  return path.join(homeDir, ".mcp-inspector", "secrets.json");
+  // Resolved like the two override branches. A service started with a minimal
+  // environment has neither variable, and the `"."` fallback then yields
+  // `.mcp-inspector/secrets.json` — a *relative* path, while
+  // `FileSecretStoreOptions.filePath` and the `SecretStorageInfo.path` the UI
+  // copies both promise an absolute one. The footer would offer to copy a
+  // location that means nothing without knowing the process's cwd.
+  return path.resolve(homeDir, ".mcp-inspector", "secrets.json");
 }
 
 /**
