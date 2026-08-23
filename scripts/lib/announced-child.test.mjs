@@ -22,43 +22,55 @@ function waitForExit(child) {
   return new Promise((resolve) => child.once("close", resolve));
 }
 
-test("hands the child to onSpawn before waiting, and returns the match", async () => {
+/**
+ * Build an `onSpawn` that registers teardown the moment the child exists, so it
+ * is killed on every path out of the test — a failed assertion included.
+ *
+ * This is the helper's own ownership rule applied to the suite: killing only on
+ * the success path would leak a 60-second child into the runner precisely when
+ * the regression being guarded has come back, which is the one run where a leak
+ * matters most. Killing an already-exited child is a no-op, so the early-exit
+ * cases pay nothing for it.
+ */
+function killOnTeardown(t, capture = () => {}) {
+  return (child) => {
+    capture(child);
+    t.after(async () => {
+      child.kill("SIGKILL");
+      await waitForExit(child);
+    });
+  };
+}
+
+test("hands the child to onSpawn before waiting, and returns the match", async (t) => {
   let seen = null;
   const { child, match } = await startAnnouncedChild({
     command: process.execPath,
     args: ["-e", 'console.error("listening at http://127.0.0.1:9999")'],
     pattern: /listening at (http:\/\/\S+)/i,
-    onSpawn: (c) => (seen = c),
+    onSpawn: killOnTeardown(t, (c) => (seen = c)),
     what: "probe",
     timeoutMs: 10_000,
     pollMs: 25,
   });
-  assert.equal(
-    seen,
-    child,
-    "onSpawn received the same child that was returned",
-  );
+  assert.equal(seen, child, "onSpawn got the child that was returned");
   assert.equal(match[1], "http://127.0.0.1:9999");
-  child.kill("SIGKILL");
-  await waitForExit(child);
 });
 
-test("scans stdout as well as stderr", async () => {
-  const { child, match } = await startAnnouncedChild({
+test("scans stdout as well as stderr", async (t) => {
+  const { match } = await startAnnouncedChild({
     command: process.execPath,
     args: ["-e", 'console.log("ready on 4242")'],
     pattern: /ready on (\d+)/,
-    onSpawn: () => {},
+    onSpawn: killOnTeardown(t),
     what: "probe",
     timeoutMs: 10_000,
     pollMs: 25,
   });
   assert.equal(match[1], "4242");
-  child.kill("SIGKILL");
-  await waitForExit(child);
 });
 
-test("a non-announcing child is still reachable and killable after the timeout", async () => {
+test("a non-announcing child is still reachable and killable after the timeout", async (t) => {
   // The regression: a child that is alive but never announces. The throw must
   // not be the only thing that happens — the caller must already hold the
   // handle, or `process.exit(1)` leaves this running.
@@ -69,7 +81,7 @@ test("a non-announcing child is still reachable and killable after the timeout",
       command: process.execPath,
       args: ["-e", "setTimeout(() => {}, 60000)"],
       pattern: /never going to match/,
-      onSpawn: (c) => (published = c),
+      onSpawn: killOnTeardown(t, (c) => (published = c)),
       what: "probe",
       timeoutMs: 300,
       pollMs: 25,
@@ -92,14 +104,14 @@ test("a non-announcing child is still reachable and killable after the timeout",
   );
 });
 
-test("reports a child that exits before announcing, with its output", async () => {
+test("reports a child that exits before announcing, with its output", async (t) => {
   let published = null;
   await assert.rejects(
     startAnnouncedChild({
       command: process.execPath,
       args: ["-e", 'console.error("boom: bad config"); process.exit(3)'],
       pattern: /never going to match/,
-      onSpawn: (c) => (published = c),
+      onSpawn: killOnTeardown(t, (c) => (published = c)),
       what: "probe",
       timeoutMs: 10_000,
       pollMs: 25,
@@ -109,16 +121,15 @@ test("reports a child that exits before announcing, with its output", async () =
       /boom: bad config/.test(err.message),
   );
   assert.ok(published, "published even on the early-exit path");
-  await waitForExit(published);
 });
 
-test("reports a spawn failure rather than throwing it uncaught", async () => {
+test("reports a spawn failure rather than throwing it uncaught", async (t) => {
   await assert.rejects(
     startAnnouncedChild({
       command: "definitely-not-an-executable-2000",
       args: [],
       pattern: /never/,
-      onSpawn: () => {},
+      onSpawn: killOnTeardown(t),
       what: "probe",
       timeoutMs: 10_000,
       pollMs: 25,
