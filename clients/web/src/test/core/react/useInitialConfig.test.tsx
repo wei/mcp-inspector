@@ -11,6 +11,18 @@ import { describe, it, expect, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { useInitialConfig } from "@inspector/core/react/useInitialConfig";
 
+function payloadWithPlaintext(plaintext: boolean): Response {
+  return jsonResponse({
+    secretStorage: {
+      kind: "file",
+      reason: "fallback",
+      durable: true,
+      plaintext,
+      path: "/tmp/secrets.json",
+    },
+  });
+}
+
 function jsonResponse(body: unknown, ok = true): Response {
   return {
     ok,
@@ -504,6 +516,46 @@ describe("useInitialConfig", () => {
         expect(result.current.secretStorage?.plaintext).toBe(false),
       );
       expect(fetchFn).toHaveBeenCalledTimes(2);
+    });
+
+    it("commits only the newest load when refreshes overlap", async () => {
+      // Two debounced settings saves landing close together fire two
+      // refreshes, and nothing orders the responses. Before the request
+      // token, an earlier request resolving last put the footer back to the
+      // descriptor it had *before* the write — reverting a security
+      // statement to a stale value, which is the worst direction for this
+      // particular field to be wrong in.
+      const resolvers: Array<(v: Response) => void> = [];
+      const fetchFn = vi
+        .fn()
+        .mockImplementation(
+          () => new Promise<Response>((resolve) => resolvers.push(resolve)),
+        );
+
+      const { result } = renderHook(() =>
+        useInitialConfig({ baseUrl: "http://test.local", fetchFn }),
+      );
+      // Mount fetch is resolvers[0]; settle it so `loading` clears.
+      await act(async () => {
+        resolvers[0]?.(payloadWithPlaintext(true));
+      });
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      // Two overlapping refreshes: the first reports the pre-write state,
+      // the second the post-write state.
+      act(() => result.current.refresh()); // resolvers[1] — older
+      act(() => result.current.refresh()); // resolvers[2] — newer
+
+      // Resolve the NEWER one first, then the older one.
+      await act(async () => {
+        resolvers[2]?.(payloadWithPlaintext(false));
+      });
+      await act(async () => {
+        resolvers[1]?.(payloadWithPlaintext(true));
+      });
+
+      // The late-arriving older response must not win.
+      expect(result.current.secretStorage?.plaintext).toBe(false);
     });
 
     it("drops a refresh that resolves after unmount", async () => {

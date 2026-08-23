@@ -67,8 +67,10 @@ export interface UseInitialConfigResult {
    * about a file that is no longer plaintext. The backend already re-derives
    * the descriptor per request; this is the client half of that.
    *
-   * Safe to call at any time: the GET is idempotent, and a response that
-   * arrives after unmount is dropped.
+   * Safe to call at any time and safe to overlap: the GET is idempotent, and
+   * loads are ordered by a request token, so only the most recent one may
+   * commit — a response that arrives after unmount, after a re-fetch, or out
+   * of order behind a newer refresh is dropped.
    */
   refresh: () => void;
 }
@@ -179,63 +181,65 @@ export function useInitialConfig(
   >(undefined);
   const [loading, setLoading] = useState<boolean>(true);
 
-  // `isCancelled` lets the effect drop a response that resolves after unmount or
-  // after a re-run (baseUrl/authToken change), so a stale payload can't overwrite
-  // current state. React 18 no longer warns on setState-after-unmount — it's a
-  // silent no-op — so the guard is about correctness, not the warning.
-  const load = useCallback(
-    async (isCancelled: () => boolean): Promise<void> => {
-      const headers: Record<string, string> = {};
-      if (authToken) headers["x-mcp-remote-auth"] = `Bearer ${authToken}`;
-      try {
-        const res = await doFetch(`${base}/api/config`, {
-          method: "GET",
-          headers,
-        });
-        if (isCancelled() || !res.ok) return;
-        const body = (await res.json()) as ConfigPayload;
-        if (isCancelled()) return;
-        // Tolerate missing/non-usable fields — a legacy backend that omits any
-        // of them leaves that value at its "unavailable" default rather than
-        // showing a bogus value.
-        setVersion(usableString(body.version));
-        setSandboxUrl(usableString(body.sandboxUrl));
-        // Only an explicit `false` makes the list read-only; a missing field
-        // (legacy backend) stays writable.
-        setWritable(body.writable !== false);
-        setSecretStorage(usableSecretStorage(body.secretStorage));
-      } catch {
-        // Network error / aborted fetch: leave every field at its default
-        // (version/sandboxUrl undefined, writable true).
-      } finally {
-        if (!isCancelled()) setLoading(false);
-      }
-    },
-    [base, authToken, doFetch],
-  );
+  /**
+   * Monotonic request token. Every load claims the next value; a load may
+   * commit only while it still holds the current one.
+   *
+   * This replaces a per-caller "am I cancelled" flag, which was enough for
+   * the mount fetch and *not* enough once `refresh()` existed. Two overlapping
+   * refreshes — two debounced settings saves landing close together — are
+   * unordered, so the earlier request could resolve last and put the footer
+   * back to the descriptor it had before the write. Stale-response ordering
+   * matters more here than in most places precisely because the field it
+   * would revert is a security statement.
+   *
+   * Bumping on effect teardown covers the other two cases for free: unmount,
+   * and a `baseUrl`/`authToken` change that re-runs the effect.
+   */
+  const generation = useRef(0);
+
+  const load = useCallback(async (): Promise<void> => {
+    const mine = ++generation.current;
+    const stale = () => generation.current !== mine;
+    const headers: Record<string, string> = {};
+    if (authToken) headers["x-mcp-remote-auth"] = `Bearer ${authToken}`;
+    try {
+      const res = await doFetch(`${base}/api/config`, {
+        method: "GET",
+        headers,
+      });
+      if (stale() || !res.ok) return;
+      const body = (await res.json()) as ConfigPayload;
+      if (stale()) return;
+      // Tolerate missing/non-usable fields — a legacy backend that omits any
+      // of them leaves that value at its "unavailable" default rather than
+      // showing a bogus value.
+      setVersion(usableString(body.version));
+      setSandboxUrl(usableString(body.sandboxUrl));
+      // Only an explicit `false` makes the list read-only; a missing field
+      // (legacy backend) stays writable.
+      setWritable(body.writable !== false);
+      setSecretStorage(usableSecretStorage(body.secretStorage));
+    } catch {
+      // Network error / aborted fetch: leave every field at its default
+      // (version/sandboxUrl undefined, writable true).
+    } finally {
+      if (!stale()) setLoading(false);
+    }
+  }, [base, authToken, doFetch]);
 
   useEffect(() => {
-    let cancelled = false;
-    void load(() => cancelled);
+    void load();
     return () => {
-      cancelled = true;
+      // Invalidate whatever is in flight: this fires on unmount and on a
+      // `baseUrl`/`authToken` change, and in both cases a response for the
+      // old inputs must not commit.
+      generation.current++;
     };
   }, [load]);
 
-  // A manual re-fetch shares `load`'s cancellation contract, but has no
-  // effect teardown to key off — so it tracks its own liveness through a ref
-  // that the unmount effect flips. Without that, a refresh fired just before
-  // unmount would still call `setState` on a dead component.
-  const alive = useRef(true);
-  useEffect(() => {
-    alive.current = true;
-    return () => {
-      alive.current = false;
-    };
-  }, []);
-
   const refresh = useCallback(() => {
-    void load(() => !alive.current);
+    void load();
   }, [load]);
 
   return { version, sandboxUrl, writable, secretStorage, loading, refresh };
