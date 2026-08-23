@@ -21,8 +21,14 @@ describe("getViteBaseConfig", () => {
       expect.arrayContaining([
         "@modelcontextprotocol/client/stdio",
         "atomically",
+        "chokidar",
         "cross-spawn",
         "which",
+        "@napi-rs/keyring",
+        // #2082 — reached through `core/auth/node/file-lock.ts`. The tsup
+        // `external` lists cover the production bundles, not `vite dev`, so
+        // a node-only dependency has to be named in both places.
+        "proper-lockfile",
       ]),
     );
   });
