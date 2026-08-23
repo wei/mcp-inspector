@@ -57,6 +57,10 @@ describe("appCapabilities (#1854)", () => {
     expect(appAdvertisesElicitation(bridge)).toBe(true);
   });
 
+  it("is false when the bridge advertises nothing at all", () => {
+    expect(appAdvertisesElicitation(makeBridge(undefined))).toBe(false);
+  });
+
   it("is false for an app that advertised no elicitation", () => {
     const bridge = makeBridge({ availableDisplayModes: ["inline"] });
     const { transport } = makeTransport();
@@ -173,6 +177,40 @@ describe("appCapabilities (#1854)", () => {
       method: "ui/initialize",
       params: { appCapabilities: {} },
     } as unknown as JSONRPCMessage);
+    expect(appAdvertisesElicitation(bridge)).toBe(true);
+  });
+
+  it("rejects a frame the bridge's own schema rejects", () => {
+    // `appInfo: {}` is missing the implementation name/version that
+    // `McpUiInitializeRequestSchema` requires, so the bridge answers an error
+    // and stores nothing — this gate must not be the laxer of the two.
+    const bridge = makeBridge({});
+    const { transport } = makeTransport();
+    observeAppCapabilities(bridge, transport);
+    transport.onmessage?.({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "ui/initialize",
+      params: {
+        protocolVersion: "2026-01-26",
+        appInfo: {},
+        appCapabilities: { elicitation: {} },
+      },
+    } as unknown as JSONRPCMessage);
+    expect(appAdvertisesElicitation(bridge)).toBe(false);
+  });
+
+  it("does not treat a non-object elicitation value as an advertisement", () => {
+    // The draft declares `elicitation` as an object; `true` is a value it does
+    // not define, and truthiness would accept it.
+    const bridge = makeBridge({});
+    const { transport } = makeTransport();
+    observeAppCapabilities(bridge, transport);
+    transport.onmessage?.(initializeFrame({ elicitation: true }));
+    expect(appAdvertisesElicitation(bridge)).toBe(false);
+    transport.onmessage?.(initializeFrame({ elicitation: [] }));
+    expect(appAdvertisesElicitation(bridge)).toBe(false);
+    transport.onmessage?.(initializeFrame({ elicitation: {} }));
     expect(appAdvertisesElicitation(bridge)).toBe(true);
   });
 

@@ -1,3 +1,4 @@
+import { McpUiInitializeRequestSchema } from "@modelcontextprotocol/ext-apps/app-bridge";
 import type { AppBridge } from "@modelcontextprotocol/ext-apps/app-bridge";
 
 /**
@@ -39,40 +40,36 @@ export interface MessageObservable<TMessage = unknown> {
 }
 
 /**
- * Whether `message` is a well-formed `ui/initialize` REQUEST — a JSON-RPC
- * request id, plus the three params the handshake requires
- * (`protocolVersion`, `appInfo`, `appCapabilities`).
+ * The capabilities a view advertised in an `ui/initialize` the bridge will
+ * ACCEPT, or `undefined` for any other frame.
  *
- * This is a gate, not a second copy of the bridge's schema: the bridge stays
- * the authority on everything else in the frame. What it has to stop is a
- * *malformed* initialize the bridge will reject, since accepting one here
- * would let a view flip `elicitation` on through a frame that never negotiated
- * anything. Narrows from `unknown` throughout — the frame is whatever the
- * sandboxed view posted.
+ * Acceptance is decided by the bridge's own `McpUiInitializeRequestSchema`
+ * rather than a hand-rolled approximation of it — an approximation drifts, and
+ * anything it waves through that the bridge rejects becomes a second, laxer
+ * route to setting `elicitation` on a frame that negotiated nothing. The one
+ * check the schema cannot make is that this is a request at all: a JSON-RPC
+ * notification carries the same `method`/`params`, so the id is checked here.
+ *
+ * The capabilities are then read from the ORIGINAL frame, not the parse output,
+ * because that schema is exactly what strips `elicitation` (see the WeakMap's
+ * doc comment) — validating with it and reading through it would defeat the
+ * purpose of this module.
  */
-function isInitializeRequest(
+function acceptedInitializeCapabilities(
   message: unknown,
-): message is { params: { appCapabilities: Record<string, unknown> } } {
-  if (typeof message !== "object" || message === null) return false;
-  const frame = message as { id?: unknown; method?: unknown; params?: unknown };
-  if (frame.method !== "ui/initialize") return false;
+): Record<string, unknown> | undefined {
+  if (typeof message !== "object" || message === null) return undefined;
+  const frame = message as { id?: unknown; params?: unknown };
   // A notification (no id) is not the handshake request.
-  if (frame.id === undefined || frame.id === null) return false;
-  if (typeof frame.params !== "object" || frame.params === null) return false;
-  const params = frame.params as {
-    protocolVersion?: unknown;
-    appInfo?: unknown;
-    appCapabilities?: unknown;
-  };
-  // All three are required by the bridge's own initialize schema, so a frame
-  // missing any of them is one the bridge rejects.
-  return (
-    typeof params.protocolVersion === "string" &&
-    typeof params.appInfo === "object" &&
-    params.appInfo !== null &&
-    typeof params.appCapabilities === "object" &&
-    params.appCapabilities !== null
-  );
+  if (frame.id === undefined || frame.id === null) return undefined;
+  if (!McpUiInitializeRequestSchema.safeParse(message).success) {
+    return undefined;
+  }
+  const advertised = (frame.params as { appCapabilities?: unknown })
+    .appCapabilities;
+  return typeof advertised === "object" && advertised !== null
+    ? (advertised as Record<string, unknown>)
+    : undefined;
 }
 
 /**
@@ -85,15 +82,14 @@ function isInitializeRequest(
  * capabilities the bridge no longer holds, in both directions.
  *
  * A frame the bridge would *reject* records nothing and leaves the previous
- * value alone, which is what keeps the gate fail-closed: a malformed initialize
- * must not be a second, laxer route to setting `elicitation`.
+ * value alone: it is a route to changing this gate in neither direction.
  */
 function recordAdvertisedCapabilities(
   bridge: AppBridge,
   message: unknown,
 ): void {
-  if (!isInitializeRequest(message)) return;
-  rawAppCapabilities.set(bridge, message.params.appCapabilities);
+  const advertised = acceptedInitializeCapabilities(message);
+  if (advertised) rawAppCapabilities.set(bridge, advertised);
 }
 
 /**
@@ -124,6 +120,19 @@ export function appAdvertisesElicitation(bridge: AppBridge): boolean {
   const parsed = bridge.getAppCapabilities() as
     | Record<string, unknown>
     | undefined;
-  if (parsed?.elicitation) return true;
-  return Boolean(rawAppCapabilities.get(bridge)?.elicitation);
+  return (
+    isCapabilityObject(parsed?.elicitation) ||
+    isCapabilityObject(rawAppCapabilities.get(bridge)?.elicitation)
+  );
+}
+
+/**
+ * A declared capability is an OBJECT (`{}` today, room for sub-options later),
+ * which is what ext-apps#733 specifies. Truthiness is not the same test: an
+ * `elicitation: true` is a value the draft does not define, and treating it as
+ * an advertisement would accept something the bridge's own schema will reject
+ * the moment it carries the key.
+ */
+function isCapabilityObject(value: unknown): boolean {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
