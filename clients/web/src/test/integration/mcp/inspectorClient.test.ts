@@ -1419,6 +1419,10 @@ describe("InspectorClient", () => {
       ["an array", [1]],
       ["null", null],
       ["a boolean", true],
+      // Past `Number.MAX_SAFE_INTEGER` the float64 value is no longer the
+      // integer it was written as, and zod 4's `.int()` rejects it — so
+      // `Number.isInteger` is too loose a check here.
+      ["an unsafe integer", Number.MAX_SAFE_INTEGER + 1],
     ])(
       "drops a reserved progressToken that is %s rather than sending it",
       async (_label, badToken) => {
@@ -1511,6 +1515,8 @@ describe("InspectorClient", () => {
     it.each([
       ["a string", "tok-1"],
       ["an integer", 7],
+      // The boundary itself is still valid.
+      ["the largest safe integer", Number.MAX_SAFE_INTEGER],
     ])("keeps a valid progressToken that is %s", async (_label, token) => {
       client = new InspectorClient(
         {

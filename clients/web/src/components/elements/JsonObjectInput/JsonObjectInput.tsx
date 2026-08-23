@@ -1,5 +1,6 @@
-import { useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Input, useComputedColorScheme } from "@mantine/core";
+import type { Ace } from "ace-builds";
 import AceEditor from "react-ace";
 import ace from "ace-builds/src-noconflict/ace";
 import "ace-builds/src-noconflict/mode-json";
@@ -137,13 +138,47 @@ export function JsonObjectInput({
     });
   };
 
+  const wrapperId = useId();
+  const editorRef = useRef<Ace.Editor | null>(null);
+
   const parsed = parseJsonObjectDraft(draft);
   useValueChange(serialize(value), (next) => {
-    if (next !== echoed) setDraft(next);
+    if (next === echoed) return;
+    setDraft(next);
+    // `echoed` has to advance to the value now on screen, not just to what this
+    // component last emitted. Leaving it behind makes an external A → B → A
+    // sequence stick on B: the second A matches the stale `echoed` from before
+    // B arrived and is dismissed as our own echo.
+    setEchoed(next);
   });
+
+  // `Input.Wrapper` labels and describes a Mantine input through context. Ace
+  // is not one — it renders its own DOM — so the wrapper's label and error node
+  // exist but point at nothing, leaving the control unassociated with the error
+  // a screen reader needs and its visible label inert on click.
+  //
+  // A genuine external-system sync, so an effect rather than `useValueChange`:
+  // it writes to a DOM node React does not own. Giving the textarea the
+  // wrapper's own id is what makes the `<label for>` focus the editor; the
+  // error wiring follows Mantine's `${id}-error` naming.
+  useEffect(() => {
+    const element = editorRef.current?.textInput.getElement();
+    /* v8 ignore next -- the ref is set in `onLoad`, which react-ace calls
+       synchronously on mount, so this effect always sees an element. */
+    if (!element) return;
+    element.id = wrapperId;
+    if (parsed.ok) {
+      element.removeAttribute("aria-invalid");
+      element.removeAttribute("aria-describedby");
+    } else {
+      element.setAttribute("aria-invalid", "true");
+      element.setAttribute("aria-describedby", `${wrapperId}-error`);
+    }
+  }, [wrapperId, parsed.ok]);
 
   return (
     <Input.Wrapper
+      id={wrapperId}
       label={label}
       description={description}
       error={parsed.ok ? undefined : parsed.error}
@@ -162,6 +197,7 @@ export function JsonObjectInput({
         showPrintMargin={false}
         editorProps={{ $blockScrolling: Infinity }}
         onLoad={(editor) => {
+          editorRef.current = editor;
           // `textInputAriaLabel` alone is not enough: Ace composes the hidden
           // textarea's label as "<label>, Cursor at row N" inside
           // `TextInput.setAriaLabel`, and only recomputes it when the cursor

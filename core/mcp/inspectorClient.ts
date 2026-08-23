@@ -387,11 +387,17 @@ function describeJsonType(value: unknown): string {
  * a string or an **integer** — a float is as invalid as an object. Everything
  * else in `_meta` may be any JSON (#1910), which is exactly why this one key
  * needs its own check.
+ *
+ * `isSafeInteger`, not `isInteger`: zod 4's `.int()` rejects anything past
+ * `Number.MAX_SAFE_INTEGER`, where the float64 representation is no longer the
+ * integer it was written as. `Number.isInteger(2 ** 53)` is `true`, so the
+ * looser check would pass a token the server then rejects — verified against
+ * the pinned zod.
  */
 function isProgressToken(value: unknown): value is ProgressToken {
   return (
     typeof value === "string" ||
-    (typeof value === "number" && Number.isInteger(value))
+    (typeof value === "number" && Number.isSafeInteger(value))
   );
 }
 

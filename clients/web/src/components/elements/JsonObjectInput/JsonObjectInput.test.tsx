@@ -79,11 +79,6 @@ describe("JsonObjectInput", () => {
     const onChange = vi.fn();
     renderWithMantine(<Harness initial={{ keep: "me" }} onChange={onChange} />);
     await setAceText('{"a":');
-    console.log("[dbg] emitted:", screen.getByTestId("emitted").textContent);
-    console.log(
-      "[dbg] body has error?",
-      document.body.textContent?.includes("Not valid JSON"),
-    );
     // Displayed verbatim — not re-escaped back through JSON.stringify.
     expect(getAceText()).toBe('{"a":');
     expect(
@@ -131,6 +126,76 @@ describe("JsonObjectInput", () => {
       screen.getByRole("button", { name: "reset" }).click();
     });
     expect(JSON.parse(getAceText())).toEqual({ b: 2 });
+  });
+
+  it("applies an external value it showed before (A → B → A)", async () => {
+    // Regression: `echoed` used to hold only what this component last emitted,
+    // so returning to a previously-shown value matched the stale entry and was
+    // dismissed as our own echo, stranding the editor on B.
+    function Externally({ value }: { value: JsonObject }) {
+      return (
+        <JsonObjectInput ariaLabel={LABEL} value={value} onChange={() => {}} />
+      );
+    }
+    const { rerender } = renderWithMantine(<Externally value={{ a: 1 }} />);
+    expect(JSON.parse(getAceText())).toEqual({ a: 1 });
+
+    rerender(<Externally value={{ b: 2 }} />);
+    expect(JSON.parse(getAceText())).toEqual({ b: 2 });
+
+    // Back to the first value — a distinct object, same content.
+    rerender(<Externally value={{ a: 1 }} />);
+    expect(JSON.parse(getAceText())).toEqual({ a: 1 });
+  });
+
+  describe("wiring to the Input.Wrapper label and error", () => {
+    /** Ace's hidden textarea — the element the wrapper has to point at. */
+    function textarea(): HTMLTextAreaElement {
+      const el = document.querySelector<HTMLTextAreaElement>(
+        "textarea.ace_text-input",
+      );
+      if (!el) throw new Error("Ace text input not mounted");
+      return el;
+    }
+
+    it("lets the visible label focus the editor", () => {
+      renderWithMantine(
+        <JsonObjectInput
+          label="Request metadata"
+          ariaLabel={LABEL}
+          value={{}}
+          onChange={() => {}}
+        />,
+      );
+      // `Input.Wrapper` renders `<label for={id}>`; the editor is only
+      // reachable from it if Ace's textarea carries that same id.
+      const label = screen.getByText("Request metadata");
+      expect(label.getAttribute("for")).toBe(textarea().id);
+      expect(textarea().id).not.toBe("");
+    });
+
+    it("marks the editor invalid and points it at the error text", async () => {
+      renderWithMantine(<Harness initial={{}} />);
+      expect(textarea().getAttribute("aria-invalid")).toBeNull();
+
+      await setAceText("[1]");
+      expect(textarea().getAttribute("aria-invalid")).toBe("true");
+      const describedBy = textarea().getAttribute("aria-describedby");
+      expect(describedBy).not.toBeNull();
+      // The id must resolve to the message actually on screen.
+      expect(document.getElementById(describedBy!)?.textContent).toMatch(
+        /Must be a JSON object/,
+      );
+    });
+
+    it("clears the invalid marking once the text parses again", async () => {
+      renderWithMantine(<Harness initial={{}} />);
+      await setAceText("[1]");
+      expect(textarea().getAttribute("aria-invalid")).toBe("true");
+      await setAceText('{"a":1}');
+      expect(textarea().getAttribute("aria-invalid")).toBeNull();
+      expect(textarea().getAttribute("aria-describedby")).toBeNull();
+    });
   });
 
   it("leaves an in-progress edit alone when the parent echoes it back", async () => {
