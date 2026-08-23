@@ -13,10 +13,29 @@ import type {
  * resolve through each other's.
  */
 export interface AppElicitationEntry extends AppElicitationRequest {
+  /** The session (one InspectorClient) this request belongs to. */
+  sessionId: number;
   /** Hands the app's standard `ElicitResult` back to the server. */
   resolve: (result: ElicitResult) => void;
   /** Asks `InspectorClient` to fall back to the native elicitation UI. */
   reject: (error: Error) => void;
+}
+
+/**
+ * One client's window onto the controller.
+ *
+ * Requests are bound to the connection that made them. A closed session
+ * rejects immediately, which is what a one-shot sweep cannot do: an
+ * `InspectorClient` being replaced disconnects asynchronously and can still
+ * enqueue during its own teardown, and that late entry would otherwise be
+ * rendered by a factory bound to the *replacement* client — reading its
+ * resource, and answering, through a different server.
+ */
+export interface AppElicitationSession {
+  /** The renderer handed to this client's `InspectorClient`. */
+  render: AppElicitationRenderer;
+  /** Reject everything from this session and refuse anything later. */
+  close: (error: Error) => void;
 }
 
 /**
@@ -32,6 +51,9 @@ export interface AppElicitationEntry extends AppElicitationRequest {
 export class AppElicitationController {
   private entries: AppElicitationEntry[] = [];
   private listeners = new Set<() => void>();
+  private nextSessionId = 0;
+  /** Sessions still accepting requests. A closed one is removed. */
+  private openSessions = new Set<number>();
 
   /** Current queue. Stable identity between changes, for `useSyncExternalStore`. */
   getEntries = (): AppElicitationEntry[] => this.entries;
@@ -48,16 +70,38 @@ export class AppElicitationController {
   }
 
   /**
-   * The {@link AppElicitationRenderer} handed to `InspectorClient`. Queues the
-   * request for the UI and resolves when {@link settle} or {@link fail} is
-   * called for it.
+   * Open a window for one `InspectorClient`. Its `render` is what that client
+   * is constructed with; `close` ends it when the client is replaced.
+   */
+  openSession(): AppElicitationSession {
+    const sessionId = this.nextSessionId++;
+    this.openSessions.add(sessionId);
+    return {
+      render: (request) => this.render(sessionId, request),
+      close: (error) => this.closeSession(sessionId, error),
+    };
+  }
+
+  /**
+   * Queue a request for the UI and resolve when {@link settle} or {@link fail}
+   * is called for it.
    *
    * An abort of the originating request (cancelled tool call, disconnect) drops
    * the entry and rejects, so a modal can never outlive the request behind it.
+   * A request from a closed session is rejected without ever being queued.
    */
-  render: AppElicitationRenderer = (request: AppElicitationRequest) =>
+  private render = (sessionId: number, request: AppElicitationRequest) =>
     new Promise<ElicitResult>((resolve, reject) => {
-      const entry: AppElicitationEntry = { ...request, resolve, reject };
+      if (!this.openSessions.has(sessionId)) {
+        reject(new Error("App elicitation session is closed"));
+        return;
+      }
+      const entry: AppElicitationEntry = {
+        ...request,
+        sessionId,
+        resolve,
+        reject,
+      };
       const onAbort = () => {
         this.remove(entry.requestId);
         reject(new Error("App-rendered elicitation aborted"));
@@ -98,17 +142,15 @@ export class AppElicitationController {
   }
 
   /**
-   * Drop every queued request at once.
-   *
-   * For the host's "these entries no longer belong to the live connection"
-   * moment (a replaced `InspectorClient`): a renderer that outlived its client
-   * would rebuild against the *next* one and could read or answer through a
-   * different server.
+   * End a session: reject everything it queued, and refuse anything it queues
+   * later. The refusal is the half a one-shot sweep cannot provide — see
+   * {@link AppElicitationSession}.
    */
-  failAll(error: Error): void {
-    const dropped = this.entries;
+  private closeSession(sessionId: number, error: Error): void {
+    this.openSessions.delete(sessionId);
+    const dropped = this.entries.filter((e) => e.sessionId === sessionId);
     if (dropped.length === 0) return;
-    this.entries = [];
+    this.entries = this.entries.filter((e) => e.sessionId !== sessionId);
     this.emit();
     for (const entry of dropped) entry.reject(error);
   }

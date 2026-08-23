@@ -23,6 +23,7 @@ function entry(
 ): AppElicitationEntry {
   return {
     requestId,
+    sessionId: 0,
     resourceUri,
     params,
     signal: new AbortController().signal,

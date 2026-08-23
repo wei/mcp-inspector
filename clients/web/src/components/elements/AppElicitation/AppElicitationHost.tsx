@@ -236,6 +236,9 @@ function AppElicitationFrame({
 
   return (
     <ElicitationModal
+      // `opened` stays at the call site: it is REQUIRED by `ModalRootProps`,
+      // and `.withProps()` supplies defaults without relaxing a required prop,
+      // so baking it in leaves every call site failing TS2741.
       opened
       onClose={dismiss}
       trapFocus={isTop}

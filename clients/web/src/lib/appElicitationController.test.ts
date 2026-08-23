@@ -1,19 +1,40 @@
 import { describe, it, expect, vi } from "vitest";
 import type { ElicitRequest } from "@modelcontextprotocol/client";
-import { AppElicitationController } from "./appElicitationController";
+import {
+  AppElicitationController,
+  type AppElicitationSession,
+} from "./appElicitationController";
 
 const params: ElicitRequest["params"] = {
   message: "Choose an option",
   requestedSchema: { type: "object", properties: {} },
 };
 
+/**
+ * Queue a request through a session. Defaults to one session per controller,
+ * which is what a single connection looks like; the session tests open their
+ * own to model a client swap.
+ */
 function request(
   controller: AppElicitationController,
   requestId: string,
   resourceUri = "ui://demo/pick.html",
   signal: AbortSignal = new AbortController().signal,
+  session: AppElicitationSession = defaultSession(controller),
 ) {
-  return controller.render({ requestId, resourceUri, params, signal });
+  return session.render({ requestId, resourceUri, params, signal });
+}
+
+const sessions = new WeakMap<AppElicitationController, AppElicitationSession>();
+function defaultSession(
+  controller: AppElicitationController,
+): AppElicitationSession {
+  let session = sessions.get(controller);
+  if (!session) {
+    session = controller.openSession();
+    sessions.set(controller, session);
+  }
+  return session;
 }
 
 describe("AppElicitationController (#1854)", () => {
@@ -108,18 +129,19 @@ describe("AppElicitationController (#1854)", () => {
     expect(controller.getEntries()).toHaveLength(0);
   });
 
-  it("failAll drops every entry so a renderer cannot outlive its connection", async () => {
-    // The host calls this when the InspectorClient is replaced: the bridge
-    // factory resolves its client at call time, so an entry left queued could
-    // otherwise rebuild against the NEXT connection and answer through a
+  it("closing a session drops the entries that session queued", async () => {
+    // The host closes the old session when the InspectorClient is replaced: the
+    // bridge factory resolves its client at call time, so an entry left queued
+    // could otherwise rebuild against the NEXT connection and answer through a
     // different server.
     const controller = new AppElicitationController();
+    const session = controller.openSession();
     const listener = vi.fn();
-    const first = request(controller, "a");
-    const second = request(controller, "b");
+    const first = request(controller, "a", "ui://a", undefined, session);
+    const second = request(controller, "b", "ui://b", undefined, session);
     controller.subscribe(listener);
 
-    controller.failAll(new Error("connection replaced"));
+    session.close(new Error("connection replaced"));
 
     await expect(first).rejects.toThrow(/connection replaced/);
     await expect(second).rejects.toThrow(/connection replaced/);
@@ -127,11 +149,40 @@ describe("AppElicitationController (#1854)", () => {
     expect(listener).toHaveBeenCalledTimes(1);
   });
 
-  it("failAll on an empty queue notifies nobody", () => {
+  it("refuses a request a closed session makes during its own teardown", async () => {
+    // The half a one-shot sweep cannot provide: the replaced client
+    // disconnects asynchronously and can still enqueue, and that entry would be
+    // rendered by a factory bound to the REPLACEMENT client.
     const controller = new AppElicitationController();
+    const session = controller.openSession();
+    session.close(new Error("connection replaced"));
+    await expect(
+      request(controller, "late", "ui://a", undefined, session),
+    ).rejects.toThrow(/session is closed/);
+    expect(controller.getEntries()).toHaveLength(0);
+  });
+
+  it("leaves another session's entries alone", async () => {
+    const controller = new AppElicitationController();
+    const oldSession = controller.openSession();
+    const newSession = controller.openSession();
+    const stale = request(controller, "a", "ui://a", undefined, oldSession);
+    const live = request(controller, "b", "ui://b", undefined, newSession);
+
+    oldSession.close(new Error("connection replaced"));
+
+    await expect(stale).rejects.toThrow(/connection replaced/);
+    expect(controller.getEntries().map((e) => e.requestId)).toEqual(["b"]);
+    controller.settle("b", { action: "cancel" });
+    await expect(live).resolves.toEqual({ action: "cancel" });
+  });
+
+  it("closing a session with nothing queued notifies nobody", () => {
+    const controller = new AppElicitationController();
+    const session = controller.openSession();
     const listener = vi.fn();
     controller.subscribe(listener);
-    controller.failAll(new Error("nothing to drop"));
+    session.close(new Error("nothing to drop"));
     expect(listener).not.toHaveBeenCalled();
   });
 

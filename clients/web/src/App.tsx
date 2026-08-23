@@ -142,7 +142,10 @@ import { clearScrollMemory } from "./hooks/useScrollMemory";
 import type { AppRendererHandle } from "./components/elements/AppRenderer/AppRenderer";
 import { createAppBridgeFactory } from "./components/elements/AppRenderer/createAppBridgeFactory";
 import { AppElicitationHost } from "./components/elements/AppElicitation/AppElicitationHost";
-import { AppElicitationController } from "./lib/appElicitationController";
+import {
+  AppElicitationController,
+  type AppElicitationSession,
+} from "./lib/appElicitationController";
 import type { LogEntryData } from "./components/elements/LogEntry/LogEntry";
 import {
   ServerConfigModal,
@@ -750,6 +753,7 @@ function App() {
     sandboxUrl,
     writable: serverListWritable,
     version: inspectorVersion,
+    loading: initialConfigLoading,
   } = useInitialConfig({
     baseUrl: configBaseUrl,
     authToken: getAuthToken(),
@@ -808,6 +812,31 @@ function App() {
   const appElicitationControllerRef = useRef<AppElicitationController>(null);
   appElicitationControllerRef.current ??= new AppElicitationController();
   const appElicitationController = appElicitationControllerRef.current;
+  // The window onto the controller for the CURRENT client. Closing it when the
+  // client is replaced both rejects that connection's queued requests and
+  // refuses any it enqueues during its own (asynchronous) teardown — a late
+  // entry would otherwise be rendered by a factory bound to the replacement
+  // client, i.e. read and answered through a different server.
+  const appElicitationSessionRef = useRef<AppElicitationSession>(null);
+  // Whether the sandbox exists is only known once `/api/config` resolves, and
+  // the answer is baked into the client at construction (it decides whether the
+  // nested MCP Apps `elicitation` capability is advertised). So a connect waits
+  // for it rather than guessing: guessing "available" over-claims a capability
+  // we may not have, and guessing "unavailable" strands the whole session on
+  // the native form despite having a sandbox. The wait is a local fetch already
+  // in flight since mount.
+  const initialConfigSettledRef = useRef<{
+    promise: Promise<void>;
+    resolve: () => void;
+  }>(null);
+  initialConfigSettledRef.current ??= (() => {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => (resolve = r));
+    return { promise, resolve };
+  })();
+  useEffect(() => {
+    if (!initialConfigLoading) initialConfigSettledRef.current?.resolve();
+  }, [initialConfigLoading]);
   const appElicitations = useSyncExternalStore(
     appElicitationController.subscribe,
     appElicitationController.getEntries,
@@ -838,6 +867,19 @@ function App() {
       }),
     [inspectorClient],
   );
+  /**
+   * Close the previous client's session and open one for the client being
+   * constructed. Synchronous, and called at construction, so the swap itself is
+   * the moment ownership changes hands.
+   */
+  const newAppElicitationSession = useCallback(() => {
+    appElicitationSessionRef.current?.close(
+      new Error("Connection replaced before the app answered"),
+    );
+    const session = appElicitationController.openSession();
+    appElicitationSessionRef.current = session;
+    return session;
+  }, [appElicitationController]);
   const handleAppElicitationSettle = useCallback(
     (requestId: string, result: ElicitResult) => {
       appElicitationController.settle(requestId, result);
@@ -850,20 +892,6 @@ function App() {
     },
     [appElicitationController],
   );
-  // Request ownership must not cross connections. `elicitationBridgeFactory`
-  // resolves its client at call time, so an entry queued by a previous
-  // InspectorClient would otherwise be able to rebuild against the NEXT one and
-  // read (or answer) through a different server. Core aborts its own pending
-  // app requests during teardown, but that teardown is awaited asynchronously
-  // while the swap here is synchronous — so drop them on the swap instead of
-  // racing it. The one client alive at a time owns every live entry.
-  useEffect(() => {
-    return () => {
-      appElicitationController.failAll(
-        new Error("Connection replaced before the app answered"),
-      );
-    };
-  }, [appElicitationController, inspectorClient]);
 
   const [managedToolsState, setManagedToolsState] =
     useState<ManagedToolsState | null>(null);
@@ -2486,12 +2514,12 @@ function App() {
         // Web only, and only when the sandbox renderer is actually available:
         // supplying this advertises the nested MCP Apps `elicitation`
         // capability, and a client that cannot host an app must not claim it
-        // (#1854). `sandboxUrl` is undefined while `/api/config` is in flight
-        // and when the sandbox controller could not start, so this connection
-        // simply behaves like the CLI/TUI: the native elicitation queue, with
-        // no claim made to the server.
+        // (#1854). Callers await `initialConfigSettled` first, so `sandboxUrl`
+        // here means "confirmed absent" rather than "not known yet" — a
+        // connection that reaches this with no sandbox behaves like the
+        // CLI/TUI: native elicitation queue, no claim made to the server.
         ...(sandboxUrl && {
-          appElicitation: appElicitationController.render,
+          appElicitation: newAppElicitationSession().render,
         }),
         // Always advertise the roots capability (even with no configured
         // roots) so the server can issue roots/list and receive
@@ -2594,7 +2622,7 @@ function App() {
       sessionStorageAdapter,
       onBeforeOAuthRedirect,
       clientConfig,
-      appElicitationController.render,
+      newAppElicitationSession,
       sandboxUrl,
     ],
   );
@@ -2815,6 +2843,12 @@ function App() {
 
   const onToggleConnection = useCallback(
     async (id: string) => {
+      // Whether this client may advertise app-rendered elicitation is decided
+      // at construction and cannot be revised afterwards, so wait for the fact
+      // rather than guess it (see `initialConfigSettledRef`). Already resolved
+      // by the time any human clicks; this only orders a deep-link auto-connect
+      // that races the same page load.
+      await initialConfigSettledRef.current?.promise;
       // Same server, already connected → disconnect.
       if (
         id === activeServerId &&
