@@ -118,6 +118,7 @@ import { useMessageLog } from "@inspector/core/react/useMessageLog.js";
 import { useFetchRequestLog } from "@inspector/core/react/useFetchRequestLog.js";
 import { useStderrLog } from "@inspector/core/react/useStderrLog.js";
 import { useInitialConfig } from "@inspector/core/react/useInitialConfig.js";
+import { refreshingPersist } from "./lib/refreshingPersist";
 import { usePendingClientRequests } from "@inspector/core/react/usePendingClientRequests.js";
 import { InspectorView } from "./components/views/InspectorView/InspectorView";
 import type {
@@ -753,6 +754,8 @@ function App() {
     sandboxUrl,
     writable: serverListWritable,
     version: inspectorVersion,
+    secretStorage,
+    refresh: refreshInitialConfig,
     loading: initialConfigLoading,
   } = useInitialConfig({
     baseUrl: configBaseUrl,
@@ -3750,7 +3753,14 @@ function App() {
           runCommandInBackground(() => refreshResources(), "ambient");
         }
       }
-      void updateServerSettings(activeServerId, next).catch((err: unknown) => {
+      // Refreshed like every other secret-store mutation: this resends the
+      // server's rehydrated secrets, so it can trigger the pending
+      // plaintext-to-encrypted upgrade even though the user only toggled
+      // pagination (#1950 review r22).
+      void refreshingPersist(updateServerSettings, refreshInitialConfig)(
+        activeServerId,
+        next,
+      ).catch((err: unknown) => {
         // Persist failed: revert the optimistic override (the effect only
         // clears it when the persisted value changes, which won't happen here)
         // and roll the live client setting back, so the UI and client reflect
@@ -3769,6 +3779,7 @@ function App() {
       activeServerId,
       inspectorClient,
       updateServerSettings,
+      refreshInitialConfig,
       connected,
       loadToolsPage,
       loadPromptsPage,
@@ -4017,7 +4028,10 @@ function App() {
       setStderrLogState(null);
       setActiveServerId(undefined);
     }
-    await removeServer(id);
+    // Deleting sweeps the server's secrets from the store, which for a
+    // file-backed store is a write — and a write is what performs the pending
+    // plaintext-to-encrypted upgrade (#1950 review r22).
+    await refreshingPersist(removeServer, refreshInitialConfig)(id);
     setRemoveTarget(null);
   }, [
     removeTarget,
@@ -4036,6 +4050,7 @@ function App() {
     fetchRequestLogState,
     stderrLogState,
     removeServer,
+    refreshInitialConfig,
   ]);
 
   // Submit handler for the Add / Edit / Clone modal. Add and Clone both go
@@ -4121,7 +4136,14 @@ function App() {
     targetId: settingsModalTargetId,
     resolveInitial: (id) =>
       servers.find((s) => s.id === id)?.settings ?? EMPTY_SETTINGS,
-    onPersist: updateServerSettings,
+    // The saved settings may include an OAuth client secret or a stdio `env:`
+    // value, and writing one can change what the secrets file *is* — the first
+    // save under a newly-set passphrase re-encrypts a pre-existing plaintext
+    // file. `refreshingPersist` re-asks the backend afterwards; it is a named
+    // unit rather than an inline `await …; refresh()` because this file is
+    // outside the coverage gate, so wiring written here is tested by nothing
+    // (#1950 review r17).
+    onPersist: refreshingPersist(updateServerSettings, refreshInitialConfig),
     // Surface failures via toast — the modal usually closes
     // immediately on user dismiss, so a silent fail-on-flush would
     // leave the user thinking their last edits saved when they
@@ -4145,7 +4167,10 @@ function App() {
   } = useClientSettingsDraft({
     opened: clientSettingsOpen,
     resolveInitial: () => clientConfigToFormValues(clientConfig),
-    onPersist: async (values) => {
+    // Wrapped for the same reason as the server-settings persist above: this
+    // one can carry the enterprise IdP client secret, and that write is what
+    // flips a pending-encryption file to encrypted.
+    onPersist: refreshingPersist(async (values) => {
       if (!canPersistClientSettingsDraft(values)) return;
       const next = formValuesToClientConfig(values);
       await saveClientConfigRemote(next, {
@@ -4153,7 +4178,7 @@ function App() {
         authToken: getAuthToken(),
       });
       setClientConfig(next);
-    },
+    }, refreshInitialConfig),
     onError: (err) => {
       notifications.show({
         title: "Failed to save client settings",
@@ -4713,12 +4738,27 @@ function App() {
         initialConfig={configModalTarget?.config}
         existingIds={existingIds}
         onClose={() => setConfigModal(null)}
-        onSubmit={onConfigSubmit}
+        // Wrapped like the settings persists: this submit carries stdio `env`
+        // values, so it can perform the pending plaintext-to-encrypted
+        // upgrade and change the descriptor the footer reports.
+        onSubmit={refreshingPersist(onConfigSubmit, refreshInitialConfig)}
+        secretStorage={secretStorage}
       />
       <ServerImportConfigModal
         opened={importConfigOpen}
         existingIds={existingIds}
-        onClose={() => setImportConfigOpen(false)}
+        // Refreshed once per import batch, not per entry. `useImportClientConfig`
+        // applies every addition and conflict sequentially, and on an encrypted
+        // file store each `/api/config` authenticates the whole file with a
+        // scrypt derivation — so wrapping the per-entry callbacks made a
+        // 20-server import pay 20 serialized KDFs and round trips. Closing is
+        // the batch boundary: the modal must be dismissed before the settings
+        // footer that reads this descriptor can be reached, and closing also
+        // covers a partially-failed batch (#1950 review r26).
+        onClose={() => {
+          setImportConfigOpen(false);
+          refreshInitialConfig();
+        }}
         onFetchSource={importSource}
         onAddServer={addServerHighlighted}
         onUpdateServer={updateServer}
@@ -4727,7 +4767,10 @@ function App() {
         opened={importJsonOpen}
         existingIds={existingIds}
         onClose={() => setImportJsonOpen(false)}
-        onAddServer={addServerHighlighted}
+        onAddServer={refreshingPersist(
+          addServerHighlighted,
+          refreshInitialConfig,
+        )}
       />
       <ServerSettingsModal
         // Remount per open (and per target server) so the accordion resets to
@@ -4753,6 +4796,7 @@ function App() {
         onClearStoredOAuth={
           settingsModalIsStdio ? undefined : handleClearStoredOAuthFromSettings
         }
+        secretStorage={secretStorage}
       />
       <ClientSettingsModal
         key={
@@ -4764,6 +4808,7 @@ function App() {
         onSettingsChange={onClientSettingsChange}
         emaIdpLoginState={emaIdpLoginState}
         onEmaIdpLogout={logoutEmaIdp}
+        secretStorage={secretStorage}
       />
       {initializeResult && activeServer && (
         <ConnectionInfoModal

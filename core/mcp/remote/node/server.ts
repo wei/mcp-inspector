@@ -65,17 +65,25 @@ import { RemoteSession } from "./remote-session.js";
 import { createRemoteAuthProvider } from "./tokenAuthProvider.js";
 import { API_SERVER_ENV_VARS } from "../constants.js";
 import {
-  KeychainUnavailableError,
-  KeyringSecretStore,
+  secretStoreGetMany,
+  secretStoreSetMany,
+  secretStoreGetStrict,
+  secretStoreIsDurable,
+  SecretStoreUnavailableError,
   type SecretStore,
 } from "../../../auth/node/secret-store.js";
+import { defaultSecretStore } from "../../../auth/node/secret-store-selection.js";
 import {
   deleteClientConfigStore,
   readClientConfigStore,
   writeClientConfigStore,
 } from "../../../client/node-persistence.js";
 import { formatClientConfigLoadError } from "../../../client/config-parse.js";
-import { envSecretField } from "../../../auth/secret-fields.js";
+import {
+  envSecretField,
+  SECRET_FIELD_OAUTH_CLIENT_SECRET,
+} from "../../../auth/secret-fields.js";
+import type { SecretStorageInfo } from "../../../auth/secret-storage-info.js";
 import { ZodError } from "zod";
 
 /**
@@ -189,6 +197,15 @@ export interface InitialConfigPayload {
    * a legacy backend that predates the field; the UI just shows nothing then.
    */
   version?: string;
+  /**
+   * Where secrets typed into this session end up (#1950): the OS keychain,
+   * a file, or memory. The browser cannot work this out for itself — the
+   * store lives entirely on the Node side — and it is what the permanent
+   * footer in the Client/Server Settings modals reports. Absent on a
+   * legacy backend, in which case the footer renders nothing rather than
+   * guessing "keychain", since a wrong answer here is worse than none.
+   */
+  secretStorage?: SecretStorageInfo;
 }
 
 export interface RemoteServerOptions {
@@ -243,11 +260,22 @@ export interface RemoteServerOptions {
   /**
    * Backend for per-server secret values that we keep out of mcp.json
    * (OAuth client secret, stdio env values). Defaults to a
-   * `KeyringSecretStore` that talks to the OS keychain via
-   * `@napi-rs/keyring`. Tests inject `InMemorySecretStore` so the suite
-   * doesn't need libsecret on Linux CI runners.
+   * store selected for this host — the OS keychain where one is
+   * reachable, otherwise the file or in-memory fallback chosen by
+   * `secret-store-selection.ts` (#1950). Tests inject
+   * `InMemorySecretStore` so the suite doesn't need libsecret on Linux CI
+   * runners.
    */
   secretStore?: SecretStore;
+  /**
+   * Re-resolve the secret-storage descriptor for each `GET /api/config`.
+   *
+   * A function rather than a value because the answer changes while the
+   * process runs (see the route). Optional: a backend that doesn't supply
+   * one falls back to whatever `initialConfig` carried, which is what the
+   * tests and any embedder that doesn't care get.
+   */
+  secretStorageResolver?: () => Promise<SecretStorageInfo | undefined>;
 }
 
 export interface CreateRemoteAppResult {
@@ -490,8 +518,7 @@ export function createRemoteApp(
   const { logger: fileLogger, allowedOrigins } = options;
   const storageDir = options.storageDir ?? getDefaultStorageDir();
   const mcpConfigPath = options.mcpConfigPath ?? getDefaultMcpConfigPath();
-  const secretStore: SecretStore =
-    options.secretStore ?? new KeyringSecretStore();
+  const secretStore: SecretStore = options.secretStore ?? defaultSecretStore();
 
   // Read-only session support (#1481/#1483). `writable: false` rejects every
   // /api/servers mutation and suppresses the seed/migrate writes on read.
@@ -651,10 +678,28 @@ export function createRemoteApp(
     app.use("*", createAuthMiddleware(authToken));
   }
 
-  app.get("/api/config", (c) => {
+  app.get("/api/config", async (c) => {
+    // `secretStorage` is re-resolved per request, not taken from the
+    // startup payload. It describes bytes on disk that this very process
+    // changes — the first `set` under a newly-set passphrase encrypts a
+    // pre-existing plaintext file — so a value captured at boot would keep
+    // telling every page load "still unencrypted" until a restart. That is
+    // stale in the safe direction, but stale about the single fact this
+    // field exists to state, which makes re-reading a small file per config
+    // fetch (once per page load) the obviously right trade.
+    const secretStorage = options.secretStorageResolver
+      ? await options.secretStorageResolver()
+      : options.initialConfig?.secretStorage;
     const payload = {
       ...options.initialConfig,
       writable,
+      // Assigned unconditionally, not spread-when-truthy. The resolver's
+      // contract is that `undefined` means "not known right now", and a
+      // conditional spread leaves the *startup* descriptor from
+      // `initialConfig` standing in its place — so a store that became
+      // undescribable would keep serving a stale, confident answer. Setting
+      // it to `undefined` is what clears it; `c.json` omits the key.
+      secretStorage,
       ...(options.sandboxUrl ? { sandboxUrl: options.sandboxUrl } : {}),
     };
     return c.json(payload);
@@ -1830,9 +1875,11 @@ export function createRemoteApp(
   // Centralizes the "write the secrets in this entry to the keychain" and
   // "fetch all secrets for this entry from the keychain" steps so the
   // POST/PUT/DELETE/GET handlers stay readable. Each operation translates a
-  // `KeychainUnavailableError` from the underlying store into a Hono 503
-  // — the only realistic trigger is Linux without libsecret, and the user
-  // can install it without restarting.
+  // `SecretStoreUnavailableError` from the underlying store into a Hono
+  // 503 — a keychain the user can install without restarting (Linux
+  // without libsecret), or a secrets file we refuse to overwrite because
+  // the passphrase changed (#1950). Both are fixable outside the process,
+  // which is what makes 503 the right code rather than 500.
 
   // Same Promise.all reasoning as `readKeychainEntriesFor`: each set
   // is a native round-trip and there's no ordering requirement among
@@ -1843,11 +1890,11 @@ export function createRemoteApp(
     id: string,
     secrets: Record<string, string>,
   ): Promise<void> => {
-    await Promise.all(
-      Object.entries(secrets).map(([field, value]) =>
-        secretStore.set(id, field, value),
-      ),
-    );
+    // One pass for the entry's whole secret set. The settings form resends a
+    // server's full `env` map on any edit, and for the file store each `set`
+    // is a read-decrypt-encrypt-write-verify cycle — so this is the
+    // difference between one of those and one per variable.
+    await secretStoreSetMany(secretStore, id, secrets);
   };
 
   // Fetch every keychain value an entry could need into a flat record
@@ -1864,16 +1911,13 @@ export function createRemoteApp(
     id: string,
     fields: string[],
   ): Promise<Record<string, string>> => {
-    const values = await Promise.all(
-      fields.map(
-        async (field) => [field, await secretStore.get(id, field)] as const,
-      ),
-    );
-    const out: Record<string, string> = {};
-    for (const [field, v] of values) {
-      if (v !== null) out[field] = v;
-    }
-    return out;
+    // Single-server callers (rename, POST/PUT) go through the same batch
+    // seam with a one-element request. `rehydrateConfig` below batches the
+    // whole catalog instead — see `secretStoreGetMany`.
+    const many = await secretStoreGetMany(secretStore, [
+      { serverId: id, fields },
+    ]);
+    return many[id] ?? {};
   };
 
   // Cheap structural check used by the GET handler to decide whether
@@ -1896,15 +1940,32 @@ export function createRemoteApp(
   // knows whether to persist the cleanup.
   //
   // When the keychain is unavailable (Linux without libsecret), the
-  // first `secretStore.set` throws `KeychainUnavailableError`. We catch
+  // first `secretStore.set` throws `SecretStoreUnavailableError`. We catch
   // it and abandon the migration for this GET — the on-disk file stays
   // as-is so the user's secret isn't lost, and the next GET retries
   // (e.g. after the user installs libsecret).
+  // Warned lazily, at most once per server instance, and only when there is
+  // actually something being preserved. Announcing it up front meant every
+  // `/api/servers` read on a session-scoped store logged that plaintext
+  // values were left on disk — including for the default empty catalog,
+  // where the statement is simply false, repeated on every list refresh.
+  // Hoisted out of the function so it is once per process rather than once
+  // per read.
+  let warnedSessionPreserved = false;
+
   const migratePlaintextSecrets = async (
     config: MCPConfig,
   ): Promise<{ migrated: MCPConfig; changed: boolean }> => {
     let changed = false;
     const next: MCPConfig = { mcpServers: {} };
+    const durable = await secretStoreIsDurable(secretStore);
+    const warnSessionPreserved = () => {
+      if (warnedSessionPreserved || durable || !fileLogger) return;
+      warnedSessionPreserved = true;
+      fileLogger.warn(
+        "Secrets are kept in memory for this session, so plaintext values in mcp.json are left on disk rather than migrated away. They would otherwise be lost when the Inspector exits.",
+      );
+    };
     try {
       for (const [id, stored] of Object.entries(config.mcpServers)) {
         const { stripped, secrets } = extractSecretsFromStored(stored);
@@ -1913,7 +1974,13 @@ export function createRemoteApp(
           continue;
         }
         for (const [field, value] of Object.entries(secrets)) {
-          const existing = await secretStore.get(id, field);
+          // Strict: `get` maps an unreadable store to `null`, and this
+          // branch *writes* on `null` — so a transient keychain read
+          // failure would let the older plaintext value overwrite a newer
+          // keychain one, and the disk copy would then be stripped. A throw
+          // is a `SecretStoreUnavailableError`, which the catch below turns
+          // into "abandon the migration and keep mcp.json as it is".
+          const existing = await secretStoreGetStrict(secretStore, id, field);
           if (existing === null) {
             await secretStore.set(id, field, value);
           }
@@ -1922,15 +1989,27 @@ export function createRemoteApp(
           // plaintext from disk. This handles the case where a user has
           // edited mcp.json by hand after the original migration.
         }
+        // Only strip the plaintext once it is somewhere that outlives us.
+        // Against a session-scoped store (the container fallback added in
+        // #1950) this would trade a secret that survives restarts for one
+        // that dies with the process — and it runs on an ordinary GET, so
+        // merely opening the app would destroy it. The values are still
+        // loaded into the store above, so this session behaves normally;
+        // only the disk delete is withheld.
+        if (!durable) {
+          warnSessionPreserved();
+          next.mcpServers[id] = stored;
+          continue;
+        }
         next.mcpServers[id] = stripped;
         changed = true;
       }
     } catch (err) {
-      if (err instanceof KeychainUnavailableError) {
+      if (err instanceof SecretStoreUnavailableError) {
         if (fileLogger) {
           fileLogger.warn(
             { err: err.message },
-            "Keychain unavailable; skipping plaintext-secret migration on this read. Existing mcp.json plaintext values are preserved.",
+            "Secret store unavailable; skipping plaintext-secret migration on this read. Existing mcp.json plaintext values are preserved.",
           );
         }
         // Partial-migration semantics: if `set` threw partway through
@@ -1953,11 +2032,22 @@ export function createRemoteApp(
   // the browser saw before the keychain split. Runs after migration in
   // the GET handler.
   const rehydrateConfig = async (config: MCPConfig): Promise<MCPConfig> => {
+    const entries = Object.entries(config.mcpServers);
+    // One batch for the whole catalog. The per-server loop this replaced
+    // was serial, so an encrypted file store paid one scrypt derivation per
+    // *server* on every `GET /api/servers` — a 20-server catalog spent the
+    // same ~450ms the bulk seam was introduced to remove, reached one
+    // server at a time instead of one field at a time.
+    const secrets = await secretStoreGetMany(
+      secretStore,
+      entries.map(([serverId, stored]) => ({
+        serverId,
+        fields: expectedSecretFields(stored),
+      })),
+    );
     const out: MCPConfig = { mcpServers: {} };
-    for (const [id, stored] of Object.entries(config.mcpServers)) {
-      const fields = expectedSecretFields(stored);
-      const secrets = await readKeychainEntriesFor(id, fields);
-      out.mcpServers[id] = mergeSecretsIntoStored(stored, secrets);
+    for (const [id, stored] of entries) {
+      out.mcpServers[id] = mergeSecretsIntoStored(stored, secrets[id] ?? {});
     }
     return out;
   };
@@ -1968,17 +2058,6 @@ export function createRemoteApp(
   // to perform the destructive operation (we want it after the disk
   // write so a failed disk write doesn't leave the user with their
   // old config on disk but missing keychain entries).
-  const computeObsoleteFields = (
-    previousFields: Set<string>,
-    nextSecrets: Record<string, string>,
-  ): string[] => {
-    const nextFieldSet = new Set(Object.keys(nextSecrets));
-    const obsolete: string[] = [];
-    for (const field of previousFields) {
-      if (!nextFieldSet.has(field)) obsolete.push(field);
-    }
-    return obsolete;
-  };
 
   /**
    * Merge keychain secrets for a server-id rename. PUT payload values win
@@ -2012,11 +2091,53 @@ export function createRemoteApp(
     await Promise.all(fields.map((field) => secretStore.delete(id, field)));
   };
 
+  /**
+   * The entry that actually goes to disk.
+   *
+   * `stripped` while the store outlives the process, `built` (secrets and
+   * all) while it does not. The GET migration already withheld its strip for
+   * a session-scoped store; the POST/PUT paths did not, so saving any
+   * unrelated setting round-tripped the rehydrated secret through the form
+   * and then wrote the stripped shape — moving the only durable copy into
+   * RAM, where exiting loses it. The user changed a timeout and lost a
+   * client secret, with every operation reporting success.
+   *
+   * The two paths have to agree: while the store cannot outlive the process,
+   * `mcp.json` stays the durable copy.
+   */
+  const entryForDisk = async (
+    built: StoredMCPServer,
+    stripped: StoredMCPServer,
+    previous?: StoredMCPServer,
+  ): Promise<StoredMCPServer> => {
+    if (await secretStoreIsDurable(secretStore)) return stripped;
+    // Non-durable, and the distinction is the whole of it: **legacy plaintext
+    // that was already on disk** is preserved, because stripping it would
+    // move the only durable copy into RAM. A **newly entered** secret is not,
+    // because the footer promises that a session store writes secrets
+    // nowhere — and the first version of this used the whole submitted entry
+    // as a proxy for provenance, which turned `MCP_INSPECTOR_SECRET_STORE=
+    // memory` into "write every new secret to mcp.json in the clear" while
+    // the UI said the opposite.
+    //
+    // A changed value is new: the old plaintext goes, the new value lives in
+    // the session store, and the footer's promise holds for it.
+    const prior = previous ? extractSecretsFromStored(previous).secrets : {};
+    const submitted = extractSecretsFromStored(built).secrets;
+    const carry: Record<string, string> = {};
+    for (const [field, value] of Object.entries(submitted)) {
+      if (prior[field] === value) carry[field] = value;
+    }
+    return Object.keys(carry).length > 0
+      ? mergeSecretsIntoStored(stripped, carry)
+      : stripped;
+  };
+
   const keychainErrorResponse = (
     c: Context,
     err: unknown,
   ): Response | undefined => {
-    if (err instanceof KeychainUnavailableError) {
+    if (err instanceof SecretStoreUnavailableError) {
       return c.json({ error: err.message }, 503);
     }
     return undefined;
@@ -2182,7 +2303,7 @@ export function createRemoteApp(
         // goes to disk, the values go to the keychain.
         const { stripped, secrets } = extractSecretsFromStored(built);
         // Order: sweep → keychain → disk. The keychain write is the
-        // only step that can hard-fail (KeychainUnavailableError on
+        // only step that can hard-fail (SecretStoreUnavailableError on
         // `set`); doing it before the disk write means a 503 leaves no
         // disk entry behind, so a retry POST isn't trapped at 409. The
         // initial sweep handles the case where a previous DELETE failed
@@ -2190,7 +2311,7 @@ export function createRemoteApp(
         // reusing; it's a silent no-op when the keychain is unavailable.
         await secretStore.deleteAllForServer(id);
         await writeKeychainEntriesFor(id, secrets);
-        current.mcpServers[id] = stripped;
+        current.mcpServers[id] = await entryForDisk(built, stripped);
         await writeMcpAndTrackMtime(serializeStore(current));
         return c.json({ ok: true });
       });
@@ -2427,10 +2548,11 @@ export function createRemoteApp(
           }
         }
         const { stripped, secrets } = extractSecretsFromStored(built);
+        const onDisk = await entryForDisk(built, stripped, existing);
         const next: MCPConfig = { mcpServers: {} };
         for (const [key, val] of Object.entries(current.mcpServers)) {
           if (key === originalId) {
-            next.mcpServers[newId] = stripped;
+            next.mcpServers[newId] = onDisk;
           } else {
             next.mcpServers[key] = val;
           }
@@ -2439,7 +2561,7 @@ export function createRemoteApp(
         // disk file, then clean up obsolete keychain entries.
         //
         // - Keychain set is the only hard-fail step (it raises 503 on
-        //   `KeychainUnavailableError`). Doing it first means a failed
+        //   `SecretStoreUnavailableError`). Doing it first means a failed
         //   set leaves both disk and keychain in their pre-PUT state;
         //   the user retries and nothing is half-applied.
         // - The disk write happens after the keychain is fully primed,
@@ -2469,8 +2591,42 @@ export function createRemoteApp(
           // In-place update: same id, possibly different fields. Set
           // the new values first, then write disk, then drop obsolete
           // fields (env keys the user removed, OAuth secret cleared).
+          //
+          // **Only when the caller said something about settings.** On a
+          // `preserve` intent the body carried no `settings` at all — the
+          // config-only PUT that `useServers.updateServer` sends for the
+          // Add/Edit modal — so the settings are re-derived from the *disk*
+          // entry, which by #1356's design no longer holds the secrets. They
+          // were therefore absent from `secrets`, `expectedSecretFields`
+          // always lists the OAuth slot, and the reconcile deleted a value
+          // the user never touched: editing a server's URL destroyed its
+          // stored OAuth client secret, on the keychain as much as on a
+          // session store. Saying nothing about settings has to mean
+          // "leave the secrets alone", not "the user cleared them".
+          // Two kinds of field, retired on different evidence — a single
+          // "absent from the submitted secrets" test cannot serve both.
+          //
+          // A stdio `env:` field is implied by the entry's *shape*: `env` is
+          // part of `config`, so a config-only PUT that drops a key really
+          // has retired that secret, and the new entry no longer expecting it
+          // is the proof.
+          //
+          // The OAuth slot is not implied by anything —
+          // `expectedSecretFields` always lists it — so its absence from the
+          // submitted set means "the caller cleared it" only when the caller
+          // spoke about settings at all. On a `preserve` intent (the
+          // config-only PUT the Add/Edit modal sends) the settings were
+          // re-derived from the disk entry, which by #1356's design no longer
+          // holds the secret; treating that absence as a clear deleted a
+          // value the user never touched, on the keychain as much as on a
+          // session store.
           const previousFields = new Set(expectedSecretFields(existing));
-          const obsolete = computeObsoleteFields(previousFields, secrets);
+          const stillExpected = new Set(expectedSecretFields(built));
+          const obsolete = [...previousFields].filter((field) =>
+            field === SECRET_FIELD_OAUTH_CLIENT_SECRET
+              ? settingsIntent.kind !== "preserve" && !(field in secrets)
+              : !stillExpected.has(field),
+          );
           await writeKeychainEntriesFor(newId, secrets);
           await writeMcpAndTrackMtime(serializeStore(next));
           await deleteKeychainFields(newId, obsolete);

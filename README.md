@@ -30,7 +30,9 @@ inspector/
 │   ├── tui/          # TUI client (Ink + React, tsup bundle)
 │   └── launcher/     # Shared launcher — provides the `mcp-inspector` bin, dispatches to web/cli/tui
 ├── core/             # Shared code consumed via the `@inspector/core` alias (no package.json)
-│   ├── auth/         # OAuth: providers, discovery, storage, endpoint overrides, mid-session recovery (browser/node/remote backends)
+│   ├── auth/         # OAuth: providers, discovery, storage, endpoint overrides, mid-session recovery (browser/node/remote backends);
+│   │                 #   plus per-server secret storage — the keychain/file/memory SecretStore
+│   │                 #   implementations, the selection policy, and the descriptor the banner and UI report
 │   ├── client/       # Install-level client config (`client.json`): browser-safe parse/validate + Node load/save, remote backend, secrets
 │   ├── json/         # JSON + parameter/argument conversion utilities, and the nullable-union
 │   │                 #   schema collapse shared by the web and TUI form builders
@@ -137,8 +139,8 @@ This is what lets an Inspector connection negotiating `protocolEra: "auto" | "mo
 
 Each config below is a ready-made server for exercising one feature by hand. Load one with `--config`, and unless noted, connect with **Protocol Era = Modern**.
 
-| Config                                    | Demonstrates                                       | Issue                                                                  |
-| ----------------------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------- |
+| Config                                    | Demonstrates                                        | Issue                                                                  |
+| ----------------------------------------- | --------------------------------------------------- | ---------------------------------------------------------------------- |
 | `mcp-app-http.json` **(legacy era)**      | An MCP App (UI resource + app tool) in the Apps tab | [#1859](https://github.com/modelcontextprotocol/inspector/issues/1859) |
 | `app-elicitation-http.json` **(legacy era)** | An MCP App rendering a form elicitation           | [#1854](https://github.com/modelcontextprotocol/inspector/issues/1854) |
 | `modern-mrtr-http.json`                   | A single MRTR round-trip                           | —                                                                      |
@@ -150,10 +152,10 @@ Each config below is a ready-made server for exercising one feature by hand. Loa
 | `duplicate-tool-names-http.json`          | A `tools/list` that repeats a tool name            | [#1957](https://github.com/modelcontextprotocol/inspector/issues/1957) |
 | `nullable-fields-http.json`               | Tools tab: nullable (`anyOf` + `null`) arguments   | [#1928](https://github.com/modelcontextprotocol/inspector/issues/1928) |
 | `rfc6570-templates-http.json`             | Resources tab: RFC 6570 resource-template expansion | [#1919](https://github.com/modelcontextprotocol/inspector/issues/1919) |
-| `advertised-extensions-http.json`         | Tool registration gated on advertised extensions   | [#1739](https://github.com/modelcontextprotocol/inspector/issues/1739) |
-| `logging-{legacy,modern}-http.json`       | Logging, both eras                                 | [#1629](https://github.com/modelcontextprotocol/inspector/issues/1629) |
-| `subscriptions-{legacy,modern}-http.json` | Resource subscriptions, both eras                  | [#1630](https://github.com/modelcontextprotocol/inspector/issues/1630) |
-| `tasks-{legacy,modern}-http.json`         | Tasks, both eras                                   | [#1631](https://github.com/modelcontextprotocol/inspector/issues/1631) |
+| `advertised-extensions-http.json`         | Tool registration gated on advertised extensions    | [#1739](https://github.com/modelcontextprotocol/inspector/issues/1739) |
+| `logging-{legacy,modern}-http.json`       | Logging, both eras                                  | [#1629](https://github.com/modelcontextprotocol/inspector/issues/1629) |
+| `subscriptions-{legacy,modern}-http.json` | Resource subscriptions, both eras                   | [#1630](https://github.com/modelcontextprotocol/inspector/issues/1630) |
+| `tasks-{legacy,modern}-http.json`         | Tasks, both eras                                    | [#1631](https://github.com/modelcontextprotocol/inspector/issues/1631) |
 
 #### MCP Apps
 
@@ -284,23 +286,23 @@ Open the Resources tab and pick **events_by_topic**, then enter `foo/bar`. The r
 
 The web client and the TUI expand through one shared helper, [`core/mcp/uriTemplate.ts`](./core/mcp/uriTemplate.ts) — the web Resources form directly, the TUI via `InspectorClient.readResourceFromTemplate` — and both derive their **form fields** from its parser too, which is the half that makes the sharing real: a form submits values under the names it rendered, so a parser that mangles a name silently drops the value at expansion time. (The CLI is not a consumer: it has no template form, and its `resources/read` passes the already-expanded `--uri` straight through.)
 
-The SDK's `UriTemplate` is still used, but only to *validate* a template (constructing it is what rejects an unclosed expression). Its expander is not, because it is incomplete in five ways — each measured against the pinned SDK, not inferred:
+The SDK's `UriTemplate` is still used, but only to _validate_ a template (constructing it is what rejects an unclosed expression). Its expander is not, because it is incomplete in five ways — each measured against the pinned SDK, not inferred:
 
-| Shape | SDK behavior |
-| --- | --- |
-| `{a,b}` | raw-joins the values — no encoding, operator prefix dropped |
-| `{;id}` | `;` is missing from its operator list, so the variable parses as `;id` |
-| `{id:3}` | the prefix modifier is folded into the name, giving `id:3` |
+| Shape           | SDK behavior                                                                                                   |
+| --------------- | -------------------------------------------------------------------------------------------------------------- |
+| `{a,b}`         | raw-joins the values — no encoding, operator prefix dropped                                                    |
+| `{;id}`         | `;` is missing from its operator list, so the variable parses as `;id`                                         |
+| `{id:3}`        | the prefix modifier is folded into the name, giving `id:3`                                                     |
 | `{+v}` / `{#v}` | `encodeURI` mangles reserved `[`/`]` (`[::1]` → `%5B::1%5D`) and double-encodes pct-triplets (`%2F` → `%252F`) |
-| `{v}` | `encodeURIComponent` leaves the sub-delims `!'()*` bare, which RFC 6570 requires encoded |
+| `{v}`           | `encodeURIComponent` leaves the sub-delims `!'()*` bare, which RFC 6570 requires encoded                       |
 
 The `;` and `:3` rows are the ones a user sees directly: on the SDK's parse the form renders fields literally labelled `;id` and `id:3`. The `+`/`#` row is silent corruption rather than over-escaping — an IPv6 literal or an already-encoded path arrives at the server altered.
 
 A template that cannot be expanded at all — an out-of-grammar modifier (`{id:abc}`), or an expression declaring no variable (`{}`, `{a,}`, `{?}`) — **withholds the read** rather than sending something. Pick **events_malformed** (`foobar://events/{topic:abc}`) to see it: Read Resource is disabled, the reason is printed under the form, and the preview shows the template as the server declared it. The alternative is worse than it looks: `x://{}` would otherwise expand to `x://` with no inputs rendered, so the form's "everything required is filled" check passes vacuously and it reads a URI that is not the template the server published.
 
-Literals are pct-encoded on expansion too (RFC 6570 §3.1): `café/{var}` sends `caf%C3%A9/value`, not raw UTF-8 in the path — something the SDK's expander does not do either. And the *names* a template may use are RFC 6570's `varchar` plus a labelled tolerance for `-` and `~`: the conformance suite rejects `{default-graph-uri}`, but real servers publish such names and the SDK's matcher round-trips them, so the Inspector expands them and marks the variable `conforming: false` rather than refusing a resource that demonstrably works.
+Literals are pct-encoded on expansion too (RFC 6570 §3.1): `café/{var}` sends `caf%C3%A9/value`, not raw UTF-8 in the path — something the SDK's expander does not do either. And the _names_ a template may use are RFC 6570's `varchar` plus a labelled tolerance for `-` and `~`: the conformance suite rejects `{default-graph-uri}`, but real servers publish such names and the SDK's matcher round-trips them, so the Inspector expands them and marks the variable `conforming: false` rather than refusing a resource that demonstrably works.
 
-An **undefined** variable is what omits its expression — a variable defined as the empty string expands (`x{?q}` gives `x?q=`, `x{;q}` gives `x;q`, per RFC 6570 §3.2.7). The expander honors that distinction, so a caller such as `readResourceFromTemplate` can request either URI. Collapsing the two is a *form* concern, not a template one: both clients seed every declared variable with `""` and a text input cannot express "defined but empty", so each form drops its blanks (`definedValues`) on the way in.
+An **undefined** variable is what omits its expression — a variable defined as the empty string expands (`x{?q}` gives `x?q=`, `x{;q}` gives `x;q`, per RFC 6570 §3.2.7). The expander honors that distinction, so a caller such as `readResourceFromTemplate` can request either URI. Collapsing the two is a _form_ concern, not a template one: both clients seed every declared variable with `""` and a text input cannot express "defined but empty", so each form drops its blanks (`definedValues`) on the way in.
 
 Requiredness is a property of the **expression**, not the variable: RFC 6570 drops undefined names from a multi-name expression, so `{a,b}` with only `a` filled is expandable and a form must not block it. `requiredGroups` returns one entry per non-omittable expression and `hasRequiredValues` asks that each be satisfied by any one of its names — which no per-variable flag can express once a name recurs across expressions (`{a,b}{a,c}` is satisfied by filling `b` and `c`).
 
@@ -389,7 +391,7 @@ The root `package.json` `"files"` allowlist is the source of truth for the tarba
 - **No source maps.** The client bundlers set `sourcemap: false` (`clients/{cli,tui}/tsup.config.ts`, `clients/web/tsup.runner.config.ts`); Vite and the launcher's `tsc` already emit none. Maps are ~half the unpacked size and aren't needed at runtime — debug via `npm run dev` on the source.
 - **`clients/web/build` ships via `clients/web/.npmignore`.** `clients/web/.gitignore` lists `build/`, and npm's packlist honors that nested `.gitignore` over the root `"files"` allowlist — so the prod web-server runner was silently missing from the tarball while `clients/web/dist` slipped through (its `.gitignore` only lists `dist-ssr`). `clients/web/.npmignore` overrides the `.gitignore` for publishing so both `build/` (runner) and `dist/` (SPA) ship. The other clients don't need this — none ship a nested `.gitignore`.
 - **`clients/web/static` ships the MCP Apps sandbox proxy.** `clients/web/static/sandbox_proxy.html` is a committed source file (not a build artifact), read from disk at runtime by `clients/web/server/sandbox-controller.ts` as `<runner dir>/../static/sandbox_proxy.html`. It was missing from the root `"files"` allowlist entirely, so every published build failed the Apps tab with **"Sandbox not loaded"** ([#1859](https://github.com/modelcontextprotocol/inspector/issues/1859)) while working fine in the repo. Because the path is resolved _relative to_ `clients/web/build`, the directory must ship at that exact location — `pack:verify` asserts both the tarball entry and the installed-on-disk path.
-- **A dependency that renders React is bundled, not externalized.** An externalized package resolves its own `react` from wherever npm placed **it** in the consumer's tree, which is not necessarily where the bundle resolves ours — npm places a package beside a React satisfying *its* peer range, and those ranges are looser than ours. `ink-form` and `ink-scroll-view` declare `">=18"`, so a project holding React 18 satisfies them and gets them hoisted while the Inspector's React 19 nests underneath: two React copies, and the TUI dies with `TypeError: Cannot read properties of null (reading 'useState')` the moment a tool test form or a scroll view mounts ([#1952](https://github.com/modelcontextprotocol/inspector/issues/1952)). Both are therefore inlined by `clients/tui/tsup.config.ts` and are **not** root dependencies: the tarball ships their code inside `clients/tui/build/index.js` rather than having consumers install them. Bundling also pins their transitive deps to what this repo's install resolved (notably `ink-select-input@6` via `overrides`, which npm ignores for a package installed as a dependency). **`ink` is the one exception, on cost:** bundling it works but adds ~1.4 MB (`react-reconciler` and `yoga-layout` come along, plus a `createRequire` banner for the inlined CJS), so it stays external — *not* because its `">=19"` peer makes it safe, which it does not. What keeps that tolerable is the root `react` range: `"^19.0.0"` is deliberately open to the whole major so npm can dedupe our React with whatever React 19 a consumer pins, leaving an external `ink` on the same copy the bundle uses. **Narrowing that range reopens the bug for the renderer itself** — `clients/tui/__tests__/tsupConfig.test.ts` pins it to `ink`'s peer floor, and guards the rest of the split; see the [TUI README](./clients/tui/README.md#bundling-react-rendering-dependencies-must-be-inlined-1952).
+- **A dependency that renders React is bundled, not externalized.** An externalized package resolves its own `react` from wherever npm placed **it** in the consumer's tree, which is not necessarily where the bundle resolves ours — npm places a package beside a React satisfying _its_ peer range, and those ranges are looser than ours. `ink-form` and `ink-scroll-view` declare `">=18"`, so a project holding React 18 satisfies them and gets them hoisted while the Inspector's React 19 nests underneath: two React copies, and the TUI dies with `TypeError: Cannot read properties of null (reading 'useState')` the moment a tool test form or a scroll view mounts ([#1952](https://github.com/modelcontextprotocol/inspector/issues/1952)). Both are therefore inlined by `clients/tui/tsup.config.ts` and are **not** root dependencies: the tarball ships their code inside `clients/tui/build/index.js` rather than having consumers install them. Bundling also pins their transitive deps to what this repo's install resolved (notably `ink-select-input@6` via `overrides`, which npm ignores for a package installed as a dependency). **`ink` is the one exception, on cost:** bundling it works but adds ~1.4 MB (`react-reconciler` and `yoga-layout` come along, plus a `createRequire` banner for the inlined CJS), so it stays external — _not_ because its `">=19"` peer makes it safe, which it does not. What keeps that tolerable is the root `react` range: `"^19.0.0"` is deliberately open to the whole major so npm can dedupe our React with whatever React 19 a consumer pins, leaving an external `ink` on the same copy the bundle uses. **Narrowing that range reopens the bug for the renderer itself** — `clients/tui/__tests__/tsupConfig.test.ts` pins it to `ink`'s peer floor, and guards the rest of the split; see the [TUI README](./clients/tui/README.md#bundling-react-rendering-dependencies-must-be-inlined-1952).
 - **A single version number, read from the root `package.json`.** The Inspector ships as one package with one version, so only the **root** `package.json` carries a `version` — the four `clients/*/package.json`s deliberately have none. Every Node client (CLI, TUI, and the web backend) resolves the version through the shared `readInspectorVersion()` reader in `core/node/version.ts`, which walks up to the root manifest (always present in the tarball). No client `package.json` is read at runtime, so none needs to ship. The web **browser** can't read the filesystem; it gets its version from the backend via `GET /api/config` (see [#1639](https://github.com/modelcontextprotocol/inspector/issues/1639)).
 
 ### `npm run pack:verify` — publish smoke against the real tarball
@@ -421,7 +423,7 @@ npm version minor --no-git-tag-version   # or major / patch; bump only, no tag
 
 **2. Merge `v2/main` → `main`** through the usual milestone-merge branch. It now carries the bump, so the release lands on `main` with the version already correct.
 
-Between steps 1 and 2 the two branches **do** differ, and that is expected, not drift: `v2/main` reads the version being built while `main` still reads the one currently released. What this ordering removes is *post-release* drift — once the milestone merge lands they agree again, and `v2/main` is never left **behind** `main`. If you see `v2/main` ahead of `main`, a release is in flight; if you see it behind, something went wrong.
+Between steps 1 and 2 the two branches **do** differ, and that is expected, not drift: `v2/main` reads the version being built while `main` still reads the one currently released. What this ordering removes is _post-release_ drift — once the milestone merge lands they agree again, and `v2/main` is never left **behind** `main`. If you see `v2/main` ahead of `main`, a release is in flight; if you see it behind, something went wrong.
 
 **3. Tag the `main` commit and draft the Release:**
 
@@ -437,7 +439,7 @@ git tag 2.3.0 origin/main && git push origin 2.3.0
 
 The release's target commit selects which workflow runs, so this only publishes when a release is cut from a commit carrying this (v2) workflow.
 
-**Why the bump goes on `v2/main` first ([#2010](https://github.com/modelcontextprotocol/inspector/issues/2010)).** It used to happen on the milestone-merge branch, which is cut from `main` — so the bump existed only *downstream* of `v2/main` and nothing carried it back. `v2/main` sat at `2.0.0` through both the 2.1.0 and 2.2.0 releases. That is not cosmetic: a branch cut from a milestone-merge branch silently carries the bump into an unrelated PR (this happened on [#2009](https://github.com/modelcontextprotocol/inspector/issues/2009), where a container bugfix arrived with a `2.0.0 → 2.2.0` diff), and anything reading the version in development — `readInspectorVersion()`, `--version`, `GET /api/config` — reported a version two releases old.
+**Why the bump goes on `v2/main` first ([#2010](https://github.com/modelcontextprotocol/inspector/issues/2010)).** It used to happen on the milestone-merge branch, which is cut from `main` — so the bump existed only _downstream_ of `v2/main` and nothing carried it back. `v2/main` sat at `2.0.0` through both the 2.1.0 and 2.2.0 releases. That is not cosmetic: a branch cut from a milestone-merge branch silently carries the bump into an unrelated PR (this happened on [#2009](https://github.com/modelcontextprotocol/inspector/issues/2009), where a container bugfix arrived with a `2.0.0 → 2.2.0` diff), and anything reading the version in development — `readInspectorVersion()`, `--version`, `GET /api/config` — reported a version two releases old.
 
 Do **not** "fix" a future drift by merging `main` back into `v2/main`. `main` carries the entire pre-v2 v1 history (retained through `ec5d8e13 chore: replace main's tree with v2` — ~230 commits `v2/main` does not have), so a back-merge grafts all of it into the develop branch's log permanently in order to deliver a two-file change. Bumping first means there is nothing to back-merge.
 
@@ -474,6 +476,37 @@ docker run --rm -p 127.0.0.1:6274:6274 \
 ```
 
 The same volume also persists OAuth tokens and stored state, so an authorized server stays authorized across runs. Use `-e MCP_CATALOG_PATH=/some/other/path.json` to put the catalog somewhere else — mount a volume covering whatever directory you point it at. If you **bind-mount a host directory** instead of a named volume (`-v "$PWD/inspector-data:/home/node/.mcp-inspector"`), the directory keeps its host ownership, so on Linux add `--user "$(id -u):$(id -g)"` or `chown` it to uid `1000` — otherwise the non-root `node` user can't write and adding a server fails with `EACCES`.
+
+**Where secrets go, and how to make them survive (#1950).** The Inspector keeps the values it deliberately does _not_ write to `mcp.json` — an OAuth client secret, an enterprise IdP client secret, each stdio `env:` value — in the **OS keychain**. A container has no keychain (the published image has no D-Bus session), so on startup the Inspector probes for one and falls back, saying so in the logs and in a permanent footer at the bottom of the Client Settings and Server Settings dialogs. Which fallback you get depends on whether the directory it would write to is going to survive:
+
+| Situation                                                      | Store                                        | Secrets survive a restart? |
+| -------------------------------------------------------------- | -------------------------------------------- | -------------------------- |
+| Keychain reachable (a normal desktop install)                  | OS keychain                                  | Yes                        |
+| Container, **no volume** on `/home/node/.mcp-inspector`        | Memory                                       | No — session only          |
+| Container **with** that volume, or any host without a keychain | `~/.mcp-inspector/secrets.json`, mode `0600` | Yes                        |
+
+So the same volume that keeps your server list also switches secrets from session-scoped to durable — nothing extra to configure. The in-memory default for an unmounted container is deliberate: a file in the writable layer is discarded by `--rm` and by every image update, and promising durability it can't deliver is worse than declining to.
+
+**A file-backed store is unencrypted unless you give it a key.** Set `MCP_INSPECTOR_SECRET_KEY` and the file is encrypted with AES-256-GCM (the passphrase is stretched with scrypt against a per-file random salt). Without it the file is still `0600`, but the values are readable to anyone who can read the file — which the startup log and the settings footer both say, every session, in a warning tone:
+
+```bash
+docker run --rm -p 127.0.0.1:6274:6274 \
+  -v mcp-inspector-data:/home/node/.mcp-inspector \
+  -e MCP_INSPECTOR_SECRET_KEY="$MY_PASSPHRASE" \
+  ghcr.io/modelcontextprotocol/inspector
+```
+
+**Use a high-entropy passphrase — generated, not chosen.** The random salt stops an attacker precomputing a table across files; it does nothing against _guessing_, and the scrypt cost is deliberately low because the derivation runs on every read and write. Anyone who obtains `secrets.json` can therefore test candidate passphrases quickly and offline, so treat this value like any other credential rather than like a memorable password.
+
+Setting the passphrase later is safe — the next write upgrades an existing plaintext file in place. Until that write happens the existing values really are still readable, and the banner and footer keep saying so rather than reporting the file as encrypted the moment the variable appears. **Changing or losing the passphrase is not safe**: a file that can no longer be decrypted is read as empty and _refuses to be written_, rather than being silently replaced with a new one holding only your latest secret. Restore the original passphrase, or delete `secrets.json` and re-enter the values.
+
+The Inspector writes the file `0600` and re-tightens it at startup if something loosened it. If it _cannot_ — the file belongs to another user, or the mount is read-only — it says so in the log rather than continuing to describe the file as protected, since on that box the mode claim above is not true.
+
+**Two Inspectors, one file.** Within a process, mutations are serialized per file path, so a web session's own concurrent saves cannot lose each other. Across processes — a CLI run beside a web session — there is deliberately **no lock**: writers are allowed to collide and the loser is made to notice. Each mutation reads the file, applies its change, writes, then reads back and compares the whole map; if another process wrote in between, it re-applies onto what they left and retries, and after five lost rounds it fails loudly rather than returning as though the value were saved.
+
+This is **not mutual exclusion**, and the residual case is worth stating: the verify only catches a clobber that has already landed, so if one Inspector reads back *before* the other's write arrives, both report success and one value is gone. That needs two Inspectors writing the same file within the gap between one's write and its read-back — narrow, but not only a crash. An earlier build did take a lock (`secrets.json.lock`); it was removed because making a `mkdir` lock single-winner on a stale takeover needs a compare-and-swap on a directory entry that Node does not expose, so it had the same class of failure with several hundred more lines and no way to close it.
+
+Three env vars affect where the file lands. `MCP_INSPECTOR_SECRET_STORE=keyring|file|memory` picks the store outright, bypassing the probe. `MCP_INSPECTOR_SECRET_FILE` names the file. Failing both, the file follows `MCP_STORAGE_DIR` — the same variable that relocates OAuth tokens and `client.json` — so mounting a volume at your configured storage directory is enough to make secrets durable there.
 
 **Upgrading from an image before this fix?** Earlier images did not create `/home/node/.mcp-inspector`, so Docker created the volume's mount point as `root` and the non-root `node` user couldn't write to it. An **empty** volume repairs itself on the first run of a current image (Docker applies the image directory's ownership to an empty volume), but one that already has files in it keeps its old `root` ownership and still fails with `EACCES`. Fix it once:
 
