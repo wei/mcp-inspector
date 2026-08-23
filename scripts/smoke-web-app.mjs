@@ -169,6 +169,14 @@ function ensureTestServer() {
  * this times out with an empty diagnostic. Piping both also keeps the child's
  * noise out of the smoke's own output while still making it available in the
  * failure message.
+ *
+ * The child is published to `mcpServer` the moment it is spawned rather than
+ * handed back on success, so `shutdown()` can stop it on every throw path.
+ * Returning it only after the announcement matched left the readiness timeout
+ * — a child that is alive but never announces — with no reachable handle, so
+ * `process.exit(1)` orphaned a live server still holding its port. The
+ * `spawnError` and `exited` paths never had that problem (the child is already
+ * gone there), but they cost nothing to cover the same way.
  */
 async function startMcpServer() {
   const child = spawn(
@@ -176,6 +184,7 @@ async function startMcpServer() {
     [composableServer, "--config", appConfig],
     { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] },
   );
+  mcpServer = child;
   let out = "";
   child.stdout.on("data", (d) => (out += d));
   child.stderr.on("data", (d) => (out += d));
@@ -193,7 +202,7 @@ async function startMcpServer() {
   for (let attempt = 0; attempt < 120; attempt++) {
     // Take the port the server actually bound, not the one we asked for.
     const announced = out.match(/listening at (http:\/\/\S+)/i);
-    if (announced) return { child, url: announced[1] };
+    if (announced) return { url: announced[1] };
     if (spawnError) {
       throw new Error(
         `could not spawn the MCP test server (${composableServer}): ${spawnError.message}`,
@@ -247,7 +256,9 @@ try {
   }
 
   ensureTestServer();
-  ({ child: mcpServer, url: mcpUrl } = await startMcpServer());
+  // `startMcpServer` publishes the child to `mcpServer` itself, so teardown
+  // reaches it even when this throws before returning.
+  ({ url: mcpUrl } = await startMcpServer());
   await server.waitForReady();
   browser = await loadChromium();
   const page = await browser.newPage();
