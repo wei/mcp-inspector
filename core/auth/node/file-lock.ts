@@ -494,13 +494,20 @@ export async function openSecretFileLock(
       // happened, so there is nothing to add.
       if ((err as NodeJS.ErrnoException).code === "ERELEASED") return;
       warnOnce(
-        // No branch on the *removal* error code, deliberately. Our own guard
-        // `stat`s before removing, so anything else reaching here is an
-        // `rmdir` that was refused — and **stale takeover reclaims through
-        // that same `rmdir`**, so whatever blocked ours blocks that too.
-        // `ENOTEMPTY` is the reachable one; `EACCES`, `EPERM` and `EROFS`
-        // behave identically. Promising expiry was wrong for all of them.
-        `Could not release the lock on the secrets file at ${target} (${describeError(err)}). Stale takeover reclaims a lock through the same directory removal, so whatever blocked this blocks that too: saves will keep failing until you remove ${lockPathOf(target)} by hand.`,
+        // **Conditional, not an instruction.** Two blanket versions of this
+        // have now been wrong in opposite directions: "it expires on its own"
+        // (false whenever the same `rmdir` that blocked us also blocks stale
+        // takeover — `ENOTEMPTY`, `EACCES`, `EPERM`, `EROFS`), and "remove it
+        // by hand" (false whenever the failure was transient, since the path
+        // may by then hold a *different, live* Inspector's lock, and deleting
+        // that destroys the exclusion of a process that did nothing wrong).
+        //
+        // `proper-lockfile` forwards whatever the filesystem returned, and
+        // nothing here can tell a permanent refusal from a passing one. So
+        // this reports what happened and states the two conditions the
+        // operator can check for themselves, rather than asserting an outcome
+        // this code does not know.
+        `Could not release the lock on the secrets file at ${target} (${describeError(err)}). It may clear on its own — stale takeover reclaims a lock through the same directory removal, so it will not if whatever blocked this persists. If saves keep failing against this file and no other Inspector is running, remove ${lockPathOf(target)} by hand.`,
       );
     }
   };

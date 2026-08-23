@@ -475,8 +475,17 @@ describe("withSecretFileLock reports what it cannot clean up", () => {
     // not be turned into a failure by its own teardown.
     expect(result).toBe("saved");
     expect(warnings()).toContain("Could not release the lock");
-    expect(warnings()).toContain("by hand");
-    expect(warnings()).not.toContain("expires on its own");
+    // Conditional guidance, not an instruction. `proper-lockfile` forwards
+    // whatever the filesystem returned and nothing here can tell a permanent
+    // refusal from a transient one — and if it was transient, this path may
+    // by then hold a *different, live* Inspector's lock, so an unconditional
+    // "remove it" would destroy the exclusion of a process that did nothing
+    // wrong. Both conditions must be stated.
+    expect(warnings()).toContain("If saves keep failing");
+    expect(warnings()).toContain("no other Inspector is running");
+    // …and it must not promise the lock clears by itself either, which is
+    // false whenever the same `rmdir` also blocks stale takeover.
+    expect(warnings()).not.toMatch(/It expires on its own/);
   });
 
   it("warns rather than crashing the process when the library detects the takeover", async () => {
