@@ -1091,12 +1091,12 @@ export class InspectorClient extends InspectorClientEventTarget {
    * The `progressToken` a caller stamped on its request metadata, when it is
    * one the SDK will accept.
    *
-   * `_meta` values are arbitrary JSON (#1910), but `progressToken` is a
-   * reserved key the spec types as `string | number`. Anything else — an
-   * object, an array, `null`, a boolean — is not a token the SDK can correlate
-   * a `notifications/progress` back to, so it is read as "no token" rather than
-   * forwarded. The key still reaches the wire inside `_meta`; this only governs
-   * whether the client wires up a progress callback for it.
+   * This governs only **callback correlation** — whether the client wires up an
+   * `onprogress` for the request. Keeping an invalid value off the **wire** is
+   * a separate concern handled in {@link mergeMeta}, which deletes the member
+   * from the outgoing `_meta` so a conforming server is never sent something
+   * `ProgressTokenSchema` rejects. The two use the same {@link isProgressToken}
+   * predicate, so they cannot disagree about what counts as valid.
    */
   private progressTokenOf(
     metadata: RequestMetadata | undefined,
