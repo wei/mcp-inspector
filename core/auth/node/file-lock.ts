@@ -29,12 +29,25 @@
  * the hand-rolled version could not close, and it cannot be closed with what
  * Node exposes (`renameat2(RENAME_EXCHANGE)`).
  *
- * What the library adds over the hand-rolled one is that the loser finds
- * out. Its refresh tick compares the lock's mtime against the value it
- * recorded at acquire, so a holder whose directory was replaced is marked
- * `ECOMPROMISED` and told — see `onCompromised` below. The window is also
- * narrow and conditional: it opens only after a holder *dies without
- * releasing*, since nothing else lets a lock go stale.
+ * The library detects it only on its refresh tick — `updateLock` compares
+ * the lock's mtime against the value recorded at acquire and fires
+ * `onCompromised`. That tick runs at `stale / 2`, i.e. every 5s here, while
+ * an ordinary mutation is a read, an scrypt derivation and an atomic write:
+ * comfortably under a second. **So in the common case the tick never runs
+ * and the library tells nobody.** Worse, its `release` path calls `rmdir`
+ * unconditionally, with no ownership check — so a holder whose lock was
+ * replaced goes on to delete the *winner's* lock on the way out, silently
+ * ending the winner's exclusion too.
+ *
+ * {@link withSecretFileLock} therefore does its own ownership check before
+ * releasing (see there). That closes the destructive half — we never remove
+ * a lock directory that is not the one we created — and surfaces the
+ * compromise in exactly the fast-mutation case the tick misses. Detection is
+ * still **best-effort**, not a guarantee: it rests on inode and birth-time
+ * identity, which some filesystems do not report.
+ *
+ * The window is at least narrow and conditional: it opens only after a
+ * holder *dies without releasing*, since nothing else lets a lock go stale.
  *
  * **Which is why the optimistic verify in {@link FileSecretStore.mutate}
  * stays, and is not belt-and-braces.** It is what still catches a clobber
@@ -166,6 +179,53 @@ const isHeldElsewhere = (err: unknown): boolean =>
 const describeError = (err: unknown): string =>
   err instanceof Error ? err.message : String(err);
 
+/** Where `proper-lockfile` puts the lock for `target` — its documented default. */
+const lockPathOf = (target: string): string => `${target}.lock`;
+
+/**
+ * A lock directory's identity, or `null` if it could not be read.
+ *
+ * `ino` and `birthtimeMs` together: a directory removed and recreated gets a
+ * new inode and a new birth time, while `utimes` — which the library's own
+ * refresh tick performs on our behalf every few seconds — changes neither.
+ *
+ * Not every filesystem reports both (Windows shares, some network mounts, and
+ * older kernels report `0`). There the two reads simply agree and the check
+ * below concludes the lock is ours, which is the behaviour without this check
+ * at all — best-effort, and never a false alarm on a healthy lock.
+ */
+async function identify(
+  lockPath: string,
+): Promise<{ ino: number; birthtimeMs: number } | null> {
+  try {
+    const stat = await fs.stat(lockPath);
+    return { ino: stat.ino, birthtimeMs: stat.birthtimeMs };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Is the lock directory still the one we created?
+ *
+ * A missing directory counts as **not ours** — it was removed by a takeover
+ * (or by hand), and there is nothing of ours left to release.
+ *
+ * An unreadable *baseline* (`claimedAs === null`) is the one case that
+ * answers "ours": we could not identify the directory at acquire, so we have
+ * nothing to compare against and must not accuse a healthy lock. Releasing is
+ * then exactly what the library would have done unaided.
+ */
+async function stillOurs(
+  lockPath: string,
+  claimedAs: { ino: number; birthtimeMs: number } | null,
+): Promise<boolean> {
+  if (claimedAs === null) return true;
+  const now = await identify(lockPath);
+  if (now === null) return false;
+  return now.ino === claimedAs.ino && now.birthtimeMs === claimedAs.birthtimeMs;
+}
+
 /**
  * One `proper-lockfile` acquire against `target`, with the given retry policy.
  *
@@ -266,20 +326,40 @@ export async function withSecretFileLock<T>(
     );
     return fn();
   }
+  // Identity of the directory we just created, for the ownership check below.
+  // **Not the mtime**, which is what the library compares: a lock held longer
+  // than one refresh tick has its mtime rewritten by `utimes` legitimately,
+  // so an mtime comparison would call our own healthy lock compromised. The
+  // inode and birth time both survive `utimes` and both change when a
+  // directory is removed and recreated, which is precisely the event to
+  // detect.
+  const claimedAs = await identify(lockPathOf(target));
   try {
     return await fn();
   } finally {
-    try {
-      await release();
-    } catch (err) {
-      // The body already ran and its result is being returned; a release
-      // that failed means the lock was taken from us (declared stale while
-      // we held it) or the directory went away. Neither is worth turning a
-      // successful save into a failure, but a silent catch would leave a
-      // lock nobody can explain, so say it.
+    if (!(await stillOurs(lockPathOf(target), claimedAs))) {
+      // Someone declared our lock stale and replaced it. **Do not release**:
+      // `proper-lockfile`'s release is an unconditional `rmdir`, so calling
+      // it here would delete the lock directory that now belongs to whoever
+      // took over — ending their exclusion as well as ours, and turning one
+      // compromised holder into two unprotected writers. Leaving their lock
+      // alone costs us nothing; ours is already gone.
       warnOnce(
-        `Could not release the lock on the secrets file at ${target} (${describeError(err)}). It expires on its own after ${STALE_MS / 1000}s.`,
+        `The lock on the secrets file at ${target} was taken over by another process while a write was in progress. If a secret you just saved is missing, save it again.`,
       );
+    } else {
+      try {
+        await release();
+      } catch (err) {
+        // The body already ran and its result is being returned; a release
+        // that failed means the lock was taken from us (declared stale while
+        // we held it) or the directory went away. Neither is worth turning a
+        // successful save into a failure, but a silent catch would leave a
+        // lock nobody can explain, so say it.
+        warnOnce(
+          `Could not release the lock on the secrets file at ${target} (${describeError(err)}). It expires on its own after ${STALE_MS / 1000}s.`,
+        );
+      }
     }
   }
 }

@@ -360,27 +360,67 @@ describe("withSecretFileLock degrades rather than failing", () => {
 });
 
 describe("withSecretFileLock reports what it cannot clean up", () => {
-  it("warns rather than crashing the process when the lock is taken over", async () => {
-    // `proper-lockfile`'s default `onCompromised` *throws*, from a timer
-    // with no caller on the stack — an uncaught exception that takes an
-    // Inspector session down. Driven for real: the lock directory is removed
-    // while held, which is what an operator "clearing a stuck lock" does,
-    // and the library's own refresh tick (`stale / 2`) notices.
+  it("does not delete the winner's lock after being taken over", async () => {
+    // The destructive half of the stale-takeover race, and the reason this
+    // check exists at all. `proper-lockfile`'s release is an unconditional
+    // `rmdir`: a holder whose lock was replaced deletes the *winner's*
+    // directory on the way out, so one compromised holder becomes two
+    // unprotected writers. Its own detection cannot prevent that — it runs on
+    // the refresh tick (5s here) while an ordinary mutation finishes in well
+    // under a second, so the tick never runs and nobody is told.
+    //
+    // No waiting here, deliberately: this is the fast case the tick misses.
+    const target = filePath();
+    const lockPath = `${target}.lock`;
+
+    let winner: { ino: number; birthtimeMs: number } | undefined;
+    const result = await withSecretFileLock(target, async () => {
+      // Someone declares our lock stale, removes it, and takes over.
+      await fs.rm(lockPath, { recursive: true, force: true });
+      await fs.mkdir(lockPath);
+      const stat = await fs.stat(lockPath);
+      winner = { ino: stat.ino, birthtimeMs: stat.birthtimeMs };
+      return "saved";
+    });
+
+    expect(result).toBe("saved");
+    // The winner's lock is untouched — same directory, not a recreated one.
+    const after = await fs.stat(lockPath);
+    expect(after.ino).toBe(winner?.ino);
+    expect(after.birthtimeMs).toBe(winner?.birthtimeMs);
+    expect(warnings()).toContain("was taken over by another process");
+  });
+
+  it("warns instead of throwing when releasing a lock that is ours fails", async () => {
+    // The ownership check above must not swallow a genuine release failure.
+    // `rmdir` refuses a non-empty directory, so a stray file inside the lock
+    // leaves it identifiably *ours* — same inode, same birth time — and still
+    // unremovable.
     const target = filePath();
     const result = await withSecretFileLock(target, async () => {
+      await fs.writeFile(`${target}.lock/stray`, "", "utf-8");
+      return "saved";
+    });
+
+    // The body's result is returned regardless: a save that completed must
+    // not be turned into a failure by its own teardown.
+    expect(result).toBe("saved");
+    expect(warnings()).toContain("Could not release the lock");
+  });
+
+  it("warns rather than crashing the process when the library detects the takeover", async () => {
+    // `proper-lockfile`'s default `onCompromised` *throws*, from a timer with
+    // no caller on the stack — an uncaught exception that takes an Inspector
+    // session down. Replaced with a warning. This is the slow path: the lock
+    // is removed and the body stays alive past the refresh tick, so the
+    // library's own detection fires rather than the release-time check above.
+    const target = filePath();
+    await withSecretFileLock(target, async () => {
       await fs.rm(`${target}.lock`, { recursive: true, force: true });
       await vi.waitFor(
         () => expect(warnings()).toContain("was taken over by another process"),
         { timeout: 20_000, interval: 250 },
       );
-      return "saved";
     });
-
-    // The body's result is returned regardless. A compromised lock means the
-    // guarantee was lost, not that the work did not happen, and the release
-    // that then fails (`ELOCKNOTHELD`, since the library has already given
-    // the lock up) must not turn a completed save into a thrown error.
-    expect(result).toBe("saved");
-    expect(warnings()).toContain("Could not release the lock");
   }, 30_000);
 });

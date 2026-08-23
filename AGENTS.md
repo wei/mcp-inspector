@@ -73,8 +73,13 @@ v2/main/
 │   │   │                               #     mutual exclusion #2082 settled on — proper-lockfile,
 │   │   │                               #     borrowed rather than hand-rolled. Read its header before
 │   │   │                               #     citing it: it makes two LIVE Inspectors exclusive, and
-│   │   │                               #     does NOT make stale takeover single-winner — it makes the
-│   │   │                               #     loser detectable (ECOMPROMISED), which is the honest claim.
+│   │   │                               #     does NOT make stale takeover single-winner. proper-lockfile
+│   │   │                               #     detects a takeover only on its 5s refresh tick, which an
+│   │   │                               #     ordinary sub-second mutation never reaches, and its release
+│   │   │                               #     is an unconditional rmdir — so withSecretFileLock does its
+│   │   │                               #     OWN ownership check (inode+birthtime) before releasing, to
+│   │   │                               #     avoid deleting the winner's lock. Detection is BEST-EFFORT;
+│   │   │                               #     do not write that a compromised holder is always told.
 │   │   │                               #     DEGRADES when no lock CAN be taken (read-only $HOME etc),
 │   │   │                               #     since this store exists for boxes missing the usual
 │   │   │                               #     mechanism; but THROWS on ELOCKED — a lock held by a live
