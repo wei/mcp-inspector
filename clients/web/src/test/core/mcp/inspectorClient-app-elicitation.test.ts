@@ -482,6 +482,41 @@ describe("app-rendered elicitation routing (#1854)", () => {
       await client.disconnect();
     });
 
+    it("tears the app down on tasks/cancel and keeps the task cancelled", async () => {
+      // `tasks/cancel` is the server changing its mind. Without an abort the
+      // modal stayed live, and a later answer overwrote `cancelled` with
+      // `completed` — a task the server was told it had cancelled.
+      const transport = new ElicitTransport();
+      let aborted = false;
+      let settle: ((r: ElicitResult) => void) | undefined;
+      const client = await connectWithTasks(
+        transport,
+        (request) =>
+          new Promise<ElicitResult>((resolve) => {
+            settle = resolve;
+            request.signal.addEventListener("abort", () => (aborted = true));
+          }),
+      );
+
+      const created = (await transport.elicit(52, taskParams())) as {
+        result?: { task?: { taskId?: string } };
+      };
+      const taskId = created.result?.task?.taskId;
+      expect(taskId).toBeDefined();
+      await vi.waitFor(() => expect(settle).toBeDefined());
+
+      await transport.sendRequest(53, "tasks/cancel", { taskId });
+      expect(aborted).toBe(true);
+      expect(await taskStatuses(transport, 54)).toContain("cancelled");
+
+      // An answer that lands after the cancel must not resurrect the task.
+      settle?.({ action: "accept", content: { choice: "too-late" } });
+      await vi.waitFor(async () =>
+        expect(await taskStatuses(transport, 55)).toEqual(["cancelled"]),
+      );
+      await client.disconnect();
+    });
+
     it("falls back to the native queue when the app cannot answer", async () => {
       const transport = new ElicitTransport();
       const client = await connectWithTasks(transport, async () => {

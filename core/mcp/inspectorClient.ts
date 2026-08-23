@@ -239,6 +239,14 @@ interface ReceiverTaskRecord {
   resolvePayload: (payload: ClientResult) => void;
   rejectPayload: (reason?: unknown) => void;
   cleanupTimeoutId?: ReturnType<typeof setTimeout>;
+  /**
+   * Aborted when the task reaches a terminal state some way other than the
+   * user answering — a `tasks/cancel`, or session teardown. Whatever is
+   * collecting the answer (the native pending-request entry, or an app-rendered
+   * elicitation and its bridge) is torn down from this, so a cancelled task
+   * cannot leave a modal on screen waiting for an answer nothing will read.
+   */
+  abort: AbortController;
 }
 
 /**
@@ -1222,6 +1230,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       payloadPromise,
       resolvePayload,
       rejectPayload,
+      abort: new AbortController(),
     };
     record.cleanupTimeoutId = setTimeout(() => {
       record.cleanupTimeoutId = undefined;
@@ -1298,6 +1307,9 @@ export class InspectorClient extends InspectorClientEventTarget {
     };
     record.task = updatedTask;
     record.rejectPayload(new Error("Task cancelled"));
+    // Stop collecting an answer nobody will read: drops the native pending
+    // entry and tears down an app-rendered elicitation's renderer.
+    record.abort.abort();
     if (record.cleanupTimeoutId != null) {
       clearTimeout(record.cleanupTimeoutId);
       record.cleanupTimeoutId = undefined;
@@ -1440,6 +1452,11 @@ export class InspectorClient extends InspectorClientEventTarget {
           // an app-rendered answer completes the task exactly as a native one
           // does.
           const completeTask = (result: ElicitResult) => {
+            // A cancelled (or otherwise terminal) task must not be re-settled:
+            // an answer that arrives after `tasks/cancel` would otherwise
+            // overwrite `cancelled` with `completed`.
+            if (InspectorClient.isTerminalTaskStatus(record.task.status))
+              return;
             record.resolvePayload(result);
             const updated: Task = {
               ...record.task,
@@ -1450,6 +1467,8 @@ export class InspectorClient extends InspectorClientEventTarget {
             this.upsertReceiverTask(updated);
           };
           const failTask = (error: Error) => {
+            if (InspectorClient.isTerminalTaskStatus(record.task.status))
+              return;
             record.rejectPayload(error);
             const updated: Task = {
               ...record.task,
@@ -1471,7 +1490,10 @@ export class InspectorClient extends InspectorClientEventTarget {
             // it natively.
             let appResult: ElicitResult | null;
             try {
-              appResult = await this.tryAppElicitation(request);
+              appResult = await this.tryAppElicitation(
+                request,
+                record.abort.signal,
+              );
             } catch (error) {
               failTask(
                 error instanceof Error ? error : new Error(String(error)),
@@ -1489,6 +1511,11 @@ export class InspectorClient extends InspectorClientEventTarget {
               failTask,
             );
             this.addPendingElicitation(elicitationRequest);
+            // A `tasks/cancel` (or teardown) drops the queued entry, so the
+            // modal does not outlive the task it belongs to.
+            this.wirePendingAbort(record.abort.signal, () =>
+              this.removePendingElicitation(elicitationRequest.id),
+            );
           })();
           // Task-augmented (2025-11-25) response — see the sampling handler
           // above. Reply with a `CreateTaskResult` (`{ task }`), routed around
@@ -1620,6 +1647,9 @@ export class InspectorClient extends InspectorClientEventTarget {
       if (record.cleanupTimeoutId != null) {
         clearTimeout(record.cleanupTimeoutId);
       }
+      // Same reason as `cancelReceiverTask`: the session that owns whatever is
+      // collecting the answer is ending.
+      record.abort.abort();
     }
     this.receiverTaskRecords.clear();
   }
