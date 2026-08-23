@@ -2423,6 +2423,48 @@ describe("App paginated list pagination toggle (#1721)", () => {
     };
     expect(lastPush?.paginatedLists).toBeFalsy();
   });
+
+  it("rolls back to the last write that landed, not to a stale list entry (#2089)", async () => {
+    // Two toggles. The first PUT lands but the list reload behind it fails, so
+    // the `servers` entry keeps describing disk as it was *before* it — which
+    // this suite models exactly, because `useServers` is mocked to return the
+    // same entry forever. The second PUT fails outright and rolls back.
+    //
+    // Reverting to the `servers` entry there lands on `false`, the value from
+    // before the first toggle, contradicting what is on disk. The baseline has
+    // to come from the write that landed instead.
+    //
+    // One failed toggle cannot distinguish the two baselines — they only differ
+    // once a write has landed that the list never caught up with — so the test
+    // needs the full sequence.
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    await user.click(screen.getByText("paginated-on"));
+    await waitFor(() =>
+      expect(updateServerSettingsSpy).toHaveBeenCalledWith(
+        "A",
+        expect.objectContaining({ paginatedLists: true }),
+      ),
+    );
+
+    updateServerSettingsSpy.mockRejectedValueOnce(new Error("disk full"));
+    await user.click(screen.getByText("paginated-off"));
+
+    // Back to the value the first toggle put on disk, not to the pre-toggle one.
+    await waitFor(() =>
+      expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true"),
+    );
+    const client = clientInstances[0] as EventTarget & {
+      setServerSettings: ReturnType<typeof vi.fn>;
+    };
+    const lastPush = client.setServerSettings.mock.calls.at(-1)?.[0] as {
+      paginatedLists?: boolean;
+    };
+    expect(lastPush?.paginatedLists).toBe(true);
+  });
 });
 
 // A background command runs through `runCommandInBackground`, which owns the

@@ -110,6 +110,7 @@ import { usePagedTools } from "@inspector/core/react/usePagedTools.js";
 import { usePagedPrompts } from "@inspector/core/react/usePagedPrompts.js";
 import { usePagedResources } from "@inspector/core/react/usePagedResources.js";
 import { usePaginatedList } from "./hooks/usePaginatedList";
+import { useLastPersistedSettings } from "./hooks/useLastPersistedSettings";
 import type { ListPaginationControlsProps } from "./components/elements/ListPaginationControls/ListPaginationControls";
 import { useManagedResourceTemplates } from "@inspector/core/react/useManagedResourceTemplates.js";
 import { useManagedRequestorTasks } from "@inspector/core/react/useManagedRequestorTasks.js";
@@ -1159,6 +1160,10 @@ function App() {
     error: pagedResourcesLoadError,
     loadPage: loadResourcesPage,
   } = usePagedResources(inspectorClient, pagedResourcesState);
+  // What every settings write that landed on disk actually wrote, so a later
+  // failed write can be rolled back to that rather than to a `servers` entry
+  // frozen at the last successful list read (#2089).
+  const lastPersistedSettings = useLastPersistedSettings();
   // The active server's persisted paginated setting drives the display mode.
   // The sidebar toggle edits it (optimistically, below) and persists it.
   const persistedPaginatedLists =
@@ -3730,7 +3735,15 @@ function App() {
       setPaginatedListsOverride(value);
       const current = servers.find((s) => s.id === activeServerId);
       if (!current || activeServerId === undefined) return;
-      const prevSettings = current.settings ?? EMPTY_SETTINGS;
+      // Not `current.settings` directly: that entry only advances on a
+      // successful list read, so once one has failed it describes disk as it
+      // was *before* the writes made since. Roll back to the last write known
+      // to have landed while that is the fresher account (#2089).
+      const prevSettings = lastPersistedSettings.resolve(
+        activeServerId,
+        current,
+        current.settings ?? EMPTY_SETTINGS,
+      );
       const next: InspectorServerSettings = {
         ...prevSettings,
         paginatedLists: value,
@@ -3760,23 +3773,35 @@ function App() {
       void refreshingPersist(updateServerSettings, refreshInitialConfig)(
         activeServerId,
         next,
-      ).catch((err: unknown) => {
-        // Persist failed: revert the optimistic override (the effect only
-        // clears it when the persisted value changes, which won't happen here)
-        // and roll the live client setting back, so the UI and client reflect
-        // the value that's actually on disk rather than the failed edit (#1721).
-        setPaginatedListsOverride(null);
-        inspectorClient?.setServerSettings(prevSettings);
-        notifications.show({
-          title: "Failed to save pagination setting",
-          message: err instanceof Error ? err.message : String(err),
-          color: "red",
+      )
+        .then(() => {
+          // This value is on disk now. Remember it as the rollback baseline for
+          // whatever is written next, since the `servers` entry it was derived
+          // from will keep describing the old value if the reload behind this
+          // write — or any later one — fails (#2089).
+          lastPersistedSettings.record(activeServerId, next, current);
+        })
+        .catch((err: unknown) => {
+          // Persist failed: revert the optimistic override and roll the live
+          // client setting back, so the UI and client reflect the value that's
+          // actually on disk rather than the failed edit (#1721). The override
+          // is set to the baseline rather than cleared: clearing it falls back
+          // to `persistedPaginatedLists`, read from the same `servers` entry
+          // that may be stale, which would show the same wrong value from the
+          // other direction (#2089).
+          setPaginatedListsOverride(prevSettings.paginatedLists ?? false);
+          inspectorClient?.setServerSettings(prevSettings);
+          notifications.show({
+            title: "Failed to save pagination setting",
+            message: err instanceof Error ? err.message : String(err),
+            color: "red",
+          });
         });
-      });
     },
     [
       servers,
       activeServerId,
+      lastPersistedSettings,
       inspectorClient,
       updateServerSettings,
       refreshInitialConfig,
@@ -4143,7 +4168,22 @@ function App() {
     // unit rather than an inline `await …; refresh()` because this file is
     // outside the coverage gate, so wiring written here is tested by nothing
     // (#1950 review r17).
-    onPersist: refreshingPersist(updateServerSettings, refreshInitialConfig),
+    onPersist: async (id: string, value: InspectorServerSettings) => {
+      const entry = servers.find((s) => s.id === id);
+      await refreshingPersist(updateServerSettings, refreshInitialConfig)(
+        id,
+        value,
+      );
+      // Recorded for the same reason the pagination toggle records its own
+      // write (#2089): this is what disk holds now, and the `servers` entry it
+      // was edited from will keep describing the previous value for as long as
+      // list reads keep failing. Both settings writers feed the one record, so
+      // a rollback in either takes the most recent write, not just the most
+      // recent write *of its own kind*. No entry means the modal was opened
+      // against a server the list doesn't have, and there is nothing for a
+      // later read to supersede.
+      if (entry) lastPersistedSettings.record(id, value, entry);
+    },
     // Surface failures via toast — the modal usually closes
     // immediately on user dismiss, so a silent fail-on-flush would
     // leave the user thinking their last edits saved when they
