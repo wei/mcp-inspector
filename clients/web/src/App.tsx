@@ -113,6 +113,7 @@ import { usePagedTools } from "@inspector/core/react/usePagedTools.js";
 import { usePagedPrompts } from "@inspector/core/react/usePagedPrompts.js";
 import { usePagedResources } from "@inspector/core/react/usePagedResources.js";
 import { usePaginatedList } from "./hooks/usePaginatedList";
+import { useLastPersistedSettings } from "./hooks/useLastPersistedSettings";
 import { useValueChange } from "./hooks/useValueChange";
 import type { ListPaginationControlsProps } from "./components/elements/ListPaginationControls/ListPaginationControls";
 import { useManagedResourceTemplates } from "@inspector/core/react/useManagedResourceTemplates.js";
@@ -1163,19 +1164,34 @@ function App() {
     error: pagedResourcesLoadError,
     loadPage: loadResourcesPage,
   } = usePagedResources(inspectorClient, pagedResourcesState);
+  // What every settings write that landed on disk actually wrote, so a later
+  // failed write can be rolled back to that rather than to a `servers` entry
+  // frozen at the last successful list read (#2089).
+  const lastPersistedSettings = useLastPersistedSettings(servers);
   // The active server's persisted paginated setting drives the display mode.
   // The sidebar toggle edits it (optimistically, below) and persists it.
+  const activeServerEntry = servers.find((s) => s.id === activeServerId);
   const persistedPaginatedLists =
-    servers.find((s) => s.id === activeServerId)?.settings?.paginatedLists ??
-    false;
+    activeServerEntry?.settings?.paginatedLists ?? false;
   const [paginatedListsOverride, setPaginatedListsOverride] = useState<
     boolean | null
   >(null);
   // Drop the optimistic override once the persisted value catches up (or the
   // active server changes), so the persisted setting is the resting source.
-  useEffect(() => {
-    setPaginatedListsOverride(null);
-  }, [persistedPaginatedLists, activeServerId]);
+  //
+  // Keyed on the entry object rather than on the boolean it carries: the
+  // override can hold a *concrete* value (a rollback sets one instead of
+  // clearing), and if a later successful read reports the value that override
+  // replaced — an outside edit overtaking the write — the boolean and the
+  // server id are both unchanged and the UI stays stuck on it. Every successful
+  // read rebuilds the list, so the entry is the signal that supersedes it, and
+  // it subsumes the other two: the value is read off this entry, and switching
+  // servers selects a different one (#2089).
+  //
+  // Adjusted during render rather than in an effect, per this repo's rule
+  // against resetting state from render data in `useEffect` — the entry is
+  // referentially stable between reads, which is what `useValueChange` needs.
+  useValueChange(activeServerEntry, () => setPaginatedListsOverride(null));
   const paginatedLists = paginatedListsOverride ?? persistedPaginatedLists;
   // The malformed-entry report is written by the aggregate walk's salvage. In
   // paginated mode the tools/prompts/resources panels render the paged stores
@@ -1719,11 +1735,18 @@ function App() {
   const activeServerNameRef = useRef<string | undefined>(undefined);
   const activeServerIdRef = useRef<string | undefined>(activeServerId);
   const serversRef = useRef(servers);
+  // The live client, mirrored for the same reason: a settings write that
+  // outlives a disconnect/reconnect to the *same* server would otherwise push
+  // its value into the instance captured when it was issued — which has since
+  // been destroyed — while the replacement client, built from the stale list
+  // entry, keeps the value the write replaced (#2089).
+  const inspectorClientRef = useRef<InspectorClient | null>(inspectorClient);
   useEffect(() => {
     if (activeServer) activeServerNameRef.current = activeServer.name;
     activeServerIdRef.current = activeServerId;
     serversRef.current = servers;
-  }, [activeServer, activeServerId, servers]);
+    inspectorClientRef.current = inspectorClient;
+  }, [activeServer, activeServerId, servers, inspectorClient]);
 
   // Last connection-level error message, surfaced as `data-error-message` on
   // the InspectorView header so an automated driver can read *why* a connect
@@ -1909,6 +1932,43 @@ function App() {
   // pre-redirect hook below can read the current Network log without being
   // rebound every time the active server (and its log state) changes.
   const fetchLogRef = useRef<FetchRequestLogState | null>(null);
+
+  // Make the live client reflect one settings value, in full. Every path that
+  // decides what the active server's settings *are* goes through this: the
+  // settings modal's close (#1444), and each write's settled / rolled-back
+  // reconciliation (#2089). It is one function because the live surface is more
+  // than `setServerSettings` — a partial re-application would leave the Network
+  // log sized for, and the server advertised roots from, a value that is not on
+  // disk. Reads the client through its ref so a write outliving a reconnect
+  // applies to the instance that exists now.
+  const applyLiveServerSettings = useCallback(
+    (settings: InspectorServerSettings) => {
+      const client = inspectorClientRef.current;
+      if (!client) return;
+      // Settings the managed state reads at notification time
+      // (auto-refresh-on-list-changed) take effect without a reconnect (#1444).
+      // Connection-time inputs (transport, OAuth, timeouts) still only apply on
+      // the next connect.
+      client.setServerSettings(settings);
+      // Resize the Network log buffer live so a maxFetchRequests edit takes
+      // effect without a reconnect (shrinking trims immediately).
+      fetchLogRef.current?.setMaxFetchRequests(settings.maxFetchRequests);
+      // Root edits are diffed against what the client currently advertises
+      // (both cleaned) and notified only when they differ: `setRoots` fires
+      // `notifications/roots/list_changed`, which makes the server re-request
+      // `roots/list`.
+      const nextRoots = cleanRoots(settings.roots);
+      const currentRoots = cleanRoots(client.getRoots());
+      if (JSON.stringify(nextRoots) !== JSON.stringify(currentRoots)) {
+        void client.setRoots(nextRoots).catch(() => {
+          // setRoots swallows notification failures internally; a throw here
+          // only means the client is mid-teardown — the persisted roots will
+          // re-advertise on the next connect, so nothing to surface.
+        });
+      }
+    },
+    [],
+  );
 
   // Flush the pre-redirect Network log to backend storage, keyed by the OAuth
   // authId carried in the authorization URL's `state`. Runs synchronously from
@@ -2465,7 +2525,16 @@ function App() {
       );
       // The settings node persisted in mcp.json for this server — distinct
       // from the InspectorClient options we're about to derive from it.
-      const savedSettings = server.settings;
+      //
+      // Through the tracker, not `server.settings` directly: the entry only
+      // advances on a successful list read, so a write that landed while reads
+      // were failing — including one made from the settings modal for a server
+      // that was not connected at the time — would otherwise be undone at the
+      // next connect, which builds the client from that frozen entry. This is
+      // the one place the whole connection is configured, so every construction
+      // path (connect, reconnect, OAuth resume) goes through it (#2089).
+      const savedSettings =
+        lastPersistedSettings.resolve(server.id) ?? server.settings;
       const activeIdp = getActiveEnterpriseManagedAuthIdp(clientConfig);
       const activeCimdUrl = getActiveCimdClientMetadataUrl(clientConfig);
       // Flatten the persisted settings into the InspectorClient options shape.
@@ -2637,6 +2706,7 @@ function App() {
       onBeforeOAuthRedirect,
       clientConfig,
       newAppElicitationSession,
+      lastPersistedSettings,
     ],
   );
 
@@ -3734,9 +3804,12 @@ function App() {
       setPaginatedListsOverride(value);
       const current = servers.find((s) => s.id === activeServerId);
       if (!current || activeServerId === undefined) return;
-      const prevSettings = current.settings ?? EMPTY_SETTINGS;
+      // Not `current.settings` directly: that entry only advances on a
+      // successful list read, so once one has failed it describes disk as it
+      // was *before* the writes made since. Build on the last write known to
+      // have landed while that is the fresher account (#2089).
       const next: InspectorServerSettings = {
-        ...prevSettings,
+        ...(lastPersistedSettings.resolve(activeServerId) ?? EMPTY_SETTINGS),
         paginatedLists: value,
       };
       inspectorClient?.setServerSettings(next);
@@ -3761,35 +3834,91 @@ function App() {
       // server's rehydrated secrets, so it can trigger the pending
       // plaintext-to-encrypted upgrade even though the user only toggled
       // pagination (#1950 review r22).
+      // Announced before the request goes out, so two toggles in flight at once
+      // are ordered by when they were issued rather than by which one's list
+      // reload finished first (#2089).
+      const write = lastPersistedSettings.begin(activeServerId);
+      // This value is on disk now. Remember it as the rollback baseline for
+      // whatever is written next, since the `servers` entry it was derived
+      // from will keep describing the old value if the reload behind this
+      // write — or any later one — fails (#2089).
+      //
+      // Re-apply it when this write is the settled one: an overlapping toggle
+      // that failed *first* rolled the UI and the live client back to a
+      // baseline this write has since replaced, and if the list read behind
+      // this write failed too, nothing else would ever correct them. Through
+      // the *current* client, not this continuation's closure: a reconnect to
+      // the same server passes the id check while the captured instance is
+      // already destroyed.
+      const settlePaginationWrite = () => {
+        const settled = write.landed(next);
+        if (settled && activeServerIdRef.current === activeServerId) {
+          setPaginatedListsOverride(next.paginatedLists ?? false);
+          applyLiveServerSettings(next);
+        }
+      };
       void refreshingPersist(updateServerSettings, refreshInitialConfig)(
         activeServerId,
         next,
-      ).catch((err: unknown) => {
-        // A ServerListReloadError means the PUT landed and only reading the
-        // list back failed, so the new setting IS on disk (#1914). Rolling
-        // back here would put the UI and the live client on the *old* value
-        // and contradict it — report it and leave the optimistic state alone.
-        const reloadFailed = err instanceof ServerListReloadError;
-        if (!reloadFailed) {
-          // Persist failed: revert the optimistic override (the effect only
-          // clears it when the persisted value changes, which won't happen here)
-          // and roll the live client setting back, so the UI and client reflect
-          // the value that's actually on disk rather than the failed edit (#1721).
-          setPaginatedListsOverride(null);
-          inspectorClient?.setServerSettings(prevSettings);
-        }
-        notifications.show({
-          title: reloadFailed
-            ? "Pagination setting saved, but the server list did not reload"
-            : "Failed to save pagination setting",
-          message: err instanceof Error ? err.message : String(err),
-          color: "red",
+      )
+        .then(settlePaginationWrite)
+        .catch((err: unknown) => {
+          // A `ServerListReloadError` means the PUT landed and only reading the
+          // list back failed, so the new setting IS on disk (#1914). That is a
+          // landed write, not a failed one: rolling back would put the UI and
+          // the live client on the *old* value and contradict disk. Settle it
+          // exactly as the success path does and report only the failed reload.
+          if (err instanceof ServerListReloadError) {
+            settlePaginationWrite();
+            notifications.show({
+              title:
+                "Pagination setting saved, but the server list did not reload",
+              message: err.message,
+              color: "red",
+            });
+            return;
+          }
+          // This write is over and never reached disk, so it stops counting as
+          // in flight: an earlier write still running is the settled state once
+          // it lands, and is what re-applies the UI this rollback is about to
+          // set (#2089).
+          write.failed();
+          // Persist failed: revert the optimistic override and roll the live
+          // client setting back, so the UI and client reflect the value that's
+          // actually on disk rather than the failed edit (#1721).
+          //
+          // The baseline is resolved *here*, not captured when this write was
+          // issued: another toggle can land in between, and its value is what
+          // disk holds by the time this one fails. The override is set to that
+          // baseline rather than cleared, because clearing it falls back to
+          // `persistedPaginatedLists` — read from a `servers` entry that may be
+          // stale, showing the same wrong value from the other side (#2089).
+          //
+          // Applied only while this write's server is still the active one: the
+          // override is a single app-wide boolean and the live client belongs to
+          // whichever server is connected now, so a rejection arriving after the
+          // user switched would render this server's value on another one.
+          // The client is taken from the ref for the same reason the success
+          // path does: a reconnect to the same server passes the id check while
+          // this continuation's captured instance is already destroyed.
+          const baseline =
+            lastPersistedSettings.resolve(activeServerId) ?? EMPTY_SETTINGS;
+          if (activeServerIdRef.current === activeServerId) {
+            setPaginatedListsOverride(baseline.paginatedLists ?? false);
+            applyLiveServerSettings(baseline);
+          }
+          notifications.show({
+            title: "Failed to save pagination setting",
+            message: err instanceof Error ? err.message : String(err),
+            color: "red",
+          });
         });
-      });
     },
     [
       servers,
       activeServerId,
+      lastPersistedSettings,
+      applyLiveServerSettings,
       inspectorClient,
       updateServerSettings,
       refreshInitialConfig,
@@ -4197,8 +4326,12 @@ function App() {
     flush: flushSettingsDraft,
   } = useSettingsDraft<InspectorServerSettings>({
     targetId: settingsModalTargetId,
-    resolveInitial: (id) =>
-      servers.find((s) => s.id === id)?.settings ?? EMPTY_SETTINGS,
+    // Through the tracker rather than off `servers` directly: after a write
+    // lands whose list reload failed, that entry still describes the previous
+    // value, so seeding from it and saving an unrelated field would write the
+    // superseded value straight back to disk (#2089). `resolve` falls back to
+    // the entry when nothing has landed, so the ordinary case is unchanged.
+    resolveInitial: (id) => lastPersistedSettings.resolve(id) ?? EMPTY_SETTINGS,
     // The saved settings may include an OAuth client secret or a stdio `env:`
     // value, and writing one can change what the secrets file *is* — the first
     // save under a newly-set passphrase re-encrypts a pre-existing plaintext
@@ -4206,7 +4339,60 @@ function App() {
     // unit rather than an inline `await …; refresh()` because this file is
     // outside the coverage gate, so wiring written here is tested by nothing
     // (#1950 review r17).
-    onPersist: refreshingPersist(updateServerSettings, refreshInitialConfig),
+    onPersist: async (id: string, value: InspectorServerSettings) => {
+      // Announced before the request, like the toggle's own write: the debounced
+      // flush can put two saves for one server in flight, and the later-issued
+      // one describes disk however the two happen to finish (#2089).
+      const write = lastPersistedSettings.begin(id);
+      const settleSettingsWrite = () => {
+        const settled = write.landed(value);
+        if (settled && activeServerIdRef.current === id) {
+          setPaginatedListsOverride(value.paginatedLists ?? false);
+          applyLiveServerSettings(value);
+        }
+      };
+      try {
+        await refreshingPersist(updateServerSettings, refreshInitialConfig)(
+          id,
+          value,
+        );
+      } catch (err) {
+        // A `ServerListReloadError` means the PUT landed and only reading the
+        // list back failed, so this write did reach disk (#1914): record it
+        // like the success path below instead of rolling anything back, and
+        // rethrow so `onError` can say the reload — not the save — failed.
+        if (err instanceof ServerListReloadError) {
+          settleSettingsWrite();
+          throw err;
+        }
+        // Stop counting as in flight before the rejection goes on to
+        // `onError` — an earlier write still running settles the state once it
+        // lands, and cannot know that while this one looks pending (#2089).
+        write.failed();
+        // A write that landed while this one was pending was told it was not
+        // settled and so applied nothing; this save never reached disk, so that
+        // write is the account of it and nothing else will re-apply it. Same
+        // reconciliation the toggle's own failure path does.
+        const baseline = lastPersistedSettings.resolve(id);
+        if (baseline && activeServerIdRef.current === id) {
+          setPaginatedListsOverride(baseline.paginatedLists ?? false);
+          applyLiveServerSettings(baseline);
+        }
+        throw err;
+      }
+      // Recorded for the same reason the pagination toggle records its own
+      // write: this is what disk holds now, and the `servers` entry it was
+      // edited from will keep describing the previous value for as long as list
+      // reads keep failing. Both settings writers feed the same per-server
+      // record, so a rollback in either takes the most recent write for that
+      // server, not just the most recent write *of its own kind*.
+      //
+      // And the reconciliation is shared too, for the mixed-writer overlap: a
+      // toggle failing while this save is in flight rolls the UI and the live
+      // client back to a baseline this save then replaces on disk, so a settled
+      // save has to re-apply itself exactly as a settled toggle does (#2089).
+      settleSettingsWrite();
+    },
     // Surface failures via toast — the modal usually closes
     // immediately on user dismiss, so a silent fail-on-flush would
     // leave the user thinking their last edits saved when they
@@ -4346,25 +4532,20 @@ function App() {
       settingsModalTargetId === activeServerId &&
       settingsDraft
     ) {
-      // Push the edited settings onto the live client so settings the managed
-      // state reads at notification time (auto-refresh-on-list-changed) take
-      // effect without a reconnect (#1444). Connection-time inputs (transport,
-      // OAuth, timeouts) still only apply on the next connect.
-      inspectorClient.setServerSettings(settingsDraft);
-      // Resize the Network log buffer live so a maxFetchRequests edit takes
-      // effect without a reconnect (shrinking trims immediately). Connect-time
-      // construction also reads this, so a reconnect would apply it anyway —
-      // this just makes the toast→adjust flow responsive.
-      fetchLogRef.current?.setMaxFetchRequests(settingsDraft.maxFetchRequests);
-      const nextRoots = cleanRoots(settingsDraft.roots);
-      const currentRoots = cleanRoots(inspectorClient.getRoots());
-      if (JSON.stringify(nextRoots) !== JSON.stringify(currentRoots)) {
-        void inspectorClient.setRoots(nextRoots).catch(() => {
-          // setRoots swallows notification failures internally; a throw here
-          // only means the client is mid-teardown — the persisted roots will
-          // re-advertise on the next connect, so nothing to surface.
-        });
-      }
+      // Normally the draft is what the user just saved, so it is also what is
+      // on disk. When this server's last write *rejected* it is not: the draft
+      // still holds the failed edit, and applying it here would contradict disk
+      // and undo the rollback that reported the failure — so apply what landed
+      // instead. `EMPTY_SETTINGS`, not the draft, when nothing has ever landed
+      // for this server: falling back to the draft would re-apply the very
+      // values that failed (#2089).
+      const applied = lastPersistedSettings.lastWriteFailed(
+        settingsModalTargetId,
+      )
+        ? (lastPersistedSettings.resolve(settingsModalTargetId) ??
+          EMPTY_SETTINGS)
+        : settingsDraft;
+      applyLiveServerSettings(applied);
     }
     setSettingsModalTargetId(undefined);
   }, [
@@ -4373,6 +4554,8 @@ function App() {
     settingsModalTargetId,
     activeServerId,
     settingsDraft,
+    lastPersistedSettings,
+    applyLiveServerSettings,
   ]);
 
   // The Resources screen needs `isSubscribed` to flip the Subscribe button

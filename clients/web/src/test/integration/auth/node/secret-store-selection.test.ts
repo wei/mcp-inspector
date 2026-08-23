@@ -684,6 +684,197 @@ describe("absorbFileSecretsIntoKeyring", () => {
     return filePath;
   }
 
+  it("does not throw when another process holds the lock (#2082)", async () => {
+    // `withSecretFileLock` throws on a lock held past its retry budget, which
+    // is right for a `set` — the user is waiting on that value — and wrong
+    // here. This function is awaited directly by both `resolveSecretStore`
+    // branches, so an escaping error fails store resolution and with it the
+    // whole session: a stuck writer elsewhere on the box would stop the
+    // Inspector from starting. Leaving the file for the next run is the only
+    // acceptable outcome.
+    const filePath = await seedFile({ "srv:oauthClientSecret": "from-file" });
+    process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await loadWithProbe(true);
+
+    const properLockfile = (await import("proper-lockfile")).default;
+    const release = await properLockfile.lock(filePath, {
+      realpath: false,
+      stale: 10_000,
+    });
+
+    await expect(
+      mod.absorbFileSecretsIntoKeyring(new InMemorySecretStore()),
+    ).resolves.toBeUndefined();
+    await release();
+
+    // Left exactly as it was, and said so — asserting the *lock* message
+    // specifically, since the pre-existing claim-failure warning also ends in
+    // "left in place" and would let this pass without the lock ever being hit.
+    expect(existsSync(filePath)).toBe(true);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("Could not lock the secrets file"),
+    );
+  }, 60_000);
+
+  it("takes no lock when there is nothing to migrate (#2082)", async () => {
+    // The overwhelmingly common startup: a keychain is available and no file
+    // was ever written. Locking first would create and remove a lock
+    // directory on every run — and on a box whose storage directory does not
+    // exist yet the lock cannot be created at all, so the degrade path would
+    // warn about unprotected writes on every single run, with nothing to
+    // protect.
+    const filePath = path.join(tmpDir, "no-such-dir", "secrets.json");
+    process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await loadWithProbe(true);
+
+    await mod.absorbFileSecretsIntoKeyring(new InMemorySecretStore());
+
+    expect(warn).not.toHaveBeenCalled();
+    expect(existsSync(`${filePath}.lock`)).toBe(false);
+  });
+
+  it("treats ENOTDIR as the fresh-install case, like ENOENT (#2082)", async () => {
+    // A path whose parent is a *file* answers `readdir` with ENOTDIR — the
+    // other shape of "there is no directory here" — so it takes the same
+    // silent path as a missing one. The *unlistable* case is different and is
+    // covered by the test below.
+    await fs.writeFile(path.join(tmpDir, "not-a-dir"), "", "utf-8");
+    const filePath = path.join(tmpDir, "not-a-dir", "secrets.json");
+    process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await loadWithProbe(true);
+
+    await mod.absorbFileSecretsIntoKeyring(new InMemorySecretStore());
+
+    // ENOTDIR is a fresh-install shape: nothing said, nothing locked.
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  // Root bypasses POSIX permission checks, and Windows does not model them
+  // the same way — in either case the directory below stays listable and the
+  // test would assert nothing.
+  const canDenyListing =
+    process.platform !== "win32" && process.getuid?.() !== 0;
+
+  it.skipIf(!canDenyListing)(
+    "does not treat an unlistable directory as an empty one (#2082)",
+    async () => {
+      // The case ENOTDIR does *not* cover, and the reason the catch narrowed
+      // to ENOENT/ENOTDIR rather than swallowing everything. A directory with
+      // `--x` permission denies `readdir` with EACCES while still permitting
+      // access to a *known* name inside it — so reading EACCES as "nothing to
+      // migrate" selects the keychain and leaves those secrets invisible with
+      // nothing said. That asymmetry is real POSIX behaviour, which is why
+      // this drives it with a real mode rather than a stubbed `readdir`.
+      const filePath = await seedFile({ "srv:oauthClientSecret": "from-file" });
+      process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      // Write + execute, no read: `readdir` fails, `stat`/`open`/`rename` of a
+      // known name still work — which is exactly what the migration needs.
+      await fs.chmod(tmpDir, 0o300);
+      try {
+        const mod = await loadWithProbe(true);
+        const keyring = new InMemorySecretStore();
+        await mod.absorbFileSecretsIntoKeyring(keyring);
+
+        // It went on and migrated, rather than silently skipping.
+        expect(await keyring.get("srv", "oauthClientSecret")).toBe("from-file");
+      } finally {
+        // Restore before `afterEach`, which needs to list it to remove it.
+        await fs.chmod(tmpDir, 0o700);
+      }
+    },
+  );
+
+  it("does not adopt a snapshot another migration is still using (#2082)", async () => {
+    // A `*.migrating-*` file is not automatically an orphan: the process that
+    // staged it may still be reading it. Adopting one mid-hand-off links it
+    // back to the live path and re-claims it under a new name, so its owner's
+    // hand-off fails ENOENT — and if we exit before copying, that healthy
+    // session starts with none of those secrets.
+    //
+    // Liveness is the snapshot's own lock rather than the pid in its name: a
+    // pid outlives its process and recurs (pid 1 on every container start),
+    // whereas the lock expires by itself if the owner dies.
+    const inProgress = path.join(tmpDir, "secrets.json.migrating-999-abc");
+    await fs.writeFile(
+      inProgress,
+      JSON.stringify({
+        version: 1,
+        encryption: "none",
+        secrets: { "srv:oauthClientSecret": "still-migrating" },
+      }),
+      "utf-8",
+    );
+    process.env.MCP_INSPECTOR_SECRET_FILE = path.join(tmpDir, "secrets.json");
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const properLockfile = (await import("proper-lockfile")).default;
+    const release = await properLockfile.lock(inProgress, {
+      realpath: false,
+      stale: 10_000,
+    });
+
+    const mod = await loadWithProbe(true);
+    const keyring = new InMemorySecretStore();
+    await mod.absorbFileSecretsIntoKeyring(keyring);
+    await release();
+
+    // Left exactly where its owner put it, and not migrated from under it.
+    expect(existsSync(inProgress)).toBe(true);
+    expect(existsSync(path.join(tmpDir, "secrets.json"))).toBe(false);
+    expect(await keyring.get("srv", "oauthClientSecret")).toBe(null);
+  });
+
+  it("ignores a snapshot's own lock directory (#2082)", async () => {
+    // `secrets.json.migrating-<pid>-<uuid>.lock` matches the plain prefix
+    // test, and treating it as a snapshot is self-sustaining damage: the
+    // liveness probe asks about a nonexistent `<name>.lock.lock` and answers
+    // "not held", recovery tries to hard-link a *directory* onto the secrets
+    // path, fails, and prints the orphan warning — every startup, forever,
+    // since a liveness *check* never clears a stale lock directory.
+    const strayLock = path.join(tmpDir, "secrets.json.migrating-999-abc.lock");
+    await fs.mkdir(strayLock);
+    process.env.MCP_INSPECTOR_SECRET_FILE = path.join(tmpDir, "secrets.json");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await loadWithProbe(true);
+
+    await mod.absorbFileSecretsIntoKeyring(new InMemorySecretStore());
+
+    // Not mistaken for a snapshot: nothing said, nothing linked, and the
+    // directory left exactly where it was.
+    expect(warn).not.toHaveBeenCalled();
+    expect(existsSync(strayLock)).toBe(true);
+    expect(existsSync(path.join(tmpDir, "secrets.json"))).toBe(false);
+  });
+
+  it("still adopts an orphan when the live file is absent (#2082)", async () => {
+    // The fast path above must not be a `stat` of `secrets.json`: an
+    // interrupted migration leaves *only* the snapshot, which is precisely
+    // the case where there is everything to migrate and no live file.
+    const orphan = path.join(tmpDir, "secrets.json.migrating-123-abc");
+    await fs.writeFile(
+      orphan,
+      JSON.stringify({
+        version: 1,
+        encryption: "none",
+        secrets: { "srv:oauthClientSecret": "from-orphan" },
+      }),
+      "utf-8",
+    );
+    process.env.MCP_INSPECTOR_SECRET_FILE = path.join(tmpDir, "secrets.json");
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await loadWithProbe(true);
+    const keyring = new InMemorySecretStore();
+
+    await mod.absorbFileSecretsIntoKeyring(keyring);
+
+    expect(await keyring.get("srv", "oauthClientSecret")).toBe("from-orphan");
+    expect(existsSync(orphan)).toBe(false);
+  });
+
   it("moves the file's secrets into the keychain and removes the file", async () => {
     const filePath = await seedFile({ "srv:oauthClientSecret": "from-file" });
     process.env.MCP_INSPECTOR_SECRET_FILE = filePath;

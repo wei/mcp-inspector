@@ -62,6 +62,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { readStoreFile, writeStoreFile } from "../../storage/store-io.js";
+import { withSecretFileLock } from "./file-lock.js";
 import {
   SecretStoreUnavailableError,
   type SecretBulkRequest,
@@ -597,30 +598,33 @@ export class FileSecretStore implements SecretStore {
   }
 
   /**
-   * Run `fn` with the file to itself across *processes* as well.
+   * Apply a mutation to the file, under a cross-process lock, and confirm it
+   * survived.
    *
-   * The in-process queue is necessary and not sufficient: a durable secrets
-   * file is shared state, and a second Inspector on the same box — a CLI run
-   * beside a web session is the ordinary case, not a contrived one — reads
-   * the same "before" map and then atomically replaces the file, dropping
-   * whatever the first process had just added. Both writes report success;
-   * one secret is simply gone.
+   * **Two mechanisms, and they answer different questions** — this is not
+   * belt-and-braces.
    *
-   * Apply a mutation to the file, and confirm it survived.
+   * The lock ({@link withSecretFileLock}, #2082) is the one that provides
+   * mutual exclusion: a durable secrets file is shared state, and a second
+   * Inspector on the same box — a CLI run beside a web session is the
+   * ordinary case, not a contrived one — otherwise reads the same "before"
+   * map and then atomically replaces the file, dropping whatever the first
+   * process had just added. Both writes report success; one secret is simply
+   * gone. Held across the read *and* the write, so no other holder can
+   * observe or replace the map in between.
    *
-   * **There is no cross-process lock.** There was one — a `mkdir` election
-   * with an owner stamp, a heartbeat and a stale-takeover — and three
-   * consecutive review rounds found a real race in it. The last one is
-   * unfixable with what Node exposes: claiming a stale lock needs
-   * compare-and-swap on a directory entry (`renameat2(RENAME_EXCHANGE)`),
-   * and without it a waiter that loses the race can still move the winner's
-   * *fresh* lock aside and enter alongside it.
+   * The verify covers what a lock structurally cannot. A lock is an advisory
+   * convention between the processes that take it, so it says nothing about
+   * a writer that does not: an editor, a restored backup, a `jq` one-liner,
+   * or an Inspector predating #2082. It is also the fallback when the lock
+   * is unavailable at all — `withSecretFileLock` runs the body anyway on a
+   * read-only or lock-hostile directory rather than failing a `set` on
+   * exactly the deployments this store exists for (#1848, #1905).
    *
-   * So this does the opposite: it lets writers collide and makes the loser
-   * notice. Read `M0`, apply the mutation to get `M1`, write it, then read
-   * back `M2`. If `M2` equals `M1` nothing interleaved. If it does not,
-   * someone wrote between our write and our read — so re-apply onto what
-   * they left and try again.
+   * So: read `M0`, apply the mutation to get `M1`, write it, then read back
+   * `M2`. If `M2` equals `M1` nothing interleaved. If it does not, someone
+   * wrote between our write and our read — so re-apply onto what they left
+   * and try again.
    *
    * The comparison is over the **whole map**, not just the entry we touched.
    * Checking only our own key would pass in precisely the case that loses
@@ -629,31 +633,28 @@ export class FileSecretStore implements SecretStore {
    * repairs it — A writes `MA`, B writes `MB` over it, B verifies `MB`
    * correctly, A verifies, sees `M2 !== MA`, re-applies onto `MB`.
    *
-   * **This is not mutual exclusion, and the gap is wider than a crash.**
-   * The verify only catches a clobber that has already landed. Order the
-   * same two writers as write-A, verify-A, write-B, verify-B and both
-   * succeed while A's entry is gone: A's verify ran before B's write, so
-   * there was nothing yet to see, and B did nothing wrong. Nothing detects
-   * it afterwards. A crash between write and verify is one instance of the
-   * same shape, not the whole of it — an earlier version of this comment
-   * said otherwise, which understated it.
-   *
-   * What that buys, stated without overselling: two processes must write the
-   * same file within the window between one's write and its read-back, and
-   * the loss is one secret that reported success. The lock this replaced
-   * lost updates in a *wider* set of interleavings, with every participant
-   * alive, and could not be closed without a primitive Node does not expose
-   * (`renameat2(RENAME_EXCHANGE)`); this costs ~220 fewer lines and converges
-   * in every interleaving where the clobber lands before the verify. If the
-   * residual matters for a deployment, the answer is a real lock — an
-   * OS-backed one from a dedicated library — not another hand-rolled
-   * election.
+   * **What is left, stated without overselling.** Against an unlocked writer
+   * the verify is not mutual exclusion: it only catches a clobber that has
+   * already landed, so ordering the two as write-A, verify-A, write-B,
+   * verify-B loses A's entry with both reporting success. That residual is
+   * now confined to a writer outside this codebase, or to a directory where
+   * no lock could be taken — and the latter announces itself, once, on the
+   * console.
    *
    * Reads deliberately do not participate: `writeStoreFile` is atomic
    * (write-temp-then-rename), so a reader sees either the old file or the
-   * new one, never a torn one.
+   * new one, never a torn one. Taking the lock for them would serialize
+   * every `GET /api/servers` behind whatever else holds it, to prevent
+   * nothing.
    */
   private async mutate(
+    apply: (map: Record<string, string>) => Record<string, string> | null,
+  ): Promise<void> {
+    await withSecretFileLock(this.filePath, () => this.mutateLocked(apply));
+  }
+
+  /** {@link mutate}'s body, with the lock already held. */
+  private async mutateLocked(
     apply: (map: Record<string, string>) => Record<string, string> | null,
   ): Promise<void> {
     for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt++) {
@@ -713,9 +714,15 @@ export class FileSecretStore implements SecretStore {
    * Measured, not theorised — two instances racing `set` lost an entry on
    * the first run of the convergence test below.
    *
-   * So the in-process case is made correct by construction here, and the
-   * verify-and-retry in {@link mutate} covers what this cannot see: a
+   * So the in-process case is made correct by construction here, and
+   * {@link mutate}'s cross-process lock covers what this cannot see: a
    * second Inspector process.
+   *
+   * The queue is *also* what keeps that lock usable. `proper-lockfile` is
+   * not reentrant — a second `lock()` on a path this process already holds
+   * fails `ELOCKED`, which is indistinguishable from a genuine remote
+   * holder. Serializing here means the lock is only ever contended between
+   * processes, which is the only contention it is asked to arbitrate.
    */
   private serialize<T>(fn: () => Promise<T>): Promise<T> {
     const key = path.resolve(this.filePath);
