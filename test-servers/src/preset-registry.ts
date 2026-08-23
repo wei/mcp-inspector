@@ -57,6 +57,7 @@ import {
   createMcpAppDemoResource,
   createAppElicitationTool,
   createAppElicitationResource,
+  createMrtrAppElicitationTool,
   createArchitectureResource,
   createTestCwdResource,
   createTestEnvResource,
@@ -227,6 +228,8 @@ function resolveToolPreset(
       return createMcpAppDemoTool();
     case "app_choose_option":
       return createAppElicitationTool();
+    case "mrtr_app_choose_option":
+      return createMrtrAppElicitationTool();
     default:
       throw new Error(`Unknown tool preset: ${name}`);
   }

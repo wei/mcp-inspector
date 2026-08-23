@@ -2953,12 +2953,12 @@ export class InspectorClient extends InspectorClientEventTarget {
     // Request-scoped abort: forwards the caller's signal (MRTR cancellation)
     // and is aborted by `settleAndDropPendingPeerRequests` on disconnect, so a
     // rendered app cannot outlive the connection that asked for it.
+    // Already cancelled before we got here (the caller aborted while an earlier
+    // MRTR round was in flight): don't mount an app nobody is waiting on.
+    if (signal?.aborted) throw createPendingAbortError();
     const controller = new AbortController();
     const forwardAbort = () => controller.abort(signal?.reason);
-    if (signal) {
-      if (signal.aborted) forwardAbort();
-      else signal.addEventListener("abort", forwardAbort, { once: true });
-    }
+    signal?.addEventListener("abort", forwardAbort, { once: true });
     this.activeAppElicitations.add(controller);
     try {
       const result = await renderer({

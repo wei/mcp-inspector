@@ -642,6 +642,66 @@ export function createAppElicitationTool(): ToolDefinition {
 }
 
 /**
+ * The modern (2026-07-28) counterpart of {@link createAppElicitationTool}: an
+ * MRTR tool whose EMBEDDED elicitation carries `_meta.ui.resourceUri` (#1854).
+ *
+ * The two paths reach the Inspector completely differently — a server→client
+ * `elicitation/create` request on the legacy leg, an `input_required` result
+ * the client unpacks and retries on the modern one — and the routing decision
+ * has to be identical on both. It is, because both funnel through the same
+ * `enqueuePendingElicitation`; this fixture is what lets a test prove that
+ * rather than assert it.
+ *
+ * Completes on the retry by echoing the `ElicitResult` the app produced, so a
+ * caller can see the app's answer round-trip through `inputResponses`.
+ */
+export function createMrtrAppElicitationTool(): ToolDefinition {
+  return {
+    name: "mrtr_app_choose_option",
+    description:
+      "Modern MRTR tool whose embedded elicitation offers an MCP App to render the form",
+    inputSchema: {
+      prompt: z.string().optional().describe("Message shown above the choice"),
+    },
+    handler: async (
+      params: Record<string, unknown>,
+      _context?: TestServerContext,
+      extra?: HandlerExtra,
+    ) => {
+      const responses = extra?.inputResponses;
+      if (!responses || responses.choice === undefined) {
+        return inputRequired({
+          inputRequests: {
+            choice: inputRequired.elicit({
+              message:
+                typeof params.prompt === "string"
+                  ? params.prompt
+                  : "Choose option A or B.",
+              requestedSchema: {
+                type: "object",
+                properties: {
+                  choice: {
+                    type: "string",
+                    enum: ["option-a", "option-b"],
+                    title: "Choice",
+                  },
+                },
+                required: ["choice"],
+              },
+              _meta: { ui: { resourceUri: APP_ELICITATION_URI } },
+            }),
+          },
+          requestState: `mrtr-app:${++mrtrMintCount}`,
+        });
+      }
+      return toToolResult(
+        `Elicitation response: ${JSON.stringify(responses.choice)}`,
+      );
+    },
+  };
+}
+
+/**
  * Create an "mrtr_confirm" tool exercising the modern (2026-07-28) multi
  * round-trip request (MRTR) flow. On the first call it returns an
  * `input_required` result embedding a form elicitation ("Confirm: <action>?");
