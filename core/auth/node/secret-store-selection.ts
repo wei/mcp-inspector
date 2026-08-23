@@ -553,6 +553,14 @@ export async function absorbFileSecretsIntoKeyring(
   // The lock is released before the hand-off: that part reads a snapshot
   // nobody else can reach, and holding it across a keychain round-trip per
   // secret would block every writer for the duration of a migration.
+  //
+  // Wrapped because `withSecretFileLock` **throws** when another process
+  // holds the lock past its retry budget, and this function's contract is
+  // that it never throws: it is awaited directly by both `resolveSecretStore`
+  // branches, so a stuck writer would fail store resolution and with it the
+  // whole session. Refusing is the right answer for a `set` — the user is
+  // waiting on that value — and the wrong one here, where the file simply
+  // stays put and the next run migrates it.
   const claimed = await withSecretFileLock(filePath, async () => {
     // A crash between the claim and the delete leaves only
     // `secrets.json.migrating-<pid>`. Checking the canonical path alone then
@@ -600,6 +608,15 @@ export async function absorbFileSecretsIntoKeyring(
       return null;
     }
     return staged;
+    // `withSecretFileLock` rejects only with the `SecretStoreUnavailableError`
+    // it constructs itself (a lock it could not create degrades instead of
+    // throwing), so the cast is over a value produced one call away rather
+    // than an assumption about arbitrary throwables.
+  }).catch((err: Error) => {
+    console.warn(
+      `\n[mcp-inspector] Could not lock the secrets file at ${filePath} to migrate it into the OS keychain (${err.message}), so it has been left in place. Its secrets are not visible to this session; the next run will try again.`,
+    );
+    return null;
   });
   if (claimed === null) return;
   const staged = claimed;

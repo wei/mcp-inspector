@@ -96,6 +96,28 @@ const RETRY = {
   maxTimeout: 1_000,
 } as const;
 
+/**
+ * What {@link RETRY} actually sums to, in milliseconds.
+ *
+ * Computed rather than written down. `retries * maxTimeout` overstates it by
+ * a third — the early attempts are the exponential ramp, not the cap — and a
+ * hand-maintained constant is one edit away from disagreeing with the
+ * schedule it describes, in a message whose whole job is to tell a user how
+ * long the Inspector waited. `retry` applies no jitter by default
+ * (`randomize` is off), so this is exact rather than an estimate.
+ *
+ * It must stay **above {@link STALE_MS}**: see {@link RETRY}.
+ */
+const RETRY_BUDGET_MS = ((): number => {
+  let total = 0;
+  let delay = RETRY.minTimeout;
+  for (let i = 0; i < RETRY.retries; i++) {
+    total += Math.min(delay, RETRY.maxTimeout);
+    delay *= RETRY.factor;
+  }
+  return total;
+})();
+
 /** Emitted once per process, not once per call — see {@link warnOnce}. */
 const warned = new Set<string>();
 
@@ -231,7 +253,7 @@ export async function withSecretFileLock<T>(
     // retries — whereas proceeding can lose a secret while reporting success.
     if (isHeldElsewhere(err)) {
       throw new SecretStoreUnavailableError(
-        `Could not save to the secrets file at ${target}: another process has held the lock on it for over ${Math.round((RETRY.retries * RETRY.maxTimeout) / 1000)} seconds. Its secrets are intact; the value you just entered was not saved. If no other Inspector is running, remove ${target}.lock and try again.`,
+        `Could not save to the secrets file at ${target}: another process has held the lock on it for the ${Math.round(RETRY_BUDGET_MS / 1000)} seconds this save waited. Its secrets are intact; the value you just entered was not saved. If no other Inspector is running, remove ${target}.lock and try again.`,
       );
     }
     // Everything else is the lock being *unavailable* rather than held — a
