@@ -1628,6 +1628,9 @@ describe("App task wiring", () => {
 type RootsFakeClient = EventTarget & {
   setRoots: ReturnType<typeof vi.fn>;
   getRoots: ReturnType<typeof vi.fn>;
+  // Close also pushes the settings it decided to apply, which is what the
+  // failed-save case asserts on (#2089).
+  setServerSettings: ReturnType<typeof vi.fn>;
 };
 
 const settingsWithRoots = (
@@ -1717,6 +1720,99 @@ describe("App roots live-apply on settings-dialog close", () => {
       expect(screen.queryByText("Server Settings")).not.toBeInTheDocument(),
     );
     expect(client.setRoots).not.toHaveBeenCalled();
+  });
+
+  it("applies the last persisted settings on close after a save failed (#2089)", async () => {
+    // `useSettingsDraft` keeps the draft when a save rejects, so closing the
+    // modal would push a value that never reached disk into the live client —
+    // undoing the rollback that reported the failure. Close has to apply what
+    // landed instead.
+    const user = userEvent.setup();
+    updateServerSettingsSpy.mockClear();
+    const failedDraft: InspectorServerSettings = {
+      ...settingsWithRoots([{ uri: "file:///rejected" }]),
+      paginatedLists: true,
+    };
+    const client = await openSettingsForConnectedServer(failedDraft);
+    client.getRoots.mockReturnValue([]);
+
+    const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+    if (!draftOptions) throw new Error("useSettingsDraft was never called");
+    // One save lands, so the tracker has an account of disk…
+    const persistedSettings: InspectorServerSettings = {
+      ...settingsWithRoots([]),
+      paginatedLists: false,
+    };
+    await act(async () => {
+      await draftOptions.onPersist("A", persistedSettings);
+    });
+    // …then the next one rejects, leaving the draft holding an unsaved edit.
+    updateServerSettingsSpy.mockRejectedValueOnce(new Error("disk full"));
+    await act(async () => {
+      await draftOptions.onPersist("A", failedDraft).catch(() => undefined);
+    });
+    client.setServerSettings.mockClear();
+
+    await closeModal(user);
+
+    await waitFor(() => expect(client.setServerSettings).toHaveBeenCalled());
+    expect(client.setServerSettings).toHaveBeenLastCalledWith(
+      persistedSettings,
+    );
+    // …and the rejected roots edit is not advertised either.
+    expect(client.setRoots).not.toHaveBeenCalled();
+  });
+
+  it("restores the roots and log size too when a flushed save rejects (#2089)", async () => {
+    // Close flushes a pending save and live-applies the draft immediately —
+    // roots and the Network log size, not just the settings object. If that
+    // save then rejects, reconciling only `setServerSettings` would leave the
+    // server advertising roots that were never persisted.
+    const user = userEvent.setup();
+    updateServerSettingsSpy.mockClear();
+    const rejectedDraft: InspectorServerSettings = {
+      ...settingsWithRoots([{ uri: "file:///rejected" }]),
+      maxFetchRequests: 10,
+    };
+    const client = await openSettingsForConnectedServer(rejectedDraft);
+    client.getRoots.mockReturnValue([]);
+
+    const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+    if (!draftOptions) throw new Error("useSettingsDraft was never called");
+    const persistedSettings = settingsWithRoots([]);
+    await act(async () => {
+      await draftOptions.onPersist("A", persistedSettings);
+    });
+
+    // Close applies the draft live — the state the flush leaves behind.
+    const fetchLog = fetchLogInstances.at(-1) as EventTarget & {
+      setMaxFetchRequests: ReturnType<typeof vi.fn>;
+    };
+    await closeModal(user);
+    await waitFor(() =>
+      expect(client.setRoots).toHaveBeenCalledWith([
+        { uri: "file:///rejected" },
+      ]),
+    );
+    expect(fetchLog.setMaxFetchRequests).toHaveBeenLastCalledWith(10);
+    client.getRoots.mockReturnValue([{ uri: "file:///rejected" }]);
+    client.setRoots.mockClear();
+
+    // …and only now does the flushed save reject.
+    updateServerSettingsSpy.mockRejectedValueOnce(new Error("disk full"));
+    await act(async () => {
+      await draftOptions.onPersist("A", rejectedDraft).catch(() => undefined);
+    });
+
+    // The whole live surface goes back to what landed — settings, roots, and
+    // the log size, each of which close had moved to the rejected draft.
+    await waitFor(() => expect(client.setRoots).toHaveBeenCalledWith([]));
+    expect(client.setServerSettings).toHaveBeenLastCalledWith(
+      persistedSettings,
+    );
+    expect(fetchLog.setMaxFetchRequests).toHaveBeenLastCalledWith(
+      persistedSettings.maxFetchRequests,
+    );
   });
 });
 
@@ -2422,6 +2518,450 @@ describe("App paginated list pagination toggle (#1721)", () => {
       paginatedLists?: boolean;
     };
     expect(lastPush?.paginatedLists).toBeFalsy();
+  });
+
+  it("rolls back to the last write that landed, not to a stale list entry (#2089)", async () => {
+    // Two toggles. The first PUT lands but the list reload behind it fails, so
+    // the `servers` entry keeps describing disk as it was *before* it — which
+    // this suite models exactly, because `useServers` is mocked to return the
+    // same entry forever. The second PUT fails outright and rolls back.
+    //
+    // Reverting to the `servers` entry there lands on `false`, the value from
+    // before the first toggle, contradicting what is on disk. The baseline has
+    // to come from the write that landed instead.
+    //
+    // One failed toggle cannot distinguish the two baselines — they only differ
+    // once a write has landed that the list never caught up with — so the test
+    // needs the full sequence.
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    await user.click(screen.getByText("paginated-on"));
+    await waitFor(() =>
+      expect(updateServerSettingsSpy).toHaveBeenCalledWith(
+        "A",
+        expect.objectContaining({ paginatedLists: true }),
+      ),
+    );
+
+    updateServerSettingsSpy.mockRejectedValueOnce(new Error("disk full"));
+    await user.click(screen.getByText("paginated-off"));
+
+    // Back to the value the first toggle put on disk, not to the pre-toggle one.
+    await waitFor(() =>
+      expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true"),
+    );
+    const client = clientInstances[0] as EventTarget & {
+      setServerSettings: ReturnType<typeof vi.fn>;
+    };
+    const lastPush = client.setServerSettings.mock.calls.at(-1)?.[0] as {
+      paginatedLists?: boolean;
+    };
+    expect(lastPush?.paginatedLists).toBe(true);
+  });
+
+  it("rolls back to a write that landed while this one was in flight (#2089)", async () => {
+    // Overlapping toggles. The baseline cannot be captured when a write is
+    // issued: toggle 1 is still in flight when toggle 2 reads it, so toggle 2
+    // would close over `false` — and by the time toggle 2 fails, toggle 1 has
+    // landed `true` on disk. Rolling back to the captured value contradicts
+    // disk exactly as the stale-list case does; the baseline has to be resolved
+    // at failure time. The two writes are driven by deferred promises so the
+    // order — issue 1, issue 2, land 1, fail 2 — is exact rather than timed.
+    const user = userEvent.setup();
+    let landFirst: (() => void) | undefined;
+    let failSecond: ((err: Error) => void) | undefined;
+    const first = new Promise<void>((resolve) => {
+      landFirst = resolve;
+    });
+    const second = new Promise<void>((_resolve, reject) => {
+      failSecond = (err) => {
+        reject(err);
+      };
+    });
+    updateServerSettingsSpy
+      .mockImplementationOnce(() => first)
+      .mockImplementationOnce(() => second);
+
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    await user.click(screen.getByText("paginated-on"));
+    await user.click(screen.getByText("paginated-off"));
+    await waitFor(() =>
+      expect(updateServerSettingsSpy).toHaveBeenCalledTimes(2),
+    );
+
+    await act(async () => {
+      landFirst?.();
+      await first;
+    });
+    await act(async () => {
+      failSecond?.(new Error("disk full"));
+      await second.catch(() => undefined);
+    });
+
+    // `true` is what the landed write put on disk — not the `false` the second
+    // toggle read before it got there.
+    await waitFor(() =>
+      expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true"),
+    );
+    const client = clientInstances[0] as EventTarget & {
+      setServerSettings: ReturnType<typeof vi.fn>;
+    };
+    const lastPush = client.setServerSettings.mock.calls.at(-1)?.[0] as {
+      paginatedLists?: boolean;
+    };
+    expect(lastPush?.paginatedLists).toBe(true);
+  });
+
+  it("re-applies a write that lands after an overlapping one failed (#2089)", async () => {
+    // The mirror of the test above, in the other settlement order: toggle 1
+    // (`true`) is still in flight when toggle 2 (`false`) fails, so the rollback
+    // resolves to the stale entry's `false` — correct at that instant, since
+    // nothing had landed. Toggle 1 then lands `true`. If its list reload failed
+    // too, no render will ever correct the UI, so the write that settles has to
+    // re-apply itself.
+    const user = userEvent.setup();
+    let landFirst: (() => void) | undefined;
+    let failSecond: ((err: Error) => void) | undefined;
+    const first = new Promise<void>((resolve) => {
+      landFirst = resolve;
+    });
+    const second = new Promise<void>((_resolve, reject) => {
+      failSecond = (err) => {
+        reject(err);
+      };
+    });
+    updateServerSettingsSpy
+      .mockImplementationOnce(() => first)
+      .mockImplementationOnce(() => second);
+
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    await user.click(screen.getByText("paginated-on"));
+    await user.click(screen.getByText("paginated-off"));
+    await waitFor(() =>
+      expect(updateServerSettingsSpy).toHaveBeenCalledTimes(2),
+    );
+
+    // Fail the second write first, then land the first.
+    await act(async () => {
+      failSecond?.(new Error("disk full"));
+      await second.catch(() => undefined);
+    });
+    expect(screen.getByTestId("tools-paginated")).toHaveTextContent("false");
+    await act(async () => {
+      landFirst?.();
+      await first;
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true"),
+    );
+    const client = clientInstances[0] as EventTarget & {
+      setServerSettings: ReturnType<typeof vi.fn>;
+    };
+    const lastPush = client.setServerSettings.mock.calls.at(-1)?.[0] as {
+      paginatedLists?: boolean;
+    };
+    expect(lastPush?.paginatedLists).toBe(true);
+  });
+
+  it("re-applies a settled modal save after a toggle failed first (#2089)", async () => {
+    // The mixed-writer version of the order above: the modal's flush is in
+    // flight with `paginatedLists: true` when the sidebar toggle fails and
+    // rolls back to the stale entry's `false`. The modal save then lands, so it
+    // is the settled state — and it has to re-apply itself for the same reason
+    // the toggle does, or disk holds `true` while the UI and the live client
+    // sit on `false`.
+    const user = userEvent.setup();
+    let landModal: (() => void) | undefined;
+    const modalWrite = new Promise<void>((resolve) => {
+      landModal = resolve;
+    });
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+    if (!draftOptions) throw new Error("useSettingsDraft was never called");
+    updateServerSettingsSpy.mockImplementationOnce(() => modalWrite);
+    const persisted = draftOptions.onPersist("A", {
+      ...settingsWithRoots([]),
+      paginatedLists: true,
+    });
+
+    updateServerSettingsSpy.mockRejectedValueOnce(new Error("disk full"));
+    await user.click(screen.getByText("paginated-off"));
+    await waitFor(() =>
+      expect(screen.getByTestId("tools-paginated")).toHaveTextContent("false"),
+    );
+
+    await act(async () => {
+      landModal?.();
+      await persisted;
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true"),
+    );
+    const client = clientInstances[0] as EventTarget & {
+      setServerSettings: ReturnType<typeof vi.fn>;
+    };
+    const lastPush = client.setServerSettings.mock.calls.at(-1)?.[0] as {
+      paginatedLists?: boolean;
+    };
+    expect(lastPush?.paginatedLists).toBe(true);
+  });
+
+  it("applies a settled write to the current client, not the one it started on (#2089)", async () => {
+    // A write can outlive a disconnect/reconnect to the *same* server: the id
+    // guard still passes, but the client captured when the write was issued has
+    // been destroyed and replaced by one built from the stale list entry. The
+    // settled value has to reach the live instance.
+    const user = userEvent.setup();
+    let landWrite: (() => void) | undefined;
+    const write = new Promise<void>((resolve) => {
+      landWrite = resolve;
+    });
+    updateServerSettingsSpy.mockImplementationOnce(() => write);
+
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    await user.click(screen.getByText("paginated-on"));
+    // Reconnect to the same server while that write is in flight. The transport
+    // drops, then the user reconnects — and `onToggleConnection` always
+    // rebuilds the client so the latest saved settings are picked up.
+    act(() => {
+      clientInstances[0].dispatchEvent(new Event("disconnect"));
+    });
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(2));
+    const replacement = clientInstances[1] as EventTarget & {
+      setServerSettings: ReturnType<typeof vi.fn>;
+    };
+    replacement.setServerSettings.mockClear();
+
+    await act(async () => {
+      landWrite?.();
+      await write;
+    });
+
+    await waitFor(() =>
+      expect(replacement.setServerSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ paginatedLists: true }),
+      ),
+    );
+  });
+
+  it("reconciles after a modal save fails onto a write that landed first (#2089)", async () => {
+    // Reverse of the mixed-writer case above: the toggle lands while the modal
+    // save is still pending, so it is told it is not settled and applies
+    // nothing. The modal save then fails, which makes the toggle's value the
+    // account of disk — and nothing else is left to apply it.
+    const user = userEvent.setup();
+    let failModal: ((err: Error) => void) | undefined;
+    const modalWrite = new Promise<void>((_resolve, reject) => {
+      failModal = (err) => {
+        reject(err);
+      };
+    });
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+    if (!draftOptions) throw new Error("useSettingsDraft was never called");
+    updateServerSettingsSpy.mockImplementationOnce(() => modalWrite);
+    const persisted = draftOptions
+      .onPersist("A", { ...settingsWithRoots([]), paginatedLists: false })
+      .catch(() => undefined);
+
+    // The toggle lands `true` while the modal save is still in flight.
+    await user.click(screen.getByText("paginated-on"));
+    await waitFor(() =>
+      expect(updateServerSettingsSpy).toHaveBeenCalledTimes(2),
+    );
+    const client = clientInstances[0] as EventTarget & {
+      setServerSettings: ReturnType<typeof vi.fn>;
+    };
+    client.setServerSettings.mockClear();
+
+    await act(async () => {
+      failModal?.(new Error("disk full"));
+      await persisted;
+    });
+
+    // The failure is what reconciles: a push carrying the landed value arrives
+    // only after it, since the landed write itself was not settled at the time.
+    await waitFor(() =>
+      expect(client.setServerSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ paginatedLists: true }),
+      ),
+    );
+  });
+
+  it("seeds the settings modal from the last write, not the stale entry (#2089)", async () => {
+    // The modal draft is the input to the *next* write, so seeding it from a
+    // `servers` entry that a failed list reload froze would send the superseded
+    // value back to disk the moment the user saves any unrelated field.
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    await user.click(screen.getByText("paginated-on"));
+    await waitFor(() =>
+      expect(updateServerSettingsSpy).toHaveBeenCalledWith(
+        "A",
+        expect.objectContaining({ paginatedLists: true }),
+      ),
+    );
+
+    // `servers` is mocked to a fixed entry here, so it still reports the
+    // pre-toggle value — exactly what a failed reload leaves behind.
+    const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+    if (!draftOptions) throw new Error("useSettingsDraft was never called");
+    expect(draftOptions.resolveInitial("A")).toEqual(
+      expect.objectContaining({ paginatedLists: true }),
+    );
+  });
+
+  it("builds the next client from the last write, not the stale entry (#2089)", async () => {
+    // Connecting is where the whole connection is configured, and it read the
+    // `servers` entry directly — so a save that landed while list reads were
+    // failing (including one made from the modal for a server that was not
+    // connected at the time) was undone by the next connect, which rebuilt the
+    // client from the frozen entry.
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+
+    const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+    if (!draftOptions) throw new Error("useSettingsDraft was never called");
+    const saved: InspectorServerSettings = {
+      ...settingsWithRoots([{ uri: "file:///saved" }]),
+      maxFetchRequests: 42,
+    };
+    await act(async () => {
+      await draftOptions.onPersist("A", saved);
+    });
+
+    // `servers` still reports the entry with no settings at all — what a failed
+    // reload leaves. The client must be built from the write that landed.
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+    const clientOptions = vi
+      .mocked(McpIndex.InspectorClient)
+      .mock.calls.at(-1)?.[1] as { roots?: { uri: string }[] } | undefined;
+    expect(clientOptions?.roots).toEqual([{ uri: "file:///saved" }]);
+    const fetchLogOptions = vi
+      .mocked(FetchLogModule.FetchRequestLogState)
+      .mock.calls.at(-1)?.[1] as { maxFetchRequests?: number } | undefined;
+    expect(fetchLogOptions?.maxFetchRequests).toBe(42);
+  });
+
+  it("lets a successful list read supersede a concrete rollback override (#2089)", async () => {
+    // A rollback sets the override to a value rather than clearing it, so the
+    // effect that drops it cannot key on the persisted boolean alone: if a
+    // later read reports the value the override replaced — an edit made outside
+    // the Inspector overtaking the write — neither that boolean nor the server
+    // id changes, and the UI would stay stuck on the override forever. A read
+    // rebuilds the list, so the entry object is the signal that supersedes it.
+    const user = userEvent.setup();
+    const previousUseServers = vi.mocked(useServers).getMockImplementation();
+    try {
+      const { rerender } = renderWithMantine(<App />);
+      await user.click(screen.getByText("connect"));
+      await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+      // A write lands `true` while list reads are stale, then a toggle fails —
+      // leaving the override on `true` with the entry still reporting `false`.
+      const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+      if (!draftOptions) throw new Error("useSettingsDraft was never called");
+      await act(async () => {
+        await draftOptions.onPersist("A", {
+          ...settingsWithRoots([]),
+          paginatedLists: true,
+        });
+      });
+      updateServerSettingsSpy.mockRejectedValueOnce(new Error("disk full"));
+      await user.click(screen.getByText("paginated-off"));
+      await waitFor(() =>
+        expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true"),
+      );
+
+      // Now a list read succeeds and still says `false` — same boolean, same
+      // server id, new entry object. It is authoritative and must win.
+      vi.mocked(useServers).mockReturnValue({
+        servers: [{ ...SERVER_A } as ServerEntry],
+        loading: false,
+        error: undefined,
+        refresh: vi.fn().mockResolvedValue(undefined),
+        addServer: vi.fn(),
+        updateServer: vi.fn(),
+        updateServerSettings: updateServerSettingsSpy,
+        removeServer: vi.fn(),
+        reorderServers: vi.fn(),
+        importSource: vi.fn().mockResolvedValue({ servers: {} }),
+      });
+      rerender(<App />);
+      await waitFor(() =>
+        expect(screen.getByTestId("tools-paginated")).toHaveTextContent(
+          "false",
+        ),
+      );
+    } finally {
+      if (previousUseServers) {
+        vi.mocked(useServers).mockImplementation(previousUseServers);
+      }
+    }
+  });
+
+  it("rolls back to a settings-modal save that landed, not just a toggle (#2089)", async () => {
+    // The two settings writers feed one record, and this is the half the
+    // toggle-driven tests cannot reach: `useSettingsDraft` is mocked for this
+    // file, so its `onPersist` never runs on its own and a regression that
+    // dropped `begin`/`landed` from the modal path would go unnoticed. The
+    // callback the App handed the hook is invoked directly instead.
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+    if (!draftOptions) throw new Error("useSettingsDraft was never called");
+    const saved: InspectorServerSettings = {
+      ...settingsWithRoots([]),
+      paginatedLists: true,
+    };
+    // The save lands; the list read behind it is what stays stale, so `servers`
+    // (mocked to a fixed entry here) never reports it.
+    await act(async () => {
+      await draftOptions.onPersist("A", saved);
+    });
+    expect(updateServerSettingsSpy).toHaveBeenCalledWith("A", saved);
+
+    updateServerSettingsSpy.mockRejectedValueOnce(new Error("disk full"));
+    await user.click(screen.getByText("paginated-off"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true"),
+    );
+    const client = clientInstances[0] as EventTarget & {
+      setServerSettings: ReturnType<typeof vi.fn>;
+    };
+    const lastPush = client.setServerSettings.mock.calls.at(-1)?.[0] as {
+      paginatedLists?: boolean;
+    };
+    expect(lastPush?.paginatedLists).toBe(true);
   });
 });
 
