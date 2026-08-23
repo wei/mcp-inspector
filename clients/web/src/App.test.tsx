@@ -2465,6 +2465,62 @@ describe("App paginated list pagination toggle (#1721)", () => {
     };
     expect(lastPush?.paginatedLists).toBe(true);
   });
+
+  it("rolls back to a write that landed while this one was in flight (#2089)", async () => {
+    // Overlapping toggles. The baseline cannot be captured when a write is
+    // issued: toggle 1 is still in flight when toggle 2 reads it, so toggle 2
+    // would close over `false` — and by the time toggle 2 fails, toggle 1 has
+    // landed `true` on disk. Rolling back to the captured value contradicts
+    // disk exactly as the stale-list case does; the baseline has to be resolved
+    // at failure time. The two writes are driven by deferred promises so the
+    // order — issue 1, issue 2, land 1, fail 2 — is exact rather than timed.
+    const user = userEvent.setup();
+    let landFirst: (() => void) | undefined;
+    let failSecond: ((err: Error) => void) | undefined;
+    const first = new Promise<void>((resolve) => {
+      landFirst = resolve;
+    });
+    const second = new Promise<void>((_resolve, reject) => {
+      failSecond = (err) => {
+        reject(err);
+      };
+    });
+    updateServerSettingsSpy
+      .mockImplementationOnce(() => first)
+      .mockImplementationOnce(() => second);
+
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    await user.click(screen.getByText("paginated-on"));
+    await user.click(screen.getByText("paginated-off"));
+    await waitFor(() =>
+      expect(updateServerSettingsSpy).toHaveBeenCalledTimes(2),
+    );
+
+    await act(async () => {
+      landFirst?.();
+      await first;
+    });
+    await act(async () => {
+      failSecond?.(new Error("disk full"));
+      await second.catch(() => undefined);
+    });
+
+    // `true` is what the landed write put on disk — not the `false` the second
+    // toggle read before it got there.
+    await waitFor(() =>
+      expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true"),
+    );
+    const client = clientInstances[0] as EventTarget & {
+      setServerSettings: ReturnType<typeof vi.fn>;
+    };
+    const lastPush = client.setServerSettings.mock.calls.at(-1)?.[0] as {
+      paginatedLists?: boolean;
+    };
+    expect(lastPush?.paginatedLists).toBe(true);
+  });
 });
 
 // A background command runs through `runCommandInBackground`, which owns the

@@ -67,24 +67,29 @@ function harness(initial: ServerEntry[]): Harness {
 }
 
 describe("useLastPersistedSettings", () => {
-  it("falls back to the caller's value when no write has been recorded", () => {
+  it("reads the list entry when no write has landed for that server", () => {
+    const onDisk = settings({ paginatedLists: true });
+    const { api } = harness([entry("A", onDisk)]);
+    expect(api.resolve("A")).toBe(onDisk);
+  });
+
+  it("returns nothing when the list has no settings and nothing landed", () => {
     const { api } = harness([entry("A")]);
-    const fallback = settings({ paginatedLists: true });
-    expect(api.resolve("A", fallback)).toBe(fallback);
+    expect(api.resolve("A")).toBeUndefined();
   });
 
   it("returns the recorded write while the entry has not been re-read", () => {
-    const { api } = harness([entry("A")]);
+    const { api } = harness([entry("A", settings())]);
     const written = settings({ paginatedLists: true });
     api.begin("A").landed(written);
-    expect(api.resolve("A", settings())).toBe(written);
+    expect(api.resolve("A")).toBe(written);
   });
 
   it("ignores a record made for a different server", () => {
-    const { api } = harness([entry("A"), entry("B")]);
+    const onDiskB = settings();
+    const { api } = harness([entry("A"), entry("B", onDiskB)]);
     api.begin("A").landed(settings({ paginatedLists: true }));
-    const fallback = settings();
-    expect(api.resolve("B", fallback)).toBe(fallback);
+    expect(api.resolve("B")).toBe(onDiskB);
   });
 
   it("keeps each server's record, so a save on B doesn't discard A's", () => {
@@ -92,42 +97,42 @@ describe("useLastPersistedSettings", () => {
     // this sequence is reachable: A's write lands while list reads are failing,
     // B is saved from the modal, and only then does a write on A fail. A single
     // slot would have lost A's baseline and reproduced #2089.
-    const { api } = harness([entry("A"), entry("B")]);
+    const { api } = harness([entry("A", settings()), entry("B", settings())]);
     const writtenA = settings({ paginatedLists: true });
     api.begin("A").landed(writtenA);
     api.begin("B").landed(settings({ autoRefreshOnListChanged: true }));
-    expect(api.resolve("A", settings())).toBe(writtenA);
+    expect(api.resolve("A")).toBe(writtenA);
   });
 
   it("stops trusting the record once a fresh list read replaces the entry", () => {
-    const { api, setServers } = harness([entry("A")]);
+    const { api, setServers } = harness([entry("A", settings())]);
     api.begin("A").landed(settings({ paginatedLists: true }));
     // A successful `GET /api/servers` rebuilds the list, so the entry is a new
     // object even when its values are unchanged. That is the signal the list
     // has caught up, and it is authoritative again from here.
     const fresh = settings();
     setServers([entry("A", fresh)]);
-    expect(api.resolve("A", fresh)).toBe(fresh);
+    expect(api.resolve("A")).toBe(fresh);
   });
 
   it("pairs the record with the entry as of completion, not of issue", () => {
     // A list read that lands while the write is in flight must not be mistaken
     // for one that happened after it. The pairing is taken in `landed`, so the
     // read below — which the write outlives — does not invalidate the record.
-    const { api, setServers } = harness([entry("A")]);
+    const { api, setServers } = harness([entry("A", settings())]);
     const write = api.begin("A");
-    setServers([entry("A")]);
+    setServers([entry("A", settings())]);
     const written = settings({ paginatedLists: true });
     write.landed(written);
-    expect(api.resolve("A", settings())).toBe(written);
+    expect(api.resolve("A")).toBe(written);
   });
 
   it("keeps only the most recent write for a server", () => {
-    const { api } = harness([entry("A")]);
+    const { api } = harness([entry("A", settings())]);
     api.begin("A").landed(settings({ paginatedLists: true }));
     const later = settings({ autoRefreshOnListChanged: true });
     api.begin("A").landed(later);
-    expect(api.resolve("A", settings())).toBe(later);
+    expect(api.resolve("A")).toBe(later);
   });
 
   it("lets the later-issued write win however the two finish", () => {
@@ -135,33 +140,32 @@ describe("useLastPersistedSettings", () => {
     // write with a slow read can complete last. Ordering by completion would
     // then record a value that a newer write has already replaced on disk, and
     // the next failed write would roll back to it.
-    const { api } = harness([entry("A")]);
+    const { api } = harness([entry("A", settings())]);
     const first = api.begin("A");
     const second = api.begin("A");
     const newest = settings({ paginatedLists: true });
     second.landed(newest);
     first.landed(settings({ paginatedLists: false }));
-    expect(api.resolve("A", settings())).toBe(newest);
+    expect(api.resolve("A")).toBe(newest);
   });
 
   it("does not let a straggler resurrect a record a fresh read dropped", () => {
     // The high-water mark outlives the record, so an earlier write reporting
     // after `resolve` invalidated things cannot reinstate a superseded value.
-    const { api, setServers } = harness([entry("A")]);
+    const { api, setServers } = harness([entry("A", settings())]);
     const first = api.begin("A");
     api.begin("A").landed(settings({ paginatedLists: true }));
     const fresh = settings();
     setServers([entry("A", fresh)]);
-    expect(api.resolve("A", fresh)).toBe(fresh);
+    expect(api.resolve("A")).toBe(fresh);
     first.landed(settings({ paginatedLists: false }));
-    expect(api.resolve("A", fresh)).toBe(fresh);
+    expect(api.resolve("A")).toBe(fresh);
   });
 
-  it("falls back when the server has left the list entirely", () => {
-    const { api, setServers } = harness([entry("A")]);
+  it("returns nothing when the server has left the list entirely", () => {
+    const { api, setServers } = harness([entry("A", settings())]);
     api.begin("A").landed(settings({ paginatedLists: true }));
     setServers([]);
-    const fallback = settings();
-    expect(api.resolve("A", fallback)).toBe(fallback);
+    expect(api.resolve("A")).toBeUndefined();
   });
 });

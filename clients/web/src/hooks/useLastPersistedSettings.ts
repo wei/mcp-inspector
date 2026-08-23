@@ -68,15 +68,19 @@ export interface LastPersistedSettings {
    */
   begin: (serverId: string) => SettingsWrite;
   /**
-   * The best available answer to "what is on disk for this server". Returns the
-   * recorded write while the list still carries the entry that write was paired
-   * with, and `fallback` (the caller's read of the entry) once a fresh list read
-   * has replaced it, or when no write has landed for that server this session.
+   * The best available answer to "what is on disk for this server", **as of the
+   * moment it is called**. Returns the recorded write while the list still
+   * carries the entry that write was paired with, otherwise that server's
+   * current entry settings, and `undefined` when the list has no such entry (or
+   * one carrying no settings) and no write has landed for it this session.
+   *
+   * Both the record and the list are read live, so calling this in a failure
+   * handler answers for the state at failure time. Do not hoist the result into
+   * a variable at the point the write is issued and reuse it on rejection: an
+   * overlapping write that landed in between would make it stale, which is the
+   * same class of bug as reading the baseline from a stale `servers` entry.
    */
-  resolve: (
-    serverId: string,
-    fallback: InspectorServerSettings,
-  ) => InspectorServerSettings;
+  resolve: (serverId: string) => InspectorServerSettings | undefined;
 }
 
 export interface SettingsWrite {
@@ -130,20 +134,17 @@ export function useLastPersistedSettings(
   }, []);
 
   const resolve = useCallback(
-    (
-      serverId: string,
-      fallback: InspectorServerSettings,
-    ): InspectorServerSettings => {
-      const current = recordsRef.current.get(serverId);
-      if (!current) return fallback;
+    (serverId: string): InspectorServerSettings | undefined => {
       const entry = serversRef.current.find((s) => s.id === serverId);
+      const current = recordsRef.current.get(serverId);
+      if (!current) return entry?.settings;
       // Identity, not deep equality: the question is whether the list has been
       // re-read since the write, not whether the values happen to match.
       if (current.entry !== entry) {
         // Superseded — drop it rather than re-checking a dead record on every
         // later write for this server.
         recordsRef.current.delete(serverId);
-        return fallback;
+        return entry?.settings;
       }
       return current.written;
     },

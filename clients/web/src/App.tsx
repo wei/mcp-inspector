@@ -3737,14 +3737,10 @@ function App() {
       if (!current || activeServerId === undefined) return;
       // Not `current.settings` directly: that entry only advances on a
       // successful list read, so once one has failed it describes disk as it
-      // was *before* the writes made since. Roll back to the last write known
-      // to have landed while that is the fresher account (#2089).
-      const prevSettings = lastPersistedSettings.resolve(
-        activeServerId,
-        current.settings ?? EMPTY_SETTINGS,
-      );
+      // was *before* the writes made since. Build on the last write known to
+      // have landed while that is the fresher account (#2089).
       const next: InspectorServerSettings = {
-        ...prevSettings,
+        ...(lastPersistedSettings.resolve(activeServerId) ?? EMPTY_SETTINGS),
         paginatedLists: value,
       };
       inspectorClient?.setServerSettings(next);
@@ -3787,13 +3783,18 @@ function App() {
         .catch((err: unknown) => {
           // Persist failed: revert the optimistic override and roll the live
           // client setting back, so the UI and client reflect the value that's
-          // actually on disk rather than the failed edit (#1721). The override
-          // is set to the baseline rather than cleared: clearing it falls back
-          // to `persistedPaginatedLists`, read from the same `servers` entry
-          // that may be stale, which would show the same wrong value from the
-          // other direction (#2089).
-          setPaginatedListsOverride(prevSettings.paginatedLists ?? false);
-          inspectorClient?.setServerSettings(prevSettings);
+          // actually on disk rather than the failed edit (#1721).
+          //
+          // The baseline is resolved *here*, not captured when this write was
+          // issued: another toggle can land in between, and its value is what
+          // disk holds by the time this one fails. The override is set to that
+          // baseline rather than cleared, because clearing it falls back to
+          // `persistedPaginatedLists` — read from a `servers` entry that may be
+          // stale, showing the same wrong value from the other side (#2089).
+          const baseline =
+            lastPersistedSettings.resolve(activeServerId) ?? EMPTY_SETTINGS;
+          setPaginatedListsOverride(baseline.paginatedLists ?? false);
+          inspectorClient?.setServerSettings(baseline);
           notifications.show({
             title: "Failed to save pagination setting",
             message: err instanceof Error ? err.message : String(err),
