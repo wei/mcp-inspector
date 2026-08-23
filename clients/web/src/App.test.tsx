@@ -2581,6 +2581,39 @@ describe("App config submit with a failed list reload (#1914)", () => {
     );
   });
 
+  it("labels a settings save whose reload failed as saved, not failed (#1914)", () => {
+    // The settings draft debounces and flushes on close, so this toast is the
+    // user's only signal — a flush that rejects usually does so after the
+    // modal is gone. `useSettingsDraft` is mocked here, so the App's `onError`
+    // is invoked directly with the options it was handed.
+    renderWithMantine(<App />);
+    const onError = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0].onError;
+    expect(onError).toBeDefined();
+
+    act(() => {
+      onError!(
+        "A",
+        new ServerListReloadError(
+          "The server was saved, but the server list could not be reloaded: disk full",
+        ),
+      );
+    });
+    expect(notificationsMock.show).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Saved settings for "A", but the server list did not reload',
+        message: expect.stringContaining("disk full"),
+      }),
+    );
+
+    // A genuinely failed write still reads as a failure.
+    act(() => {
+      onError!("A", new Error("disk full"));
+    });
+    expect(notificationsMock.show).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Failed to save settings for "A"' }),
+    );
+  });
+
   it("keeps a successful add in the highlight batch when the reload failed (#1914)", async () => {
     // `addServerHighlighted` marked the new id only after `addServer`
     // resolved. The row is on disk either way, so on a reload failure it has
