@@ -4,7 +4,7 @@ import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { JsonObject } from "@inspector/core/json/jsonUtils.js";
 import { renderWithMantine } from "../../../test/renderWithMantine";
-import { JsonObjectInput, parseObjectDraft } from "./JsonObjectInput";
+import { JsonObjectInput } from "./JsonObjectInput";
 
 const LABEL = "Payload JSON";
 
@@ -35,50 +35,6 @@ function Harness({
 function box() {
   return screen.getByLabelText(LABEL) as HTMLTextAreaElement;
 }
-
-describe("parseObjectDraft", () => {
-  it("reads empty text as the empty object rather than an error", () => {
-    expect(parseObjectDraft("")).toEqual({ ok: true, value: {} });
-    expect(parseObjectDraft("   \n ")).toEqual({ ok: true, value: {} });
-  });
-
-  it("accepts a JSON object with values of any JSON type", () => {
-    const result = parseObjectDraft(
-      '{"s":"a","n":1,"b":true,"z":null,"arr":[1,{"k":2}],"o":{"deep":{"er":1}}}',
-    );
-    expect(result).toEqual({
-      ok: true,
-      value: {
-        s: "a",
-        n: 1,
-        b: true,
-        z: null,
-        arr: [1, { k: 2 }],
-        o: { deep: { er: 1 } },
-      },
-    });
-  });
-
-  it("rejects text that is not JSON", () => {
-    expect(parseObjectDraft('{"a":')).toEqual({
-      ok: false,
-      error: "Not valid JSON — changes are not applied",
-    });
-  });
-
-  it.each([
-    ["an array", "[1,2]"],
-    ["a string", '"hello"'],
-    ["a number", "42"],
-    ["null", "null"],
-  ])("rejects valid JSON that is not an object: %s", (_label, text) => {
-    const result = parseObjectDraft(text);
-    expect(result.ok).toBe(false);
-    expect(result.ok === false && result.error).toMatch(
-      /Must be a JSON object/,
-    );
-  });
-});
 
 describe("JsonObjectInput", () => {
   it("opens with the value serialized two-space, nesting intact", () => {

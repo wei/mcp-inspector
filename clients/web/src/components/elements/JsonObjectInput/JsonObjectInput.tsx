@@ -2,6 +2,7 @@ import { useState } from "react";
 import { JsonInput } from "@mantine/core";
 import type { JsonObject } from "@inspector/core/json/jsonUtils.js";
 import { useValueChange } from "../../../hooks/useValueChange";
+import { parseJsonObjectDraft } from "../../../utils/jsonObjectDraft";
 
 const ObjectJsonInput = JsonInput.withProps({
   formatOnBlur: true,
@@ -13,39 +14,6 @@ const ObjectJsonInput = JsonInput.withProps({
 /** Two-space canonical form — the same shape the catalog file is written in. */
 function serialize(value: JsonObject): string {
   return JSON.stringify(value, null, 2);
-}
-
-/** A plain JSON object, i.e. not an array and not a scalar. */
-function isJsonObject(value: unknown): value is JsonObject {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-/**
- * What a draft's text currently means: the object to emit, or why it can't be.
- *
- * Empty text is the object `{}` rather than an error — clearing the box is how
- * "send no metadata" is spelled, and an empty editor showing a red error would
- * read as broken.
- */
-type DraftState =
-  | { ok: true; value: JsonObject }
-  | { ok: false; error: string };
-
-export function parseObjectDraft(text: string): DraftState {
-  if (text.trim() === "") return { ok: true, value: {} };
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return { ok: false, error: "Not valid JSON — changes are not applied" };
-  }
-  if (!isJsonObject(parsed)) {
-    return {
-      ok: false,
-      error: "Must be a JSON object (`{ … }`) — changes are not applied",
-    };
-  }
-  return { ok: true, value: parsed };
 }
 
 export interface JsonObjectInputProps {
@@ -92,7 +60,7 @@ export function JsonObjectInput({
   // parses to, so an external reset (switching servers, a reloaded catalog)
   // reaches the box while an in-progress edit is left alone. Compared through
   // canonical JSON because the parent hands back a fresh object each time.
-  const parsed = parseObjectDraft(draft);
+  const parsed = parseJsonObjectDraft(draft);
   const draftJson = parsed.ok ? serialize(parsed.value) : null;
   useValueChange(serialize(value), (next) => {
     if (next !== draftJson) setDraft(next);
@@ -105,7 +73,7 @@ export function JsonObjectInput({
       error={parsed.ok ? undefined : parsed.error}
       onChange={(text) => {
         setDraft(text);
-        const result = parseObjectDraft(text);
+        const result = parseJsonObjectDraft(text);
         if (result.ok) onChange(result.value);
       }}
     />

@@ -729,10 +729,10 @@ export function ServerSettingsForm({
         <Accordion.Panel>
           <Stack gap="md">
             <HintText>
-              Metadata merged into the `_meta` field of every MCP request to
-              this server, as a JSON object. Values may be any JSON — objects,
-              arrays, numbers, booleans, `null` — not just strings. Leave it as{" "}
-              <Code>{"{}"}</Code> to send none.
+              Metadata merged into the <Code>_meta</Code> field of every MCP
+              request to this server, as a JSON object. Values may be any JSON —
+              objects, arrays, numbers, booleans, <Code>null</Code> — not just
+              strings. Leave it as <Code>{"{}"}</Code> to send none.
             </HintText>
             <JsonObjectInput
               aria-label="Request metadata JSON"
