@@ -10,7 +10,10 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { useServers } from "@inspector/core/react/useServers";
+import {
+  ServerListReloadError,
+  useServers,
+} from "@inspector/core/react/useServers";
 import { createRemoteApp } from "@inspector/core/mcp/remote/node/server";
 import { DEFAULT_SEED_CONFIG } from "@inspector/core/mcp/serverList";
 import { InMemorySecretStore } from "@inspector/core/auth/node/secret-store";
@@ -1313,6 +1316,35 @@ describe("useServers", () => {
       ).rejects.toThrow(
         /The server was saved, but the server list could not be reloaded: disk full/,
       );
+    });
+  });
+
+  it("tags a post-write reload failure as ServerListReloadError, not a failed write (#1914)", async () => {
+    // The pagination toggle updates optimistically and reverts the live
+    // client on a rejection. That is right for a failed PUT and wrong for a
+    // failed reload — the setting IS on disk — so the two must be tellable
+    // apart by type, not by message matching.
+    const { fetchFn, startFailing } = failGetAfterWrite("disk full");
+    const { result } = renderHook(() =>
+      useServers({ baseUrl: "http://test.local", fetchFn }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    startFailing();
+    await act(async () => {
+      await expect(
+        result.current.addServer("alpha", { type: "stdio", command: "node" }),
+      ).rejects.toBeInstanceOf(ServerListReloadError);
+    });
+
+    // A rejected *write* stays a plain Error, so a caller branching on the
+    // type still rolls back for the case the rollback was written for.
+    await act(async () => {
+      const err = await result.current
+        .addServer("alpha", { type: "stdio", command: "node" })
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err).not.toBeInstanceOf(ServerListReloadError);
     });
   });
 

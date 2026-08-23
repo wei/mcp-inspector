@@ -62,6 +62,25 @@ export interface UseServersResult {
   importSource: (type: string) => Promise<ImportSourceResult>;
 }
 
+/**
+ * Thrown when a mutation's *write* landed but reading the list back
+ * afterwards failed — see `refreshAfterWrite`.
+ *
+ * Distinct from a rejected write because the two call for opposite handling
+ * in an optimistic caller. The pagination toggle in `App.tsx` reverts its
+ * optimistic override and rolls the live client back on a rejection, which is
+ * right for a failed PUT and wrong here: the setting *is* on disk, so the
+ * rollback would show the user a value that no longer matches it. Callers
+ * that update optimistically must branch on this; callers that only report
+ * (the modals) can treat it as any other error.
+ */
+export class ServerListReloadError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "ServerListReloadError";
+  }
+}
+
 function buildHeaders(
   authToken: string | undefined,
   includeJsonBody: boolean,
@@ -182,6 +201,10 @@ export function useServers(opts: UseServersOptions): UseServersResult {
   // back failed. A bare "could not add server" would send the user straight
   // into a retry that trips the duplicate-id check, which is the dead end the
   // original report described.
+  //
+  // The rejection is a `ServerListReloadError` rather than a bare `Error` so
+  // an optimistic caller can tell it from a failed write and skip its
+  // rollback — reverting here would contradict what is actually on disk.
   const refreshAfterWrite = useCallback(
     async (verb: string): Promise<void> => {
       setLoading(true);
@@ -191,7 +214,7 @@ export function useServers(opts: UseServersOptions): UseServersResult {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         setError(message);
-        throw new Error(
+        throw new ServerListReloadError(
           `The server was ${verb}, but the server list could not be reloaded: ${message}`,
           { cause: err },
         );

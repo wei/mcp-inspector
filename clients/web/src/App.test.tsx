@@ -225,7 +225,13 @@ const { updateServerSettingsSpy } = vi.hoisted(() => ({
 const { clearToolsListChangedSpy } = vi.hoisted(() => ({
   clearToolsListChangedSpy: vi.fn(),
 }));
-vi.mock("@inspector/core/react/useServers.js", () => ({
+vi.mock("@inspector/core/react/useServers.js", async (importOriginal) => ({
+  // `ServerListReloadError` is a real class the pagination toggle branches on
+  // with `instanceof`, so it must be the genuine one — a stub would make the
+  // check vacuously false and the #1914 branch untestable (#1914 review r1).
+  ...(await importOriginal<
+    typeof import("@inspector/core/react/useServers.js")
+  >()),
   useServers: vi.fn(() => ({
     servers: [SERVER_A],
     addServer: vi.fn(),
@@ -584,7 +590,10 @@ import { usePagedTools } from "@inspector/core/react/usePagedTools.js";
 import { useMessageLog } from "@inspector/core/react/useMessageLog.js";
 import { useInspectorClient } from "@inspector/core/react/useInspectorClient.js";
 import { useSettingsDraft } from "@inspector/core/react/useSettingsDraft.js";
-import { useServers } from "@inspector/core/react/useServers.js";
+import {
+  ServerListReloadError,
+  useServers,
+} from "@inspector/core/react/useServers.js";
 import type {
   InspectorServerSettings,
   MessageEntry,
@@ -2422,6 +2431,40 @@ describe("App paginated list pagination toggle (#1721)", () => {
       paginatedLists?: boolean;
     };
     expect(lastPush?.paginatedLists).toBeFalsy();
+  });
+
+  it("keeps the optimistic toggle when only the list reload failed (#1914)", async () => {
+    // The mirror of the test above. `refreshAfterWrite` rejects with a
+    // `ServerListReloadError` when the PUT landed and only reading the list
+    // back failed — the setting IS on disk, so the #1721 rollback would put
+    // the UI and the live client on the value the user just changed away
+    // from, and contradict what a reload would show.
+    const user = userEvent.setup();
+    updateServerSettingsSpy.mockRejectedValueOnce(
+      new ServerListReloadError(
+        "The server was saved, but the server list could not be reloaded: disk full",
+      ),
+    );
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    await user.click(screen.getByText("paginated-on"));
+    await waitFor(() =>
+      expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true"),
+    );
+    // Give the rejection a turn to land, then confirm nothing reverted it.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true");
+    const client = clientInstances[0] as unknown as {
+      setServerSettings: ReturnType<typeof vi.fn>;
+    };
+    const lastPush = client.setServerSettings.mock.calls.at(-1)?.[0] as {
+      paginatedLists?: boolean;
+    };
+    expect(lastPush?.paginatedLists).toBe(true);
   });
 });
 

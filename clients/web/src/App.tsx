@@ -98,7 +98,10 @@ import {
 } from "@inspector/core/auth/index.js";
 import { RemoteInspectorClientStorage } from "@inspector/core/mcp/remote/index.js";
 import { useInspectorClient } from "@inspector/core/react/useInspectorClient.js";
-import { useServers } from "@inspector/core/react/useServers.js";
+import {
+  ServerListReloadError,
+  useServers,
+} from "@inspector/core/react/useServers.js";
 import { useSettingsDraft } from "@inspector/core/react/useSettingsDraft.js";
 import { useClientSettingsDraft } from "@inspector/core/react/useClientSettingsDraft.js";
 import { useEmaIdpLoginState } from "@inspector/core/react/useEmaIdpLoginState.js";
@@ -3761,14 +3764,23 @@ function App() {
         activeServerId,
         next,
       ).catch((err: unknown) => {
-        // Persist failed: revert the optimistic override (the effect only
-        // clears it when the persisted value changes, which won't happen here)
-        // and roll the live client setting back, so the UI and client reflect
-        // the value that's actually on disk rather than the failed edit (#1721).
-        setPaginatedListsOverride(null);
-        inspectorClient?.setServerSettings(prevSettings);
+        // A ServerListReloadError means the PUT landed and only reading the
+        // list back failed, so the new setting IS on disk (#1914). Rolling
+        // back here would put the UI and the live client on the *old* value
+        // and contradict it — report it and leave the optimistic state alone.
+        const reloadFailed = err instanceof ServerListReloadError;
+        if (!reloadFailed) {
+          // Persist failed: revert the optimistic override (the effect only
+          // clears it when the persisted value changes, which won't happen here)
+          // and roll the live client setting back, so the UI and client reflect
+          // the value that's actually on disk rather than the failed edit (#1721).
+          setPaginatedListsOverride(null);
+          inspectorClient?.setServerSettings(prevSettings);
+        }
         notifications.show({
-          title: "Failed to save pagination setting",
+          title: reloadFailed
+            ? "Pagination setting saved, but the server list did not reload"
+            : "Failed to save pagination setting",
           message: err instanceof Error ? err.message : String(err),
           color: "red",
         });
