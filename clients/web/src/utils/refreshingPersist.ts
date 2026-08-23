@@ -16,16 +16,29 @@
  * that changed it. Review round 17 of #1950 caught that, after three earlier
  * rounds had each found a defect in this same path.
  *
- * `refresh` runs **only on success**. A persist that threw did not write, so
- * there is nothing new to describe, and re-fetching would just repaint the
- * state already on screen while the caller is handling the failure.
+ * `refresh` runs in a `finally`, **not only on success**, and the first
+ * version of this got that wrong on plausible-sounding reasoning: "a persist
+ * that threw did not write, so there is nothing new to describe". That is
+ * false for this write order. Both persistence paths write the secret store
+ * *before* the file — so a rejected disk write can follow a `set` that has
+ * already upgraded `secrets.json` from plaintext to encrypted. Skipping the
+ * refresh there leaves the footer describing a file that no longer exists in
+ * that form, which is the stale-descriptor bug this wrapper exists to
+ * prevent, reached through its own error path.
+ *
+ * The asymmetry is what settles it: refreshing after a failure that changed
+ * nothing costs one idempotent GET, while not refreshing after a failure that
+ * changed something leaves a security statement wrong until reload.
  */
 export function refreshingPersist<Args extends unknown[]>(
   persist: (...args: Args) => Promise<void>,
   refresh: () => void,
 ): (...args: Args) => Promise<void> {
   return async (...args: Args) => {
-    await persist(...args);
-    refresh();
+    try {
+      await persist(...args);
+    } finally {
+      refresh();
+    }
   };
 }

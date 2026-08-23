@@ -32,16 +32,22 @@ describe("refreshingPersist", () => {
     expect(persist).toHaveBeenCalledWith("srv-1", settings);
   });
 
-  it("does not refresh when the persist fails, and propagates the error", async () => {
-    // A save that threw did not write, so there is nothing new to describe —
-    // and the caller is mid-error-handling, which is the wrong moment to
-    // repaint state that did not change.
+  it("refreshes even when the persist fails, and still propagates the error", async () => {
+    // This asserted the opposite until round 22, on reasoning that sounded
+    // right and was wrong for this write order: both persistence paths write
+    // the secret store *before* the file, so a rejected disk write can follow
+    // a `set` that already upgraded `secrets.json` from plaintext to
+    // encrypted. Skipping the refresh there left the footer describing a file
+    // that no longer exists in that form.
+    //
+    // The asymmetry decides it: a needless refresh costs one idempotent GET;
+    // a missed one leaves a security statement wrong until reload.
     const boom = new Error("keychain unavailable");
     const persist = vi.fn().mockRejectedValue(boom);
     const refresh = vi.fn();
 
     await expect(refreshingPersist(persist, refresh)()).rejects.toBe(boom);
-    expect(refresh).not.toHaveBeenCalled();
+    expect(refresh).toHaveBeenCalledTimes(1);
   });
 
   it("returns a function usable as a persist callback more than once", async () => {

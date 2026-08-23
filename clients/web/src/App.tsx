@@ -3625,7 +3625,14 @@ function App() {
           runCommandInBackground(() => refreshResources(), "ambient");
         }
       }
-      void updateServerSettings(activeServerId, next).catch((err: unknown) => {
+      // Refreshed like every other secret-store mutation: this resends the
+      // server's rehydrated secrets, so it can trigger the pending
+      // plaintext-to-encrypted upgrade even though the user only toggled
+      // pagination (#1950 review r22).
+      void refreshingPersist(updateServerSettings, refreshInitialConfig)(
+        activeServerId,
+        next,
+      ).catch((err: unknown) => {
         // Persist failed: revert the optimistic override (the effect only
         // clears it when the persisted value changes, which won't happen here)
         // and roll the live client setting back, so the UI and client reflect
@@ -3892,7 +3899,10 @@ function App() {
       setStderrLogState(null);
       setActiveServerId(undefined);
     }
-    await removeServer(id);
+    // Deleting sweeps the server's secrets from the store, which for a
+    // file-backed store is a write — and a write is what performs the pending
+    // plaintext-to-encrypted upgrade (#1950 review r22).
+    await refreshingPersist(removeServer, refreshInitialConfig)(id);
     setRemoveTarget(null);
   }, [
     removeTarget,

@@ -277,6 +277,15 @@ function encryptedEnvelopeProblem(parsed: SecretFile): string | null {
   if (!isPositiveInt(r) || !isPositiveInt(p)) {
     return `kdf r/p are ${String(r)}/${String(p)}, which are not positive integers`;
   }
+  // Bounded, not merely well-formed. scrypt's work is proportional to
+  // `N * r * p`, and every one of those comes off disk — so a file declaring
+  // a modest `N` with an enormous `p` burns unbounded CPU on any read *and*
+  // on merely describing the store for `/api/config`, which is a page load.
+  // This build writes exactly the constants above and refuses a `version` it
+  // does not know, so anything larger cannot be a file it produced.
+  if (N > SCRYPT_N || r > SCRYPT_R || p > SCRYPT_P) {
+    return `kdf cost parameters (N=${N}, r=${r}, p=${p}) exceed the supported maximum (N=${SCRYPT_N}, r=${SCRYPT_R}, p=${SCRYPT_P})`;
+  }
   return null;
 }
 

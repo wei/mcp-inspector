@@ -1165,6 +1165,22 @@ describe("readOnDiskEncryption rejects an envelope it could not open", () => {
       "kdf r/p are 0/1, which are not positive integers",
     ],
     [
+      "a KDF cost parameter large enough to burn unbounded CPU",
+      {
+        version: 1,
+        encryption: "aes-256-gcm",
+        kdf: {
+          algorithm: "scrypt",
+          salt: "AAAA",
+          N: 16384,
+          r: 8,
+          p: 1_000_000,
+        },
+        data: `${Buffer.alloc(12).toString("base64")}.${Buffer.alloc(16).toString("base64")}.${Buffer.alloc(8).toString("base64")}`,
+      },
+      "kdf cost parameters (N=16384, r=8, p=1000000) exceed the supported maximum (N=16384, r=8, p=1)",
+    ],
+    [
       "an unsupported KDF",
       {
         version: 1,
