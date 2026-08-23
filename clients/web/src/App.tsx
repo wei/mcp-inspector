@@ -1738,12 +1738,6 @@ function App() {
   // been destroyed — while the replacement client, built from the stale list
   // entry, keeps the value the write replaced (#2089).
   const inspectorClientRef = useRef<InspectorClient | null>(inspectorClient);
-  // The server whose last settings-modal save rejected, if any. `useSettingsDraft`
-  // keeps the edited draft on failure, and closing the modal pushes that draft
-  // into the live client — which would put back a value that never reached disk
-  // and undo the rollback. Cleared by the next save for that server that lands,
-  // and by the close that acts on it (#2089).
-  const failedSettingsSaveRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (activeServer) activeServerNameRef.current = activeServer.name;
     activeServerIdRef.current = activeServerId;
@@ -1935,6 +1929,43 @@ function App() {
   // pre-redirect hook below can read the current Network log without being
   // rebound every time the active server (and its log state) changes.
   const fetchLogRef = useRef<FetchRequestLogState | null>(null);
+
+  // Make the live client reflect one settings value, in full. Every path that
+  // decides what the active server's settings *are* goes through this: the
+  // settings modal's close (#1444), and each write's settled / rolled-back
+  // reconciliation (#2089). It is one function because the live surface is more
+  // than `setServerSettings` — a partial re-application would leave the Network
+  // log sized for, and the server advertised roots from, a value that is not on
+  // disk. Reads the client through its ref so a write outliving a reconnect
+  // applies to the instance that exists now.
+  const applyLiveServerSettings = useCallback(
+    (settings: InspectorServerSettings) => {
+      const client = inspectorClientRef.current;
+      if (!client) return;
+      // Settings the managed state reads at notification time
+      // (auto-refresh-on-list-changed) take effect without a reconnect (#1444).
+      // Connection-time inputs (transport, OAuth, timeouts) still only apply on
+      // the next connect.
+      client.setServerSettings(settings);
+      // Resize the Network log buffer live so a maxFetchRequests edit takes
+      // effect without a reconnect (shrinking trims immediately).
+      fetchLogRef.current?.setMaxFetchRequests(settings.maxFetchRequests);
+      // Root edits are diffed against what the client currently advertises
+      // (both cleaned) and notified only when they differ: `setRoots` fires
+      // `notifications/roots/list_changed`, which makes the server re-request
+      // `roots/list`.
+      const nextRoots = cleanRoots(settings.roots);
+      const currentRoots = cleanRoots(client.getRoots());
+      if (JSON.stringify(nextRoots) !== JSON.stringify(currentRoots)) {
+        void client.setRoots(nextRoots).catch(() => {
+          // setRoots swallows notification failures internally; a throw here
+          // only means the client is mid-teardown — the persisted roots will
+          // re-advertise on the next connect, so nothing to surface.
+        });
+      }
+    },
+    [],
+  );
 
   // Flush the pre-redirect Network log to backend storage, keyed by the OAuth
   // authId carried in the authorization URL's `state`. Runs synchronously from
@@ -3814,7 +3845,7 @@ function App() {
           const settled = write.landed(next);
           if (settled && activeServerIdRef.current === activeServerId) {
             setPaginatedListsOverride(next.paginatedLists ?? false);
-            inspectorClientRef.current?.setServerSettings(next);
+            applyLiveServerSettings(next);
           }
         })
         .catch((err: unknown) => {
@@ -3845,7 +3876,7 @@ function App() {
             lastPersistedSettings.resolve(activeServerId) ?? EMPTY_SETTINGS;
           if (activeServerIdRef.current === activeServerId) {
             setPaginatedListsOverride(baseline.paginatedLists ?? false);
-            inspectorClientRef.current?.setServerSettings(baseline);
+            applyLiveServerSettings(baseline);
           }
           notifications.show({
             title: "Failed to save pagination setting",
@@ -3858,6 +3889,7 @@ function App() {
       servers,
       activeServerId,
       lastPersistedSettings,
+      applyLiveServerSettings,
       inspectorClient,
       updateServerSettings,
       refreshInitialConfig,
@@ -4243,11 +4275,6 @@ function App() {
         // `onError` — an earlier write still running settles the state once it
         // lands, and cannot know that while this one looks pending (#2089).
         write.failed();
-        // The draft keeps the values this save was carrying, and closing the
-        // modal pushes the draft into the live client — which would put back
-        // the value that just failed to reach disk. Remember that this
-        // server's draft is unpersisted so close can apply disk instead.
-        failedSettingsSaveRef.current = id;
         // A write that landed while this one was pending was told it was not
         // settled and so applied nothing; this save never reached disk, so that
         // write is the account of it and nothing else will re-apply it. Same
@@ -4255,7 +4282,7 @@ function App() {
         const baseline = lastPersistedSettings.resolve(id);
         if (baseline && activeServerIdRef.current === id) {
           setPaginatedListsOverride(baseline.paginatedLists ?? false);
-          inspectorClientRef.current?.setServerSettings(baseline);
+          applyLiveServerSettings(baseline);
         }
         throw err;
       }
@@ -4270,17 +4297,10 @@ function App() {
       // toggle failing while this save is in flight rolls the UI and the live
       // client back to a baseline this save then replaces on disk, so a settled
       // save has to re-apply itself exactly as a settled toggle does (#2089).
-      // This save reached disk, so the draft it came from is persisted again.
-      if (failedSettingsSaveRef.current === id) {
-        failedSettingsSaveRef.current = undefined;
-      }
       const settled = write.landed(value);
       if (settled && activeServerIdRef.current === id) {
         setPaginatedListsOverride(value.paginatedLists ?? false);
-        // The current client, not the one captured when this save began — a
-        // reconnect to the same server would otherwise be written to a
-        // destroyed instance while the replacement keeps the stale value.
-        inspectorClientRef.current?.setServerSettings(value);
+        applyLiveServerSettings(value);
       }
     },
     // Surface failures via toast — the modal usually closes
@@ -4416,36 +4436,19 @@ function App() {
       settingsDraft
     ) {
       // Normally the draft is what the user just saved, so it is also what is
-      // on disk. When this server's last save *rejected* it is not: the draft
-      // still holds the failed edit, and pushing it here would contradict disk
-      // and undo the rollback that reported the failure. Apply what landed
-      // instead, and drop the flag — the stale draft goes with the modal, and
-      // reopening seeds from the tracker (#2089).
-      let applied = settingsDraft;
-      if (failedSettingsSaveRef.current === settingsModalTargetId) {
-        applied =
-          lastPersistedSettings.resolve(settingsModalTargetId) ?? settingsDraft;
-        failedSettingsSaveRef.current = undefined;
-      }
-      // Push the edited settings onto the live client so settings the managed
-      // state reads at notification time (auto-refresh-on-list-changed) take
-      // effect without a reconnect (#1444). Connection-time inputs (transport,
-      // OAuth, timeouts) still only apply on the next connect.
-      inspectorClient.setServerSettings(applied);
-      // Resize the Network log buffer live so a maxFetchRequests edit takes
-      // effect without a reconnect (shrinking trims immediately). Connect-time
-      // construction also reads this, so a reconnect would apply it anyway —
-      // this just makes the toast→adjust flow responsive.
-      fetchLogRef.current?.setMaxFetchRequests(applied.maxFetchRequests);
-      const nextRoots = cleanRoots(applied.roots);
-      const currentRoots = cleanRoots(inspectorClient.getRoots());
-      if (JSON.stringify(nextRoots) !== JSON.stringify(currentRoots)) {
-        void inspectorClient.setRoots(nextRoots).catch(() => {
-          // setRoots swallows notification failures internally; a throw here
-          // only means the client is mid-teardown — the persisted roots will
-          // re-advertise on the next connect, so nothing to surface.
-        });
-      }
+      // on disk. When this server's last write *rejected* it is not: the draft
+      // still holds the failed edit, and applying it here would contradict disk
+      // and undo the rollback that reported the failure — so apply what landed
+      // instead. `EMPTY_SETTINGS`, not the draft, when nothing has ever landed
+      // for this server: falling back to the draft would re-apply the very
+      // values that failed (#2089).
+      const applied = lastPersistedSettings.lastWriteFailed(
+        settingsModalTargetId,
+      )
+        ? (lastPersistedSettings.resolve(settingsModalTargetId) ??
+          EMPTY_SETTINGS)
+        : settingsDraft;
+      applyLiveServerSettings(applied);
     }
     setSettingsModalTargetId(undefined);
   }, [
@@ -4455,6 +4458,7 @@ function App() {
     activeServerId,
     settingsDraft,
     lastPersistedSettings,
+    applyLiveServerSettings,
   ]);
 
   // The Resources screen needs `isSubscribed` to flip the Subscribe button

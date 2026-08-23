@@ -191,6 +191,31 @@ describe("useLastPersistedSettings", () => {
     expect(api.resolve("A")).toBe(fresh);
   });
 
+  it("reports a failed last write per server, ordered by issue", () => {
+    // The settings modal's draft survives a rejected save, so its owner has to
+    // know whether what the user last tried to save is on disk. A failure on B
+    // says nothing about A, and a straggling failure from an older write does
+    // not overrule a newer write that succeeded.
+    const { api } = harness([entry("A", settings()), entry("B", settings())]);
+    expect(api.lastWriteFailed("A")).toBe(false);
+
+    const firstA = api.begin("A");
+    const secondA = api.begin("A");
+    secondA.landed(settings({ paginatedLists: true }));
+    firstA.failed();
+    expect(api.lastWriteFailed("A")).toBe(false);
+
+    api.begin("B").failed();
+    expect(api.lastWriteFailed("B")).toBe(true);
+    expect(api.lastWriteFailed("A")).toBe(false);
+
+    // …and a newer failure on A does count, until a newer write lands.
+    api.begin("A").failed();
+    expect(api.lastWriteFailed("A")).toBe(true);
+    api.begin("A").landed(settings());
+    expect(api.lastWriteFailed("A")).toBe(false);
+  });
+
   it("returns nothing when the server has left the list entirely", () => {
     const { api, setServers } = harness([entry("A", settings())]);
     api.begin("A").landed(settings({ paginatedLists: true }));

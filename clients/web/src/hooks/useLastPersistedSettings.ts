@@ -81,6 +81,19 @@ export interface LastPersistedSettings {
    * same class of bug as reading the baseline from a stale `servers` entry.
    */
   resolve: (serverId: string) => InspectorServerSettings | undefined;
+  /**
+   * Whether the most recently **issued** write that has reported for this
+   * server ended in failure — i.e. whatever the user last tried to save is not
+   * what disk holds. A caller holding an edit buffer for that server (the
+   * settings modal's draft) uses it to know its buffer is unpersisted, and to
+   * apply `resolve` instead of the buffer.
+   *
+   * Ordered by issue, not by arrival, for the same reason the record is: a
+   * straggling failure from an older write does not overwrite the outcome of a
+   * newer one, and outcomes are kept per server so a failure on B says nothing
+   * about A.
+   */
+  lastWriteFailed: (serverId: string) => boolean;
 }
 
 export interface SettingsWrite {
@@ -126,6 +139,12 @@ export function useLastPersistedSettings(
   // whether it is the last word or whether something later will still report.
   // A write leaves this set through `landed` or `failed` alike.
   const pendingRef = useRef<Map<string, Set<number>>>(new Map());
+  // Outcome of the latest-issued write that has reported, per server. Kept
+  // apart from the record because a *failed* write leaves no record but is
+  // still the answer to "is the user's last attempt on disk?".
+  const outcomesRef = useRef<Map<string, { sequence: number; ok: boolean }>>(
+    new Map(),
+  );
   // Read the list through a ref so a write pairs with the entry as it stands
   // when it finishes, not the one captured when it was issued. Mirrored in an
   // effect rather than assigned during render: writing a ref mid-render is an
@@ -141,12 +160,18 @@ export function useLastPersistedSettings(
     const pending = pendingRef.current.get(serverId) ?? new Set<number>();
     pending.add(sequence);
     pendingRef.current.set(serverId, pending);
-    const settle = () => {
+    const settle = (ok: boolean) => {
       pending.delete(sequence);
+      // Keep the outcome of the latest-issued write that has reported, so an
+      // older straggler cannot overwrite a newer one's verdict.
+      const previous = outcomesRef.current.get(serverId);
+      if (!previous || previous.sequence <= sequence) {
+        outcomesRef.current.set(serverId, { sequence, ok });
+      }
     };
     return {
       landed: (written: InspectorServerSettings) => {
-        settle();
+        settle(true);
         const confirmed = confirmedRef.current.get(serverId) ?? 0;
         // A write issued after this one already reported; it describes disk
         // more recently, whichever of the two happened to finish first.
@@ -160,9 +185,14 @@ export function useLastPersistedSettings(
         for (const other of pending) if (other > sequence) return false;
         return true;
       },
-      failed: settle,
+      failed: () => settle(false),
     };
   }, []);
+
+  const lastWriteFailed = useCallback(
+    (serverId: string) => outcomesRef.current.get(serverId)?.ok === false,
+    [],
+  );
 
   const resolve = useCallback(
     (serverId: string): InspectorServerSettings | undefined => {
@@ -182,5 +212,5 @@ export function useLastPersistedSettings(
     [],
   );
 
-  return { begin, resolve };
+  return { begin, resolve, lastWriteFailed };
 }

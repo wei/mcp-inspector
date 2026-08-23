@@ -1762,6 +1762,50 @@ describe("App roots live-apply on settings-dialog close", () => {
     // …and the rejected roots edit is not advertised either.
     expect(client.setRoots).not.toHaveBeenCalled();
   });
+
+  it("restores the roots and log size too when a flushed save rejects (#2089)", async () => {
+    // Close flushes a pending save and live-applies the draft immediately —
+    // roots and the Network log size, not just the settings object. If that
+    // save then rejects, reconciling only `setServerSettings` would leave the
+    // server advertising roots that were never persisted.
+    const user = userEvent.setup();
+    updateServerSettingsSpy.mockClear();
+    const rejectedDraft: InspectorServerSettings = {
+      ...settingsWithRoots([{ uri: "file:///rejected" }]),
+      maxFetchRequests: 10,
+    };
+    const client = await openSettingsForConnectedServer(rejectedDraft);
+    client.getRoots.mockReturnValue([]);
+
+    const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+    if (!draftOptions) throw new Error("useSettingsDraft was never called");
+    const persistedSettings = settingsWithRoots([]);
+    await act(async () => {
+      await draftOptions.onPersist("A", persistedSettings);
+    });
+
+    // Close applies the draft live — the state the flush leaves behind.
+    await closeModal(user);
+    await waitFor(() =>
+      expect(client.setRoots).toHaveBeenCalledWith([
+        { uri: "file:///rejected" },
+      ]),
+    );
+    client.getRoots.mockReturnValue([{ uri: "file:///rejected" }]);
+    client.setRoots.mockClear();
+
+    // …and only now does the flushed save reject.
+    updateServerSettingsSpy.mockRejectedValueOnce(new Error("disk full"));
+    await act(async () => {
+      await draftOptions.onPersist("A", rejectedDraft).catch(() => undefined);
+    });
+
+    // The whole live surface goes back to what landed, roots included.
+    await waitFor(() => expect(client.setRoots).toHaveBeenCalledWith([]));
+    expect(client.setServerSettings).toHaveBeenLastCalledWith(
+      persistedSettings,
+    );
+  });
 });
 
 describe("App history pin/replay", () => {
