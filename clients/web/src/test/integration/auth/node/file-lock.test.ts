@@ -361,13 +361,12 @@ describe("withSecretFileLock degrades rather than failing", () => {
 
 describe("withSecretFileLock reports what it cannot clean up", () => {
   it("does not delete the winner's lock after being taken over", async () => {
-    // The destructive half of the stale-takeover race, and the reason this
-    // check exists at all. `proper-lockfile`'s release is an unconditional
-    // `rmdir`: a holder whose lock was replaced deletes the *winner's*
-    // directory on the way out, so one compromised holder becomes two
-    // unprotected writers. Its own detection cannot prevent that — it runs on
-    // the refresh tick (5s here) while an ordinary mutation finishes in well
-    // under a second, so the tick never runs and nobody is told.
+    // The destructive half of the stale-takeover race. `proper-lockfile`'s
+    // removal is an unconditional `rmdir`, so a holder whose lock was
+    // replaced deletes the *winner's* directory on the way out — one
+    // compromised holder becoming two unprotected writers. Its own detection
+    // cannot prevent that: it runs on the refresh tick (5s here) while an
+    // ordinary mutation finishes in well under a second.
     //
     // No waiting here, deliberately: this is the fast case the tick misses.
     const target = filePath();
@@ -375,7 +374,6 @@ describe("withSecretFileLock reports what it cannot clean up", () => {
 
     let winner: { ino: number; birthtimeMs: number } | undefined;
     const result = await withSecretFileLock(target, async () => {
-      // Someone declares our lock stale, removes it, and takes over.
       await fs.rm(lockPath, { recursive: true, force: true });
       await fs.mkdir(lockPath);
       const stat = await fs.stat(lockPath);
@@ -384,18 +382,58 @@ describe("withSecretFileLock reports what it cannot clean up", () => {
     });
 
     expect(result).toBe("saved");
-    // The winner's lock is untouched — same directory, not a recreated one.
+    // Same directory, not a recreated one — it was left alone, not deleted.
     const after = await fs.stat(lockPath);
     expect(after.ino).toBe(winner?.ino);
     expect(after.birthtimeMs).toBe(winner?.birthtimeMs);
     expect(warnings()).toContain("was taken over by another process");
   });
 
-  it("warns instead of throwing when releasing a lock that is ours fails", async () => {
-    // The ownership check above must not swallow a genuine release failure.
-    // `rmdir` refuses a non-empty directory, so a stray file inside the lock
-    // leaves it identifiably *ours* — same inode, same birth time — and still
-    // unremovable.
+  it("the exit handler this guards against really does delete a lock", async () => {
+    // The other lifecycle window, and the reason the guard lives in
+    // `options.fs` rather than in a check before `release()`:
+    // `proper-lockfile` registers a `signal-exit` handler that `rmdirSync`s
+    // every lock it still has registered, with no ownership check of its own.
+    // A guard placed only around release would leave that free to delete the
+    // winner's directory if the process exits at the wrong moment.
+    //
+    // Shown in a real child, because the handler only runs on a real exit,
+    // and with an **empty** replacement directory — a non-empty one makes
+    // `rmdirSync` fail `ENOTEMPTY` and would "pass" for the wrong reason,
+    // which is exactly how the first draft of this test fooled itself.
+    //
+    // `withSecretFileLock` routes that same handler through the shim's
+    // `rmdirSync`, which shares `removeIfMine` with the release path proven
+    // by the test above.
+    const target = filePath();
+    const lockPath = `${target}.lock`;
+    await fs.mkdir(path.dirname(target), { recursive: true });
+
+    const script = `
+      const lockfile = require(${JSON.stringify(LOCKFILE_MODULE)});
+      const fs = require("node:fs");
+      const lockPath = ${JSON.stringify(lockPath)};
+      lockfile
+        .lock(${JSON.stringify(target)}, { realpath: false, stale: 10000 })
+        .then(() => {
+          // Taken over while we hold it, then exit *without* releasing.
+          fs.rmSync(lockPath, { recursive: true, force: true });
+          fs.mkdirSync(lockPath);
+          process.exit(0);
+        });
+    `;
+    await run(process.execPath, ["-e", script]);
+
+    // Unguarded, the winner's directory is gone.
+    expect(existsSync(lockPath)).toBe(false);
+  }, 30_000);
+
+  it("tells the operator to clear a lock that cannot expire on its own", async () => {
+    // `rmdir` refuses a non-empty directory — and so does stale takeover,
+    // which reclaims through the same call. So an `ENOTEMPTY` lock is not
+    // cleaned up by the staleness mechanism, by us, or by the next writer:
+    // every later save fails `ELOCKED` against it until somebody deletes it.
+    // Promising it "expires on its own after 10s" would be false.
     const target = filePath();
     const result = await withSecretFileLock(target, async () => {
       await fs.writeFile(`${target}.lock/stray`, "", "utf-8");
@@ -406,6 +444,8 @@ describe("withSecretFileLock reports what it cannot clean up", () => {
     // not be turned into a failure by its own teardown.
     expect(result).toBe("saved");
     expect(warnings()).toContain("Could not release the lock");
+    expect(warnings()).toContain("by hand");
+    expect(warnings()).not.toContain("expires on its own");
   });
 
   it("warns rather than crashing the process when the library detects the takeover", async () => {
@@ -413,7 +453,7 @@ describe("withSecretFileLock reports what it cannot clean up", () => {
     // no caller on the stack — an uncaught exception that takes an Inspector
     // session down. Replaced with a warning. This is the slow path: the lock
     // is removed and the body stays alive past the refresh tick, so the
-    // library's own detection fires rather than the release-time check above.
+    // library's own detection fires rather than the removal guard.
     const target = filePath();
     await withSecretFileLock(target, async () => {
       await fs.rm(`${target}.lock`, { recursive: true, force: true });

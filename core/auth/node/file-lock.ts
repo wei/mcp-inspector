@@ -39,12 +39,19 @@
  * replaced goes on to delete the *winner's* lock on the way out, silently
  * ending the winner's exclusion too.
  *
- * {@link withSecretFileLock} therefore does its own ownership check before
- * releasing (see there). That closes the destructive half — we never remove
- * a lock directory that is not the one we created — and surfaces the
- * compromise in exactly the fast-mutation case the tick misses. Detection is
- * still **best-effort**, not a guarantee: it rests on inode and birth-time
- * identity, which some filesystems do not report.
+ * {@link withSecretFileLock} therefore guards every removal the library makes
+ * on its behalf — see `guardedFs`, which sits in `options.fs` so it covers
+ * the release path *and* the `signal-exit` handler. It refuses to delete a
+ * directory that is no longer the one we created, and surfaces the compromise
+ * in the fast-mutation case the tick misses.
+ *
+ * **That narrows the destructive window; it does not close it.** The guard is
+ * a `statSync` immediately followed by an `rmdirSync`, so nothing in this
+ * process can interleave — but it is still check-then-act against other
+ * processes, and closing that needs the same compare-and-swap Node does not
+ * expose. It also rests on inode and birth-time identity, which some
+ * filesystems do not report. Best-effort throughout: it makes the destructive
+ * case rare, not impossible.
  *
  * The window is at least narrow and conditional: it opens only after a
  * holder *dies without releasing*, since nothing else lets a lock go stale.
@@ -68,6 +75,7 @@
  * underneath it, and says so once.
  */
 
+import nodeFs, { statSync, rmdirSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 // CJS-only package. A default import is the shape that survives every
@@ -182,23 +190,30 @@ const describeError = (err: unknown): string =>
 /** Where `proper-lockfile` puts the lock for `target` — its documented default. */
 const lockPathOf = (target: string): string => `${target}.lock`;
 
+/** A lock directory's identity: what changes on delete-and-recreate. */
+interface LockIdentity {
+  ino: number;
+  birthtimeMs: number;
+}
+
 /**
- * A lock directory's identity, or `null` if it could not be read.
+ * Identify a lock directory, or `null` if it cannot be read.
  *
- * `ino` and `birthtimeMs` together: a directory removed and recreated gets a
- * new inode and a new birth time, while `utimes` — which the library's own
- * refresh tick performs on our behalf every few seconds — changes neither.
+ * `ino` and `birthtimeMs` together, and **not the mtime** the library
+ * compares: a lock held longer than one refresh tick has its mtime rewritten
+ * by `utimes` legitimately, so an mtime comparison would call our own healthy
+ * lock compromised. Both of these survive `utimes` and both change when a
+ * directory is removed and recreated, which is the event to detect.
  *
- * Not every filesystem reports both (Windows shares, some network mounts, and
- * older kernels report `0`). There the two reads simply agree and the check
- * below concludes the lock is ours, which is the behaviour without this check
- * at all — best-effort, and never a false alarm on a healthy lock.
+ * Not every filesystem reports either (Windows shares, some network mounts,
+ * older kernels report `0`). There the comparison trivially succeeds and the
+ * guard below concludes the lock is ours — the behaviour without the guard at
+ * all, which is the right way to fail: best-effort, never a false alarm on a
+ * healthy lock.
  */
-async function identify(
-  lockPath: string,
-): Promise<{ ino: number; birthtimeMs: number } | null> {
+function identifySync(lockPath: string): LockIdentity | null {
   try {
-    const stat = await fs.stat(lockPath);
+    const stat = statSync(lockPath);
     return { ino: stat.ino, birthtimeMs: stat.birthtimeMs };
   } catch {
     return null;
@@ -206,24 +221,89 @@ async function identify(
 }
 
 /**
- * Is the lock directory still the one we created?
+ * A `proper-lockfile` `fs` shim whose directory removal refuses to delete a
+ * lock that is no longer the one we created.
  *
- * A missing directory counts as **not ours** — it was removed by a takeover
- * (or by hand), and there is nothing of ours left to release.
+ * **Why this sits in `options.fs` rather than in a check before `release()`.**
+ * Every deletion the library performs on our behalf goes through this object
+ * — the `release()` path (`removeLock` → `fs.rmdir`) *and* its `signal-exit`
+ * handler (`rmdirSync` over every registered lock, with no ownership check of
+ * its own). A check placed before `release()` covers only the first, and
+ * leaves the second free to delete the winner's lock if the process exits at
+ * the wrong moment. Guarding at the single point where a directory is
+ * actually removed covers both, and there is nowhere narrower to put it.
  *
- * An unreadable *baseline* (`claimedAs === null`) is the one case that
- * answers "ours": we could not identify the directory at acquire, so we have
- * nothing to compare against and must not accuse a healthy lock. Releasing is
- * then exactly what the library would have done unaided.
+ * **It narrows the window; it does not close it.** The guard is
+ * `statSync` immediately followed by `rmdirSync`, with no `await` between
+ * them — so nothing else *in this process* can interleave, and the gap is as
+ * small as this platform allows. It is still a check-then-act against other
+ * processes, and closing that needs compare-and-swap on a directory entry
+ * (`renameat2(RENAME_EXCHANGE)`), which is exactly what Node does not expose
+ * and what the whole stale-takeover problem reduces to. Treat this as making
+ * the destructive case rare, not impossible.
+ *
+ * `owned.id` stays `null` until we have acquired, which is deliberate: during
+ * `acquireLock` the library removes *another* holder's stale directory
+ * through this same seam, and that removal must go through untouched.
  */
-async function stillOurs(
+function guardedFs(
   lockPath: string,
-  claimedAs: { ino: number; birthtimeMs: number } | null,
-): Promise<boolean> {
-  if (claimedAs === null) return true;
-  const now = await identify(lockPath);
-  if (now === null) return false;
-  return now.ino === claimedAs.ino && now.birthtimeMs === claimedAs.birthtimeMs;
+  owned: { id: LockIdentity | null },
+  onRefused: () => void,
+): unknown {
+  const mine = (): boolean => {
+    if (owned.id === null) return true; // Not ours yet — see above.
+    const now = identifySync(lockPath);
+    if (now === null) return false; // Already gone; nothing of ours to remove.
+    return now.ino === owned.id.ino && now.birthtimeMs === owned.id.birthtimeMs;
+  };
+  const removeIfMine = (): void => {
+    if (!mine()) {
+      onRefused();
+      return;
+    }
+    rmdirSync(lockPath);
+  };
+  return {
+    ...nodeFs,
+    // Reported as success when refused: the library's bookkeeping should
+    // forget this lock either way. Leaving it registered would hand the
+    // `signal-exit` handler a record pointing at the winner's directory.
+    rmdir: (_p: string, cb: (err: NodeJS.ErrnoException | null) => void) => {
+      try {
+        removeIfMine();
+        cb(null);
+      } catch (err) {
+        cb(err as NodeJS.ErrnoException);
+      }
+    },
+    /* v8 ignore next 3 -- @preserve: only reachable from proper-lockfile's
+       signal-exit handler, i.e. at real process exit, which no in-process
+       test can drive. Its logic is `removeIfMine`, covered via `rmdir`. */
+    rmdirSync: () => {
+      removeIfMine();
+    },
+  };
+}
+
+/**
+ * What to tell an operator about a lock we could not remove.
+ *
+ * The blanket "it expires on its own" is **false for `ENOTEMPTY`**, and that
+ * is the reachable case rather than a hypothetical: stale takeover reclaims a
+ * lock through the same `rmdir`, which also cannot remove a non-empty
+ * directory. So a lock directory with anything inside it is not cleaned up by
+ * the staleness mechanism, by us, or by the next writer — it stays until
+ * somebody deletes it, and every later save fails `ELOCKED` against it.
+ *
+ * Any other failure leaves a directory the refresher has stopped touching, so
+ * the stale path really does reclaim it after {@link STALE_MS}.
+ */
+function releaseAdvice(err: unknown, target: string): string {
+  const code = (err as NodeJS.ErrnoException).code;
+  return code === "ENOTEMPTY"
+    ? `It has something inside it, which stale takeover cannot clear either, so saves will keep failing until you remove ${lockPathOf(target)} by hand.`
+    : `It expires on its own after ${STALE_MS / 1000}s.`;
 }
 
 /**
@@ -241,11 +321,15 @@ async function stillOurs(
 function acquire(
   target: string,
   retries: number | typeof RETRY,
+  fsShim: unknown,
 ): Promise<() => Promise<void>> {
   return properLockfile.lock(target, {
     realpath: false,
     stale: STALE_MS,
     retries,
+    // Every directory removal the library performs — on release and from its
+    // exit handler — routes through here. See `guardedFs`.
+    fs: fsShim,
     // The library's default `onCompromised` *throws* — from a timer, with no
     // caller on the stack, so it lands as an uncaught exception and takes the
     // process down. This is also the library's *only* signal for the
@@ -289,9 +373,16 @@ export async function withSecretFileLock<T>(
   // taken, and the catch below already says so with the right message — one
   // that mentions the lock rather than a `mkdir` the caller never asked for.
   await fs.mkdir(path.dirname(target), { recursive: true }).catch(() => {});
+  // Filled in once we actually hold the lock; see `guardedFs`.
+  const owned: { id: LockIdentity | null } = { id: null };
+  const fsShim = guardedFs(lockPathOf(target), owned, () =>
+    warnOnce(
+      `The lock on the secrets file at ${target} was taken over by another process while a write was in progress, so it was left alone rather than removed. If a secret you just saved is missing, save it again.`,
+    ),
+  );
   let release: (() => Promise<void>) | undefined;
   try {
-    release = await acquire(target, 0).catch((err: unknown) => {
+    release = await acquire(target, 0, fsShim).catch((err: unknown) => {
       // **Retries are for contention, and only for contention.**
       // `proper-lockfile` drives its whole acquire through `retry`, which
       // re-attempts on *any* error — so a read-only `$HOME` would spend the
@@ -300,7 +391,7 @@ export async function withSecretFileLock<T>(
       // separates the two answers at the cost of one syscall: `ELOCKED` is
       // worth waiting out, an infrastructure failure is not.
       if (!isHeldElsewhere(err)) throw err;
-      return acquire(target, RETRY);
+      return acquire(target, RETRY, fsShim);
     });
   } catch (err) {
     // **`ELOCKED` is not a reason to degrade — it is the opposite.** It means
@@ -326,40 +417,22 @@ export async function withSecretFileLock<T>(
     );
     return fn();
   }
-  // Identity of the directory we just created, for the ownership check below.
-  // **Not the mtime**, which is what the library compares: a lock held longer
-  // than one refresh tick has its mtime rewritten by `utimes` legitimately,
-  // so an mtime comparison would call our own healthy lock compromised. The
-  // inode and birth time both survive `utimes` and both change when a
-  // directory is removed and recreated, which is precisely the event to
-  // detect.
-  const claimedAs = await identify(lockPathOf(target));
+  // Now that we hold it, record which directory is ours so the guard above
+  // can refuse to delete anyone else's.
+  owned.id = identifySync(lockPathOf(target));
   try {
     return await fn();
   } finally {
-    if (!(await stillOurs(lockPathOf(target), claimedAs))) {
-      // Someone declared our lock stale and replaced it. **Do not release**:
-      // `proper-lockfile`'s release is an unconditional `rmdir`, so calling
-      // it here would delete the lock directory that now belongs to whoever
-      // took over — ending their exclusion as well as ours, and turning one
-      // compromised holder into two unprotected writers. Leaving their lock
-      // alone costs us nothing; ours is already gone.
+    try {
+      await release();
+    } catch (err) {
+      // The body already ran and its result is being returned; turning a
+      // completed save into a failure at teardown would be the wrong trade.
+      // But a lock left behind is worth explaining, and the two reasons need
+      // different advice — see `releaseAdvice`.
       warnOnce(
-        `The lock on the secrets file at ${target} was taken over by another process while a write was in progress. If a secret you just saved is missing, save it again.`,
+        `Could not release the lock on the secrets file at ${target} (${describeError(err)}). ${releaseAdvice(err, target)}`,
       );
-    } else {
-      try {
-        await release();
-      } catch (err) {
-        // The body already ran and its result is being returned; a release
-        // that failed means the lock was taken from us (declared stale while
-        // we held it) or the directory went away. Neither is worth turning a
-        // successful save into a failure, but a silent catch would leave a
-        // lock nobody can explain, so say it.
-        warnOnce(
-          `Could not release the lock on the secrets file at ${target} (${describeError(err)}). It expires on its own after ${STALE_MS / 1000}s.`,
-        );
-      }
     }
   }
 }
