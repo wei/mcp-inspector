@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import {
   Anchor,
   Box,
@@ -135,6 +142,11 @@ import {
 import { clearScrollMemory } from "./hooks/useScrollMemory";
 import type { AppRendererHandle } from "./components/elements/AppRenderer/AppRenderer";
 import { createAppBridgeFactory } from "./components/elements/AppRenderer/createAppBridgeFactory";
+import { AppElicitationHost } from "./components/elements/AppElicitation/AppElicitationHost";
+import {
+  AppElicitationController,
+  type AppElicitationSession,
+} from "./lib/appElicitationController";
 import type { LogEntryData } from "./components/elements/LogEntry/LogEntry";
 import {
   ServerConfigModal,
@@ -744,6 +756,7 @@ function App() {
     version: inspectorVersion,
     secretStorage,
     refresh: refreshInitialConfig,
+    loading: initialConfigLoading,
   } = useInitialConfig({
     baseUrl: configBaseUrl,
     authToken: getAuthToken(),
@@ -793,6 +806,101 @@ function App() {
         },
       }),
     [inspectorClient],
+  );
+
+  // App-rendered form elicitations (#1854). The controller is created once and
+  // handed to every InspectorClient at construction — its `render` is what opts
+  // this client into advertising the nested MCP Apps `elicitation` capability,
+  // which is why only the web client (the one with a sandbox) claims it.
+  const appElicitationControllerRef = useRef<AppElicitationController>(null);
+  appElicitationControllerRef.current ??= new AppElicitationController();
+  const appElicitationController = appElicitationControllerRef.current;
+  // The window onto the controller for the CURRENT client. Closing it when the
+  // client is replaced both rejects that connection's queued requests and
+  // refuses any it enqueues during its own (asynchronous) teardown — a late
+  // entry would otherwise be rendered by a factory bound to the replacement
+  // client, i.e. read and answered through a different server.
+  const appElicitationSessionRef = useRef<AppElicitationSession>(null);
+  // `setupClientForServer` is synchronous and memoized, so a caller that
+  // awaited the config would still resume with the `sandboxUrl` captured by the
+  // render it STARTED in — undefined, on the very load this matters for. The
+  // ref is written every render, so client construction reads the current value
+  // whichever entry point (connect, deep link, OAuth callback) reached it.
+  const sandboxUrlRef = useRef<string | undefined>(undefined);
+  sandboxUrlRef.current = sandboxUrl;
+  // Whether the sandbox exists is only known once `/api/config` resolves, and
+  // the answer is baked into the client at construction (it decides whether the
+  // nested MCP Apps `elicitation` capability is advertised). So a connect waits
+  // for it rather than guessing: guessing "available" over-claims a capability
+  // we may not have, and guessing "unavailable" strands the whole session on
+  // the native form despite having a sandbox. The wait is a local fetch already
+  // in flight since mount.
+  const initialConfigSettledRef = useRef<{
+    promise: Promise<void>;
+    resolve: () => void;
+  }>(null);
+  initialConfigSettledRef.current ??= (() => {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => (resolve = r));
+    return { promise, resolve };
+  })();
+  useEffect(() => {
+    if (!initialConfigLoading) initialConfigSettledRef.current?.resolve();
+  }, [initialConfigLoading]);
+  const appElicitations = useSyncExternalStore(
+    appElicitationController.subscribe,
+    appElicitationController.getEntries,
+  );
+  // A SECOND factory, differing from `sandboxBridgeFactory` only in that it
+  // advertises `hostCapabilities.elicitation`. An App-tool frame is never handed
+  // an elicitation, so telling those apps otherwise would be a false claim.
+  const elicitationBridgeFactory = useMemo(
+    () =>
+      createAppBridgeFactory({
+        advertiseElicitation: true,
+        getClient: () => inspectorClient?.getAppRendererClient() ?? null,
+        readResource: async (uri) => {
+          if (!inspectorClient) throw new Error("No MCP client connected.");
+          const invocation = await inspectorClient.readResource(uri);
+          return invocation.result;
+        },
+        // Unlike the Apps tab there is no persistent surface to show the
+        // failure on — the modal is about to be replaced by the native form —
+        // so the toast is the only place the user learns why.
+        onResourceError: (err) => {
+          notifications.show({
+            title: "Elicitation app failed to load",
+            message: err.message,
+            color: "red",
+          });
+        },
+      }),
+    [inspectorClient],
+  );
+  /**
+   * Close the previous client's session and open one for the client being
+   * constructed. Synchronous, and called at construction, so the swap itself is
+   * the moment ownership changes hands.
+   */
+  const newAppElicitationSession = useCallback(() => {
+    appElicitationSessionRef.current?.close(
+      new Error("Connection replaced before the app answered"),
+    );
+    const session = appElicitationController.openSession();
+    appElicitationSessionRef.current = session;
+    return session;
+  }, [appElicitationController]);
+  const handleAppElicitationSettle = useCallback(
+    (requestId: string, result: ElicitResult) => {
+      appElicitationController.settle(requestId, result);
+    },
+    [appElicitationController],
+  );
+  const handleAppElicitationFail = useCallback(
+    (requestId: string, error: Error) => {
+      appElicitationController.fail(requestId, error);
+    },
+    [appElicitationController],
   );
 
   const [managedToolsState, setManagedToolsState] =
@@ -2413,6 +2521,16 @@ function App() {
         // Sampling / elicitation are on by default; keep the parameterized
         // options off until the UI grows the surface to render them.
         elicit: { form: true, url: true },
+        // Web only, and only when the sandbox renderer is actually available:
+        // supplying this advertises the nested MCP Apps `elicitation`
+        // capability, and a client that cannot host an app must not claim it
+        // (#1854). Callers await `initialConfigSettled` first, so `sandboxUrl`
+        // here means "confirmed absent" rather than "not known yet" — a
+        // connection that reaches this with no sandbox behaves like the
+        // CLI/TUI: native elicitation queue, no claim made to the server.
+        ...(sandboxUrlRef.current && {
+          appElicitation: newAppElicitationSession().render,
+        }),
         // Always advertise the roots capability (even with no configured
         // roots) so the server can issue roots/list and receive
         // roots/list_changed; the configured roots are the answer to
@@ -2514,6 +2632,7 @@ function App() {
       sessionStorageAdapter,
       onBeforeOAuthRedirect,
       clientConfig,
+      newAppElicitationSession,
     ],
   );
 
@@ -2633,6 +2752,9 @@ function App() {
     }
 
     void (async () => {
+      // Same reason as the connect path: whether this client may advertise
+      // app-rendered elicitation is fixed at construction.
+      await initialConfigSettledRef.current?.promise;
       try {
         await webOAuthStorage.load();
       } catch (err) {
@@ -2733,6 +2855,12 @@ function App() {
 
   const onToggleConnection = useCallback(
     async (id: string) => {
+      // Whether this client may advertise app-rendered elicitation is decided
+      // at construction and cannot be revised afterwards, so wait for the fact
+      // rather than guess it (see `initialConfigSettledRef`). Already resolved
+      // by the time any human clicks; this only orders a deep-link auto-connect
+      // that races the same page load.
+      await initialConfigSettledRef.current?.promise;
       // Same server, already connected → disconnect.
       if (
         id === activeServerId &&
@@ -4596,6 +4724,13 @@ function App() {
           onRefreshApps={onRefreshTools}
         />
       </Box>
+      <AppElicitationHost
+        entries={appElicitations}
+        sandboxPath={sandboxUrl}
+        bridgeFactory={elicitationBridgeFactory}
+        onSettle={handleAppElicitationSettle}
+        onFail={handleAppElicitationFail}
+      />
       <ServerConfigModal
         opened={configModal !== null}
         mode={configModal?.mode ?? "add"}
