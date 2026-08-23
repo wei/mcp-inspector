@@ -25,7 +25,7 @@
     "test:integration": "npm run test-servers:build && vitest run --project=integration",
     "test:integration:watch": "npm run test-servers:build && vitest --project=integration",
     "test-servers:build": "tsc -p ../../test-servers --noCheck",
-    "lint": "eslint .",
+    "lint": "eslint . --max-warnings 0",
     "format": "prettier --write src server .storybook \"*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}\"",
     "format:check": "prettier --check src server .storybook \"*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}\"",
     "preview": "vite preview",
