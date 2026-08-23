@@ -79,7 +79,10 @@ import {
   writeClientConfigStore,
 } from "../../../client/node-persistence.js";
 import { formatClientConfigLoadError } from "../../../client/config-parse.js";
-import { envSecretField } from "../../../auth/secret-fields.js";
+import {
+  envSecretField,
+  SECRET_FIELD_OAUTH_CLIENT_SECRET,
+} from "../../../auth/secret-fields.js";
 import type { SecretStorageInfo } from "../../../auth/secret-storage-info.js";
 import { ZodError } from "zod";
 
@@ -2055,17 +2058,6 @@ export function createRemoteApp(
   // to perform the destructive operation (we want it after the disk
   // write so a failed disk write doesn't leave the user with their
   // old config on disk but missing keychain entries).
-  const computeObsoleteFields = (
-    previousFields: Set<string>,
-    nextSecrets: Record<string, string>,
-  ): string[] => {
-    const nextFieldSet = new Set(Object.keys(nextSecrets));
-    const obsolete: string[] = [];
-    for (const field of previousFields) {
-      if (!nextFieldSet.has(field)) obsolete.push(field);
-    }
-    return obsolete;
-  };
 
   /**
    * Merge keychain secrets for a server-id rename. PUT payload values win
@@ -2599,8 +2591,42 @@ export function createRemoteApp(
           // In-place update: same id, possibly different fields. Set
           // the new values first, then write disk, then drop obsolete
           // fields (env keys the user removed, OAuth secret cleared).
+          //
+          // **Only when the caller said something about settings.** On a
+          // `preserve` intent the body carried no `settings` at all — the
+          // config-only PUT that `useServers.updateServer` sends for the
+          // Add/Edit modal — so the settings are re-derived from the *disk*
+          // entry, which by #1356's design no longer holds the secrets. They
+          // were therefore absent from `secrets`, `expectedSecretFields`
+          // always lists the OAuth slot, and the reconcile deleted a value
+          // the user never touched: editing a server's URL destroyed its
+          // stored OAuth client secret, on the keychain as much as on a
+          // session store. Saying nothing about settings has to mean
+          // "leave the secrets alone", not "the user cleared them".
+          // Two kinds of field, retired on different evidence — a single
+          // "absent from the submitted secrets" test cannot serve both.
+          //
+          // A stdio `env:` field is implied by the entry's *shape*: `env` is
+          // part of `config`, so a config-only PUT that drops a key really
+          // has retired that secret, and the new entry no longer expecting it
+          // is the proof.
+          //
+          // The OAuth slot is not implied by anything —
+          // `expectedSecretFields` always lists it — so its absence from the
+          // submitted set means "the caller cleared it" only when the caller
+          // spoke about settings at all. On a `preserve` intent (the
+          // config-only PUT the Add/Edit modal sends) the settings were
+          // re-derived from the disk entry, which by #1356's design no longer
+          // holds the secret; treating that absence as a clear deleted a
+          // value the user never touched, on the keychain as much as on a
+          // session store.
           const previousFields = new Set(expectedSecretFields(existing));
-          const obsolete = computeObsoleteFields(previousFields, secrets);
+          const stillExpected = new Set(expectedSecretFields(built));
+          const obsolete = [...previousFields].filter((field) =>
+            field === SECRET_FIELD_OAUTH_CLIENT_SECRET
+              ? settingsIntent.kind !== "preserve" && !(field in secrets)
+              : !stillExpected.has(field),
+          );
           await writeKeychainEntriesFor(newId, secrets);
           await writeMcpAndTrackMtime(serializeStore(next));
           await deleteKeychainFields(newId, obsolete);

@@ -111,7 +111,7 @@ import { useMessageLog } from "@inspector/core/react/useMessageLog.js";
 import { useFetchRequestLog } from "@inspector/core/react/useFetchRequestLog.js";
 import { useStderrLog } from "@inspector/core/react/useStderrLog.js";
 import { useInitialConfig } from "@inspector/core/react/useInitialConfig.js";
-import { refreshingPersist } from "./utils/refreshingPersist";
+import { refreshingPersist } from "./lib/refreshingPersist";
 import { usePendingClientRequests } from "@inspector/core/react/usePendingClientRequests.js";
 import { InspectorView } from "./components/views/InspectorView/InspectorView";
 import type {

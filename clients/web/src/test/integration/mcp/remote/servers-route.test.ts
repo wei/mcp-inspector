@@ -2625,6 +2625,124 @@ describe("/api/servers read-only sessions (#1481/#1483)", () => {
   });
 });
 
+describe("a config-only PUT must not delete stored secrets (#2083)", () => {
+  // `useServers.updateServer` sends `{ id, config }` with no `settings` —
+  // the Add/Edit modal's save. The route re-derives settings from the *disk*
+  // entry, which by #1356's design no longer holds the secrets, so they were
+  // absent from the submitted set; `expectedSecretFields` always lists the
+  // OAuth slot, and the reconcile deleted a value the user never touched.
+  let tempDir: string;
+  let configPath: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "inspector-config-put-"));
+    configPath = join(tempDir, "mcp.json");
+    writeFileSync(configPath, JSON.stringify({ mcpServers: {} }));
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const seed = async (
+    app: ReturnType<typeof createRemoteApp>["app"],
+    extra: Record<string, unknown> = {},
+  ) =>
+    app.request(
+      new Request("http://test/api/servers", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          id: "srv",
+          config: { type: "streamable-http", url: "https://a.test/mcp" },
+          settings: {
+            headers: [],
+            env: [],
+            metadata: [],
+            connectionTimeout: 30000,
+            requestTimeout: 60000,
+            taskTtl: 60000,
+            maxFetchRequests: 1000,
+            roots: [],
+            oauthClientId: "cid",
+            oauthClientSecret: "keep-me",
+            ...extra,
+          },
+        }),
+      }),
+    );
+
+  it("keeps the secret in a durable store when only the config changes", async () => {
+    // Not a session-store quirk — this loses the value from the keychain too,
+    // which is what makes it a bug in shipped behaviour rather than in the
+    // fallback added by #1950.
+    const store = new InMemorySecretStore();
+    const { app } = createRemoteApp({
+      dangerouslyOmitAuth: true,
+      mcpConfigPath: configPath,
+      initialConfig: { defaultEnvironment: {} },
+      secretStore: store,
+    });
+    await seed(app);
+    expect(await store.get("srv", SECRET_FIELD_OAUTH_CLIENT_SECRET)).toBe(
+      "keep-me",
+    );
+
+    const res = await app.request(
+      new Request("http://test/api/servers/srv", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          id: "srv",
+          config: { type: "streamable-http", url: "https://b.test/mcp" },
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(await store.get("srv", SECRET_FIELD_OAUTH_CLIENT_SECRET)).toBe(
+      "keep-me",
+    );
+    expect(readFileSync(configPath, "utf-8")).toContain("b.test");
+  });
+
+  it("still clears a secret the user actually cleared", async () => {
+    // The reconcile has to keep working when the caller *did* say something:
+    // an explicit settings apply with the field emptied must delete it.
+    const store = new InMemorySecretStore();
+    const { app } = createRemoteApp({
+      dangerouslyOmitAuth: true,
+      mcpConfigPath: configPath,
+      initialConfig: { defaultEnvironment: {} },
+      secretStore: store,
+    });
+    await seed(app);
+
+    const res = await app.request(
+      new Request("http://test/api/servers/srv", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          id: "srv",
+          settings: {
+            headers: [],
+            env: [],
+            metadata: [],
+            connectionTimeout: 30000,
+            requestTimeout: 60000,
+            taskTtl: 60000,
+            maxFetchRequests: 1000,
+            roots: [],
+            oauthClientId: "cid",
+            oauthClientSecret: "",
+          },
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(await store.get("srv", SECRET_FIELD_OAUTH_CLIENT_SECRET)).toBe(null);
+  });
+});
+
 describe("plaintext migration against a session-scoped store (#1950)", () => {
   // The container fallback selects an in-memory store in production. The
   // migration must not take that as licence to delete the durable copy: it

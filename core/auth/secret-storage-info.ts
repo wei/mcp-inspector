@@ -50,8 +50,12 @@ export interface SecretStorageInfo {
    * readable until then. Reporting the intent would tell that user their
    * secrets were encrypted while they were not.
    *
-   * Always false for the other kinds — a keychain is opaque to us and RAM
-   * is not "at rest" in the sense this flag is about.
+   * **File-only, and omitted entirely for the other kinds** — not "false".
+   * A keychain is opaque to us and RAM is not "at rest" in the sense this
+   * flag is about, so the producer leaves it off and
+   * `useInitialConfig.usableSecretStorage` rejects a descriptor that carries
+   * it on a non-file kind. Documenting it as "always false elsewhere" invited
+   * an API consumer to construct exactly the shape the web client discards.
    */
   plaintext?: boolean;
   /**

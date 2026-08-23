@@ -7,6 +7,13 @@
  * settings-modal footer has to be re-fetched afterwards, or the footer keeps
  * reporting the state it had at page load.
  *
+ * Lives in `lib/` rather than `utils/`: the combinator itself computes
+ * nothing, but what it exists to do is *sequence side effects* — a persist
+ * that writes to disk and a refetch that hits the network — which is the
+ * `lib` half of the repo's split. Judged the other way at first on the
+ * grounds that the function is a pure higher-order one; the rule is about
+ * what a module is for, not about whether its own body touches I/O.
+ *
  * It exists as a named unit rather than two inline `await …; refresh()` pairs
  * in `App.tsx` because of where the coverage gate can reach. `App.tsx` is
  * deliberately outside the coverage `include` (a ~4.5k-line composition root),
