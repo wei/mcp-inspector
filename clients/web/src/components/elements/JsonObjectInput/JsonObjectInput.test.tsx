@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { describe, it, expect, vi } from "vitest";
 import { act, screen } from "@testing-library/react";
-import type { JsonObject } from "@inspector/core/json/jsonUtils.js";
+import type { StrictJsonObject } from "@inspector/core/json/jsonUtils.js";
 import { renderWithMantine } from "../../../test/renderWithMantine";
 import { aceLabel, getAceText, setAceText } from "../../../test/aceEditor";
 import { JsonObjectInput } from "./JsonObjectInput";
@@ -13,10 +13,10 @@ function Harness({
   initial,
   onChange,
 }: {
-  initial: JsonObject;
-  onChange?: (v: JsonObject) => void;
+  initial: StrictJsonObject;
+  onChange?: (v: StrictJsonObject) => void;
 }) {
-  const [value, setValue] = useState<JsonObject>(initial);
+  const [value, setValue] = useState<StrictJsonObject>(initial);
   return (
     <>
       <JsonObjectInput
@@ -109,7 +109,7 @@ describe("JsonObjectInput", () => {
     // An external reset (switching servers, a reloaded catalog) must reach the
     // editor; an in-progress edit must not be overwritten by what it emitted.
     function Externally() {
-      const [value, setValue] = useState<JsonObject>({ a: 1 });
+      const [value, setValue] = useState<StrictJsonObject>({ a: 1 });
       return (
         <>
           <JsonObjectInput
@@ -132,7 +132,7 @@ describe("JsonObjectInput", () => {
     // Regression: `echoed` used to hold only what this component last emitted,
     // so returning to a previously-shown value matched the stale entry and was
     // dismissed as our own echo, stranding the editor on B.
-    function Externally({ value }: { value: JsonObject }) {
+    function Externally({ value }: { value: StrictJsonObject }) {
       return (
         <JsonObjectInput ariaLabel={LABEL} value={value} onChange={() => {}} />
       );
@@ -206,6 +206,38 @@ describe("JsonObjectInput", () => {
       expect(document.getElementById(describedBy!)?.textContent).toMatch(
         /Must be a JSON object/,
       );
+    });
+
+    it("announces a supplied description, and keeps it when the draft breaks", async () => {
+      function WithDescription() {
+        const [value, setValue] = useState<StrictJsonObject>({});
+        return (
+          <JsonObjectInput
+            ariaLabel={LABEL}
+            description="Sent with every request"
+            value={value}
+            onChange={setValue}
+          />
+        );
+      }
+      renderWithMantine(<WithDescription />);
+
+      const described = () =>
+        (textarea().getAttribute("aria-describedby") ?? "")
+          .split(" ")
+          .filter(Boolean)
+          .map((id) => document.getElementById(id)?.textContent);
+
+      // Valid draft: described by the description alone.
+      expect(described()).toEqual(["Sent with every request"]);
+
+      // Invalid draft: the error joins it rather than replacing it — the
+      // description is still true, and dropping it would silently un-describe
+      // the control at the moment it needs explaining most.
+      await setAceText("[1]");
+      expect(described()).toHaveLength(2);
+      expect(described()[0]).toBe("Sent with every request");
+      expect(described()[1]).toMatch(/Must be a JSON object/);
     });
 
     it("clears the invalid marking once the text parses again", async () => {

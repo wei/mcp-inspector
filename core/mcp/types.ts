@@ -24,7 +24,11 @@ import type { OAuthClientProvider } from "@modelcontextprotocol/client";
 import type { Transport } from "@modelcontextprotocol/client";
 import type { InspectorLogger } from "../logging/logger.js";
 import type { AppElicitationRenderer } from "./appElicitation.js";
-import type { JsonObject, JsonValue } from "../json/jsonUtils.js";
+import type {
+  JsonValue,
+  StrictJsonObject,
+  StrictJsonValue,
+} from "../json/jsonUtils.js";
 import type {
   ClientConfig,
   EnterpriseManagedAuthIdpConfig,
@@ -112,7 +116,7 @@ export type StoredMCPServer = MCPServerConfig & {
    * existing `mcp.json` keeps working, but it is never written back — a
    * round-trip through the Inspector rewrites the field as an object.
    */
-  metadata?: JsonObject;
+  metadata?: StrictJsonObject;
   /**
    * Protocol era to negotiate with this server (`"legacy" | "auto" | "modern"`),
    * orthogonal to the transport `type`. Inspector-specific (no analog in the
@@ -374,6 +378,11 @@ export interface ServerState {
  * A `_meta` payload: a JSON object whose values may be any JSON, not just
  * strings (#1910).
  *
+ * {@link StrictJsonValue}, not `JsonValue`: the latter admits `undefined`,
+ * which `JSON.stringify` drops from an object and turns into `null` inside an
+ * array — so a value the type accepted would not be the value that reaches the
+ * server, contradicting the one promise this payload makes.
+ *
  * The MCP spec places no restriction on `_meta` value types and the SDK models
  * the field as a passthrough object, so the Inspector must be able to send —
  * and to record — nested objects, arrays, numbers, booleans and `null`. Used
@@ -381,7 +390,7 @@ export interface ServerState {
  * `InspectorClientOptions.defaultMetadata`) and the per-call metadata every
  * request verb accepts.
  */
-export type RequestMetadata = Record<string, JsonValue>;
+export type RequestMetadata = Record<string, StrictJsonValue>;
 
 /**
  * Represents a complete resource read invocation, including request parameters,

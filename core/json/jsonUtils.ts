@@ -15,6 +15,29 @@ export type JsonValue =
 export type JsonObject = { [key: string]: JsonValue };
 
 /**
+ * A JSON value that survives serialization unchanged — {@link JsonValue}
+ * without `undefined`.
+ *
+ * `JsonValue` admits `undefined` because it is also used for *arguments*, where
+ * it usefully means "this field was not supplied". That meaning does not carry
+ * to a payload the Inspector promises to transmit verbatim: `JSON.stringify`
+ * drops an `undefined` object member entirely and rewrites an `undefined` array
+ * element to `null`, so a value the type accepted is not the value that arrives.
+ *
+ * Used for `_meta` (#1910), whose whole contract is that any JSON the user
+ * writes reaches the wire as written.
+ */
+export type StrictJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | StrictJsonValue[]
+  | { [key: string]: StrictJsonValue };
+
+export type StrictJsonObject = { [key: string]: StrictJsonValue };
+
+/**
  * Widen a typed object to a generic string-keyed record so its keys can be
  * iterated or read/written generically. Many of the project's config/SDK types
  * (`StoredMCPServer`, `MCPServerConfig`, `pino.Logger`, DOM `Window`, …) have no

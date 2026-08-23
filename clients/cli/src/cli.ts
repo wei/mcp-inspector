@@ -24,6 +24,7 @@ import {
   parseHeaderPair,
 } from "@inspector/core/mcp/node/index.js";
 import type { JsonValue } from "@inspector/core/mcp/index.js";
+import type { StrictJsonValue } from "@inspector/core/json/jsonUtils.js";
 import {
   canonicalUrlHost,
   isAllInterfacesHost,
@@ -473,8 +474,8 @@ function buildHandoff(
 
 function parseKeyValuePair(
   value: string,
-  previous: Record<string, JsonValue> = {},
-): Record<string, JsonValue> {
+  previous: Record<string, StrictJsonValue> = {},
+): Record<string, StrictJsonValue> {
   const parts = value.split("=");
   const key = parts[0];
   const val = parts.slice(1).join("=");
@@ -485,9 +486,11 @@ function parseKeyValuePair(
     );
   }
 
-  let parsedValue: JsonValue;
+  // `StrictJsonValue`: `JSON.parse` cannot produce `undefined`, and these values
+  // become `_meta`, which must reach the wire exactly as written (#1910).
+  let parsedValue: StrictJsonValue;
   try {
-    parsedValue = JSON.parse(val) as JsonValue;
+    parsedValue = JSON.parse(val) as StrictJsonValue;
   } catch {
     parsedValue = val;
   }
@@ -735,8 +738,8 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
     promptName?: string;
     promptArgs?: Record<string, JsonValue>;
     logLevel?: LoggingLevel;
-    metadata?: Record<string, JsonValue>;
-    toolMetadata?: Record<string, JsonValue>;
+    metadata?: Record<string, StrictJsonValue>;
+    toolMetadata?: Record<string, StrictJsonValue>;
     cwd?: string;
     transport?: "sse" | "http" | "stdio";
     serverUrl?: string;

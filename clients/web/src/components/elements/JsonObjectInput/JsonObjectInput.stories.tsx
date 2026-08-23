@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, userEvent, within } from "storybook/test";
-import type { JsonObject } from "@inspector/core/json/jsonUtils.js";
+import { expect, userEvent, waitFor, within } from "storybook/test";
+import type { StrictJsonObject } from "@inspector/core/json/jsonUtils.js";
 import { JsonObjectInput } from "./JsonObjectInput";
 
 const LABEL = "Request metadata JSON";
@@ -15,8 +15,8 @@ const LABEL = "Request metadata JSON";
  * place Ace's keyboard behavior can be tested: the unit suite runs in
  * happy-dom, where Ace's hidden-textarea input path does not work at all.
  */
-function ControlledJsonObjectInput({ initial }: { initial: JsonObject }) {
-  const [value, setValue] = useState<JsonObject>(initial);
+function ControlledJsonObjectInput({ initial }: { initial: StrictJsonObject }) {
+  const [value, setValue] = useState<StrictJsonObject>(initial);
   return (
     <JsonObjectInput
       label="Request metadata"
@@ -40,6 +40,7 @@ function aceEditor(canvasElement: HTMLElement): {
   focus(): void;
   selectAll(): void;
   getValue(): string;
+  session: { getAnnotations(): { row: number; type: string }[] };
 } {
   const container = canvasElement.querySelector(".ace_editor");
   const editor = (
@@ -50,6 +51,7 @@ function aceEditor(canvasElement: HTMLElement): {
               focus(): void;
               selectAll(): void;
               getValue(): string;
+              session: { getAnnotations(): { row: number; type: string }[] };
             };
           };
         })
@@ -180,5 +182,36 @@ export const NotAnObject: Story = {
     await expect(
       await canvas.findByText(/Must be a JSON object/),
     ).toBeVisible();
+  },
+};
+
+/**
+ * The JSON worker marks the offending line in the gutter — the reason this
+ * component registers `worker-json` through `ace.config.setModuleUrl` with a
+ * Vite `?url` asset.
+ *
+ * Asserted because nothing else covers it: the worker runs out-of-process, so
+ * if its URL registration breaks, Ace fails to start it and silently falls back
+ * to no annotations. Every other test here — including the wrapper's own
+ * "Not valid JSON" message, which comes from our parser, not from Ace — would
+ * still pass while the gutter diagnostics quietly disappeared.
+ */
+export const AnnotatesTheOffendingLine: Story = {
+  args: { initial: {} },
+  play: async ({ canvasElement }) => {
+    await focusAndClear(canvasElement);
+    // A trailing comma on line 2: valid-looking until the closing brace, so the
+    // worker has to locate it rather than just reject the document.
+    await userEvent.keyboard('{{"a": 1,{Enter}}');
+    await waitFor(
+      async () => {
+        const annotations = aceEditor(canvasElement).session.getAnnotations();
+        await expect(annotations.length).toBeGreaterThan(0);
+        await expect(annotations.some((a) => a.type === "error")).toBe(true);
+      },
+      // The worker is asynchronous and debounced, so this needs a real wait
+      // rather than a tick.
+      { timeout: 5000 },
+    );
   },
 };

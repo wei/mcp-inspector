@@ -10,7 +10,7 @@ import "ace-builds/src-noconflict/theme-github_dark";
 // Without it Ace fetches `worker-json.js` from a path that does not exist in a
 // bundled app, silently loses its annotations, and logs a fetch error.
 import jsonWorkerUrl from "ace-builds/src-noconflict/worker-json.js?url";
-import type { JsonObject } from "@inspector/core/json/jsonUtils.js";
+import type { StrictJsonObject } from "@inspector/core/json/jsonUtils.js";
 import { useValueChange } from "../../../hooks/useValueChange";
 import { parseJsonObjectDraft } from "../../../utils/jsonObjectDraft";
 
@@ -19,13 +19,13 @@ import { parseJsonObjectDraft } from "../../../utils/jsonObjectDraft";
 ace.config.setModuleUrl("ace/mode/json_worker", jsonWorkerUrl);
 
 /** Two-space canonical form — the same shape the catalog file is written in. */
-function serialize(value: JsonObject): string {
+function serialize(value: StrictJsonObject): string {
   return JSON.stringify(value, null, 2);
 }
 
 export interface JsonObjectInputProps {
-  value: JsonObject;
-  onChange: (value: JsonObject) => void;
+  value: StrictJsonObject;
+  onChange: (value: StrictJsonObject) => void;
   label?: string;
   description?: string;
   /**
@@ -167,14 +167,29 @@ export function JsonObjectInput({
        synchronously on mount, so this effect always sees an element. */
     if (!element) return;
     element.id = wrapperId;
+
+    // Both the description and the error are rendered by the wrapper and both
+    // describe this control, so both ids belong here — a supplied description
+    // is otherwise never announced, and it must not be dropped just because the
+    // draft went invalid. Mantine renders each only when its prop is set, so
+    // referencing an absent one would point at nothing.
+    const describedBy = [
+      description === undefined ? null : `${wrapperId}-description`,
+      parsed.ok ? null : `${wrapperId}-error`,
+    ].filter((id) => id !== null);
+
+    if (describedBy.length > 0) {
+      element.setAttribute("aria-describedby", describedBy.join(" "));
+    } else {
+      element.removeAttribute("aria-describedby");
+    }
+
     if (parsed.ok) {
       element.removeAttribute("aria-invalid");
-      element.removeAttribute("aria-describedby");
     } else {
       element.setAttribute("aria-invalid", "true");
-      element.setAttribute("aria-describedby", `${wrapperId}-error`);
     }
-  }, [wrapperId, parsed.ok]);
+  }, [wrapperId, parsed.ok, description]);
 
   return (
     <Input.Wrapper

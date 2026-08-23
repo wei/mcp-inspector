@@ -1,15 +1,21 @@
-import type { JsonObject } from "@inspector/core/json/jsonUtils.js";
+import type { StrictJsonObject } from "@inspector/core/json/jsonUtils.js";
 
 /**
  * What a JSON-object editor's draft text currently means: the object to emit,
  * or why it cannot be emitted.
  */
 export type JsonObjectDraft =
-  | { ok: true; value: JsonObject }
+  | { ok: true; value: StrictJsonObject }
   | { ok: false; error: string };
 
-/** A plain JSON object, i.e. not an array and not a scalar. */
-export function isJsonObject(value: unknown): value is JsonObject {
+/**
+ * A plain JSON object, i.e. not an array and not a scalar.
+ *
+ * The `StrictJsonObject` narrowing is sound because the only caller parses with
+ * `JSON.parse`, whose output cannot contain `undefined` — the value that
+ * separates the strict type from `JsonValue`.
+ */
+export function isJsonObject(value: unknown): value is StrictJsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
