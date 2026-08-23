@@ -226,9 +226,13 @@ function footerTooltip(info: SecretStorageInfo): string | undefined {
  * The permanent "here is where your secrets go" strip at the bottom of the
  * Client Settings and Server Settings modals (#1950).
  *
- * Those two dialogs are the only places the Inspector accepts a secret —
- * an OAuth client secret, an enterprise IdP client secret, a stdio `env:`
- * value — so they are where the answer belongs. The alternatives were
+ * It appears wherever the Inspector accepts a secret — Client Settings (the
+ * enterprise IdP client secret), Server Settings (the per-server OAuth
+ * client secret and stdio `env:` values), and Server Config (stdio `env:`
+ * values again). This comment named only the first two until review round
+ * 20, and the dialog it omitted was the one taking secrets with no
+ * disclosure at all, so the wrong count here was the bug rather than a
+ * description of it. The alternatives were
  * considered and rejected: a startup banner is seen once, by whoever
  * started the process, possibly hours before anyone types anything; a
  * toast is seen once and then gone; a dismissible banner is, by design,

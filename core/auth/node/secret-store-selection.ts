@@ -39,6 +39,7 @@
  * stating that this directory is meant to survive.
  */
 
+import { randomUUID } from "node:crypto";
 import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -555,7 +556,12 @@ export async function absorbFileSecretsIntoKeyring(
   // The staged name carries the pid so two Inspectors starting together
   // cannot claim the same destination; whichever wins the rename does the
   // migration and the loser sees ENOENT and returns.
-  const staged = `${filePath}.migrating-${process.pid}`;
+  // A per-attempt nonce, not just the pid. `recoverOrphanedSnapshots`
+  // deliberately leaves an orphan in place when a live `secrets.json` also
+  // exists — and a pid-only name is reusable across restarts (pid 1 on every
+  // container start), so the next claim would `rename` straight over that
+  // orphan and permanently discard secrets it may uniquely hold.
+  const staged = `${filePath}.migrating-${process.pid}-${randomUUID()}`;
   try {
     await fs.rename(filePath, staged);
   } catch (err) {

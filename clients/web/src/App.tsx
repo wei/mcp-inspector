@@ -4591,21 +4591,31 @@ function App() {
         initialConfig={configModalTarget?.config}
         existingIds={existingIds}
         onClose={() => setConfigModal(null)}
-        onSubmit={onConfigSubmit}
+        // Wrapped like the settings persists: this submit carries stdio `env`
+        // values, so it can perform the pending plaintext-to-encrypted
+        // upgrade and change the descriptor the footer reports.
+        onSubmit={refreshingPersist(onConfigSubmit, refreshInitialConfig)}
+        secretStorage={secretStorage}
       />
       <ServerImportConfigModal
         opened={importConfigOpen}
         existingIds={existingIds}
         onClose={() => setImportConfigOpen(false)}
         onFetchSource={importSource}
-        onAddServer={addServerHighlighted}
-        onUpdateServer={updateServer}
+        onAddServer={refreshingPersist(
+          addServerHighlighted,
+          refreshInitialConfig,
+        )}
+        onUpdateServer={refreshingPersist(updateServer, refreshInitialConfig)}
       />
       <ServerImportJsonModal
         opened={importJsonOpen}
         existingIds={existingIds}
         onClose={() => setImportJsonOpen(false)}
-        onAddServer={addServerHighlighted}
+        onAddServer={refreshingPersist(
+          addServerHighlighted,
+          refreshInitialConfig,
+        )}
       />
       <ServerSettingsModal
         // Remount per open (and per target server) so the accordion resets to
