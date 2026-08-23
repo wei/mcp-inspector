@@ -46,13 +46,13 @@
  * demand if missing, as in smoke:cli.
  */
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
-import { setTimeout as delay } from "node:timers/promises";
 import { join, resolve } from "node:path";
 import { startProdWebServer } from "./lib/prod-web-server.mjs";
 import { stopChild } from "./lib/child-cleanup.mjs";
+import { startAnnouncedChild } from "./lib/announced-child.mjs";
 import { resolveNodeBin } from "./lib/resolve-node-bin.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
@@ -164,54 +164,30 @@ function ensureTestServer() {
 /**
  * Spawn the MCP App test server and wait for it to announce its URL.
  *
- * Both stdio channels are piped and scanned: server-composable.ts announces
- * readiness with `console.error`, so watching stdout alone never matches and
- * this times out with an empty diagnostic. Piping both also keeps the child's
- * noise out of the smoke's own output while still making it available in the
- * failure message.
+ * The spawn/readiness ownership lives in `lib/announced-child.mjs` so the
+ * failure path is testable: this smoke's happy path always gets the
+ * announcement, so nothing here could prove that a child which stays alive
+ * through the readiness timeout is still reachable by `shutdown()` — the case
+ * that used to orphan a live server holding its port (#2000). `onSpawn`
+ * publishes the child to `mcpServer` before the wait, so every throw path is
+ * covered by teardown.
  *
- * The child is published to `mcpServer` the moment it is spawned rather than
- * handed back on success, so `shutdown()` can stop it on every throw path.
- * Returning it only after the announcement matched left the readiness timeout
- * — a child that is alive but never announces — with no reachable handle, so
- * `process.exit(1)` orphaned a live server still holding its port. The
- * `spawnError` and `exited` paths never had that problem (the child is already
- * gone there), but they cost nothing to cover the same way.
+ * The announced URL is authoritative rather than the config's port:
+ * createTestServerHttp resolves through findAvailablePort(), which walks upward
+ * when the configured value is taken.
  */
 async function startMcpServer() {
-  const child = spawn(
-    process.execPath,
-    [composableServer, "--config", appConfig],
-    { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] },
-  );
-  mcpServer = child;
-  let out = "";
-  child.stdout.on("data", (d) => (out += d));
-  child.stderr.on("data", (d) => (out += d));
-  let exited = false;
-  let spawnError = null;
-  // A spawn failure (e.g. an unbuilt/renamed entry) emits `error`, NOT `exit` —
-  // and with no `error` listener Node throws it uncaught, replacing this smoke's
-  // diagnostic with a raw stack. `close` is listened to alongside `exit` for the
-  // same reason: it fires in cases `exit` does not, so a child that dies without
-  // an exit event can't leave the poll below spinning for the full 30s.
-  child.on("error", (err) => (spawnError = err));
-  child.on("exit", () => (exited = true));
-  child.on("close", () => (exited = true));
-
-  for (let attempt = 0; attempt < 120; attempt++) {
-    // Take the port the server actually bound, not the one we asked for.
-    const announced = out.match(/listening at (http:\/\/\S+)/i);
-    if (announced) return { url: announced[1] };
-    if (spawnError) {
-      throw new Error(
-        `could not spawn the MCP test server (${composableServer}): ${spawnError.message}`,
-      );
-    }
-    if (exited) throw new Error(`MCP test server exited early:\n${out}`);
-    await delay(250);
-  }
-  throw new Error(`MCP test server did not start within 30s:\n${out}`);
+  const { match } = await startAnnouncedChild({
+    command: process.execPath,
+    args: [composableServer, "--config", appConfig],
+    cwd: repoRoot,
+    pattern: /listening at (http:\/\/\S+)/i,
+    onSpawn: (child) => {
+      mcpServer = child;
+    },
+    what: `MCP test server (${composableServer})`,
+  });
+  return { url: match[1] };
 }
 
 /** base64url(JSON) — the appArgs encoding the deep link expects. */
