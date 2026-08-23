@@ -11,18 +11,38 @@
  * aside and enter alongside it.
  *
  * So the choice #2082 settles is not "lock versus no lock" but "hand-rolled
- * versus borrowed". `proper-lockfile` is the borrowed one: it is what npm
- * itself uses, and stale-takeover is precisely the problem it has already
- * solved — it re-`stat`s the lock directory after claiming it and gives the
- * lock up if the mtime is not the one it wrote, so a loser of the takeover
- * race releases rather than proceeding.
+ * versus borrowed". `proper-lockfile` is the borrowed one — what npm itself
+ * locks with — and it is worth being exact about what it does and does not
+ * buy, because the temptation is to overclaim it.
  *
- * **What this does not remove.** The optimistic verify in
- * {@link FileSecretStore.mutate} stays. A lock is an advisory convention
- * between participants that take it, so it orders Inspector against
- * Inspector and says nothing about an editor, a backup restore, or an
- * Inspector old enough to predate this file. The verify is also what covers
- * {@link withSecretFileLock} *declining* — see below.
+ * **What it makes exclusive.** `mkdir` is atomic, and a live holder refreshes
+ * the lock's mtime at `stale / 2` for as long as it lives, so its lock never
+ * becomes eligible for takeover. Two running Inspectors are therefore
+ * genuinely serialized: one holds, the other waits. That is the case #1950
+ * lost updates in, and it is closed.
+ *
+ * **What it does not.** Stale takeover is still not single-winner. Reading
+ * `lib/lockfile.js@4.1.2`: on `EEXIST` it `stat`s, and if stale it `rmdir`s
+ * and re-`mkdir`s — without checking that the directory it removed is the
+ * one it found stale. So a slow waiter can delete a fast waiter's *fresh*
+ * lock and claim a replacement, and both proceed. That is the identical race
+ * the hand-rolled version could not close, and it cannot be closed with what
+ * Node exposes (`renameat2(RENAME_EXCHANGE)`).
+ *
+ * What the library adds over the hand-rolled one is that the loser finds
+ * out. Its refresh tick compares the lock's mtime against the value it
+ * recorded at acquire, so a holder whose directory was replaced is marked
+ * `ECOMPROMISED` and told — see `onCompromised` below. The window is also
+ * narrow and conditional: it opens only after a holder *dies without
+ * releasing*, since nothing else lets a lock go stale.
+ *
+ * **Which is why the optimistic verify in {@link FileSecretStore.mutate}
+ * stays, and is not belt-and-braces.** It is what still catches a clobber
+ * inside that window. It also covers what no lock can: an advisory
+ * convention orders Inspector against Inspector and says nothing about an
+ * editor, a backup restore, or an Inspector old enough to predate this file
+ * — and it covers {@link withSecretFileLock} being unable to lock at all,
+ * see below.
  *
  * **Degrading rather than failing is deliberate.** The store's whole reason
  * for existing is a box where the usual mechanism is unavailable (no
@@ -42,6 +62,7 @@ import * as path from "node:path";
 // graph for the web runner); named imports off a CJS module depend on
 // lexer detection that esbuild and rollup disagree about.
 import properLockfile from "proper-lockfile";
+import { SecretStoreUnavailableError } from "./secret-store.js";
 
 /**
  * How long a lock may go untouched before another process may claim it.
@@ -55,14 +76,21 @@ import properLockfile from "proper-lockfile";
 const STALE_MS = 10_000;
 
 /**
- * How long a waiter will keep trying before giving up.
+ * How long a waiter keeps trying before giving up.
  *
- * The retry schedule below tops out around 3s of waiting. That is long
- * enough for any real mutation to finish (see above) and short enough that a
- * pathological case surfaces as a slow save rather than a hung one.
+ * This schedule sums to roughly 15s, and the number that matters is that it
+ * is comfortably **longer than {@link STALE_MS}**. A waiter that gives up
+ * first would abandon the save while the lock still belonged to a process
+ * that had already died — the takeover that resolves it becomes possible
+ * only once the lock goes stale, so a budget under 10s would turn a crashed
+ * Inspector into a failed save for every other one on the box.
+ *
+ * An uncontended acquire is one `mkdir` and pays none of this; the first
+ * retries are tens of milliseconds, so ordinary contention (a mutation is a
+ * read, an scrypt derivation and an atomic write) resolves imperceptibly.
  */
 const RETRY = {
-  retries: 8,
+  retries: 20,
   factor: 2,
   minTimeout: 20,
   maxTimeout: 1_000,
@@ -117,12 +145,7 @@ const describeError = (err: unknown): string =>
   err instanceof Error ? err.message : String(err);
 
 /**
- * Run `fn` holding an exclusive cross-process lock on `filePath`.
- *
- * The lock is `<filePath>.lock`, a directory beside the secrets file rather
- * than inside it — `proper-lockfile` never opens or truncates the file it
- * guards, so a lock that outlives its holder can only ever block a write,
- * never damage one.
+ * One `proper-lockfile` acquire against `target`, with the given retry policy.
  *
  * `realpath: false` is load-bearing: by default the library resolves the
  * target through `fs.realpath`, which fails `ENOENT` on a secrets file that
@@ -132,6 +155,36 @@ const describeError = (err: unknown): string =>
  * through different symlinks take different locks; the store resolves its
  * path once at construction and every caller goes through it, so that is a
  * shape this codebase does not produce.
+ */
+function acquire(
+  target: string,
+  retries: number | typeof RETRY,
+): Promise<() => Promise<void>> {
+  return properLockfile.lock(target, {
+    realpath: false,
+    stale: STALE_MS,
+    retries,
+    // The library's default `onCompromised` *throws* — from a timer, with no
+    // caller on the stack, so it lands as an uncaught exception and takes the
+    // process down. This is also the library's *only* signal for the
+    // stale-takeover race described at the top of this file — someone
+    // declared our lock stale and replaced it — so it is the one place a user
+    // learns the guarantee was lost. Worth saying; not worth killing an
+    // Inspector session over.
+    onCompromised: (err) =>
+      warnOnce(
+        `The lock on the secrets file at ${target} was taken over by another process while a write was in progress (${err.message}). If a secret you just saved is missing, save it again.`,
+      ),
+  });
+}
+
+/**
+ * Run `fn` holding an exclusive cross-process lock on `filePath`.
+ *
+ * The lock is `<filePath>.lock`, a directory beside the secrets file rather
+ * than inside it — `proper-lockfile` never opens or truncates the file it
+ * guards, so a lock that outlives its holder can only ever block a write,
+ * never damage one.
  *
  * Returns whatever `fn` returns. `fn` runs exactly once either way — the
  * lock's absence changes the guarantee, never whether the work happens.
@@ -156,25 +209,38 @@ export async function withSecretFileLock<T>(
   await fs.mkdir(path.dirname(target), { recursive: true }).catch(() => {});
   let release: (() => Promise<void>) | undefined;
   try {
-    release = await properLockfile.lock(target, {
-      realpath: false,
-      stale: STALE_MS,
-      retries: RETRY,
-      // The library's default `onCompromised` *throws* — from a timer, with
-      // no caller on the stack, so it lands as an uncaught exception and
-      // takes the process down. A compromised lock means someone declared
-      // ours stale and took it; the write in flight is at risk, which is
-      // worth saying and is not worth killing an Inspector session over.
-      onCompromised: (err) =>
-        warnOnce(
-          `The lock on the secrets file at ${target} was taken over by another process while a write was in progress (${err.message}). If a secret you just saved is missing, save it again.`,
-        ),
+    release = await acquire(target, 0).catch((err: unknown) => {
+      // **Retries are for contention, and only for contention.**
+      // `proper-lockfile` drives its whole acquire through `retry`, which
+      // re-attempts on *any* error — so a read-only `$HOME` would spend the
+      // full ~15s budget re-issuing an `mkdir` that fails identically every
+      // time, on every save, before degrading. Probing once with no retries
+      // separates the two answers at the cost of one syscall: `ELOCKED` is
+      // worth waiting out, an infrastructure failure is not.
+      if (!isHeldElsewhere(err)) throw err;
+      return acquire(target, RETRY);
     });
   } catch (err) {
+    // **`ELOCKED` is not a reason to degrade — it is the opposite.** It means
+    // the lock is working and something else demonstrably holds it right now,
+    // so running the body anyway would write alongside a *known* concurrent
+    // writer: the precise interleaving this exists to prevent, entered
+    // deliberately. Having already waited past the stale window (see
+    // {@link RETRY}), a holder still there is not one that crashed; it is one
+    // that is stuck. Refusing loses nothing — `set` reports it and the user
+    // retries — whereas proceeding can lose a secret while reporting success.
+    if (isHeldElsewhere(err)) {
+      throw new SecretStoreUnavailableError(
+        `Could not save to the secrets file at ${target}: another process has held the lock on it for over ${Math.round((RETRY.retries * RETRY.maxTimeout) / 1000)} seconds. Its secrets are intact; the value you just entered was not saved. If no other Inspector is running, remove ${target}.lock and try again.`,
+      );
+    }
+    // Everything else is the lock being *unavailable* rather than held — a
+    // read-only `$HOME`, a mount owned by another uid, a filesystem without
+    // `mkdir` semantics. There the choice is between degrading and refusing
+    // every save on a box that has no other way to keep a secret, and this
+    // store exists for exactly those boxes (#1848, #1905).
     warnOnce(
-      isHeldElsewhere(err)
-        ? `Another process has held the secrets file at ${target} for longer than this write was willing to wait, so the write went ahead without the lock. If two Inspectors are saving secrets at once, one of them may not be saved.`
-        : `Could not take a lock on the secrets file at ${target} (${describeError(err)}), so writes to it are not protected against another process writing at the same moment.`,
+      `Could not take a lock on the secrets file at ${target} (${describeError(err)}), so writes to it are not protected against another process writing at the same moment.`,
     );
     return fn();
   }

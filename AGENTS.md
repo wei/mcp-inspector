@@ -71,11 +71,15 @@ v2/main/
 │   │   │                               #   file it cannot decrypt rather than destroying it),
 │   │   │                               #   file-lock.ts (withSecretFileLock: the cross-process
 │   │   │                               #     mutual exclusion #2082 settled on — proper-lockfile,
-│   │   │                               #     borrowed rather than hand-rolled, because stale-takeover
-│   │   │                               #     is what three review rounds of a mkdir election failed to
-│   │   │                               #     get right; DEGRADES rather than throws when no lock can
-│   │   │                               #     be taken, since this store exists for boxes missing the
-│   │   │                               #     usual mechanism and must not gain a new way to fail),
+│   │   │                               #     borrowed rather than hand-rolled. Read its header before
+│   │   │                               #     citing it: it makes two LIVE Inspectors exclusive, and
+│   │   │                               #     does NOT make stale takeover single-winner — it makes the
+│   │   │                               #     loser detectable (ECOMPROMISED), which is the honest claim.
+│   │   │                               #     DEGRADES when no lock CAN be taken (read-only $HOME etc),
+│   │   │                               #     since this store exists for boxes missing the usual
+│   │   │                               #     mechanism; but THROWS on ELOCKED — a lock held by a live
+│   │   │                               #     writer is evidence the lock works, not licence to bypass
+│   │   │                               #     it — after waiting past the stale window),
 │   │   │                               #   and
 │   │   │                               #   secret-store-selection.ts (the POLICY: explicit
 │   │   │                               #   MCP_INSPECTOR_SECRET_STORE wins, else probe the keychain,
