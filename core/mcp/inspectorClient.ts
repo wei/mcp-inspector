@@ -1037,7 +1037,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   private mergeMeta(
     callMetadata?: RequestMetadata,
-  ): Record<string, string> | undefined {
+  ): RequestMetadata | undefined {
     const defaults = this.defaultMetadata;
     // Modern-era per-request log level (#1629): stamp the opt-in `_meta` key on
     // every request so the server emits `notifications/message` on this
@@ -1132,7 +1132,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   private aggregateListParams(
     metadata?: RequestMetadata,
-  ): { _meta: Record<string, string> } | undefined {
+  ): { _meta: RequestMetadata } | undefined {
     const effectiveMeta = this.mergeMeta(metadata);
     return effectiveMeta ? { _meta: effectiveMeta } : undefined;
   }
@@ -4279,7 +4279,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     const callParams: {
       name: string;
       arguments: Record<string, JsonValue>;
-      _meta?: Record<string, string>;
+      _meta?: RequestMetadata;
       task?: { ttl: number };
     } = {
       name: tool.name,

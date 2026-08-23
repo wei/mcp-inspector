@@ -234,7 +234,19 @@ export function normalizeStoredMetadata(
       }
       const { key, value } = entry as { key: string; value?: JsonValue };
       if (key.trim() === "") continue;
-      out[key] = value ?? "";
+      // `??`, not `||`: `null` is a legal `_meta` value and must survive the
+      // migration as `null`. Only a genuinely absent `value` becomes `""`.
+      //
+      // `defineProperty` rather than `out[key] = …` because a legacy key of
+      // `__proto__` would otherwise hit the prototype setter — silently
+      // dropping the entry (or, for an object value, mutating the prototype)
+      // instead of storing an own property under that name.
+      Object.defineProperty(out, key, {
+        value: value === undefined ? "" : value,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
     }
     return out;
   }

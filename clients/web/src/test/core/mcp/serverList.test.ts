@@ -1424,6 +1424,26 @@ describe("normalizeStoredMetadata (#1910)", () => {
     ).toEqual({ kept: "yes" });
   });
 
+  it("preserves an explicit null in a legacy pair rather than blanking it", () => {
+    // `null` is a legal `_meta` value, so the migration must not fold it into
+    // `""` — only a genuinely absent `value` defaults.
+    expect(normalizeStoredMetadata([{ key: "z", value: null }])).toEqual({
+      z: null,
+    });
+  });
+
+  it("stores a legacy `__proto__` key as an own property", () => {
+    // Plain assignment would hit the prototype setter: the entry would vanish
+    // (and an object value would mutate the prototype) instead of being stored.
+    const out = normalizeStoredMetadata([
+      { key: "__proto__", value: { polluted: true } },
+    ]);
+    expect(Object.hasOwn(out, "__proto__")).toBe(true);
+    expect(out["__proto__"]).toEqual({ polluted: true });
+    expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
   it("reads a legacy pair with no value as an empty string", () => {
     expect(normalizeStoredMetadata([{ key: "k" }])).toEqual({ k: "" });
   });
@@ -1460,18 +1480,19 @@ describe("normalizeStoredMetadata (#1910)", () => {
   it("migrates a legacy file to the object shape on the next write", () => {
     // Read side accepts the pair array; write side emits only the object, so
     // one round-trip is the migration.
-    const entries = mcpConfigToServerEntries({
+    // The legacy on-disk shape no longer matches `MCPConfig` — that is what
+    // the test is about — so the fixture is untyped and cast once where it
+    // crosses into the typed parser, the same boundary a real file crosses.
+    const legacyFile: unknown = {
       mcpServers: {
         legacy: {
           type: "streamable-http",
           url: "https://x.test/mcp",
-          metadata: [{ key: "tenant", value: "acme" }] as unknown as Record<
-            string,
-            never
-          >,
+          metadata: [{ key: "tenant", value: "acme" }],
         },
       },
-    });
+    };
+    const entries = mcpConfigToServerEntries(legacyFile as MCPConfig);
     expect(entries[0]?.settings?.metadata).toEqual({ tenant: "acme" });
     const round = serverEntriesToMcpConfig(entries);
     expect(round.mcpServers.legacy?.metadata).toEqual({ tenant: "acme" });
