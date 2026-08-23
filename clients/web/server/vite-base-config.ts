@@ -34,6 +34,14 @@ const NODE_ONLY_OPTIMIZE_DEPS_EXCLUDE = [
   // excluding it keeps Vite's dep scanner from chasing into the
   // platform-specific binaries during dev startup.
   "@napi-rs/keyring",
+  // `proper-lockfile` is reached only through `core/auth/node/file-lock.ts`
+  // — the secrets file's cross-process lock (#2082) — which the Hono
+  // `/api/servers` handlers pull in via `core/auth/node/file-secret-store.ts`.
+  // Same node-only import chain as `atomically` above, and the same reason:
+  // it is CJS with a `graceful-fs`/`signal-exit`/`retry` graph that Vite's
+  // dev scanner has no business walking. Note the tsup `external` lists do
+  // **not** cover this — they configure the production bundles, not `vite dev`.
+  "proper-lockfile",
 ] as const;
 
 export function getViteBaseConfig() {

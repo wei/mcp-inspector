@@ -68,7 +68,28 @@ v2/main/
 │   │   │                               #   throws and the routes turn into a 503, and the keychain
 │   │   │                               #   probe), file-secret-store.ts (0600 JSON, AES-256-GCM when
 │   │   │                               #   MCP_INSPECTOR_SECRET_KEY is set — refuses to overwrite a
-│   │   │                               #   file it cannot decrypt rather than destroying it), and
+│   │   │                               #   file it cannot decrypt rather than destroying it),
+│   │   │                               #   file-lock.ts (withSecretFileLock: the cross-process
+│   │   │                               #     mutual exclusion #2082 settled on — proper-lockfile,
+│   │   │                               #     borrowed rather than hand-rolled. Read its header before
+│   │   │                               #     citing it: it makes two LIVE Inspectors exclusive, and
+│   │   │                               #     does NOT make stale takeover single-winner. proper-lockfile
+│   │   │                               #     detects a takeover only on its 5s refresh tick, which an
+│   │   │                               #     ordinary sub-second mutation never reaches, and its release
+│   │   │                               #     is an unconditional rmdir (as is its signal-exit handler) —
+│   │   │                               #     so withSecretFileLock passes a GUARDED options.fs, the one
+│   │   │                               #     seam both removal paths share, refusing to delete a lock
+│   │   │                               #     that is no longer ours (inode+birthtime). That NARROWS the
+│   │   │                               #     window, it does not close it — still check-then-act across
+│   │   │                               #     processes. BEST-EFFORT throughout: do not write that a
+│   │   │                               #     compromised holder is always told, or that the winner's
+│   │   │                               #     lock is always preserved.
+│   │   │                               #     DEGRADES when no lock CAN be taken (read-only $HOME etc),
+│   │   │                               #     since this store exists for boxes missing the usual
+│   │   │                               #     mechanism; but THROWS on ELOCKED — a lock held by a live
+│   │   │                               #     writer is evidence the lock works, not licence to bypass
+│   │   │                               #     it — after waiting past the stale window),
+│   │   │                               #   and
 │   │   │                               #   secret-store-selection.ts (the POLICY: explicit
 │   │   │                               #   MCP_INSPECTOR_SECRET_STORE wins, else probe the keychain,
 │   │   │                               #   else fall back LOUDLY — to memory in a container with
@@ -227,6 +248,8 @@ The same **placement** rule covers anything reached only through **root-owned co
 - A package `core/` imports at runtime belongs in root **`dependencies`**. The client builds bundle `core/` but externalize npm packages, so a published install resolves them from the root manifest — and devDependencies are not installed for consumers, so a runtime import parked there breaks the published package while passing every local check.
 - A package only the tests, the test servers, or the build tooling need belongs in **`devDependencies`** — `express`, added there by #1970.
 - `yaml` is in `dependencies` today even though its only importer is `test-servers/src/load-config.ts`. Left as-is deliberately (moving it changes what ships, which is not a docs change); if you touch it, confirm no published path reads YAML first.
+
+**A root-declared package that `core/` imports at runtime must also be named in each client's bundler `external` list.** tsup and Vite externalize what the *client's* `package.json` declares, and a root-only dependency is in none of them — so it gets **bundled**, silently, and the placement rule above is what guarantees every such package is root-only. For a CJS package inlined into an ESM bundle that is fatal rather than merely wasteful: esbuild leaves a `Dynamic require of "path" is not supported` shim that throws at *import* time, so the binary dies before it parses a flag. `proper-lockfile` hit exactly that in #2082; `@napi-rs/keyring` is listed in all three for the same reason. The three lists are `clients/cli/tsup.config.ts`, `clients/tui/tsup.config.ts`, and `clients/web/tsup.runner.config.ts` — add a new package to **all** of them, since which client reaches it is a function of what `core/` imports, not of what the client's own code names.
 
 **A dependency that renders React components must be bundled into the client that uses it, and is then not a root dependency.** An externalized package resolves its own `react` from wherever npm placed **it** in the consumer's tree, and npm places a package beside a React satisfying *that package's* peer range — looser than ours in every case here, which is all it takes to split React. `ink-form` and `ink-scroll-view` declare `">=18"`, satisfied by a consumer's React 18 while our React 19 nests underneath: the bundle renders through one React, those packages call hooks on another, and the TUI crashes on the first hook (#1952). Both are inlined by `clients/tui/tsup.config.ts` (`noExternal`) and declared only in `clients/tui/package.json`, where the build resolves them — declaring an inlined package at the root would just make consumers install a second, unused copy.
 

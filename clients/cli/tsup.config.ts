@@ -21,6 +21,13 @@ export default defineConfig({
   noExternal: [/^@inspector\/core/],
   external: [
     "@napi-rs/keyring",
+    // Root-declared (see the repo's dependency-placement rule) and CJS, which
+    // is the combination that bites: tsup externalizes what the *client's*
+    // package.json declares, so a root-only dependency is bundled unless named
+    // here — and inlining a CJS module into an ESM bundle leaves esbuild's
+    // `Dynamic require of "path" is not supported` shim, which throws at
+    // import time and takes the whole binary down before it parses a flag.
+    "proper-lockfile",
     "@modelcontextprotocol/client",
     "@modelcontextprotocol/core",
     "commander",

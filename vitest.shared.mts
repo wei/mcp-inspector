@@ -101,6 +101,17 @@ export function vitestSharedPaths(clientDir: string) {
       find: /^yaml$/,
       replacement: path.resolve(repoRoot, "node_modules/yaml"),
     },
+    // Same reasoning, one layer in: `proper-lockfile` is reached only through
+    // `core/` (the secrets file's cross-process lock, #2082), which is the
+    // other root-owned tree with no manifest of its own. Resolution finds the
+    // root copy on its own today — nothing declares it in a client — and this
+    // pin is what keeps that from depending on nothing ever arriving as some
+    // client's transitive dependency, which would otherwise give a test two
+    // copies of a module whose whole job is a single registry of held locks.
+    {
+      find: /^proper-lockfile$/,
+      replacement: path.resolve(repoRoot, "node_modules/proper-lockfile"),
+    },
   ];
 
   const projectResolve = {
