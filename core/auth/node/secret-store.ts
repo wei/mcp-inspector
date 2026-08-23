@@ -366,6 +366,21 @@ export interface SecretStore {
     requests: SecretBulkRequest[],
   ): Promise<Record<string, Record<string, string>>>;
   set(serverId: string, field: string, value: string): Promise<void>;
+  /**
+   * Write several of one server's fields in a single pass.
+   *
+   * The write-side twin of {@link getMany}, and the same shape of problem:
+   * `FileSecretStore.set` costs a whole-file read, decrypt, encrypt, write
+   * and verifying read *per call*, all serialized. A settings save resends
+   * the server's full `env` map even when the user edited something
+   * unrelated, so an entry with N secret fields paid roughly `3N` scrypt
+   * derivations on every debounced save — a stall that grows with the
+   * environment rather than with the edit.
+   *
+   * Optional: {@link secretStoreSetMany} falls back to parallel `set` calls,
+   * which is what the keychain wants (independent native round-trips).
+   */
+  setMany?(serverId: string, values: Record<string, string>): Promise<void>;
   /** No-op if no entry exists. */
   delete(serverId: string, field: string): Promise<void>;
   /** Remove every secret stored for this server id (called on DELETE /api/servers/:id). */
@@ -591,6 +606,26 @@ export async function secretStoreGetMany(
     }),
   );
   return out;
+}
+
+/**
+ * Write several of one server's fields, using the store's bulk path when it
+ * has one. Falls back to parallel `set`s.
+ *
+ * The fallback keeps `set`'s contract: `Promise.all` surfaces the first
+ * rejection, which is what the routes translate into a 503.
+ */
+export async function secretStoreSetMany(
+  store: SecretStore,
+  serverId: string,
+  values: Record<string, string>,
+): Promise<void> {
+  if (store.setMany) return store.setMany(serverId, values);
+  await Promise.all(
+    Object.entries(values).map(([field, value]) =>
+      store.set(serverId, field, value),
+    ),
+  );
 }
 
 export async function secretStoreIsDurable(

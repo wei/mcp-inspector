@@ -2727,6 +2727,63 @@ describe("plaintext migration against a session-scoped store (#1950)", () => {
     expect(saidSessionWarning()).toHaveLength(1);
   });
 
+  it("keeps the plaintext on disk through a later unrelated settings edit", async () => {
+    // The gap round 19 found. The GET migration withheld the strip for a
+    // session store, but the *write* paths did not — and the GET returns the
+    // rehydrated secret to the settings form, which resends the whole object
+    // on any edit. So changing a timeout wrote the stripped shape, moving the
+    // only durable copy into RAM to be lost at exit. The user changed a
+    // timeout and lost a client secret, with everything reporting success.
+    const { app } = createRemoteApp({
+      dangerouslyOmitAuth: true,
+      mcpConfigPath: configPath,
+      initialConfig: { defaultEnvironment: {} },
+      secretStore: new SessionSecretStore(),
+    });
+
+    // Read it the way the UI does — this is what fills the form.
+    const listed = (await (
+      await app.request(new Request("http://test/api/servers"))
+    ).json()) as MCPConfig;
+    expect(
+      (listed.mcpServers.srv as { oauth?: { clientSecret?: string } }).oauth
+        ?.clientSecret,
+    ).toBe("must-survive");
+
+    // Now save an unrelated change, resending the settings verbatim.
+    const res = await app.request(
+      new Request("http://test/api/servers/srv", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          id: "srv",
+          config: { type: "streamable-http", url: "https://x.test/mcp" },
+          settings: {
+            headers: [],
+            env: [],
+            metadata: [],
+            connectionTimeout: 45000,
+            requestTimeout: 60000,
+            taskTtl: 60000,
+            maxFetchRequests: 1000,
+            roots: [],
+            oauthClientId: "cid",
+            oauthClientSecret: "must-survive",
+          },
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    // The durable copy is still on disk. Exiting now loses nothing.
+    const onDisk = JSON.parse(readFileSync(configPath, "utf-8")) as {
+      mcpServers: Record<string, { oauth?: { clientSecret?: string } }>;
+    };
+    expect(onDisk.mcpServers.srv?.oauth?.clientSecret).toBe("must-survive");
+    // And the unrelated edit did land.
+    expect(readFileSync(configPath, "utf-8")).toContain("45000");
+  });
+
   it("aborts the migration when the keychain read fails, preserving mcp.json", async () => {
     // The keychain-wins lookup used the tolerant `get`, so an unreadable
     // keychain read as "nothing there" — and the write that followed would

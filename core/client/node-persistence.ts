@@ -121,7 +121,18 @@ export async function writeClientConfigStore(
       SECRET_FIELD_IDP_CLIENT_SECRET,
     );
   }
-  await writeStoreFile(filePath, serializeStore(stripped));
+  // What actually goes to disk. The read-path migration already withholds
+  // the strip for a session-scoped store, but the *write* path did not — so
+  // saving any unrelated field (a CIMD URL, an issuer) round-tripped the
+  // rehydrated secret through the form and then wrote the stripped shape,
+  // moving the only durable copy into RAM to be lost at exit. The two paths
+  // have to agree: while the store cannot outlive the process, `client.json`
+  // stays the durable copy.
+  const durable = await secretStoreIsDurable(secretStore);
+  await writeStoreFile(
+    filePath,
+    serializeStore(durable ? stripped : validated),
+  );
 }
 
 /** Remove client.json and the install-level IdP secret from the keychain. */

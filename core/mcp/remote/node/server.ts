@@ -66,6 +66,7 @@ import { createRemoteAuthProvider } from "./tokenAuthProvider.js";
 import { API_SERVER_ENV_VARS } from "../constants.js";
 import {
   secretStoreGetMany,
+  secretStoreSetMany,
   secretStoreGetStrict,
   secretStoreIsDurable,
   SecretStoreUnavailableError,
@@ -1886,11 +1887,11 @@ export function createRemoteApp(
     id: string,
     secrets: Record<string, string>,
   ): Promise<void> => {
-    await Promise.all(
-      Object.entries(secrets).map(([field, value]) =>
-        secretStore.set(id, field, value),
-      ),
-    );
+    // One pass for the entry's whole secret set. The settings form resends a
+    // server's full `env` map on any edit, and for the file store each `set`
+    // is a read-decrypt-encrypt-write-verify cycle — so this is the
+    // difference between one of those and one per variable.
+    await secretStoreSetMany(secretStore, id, secrets);
   };
 
   // Fetch every keychain value an entry could need into a flat record
@@ -2098,6 +2099,26 @@ export function createRemoteApp(
     await Promise.all(fields.map((field) => secretStore.delete(id, field)));
   };
 
+  /**
+   * The entry that actually goes to disk.
+   *
+   * `stripped` while the store outlives the process, `built` (secrets and
+   * all) while it does not. The GET migration already withheld its strip for
+   * a session-scoped store; the POST/PUT paths did not, so saving any
+   * unrelated setting round-tripped the rehydrated secret through the form
+   * and then wrote the stripped shape — moving the only durable copy into
+   * RAM, where exiting loses it. The user changed a timeout and lost a
+   * client secret, with every operation reporting success.
+   *
+   * The two paths have to agree: while the store cannot outlive the process,
+   * `mcp.json` stays the durable copy.
+   */
+  const entryForDisk = async (
+    built: StoredMCPServer,
+    stripped: StoredMCPServer,
+  ): Promise<StoredMCPServer> =>
+    (await secretStoreIsDurable(secretStore)) ? stripped : built;
+
   const keychainErrorResponse = (
     c: Context,
     err: unknown,
@@ -2276,7 +2297,7 @@ export function createRemoteApp(
         // reusing; it's a silent no-op when the keychain is unavailable.
         await secretStore.deleteAllForServer(id);
         await writeKeychainEntriesFor(id, secrets);
-        current.mcpServers[id] = stripped;
+        current.mcpServers[id] = await entryForDisk(built, stripped);
         await writeMcpAndTrackMtime(serializeStore(current));
         return c.json({ ok: true });
       });
@@ -2513,10 +2534,11 @@ export function createRemoteApp(
           }
         }
         const { stripped, secrets } = extractSecretsFromStored(built);
+        const onDisk = await entryForDisk(built, stripped);
         const next: MCPConfig = { mcpServers: {} };
         for (const [key, val] of Object.entries(current.mcpServers)) {
           if (key === originalId) {
-            next.mcpServers[newId] = stripped;
+            next.mcpServers[newId] = onDisk;
           } else {
             next.mcpServers[key] = val;
           }

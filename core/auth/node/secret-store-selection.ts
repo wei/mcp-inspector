@@ -58,6 +58,7 @@ import {
   parseAccount,
   probeKeyringAvailable,
   secretStoreGetMany,
+  secretStoreSetMany,
   type SecretBulkRequest,
   secretStoreGetStrict,
   secretStoreIsDurable,
@@ -531,8 +532,64 @@ export async function absorbFileSecretsIntoKeyring(
   const filePath = defaultSecretFilePath();
   if (!fsSync.existsSync(filePath)) return;
 
-  const file = new FileSecretStore({ filePath });
-  await handOff(file, filePath, keyring);
+  // **Claim the file atomically before reading it.** Comparing its contents
+  // immediately before `rm` narrowed the window and could not close it: a
+  // writer that completes a `set` after the comparison and before the delete
+  // has its write verified, reports success, and then loses it — a *later*
+  // successful write destroyed, which is worse than the optimistic-write
+  // residual and, unlike that one, fixable here.
+  //
+  // `rename` is atomic and leaves the live path free. Everything after this
+  // point operates on a snapshot nobody else can reach, and a writer that
+  // recreates `secrets.json` in the meantime is simply untouched — its file
+  // is a different one, and the next run migrates it.
+  //
+  // The staged name carries the pid so two Inspectors starting together
+  // cannot claim the same destination; whichever wins the rename does the
+  // migration and the loser sees ENOENT and returns.
+  const staged = `${filePath}.migrating-${process.pid}`;
+  try {
+    await fs.rename(filePath, staged);
+  } catch {
+    // Someone else claimed it first, or it vanished. Either way there is
+    // nothing here to migrate and no file of ours to clean up.
+    return;
+  }
+
+  const file = new FileSecretStore({ filePath: staged });
+  // True only when every value reached the keychain *and* there was
+  // something to move — the one case where the snapshot is redundant.
+  const absorbed = await handOff(file, staged, keyring);
+
+  if (absorbed) {
+    try {
+      await fs.rm(staged, { force: true });
+      console.warn(
+        `\n[mcp-inspector] The OS keychain is available again. Secrets kept in ${filePath} while it was not have been moved into the keychain, and the file has been removed.`,
+      );
+    } catch {
+      // Every value is in the keychain; only the now-redundant snapshot
+      // remains. Not worth failing startup over, and keychain-wins makes the
+      // next attempt harmless.
+    }
+    return;
+  }
+
+  // Not fully migrated: put the snapshot back so the next run finds it.
+  // Claiming the file is what makes the delete safe; it must not also make a
+  // *failed* migration lose the file, which is what the claim exists to
+  // prevent one line further down.
+  try {
+    await fs.rename(staged, filePath);
+  } catch {
+    // The live path is occupied — a writer recreated it while we held the
+    // snapshot — so restoring would overwrite a newer file. Leave the
+    // snapshot and say exactly where it is: an operator-visible orphan is
+    // recoverable, and silently clobbering someone's write is not.
+    console.warn(
+      `\n[mcp-inspector] Could not restore ${staged} to ${filePath} because a new secrets file was written while the migration ran. Both files exist; the snapshot holds the secrets that were not migrated.`,
+    );
+  }
 }
 
 /**
@@ -556,7 +613,7 @@ async function handOff(
   file: FileSecretStore,
   filePath: string,
   keyring: SecretStore,
-): Promise<void> {
+): Promise<boolean> {
   let entries: Record<string, string> | null;
   try {
     entries = await file.readAll();
@@ -564,9 +621,13 @@ async function handOff(
     console.warn(
       `\n[mcp-inspector] The OS keychain is available again, but the secrets file at ${filePath} could not be read, so its contents were left there: ${err instanceof Error ? err.message : String(err)}`,
     );
-    return;
+    return false;
   }
-  if (!entries || Object.keys(entries).length === 0) return;
+  // Nothing to migrate. Report "do not delete" rather than "done": we moved
+  // no values out of this file, and its presence is what records which
+  // encryption mode this install settled on, so removing it would change
+  // that on the user's behalf for no gain.
+  if (!entries || Object.keys(entries).length === 0) return false;
 
   // A key that is not `serverId:field` cannot be addressed through the store
   // API, so it cannot be copied — which makes the hand-off incomplete by
@@ -600,65 +661,16 @@ async function handOff(
     console.warn(
       `\n[mcp-inspector] Could not move the secrets file at ${filePath} into the OS keychain, so it has been left in place: ${err instanceof Error ? err.message : String(err)}`,
     );
-    return;
+    return false;
   }
 
   if (!complete) {
     console.warn(
       `\n[mcp-inspector] Secrets from ${filePath} have been copied into the OS keychain, but at least one entry could not be read (its key is not in \`serverId:field\` form). The file has been left in place so nothing is lost.`,
     );
-    return;
+    return false;
   }
-
-  // Re-read immediately before deleting. Everything above is now in the
-  // keychain, but the file is written without a lock, so another Inspector
-  // may have added an entry since — and that entry has not been copied.
-  // Deleting on a stale read is how a `set` that reported success loses its
-  // value.
-  let latest: Record<string, string> | null;
-  try {
-    latest = await file.readAll();
-  } catch {
-    // Unreadable now, readable a moment ago: something changed it in a way
-    // this passphrase cannot open. Leave it — the copies are safe in the
-    // keychain and the file is the only record of whatever arrived.
-    console.warn(
-      `\n[mcp-inspector] Secrets from ${filePath} were copied into the OS keychain, but the file changed while that ran and can no longer be read, so it has been left in place.`,
-    );
-    return;
-  }
-  if (latest && !sameSecrets(entries, latest)) {
-    // Leave it for the next run rather than looping here: leaving the file
-    // costs nothing (keychain-wins makes the retry idempotent) while
-    // deleting it on a stale comparison costs a secret.
-    console.warn(
-      `\n[mcp-inspector] Secrets from ${filePath} were copied into the OS keychain, but the file changed while that ran, so it has been left in place and will be moved on the next run.`,
-    );
-    return;
-  }
-
-  try {
-    await fs.rm(filePath, { force: true });
-    console.warn(
-      `\n[mcp-inspector] The OS keychain is available again. Secrets kept in ${filePath} while it was not have been moved into the keychain, and the file has been removed.`,
-    );
-  } catch {
-    // Every value is in the keychain; only the now-redundant file remains.
-    // Not worth failing startup over, and the keychain-wins rule makes the
-    // next attempt harmless.
-  }
-}
-
-/** Do two secret maps hold exactly the same entries? */
-function sameSecrets(
-  a: Record<string, string>,
-  b: Record<string, string>,
-): boolean {
-  const ak = Object.keys(a);
-  if (ak.length !== Object.keys(b).length) return false;
-  return ak.every(
-    (k) => Object.prototype.hasOwnProperty.call(b, k) && a[k] === b[k],
-  );
+  return true;
 }
 
 /**
@@ -722,6 +734,12 @@ class DeferredSecretStore implements SecretStore {
   }
   async set(serverId: string, field: string, value: string): Promise<void> {
     await (await this.target()).set(serverId, field, value);
+  }
+  async setMany(
+    serverId: string,
+    values: Record<string, string>,
+  ): Promise<void> {
+    await secretStoreSetMany(await this.target(), serverId, values);
   }
   async delete(serverId: string, field: string): Promise<void> {
     await (await this.target()).delete(serverId, field);

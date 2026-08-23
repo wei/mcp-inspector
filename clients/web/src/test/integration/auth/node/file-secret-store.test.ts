@@ -10,6 +10,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
+import { existsSync as existsSyncFile } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
@@ -912,6 +913,63 @@ describe("getMany", () => {
       vi.doUnmock("node:crypto");
       vi.resetModules();
     }
+  });
+
+  it("setMany derives the key once, not three times per field", async () => {
+    // `set` is a read-decrypt-encrypt-write-verify cycle per call — roughly
+    // three derivations each — and the settings form resends a server's full
+    // env map on any edit, so a 10-variable server paid ~30 to save an
+    // unrelated timeout change.
+    vi.resetModules();
+    let derivations = 0;
+    vi.doMock("node:crypto", async () => {
+      const actual =
+        await vi.importActual<typeof import("node:crypto")>("node:crypto");
+      return {
+        ...actual,
+        default: actual,
+        scrypt: (...args: Parameters<typeof actual.scrypt>) => {
+          derivations++;
+          return actual.scrypt(...args);
+        },
+      };
+    });
+    try {
+      const mod =
+        await import("@inspector/core/auth/node/file-secret-store.js");
+      const store = new mod.FileSecretStore({
+        filePath: filePath(),
+        passphrase: "hunter2",
+      });
+      await store.set("srv", "env:SEED", "0");
+
+      derivations = 0;
+      await store.setMany("srv", {
+        "env:A": "1",
+        "env:B": "2",
+        "env:C": "3",
+      });
+      const bulk = derivations;
+
+      derivations = 0;
+      await store.set("srv", "env:D", "4");
+      const single = derivations;
+
+      // Three fields in one cycle must not cost more than one field does.
+      expect(bulk).toBeLessThanOrEqual(single);
+      expect(await store.get("srv", "env:A")).toBe("1");
+      expect(await store.get("srv", "env:C")).toBe("3");
+      expect(await store.get("srv", "env:SEED")).toBe("0");
+    } finally {
+      vi.doUnmock("node:crypto");
+      vi.resetModules();
+    }
+  });
+
+  it("setMany with nothing to write does not touch the file", async () => {
+    const store = new FileSecretStore({ filePath: filePath() });
+    await store.setMany("srv", {});
+    expect(existsSyncFile(filePath())).toBe(false);
   });
 
   it("is tolerant like get: an unreadable store yields no fields", async () => {

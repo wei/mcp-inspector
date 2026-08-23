@@ -857,23 +857,26 @@ describe("absorbFileSecretsIntoKeyring", () => {
     );
   });
 
-  it("declines to delete a file that changed while the hand-off ran", async () => {
-    // Read → copy → delete is no longer one transaction: the store dropped
-    // its cross-process lock in favour of optimistic writes, so another
-    // Inspector can complete a `set` between the read and the delete. That
-    // entry has not been copied, so deleting the file would discard a write
-    // that reported success. The hand-off re-reads immediately before the
-    // delete and backs off when the contents moved.
+  it("claims the file atomically, so a later write is not deleted", async () => {
+    // Round 19: the pre-delete comparison was a check-to-delete race. A
+    // writer completing a `set` *after* the comparison and before the `rm`
+    // had its write verified, reported success, and then lost it — a later,
+    // already-successful write destroyed, which is worse than the
+    // optimistic-write residual and, unlike that one, fixable.
+    //
+    // The file is now claimed by an atomic rename before anything reads it,
+    // so a writer that recreates `secrets.json` afterwards is untouched: its
+    // file is a different one and the next run migrates it.
     const filePath = await seedFile({ "srv:oauthClientSecret": "from-file" });
     process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
     const mod = await loadWithProbe(true);
 
-    // Stand in for the other Inspector: write to the file *during* the copy,
-    // which is exactly the window the old lock covered.
     const keyring = new InMemorySecretStore();
     const { FileSecretStore } =
       await import("@inspector/core/auth/node/file-secret-store.js");
+    // Stand in for the other Inspector: write to the live path *during* the
+    // copy — i.e. after the claim, in the window the old comparison missed.
     const original = keyring.set.bind(keyring);
     let intruded = false;
     keyring.set = async (id: string, field: string, value: string) => {
@@ -886,14 +889,18 @@ describe("absorbFileSecretsIntoKeyring", () => {
 
     await mod.absorbFileSecretsIntoKeyring(keyring);
 
-    // The file survives, and so does the entry that arrived late.
+    // The late write survives at the live path...
     expect(existsSync(filePath)).toBe(true);
     expect(
       await new FileSecretStore({ filePath }).get("other", "env:LATE"),
     ).toBe("z");
-    expect(warn.mock.calls.flat().join("\n")).toMatch(
-      /changed while that ran, so it has been left in place/,
+    // ...the migrated values reached the keychain...
+    expect(await keyring.get("srv", "oauthClientSecret")).toBe("from-file");
+    // ...and no staging file is left behind.
+    const leftovers = (await fs.readdir(path.dirname(filePath))).filter((f) =>
+      f.includes(".migrating-"),
     );
+    expect(leftovers).toEqual([]);
   });
 
   it("deletes the file when nothing changed under it", async () => {

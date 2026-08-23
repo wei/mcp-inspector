@@ -321,9 +321,13 @@ export class FileSecretStore implements SecretStore {
    * existing secrets sat in the clear — the precise reassurance this whole
    * subsystem exists not to give.
    *
-   * Reads the envelope only. It never decrypts, so it needs no passphrase
-   * and answers correctly even when the key is wrong or missing — which is
-   * also a state the UI has to describe rather than throw on.
+   * Reads the envelope, and for an encrypted one **attempts to open it**.
+   * Structure alone is not access: a well-formed file this passphrase cannot
+   * decrypt answers `null` from every `get` and refuses every `set`, so
+   * reporting it as a healthy "encrypted" store hands the quiet footer to
+   * exactly the state the unreadable one exists to warn about. The
+   * authentication costs one scrypt derivation per call, which is once per
+   * `/api/config`, and the decrypted bytes are discarded.
    *
    * `absent` and `unreadable` are kept apart deliberately. Collapsing them
    * (as a bare `null` did) means an existing file that is corrupt, or
@@ -781,6 +785,30 @@ export class FileSecretStore implements SecretStore {
       // changed.
       return null;
     }
+  }
+
+  /**
+   * One read-modify-write-verify cycle for a whole server's fields.
+   *
+   * `set` pays that cycle — and, encrypted, three scrypt derivations — per
+   * call, serialized behind this store's queue. The settings form resends a
+   * server's full `env` map on any edit, so a 10-variable stdio server spent
+   * ~30 derivations saving an unrelated timeout change.
+   */
+  async setMany(
+    serverId: string,
+    values: Record<string, string>,
+  ): Promise<void> {
+    if (Object.keys(values).length === 0) return;
+    await this.serialize(() =>
+      this.mutate((map) => {
+        const next = { ...map };
+        for (const [field, value] of Object.entries(values)) {
+          next[buildAccount(serverId, field)] = value;
+        }
+        return next;
+      }),
+    );
   }
 
   async set(serverId: string, field: string, value: string): Promise<void> {

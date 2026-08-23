@@ -224,3 +224,60 @@ describe("client node-persistence", () => {
     ).toBeNull();
   });
 });
+
+describe("session-scoped store keeps client.json durable (#1950 review r19)", () => {
+  it("does not strip the IdP secret when the store cannot outlive the process", async () => {
+    // The read-path migration already withheld its strip for a session
+    // store, but the write path did not — and `readClientConfigStore` hands
+    // the rehydrated secret to the form, which resends the whole object when
+    // an unrelated field changes. Saving a CIMD URL therefore moved the only
+    // durable copy into RAM, to be lost at exit.
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "client-durable-"));
+    const file = path.join(dir, "client.json");
+    try {
+      await writeClientConfigStore(
+        file,
+        {
+          enterpriseManagedAuth: {
+            enabled: true,
+            idp: {
+              issuer: "https://idp.example/",
+              clientId: "cid",
+              clientSecret: "must-survive",
+            },
+          },
+        },
+        new SessionSecretStore(),
+      );
+      expect(await fs.readFile(file, "utf-8")).toContain("must-survive");
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still strips against a durable store, so the guard is the difference", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "client-durable-"));
+    const file = path.join(dir, "client.json");
+    try {
+      await writeClientConfigStore(
+        file,
+        {
+          enterpriseManagedAuth: {
+            enabled: true,
+            idp: {
+              issuer: "https://idp.example/",
+              clientId: "cid",
+              clientSecret: "goes-to-the-store",
+            },
+          },
+        },
+        new InMemorySecretStore(),
+      );
+      expect(await fs.readFile(file, "utf-8")).not.toContain(
+        "goes-to-the-store",
+      );
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
