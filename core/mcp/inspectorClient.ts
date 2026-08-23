@@ -1439,7 +1439,13 @@ export class InspectorClient extends InspectorClientEventTarget {
     // an elicit option that enables no mode advertises nothing, and registering
     // regardless throws before the handshake.
     if (this.elicitationCapabilityAdvertised && this.client) {
-      const elicitHandler = (request: ElicitRequest): Promise<ElicitResult> => {
+      const elicitHandler = (
+        request: ElicitRequest,
+        // Structural, and only the one field this needs: the SDK's
+        // `ClientContext` carries much more, and naming it here would tie the
+        // handler to a type the bypass helper below does not thread through.
+        ctx?: { mcpReq?: { signal?: AbortSignal } },
+      ): Promise<ElicitResult> => {
         const paramsTask = (request.params as { task?: { ttl?: number } })
           ?.task;
         if (this.tasksCapabilityAdvertised && paramsTask != null) {
@@ -1528,7 +1534,19 @@ export class InspectorClient extends InspectorClientEventTarget {
           const taskResult: CreateTaskResult = { task: record.task };
           return Promise.resolve(taskResult as unknown as ElicitResult);
         }
-        return this.enqueuePendingElicitation(request, "server-request");
+        // `ctx.mcpReq.signal` aborts when the server cancels this request
+        // (`notifications/cancelled`). Threading it through means both answer
+        // surfaces — the native queue entry and an app-rendered elicitation's
+        // renderer — are torn down with the request, instead of a modal
+        // outliving work the server abandoned. The task-augmented branch above
+        // deliberately does NOT use it: that request is answered immediately
+        // with a `CreateTaskResult`, so its lifetime is the task's, which
+        // carries its own abort (see `ReceiverTaskRecord.abort`).
+        return this.enqueuePendingElicitation(
+          request,
+          "server-request",
+          ctx?.mcpReq?.signal,
+        );
       };
       this.client.setRequestHandler("elicitation/create", elicitHandler);
       // Registration, like the `setRequestHandler` above it — and the whole

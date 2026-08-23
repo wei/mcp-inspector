@@ -124,6 +124,15 @@ class ElicitTransport implements Transport {
     ]).finally(() => clearTimeout(timer));
   }
 
+  /** Deliver a server→client notification (no reply expected). */
+  notify(method: string, params?: Record<string, unknown>): void {
+    this.deliver({
+      jsonrpc: "2.0",
+      method,
+      ...(params && { params }),
+    } as unknown as JSONRPCMessage);
+  }
+
   private deliver(message: JSONRPCMessage): void {
     this.onmessage?.(message);
   }
@@ -589,6 +598,38 @@ describe("app-rendered elicitation routing (#1854)", () => {
       // An aborted request must NOT resurface in the native queue: the user
       // abandoned it, and the connection it belonged to is gone.
       expect(client.getPendingElicitations()).toHaveLength(0);
+    });
+
+    it("tears the app down when the server cancels the request", async () => {
+      // A direct server→client `elicitation/create` can be cancelled with
+      // `notifications/cancelled`; the SDK aborts `ctx.mcpReq.signal` for it.
+      // Without that signal threaded through, the modal and its bridge outlive
+      // the request and could answer work the server abandoned.
+      const transport = new ElicitTransport();
+      let aborted = false;
+      const client = await connectClient({
+        transport,
+        appElicitation: (request) =>
+          new Promise<ElicitResult>((_resolve, reject) => {
+            request.signal.addEventListener("abort", () => {
+              aborted = true;
+              reject(new Error("aborted"));
+            });
+          }),
+      });
+
+      void transport.elicit(32, appParams()).catch(() => {});
+      await vi.waitFor(() => expect(aborted).toBe(false));
+
+      transport.notify("notifications/cancelled", {
+        requestId: 32,
+        reason: "server changed its mind",
+      });
+
+      await vi.waitFor(() => expect(aborted).toBe(true));
+      // Not reopened natively: the request the user was answering is gone.
+      expect(client.getPendingElicitations()).toHaveLength(0);
+      await client.disconnect();
     });
 
     it("aborts a pending app elicitation on a mid-session transport close", async () => {
