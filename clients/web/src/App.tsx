@@ -111,6 +111,7 @@ import { usePagedPrompts } from "@inspector/core/react/usePagedPrompts.js";
 import { usePagedResources } from "@inspector/core/react/usePagedResources.js";
 import { usePaginatedList } from "./hooks/usePaginatedList";
 import { useLastPersistedSettings } from "./hooks/useLastPersistedSettings";
+import { useValueChange } from "./hooks/useValueChange";
 import type { ListPaginationControlsProps } from "./components/elements/ListPaginationControls/ListPaginationControls";
 import { useManagedResourceTemplates } from "@inspector/core/react/useManagedResourceTemplates.js";
 import { useManagedRequestorTasks } from "@inspector/core/react/useManagedRequestorTasks.js";
@@ -1175,15 +1176,19 @@ function App() {
   // Drop the optimistic override once the persisted value catches up (or the
   // active server changes), so the persisted setting is the resting source.
   //
-  // Keyed on the entry object as well as the value it carries: a rollback can
-  // set the override to a *concrete* value rather than clear it, and if a later
-  // successful read then reports the value the override replaced — an edit made
-  // outside the Inspector overtaking the write — neither the boolean nor the id
-  // changes and the UI stays stuck on the override. A read rebuilds the list, so
-  // a fresh entry is what makes every authoritative read supersede it (#2089).
-  useEffect(() => {
-    setPaginatedListsOverride(null);
-  }, [persistedPaginatedLists, activeServerId, activeServerEntry]);
+  // Keyed on the entry object rather than on the boolean it carries: the
+  // override can hold a *concrete* value (a rollback sets one instead of
+  // clearing), and if a later successful read reports the value that override
+  // replaced — an outside edit overtaking the write — the boolean and the
+  // server id are both unchanged and the UI stays stuck on it. Every successful
+  // read rebuilds the list, so the entry is the signal that supersedes it, and
+  // it subsumes the other two: the value is read off this entry, and switching
+  // servers selects a different one (#2089).
+  //
+  // Adjusted during render rather than in an effect, per this repo's rule
+  // against resetting state from render data in `useEffect` — the entry is
+  // referentially stable between reads, which is what `useValueChange` needs.
+  useValueChange(activeServerEntry, () => setPaginatedListsOverride(null));
   const paginatedLists = paginatedListsOverride ?? persistedPaginatedLists;
   // The malformed-entry report is written by the aggregate walk's salvage. In
   // paginated mode the tools/prompts/resources panels render the paged stores
@@ -3785,9 +3790,23 @@ function App() {
           // whatever is written next, since the `servers` entry it was derived
           // from will keep describing the old value if the reload behind this
           // write — or any later one — fails (#2089).
-          write.landed(next);
+          //
+          // Re-apply it when this write is the settled one: an overlapping
+          // toggle that failed *first* rolled the UI and the live client back
+          // to a baseline this write has since replaced, and if the list read
+          // behind this write failed too, nothing else would ever correct them.
+          const settled = write.landed(next);
+          if (settled && activeServerIdRef.current === activeServerId) {
+            setPaginatedListsOverride(next.paginatedLists ?? false);
+            inspectorClient?.setServerSettings(next);
+          }
         })
         .catch((err: unknown) => {
+          // This write is over and never reached disk, so it stops counting as
+          // in flight: an earlier write still running is the settled state once
+          // it lands, and is what re-applies the UI this rollback is about to
+          // set (#2089).
+          write.failed();
           // Persist failed: revert the optimistic override and roll the live
           // client setting back, so the UI and client reflect the value that's
           // actually on disk rather than the failed edit (#1721).
@@ -4191,10 +4210,18 @@ function App() {
       // flush can put two saves for one server in flight, and the later-issued
       // one describes disk however the two happen to finish (#2089).
       const write = lastPersistedSettings.begin(id);
-      await refreshingPersist(updateServerSettings, refreshInitialConfig)(
-        id,
-        value,
-      );
+      try {
+        await refreshingPersist(updateServerSettings, refreshInitialConfig)(
+          id,
+          value,
+        );
+      } catch (err) {
+        // Stop counting as in flight before the rejection goes on to
+        // `onError` — an earlier write still running settles the state once it
+        // lands, and cannot know that while this one looks pending (#2089).
+        write.failed();
+        throw err;
+      }
       // Recorded for the same reason the pagination toggle records its own
       // write: this is what disk holds now, and the `servers` entry it was
       // edited from will keep describing the previous value for as long as list

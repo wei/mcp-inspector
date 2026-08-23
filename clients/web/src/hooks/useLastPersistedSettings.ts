@@ -87,8 +87,22 @@ export interface SettingsWrite {
   /**
    * Record that this write reached disk. A no-op if a write issued after this
    * one has already been confirmed for the same server.
+   *
+   * Returns whether this write is now the **settled** state for that server —
+   * recorded, with no later write still in flight to describe disk after it.
+   * Callers that own UI derived from the setting use it to re-apply the value:
+   * an overlapping write that failed *first* will have rolled that UI back to a
+   * baseline this write has since replaced, and if the list read behind this
+   * one failed too, nothing else would ever correct it.
    */
-  landed: (written: InspectorServerSettings) => void;
+  landed: (written: InspectorServerSettings) => boolean;
+  /**
+   * Report that this write is over without reaching disk, so it stops counting
+   * as in flight. An earlier write that lands afterwards is then the settled
+   * state — which is exactly the order that leaves the UI on a rolled-back
+   * value nothing on disk holds.
+   */
+  failed: () => void;
 }
 
 interface WriteRecord {
@@ -108,6 +122,10 @@ export function useLastPersistedSettings(
   // record dropped by `resolve` can't be resurrected by a straggler that was
   // issued earlier: the high-water mark outlives the record it produced.
   const confirmedRef = useRef<Map<string, number>>(new Map());
+  // Issue orders still in flight per server, so a write that lands can tell
+  // whether it is the last word or whether something later will still report.
+  // A write leaves this set through `landed` or `failed` alike.
+  const pendingRef = useRef<Map<string, Set<number>>>(new Map());
   // Read the list through a ref so a write pairs with the entry as it stands
   // when it finishes, not the one captured when it was issued. Mirrored in an
   // effect rather than assigned during render: writing a ref mid-render is an
@@ -120,16 +138,29 @@ export function useLastPersistedSettings(
 
   const begin = useCallback((serverId: string): SettingsWrite => {
     const sequence = ++nextSequenceRef.current;
+    const pending = pendingRef.current.get(serverId) ?? new Set<number>();
+    pending.add(sequence);
+    pendingRef.current.set(serverId, pending);
+    const settle = () => {
+      pending.delete(sequence);
+    };
     return {
       landed: (written: InspectorServerSettings) => {
+        settle();
         const confirmed = confirmedRef.current.get(serverId) ?? 0;
         // A write issued after this one already reported; it describes disk
         // more recently, whichever of the two happened to finish first.
-        if (confirmed > sequence) return;
+        if (confirmed > sequence) return false;
         confirmedRef.current.set(serverId, sequence);
         const entry = serversRef.current.find((s) => s.id === serverId);
         recordsRef.current.set(serverId, { written, entry });
+        // Settled only while nothing later is still in flight — such a write
+        // will describe disk once it reports, so re-applying this value in the
+        // meantime would fight it.
+        for (const other of pending) if (other > sequence) return false;
+        return true;
       },
+      failed: settle,
     };
   }, []);
 

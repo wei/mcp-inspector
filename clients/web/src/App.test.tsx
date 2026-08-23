@@ -2522,6 +2522,61 @@ describe("App paginated list pagination toggle (#1721)", () => {
     expect(lastPush?.paginatedLists).toBe(true);
   });
 
+  it("re-applies a write that lands after an overlapping one failed (#2089)", async () => {
+    // The mirror of the test above, in the other settlement order: toggle 1
+    // (`true`) is still in flight when toggle 2 (`false`) fails, so the rollback
+    // resolves to the stale entry's `false` — correct at that instant, since
+    // nothing had landed. Toggle 1 then lands `true`. If its list reload failed
+    // too, no render will ever correct the UI, so the write that settles has to
+    // re-apply itself.
+    const user = userEvent.setup();
+    let landFirst: (() => void) | undefined;
+    let failSecond: ((err: Error) => void) | undefined;
+    const first = new Promise<void>((resolve) => {
+      landFirst = resolve;
+    });
+    const second = new Promise<void>((_resolve, reject) => {
+      failSecond = (err) => {
+        reject(err);
+      };
+    });
+    updateServerSettingsSpy
+      .mockImplementationOnce(() => first)
+      .mockImplementationOnce(() => second);
+
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    await user.click(screen.getByText("paginated-on"));
+    await user.click(screen.getByText("paginated-off"));
+    await waitFor(() =>
+      expect(updateServerSettingsSpy).toHaveBeenCalledTimes(2),
+    );
+
+    // Fail the second write first, then land the first.
+    await act(async () => {
+      failSecond?.(new Error("disk full"));
+      await second.catch(() => undefined);
+    });
+    expect(screen.getByTestId("tools-paginated")).toHaveTextContent("false");
+    await act(async () => {
+      landFirst?.();
+      await first;
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true"),
+    );
+    const client = clientInstances[0] as EventTarget & {
+      setServerSettings: ReturnType<typeof vi.fn>;
+    };
+    const lastPush = client.setServerSettings.mock.calls.at(-1)?.[0] as {
+      paginatedLists?: boolean;
+    };
+    expect(lastPush?.paginatedLists).toBe(true);
+  });
+
   it("lets a successful list read supersede a concrete rollback override (#2089)", async () => {
     // A rollback sets the override to a value rather than clearing it, so the
     // effect that drops it cannot key on the persisted boolean alone: if a

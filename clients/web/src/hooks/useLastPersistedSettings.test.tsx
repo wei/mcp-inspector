@@ -149,6 +149,35 @@ describe("useLastPersistedSettings", () => {
     expect(api.resolve("A")).toBe(newest);
   });
 
+  it("reports settled only for the last write issued", () => {
+    // The flag is what tells a caller it is safe to re-apply the value to the
+    // UI: while a later write is still in flight, that write will describe disk
+    // when it reports, and re-applying now would fight it.
+    const { api } = harness([entry("A", settings())]);
+    const first = api.begin("A");
+    expect(first.landed(settings({ paginatedLists: true }))).toBe(true);
+    const second = api.begin("A");
+    const third = api.begin("A");
+    expect(second.landed(settings({ paginatedLists: false }))).toBe(false);
+    expect(third.landed(settings({ paginatedLists: true }))).toBe(true);
+    // A superseded straggler is neither recorded nor settled.
+    expect(second.landed(settings({ paginatedLists: false }))).toBe(false);
+  });
+
+  it("treats an earlier write as settled once the later one has failed", () => {
+    // The order that leaves the UI wrong: the later write fails first, rolling
+    // the UI back to a baseline the earlier write then replaces on disk. Once
+    // the failed write stops counting as in flight, the earlier one settles and
+    // its caller can re-apply the value.
+    const { api } = harness([entry("A", settings())]);
+    const first = api.begin("A");
+    const second = api.begin("A");
+    second.failed();
+    const written = settings({ paginatedLists: true });
+    expect(first.landed(written)).toBe(true);
+    expect(api.resolve("A")).toBe(written);
+  });
+
   it("does not let a straggler resurrect a record a fresh read dropped", () => {
     // The high-water mark outlives the record, so an earlier write reporting
     // after `resolve` invalidated things cannot reinstate a superseded value.
