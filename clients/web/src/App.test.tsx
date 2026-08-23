@@ -1785,12 +1785,16 @@ describe("App roots live-apply on settings-dialog close", () => {
     });
 
     // Close applies the draft live — the state the flush leaves behind.
+    const fetchLog = fetchLogInstances.at(-1) as EventTarget & {
+      setMaxFetchRequests: ReturnType<typeof vi.fn>;
+    };
     await closeModal(user);
     await waitFor(() =>
       expect(client.setRoots).toHaveBeenCalledWith([
         { uri: "file:///rejected" },
       ]),
     );
+    expect(fetchLog.setMaxFetchRequests).toHaveBeenLastCalledWith(10);
     client.getRoots.mockReturnValue([{ uri: "file:///rejected" }]);
     client.setRoots.mockClear();
 
@@ -1800,10 +1804,14 @@ describe("App roots live-apply on settings-dialog close", () => {
       await draftOptions.onPersist("A", rejectedDraft).catch(() => undefined);
     });
 
-    // The whole live surface goes back to what landed, roots included.
+    // The whole live surface goes back to what landed — settings, roots, and
+    // the log size, each of which close had moved to the rejected draft.
     await waitFor(() => expect(client.setRoots).toHaveBeenCalledWith([]));
     expect(client.setServerSettings).toHaveBeenLastCalledWith(
       persistedSettings,
+    );
+    expect(fetchLog.setMaxFetchRequests).toHaveBeenLastCalledWith(
+      persistedSettings.maxFetchRequests,
     );
   });
 });
@@ -2825,6 +2833,39 @@ describe("App paginated list pagination toggle (#1721)", () => {
     expect(draftOptions.resolveInitial("A")).toEqual(
       expect.objectContaining({ paginatedLists: true }),
     );
+  });
+
+  it("builds the next client from the last write, not the stale entry (#2089)", async () => {
+    // Connecting is where the whole connection is configured, and it read the
+    // `servers` entry directly — so a save that landed while list reads were
+    // failing (including one made from the modal for a server that was not
+    // connected at the time) was undone by the next connect, which rebuilt the
+    // client from the frozen entry.
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+
+    const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+    if (!draftOptions) throw new Error("useSettingsDraft was never called");
+    const saved: InspectorServerSettings = {
+      ...settingsWithRoots([{ uri: "file:///saved" }]),
+      maxFetchRequests: 42,
+    };
+    await act(async () => {
+      await draftOptions.onPersist("A", saved);
+    });
+
+    // `servers` still reports the entry with no settings at all — what a failed
+    // reload leaves. The client must be built from the write that landed.
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+    const clientOptions = vi
+      .mocked(McpIndex.InspectorClient)
+      .mock.calls.at(-1)?.[1] as { roots?: { uri: string }[] } | undefined;
+    expect(clientOptions?.roots).toEqual([{ uri: "file:///saved" }]);
+    const fetchLogOptions = vi
+      .mocked(FetchLogModule.FetchRequestLogState)
+      .mock.calls.at(-1)?.[1] as { maxFetchRequests?: number } | undefined;
+    expect(fetchLogOptions?.maxFetchRequests).toBe(42);
   });
 
   it("lets a successful list read supersede a concrete rollback override (#2089)", async () => {

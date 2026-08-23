@@ -2522,7 +2522,16 @@ function App() {
       );
       // The settings node persisted in mcp.json for this server — distinct
       // from the InspectorClient options we're about to derive from it.
-      const savedSettings = server.settings;
+      //
+      // Through the tracker, not `server.settings` directly: the entry only
+      // advances on a successful list read, so a write that landed while reads
+      // were failing — including one made from the settings modal for a server
+      // that was not connected at the time — would otherwise be undone at the
+      // next connect, which builds the client from that frozen entry. This is
+      // the one place the whole connection is configured, so every construction
+      // path (connect, reconnect, OAuth resume) goes through it (#2089).
+      const savedSettings =
+        lastPersistedSettings.resolve(server.id) ?? server.settings;
       const activeIdp = getActiveEnterpriseManagedAuthIdp(clientConfig);
       const activeCimdUrl = getActiveCimdClientMetadataUrl(clientConfig);
       // Flatten the persisted settings into the InspectorClient options shape.
@@ -2694,6 +2703,7 @@ function App() {
       onBeforeOAuthRedirect,
       clientConfig,
       newAppElicitationSession,
+      lastPersistedSettings,
     ],
   );
 
