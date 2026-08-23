@@ -1163,7 +1163,7 @@ function App() {
   // What every settings write that landed on disk actually wrote, so a later
   // failed write can be rolled back to that rather than to a `servers` entry
   // frozen at the last successful list read (#2089).
-  const lastPersistedSettings = useLastPersistedSettings();
+  const lastPersistedSettings = useLastPersistedSettings(servers);
   // The active server's persisted paginated setting drives the display mode.
   // The sidebar toggle edits it (optimistically, below) and persists it.
   const persistedPaginatedLists =
@@ -3741,7 +3741,6 @@ function App() {
       // to have landed while that is the fresher account (#2089).
       const prevSettings = lastPersistedSettings.resolve(
         activeServerId,
-        current,
         current.settings ?? EMPTY_SETTINGS,
       );
       const next: InspectorServerSettings = {
@@ -3779,7 +3778,7 @@ function App() {
           // whatever is written next, since the `servers` entry it was derived
           // from will keep describing the old value if the reload behind this
           // write — or any later one — fails (#2089).
-          lastPersistedSettings.record(activeServerId, next, current);
+          lastPersistedSettings.record(activeServerId, next);
         })
         .catch((err: unknown) => {
           // Persist failed: revert the optimistic override and roll the live
@@ -4169,7 +4168,6 @@ function App() {
     // outside the coverage gate, so wiring written here is tested by nothing
     // (#1950 review r17).
     onPersist: async (id: string, value: InspectorServerSettings) => {
-      const entry = servers.find((s) => s.id === id);
       await refreshingPersist(updateServerSettings, refreshInitialConfig)(
         id,
         value,
@@ -4177,12 +4175,10 @@ function App() {
       // Recorded for the same reason the pagination toggle records its own
       // write (#2089): this is what disk holds now, and the `servers` entry it
       // was edited from will keep describing the previous value for as long as
-      // list reads keep failing. Both settings writers feed the one record, so
-      // a rollback in either takes the most recent write, not just the most
-      // recent write *of its own kind*. No entry means the modal was opened
-      // against a server the list doesn't have, and there is nothing for a
-      // later read to supersede.
-      if (entry) lastPersistedSettings.record(id, value, entry);
+      // list reads keep failing. Both settings writers feed the same per-server
+      // record, so a rollback in either takes the most recent write for that
+      // server, not just the most recent write *of its own kind*.
+      lastPersistedSettings.record(id, value);
     },
     // Surface failures via toast — the modal usually closes
     // immediately on user dismiss, so a silent fail-on-flush would
