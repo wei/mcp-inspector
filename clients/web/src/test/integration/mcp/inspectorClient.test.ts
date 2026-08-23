@@ -1579,11 +1579,13 @@ describe("InspectorClient", () => {
       await client.connect();
       await client.listTools();
 
-      const call = warn.mock.calls.find((c) =>
-        String(c[1]).includes("progressToken"),
+      // The offending key travels in the log's bindings, not in the message —
+      // the message is shared by every reserved member the sanitizer drops.
+      const call = warn.mock.calls.find(
+        (c) => (c[0] as { key?: string })?.key === "progressToken",
       );
       expect(call).toBeDefined();
-      expect(call![0]).toEqual({ received: "object" });
+      expect(call![0]).toEqual({ key: "progressToken", received: "object" });
       // Belt and braces: the secret must not appear anywhere in the record.
       expect(JSON.stringify(warn.mock.calls)).not.toContain("sk-live");
     });
