@@ -158,6 +158,26 @@ describe("JsonObjectInput", () => {
       return el;
     }
 
+    it("gives two instances distinct DOM ids", () => {
+      // react-ace uses `name` as the container id; a fixed value would put
+      // duplicate ids in the document as soon as a second editor renders.
+      renderWithMantine(
+        <>
+          <JsonObjectInput ariaLabel="First" value={{}} onChange={() => {}} />
+          <JsonObjectInput ariaLabel="Second" value={{}} onChange={() => {}} />
+        </>,
+      );
+      const containerIds = Array.from(
+        document.querySelectorAll(".ace_editor"),
+      ).map((n) => n.id);
+      const inputIds = Array.from(
+        document.querySelectorAll("textarea.ace_text-input"),
+      ).map((n) => n.id);
+      expect(containerIds).toHaveLength(2);
+      expect(new Set([...containerIds, ...inputIds]).size).toBe(4);
+      expect(containerIds.concat(inputIds).every((id) => id !== "")).toBe(true);
+    });
+
     it("lets the visible label focus the editor", () => {
       renderWithMantine(
         <JsonObjectInput

@@ -1,4 +1,10 @@
 import { Client } from "@modelcontextprotocol/client";
+// The protocol's own schemas for the reserved `_meta` members, so the client
+// validates against the SDK rather than a restatement of it that can drift.
+import {
+  ProgressTokenSchema,
+  RequestMetaSchema,
+} from "@modelcontextprotocol/core";
 import type {
   MCPServerConfig,
   StderrLogEntry,
@@ -382,23 +388,53 @@ function describeJsonType(value: unknown): string {
 /**
  * Whether a `_meta.progressToken` value is one the protocol allows.
  *
- * The spec (and the SDK's `ProgressTokenSchema`,
- * `z.union([z.string(), z.number().int()])`) constrains this reserved member to
- * a string or an **integer** — a float is as invalid as an object. Everything
- * else in `_meta` may be any JSON (#1910), which is exactly why this one key
- * needs its own check.
- *
- * `isSafeInteger`, not `isInteger`: zod 4's `.int()` rejects anything past
- * `Number.MAX_SAFE_INTEGER`, where the float64 representation is no longer the
- * integer it was written as. `Number.isInteger(2 ** 53)` is `true`, so the
- * looser check would pass a token the server then rejects — verified against
- * the pinned zod.
+ * Delegates to the SDK's own `ProgressTokenSchema` rather than restating it.
+ * A hand-rolled check drifts: this was `Number.isInteger` until review pointed
+ * out that zod 4's `.int()` rejects anything past `Number.MAX_SAFE_INTEGER`,
+ * so an unsafe integer passed here and was rejected by the server instead.
  */
 function isProgressToken(value: unknown): value is ProgressToken {
-  return (
-    typeof value === "string" ||
-    (typeof value === "number" && Number.isSafeInteger(value))
-  );
+  return ProgressTokenSchema.safeParse(value).success;
+}
+
+/**
+ * Drop the reserved `_meta` members whose value the protocol will not accept.
+ *
+ * Most of `_meta` is arbitrary JSON (#1910), but a few keys are **reserved**
+ * and carry their own schema — `progressToken` (`string | integer`) and
+ * `io.modelcontextprotocol/related-task` (`{ taskId: string }`) in the pinned
+ * SDK. Before the widening every value was a string, so only `progressToken`
+ * could even be wrong; now any of them can, and one bad reserved member makes a
+ * conforming server reject the **whole request** rather than ignore the key.
+ *
+ * Validated with the SDK's `RequestMetaSchema` instead of a hand-maintained
+ * list, which is the point: the schema is loose, so unknown keys pass through
+ * untouched, and a member the SDK constrains in a later release is covered here
+ * without anyone remembering to add it. Zod reports the offending top-level key
+ * as `issue.path[0]`, so only that member is removed — siblings survive, and
+ * the request stays well-formed because every reserved member is optional.
+ */
+function dropInvalidReservedMeta(
+  meta: RequestMetadata,
+  logger: InspectorLogger,
+): RequestMetadata {
+  const result = RequestMetaSchema.safeParse(meta);
+  if (result.success) return meta;
+
+  const cleaned = { ...meta };
+  for (const issue of result.error.issues) {
+    const key = issue.path[0];
+    if (typeof key !== "string" || !(key in cleaned)) continue;
+    // The key and the reason, never the value: `_meta` can carry credentials,
+    // and this logger is persisted by real clients (the TUI writes it to
+    // `~/.mcp-inspector/auth.log`).
+    logger.warn(
+      { key, received: describeJsonType(cleaned[key]) },
+      "Dropping reserved `_meta` member — it does not match the protocol schema.",
+    );
+    delete cleaned[key];
+  }
+  return cleaned;
 }
 
 const MODERN_RECONNECT_BASE_MS = 500;
@@ -1085,27 +1121,11 @@ export class InspectorClient extends InspectorClientEventTarget {
       ...(logMeta ?? {}),
       ...(callMetadata ?? {}),
     };
-    // `_meta` values are arbitrary JSON (#1910), but `progressToken` is a
-    // reserved member the spec constrains to `string | integer`
-    // (`ProgressTokenSchema = z.union([z.string(), z.number().int()])`). Now
-    // that a value can be an object, an array or a float, a bad one would ride
-    // out on the wire and a conforming server would reject the whole request —
-    // so drop the member rather than send something invalid. It is optional, so
-    // the request stays well-formed and simply asks for no progress. Warn,
-    // because a silently dropped key the user typed is worse than a noisy one.
-    if ("progressToken" in merged && !isProgressToken(merged.progressToken)) {
-      // Log the rejected value's *type*, never the value. `_meta` now carries
-      // arbitrary JSON, so an invalid `progressToken` can be an object holding
-      // credentials — and this logger is persisted by real clients (the TUI
-      // writes it to `~/.mcp-inspector/auth.log`). The type is what makes the
-      // warning actionable anyway; the value would only leak.
-      this.logger.warn(
-        { received: describeJsonType(merged.progressToken) },
-        "Dropping `_meta.progressToken` — expected a string or an integer.",
-      );
-      delete merged.progressToken;
-    }
-    return Object.keys(merged).length > 0 ? merged : undefined;
+    // Reserved members carry their own schemas even though the rest of `_meta`
+    // is arbitrary JSON, and one bad reserved value makes a conforming server
+    // reject the whole request. See `dropInvalidReservedMeta`.
+    const sanitized = dropInvalidReservedMeta(merged, this.logger);
+    return Object.keys(sanitized).length > 0 ? sanitized : undefined;
   }
 
   /**

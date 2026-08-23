@@ -1469,6 +1469,82 @@ describe("InspectorClient", () => {
       },
     );
 
+    it.each([
+      ["an array", [1]],
+      ["a string", "t1"],
+      ["an object with a non-string taskId", { taskId: 5 }],
+    ])(
+      "drops a related-task member that is %s, keeping its siblings",
+      async (_label, badRelatedTask) => {
+        // `progressToken` is not the only reserved member: the pinned SDK also
+        // constrains `io.modelcontextprotocol/related-task` to
+        // `{ taskId: string }`. A bad one makes a conforming server reject the
+        // whole request, so it is dropped the same way.
+        client = new InspectorClient(
+          {
+            type: "stdio",
+            command: serverCommand.command,
+            args: serverCommand.args,
+          },
+          {
+            environment: { transport: createTransportNode },
+            progress: false,
+            defaultMetadata: {
+              "io.modelcontextprotocol/related-task": badRelatedTask,
+              keep: "me",
+            },
+          },
+        );
+        const messageLogState = new MessageLogState(client);
+        await client.connect();
+        await client.listTools();
+
+        const req = messageLogState
+          .getMessages()
+          .find(
+            (m) =>
+              m.direction === "request" &&
+              (m.message as { method?: string }).method === "tools/list",
+          );
+        const meta = metaOf(req!);
+        expect(meta).not.toHaveProperty("io.modelcontextprotocol/related-task");
+        expect(meta.keep).toBe("me");
+        messageLogState.destroy();
+      },
+    );
+
+    it("keeps a well-formed related-task member", async () => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+          progress: false,
+          defaultMetadata: {
+            "io.modelcontextprotocol/related-task": { taskId: "task-1" },
+          },
+        },
+      );
+      const messageLogState = new MessageLogState(client);
+      await client.connect();
+      await client.listTools();
+
+      const req = messageLogState
+        .getMessages()
+        .find(
+          (m) =>
+            m.direction === "request" &&
+            (m.message as { method?: string }).method === "tools/list",
+        );
+      expect(metaOf(req!)["io.modelcontextprotocol/related-task"]).toEqual({
+        taskId: "task-1",
+      });
+      messageLogState.destroy();
+    });
+
     it("warns with the rejected progressToken's type, never its value", async () => {
       // This logger is persisted by real clients (the TUI writes it to
       // `~/.mcp-inspector/auth.log`), and an invalid `progressToken` can now be

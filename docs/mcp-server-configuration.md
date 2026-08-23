@@ -163,21 +163,21 @@ The file is the familiar MCP client-config shape — an `mcpServers` object keye
 
 These have no analog in the broader `mcp.json` ecosystem. Each is **omitted on write when it equals its default**, so a round-trip through the Inspector keeps the file diff minimal.
 
-| Field                                  | Default    | Meaning                                                                                                                                            |
-| -------------------------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `protocolEra`                          | `"legacy"` | `"legacy"` \| `"auto"` \| `"modern"` — which protocol era to negotiate, orthogonal to the transport                                                |
-| `modernLogLevel`                       | `"debug"`  | Per-request log level stamped on modern connections, or `"off"`. Legacy connections ignore it                                                      |
-| `roots`                                | —          | Roots advertised via the `roots` client capability; each is `{ uri, name? }`                                                                       |
-| `metadata`                             | —          | Default `_meta` payload merged into every outgoing request — a JSON object, values may be any JSON. Web and TUI only today; see the CLI note below |
-| `connectionTimeout` / `requestTimeout` | —          | Timeouts in ms                                                                                                                                     |
-| `taskTtl`                              | `60000`    | TTL in ms for tasks created via "Run as task" (`DEFAULT_TASK_TTL_MS`)                                                                              |
-| `autoRefreshOnListChanged`             | `false`    | Refresh lists automatically on `*/list_changed` instead of only flagging the indicator                                                             |
-| `paginatedLists`                       | `false`    | Fetch tools/resources/prompts one page at a time instead of auto-aggregating                                                                       |
-| `advertisedExtensions`                 | —          | Per-extension overrides for what the Inspector declares in `capabilities.extensions`                                                               |
-| `maxFetchRequests`                     | `1000`     | Network-log retention for this server (`DEFAULT_MAX_FETCH_REQUESTS`); `0` means unlimited                                                          |
-| `oauth`                                | —          | `{ clientId, clientSecret, scopes, authorizationParams, authorizationUrl, tokenUrl, enterpriseManaged, onInsufficientScope }`                      |
+| Field                                  | Default    | Meaning                                                                                                                                                                                     |
+| -------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `protocolEra`                          | `"legacy"` | `"legacy"` \| `"auto"` \| `"modern"` — which protocol era to negotiate, orthogonal to the transport                                                                                         |
+| `modernLogLevel`                       | `"debug"`  | Per-request log level stamped on modern connections, or `"off"`. Legacy connections ignore it                                                                                               |
+| `roots`                                | —          | Roots advertised via the `roots` client capability; each is `{ uri, name? }`                                                                                                                |
+| `metadata`                             | —          | Default `_meta` payload merged into every outgoing request — a JSON object; values may be any JSON except for the reserved keys noted below. Web and TUI only today; see the CLI note below |
+| `connectionTimeout` / `requestTimeout` | —          | Timeouts in ms                                                                                                                                                                              |
+| `taskTtl`                              | `60000`    | TTL in ms for tasks created via "Run as task" (`DEFAULT_TASK_TTL_MS`)                                                                                                                       |
+| `autoRefreshOnListChanged`             | `false`    | Refresh lists automatically on `*/list_changed` instead of only flagging the indicator                                                                                                      |
+| `paginatedLists`                       | `false`    | Fetch tools/resources/prompts one page at a time instead of auto-aggregating                                                                                                                |
+| `advertisedExtensions`                 | —          | Per-extension overrides for what the Inspector declares in `capabilities.extensions`                                                                                                        |
+| `maxFetchRequests`                     | `1000`     | Network-log retention for this server (`DEFAULT_MAX_FETCH_REQUESTS`); `0` means unlimited                                                                                                   |
+| `oauth`                                | —          | `{ clientId, clientSecret, scopes, authorizationParams, authorizationUrl, tokenUrl, enterpriseManaged, onInsufficientScope }`                                                               |
 
-`metadata` is a JSON **object**, and its values may be any JSON — an object, an array, a number, a boolean, `null` — not only a string. Nothing in the MCP spec restricts `_meta` value types, and the SDK models the field as a passthrough object, so the Inspector does not narrow it either ([#1910](https://github.com/modelcontextprotocol/inspector/issues/1910)). Edit it in Server Settings → Request Metadata, which is a JSON editor rather than the key/value rows `headers` and `env` use; text that is not a JSON object is flagged inline and not applied.
+`metadata` is a JSON **object**, and its values may be any JSON — an object, an array, a number, a boolean, `null` — not only a string. The MCP spec does not restrict `_meta` value types in general, and the SDK models the field as a passthrough object, so the Inspector does not narrow it either ([#1910](https://github.com/modelcontextprotocol/inspector/issues/1910)). Edit it in Server Settings → Request Metadata, which is a JSON editor rather than the key/value rows `headers` and `env` use; text that is not a JSON object is flagged inline and not applied.
 
 ```jsonc
 "metadata": {
@@ -186,6 +186,8 @@ These have no analog in the broader `mcp.json` ecosystem. Each is **omitted on w
   "features": ["apps", "tasks"]
 }
 ```
+
+> **A few keys are reserved and keep their own shape.** "Any JSON" holds for keys you invent, not for the ones the protocol defines. In the current SDK those are `progressToken` (a string or an integer) and `io.modelcontextprotocol/related-task` (`{ "taskId": "<string>" }`). A reserved key whose value does not match is **dropped from the outgoing request**, with a warning naming the key — because a conforming server rejects the _entire_ request over one bad reserved member, rather than ignoring that key. Everything else in the payload is sent unchanged.
 
 > **Not yet applied by the CLI.** The web client and the TUI both send this payload on every request. The CLI does not — it never passes the persisted value to its client, so a `metadata` entry is currently inert for `--cli` runs ([#2093](https://github.com/modelcontextprotocol/inspector/issues/2093)). Use the per-invocation `--metadata` flag there in the meantime.
 

@@ -187,7 +187,11 @@ export function JsonObjectInput({
       <AceEditor
         mode="json"
         theme={colorScheme === "dark" ? "github_dark" : "github"}
-        name="json-object-input"
+        // react-ace uses `name` as the editor container's DOM id, so a fixed
+        // value would collide the moment two of these render — and it must also
+        // differ from the id given to the textarea below, which is the one the
+        // wrapper's `<label for>` points at.
+        name={`${wrapperId}-editor`}
         value={draft}
         onChange={handleChange}
         width="100%"
