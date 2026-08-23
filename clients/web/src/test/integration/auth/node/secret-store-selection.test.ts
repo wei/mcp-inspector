@@ -315,6 +315,37 @@ describe("isOnMountPoint via /proc/self/mountinfo", () => {
     expect(mod.isOnMountPoint("/data/inspector")).toBe(true);
   });
 
+  it("does not call a tmpfs mount durable", async () => {
+    // `docker run --tmpfs /home/node/.mcp-inspector` puts a real entry in
+    // mountinfo, so believing the mount table alone selects the file store
+    // and publishes `durable: true` for a file that disappears when the
+    // container stops — the same false promise the memory fallback exists to
+    // avoid, reached by trusting the wrong field.
+    const mod = await loadWithMounts(
+      "36 35 0:32 / /home/node/.mcp-inspector rw,relatime - tmpfs tmpfs rw",
+      ["/home/node/.mcp-inspector"],
+    );
+    expect(mod.isOnMountPoint("/home/node/.mcp-inspector")).toBe(false);
+  });
+
+  it("does not call a ramfs mount durable either", async () => {
+    const mod = await loadWithMounts(
+      "36 35 0:32 / /data rw,relatime - ramfs ramfs rw",
+      ["/data"],
+    );
+    expect(mod.isOnMountPoint("/data")).toBe(false);
+  });
+
+  it("reads the fstype after the optional-fields separator, not by position", async () => {
+    // mountinfo carries a variable number of optional fields before ` - `,
+    // so the type cannot be indexed positionally. This line has two.
+    const mod = await loadWithMounts(
+      "36 35 0:32 / /data rw,relatime shared:1 master:2 - ext4 /dev/sda1 rw",
+      ["/data"],
+    );
+    expect(mod.isOnMountPoint("/data")).toBe(true);
+  });
+
   it("sees a directory that IS the mount point", async () => {
     const mod = await loadWithMounts(
       [line("/"), line("/home/node/.mcp-inspector")].join("\n"),

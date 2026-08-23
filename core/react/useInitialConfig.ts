@@ -68,9 +68,11 @@ export interface UseInitialConfigResult {
    * the descriptor per request; this is the client half of that.
    *
    * Safe to call at any time and safe to overlap: the GET is idempotent, and
-   * loads are ordered by a request token, so only the most recent one may
-   * commit — a response that arrives after unmount, after a re-fetch, or out
-   * of order behind a newer refresh is dropped.
+   * loads are ordered by a request token *and* gated on the hook still being
+   * mounted — so a response arriving after unmount, after a re-fetch, or out
+   * of order behind a newer refresh is dropped. Calling it after unmount is a
+   * no-op rather than a state update, which matters because the callers fire
+   * it from an async persist that can outlive the tree.
    */
   refresh: () => void;
 }
@@ -193,14 +195,28 @@ export function useInitialConfig(
    * matters more here than in most places precisely because the field it
    * would revert is a security statement.
    *
-   * Bumping on effect teardown covers the other two cases for free: unmount,
-   * and a `baseUrl`/`authToken` change that re-runs the effect.
+   * Bumping on effect teardown also covers a `baseUrl`/`authToken` change
+   * that re-runs the effect, by invalidating whatever that run started.
+   *
+   * It does **not** cover unmount on its own, and an earlier version of this
+   * comment claimed it did. The teardown bump only invalidates loads already
+   * in flight; a `refresh()` called *after* unmount — which happens when an
+   * async settings persist resolves after `App` has gone — claims the next
+   * token, is therefore current, and commits into a dead hook. Mounted state
+   * is tracked separately for that, and `stale()` checks both.
    */
   const generation = useRef(0);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const load = useCallback(async (): Promise<void> => {
     const mine = ++generation.current;
-    const stale = () => generation.current !== mine;
+    const stale = () => !mounted.current || generation.current !== mine;
     const headers: Record<string, string> = {};
     if (authToken) headers["x-mcp-remote-auth"] = `Bearer ${authToken}`;
     try {

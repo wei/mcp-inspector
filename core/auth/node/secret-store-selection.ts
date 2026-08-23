@@ -216,14 +216,40 @@ function unescapeMountPoint(point: string): string {
   );
 }
 
+/**
+ * Filesystem types that live in RAM and vanish with the container.
+ *
+ * `docker run --tmpfs /home/node/.mcp-inspector` produces a real entry in
+ * mountinfo, so a mount-table lookup alone answers "durable" and selects the
+ * file store — publishing `durable: true` for a file that disappears when the
+ * container stops. That is the same false promise the in-memory fallback
+ * exists to avoid, reached by believing the mount table over the filesystem
+ * type.
+ */
+const EPHEMERAL_FSTYPES = new Set(["tmpfs", "ramfs"]);
+
+/**
+ * Durable mount points visible to this process, or `null` where mountinfo
+ * cannot be read.
+ *
+ * Field 5 is the mount point; the filesystem type is the first field *after*
+ * the optional-fields separator (` - `), which is why the line is split on
+ * that rather than indexed positionally — the optional fields before it are
+ * variable in number, so `fields[8]` is not reliable.
+ */
 function readMountPoints(): string[] | null {
   try {
     return fsSync
       .readFileSync("/proc/self/mountinfo", "utf-8")
       .split("\n")
-      .map((line) => line.split(" ")[4])
-      .filter((point): point is string => Boolean(point))
-      .map(unescapeMountPoint)
+      .flatMap((line) => {
+        const point = line.split(" ")[4];
+        if (!point) return [];
+        const after = line.split(" - ")[1];
+        const fstype = after?.trim().split(/\s+/)[0];
+        if (fstype && EPHEMERAL_FSTYPES.has(fstype)) return [];
+        return [unescapeMountPoint(point)];
+      })
       .filter((point) => point !== "/");
   } catch {
     return null;

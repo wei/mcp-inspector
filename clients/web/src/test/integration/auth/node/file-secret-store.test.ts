@@ -306,7 +306,24 @@ describe("FileSecretStore failure handling", () => {
     );
   });
 
-  it("set reports a truncated ciphertext payload", async () => {
+  it("blames the file, not the passphrase, for a malformed envelope", async () => {
+    // A truncated payload or an out-of-range KDF parameter used to surface as
+    // `SecretFileKeyMismatchError`, whose 503 tells the user to restore a
+    // passphrase — advice that cannot repair a structurally broken file.
+    await writeEncryptedFixture();
+    const parsed = JSON.parse(await fs.readFile(filePath(), "utf-8"));
+    parsed.kdf.N = 3;
+    await fs.writeFile(filePath(), JSON.stringify(parsed), "utf-8");
+    const store = new FileSecretStore({
+      filePath: filePath(),
+      passphrase: "right-key",
+    });
+    await expect(store.set("alpha", "env:A", "1")).rejects.toThrow(
+      /Restoring a passphrase will not repair it/,
+    );
+  });
+
+  it("set reports a truncated ciphertext payload as a structural fault", async () => {
     await writeEncryptedFixture();
     const parsed = JSON.parse(await fs.readFile(filePath(), "utf-8"));
     parsed.data = "only-one-part";
@@ -315,16 +332,31 @@ describe("FileSecretStore failure handling", () => {
       filePath: filePath(),
       passphrase: "right-key",
     });
+    await expect(store.set("alpha", "env:A", "1")).rejects.toThrow(
+      /encrypted payload is not iv\.tag\.ciphertext/,
+    );
+  });
+
+  it("still blames the passphrase when the envelope is well-formed", async () => {
+    // The other half: structure fine, authentication fails. That *is* a key
+    // problem and must keep the advice that fits it — the round-16 change
+    // must not have turned every failure into a structural one.
+    await writeEncryptedFixture();
+    const store = new FileSecretStore({
+      filePath: filePath(),
+      passphrase: "wrong-key",
+    });
     await expect(store.set("alpha", "env:A", "1")).rejects.toBeInstanceOf(
       SecretFileKeyMismatchError,
     );
   });
 
   it("reports a file whose KDF parameters are unusable", async () => {
-    // scrypt rejects on out-of-grammar cost parameters (`N` must be a power of
-    // two > 1). Those parameters come off disk, so this is a corrupt-file case
-    // reachable without touching the crypto call site — and it must land as a
-    // refusal, not as an exception escaping the derivation.
+    // scrypt rejects out-of-grammar cost parameters (`N` must be a power of
+    // two > 1). Those parameters come off disk, so this is a corrupt-file
+    // case — and since round 16 it is diagnosed *as* one: it used to surface
+    // as a key mismatch, whose advice ("restore the passphrase") cannot
+    // repair a malformed file.
     await writeEncryptedFixture();
     const parsed = JSON.parse(await fs.readFile(filePath(), "utf-8"));
     parsed.kdf.N = 3;
@@ -336,8 +368,8 @@ describe("FileSecretStore failure handling", () => {
     expect(await store.get("alpha", SECRET_FIELD_OAUTH_CLIENT_SECRET)).toBe(
       null,
     );
-    await expect(store.set("alpha", "env:A", "1")).rejects.toBeInstanceOf(
-      SecretFileKeyMismatchError,
+    await expect(store.set("alpha", "env:A", "1")).rejects.toThrow(
+      /kdf N is 3, which is not a power of two above 1/,
     );
   });
 

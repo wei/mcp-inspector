@@ -498,7 +498,21 @@ export class FileSecretStore implements SecretStore {
     if (!this.passphrase)
       throw new SecretFileKeyMismatchError(this.filePath, false);
 
+    // Diagnose structure before blaming the passphrase. A truncated payload,
+    // a wrong-length IV or tag, or an out-of-range KDF parameter all fail
+    // below — and as a `SecretFileKeyMismatchError` they tell the user to
+    // restore a passphrase that cannot repair the file. The descriptor path
+    // already runs this check; the read path was still guessing.
+    const structural = encryptedEnvelopeProblem(parsed);
+    if (structural) {
+      throw new SecretStoreUnavailableError(
+        `The secrets file at ${this.filePath} is not readable: ${structural}. Restoring a passphrase will not repair it; the file itself is malformed.`,
+      );
+    }
     const parts = decodeParts(parsed.data);
+    /* v8 ignore next -- @preserve: unreachable, `encryptedEnvelopeProblem`
+       above returns a reason for anything `decodeParts` would reject. Kept as
+       the type narrowing `parts` needs. */
     if (!parts) throw new SecretFileKeyMismatchError(this.filePath, true);
     try {
       const key = await this.deriveKey(parsed.kdf);

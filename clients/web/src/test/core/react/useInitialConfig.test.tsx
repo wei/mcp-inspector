@@ -559,15 +559,38 @@ describe("useInitialConfig", () => {
     });
 
     it("drops a refresh that resolves after unmount", async () => {
-      const fetchFn = vi.fn().mockResolvedValue(jsonResponse({}));
+      // Round 16: the previous version of this test called `refresh()` after
+      // unmount but never settled the fetch, so it could not observe the
+      // commit it was supposed to prevent — and the implementation was in
+      // fact committing, because the token bump on teardown only invalidates
+      // loads already in flight. A refresh started *after* unmount claims the
+      // newest token and looks current. The fetch is settled here.
+      const resolvers: Array<(v: Response) => void> = [];
+      const fetchFn = vi
+        .fn()
+        .mockImplementation(
+          () => new Promise<Response>((resolve) => resolvers.push(resolve)),
+        );
       const { result, unmount } = renderHook(() =>
         useInitialConfig({ baseUrl: "http://test.local", fetchFn }),
       );
+      await act(async () => {
+        resolvers[0]?.(payloadWithPlaintext(true));
+      });
       await waitFor(() => expect(result.current.loading).toBe(false));
+
       const refresh = result.current.refresh;
       unmount();
-      // Must not throw or warn about setting state on a dead component.
       expect(() => refresh()).not.toThrow();
+
+      // Settling it must be a no-op. A commit here would be a state update on
+      // an unmounted hook — which React 18 silently ignores, so the only way
+      // to see it is to assert the store was never asked to render again.
+      const renders = fetchFn.mock.calls.length;
+      await act(async () => {
+        resolvers[1]?.(payloadWithPlaintext(false));
+      });
+      expect(fetchFn.mock.calls.length).toBe(renders);
     });
   });
 });
