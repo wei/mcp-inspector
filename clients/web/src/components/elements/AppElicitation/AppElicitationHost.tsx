@@ -253,6 +253,13 @@ function AppElicitationFrame({
           only the request id tells those two dialogs apart — for
           `landmark-unique` and for anyone navigating by screen reader. */}
       <Modal.Content
+        // A lower dialog is visually covered but would otherwise stay an
+        // exposed `aria-modal` dialog with reachable controls and an iframe —
+        // so browse navigation could land in a dialog that itself claims the
+        // rest of the page is inert. `inert` takes it out of the a11y tree and
+        // out of focus order WITHOUT unmounting, so its app keeps its bridge
+        // and its handshake and is live the moment it becomes top.
+        inert={!isTop}
         aria-label={`Elicitation ${entry.requestId} — ${entry.params.message} — rendered by ${entry.resourceUri}`}
         data-app-elicitation-status={status}
         data-testid="app-elicitation"

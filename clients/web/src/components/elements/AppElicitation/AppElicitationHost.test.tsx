@@ -216,6 +216,12 @@ describe("AppElicitationHost (#1854)", () => {
     await flushAsync();
     expect(screen.getAllByTestId("app-elicitation")).toHaveLength(2);
 
+    // The covered dialog is inert: out of the a11y tree and out of focus
+    // order, but still mounted — its app keeps its bridge and handshake.
+    const [lower, top] = screen.getAllByTestId("app-elicitation");
+    expect(lower.hasAttribute("inert")).toBe(true);
+    expect(top.hasAttribute("inert")).toBe(false);
+
     await user.keyboard("{Escape}");
     // Exactly one request is dismissed — the topmost, which is the last one.
     expect(onFail).toHaveBeenCalledTimes(1);
