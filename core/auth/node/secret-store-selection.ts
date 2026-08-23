@@ -54,7 +54,11 @@ import {
   readSecretFilePermissions,
   tightenSecretFilePermissions,
 } from "./file-secret-store.js";
-import { isFileLockHeld, withSecretFileLock } from "./file-lock.js";
+import {
+  isFileLockHeld,
+  openSecretFileLock,
+  withSecretFileLock,
+} from "./file-lock.js";
 import {
   KeyringSecretStore,
   parseAccount,
@@ -604,7 +608,17 @@ export async function absorbFileSecretsIntoKeyring(
       }
       return null;
     }
-    return staged;
+    // **Acquire the snapshot's lock before returning**, i.e. before the main
+    // lock is released. Taking it afterwards leaves a gap in which a second
+    // startup can take the main lock, see the staged file unlocked, and adopt
+    // and re-claim it — leaving this process reading a path that no longer
+    // exists, which is the very race the snapshot lock exists to prevent.
+    //
+    // `null` means locking is unavailable here; the hand-off still runs. The
+    // exposure is one unique nonce-named snapshot, which is a far better
+    // trade than refusing to migrate at all on a box that cannot lock.
+    const releaseSnapshot = await openSecretFileLock(staged).catch(() => null);
+    return { staged, releaseSnapshot };
     // `withSecretFileLock` rejects only with the `SecretStoreUnavailableError`
     // it constructs itself (a lock it could not create degrades instead of
     // throwing), so the cast is over a value produced one call away rather
@@ -616,7 +630,14 @@ export async function absorbFileSecretsIntoKeyring(
     return null;
   });
   if (claimed === null) return;
-  await handOffStagedSecrets(claimed, filePath, keyring);
+  // Outside the main lock, still holding the snapshot's: a keychain
+  // round-trip per secret must not block ordinary writers (#1950 guarantees a
+  // write completing after the claim survives).
+  try {
+    await handOffStagedSecrets(claimed.staged, filePath, keyring);
+  } finally {
+    await claimed.releaseSnapshot?.();
+  }
 }
 
 /**
@@ -636,21 +657,6 @@ export async function absorbFileSecretsIntoKeyring(
  * completing after the claim survives.
  */
 async function handOffStagedSecrets(
-  staged: string,
-  filePath: string,
-  keyring: SecretStore,
-): Promise<void> {
-  await withSecretFileLock(staged, () =>
-    handOffStagedSecretsLocked(staged, filePath, keyring),
-  ).catch((err: Error) => {
-    console.warn(
-      `\n[mcp-inspector] Could not lock ${staged} to migrate it into the OS keychain (${err.message}), so it has been left in place. The next run will try again.`,
-    );
-  });
-}
-
-/** {@link handOffStagedSecrets}'s body, with the snapshot's lock held. */
-async function handOffStagedSecretsLocked(
   staged: string,
   filePath: string,
   keyring: SecretStore,
@@ -703,6 +709,22 @@ async function handOffStagedSecretsLocked(
 }
 
 /**
+ * Is `name` a migration snapshot, as opposed to the lock directory beside one?
+ *
+ * The `.lock` exclusion is load-bearing, not tidiness. `secrets.json.lock`
+ * and `secrets.json.migrating-<pid>-<uuid>.lock` both match the plain prefix
+ * test, and treating the latter as a snapshot is self-sustaining damage: the
+ * liveness probe asks about a nonexistent `<name>.lock.lock` and so answers
+ * "not held", recovery then tries to hard-link a *directory* onto the secrets
+ * path, fails, and prints the orphan warning. Because a stale lock directory
+ * is never removed by a liveness *check* — only a would-be acquirer clears
+ * one — that false migration repeats on every startup forever, including
+ * after the real snapshot has long since been recovered.
+ */
+const isSnapshotName = (name: string, base: string): boolean =>
+  name.startsWith(`${base}.migrating-`) && !name.endsWith(".lock");
+
+/**
  * Is there a `secrets.json`, or a snapshot orphaned by an interrupted
  * migration, worth taking the lock for?
  *
@@ -715,7 +737,7 @@ async function anythingToMigrate(filePath: string): Promise<boolean> {
   const base = path.basename(filePath);
   try {
     return (await fs.readdir(path.dirname(filePath))).some(
-      (name) => name === base || name.startsWith(`${base}.migrating-`),
+      (name) => name === base || isSnapshotName(name, base),
     );
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
@@ -742,10 +764,10 @@ async function anythingToMigrate(filePath: string): Promise<boolean> {
  */
 async function recoverOrphanedSnapshots(filePath: string): Promise<void> {
   const dir = path.dirname(filePath);
-  const prefix = `${path.basename(filePath)}.migrating-`;
+  const base = path.basename(filePath);
   let names: string[];
   try {
-    names = (await fs.readdir(dir)).filter((n) => n.startsWith(prefix));
+    names = (await fs.readdir(dir)).filter((n) => isSnapshotName(n, base));
   } catch {
     return; // No directory yet, or unreadable — nothing to recover.
   }

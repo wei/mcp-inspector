@@ -828,6 +828,28 @@ describe("absorbFileSecretsIntoKeyring", () => {
     expect(await keyring.get("srv", "oauthClientSecret")).toBe(null);
   });
 
+  it("ignores a snapshot's own lock directory (#2082)", async () => {
+    // `secrets.json.migrating-<pid>-<uuid>.lock` matches the plain prefix
+    // test, and treating it as a snapshot is self-sustaining damage: the
+    // liveness probe asks about a nonexistent `<name>.lock.lock` and answers
+    // "not held", recovery tries to hard-link a *directory* onto the secrets
+    // path, fails, and prints the orphan warning — every startup, forever,
+    // since a liveness *check* never clears a stale lock directory.
+    const strayLock = path.join(tmpDir, "secrets.json.migrating-999-abc.lock");
+    await fs.mkdir(strayLock);
+    process.env.MCP_INSPECTOR_SECRET_FILE = path.join(tmpDir, "secrets.json");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await loadWithProbe(true);
+
+    await mod.absorbFileSecretsIntoKeyring(new InMemorySecretStore());
+
+    // Not mistaken for a snapshot: nothing said, nothing linked, and the
+    // directory left exactly where it was.
+    expect(warn).not.toHaveBeenCalled();
+    expect(existsSync(strayLock)).toBe(true);
+    expect(existsSync(path.join(tmpDir, "secrets.json"))).toBe(false);
+  });
+
   it("still adopts an orphan when the live file is absent (#2082)", async () => {
     // The fast path above must not be a `stat` of `secrets.json`: an
     // interrupted migration leaves *only* the snapshot, which is precisely
