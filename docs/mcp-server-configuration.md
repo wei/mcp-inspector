@@ -187,7 +187,7 @@ These have no analog in the broader `mcp.json` ecosystem. Each is **omitted on w
 }
 ```
 
-> **A few keys are reserved and keep their own shape.** "Any JSON" holds for keys you invent, not for the ones the protocol defines. In the current SDK those are `progressToken` (a string or an integer) and `io.modelcontextprotocol/related-task` (`{ "taskId": "<string>" }`). A reserved key whose value does not match is **dropped from the outgoing request**, with a warning naming the key — because a conforming server rejects the _entire_ request over one bad reserved member, rather than ignoring that key. Everything else in the payload is sent unchanged.
+> **A few keys are reserved and keep their own shape.** "Any JSON" holds for keys you invent, not for the ones the protocol defines. In the current SDK those are `progressToken` (a string or a **safe** integer — one JavaScript represents exactly, so nothing past `Number.MAX_SAFE_INTEGER`) and `io.modelcontextprotocol/related-task` (`{ "taskId": "<string>" }`). A reserved key whose value does not match is **dropped from the outgoing request**, with a warning naming the key — because a conforming server rejects the _entire_ request over one bad reserved member, rather than ignoring that key. Everything else in the payload is sent unchanged.
 
 > **Not yet applied by the CLI.** The web client and the TUI both send this payload on every request. The CLI does not — it never passes the persisted value to its client, so a `metadata` entry is currently inert for `--cli` runs ([#2093](https://github.com/modelcontextprotocol/inspector/issues/2093)). Use the per-invocation `--metadata` flag there in the meantime.
 

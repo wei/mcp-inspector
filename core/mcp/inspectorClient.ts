@@ -401,7 +401,8 @@ function isProgressToken(value: unknown): value is ProgressToken {
  * Drop the reserved `_meta` members whose value the protocol will not accept.
  *
  * Most of `_meta` is arbitrary JSON (#1910), but a few keys are **reserved**
- * and carry their own schema — `progressToken` (`string | integer`) and
+ * and carry their own schema — `progressToken` (a string or a safe integer;
+ * zod's `.int()` rejects anything past `Number.MAX_SAFE_INTEGER`) and
  * `io.modelcontextprotocol/related-task` (`{ taskId: string }`) in the pinned
  * SDK. Before the widening every value was a string, so only `progressToken`
  * could even be wrong; now any of them can, and one bad reserved member makes a

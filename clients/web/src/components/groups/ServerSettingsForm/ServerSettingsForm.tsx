@@ -734,7 +734,8 @@ export function ServerSettingsForm({
               objects, arrays, numbers, booleans, <Code>null</Code> — not just
               strings. Leave it as <Code>{"{}"}</Code> to send none. The keys
               the protocol reserves keep their own shape:{" "}
-              <Code>progressToken</Code> must be a string or an integer, and{" "}
+              <Code>progressToken</Code> must be a string or a safe integer (one
+              JavaScript can represent exactly), and{" "}
               <Code>io.modelcontextprotocol/related-task</Code> an object with a
               string <Code>taskId</Code>. A reserved key that does not match is
               dropped from the request rather than sent.
