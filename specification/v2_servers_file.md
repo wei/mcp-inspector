@@ -281,7 +281,6 @@ Each server entry may carry these Inspector-extension fields at the top level:
 
 ## Out of scope (follow-ups)
 
-- Import-from-Claude-Desktop button (read `~/Library/Application Support/Claude/claude_desktop_config.json` or the Windows/Linux equivalent, merge into our file).
 - File watching for hot reload of external edits.
 - Per-server tags / folders / groups.
 - Export current list as JSON.
