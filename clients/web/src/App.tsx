@@ -3651,6 +3651,7 @@ function App() {
       activeServerId,
       inspectorClient,
       updateServerSettings,
+      refreshInitialConfig,
       connected,
       loadToolsPage,
       loadPromptsPage,
@@ -3921,6 +3922,7 @@ function App() {
     fetchRequestLogState,
     stderrLogState,
     removeServer,
+    refreshInitialConfig,
   ]);
 
   // Submit handler for the Add / Edit / Clone modal. Add and Clone both go
