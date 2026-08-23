@@ -2624,6 +2624,95 @@ describe("App paginated list pagination toggle (#1721)", () => {
     expect(lastPush?.paginatedLists).toBe(true);
   });
 
+  it("applies a settled write to the current client, not the one it started on (#2089)", async () => {
+    // A write can outlive a disconnect/reconnect to the *same* server: the id
+    // guard still passes, but the client captured when the write was issued has
+    // been destroyed and replaced by one built from the stale list entry. The
+    // settled value has to reach the live instance.
+    const user = userEvent.setup();
+    let landWrite: (() => void) | undefined;
+    const write = new Promise<void>((resolve) => {
+      landWrite = resolve;
+    });
+    updateServerSettingsSpy.mockImplementationOnce(() => write);
+
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    await user.click(screen.getByText("paginated-on"));
+    // Reconnect to the same server while that write is in flight. The transport
+    // drops, then the user reconnects — and `onToggleConnection` always
+    // rebuilds the client so the latest saved settings are picked up.
+    act(() => {
+      clientInstances[0].dispatchEvent(new Event("disconnect"));
+    });
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(2));
+    const replacement = clientInstances[1] as EventTarget & {
+      setServerSettings: ReturnType<typeof vi.fn>;
+    };
+    replacement.setServerSettings.mockClear();
+
+    await act(async () => {
+      landWrite?.();
+      await write;
+    });
+
+    await waitFor(() =>
+      expect(replacement.setServerSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ paginatedLists: true }),
+      ),
+    );
+  });
+
+  it("reconciles after a modal save fails onto a write that landed first (#2089)", async () => {
+    // Reverse of the mixed-writer case above: the toggle lands while the modal
+    // save is still pending, so it is told it is not settled and applies
+    // nothing. The modal save then fails, which makes the toggle's value the
+    // account of disk — and nothing else is left to apply it.
+    const user = userEvent.setup();
+    let failModal: ((err: Error) => void) | undefined;
+    const modalWrite = new Promise<void>((_resolve, reject) => {
+      failModal = (err) => {
+        reject(err);
+      };
+    });
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+    if (!draftOptions) throw new Error("useSettingsDraft was never called");
+    updateServerSettingsSpy.mockImplementationOnce(() => modalWrite);
+    const persisted = draftOptions
+      .onPersist("A", { ...settingsWithRoots([]), paginatedLists: false })
+      .catch(() => undefined);
+
+    // The toggle lands `true` while the modal save is still in flight.
+    await user.click(screen.getByText("paginated-on"));
+    await waitFor(() =>
+      expect(updateServerSettingsSpy).toHaveBeenCalledTimes(2),
+    );
+    const client = clientInstances[0] as EventTarget & {
+      setServerSettings: ReturnType<typeof vi.fn>;
+    };
+    client.setServerSettings.mockClear();
+
+    await act(async () => {
+      failModal?.(new Error("disk full"));
+      await persisted;
+    });
+
+    // The failure is what reconciles: a push carrying the landed value arrives
+    // only after it, since the landed write itself was not settled at the time.
+    await waitFor(() =>
+      expect(client.setServerSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ paginatedLists: true }),
+      ),
+    );
+  });
+
   it("lets a successful list read supersede a concrete rollback override (#2089)", async () => {
     // A rollback sets the override to a value rather than clearing it, so the
     // effect that drops it cannot key on the persisted boolean alone: if a

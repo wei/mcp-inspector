@@ -1732,11 +1732,18 @@ function App() {
   const activeServerNameRef = useRef<string | undefined>(undefined);
   const activeServerIdRef = useRef<string | undefined>(activeServerId);
   const serversRef = useRef(servers);
+  // The live client, mirrored for the same reason: a settings write that
+  // outlives a disconnect/reconnect to the *same* server would otherwise push
+  // its value into the instance captured when it was issued — which has since
+  // been destroyed — while the replacement client, built from the stale list
+  // entry, keeps the value the write replaced (#2089).
+  const inspectorClientRef = useRef<InspectorClient | null>(inspectorClient);
   useEffect(() => {
     if (activeServer) activeServerNameRef.current = activeServer.name;
     activeServerIdRef.current = activeServerId;
     serversRef.current = servers;
-  }, [activeServer, activeServerId, servers]);
+    inspectorClientRef.current = inspectorClient;
+  }, [activeServer, activeServerId, servers, inspectorClient]);
 
   // Last connection-level error message, surfaced as `data-error-message` on
   // the InspectorView header so an automated driver can read *why* a connect
@@ -3795,10 +3802,13 @@ function App() {
           // toggle that failed *first* rolled the UI and the live client back
           // to a baseline this write has since replaced, and if the list read
           // behind this write failed too, nothing else would ever correct them.
+          // Through the *current* client, not this continuation's closure: a
+          // reconnect to the same server passes the id check while the captured
+          // instance is already destroyed.
           const settled = write.landed(next);
           if (settled && activeServerIdRef.current === activeServerId) {
             setPaginatedListsOverride(next.paginatedLists ?? false);
-            inspectorClient?.setServerSettings(next);
+            inspectorClientRef.current?.setServerSettings(next);
           }
         })
         .catch((err: unknown) => {
@@ -3822,11 +3832,14 @@ function App() {
           // override is a single app-wide boolean and the live client belongs to
           // whichever server is connected now, so a rejection arriving after the
           // user switched would render this server's value on another one.
+          // The client is taken from the ref for the same reason the success
+          // path does: a reconnect to the same server passes the id check while
+          // this continuation's captured instance is already destroyed.
           const baseline =
             lastPersistedSettings.resolve(activeServerId) ?? EMPTY_SETTINGS;
           if (activeServerIdRef.current === activeServerId) {
             setPaginatedListsOverride(baseline.paginatedLists ?? false);
-            inspectorClient?.setServerSettings(baseline);
+            inspectorClientRef.current?.setServerSettings(baseline);
           }
           notifications.show({
             title: "Failed to save pagination setting",
@@ -4220,6 +4233,15 @@ function App() {
         // `onError` — an earlier write still running settles the state once it
         // lands, and cannot know that while this one looks pending (#2089).
         write.failed();
+        // A write that landed while this one was pending was told it was not
+        // settled and so applied nothing; this save never reached disk, so that
+        // write is the account of it and nothing else will re-apply it. Same
+        // reconciliation the toggle's own failure path does.
+        const baseline = lastPersistedSettings.resolve(id);
+        if (baseline && activeServerIdRef.current === id) {
+          setPaginatedListsOverride(baseline.paginatedLists ?? false);
+          inspectorClientRef.current?.setServerSettings(baseline);
+        }
         throw err;
       }
       // Recorded for the same reason the pagination toggle records its own
@@ -4236,7 +4258,10 @@ function App() {
       const settled = write.landed(value);
       if (settled && activeServerIdRef.current === id) {
         setPaginatedListsOverride(value.paginatedLists ?? false);
-        inspectorClient?.setServerSettings(value);
+        // The current client, not the one captured when this save began — a
+        // reconnect to the same server would otherwise be written to a
+        // destroyed instance while the replacement keeps the stale value.
+        inspectorClientRef.current?.setServerSettings(value);
       }
     },
     // Surface failures via toast — the modal usually closes
