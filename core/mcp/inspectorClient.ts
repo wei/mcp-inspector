@@ -133,6 +133,13 @@ import {
 } from "./modernTaskSchemas.js";
 import { buildClientExtensions } from "./extensions.js";
 import {
+  getElicitationUiResourceUri,
+  isFormElicitation,
+  supportsAppElicitation,
+  validateAppElicitResult,
+  type AppElicitationRenderer,
+} from "./appElicitation.js";
+import {
   EmptyResultSchema,
   CallToolResultSchema,
   GetPromptResultSchema,
@@ -232,6 +239,14 @@ interface ReceiverTaskRecord {
   resolvePayload: (payload: ClientResult) => void;
   rejectPayload: (reason?: unknown) => void;
   cleanupTimeoutId?: ReturnType<typeof setTimeout>;
+  /**
+   * Aborted when the task reaches a terminal state some way other than the
+   * user answering — a `tasks/cancel`, or session teardown. Whatever is
+   * collecting the answer (the native pending-request entry, or an app-rendered
+   * elicitation and its bridge) is torn down from this, so a cancelled task
+   * cannot leave a modal on screen waiting for an answer nothing will read.
+   */
+  abort: AbortController;
 }
 
 /**
@@ -562,6 +577,38 @@ export class InspectorClient extends InspectorClientEventTarget {
   // Per-extension advertise overrides (#1738); undefined key falls back to the
   // registry default in ADVERTISABLE_EXTENSIONS.
   private readonly advertisedExtensions?: Record<string, boolean>;
+  /**
+   * Host-supplied renderer for app-rendered form elicitations (#1854), or
+   * undefined on a client that cannot host MCP Apps. Its presence is what
+   * advertises the nested MCP Apps `elicitation` capability, so this is the one
+   * fact both the advertisement and the routing gate read.
+   */
+  private readonly appElicitationRenderer?: AppElicitationRenderer;
+
+  /**
+   * Monotonic counter behind the request-scoped id handed to the renderer. The
+   * association MUST be per request (a map keyed by this id owns the resource
+   * URI, renderer instance and promise on the host side) so two concurrent
+   * elicitations cannot resolve through each other's bridges.
+   */
+  private appElicitationSeq = 0;
+  /**
+   * Per-instance prefix for {@link appElicitationSeq}.
+   *
+   * A counter alone is not enough: a host may hold ONE renderer across
+   * replacement clients (the web client rebuilds its `InspectorClient` on a
+   * settings change), and every fresh instance would otherwise mint
+   * `app-elicitation-1` for its first request. Settling that id would then
+   * resolve — or discard — whichever connection's request the host happened to
+   * be keying.
+   */
+  private readonly appElicitationPrefix = `app-elicitation-${globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)}`;
+  /**
+   * Abort controllers for app-rendered elicitations still awaiting an answer.
+   * Aborted alongside the native pending queue on disconnect, so a rendered app
+   * cannot outlive the connection that asked for it.
+   */
+  private activeAppElicitations = new Set<AbortController>();
   private receiverTaskTtlMs: number | (() => number);
   private receiverTaskRecords: Map<string, ReceiverTaskRecord> = new Map();
   // OAuth support (config owned by oauthManager; client delegates and uses !!oauthManager for "is OAuth configured")
@@ -616,6 +663,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     this.elicit = options.elicit ?? true;
     this.receiverTasks = options.receiverTasks ?? false;
     this.advertisedExtensions = options.advertisedExtensions;
+    this.appElicitationRenderer = options.appElicitation;
     this.receiverTaskTtlMs = options.receiverTaskTtlMs ?? 60_000;
     this.progress = options.progress ?? true;
     this.resetTimeoutOnProgress = options.resetTimeoutOnProgress ?? true;
@@ -785,6 +833,14 @@ export class InspectorClient extends InspectorClientEventTarget {
     const advertisedExtensions = buildClientExtensions({
       enterpriseManaged: options.oauth?.enterpriseManaged ?? false,
       advertised: this.advertisedExtensions,
+      // Read off the built `capabilities.elicitation.form` rather than
+      // re-deriving from `options.elicit`: the nested MCP Apps `elicitation`
+      // setting must never be advertised without the core form capability it
+      // extends, and two derivations of the same fact can drift. Disabling form
+      // elicitation therefore drops both, as the contract requires. (#1854)
+      appElicitation:
+        this.appElicitationRenderer !== undefined &&
+        capabilities.elicitation?.form !== undefined,
     });
     if (Object.keys(advertisedExtensions).length > 0) {
       capabilities.extensions = {
@@ -1174,6 +1230,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       payloadPromise,
       resolvePayload,
       rejectPayload,
+      abort: new AbortController(),
     };
     record.cleanupTimeoutId = setTimeout(() => {
       record.cleanupTimeoutId = undefined;
@@ -1250,6 +1307,9 @@ export class InspectorClient extends InspectorClientEventTarget {
     };
     record.task = updatedTask;
     record.rejectPayload(new Error("Task cancelled"));
+    // Stop collecting an answer nobody will read: drops the native pending
+    // entry and tears down an app-rendered elicitation's renderer.
+    record.abort.abort();
     if (record.cleanupTimeoutId != null) {
       clearTimeout(record.cleanupTimeoutId);
       record.cleanupTimeoutId = undefined;
@@ -1379,7 +1439,13 @@ export class InspectorClient extends InspectorClientEventTarget {
     // an elicit option that enables no mode advertises nothing, and registering
     // regardless throws before the handshake.
     if (this.elicitationCapabilityAdvertised && this.client) {
-      const elicitHandler = (request: ElicitRequest): Promise<ElicitResult> => {
+      const elicitHandler = (
+        request: ElicitRequest,
+        // Structural, and only the one field this needs: the SDK's
+        // `ClientContext` carries much more, and naming it here would tie the
+        // handler to a type the bypass helper below does not thread through.
+        ctx?: { mcpReq?: { signal?: AbortSignal } },
+      ): Promise<ElicitResult> => {
         const paramsTask = (request.params as { task?: { ttl?: number } })
           ?.task;
         if (this.tasksCapabilityAdvertised && paramsTask != null) {
@@ -1388,35 +1454,74 @@ export class InspectorClient extends InspectorClientEventTarget {
             initialStatus: "input_required",
             statusMessage: "Awaiting user input",
           });
+          // Settling the receiver task, shared by both answer routes below so
+          // an app-rendered answer completes the task exactly as a native one
+          // does.
+          const completeTask = (result: ElicitResult) => {
+            // A cancelled (or otherwise terminal) task must not be re-settled:
+            // an answer that arrives after `tasks/cancel` would otherwise
+            // overwrite `cancelled` with `completed`.
+            if (InspectorClient.isTerminalTaskStatus(record.task.status))
+              return;
+            record.resolvePayload(result);
+            const updated: Task = {
+              ...record.task,
+              status: "completed",
+              lastUpdatedAt: new Date().toISOString(),
+            };
+            record.task = updated;
+            this.upsertReceiverTask(updated);
+          };
+          const failTask = (error: Error) => {
+            if (InspectorClient.isTerminalTaskStatus(record.task.status))
+              return;
+            record.rejectPayload(error);
+            const updated: Task = {
+              ...record.task,
+              status: "failed",
+              lastUpdatedAt: new Date().toISOString(),
+              statusMessage: error.message,
+            };
+            record.task = updated;
+            this.upsertReceiverTask(updated);
+          };
           void (async () => {
+            // A task-augmented request is still an `elicitation/create`, so the
+            // app-rendering contract applies to it too (#1854). It cannot go
+            // through `enqueuePendingElicitation` — the response frame has
+            // already been sent as a `CreateTaskResult` and the answer settles
+            // the TASK rather than the request — so the same attempt is made
+            // here, falling back to the native queue exactly as that funnel
+            // does. An abort (disconnect) fails the task rather than reopening
+            // it natively.
+            let appResult: ElicitResult | null;
+            try {
+              appResult = await this.tryAppElicitation(
+                request,
+                record.abort.signal,
+              );
+            } catch (error) {
+              failTask(
+                error instanceof Error ? error : new Error(String(error)),
+              );
+              return;
+            }
+            if (appResult) {
+              completeTask(appResult);
+              return;
+            }
             const elicitationRequest = new ElicitationCreateMessage(
               request,
-              (result) => {
-                record.resolvePayload(result);
-                const now = new Date().toISOString();
-                const updated: Task = {
-                  ...record.task,
-                  status: "completed",
-                  lastUpdatedAt: now,
-                };
-                record.task = updated;
-                this.upsertReceiverTask(updated);
-              },
+              completeTask,
               (id) => this.removePendingElicitation(id),
-              (error) => {
-                record.rejectPayload(error);
-                const now = new Date().toISOString();
-                const updated: Task = {
-                  ...record.task,
-                  status: "failed",
-                  lastUpdatedAt: now,
-                  statusMessage: error.message,
-                };
-                record.task = updated;
-                this.upsertReceiverTask(updated);
-              },
+              failTask,
             );
             this.addPendingElicitation(elicitationRequest);
+            // A `tasks/cancel` (or teardown) drops the queued entry, so the
+            // modal does not outlive the task it belongs to.
+            this.wirePendingAbort(record.abort.signal, () =>
+              this.removePendingElicitation(elicitationRequest.id),
+            );
           })();
           // Task-augmented (2025-11-25) response — see the sampling handler
           // above. Reply with a `CreateTaskResult` (`{ task }`), routed around
@@ -1429,7 +1534,19 @@ export class InspectorClient extends InspectorClientEventTarget {
           const taskResult: CreateTaskResult = { task: record.task };
           return Promise.resolve(taskResult as unknown as ElicitResult);
         }
-        return this.enqueuePendingElicitation(request, "server-request");
+        // `ctx.mcpReq.signal` aborts when the server cancels this request
+        // (`notifications/cancelled`). Threading it through means both answer
+        // surfaces — the native queue entry and an app-rendered elicitation's
+        // renderer — are torn down with the request, instead of a modal
+        // outliving work the server abandoned. The task-augmented branch above
+        // deliberately does NOT use it: that request is answered immediately
+        // with a `CreateTaskResult`, so its lifetime is the task's, which
+        // carries its own abort (see `ReceiverTaskRecord.abort`).
+        return this.enqueuePendingElicitation(
+          request,
+          "server-request",
+          ctx?.mcpReq?.signal,
+        );
       };
       this.client.setRequestHandler("elicitation/create", elicitHandler);
       // Registration, like the `setRequestHandler` above it — and the whole
@@ -1548,6 +1665,9 @@ export class InspectorClient extends InspectorClientEventTarget {
       if (record.cleanupTimeoutId != null) {
         clearTimeout(record.cleanupTimeoutId);
       }
+      // Same reason as `cancelReceiverTask`: the session that owns whatever is
+      // collecting the answer is ending.
+      record.abort.abort();
     }
     this.receiverTaskRecords.clear();
   }
@@ -1688,6 +1808,13 @@ export class InspectorClient extends InspectorClientEventTarget {
       elicitation.cancel();
     }
     this.pendingElicitations = [];
+    // App-rendered elicitations (#1854) are not in the queue above — they live
+    // in the host's renderer — so abort them here on the same teardown paths.
+    // `tryAppElicitation` removes each controller in its own `finally`.
+    for (const controller of this.activeAppElicitations) {
+      controller.abort();
+    }
+    this.activeAppElicitations.clear();
   }
 
   /**
@@ -1711,7 +1838,12 @@ export class InspectorClient extends InspectorClientEventTarget {
   private clearAndAnnouncePendingPeerRequests(): void {
     if (
       this.pendingSamples.length === 0 &&
-      this.pendingElicitations.length === 0
+      this.pendingElicitations.length === 0 &&
+      // App-rendered elicitations (#1854) are not in either array — they live in
+      // the host's renderer — so an emptiness check that ignores them lets a
+      // mid-session close (the `onclose` route, which reaches teardown only
+      // through here) leave a modal open for a connection that is gone.
+      this.activeAppElicitations.size === 0
     ) {
       return;
     }
@@ -2820,11 +2952,17 @@ export class InspectorClient extends InspectorClientEventTarget {
    * corresponding `ElicitResult` (echoed to the server on retry); only a
    * genuine failure or a `signal` abort rejects.
    */
-  private enqueuePendingElicitation(
+  private async enqueuePendingElicitation(
     request: ElicitRequest,
     origin: PendingRequestOrigin,
     signal?: AbortSignal,
   ): Promise<ElicitResult> {
+    // App-rendered form elicitation (#1854) is offered first and falls back to
+    // the native queue below on every failure. Both entry points — the inbound
+    // `elicitation/create` handler and the MRTR driver's embedded requests —
+    // funnel through here, so neither can miss the routing.
+    const appResult = await this.tryAppElicitation(request, signal);
+    if (appResult) return appResult;
     // See {@link enqueuePendingSample} — Promise settle is idempotent.
     return new Promise<ElicitResult>((resolvePromise, rejectPromise) => {
       const elicitation = new ElicitationCreateMessage(
@@ -2840,6 +2978,92 @@ export class InspectorClient extends InspectorClientEventTarget {
         rejectPromise(createPendingAbortError());
       });
     });
+  }
+
+  /**
+   * Attempt to resolve an `elicitation/create` request by rendering the MCP App
+   * the server attached to it (#1854), returning the app's standard
+   * `ElicitResult`.
+   *
+   * Returns `null` for "not app-rendered — use the native UI", which covers
+   * every negotiation gate and every failure mode the contract lists: either
+   * peer did not negotiate the capability, the metadata is absent or unusable,
+   * the mode is not `form`, the renderer failed (resource read, sandbox/bridge
+   * init, missing app capability, timeout), or the app returned something that
+   * is not a valid result for this request. An explicit `decline` or `cancel`
+   * is a *completed* elicitation and is returned, not fallen back on.
+   *
+   * The one case that does not fall back is an abort of the originating
+   * request: the caller is cancelling the whole elicitation, so re-opening it
+   * in the native queue would resurrect work the user just abandoned.
+   */
+  private async tryAppElicitation(
+    request: ElicitRequest,
+    signal?: AbortSignal,
+  ): Promise<ElicitResult | null> {
+    const renderer = this.appElicitationRenderer;
+    if (!renderer) return null;
+    // Gate 1-3 (client) + 4 (server), from the negotiated capabilities of this
+    // connection — `this.capabilities` is populated at initialize.
+    if (!supportsAppElicitation(this.clientCapabilities, this.capabilities)) {
+      return null;
+    }
+    // Only form mode is app-renderable; `url` keeps its existing path.
+    if (!isFormElicitation(request.params)) return null;
+    let resourceUri: string | undefined;
+    try {
+      resourceUri = getElicitationUiResourceUri(request.params);
+    } catch (error) {
+      this.logger.warn(
+        { error },
+        "Elicitation carried unusable _meta.ui.resourceUri; using the native elicitation UI",
+      );
+      return null;
+    }
+    if (!resourceUri) return null;
+
+    // Request-scoped abort: forwards the caller's signal (MRTR cancellation)
+    // and is aborted by `settleAndDropPendingPeerRequests` on disconnect, so a
+    // rendered app cannot outlive the connection that asked for it.
+    // Already cancelled before we got here (the caller aborted while an earlier
+    // MRTR round was in flight): don't mount an app nobody is waiting on.
+    if (signal?.aborted) throw createPendingAbortError();
+    const controller = new AbortController();
+    const forwardAbort = () => controller.abort(signal?.reason);
+    signal?.addEventListener("abort", forwardAbort, { once: true });
+    this.activeAppElicitations.add(controller);
+    try {
+      const result = await renderer({
+        requestId: `${this.appElicitationPrefix}-${++this.appElicitationSeq}`,
+        resourceUri,
+        params: request.params,
+        signal: controller.signal,
+      });
+      this.outputValidator ??= new AjvJsonSchemaValidator();
+      const invalid = validateAppElicitResult(
+        this.outputValidator,
+        request.params,
+        result,
+      );
+      if (invalid) {
+        this.logger.warn(
+          { resourceUri, reason: invalid },
+          "App-rendered elicitation returned an invalid result; using the native elicitation UI",
+        );
+        return null;
+      }
+      return result;
+    } catch (error) {
+      if (controller.signal.aborted) throw createPendingAbortError();
+      this.logger.warn(
+        { error, resourceUri },
+        "App-rendered elicitation failed; using the native elicitation UI",
+      );
+      return null;
+    } finally {
+      this.activeAppElicitations.delete(controller);
+      signal?.removeEventListener("abort", forwardAbort);
+    }
   }
 
   /**
