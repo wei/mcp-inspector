@@ -368,6 +368,30 @@ function acquire(
 }
 
 /**
+ * Is someone holding the lock on `filePath` right now?
+ *
+ * Liveness, not ownership: `check` reports a *stale* lock as unheld, so a
+ * holder that died stops counting on its own after {@link STALE_MS} with no
+ * bookkeeping to clean up. That is what makes this usable as an
+ * "is this in progress" test — a pid stamp cannot say it, since a pid both
+ * outlives its process and recurs (pid 1 on every container start).
+ *
+ * Answers `false` when it cannot tell. The callers use this to decide whether
+ * to *leave something alone*, and the alternative to a wrong `false` is
+ * refusing to ever recover an abandoned file.
+ */
+export async function isFileLockHeld(filePath: string): Promise<boolean> {
+  try {
+    return await properLockfile.check(path.resolve(filePath), {
+      realpath: false,
+      stale: STALE_MS,
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Run `fn` holding an exclusive cross-process lock on `filePath`.
  *
  * The lock is `<filePath>.lock`, a directory beside the secrets file rather
@@ -449,15 +473,29 @@ export async function withSecretFileLock<T>(
       // The body already ran and its result is being returned; turning a
       // completed save into a failure at teardown would be the wrong trade.
       // But a lock left behind is worth explaining.
-      warnOnce(
-        // No branch on the error code, deliberately. Our own guard `stat`s
-        // before removing, so anything reaching here is an `rmdir` that was
-        // refused — and **stale takeover reclaims through that same `rmdir`**,
-        // so whatever blocked ours blocks that too. `ENOTEMPTY` is the
-        // reachable one; `EACCES`, `EPERM` and `EROFS` behave identically.
-        // Promising expiry for "everything else" was wrong for all of them.
-        `Could not release the lock on the secrets file at ${target} (${describeError(err)}). Stale takeover reclaims a lock through the same directory removal, so whatever blocked this blocks that too: saves will keep failing until you remove ${lockPathOf(target)} by hand.`,
-      );
+      //
+      // **`ERELEASED` is not a lock left behind.** When the library's refresh
+      // tick detects a takeover it marks the lock released and drops its
+      // registry entry *before* calling `onCompromised`, so our `release()`
+      // returns `ERELEASED` without touching the filesystem. The directory
+      // sitting there is then the **winner's live lock** — and the message
+      // below would tell the operator to delete it, destroying the exclusion
+      // of a process that did nothing wrong. `onCompromised` has already said
+      // what happened, so there is nothing to add.
+      //
+      // A conditional rather than an early `return`: a `return` inside
+      // `finally` discards whatever the body was returning or throwing.
+      if ((err as NodeJS.ErrnoException).code !== "ERELEASED") {
+        warnOnce(
+          // No branch on the *removal* error code, deliberately. Our own
+          // guard `stat`s before removing, so anything else reaching here is
+          // an `rmdir` that was refused — and **stale takeover reclaims
+          // through that same `rmdir`**, so whatever blocked ours blocks that
+          // too. `ENOTEMPTY` is the reachable one; `EACCES`, `EPERM` and
+          // `EROFS` behave identically. Promising expiry was wrong for all.
+          `Could not release the lock on the secrets file at ${target} (${describeError(err)}). Stale takeover reclaims a lock through the same directory removal, so whatever blocked this blocks that too: saves will keep failing until you remove ${lockPathOf(target)} by hand.`,
+        );
+      }
     }
   }
 }

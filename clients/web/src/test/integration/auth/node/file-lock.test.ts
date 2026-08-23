@@ -493,5 +493,13 @@ describe("withSecretFileLock reports what it cannot clean up", () => {
         { timeout: 20_000, interval: 250 },
       );
     });
+
+    // And it must NOT go on to tell the operator to delete the lock. Once the
+    // tick has fired, `release()` answers `ERELEASED` without touching the
+    // filesystem — the directory sitting at that path is then whoever took
+    // over, so "remove it by hand" would destroy the exclusion of a process
+    // that did nothing wrong. `onCompromised` has already said what happened.
+    expect(warnings()).not.toContain("by hand");
+    expect(warnings()).not.toContain("Could not release the lock");
   }, 30_000);
 });

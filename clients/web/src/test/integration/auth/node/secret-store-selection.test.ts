@@ -788,6 +788,46 @@ describe("absorbFileSecretsIntoKeyring", () => {
     },
   );
 
+  it("does not adopt a snapshot another migration is still using (#2082)", async () => {
+    // A `*.migrating-*` file is not automatically an orphan: the process that
+    // staged it may still be reading it. Adopting one mid-hand-off links it
+    // back to the live path and re-claims it under a new name, so its owner's
+    // hand-off fails ENOENT — and if we exit before copying, that healthy
+    // session starts with none of those secrets.
+    //
+    // Liveness is the snapshot's own lock rather than the pid in its name: a
+    // pid outlives its process and recurs (pid 1 on every container start),
+    // whereas the lock expires by itself if the owner dies.
+    const inProgress = path.join(tmpDir, "secrets.json.migrating-999-abc");
+    await fs.writeFile(
+      inProgress,
+      JSON.stringify({
+        version: 1,
+        encryption: "none",
+        secrets: { "srv:oauthClientSecret": "still-migrating" },
+      }),
+      "utf-8",
+    );
+    process.env.MCP_INSPECTOR_SECRET_FILE = path.join(tmpDir, "secrets.json");
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const properLockfile = (await import("proper-lockfile")).default;
+    const release = await properLockfile.lock(inProgress, {
+      realpath: false,
+      stale: 10_000,
+    });
+
+    const mod = await loadWithProbe(true);
+    const keyring = new InMemorySecretStore();
+    await mod.absorbFileSecretsIntoKeyring(keyring);
+    await release();
+
+    // Left exactly where its owner put it, and not migrated from under it.
+    expect(existsSync(inProgress)).toBe(true);
+    expect(existsSync(path.join(tmpDir, "secrets.json"))).toBe(false);
+    expect(await keyring.get("srv", "oauthClientSecret")).toBe(null);
+  });
+
   it("still adopts an orphan when the live file is absent (#2082)", async () => {
     // The fast path above must not be a `stat` of `secrets.json`: an
     // interrupted migration leaves *only* the snapshot, which is precisely

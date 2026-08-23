@@ -54,7 +54,7 @@ import {
   readSecretFilePermissions,
   tightenSecretFilePermissions,
 } from "./file-secret-store.js";
-import { withSecretFileLock } from "./file-lock.js";
+import { isFileLockHeld, withSecretFileLock } from "./file-lock.js";
 import {
   KeyringSecretStore,
   parseAccount,
@@ -546,21 +546,18 @@ export async function absorbFileSecretsIntoKeyring(
   // after the claim below. Everything that *acts* re-checks under the lock.
   if (!(await anythingToMigrate(filePath))) return;
 
-  // Orphan adoption and the claim below both move the live path around, so
-  // they run under the same cross-process lock a `set` takes (#2082) —
-  // otherwise a concurrent writer's atomic rename can land between the two
-  // and be adopted, claimed, or clobbered depending on the interleaving.
-  // The lock is released before the hand-off: that part reads a snapshot
-  // nobody else can reach, and holding it across a keychain round-trip per
-  // secret would block every writer for the duration of a migration.
+  // Orphan adoption and the claim below run under the same cross-process lock
+  // a `set` takes (#2082) — otherwise a concurrent writer's atomic rename can
+  // land between the two and be adopted, claimed, or clobbered depending on
+  // the interleaving.
   //
-  // Wrapped because `withSecretFileLock` **throws** when another process
-  // holds the lock past its retry budget, and this function's contract is
-  // that it never throws: it is awaited directly by both `resolveSecretStore`
-  // branches, so a stuck writer would fail store resolution and with it the
-  // whole session. Refusing is the right answer for a `set` — the user is
-  // waiting on that value — and the wrong one here, where the file simply
-  // stays put and the next run migrates it.
+  // The hand-off itself deliberately runs **outside** it, under a lock on the
+  // *snapshot* instead (see `handOffStagedSecrets`). Holding the main lock
+  // across a keychain round-trip per secret blocks every ordinary writer for
+  // the duration, and past the retry budget fails their save outright — which
+  // is a worse regression than the race it would close, since #1950
+  // guarantees a write completing after the claim survives.
+  //
   const claimed = await withSecretFileLock(filePath, async () => {
     // A crash between the claim and the delete leaves only
     // `secrets.json.migrating-<pid>`. Checking the canonical path alone then
@@ -619,8 +616,45 @@ export async function absorbFileSecretsIntoKeyring(
     return null;
   });
   if (claimed === null) return;
-  const staged = claimed;
+  await handOffStagedSecrets(claimed, filePath, keyring);
+}
 
+/**
+ * Move a claimed snapshot's secrets into the keychain, then dispose of it.
+ *
+ * Runs under a lock on the **snapshot**, not on `secrets.json`. That is what
+ * stops a second Inspector's {@link recoverOrphanedSnapshots} from adopting a
+ * migration still in progress — it link/unlinks the snapshot back to the live
+ * path and re-claims it, our hand-off then fails `ENOENT`, and if that second
+ * process exits before copying, the healthy first session starts with none of
+ * those secrets. Locking the snapshot says "in progress" in a way a filename
+ * cannot, and expires by itself if this process dies.
+ *
+ * Holding the *main* lock here instead would also close it, and was tried:
+ * it blocks every ordinary writer for the whole migration and fails their
+ * save past the retry budget, breaking #1950's guarantee that a write
+ * completing after the claim survives.
+ */
+async function handOffStagedSecrets(
+  staged: string,
+  filePath: string,
+  keyring: SecretStore,
+): Promise<void> {
+  await withSecretFileLock(staged, () =>
+    handOffStagedSecretsLocked(staged, filePath, keyring),
+  ).catch((err: Error) => {
+    console.warn(
+      `\n[mcp-inspector] Could not lock ${staged} to migrate it into the OS keychain (${err.message}), so it has been left in place. The next run will try again.`,
+    );
+  });
+}
+
+/** {@link handOffStagedSecrets}'s body, with the snapshot's lock held. */
+async function handOffStagedSecretsLocked(
+  staged: string,
+  filePath: string,
+  keyring: SecretStore,
+): Promise<void> {
   const file = new FileSecretStore({ filePath: staged });
   // True only when every value reached the keychain *and* there was
   // something to move — the one case where the snapshot is redundant.
@@ -717,6 +751,14 @@ async function recoverOrphanedSnapshots(filePath: string): Promise<void> {
   }
   for (const name of names) {
     const orphan = path.join(dir, name);
+    // Not an orphan at all — another Inspector is migrating it right now, and
+    // adopting it would link it back to the live path and re-claim it under a
+    // new name while its owner is still reading it. That owner's hand-off
+    // then fails `ENOENT`, and if we exit before copying, its healthy session
+    // starts with none of those secrets. The lock expires on its own if that
+    // process dies, so a genuinely abandoned snapshot becomes adoptable
+    // without anything to clean up.
+    if (await isFileLockHeld(orphan)) continue;
     try {
       await fs.link(orphan, filePath);
       await fs.rm(orphan, { force: true });
