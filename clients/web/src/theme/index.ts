@@ -1,3 +1,4 @@
+export { cssVariablesResolver } from "./cssVariables";
 export { ThemeAccordion } from "./Accordion";
 export { ThemeActionIcon } from "./ActionIcon";
 export { ThemeAlert } from "./Alert";
