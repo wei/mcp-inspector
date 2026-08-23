@@ -875,7 +875,9 @@ describe("useServers", () => {
         fetchFn: async (input, init) => {
           const url = input instanceof Request ? input.url : String(input);
           if (url.endsWith("/api/servers/events")) {
-            return { ok: true, body: null } as unknown as Response;
+            // A real Response constructed from `null` has a null `.body`,
+            // so the guard is exercised through the actual Response API.
+            return new Response(null, { status: 200 });
           }
           return h.fetchFn(url, init);
         },
@@ -894,12 +896,14 @@ describe("useServers", () => {
         fetchFn: async (input, init) => {
           const url = input instanceof Request ? input.url : String(input);
           if (url.endsWith("/api/servers/events")) {
-            const body = {
-              getReader: () => ({
-                read: () => Promise.reject(new Error("stream broke")),
-              }),
-            };
-            return { ok: true, body } as unknown as Response;
+            // A real stream whose first pull throws — `reader.read()` then
+            // rejects exactly as a broken network body would, with no cast.
+            const body = new ReadableStream<Uint8Array>({
+              pull() {
+                throw new Error("stream broke");
+              },
+            });
+            return new Response(body, { status: 200 });
           }
           return h.fetchFn(url, init);
         },
@@ -928,22 +932,18 @@ describe("useServers", () => {
         fetchFn: async (input, init) => {
           const url = input instanceof Request ? input.url : String(input);
           if (url.endsWith("/api/servers/events")) {
-            const body = {
-              getReader: () => ({
-                read: async () => {
-                  reads += 1;
-                  if (reads === 1) {
-                    // Two frames in one chunk → one background refresh.
-                    return {
-                      done: false,
-                      value: encoder.encode("event: change\n\n\n\n"),
-                    };
-                  }
-                  return { done: true, value: undefined };
-                },
-              }),
-            };
-            return { ok: true, body } as unknown as Response;
+            const body = new ReadableStream<Uint8Array>({
+              pull(controller) {
+                reads += 1;
+                if (reads === 1) {
+                  // Two frames in one chunk → one background refresh.
+                  controller.enqueue(encoder.encode("event: change\n\n\n\n"));
+                  return;
+                }
+                controller.close();
+              },
+            });
+            return new Response(body, { status: 200 });
           }
           return h.fetchFn(url, init);
         },
@@ -1138,22 +1138,24 @@ describe("useServers", () => {
     const fetchFn: typeof fetch = async (input, init) => {
       const url = input instanceof Request ? input.url : String(input);
       if (url.endsWith("/api/servers/events")) {
-        const body = {
-          getReader: () => ({
-            read: async () => {
-              reads += 1;
-              // Priming comment only — no `event:` / `data:` line.
-              if (reads === 1) {
-                return { done: false, value: encoder.encode(":\n\n") };
-              }
-              // Hold the stream open so the loop can't end and let a
-              // teardown-time settle hide a queued refresh.
-              await secondRead;
-              return { done: true, value: undefined };
-            },
-          }),
-        };
-        return { ok: true, body } as unknown as Response;
+        // `pull` runs once per read, so the counting and the blocking
+        // second read work the same way they would on a hand-rolled reader
+        // double — while staying type-checked against the Response API.
+        const body = new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            reads += 1;
+            // Priming comment only — no `event:` / `data:` line.
+            if (reads === 1) {
+              controller.enqueue(encoder.encode(":\n\n"));
+              return;
+            }
+            // Hold the stream open so the loop can't end and let a
+            // teardown-time settle hide a queued refresh.
+            await secondRead;
+            controller.close();
+          },
+        });
+        return new Response(body, { status: 200 });
       }
       if (url.endsWith("/api/servers")) listGets += 1;
       return h.fetchFn(url, init);
