@@ -70,6 +70,30 @@ test("scans stdout as well as stderr", async (t) => {
   assert.equal(match[1], "4242");
 });
 
+test("sees an announcement that lands inside the final polling interval", async (t) => {
+  // The off-by-one this guards: a fixed attempt count checks the output and
+  // then sleeps, so nothing ever observes the last interval — an announcement
+  // at 29.9s of a 30s budget reads as a timeout.
+  //
+  // Setting pollMs === timeoutMs makes that deterministic rather than a race:
+  // the attempt-counted loop gets exactly one check, at t≈0 before the child
+  // has even finished starting, and then throws. The deadline loop re-reads
+  // after the wait, so *any* announcement before the deadline is seen. The
+  // child announces immediately, ~2s inside the window on either side, so a
+  // loaded runner cannot flip the outcome. (Verified: this fails against the
+  // attempt-counted loop and passes against the deadline loop.)
+  const { match } = await startAnnouncedChild({
+    command: process.execPath,
+    args: ["-e", 'console.error("listening at http://127.0.0.1:8080")'],
+    pattern: /listening at (http:\/\/\S+)/i,
+    onSpawn: killOnTeardown(t),
+    what: "probe",
+    timeoutMs: 2000,
+    pollMs: 2000,
+  });
+  assert.equal(match[1], "http://127.0.0.1:8080");
+});
+
 test("a non-announcing child is still reachable and killable after the timeout", async (t) => {
   // The regression: a child that is alive but never announces. The throw must
   // not be the only thing that happens — the caller must already hold the

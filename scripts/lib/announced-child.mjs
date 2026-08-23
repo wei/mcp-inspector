@@ -69,15 +69,24 @@ export async function startAnnouncedChild({
   child.on("exit", () => (exited = true));
   child.on("close", () => (exited = true));
 
-  const attempts = Math.max(1, Math.ceil(timeoutMs / pollMs));
-  for (let attempt = 0; attempt < attempts; attempt++) {
+  // A deadline loop, not a fixed attempt count: state is re-read *after* every
+  // wait, including the last one. Counting attempts and throwing straight after
+  // the final `delay` leaves the whole last polling interval unobserved, so an
+  // announcement landing at 29.9s of a 30s budget is reported as a timeout —
+  // and a spawn error or early exit in that window is misattributed the same
+  // way. The final wait is also clamped to the deadline so the budget is a
+  // real bound rather than one poll longer.
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
     const match = out.match(pattern);
     if (match) return { child, match };
     if (spawnError) {
       throw new Error(`could not spawn the ${what}: ${spawnError.message}`);
     }
     if (exited) throw new Error(`${what} exited early:\n${out}`);
-    await delay(pollMs);
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    await delay(Math.min(pollMs, remaining));
   }
   throw new Error(
     `${what} did not start within ${Math.round(timeoutMs / 1000)}s:\n${out}`,
