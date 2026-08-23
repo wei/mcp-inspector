@@ -1166,17 +1166,24 @@ function App() {
   const lastPersistedSettings = useLastPersistedSettings(servers);
   // The active server's persisted paginated setting drives the display mode.
   // The sidebar toggle edits it (optimistically, below) and persists it.
+  const activeServerEntry = servers.find((s) => s.id === activeServerId);
   const persistedPaginatedLists =
-    servers.find((s) => s.id === activeServerId)?.settings?.paginatedLists ??
-    false;
+    activeServerEntry?.settings?.paginatedLists ?? false;
   const [paginatedListsOverride, setPaginatedListsOverride] = useState<
     boolean | null
   >(null);
   // Drop the optimistic override once the persisted value catches up (or the
   // active server changes), so the persisted setting is the resting source.
+  //
+  // Keyed on the entry object as well as the value it carries: a rollback can
+  // set the override to a *concrete* value rather than clear it, and if a later
+  // successful read then reports the value the override replaced — an edit made
+  // outside the Inspector overtaking the write — neither the boolean nor the id
+  // changes and the UI stays stuck on the override. A read rebuilds the list, so
+  // a fresh entry is what makes every authoritative read supersede it (#2089).
   useEffect(() => {
     setPaginatedListsOverride(null);
-  }, [persistedPaginatedLists, activeServerId]);
+  }, [persistedPaginatedLists, activeServerId, activeServerEntry]);
   const paginatedLists = paginatedListsOverride ?? persistedPaginatedLists;
   // The malformed-entry report is written by the aggregate walk's salvage. In
   // paginated mode the tools/prompts/resources panels render the paged stores
@@ -3791,10 +3798,17 @@ function App() {
           // baseline rather than cleared, because clearing it falls back to
           // `persistedPaginatedLists` — read from a `servers` entry that may be
           // stale, showing the same wrong value from the other side (#2089).
+          //
+          // Applied only while this write's server is still the active one: the
+          // override is a single app-wide boolean and the live client belongs to
+          // whichever server is connected now, so a rejection arriving after the
+          // user switched would render this server's value on another one.
           const baseline =
             lastPersistedSettings.resolve(activeServerId) ?? EMPTY_SETTINGS;
-          setPaginatedListsOverride(baseline.paginatedLists ?? false);
-          inspectorClient?.setServerSettings(baseline);
+          if (activeServerIdRef.current === activeServerId) {
+            setPaginatedListsOverride(baseline.paginatedLists ?? false);
+            inspectorClient?.setServerSettings(baseline);
+          }
           notifications.show({
             title: "Failed to save pagination setting",
             message: err instanceof Error ? err.message : String(err),

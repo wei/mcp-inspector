@@ -2521,6 +2521,102 @@ describe("App paginated list pagination toggle (#1721)", () => {
     };
     expect(lastPush?.paginatedLists).toBe(true);
   });
+
+  it("lets a successful list read supersede a concrete rollback override (#2089)", async () => {
+    // A rollback sets the override to a value rather than clearing it, so the
+    // effect that drops it cannot key on the persisted boolean alone: if a
+    // later read reports the value the override replaced — an edit made outside
+    // the Inspector overtaking the write — neither that boolean nor the server
+    // id changes, and the UI would stay stuck on the override forever. A read
+    // rebuilds the list, so the entry object is the signal that supersedes it.
+    const user = userEvent.setup();
+    const previousUseServers = vi.mocked(useServers).getMockImplementation();
+    try {
+      const { rerender } = renderWithMantine(<App />);
+      await user.click(screen.getByText("connect"));
+      await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+      // A write lands `true` while list reads are stale, then a toggle fails —
+      // leaving the override on `true` with the entry still reporting `false`.
+      const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+      if (!draftOptions) throw new Error("useSettingsDraft was never called");
+      await act(async () => {
+        await draftOptions.onPersist("A", {
+          ...settingsWithRoots([]),
+          paginatedLists: true,
+        });
+      });
+      updateServerSettingsSpy.mockRejectedValueOnce(new Error("disk full"));
+      await user.click(screen.getByText("paginated-off"));
+      await waitFor(() =>
+        expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true"),
+      );
+
+      // Now a list read succeeds and still says `false` — same boolean, same
+      // server id, new entry object. It is authoritative and must win.
+      vi.mocked(useServers).mockReturnValue({
+        servers: [{ ...SERVER_A } as ServerEntry],
+        loading: false,
+        error: undefined,
+        refresh: vi.fn().mockResolvedValue(undefined),
+        addServer: vi.fn(),
+        updateServer: vi.fn(),
+        updateServerSettings: updateServerSettingsSpy,
+        removeServer: vi.fn(),
+        reorderServers: vi.fn(),
+        importSource: vi.fn().mockResolvedValue({ servers: {} }),
+      });
+      rerender(<App />);
+      await waitFor(() =>
+        expect(screen.getByTestId("tools-paginated")).toHaveTextContent(
+          "false",
+        ),
+      );
+    } finally {
+      if (previousUseServers) {
+        vi.mocked(useServers).mockImplementation(previousUseServers);
+      }
+    }
+  });
+
+  it("rolls back to a settings-modal save that landed, not just a toggle (#2089)", async () => {
+    // The two settings writers feed one record, and this is the half the
+    // toggle-driven tests cannot reach: `useSettingsDraft` is mocked for this
+    // file, so its `onPersist` never runs on its own and a regression that
+    // dropped `begin`/`landed` from the modal path would go unnoticed. The
+    // callback the App handed the hook is invoked directly instead.
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+    if (!draftOptions) throw new Error("useSettingsDraft was never called");
+    const saved: InspectorServerSettings = {
+      ...settingsWithRoots([]),
+      paginatedLists: true,
+    };
+    // The save lands; the list read behind it is what stays stale, so `servers`
+    // (mocked to a fixed entry here) never reports it.
+    await act(async () => {
+      await draftOptions.onPersist("A", saved);
+    });
+    expect(updateServerSettingsSpy).toHaveBeenCalledWith("A", saved);
+
+    updateServerSettingsSpy.mockRejectedValueOnce(new Error("disk full"));
+    await user.click(screen.getByText("paginated-off"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true"),
+    );
+    const client = clientInstances[0] as EventTarget & {
+      setServerSettings: ReturnType<typeof vi.fn>;
+    };
+    const lastPush = client.setServerSettings.mock.calls.at(-1)?.[0] as {
+      paginatedLists?: boolean;
+    };
+    expect(lastPush?.paginatedLists).toBe(true);
+  });
 });
 
 // A background command runs through `runCommandInBackground`, which owns the
