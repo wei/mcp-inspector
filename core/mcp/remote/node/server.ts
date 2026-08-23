@@ -2116,8 +2116,30 @@ export function createRemoteApp(
   const entryForDisk = async (
     built: StoredMCPServer,
     stripped: StoredMCPServer,
-  ): Promise<StoredMCPServer> =>
-    (await secretStoreIsDurable(secretStore)) ? stripped : built;
+    previous?: StoredMCPServer,
+  ): Promise<StoredMCPServer> => {
+    if (await secretStoreIsDurable(secretStore)) return stripped;
+    // Non-durable, and the distinction is the whole of it: **legacy plaintext
+    // that was already on disk** is preserved, because stripping it would
+    // move the only durable copy into RAM. A **newly entered** secret is not,
+    // because the footer promises that a session store writes secrets
+    // nowhere — and the first version of this used the whole submitted entry
+    // as a proxy for provenance, which turned `MCP_INSPECTOR_SECRET_STORE=
+    // memory` into "write every new secret to mcp.json in the clear" while
+    // the UI said the opposite.
+    //
+    // A changed value is new: the old plaintext goes, the new value lives in
+    // the session store, and the footer's promise holds for it.
+    const prior = previous ? extractSecretsFromStored(previous).secrets : {};
+    const submitted = extractSecretsFromStored(built).secrets;
+    const carry: Record<string, string> = {};
+    for (const [field, value] of Object.entries(submitted)) {
+      if (prior[field] === value) carry[field] = value;
+    }
+    return Object.keys(carry).length > 0
+      ? mergeSecretsIntoStored(stripped, carry)
+      : stripped;
+  };
 
   const keychainErrorResponse = (
     c: Context,
@@ -2534,7 +2556,7 @@ export function createRemoteApp(
           }
         }
         const { stripped, secrets } = extractSecretsFromStored(built);
-        const onDisk = await entryForDisk(built, stripped);
+        const onDisk = await entryForDisk(built, stripped, existing);
         const next: MCPConfig = { mcpServers: {} };
         for (const [key, val] of Object.entries(current.mcpServers)) {
           if (key === originalId) {

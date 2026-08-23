@@ -2784,6 +2784,49 @@ describe("plaintext migration against a session-scoped store (#1950)", () => {
     expect(readFileSync(configPath, "utf-8")).toContain("45000");
   });
 
+  it("does not write a NEWLY entered secret to disk on a session store", async () => {
+    // The overshoot in the previous round's fix. Preserving legacy plaintext
+    // is right; using the whole submitted entry as a proxy for "legacy" is
+    // not — it turned `MCP_INSPECTOR_SECRET_STORE=memory` into "write every
+    // new secret to mcp.json in the clear" while the footer said secrets are
+    // written nowhere.
+    const freshPath = join(tempDir, "fresh.json");
+    writeFileSync(freshPath, JSON.stringify({ mcpServers: {} }));
+    const { app } = createRemoteApp({
+      dangerouslyOmitAuth: true,
+      mcpConfigPath: freshPath,
+      initialConfig: { defaultEnvironment: {} },
+      secretStore: new SessionSecretStore(),
+    });
+
+    const res = await app.request(
+      new Request("http://test/api/servers", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          id: "newsrv",
+          config: { type: "streamable-http", url: "https://y.test/mcp" },
+          settings: {
+            headers: [],
+            env: [],
+            metadata: [],
+            connectionTimeout: 30000,
+            requestTimeout: 60000,
+            taskTtl: 60000,
+            maxFetchRequests: 1000,
+            roots: [],
+            oauthClientId: "cid",
+            oauthClientSecret: "never-typed-before",
+          },
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(readFileSync(freshPath, "utf-8")).not.toContain(
+      "never-typed-before",
+    );
+  });
+
   it("aborts the migration when the keychain read fails, preserving mcp.json", async () => {
     // The keychain-wins lookup used the tolerant `get`, so an unreadable
     // keychain read as "nothing there" — and the write that followed would

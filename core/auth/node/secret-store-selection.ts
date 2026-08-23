@@ -530,6 +530,14 @@ export async function absorbFileSecretsIntoKeyring(
   keyring: SecretStore,
 ): Promise<void> {
   const filePath = defaultSecretFilePath();
+
+  // A crash between the claim and the delete leaves only
+  // `secrets.json.migrating-<pid>`. Checking the canonical path alone then
+  // reports "nothing to migrate", the keychain is selected, and every stored
+  // credential silently disappears — the claim protecting the delete having
+  // introduced a way to lose everything. Adopt any orphan first.
+  await recoverOrphanedSnapshots(filePath);
+
   if (!fsSync.existsSync(filePath)) return;
 
   // **Claim the file atomically before reading it.** Comparing its contents
@@ -550,9 +558,17 @@ export async function absorbFileSecretsIntoKeyring(
   const staged = `${filePath}.migrating-${process.pid}`;
   try {
     await fs.rename(filePath, staged);
-  } catch {
-    // Someone else claimed it first, or it vanished. Either way there is
-    // nothing here to migrate and no file of ours to clean up.
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") {
+      // Only ENOENT means someone else claimed it. Anything else — EACCES on
+      // the directory, EROFS — leaves the file exactly where it is, and
+      // returning quietly would select the keychain while file-backed
+      // secrets sit there unreadable by anything, with nothing said.
+      console.warn(
+        `\n[mcp-inspector] Could not claim the secrets file at ${filePath} for migration into the OS keychain (${code ?? "unknown error"}), so it has been left in place. Its secrets are not visible to this session.`,
+      );
+    }
     return;
   }
 
@@ -567,10 +583,14 @@ export async function absorbFileSecretsIntoKeyring(
       console.warn(
         `\n[mcp-inspector] The OS keychain is available again. Secrets kept in ${filePath} while it was not have been moved into the keychain, and the file has been removed.`,
       );
-    } catch {
-      // Every value is in the keychain; only the now-redundant snapshot
-      // remains. Not worth failing startup over, and keychain-wins makes the
-      // next attempt harmless.
+    } catch (err) {
+      // Every value is in the keychain, so this is not worth failing startup
+      // over — but the snapshot is a *plaintext-capable copy of the secrets*
+      // and the app is about to report the keychain as the only store. A
+      // silent catch leaves a file the user cannot know to delete.
+      console.warn(
+        `\n[mcp-inspector] Secrets were moved into the OS keychain, but the temporary copy at ${staged} could not be removed (${err instanceof Error ? err.message : String(err)}). Delete it once you have confirmed the keychain has your secrets.`,
+      );
     }
     return;
   }
@@ -580,15 +600,55 @@ export async function absorbFileSecretsIntoKeyring(
   // *failed* migration lose the file, which is what the claim exists to
   // prevent one line further down.
   try {
-    await fs.rename(staged, filePath);
+    // `link` and not `rename`: POSIX `rename` **replaces** its destination
+    // silently, so restoring with it would overwrite a `secrets.json` that a
+    // concurrent writer recreated while we held the snapshot — destroying a
+    // later successful write, which is the exact loss the claim exists to
+    // prevent. `link` fails with EEXIST instead, which is the no-clobber
+    // primitive this needs; the snapshot is unlinked only once the live path
+    // holds the same inode.
+    await fs.link(staged, filePath);
+    await fs.rm(staged, { force: true });
   } catch {
-    // The live path is occupied — a writer recreated it while we held the
-    // snapshot — so restoring would overwrite a newer file. Leave the
-    // snapshot and say exactly where it is: an operator-visible orphan is
-    // recoverable, and silently clobbering someone's write is not.
+    // The live path is occupied, or hard links are unavailable here. Leave
+    // the snapshot and say exactly where it is: an operator-visible orphan
+    // is recoverable, and clobbering someone's write is not.
     console.warn(
-      `\n[mcp-inspector] Could not restore ${staged} to ${filePath} because a new secrets file was written while the migration ran. Both files exist; the snapshot holds the secrets that were not migrated.`,
+      `\n[mcp-inspector] Could not restore ${staged} to ${filePath}; both files exist and the snapshot holds the secrets that were not migrated. Merge it by hand, or delete it once you have confirmed nothing is missing.`,
     );
+  }
+}
+
+/**
+ * Adopt a snapshot left behind by a process that died mid-migration.
+ *
+ * Renamed back only when the canonical path is free — a live `secrets.json`
+ * is newer than any orphan and must not be replaced. Otherwise the orphan is
+ * reported rather than removed: it may hold values the live file does not,
+ * and this is not the place to decide a merge.
+ */
+async function recoverOrphanedSnapshots(filePath: string): Promise<void> {
+  const dir = path.dirname(filePath);
+  const prefix = `${path.basename(filePath)}.migrating-`;
+  let names: string[];
+  try {
+    names = (await fs.readdir(dir)).filter((n) => n.startsWith(prefix));
+  } catch {
+    return; // No directory yet, or unreadable — nothing to recover.
+  }
+  for (const name of names) {
+    const orphan = path.join(dir, name);
+    try {
+      await fs.link(orphan, filePath);
+      await fs.rm(orphan, { force: true });
+      console.warn(
+        `\n[mcp-inspector] Recovered secrets left behind by an interrupted migration (${orphan} → ${filePath}).`,
+      );
+    } catch {
+      console.warn(
+        `\n[mcp-inspector] Found secrets from an interrupted migration at ${orphan}, and a current ${filePath} already exists, so it was left alone. It may hold values the current file does not.`,
+      );
+    }
   }
 }
 

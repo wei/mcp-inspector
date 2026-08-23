@@ -10,6 +10,8 @@ import {
   Textarea,
 } from "@mantine/core";
 import { ClearButton } from "../../elements/ClearButton/ClearButton";
+import { SecretStorageFooter } from "../../elements/SecretStorageFooter/SecretStorageFooter";
+import type { SecretStorageInfo } from "@inspector/core/auth/secret-storage-info.js";
 import { useValueChange } from "../../../hooks/useValueChange";
 import type {
   MCPServerConfig,
@@ -33,6 +35,14 @@ export interface ServerConfigModalProps {
   existingIds: string[];
   onClose: () => void;
   onSubmit: (id: string, config: MCPServerConfig) => Promise<void> | void;
+  /**
+   * Where secrets typed here end up (#1950 review r20). This dialog takes
+   * stdio `env` values, which are extracted into the secret store exactly as
+   * the ones in Server Settings are — so it is a secret-entry surface and
+   * needs the same permanent disclosure. It had none, which meant a user
+   * could type a value into the one dialog that never said where it goes.
+   */
+  secretStorage?: SecretStorageInfo;
 }
 
 type TransportChoice = "stdio" | "sse" | "streamable-http";
@@ -188,6 +198,7 @@ export function ServerConfigModal({
   existingIds,
   onClose,
   onSubmit,
+  secretStorage,
 }: ServerConfigModalProps) {
   const initial = useMemo(
     () => configToFormState(initialId, initialConfig, mode),
@@ -446,6 +457,7 @@ export function ServerConfigModal({
           </Button>
         </Actions>
       </SectionStack>
+      <SecretStorageFooter info={secretStorage} />
     </AppModalLg>
   );
 }

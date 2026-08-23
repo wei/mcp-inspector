@@ -857,6 +857,106 @@ describe("absorbFileSecretsIntoKeyring", () => {
     );
   });
 
+  it("reports a claim that fails for a reason other than a lost race", async () => {
+    // ENOENT means someone else claimed it. Anything else — EACCES, EROFS —
+    // leaves the file where it is, and returning quietly would select the
+    // keychain while file-backed secrets sit there invisible to everything,
+    // with nothing said.
+    const filePath = await seedFile({ "srv:oauthClientSecret": "stuck" });
+    process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    // Mocked before the module loads: it captures its `fs` binding at import,
+    // so spying on the namespace afterwards does not reach it.
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => {
+      const actual =
+        await vi.importActual<typeof import("node:fs/promises")>(
+          "node:fs/promises",
+        );
+      return {
+        ...actual,
+        default: actual,
+        rename: async (from: string, to: string) => {
+          if (String(to).includes(".migrating-")) {
+            throw Object.assign(new Error("read-only file system"), {
+              code: "EROFS",
+            });
+          }
+          return actual.rename(from, to);
+        },
+      };
+    });
+    try {
+      const mod = await loadWithProbe(true);
+      await mod.absorbFileSecretsIntoKeyring(new InMemorySecretStore());
+      expect(existsSync(filePath)).toBe(true);
+      expect(warn.mock.calls.flat().join("\n")).toMatch(
+        /Could not claim the secrets file .*EROFS/,
+      );
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  });
+
+  it("deferred store forwards isDurable and setMany to the resolved store", async () => {
+    // Both are optional seams, and an unforwarded one degrades silently — the
+    // exact defect that made `getStrict` inert in production for two rounds.
+    process.env.MCP_INSPECTOR_SECRET_STORE = "memory";
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await loadWithProbe(true);
+    const store = mod.defaultSecretStore();
+
+    // The memory store reports itself session-scoped; a store that dropped
+    // the call would answer the `true` default instead.
+    expect(await store.isDurable?.()).toBe(false);
+
+    await store.setMany?.("srv", { "env:A": "1", "env:B": "2" });
+    expect(await store.get("srv", "env:A")).toBe("1");
+    expect(await store.get("srv", "env:B")).toBe("2");
+  });
+
+  it("recovers a snapshot left by a process that died mid-migration", async () => {
+    // The claim protects the delete, and introduced a way to lose everything:
+    // a crash between the rename and the copy leaves only
+    // `secrets.json.migrating-<pid>`, and checking the canonical path alone
+    // then reports "nothing to migrate" while every stored credential
+    // silently disappears.
+    const filePath = await seedFile({ "srv:oauthClientSecret": "orphaned" });
+    const orphan = `${filePath}.migrating-999999`;
+    await fs.rename(filePath, orphan);
+    process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await loadWithProbe(true);
+
+    const keyring = new InMemorySecretStore();
+    await mod.absorbFileSecretsIntoKeyring(keyring);
+
+    // Adopted and migrated, not abandoned.
+    expect(await keyring.get("srv", "oauthClientSecret")).toBe("orphaned");
+    expect(existsSync(orphan)).toBe(false);
+  });
+
+  it("leaves an orphan alone when a live secrets file already exists", async () => {
+    // The live file is newer than any orphan and must not be replaced. The
+    // orphan may hold values it does not, so it is reported rather than
+    // removed — deciding a merge is not this function's job.
+    const filePath = await seedFile({ "srv:oauthClientSecret": "current" });
+    const orphan = `${filePath}.migrating-999999`;
+    await fs.copyFile(filePath, orphan);
+    process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await loadWithProbe(true);
+
+    await mod.absorbFileSecretsIntoKeyring(new InMemorySecretStore());
+
+    expect(existsSync(orphan)).toBe(true);
+    expect(warn.mock.calls.flat().join("\n")).toMatch(
+      /interrupted migration at .*migrating-999999/,
+    );
+  });
+
   it("claims the file atomically, so a later write is not deleted", async () => {
     // Round 19: the pre-delete comparison was a check-to-delete race. A
     // writer completing a `set` *after* the comparison and before the `rm`

@@ -131,8 +131,52 @@ export async function writeClientConfigStore(
   const durable = await secretStoreIsDurable(secretStore);
   await writeStoreFile(
     filePath,
-    serializeStore(durable ? stripped : validated),
+    serializeStore(
+      durable
+        ? stripped
+        : await preserveLegacyPlaintext(
+            filePath,
+            validated,
+            stripped,
+            idpSecret,
+          ),
+    ),
   );
+}
+
+/**
+ * For a session-scoped store: keep the IdP secret on disk only when it was
+ * **already there, unchanged**.
+ *
+ * Stripping legacy plaintext would move the only durable copy into RAM (the
+ * read-path migration withholds its strip for exactly this reason, and the
+ * write path has to agree). But writing a *newly entered* secret to disk
+ * would contradict the footer, which promises a session store writes secrets
+ * nowhere — so provenance decides, not the presence of a value in the
+ * submitted body.
+ */
+async function preserveLegacyPlaintext(
+  filePath: string,
+  validated: ClientConfig,
+  stripped: ClientConfig,
+  idpSecret: string | undefined,
+): Promise<ClientConfig> {
+  if (!idpSecret) return stripped;
+  try {
+    const raw = await readStoreFile(filePath);
+    if (raw === null) return stripped;
+    const prior = parseClientConfig(parseStore(raw));
+    const priorSecret =
+      extractSecretsFromClientConfig(prior).secrets[
+        SECRET_FIELD_IDP_CLIENT_SECRET
+      ];
+    return priorSecret === idpSecret ? validated : stripped;
+  } catch {
+    // Unreadable or unparseable prior file: treat the value as new, which is
+    // the conservative direction — it keeps the secret off disk rather than
+    // writing it there on a guess.
+    return stripped;
+  }
 }
 
 /** Remove client.json and the install-level IdP secret from the keychain. */
