@@ -38,6 +38,40 @@ export type StrictJsonValue =
 export type StrictJsonObject = { [key: string]: StrictJsonValue };
 
 /**
+ * Whether a value is JSON that survives `JSON.stringify` unchanged.
+ *
+ * {@link StrictJsonValue} is the *type*-level half of this and cannot express
+ * the rest: TypeScript has one `number`, but JSON has no encoding for `NaN` or
+ * `±Infinity`, so `JSON.stringify` rewrites them to `null`.
+ *
+ * That is reachable from ordinary input, not just from a careless caller —
+ * `JSON.parse("1e400")` returns `Infinity` on overflow, so text a user typed
+ * parses successfully, satisfies the type, and then reaches the wire as `null`
+ * while the editor still shows what they wrote. Checking at the boundary is the
+ * only place the distinction exists.
+ */
+export function isSerializableJson(value: unknown): value is StrictJsonValue {
+  if (value === null) return true;
+  switch (typeof value) {
+    case "string":
+    case "boolean":
+      return true;
+    case "number":
+      // Rejects NaN and ±Infinity; every other number round-trips.
+      return Number.isFinite(value);
+    case "object":
+      return Array.isArray(value)
+        ? value.every(isSerializableJson)
+        : Object.values(value as Record<string, unknown>).every(
+            isSerializableJson,
+          );
+    default:
+      // `undefined`, functions, symbols and bigints are not JSON at all.
+      return false;
+  }
+}
+
+/**
  * Widen a typed object to a generic string-keyed record so its keys can be
  * iterated or read/written generically. Many of the project's config/SDK types
  * (`StoredMCPServer`, `MCPServerConfig`, `pino.Logger`, DOM `Window`, …) have no

@@ -24,6 +24,25 @@ describe("parseJsonObjectDraft", () => {
     });
   });
 
+  it.each([
+    ["an overflowing literal", '{"n":1e400}'],
+    ["a negative overflow", '{"n":-1e400}'],
+    ["one nested in an array", '{"a":[1,1e400]}'],
+  ])("rejects %s, which would be sent as null", (_label, text) => {
+    // `JSON.parse` accepts these; `JSON.stringify` then writes `null`, so the
+    // editor would show one value and the wire would carry another.
+    const result = parseJsonObjectDraft(text);
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toMatch(/finite/);
+  });
+
+  it("still accepts large-but-finite numbers", () => {
+    expect(parseJsonObjectDraft('{"n":1e308}')).toEqual({
+      ok: true,
+      value: { n: 1e308 },
+    });
+  });
+
   it("rejects text that is not JSON", () => {
     expect(parseJsonObjectDraft('{"a":')).toEqual({
       ok: false,

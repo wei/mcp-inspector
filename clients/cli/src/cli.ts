@@ -25,6 +25,7 @@ import {
 } from "@inspector/core/mcp/node/index.js";
 import type { JsonValue } from "@inspector/core/mcp/index.js";
 import type { StrictJsonValue } from "@inspector/core/json/jsonUtils.js";
+import { isSerializableJson } from "@inspector/core/json/jsonUtils.js";
 import {
   canonicalUrlHost,
   isAllInterfacesHost,
@@ -492,7 +493,20 @@ function parseKeyValuePair(
   try {
     parsedValue = JSON.parse(val) as StrictJsonValue;
   } catch {
+    // Not JSON at all — a bare word or an unquoted string. Sent as a string,
+    // which is what the user plainly meant.
     parsedValue = val;
+  }
+
+  // Valid JSON syntax is not the same as sendable JSON: `1e400` parses to
+  // `Infinity`, which `JSON.stringify` writes as `null`. Rejecting is better
+  // than accepting the flag and silently transmitting a different value —
+  // and better than falling back to the literal string, which would also not
+  // be what was asked for.
+  if (!isSerializableJson(parsedValue)) {
+    throw new Error(
+      `Invalid parameter value: ${value}. Numbers must be finite (a value like 1e400 overflows and cannot be sent).`,
+    );
   }
 
   return { ...previous, [key as string]: parsedValue };

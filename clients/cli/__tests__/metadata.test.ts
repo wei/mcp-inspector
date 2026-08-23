@@ -880,6 +880,37 @@ describe("Metadata Tests", () => {
       }
     });
 
+    it.each([
+      ["an overflowing literal", "n=1e400"],
+      ["a negative overflow", "n=-1e400"],
+      ["one nested in an object", 'o={"a":1e400}'],
+    ])("rejects %s rather than sending null", async (_label, pair) => {
+      // `JSON.parse` accepts these and yields ±Infinity, which
+      // `JSON.stringify` writes as `null` — so accepting the flag would
+      // transmit a value the user did not ask for.
+      const server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createEchoTool()],
+      });
+      try {
+        await server.start();
+        const result = await runCli([
+          server.url,
+          "--cli",
+          "--method",
+          "tools/list",
+          "--metadata",
+          pair,
+          "--transport",
+          "http",
+        ]);
+        expect(result.exitCode).not.toBe(0);
+        expect(`${result.stderr}${result.stdout}`).toMatch(/finite/i);
+      } finally {
+        await server.stop();
+      }
+    });
+
     it("should handle metadata parsing validation", async () => {
       const server = createTestServerHttp({
         serverInfo: createTestServerInfo(),

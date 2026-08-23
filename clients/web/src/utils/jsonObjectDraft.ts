@@ -1,4 +1,5 @@
 import type { StrictJsonObject } from "@inspector/core/json/jsonUtils.js";
+import { isSerializableJson } from "@inspector/core/json/jsonUtils.js";
 
 /**
  * What a JSON-object editor's draft text currently means: the object to emit,
@@ -47,6 +48,16 @@ export function parseJsonObjectDraft(text: string): JsonObjectDraft {
     return {
       ok: false,
       error: "Must be a JSON object (`{ … }`) — changes are not applied",
+    };
+  }
+  // `JSON.parse` accepts numeric literals it cannot represent: `1e400` parses
+  // to `Infinity`, which `JSON.stringify` then writes as `null`. Accepting it
+  // here would show the user one value and send another.
+  if (!isSerializableJson(parsed)) {
+    return {
+      ok: false,
+      error:
+        "Numbers must be finite — a value like `1e400` overflows and would be sent as null",
     };
   }
   return { ok: true, value: parsed };
