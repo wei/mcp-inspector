@@ -369,6 +369,22 @@ interface ToolCallRequest {
 // server can't spin a tight zero-delay loop; a successful acknowledgement resets
 // the count, and past the cap we give up (mark the stream ended) rather than
 // retry a persistently-failing re-list forever.
+/**
+ * Whether a `_meta.progressToken` value is one the protocol allows.
+ *
+ * The spec (and the SDK's `ProgressTokenSchema`,
+ * `z.union([z.string(), z.number().int()])`) constrains this reserved member to
+ * a string or an **integer** — a float is as invalid as an object. Everything
+ * else in `_meta` may be any JSON (#1910), which is exactly why this one key
+ * needs its own check.
+ */
+function isProgressToken(value: unknown): value is ProgressToken {
+  return (
+    typeof value === "string" ||
+    (typeof value === "number" && Number.isInteger(value))
+  );
+}
+
 const MODERN_RECONNECT_BASE_MS = 500;
 const MODERN_RECONNECT_MAX_MS = 15_000;
 const MODERN_RECONNECT_MAX_ATTEMPTS = 8;
@@ -1053,6 +1069,21 @@ export class InspectorClient extends InspectorClientEventTarget {
       ...(logMeta ?? {}),
       ...(callMetadata ?? {}),
     };
+    // `_meta` values are arbitrary JSON (#1910), but `progressToken` is a
+    // reserved member the spec constrains to `string | integer`
+    // (`ProgressTokenSchema = z.union([z.string(), z.number().int()])`). Now
+    // that a value can be an object, an array or a float, a bad one would ride
+    // out on the wire and a conforming server would reject the whole request —
+    // so drop the member rather than send something invalid. It is optional, so
+    // the request stays well-formed and simply asks for no progress. Warn,
+    // because a silently dropped key the user typed is worse than a noisy one.
+    if ("progressToken" in merged && !isProgressToken(merged.progressToken)) {
+      this.logger.warn(
+        { progressToken: merged.progressToken },
+        "Dropping `_meta.progressToken` — expected a string or an integer.",
+      );
+      delete merged.progressToken;
+    }
     return Object.keys(merged).length > 0 ? merged : undefined;
   }
 
@@ -1071,9 +1102,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     metadata: RequestMetadata | undefined,
   ): ProgressToken | undefined {
     const token = metadata?.progressToken;
-    return typeof token === "string" || typeof token === "number"
-      ? token
-      : undefined;
+    return isProgressToken(token) ? token : undefined;
   }
 
   private getRequestOptions(

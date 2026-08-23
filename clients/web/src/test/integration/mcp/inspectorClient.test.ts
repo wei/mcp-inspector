@@ -1412,6 +1412,90 @@ describe("InspectorClient", () => {
       messageLogState.destroy();
     });
 
+    it.each([
+      ["a float", 3.5],
+      ["an object", { id: 1 }],
+      ["an array", [1]],
+      ["null", null],
+      ["a boolean", true],
+    ])(
+      "drops a reserved progressToken that is %s rather than sending it",
+      async (_label, badToken) => {
+        // Every other `_meta` value may be any JSON (#1910), but the spec
+        // constrains `progressToken` to `string | integer`
+        // (`ProgressTokenSchema`). Sending a bad one would make a conforming
+        // server reject the whole request, so the member is dropped — the key
+        // is optional, so what goes out is still well-formed.
+        //
+        // `progress: false` is what makes this observable. With progress on
+        // (the default) the SDK sets `onprogress` and stamps its own message
+        // id over `_meta.progressToken`, so a caller's value never reaches the
+        // wire either way; with it off nothing overwrites the member and a bad
+        // one would ship.
+        client = new InspectorClient(
+          {
+            type: "stdio",
+            command: serverCommand.command,
+            args: serverCommand.args,
+          },
+          {
+            environment: { transport: createTransportNode },
+            progress: false,
+            defaultMetadata: { progressToken: badToken, keep: "me" },
+          },
+        );
+        const messageLogState = new MessageLogState(client);
+        await client.connect();
+        await client.listTools();
+
+        const listToolsReq = messageLogState
+          .getMessages()
+          .find(
+            (m) =>
+              m.direction === "request" &&
+              (m.message as { method?: string }).method === "tools/list",
+          );
+        expect(listToolsReq).toBeDefined();
+        const meta = metaOf(listToolsReq!);
+        expect(meta).not.toHaveProperty("progressToken");
+        // Only the offending member is dropped, not the whole payload.
+        expect(meta.keep).toBe("me");
+        messageLogState.destroy();
+      },
+    );
+
+    it.each([
+      ["a string", "tok-1"],
+      ["an integer", 7],
+    ])("keeps a valid progressToken that is %s", async (_label, token) => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+          // See the note above: with progress on, the SDK overwrites this.
+          progress: false,
+          defaultMetadata: { progressToken: token },
+        },
+      );
+      const messageLogState = new MessageLogState(client);
+      await client.connect();
+      await client.listTools();
+
+      const listToolsReq = messageLogState
+        .getMessages()
+        .find(
+          (m) =>
+            m.direction === "request" &&
+            (m.message as { method?: string }).method === "tools/list",
+        );
+      expect(metaOf(listToolsReq!).progressToken).toBe(token);
+      messageLogState.destroy();
+    });
+
     it("call-time metadata overrides defaultMetadata on key collision", async () => {
       client = new InspectorClient(
         {
