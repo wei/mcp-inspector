@@ -1628,6 +1628,9 @@ describe("App task wiring", () => {
 type RootsFakeClient = EventTarget & {
   setRoots: ReturnType<typeof vi.fn>;
   getRoots: ReturnType<typeof vi.fn>;
+  // Close also pushes the settings it decided to apply, which is what the
+  // failed-save case asserts on (#2089).
+  setServerSettings: ReturnType<typeof vi.fn>;
 };
 
 const settingsWithRoots = (
@@ -1716,6 +1719,47 @@ describe("App roots live-apply on settings-dialog close", () => {
     await waitFor(() =>
       expect(screen.queryByText("Server Settings")).not.toBeInTheDocument(),
     );
+    expect(client.setRoots).not.toHaveBeenCalled();
+  });
+
+  it("applies the last persisted settings on close after a save failed (#2089)", async () => {
+    // `useSettingsDraft` keeps the draft when a save rejects, so closing the
+    // modal would push a value that never reached disk into the live client —
+    // undoing the rollback that reported the failure. Close has to apply what
+    // landed instead.
+    const user = userEvent.setup();
+    updateServerSettingsSpy.mockClear();
+    const failedDraft: InspectorServerSettings = {
+      ...settingsWithRoots([{ uri: "file:///rejected" }]),
+      paginatedLists: true,
+    };
+    const client = await openSettingsForConnectedServer(failedDraft);
+    client.getRoots.mockReturnValue([]);
+
+    const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+    if (!draftOptions) throw new Error("useSettingsDraft was never called");
+    // One save lands, so the tracker has an account of disk…
+    const persistedSettings: InspectorServerSettings = {
+      ...settingsWithRoots([]),
+      paginatedLists: false,
+    };
+    await act(async () => {
+      await draftOptions.onPersist("A", persistedSettings);
+    });
+    // …then the next one rejects, leaving the draft holding an unsaved edit.
+    updateServerSettingsSpy.mockRejectedValueOnce(new Error("disk full"));
+    await act(async () => {
+      await draftOptions.onPersist("A", failedDraft).catch(() => undefined);
+    });
+    client.setServerSettings.mockClear();
+
+    await closeModal(user);
+
+    await waitFor(() => expect(client.setServerSettings).toHaveBeenCalled());
+    expect(client.setServerSettings).toHaveBeenLastCalledWith(
+      persistedSettings,
+    );
+    // …and the rejected roots edit is not advertised either.
     expect(client.setRoots).not.toHaveBeenCalled();
   });
 });
@@ -2710,6 +2754,32 @@ describe("App paginated list pagination toggle (#1721)", () => {
       expect(client.setServerSettings).toHaveBeenCalledWith(
         expect.objectContaining({ paginatedLists: true }),
       ),
+    );
+  });
+
+  it("seeds the settings modal from the last write, not the stale entry (#2089)", async () => {
+    // The modal draft is the input to the *next* write, so seeding it from a
+    // `servers` entry that a failed list reload froze would send the superseded
+    // value back to disk the moment the user saves any unrelated field.
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    await user.click(screen.getByText("paginated-on"));
+    await waitFor(() =>
+      expect(updateServerSettingsSpy).toHaveBeenCalledWith(
+        "A",
+        expect.objectContaining({ paginatedLists: true }),
+      ),
+    );
+
+    // `servers` is mocked to a fixed entry here, so it still reports the
+    // pre-toggle value — exactly what a failed reload leaves behind.
+    const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+    if (!draftOptions) throw new Error("useSettingsDraft was never called");
+    expect(draftOptions.resolveInitial("A")).toEqual(
+      expect.objectContaining({ paginatedLists: true }),
     );
   });
 

@@ -1738,6 +1738,12 @@ function App() {
   // been destroyed — while the replacement client, built from the stale list
   // entry, keeps the value the write replaced (#2089).
   const inspectorClientRef = useRef<InspectorClient | null>(inspectorClient);
+  // The server whose last settings-modal save rejected, if any. `useSettingsDraft`
+  // keeps the edited draft on failure, and closing the modal pushes that draft
+  // into the live client — which would put back a value that never reached disk
+  // and undo the rollback. Cleared by the next save for that server that lands,
+  // and by the close that acts on it (#2089).
+  const failedSettingsSaveRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (activeServer) activeServerNameRef.current = activeServer.name;
     activeServerIdRef.current = activeServerId;
@@ -4209,8 +4215,12 @@ function App() {
     flush: flushSettingsDraft,
   } = useSettingsDraft<InspectorServerSettings>({
     targetId: settingsModalTargetId,
-    resolveInitial: (id) =>
-      servers.find((s) => s.id === id)?.settings ?? EMPTY_SETTINGS,
+    // Through the tracker rather than off `servers` directly: after a write
+    // lands whose list reload failed, that entry still describes the previous
+    // value, so seeding from it and saving an unrelated field would write the
+    // superseded value straight back to disk (#2089). `resolve` falls back to
+    // the entry when nothing has landed, so the ordinary case is unchanged.
+    resolveInitial: (id) => lastPersistedSettings.resolve(id) ?? EMPTY_SETTINGS,
     // The saved settings may include an OAuth client secret or a stdio `env:`
     // value, and writing one can change what the secrets file *is* — the first
     // save under a newly-set passphrase re-encrypts a pre-existing plaintext
@@ -4233,6 +4243,11 @@ function App() {
         // `onError` — an earlier write still running settles the state once it
         // lands, and cannot know that while this one looks pending (#2089).
         write.failed();
+        // The draft keeps the values this save was carrying, and closing the
+        // modal pushes the draft into the live client — which would put back
+        // the value that just failed to reach disk. Remember that this
+        // server's draft is unpersisted so close can apply disk instead.
+        failedSettingsSaveRef.current = id;
         // A write that landed while this one was pending was told it was not
         // settled and so applied nothing; this save never reached disk, so that
         // write is the account of it and nothing else will re-apply it. Same
@@ -4255,6 +4270,10 @@ function App() {
       // toggle failing while this save is in flight rolls the UI and the live
       // client back to a baseline this save then replaces on disk, so a settled
       // save has to re-apply itself exactly as a settled toggle does (#2089).
+      // This save reached disk, so the draft it came from is persisted again.
+      if (failedSettingsSaveRef.current === id) {
+        failedSettingsSaveRef.current = undefined;
+      }
       const settled = write.landed(value);
       if (settled && activeServerIdRef.current === id) {
         setPaginatedListsOverride(value.paginatedLists ?? false);
@@ -4396,17 +4415,29 @@ function App() {
       settingsModalTargetId === activeServerId &&
       settingsDraft
     ) {
+      // Normally the draft is what the user just saved, so it is also what is
+      // on disk. When this server's last save *rejected* it is not: the draft
+      // still holds the failed edit, and pushing it here would contradict disk
+      // and undo the rollback that reported the failure. Apply what landed
+      // instead, and drop the flag — the stale draft goes with the modal, and
+      // reopening seeds from the tracker (#2089).
+      let applied = settingsDraft;
+      if (failedSettingsSaveRef.current === settingsModalTargetId) {
+        applied =
+          lastPersistedSettings.resolve(settingsModalTargetId) ?? settingsDraft;
+        failedSettingsSaveRef.current = undefined;
+      }
       // Push the edited settings onto the live client so settings the managed
       // state reads at notification time (auto-refresh-on-list-changed) take
       // effect without a reconnect (#1444). Connection-time inputs (transport,
       // OAuth, timeouts) still only apply on the next connect.
-      inspectorClient.setServerSettings(settingsDraft);
+      inspectorClient.setServerSettings(applied);
       // Resize the Network log buffer live so a maxFetchRequests edit takes
       // effect without a reconnect (shrinking trims immediately). Connect-time
       // construction also reads this, so a reconnect would apply it anyway —
       // this just makes the toast→adjust flow responsive.
-      fetchLogRef.current?.setMaxFetchRequests(settingsDraft.maxFetchRequests);
-      const nextRoots = cleanRoots(settingsDraft.roots);
+      fetchLogRef.current?.setMaxFetchRequests(applied.maxFetchRequests);
+      const nextRoots = cleanRoots(applied.roots);
       const currentRoots = cleanRoots(inspectorClient.getRoots());
       if (JSON.stringify(nextRoots) !== JSON.stringify(currentRoots)) {
         void inspectorClient.setRoots(nextRoots).catch(() => {
@@ -4423,6 +4454,7 @@ function App() {
     settingsModalTargetId,
     activeServerId,
     settingsDraft,
+    lastPersistedSettings,
   ]);
 
   // The Resources screen needs `isSubscribed` to flip the Subscribe button
