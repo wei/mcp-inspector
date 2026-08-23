@@ -818,6 +818,13 @@ function App() {
   // entry would otherwise be rendered by a factory bound to the replacement
   // client, i.e. read and answered through a different server.
   const appElicitationSessionRef = useRef<AppElicitationSession>(null);
+  // `setupClientForServer` is synchronous and memoized, so a caller that
+  // awaited the config would still resume with the `sandboxUrl` captured by the
+  // render it STARTED in — undefined, on the very load this matters for. The
+  // ref is written every render, so client construction reads the current value
+  // whichever entry point (connect, deep link, OAuth callback) reached it.
+  const sandboxUrlRef = useRef<string | undefined>(undefined);
+  sandboxUrlRef.current = sandboxUrl;
   // Whether the sandbox exists is only known once `/api/config` resolves, and
   // the answer is baked into the client at construction (it decides whether the
   // nested MCP Apps `elicitation` capability is advertised). So a connect waits
@@ -2518,7 +2525,7 @@ function App() {
         // here means "confirmed absent" rather than "not known yet" — a
         // connection that reaches this with no sandbox behaves like the
         // CLI/TUI: native elicitation queue, no claim made to the server.
-        ...(sandboxUrl && {
+        ...(sandboxUrlRef.current && {
           appElicitation: newAppElicitationSession().render,
         }),
         // Always advertise the roots capability (even with no configured
@@ -2623,7 +2630,6 @@ function App() {
       onBeforeOAuthRedirect,
       clientConfig,
       newAppElicitationSession,
-      sandboxUrl,
     ],
   );
 
@@ -2743,6 +2749,9 @@ function App() {
     }
 
     void (async () => {
+      // Same reason as the connect path: whether this client may advertise
+      // app-rendered elicitation is fixed at construction.
+      await initialConfigSettledRef.current?.promise;
       try {
         await webOAuthStorage.load();
       } catch (err) {
