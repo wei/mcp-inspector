@@ -4075,8 +4075,20 @@ function App() {
   // opens (see the menu handlers).
   const addServerHighlighted = useCallback(
     async (id: string, config: MCPServerConfig) => {
-      await addServer(id, config);
-      setHighlightedServerIds((ids) => (ids.includes(id) ? ids : [...ids, id]));
+      const markAdded = () =>
+        setHighlightedServerIds((ids) =>
+          ids.includes(id) ? ids : [...ids, id],
+        );
+      try {
+        await addServer(id, config);
+      } catch (err) {
+        // A failed list reload still means the row is on disk, so it belongs
+        // in the highlight batch — the next successful refresh is what
+        // renders it, and it would otherwise arrive unmarked (#1914 r2).
+        if (err instanceof ServerListReloadError) markAdded();
+        throw err;
+      }
+      markAdded();
     },
     [addServer],
   );
@@ -4086,10 +4098,24 @@ function App() {
     async (id: string, config: MCPServerConfig) => {
       if (configModal?.mode === "edit" && configModal.targetId) {
         const originalId = configModal.targetId;
-        await updateServer(originalId, id, config);
-        if (originalId === activeServerId && id !== originalId) {
-          setActiveServerId(id);
+        const followRename = () => {
+          if (originalId === activeServerId && id !== originalId) {
+            setActiveServerId(id);
+          }
+        };
+        try {
+          await updateServer(originalId, id, config);
+        } catch (err) {
+          // A `ServerListReloadError` means the PUT landed and only reading
+          // the list back failed — the rename IS on disk. The active
+          // selection has to follow it anyway, or the next successful
+          // refresh leaves `activeServerId` pointing at an id that no longer
+          // exists (#1914 r2). Still rethrow, so the modal shows the reload
+          // error rather than closing as if nothing happened.
+          if (err instanceof ServerListReloadError) followRename();
+          throw err;
         }
+        followRename();
         return;
       }
       // add or clone

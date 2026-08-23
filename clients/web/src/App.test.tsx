@@ -220,6 +220,12 @@ const SERVER_A = {
 const { updateServerSettingsSpy } = vi.hoisted(() => ({
   updateServerSettingsSpy: vi.fn(() => Promise.resolve()),
 }));
+
+// Same idea for the edit-modal rename path (#1914): the test needs to make the
+// PUT's *reload* fail, which only a spy it controls can do.
+const { updateServerSpy } = vi.hoisted(() => ({
+  updateServerSpy: vi.fn(() => Promise.resolve()),
+}));
 // Stable spy for the tools list-changed acknowledgement, so a test can assert
 // the paginated Refresh clears the indicator (#1721).
 const { clearToolsListChangedSpy } = vi.hoisted(() => ({
@@ -235,7 +241,7 @@ vi.mock("@inspector/core/react/useServers.js", async (importOriginal) => ({
   useServers: vi.fn(() => ({
     servers: [SERVER_A],
     addServer: vi.fn(),
-    updateServer: vi.fn(),
+    updateServer: updateServerSpy,
     updateServerSettings: updateServerSettingsSpy,
     removeServer: vi.fn(),
   })),
@@ -418,6 +424,7 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
     onClearCompletedTasks: () => void;
     onRefreshTasks: () => void;
     onServerSettings: (id: string) => void;
+    onServerEdit: (id: string) => void;
     onClearProtocol: () => void;
     onReplayProtocol: (id: string) => void;
     onTogglePinProtocol: (id: string) => void;
@@ -543,6 +550,9 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
       </button>
       <button onClick={() => props.onSetLogLevel("debug")}>set-level</button>
       <button onClick={() => props.onServerSettings("A")}>open-settings</button>
+      {/* The real server grid (and its Edit button) lives inside this mocked
+          view, so the edit modal is only reachable through its callback. */}
+      <button onClick={() => props.onServerEdit("A")}>edit-server</button>
       <span data-testid="pinned-history">
         {Array.from(props.pinnedProtocolIds ?? []).join(",")}
       </span>
@@ -2458,13 +2468,102 @@ describe("App paginated list pagination toggle (#1721)", () => {
       await Promise.resolve();
     });
     expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true");
-    const client = clientInstances[0] as unknown as {
+    // Single intersection assertion rather than the `as unknown as` this file
+    // uses elsewhere: the fake client really is an EventTarget, and widening
+    // it keeps that relationship instead of erasing it (#1914 r2).
+    const client = clientInstances[0] as EventTarget & {
       setServerSettings: ReturnType<typeof vi.fn>;
     };
     const lastPush = client.setServerSettings.mock.calls.at(-1)?.[0] as {
       paginatedLists?: boolean;
     };
     expect(lastPush?.paginatedLists).toBe(true);
+  });
+});
+
+// `onConfigSubmit` moves `activeServerId` to the new id only after
+// `updateServer` *resolves*. Once a failed list reload rejects, the rename is
+// still on disk — so without the catch-side `followRename` the active id stays
+// on the old one, and the next successful refresh leaves it pointing at a row
+// that no longer exists (#1914 review r2).
+describe("App edit rename with a failed list reload (#1914)", () => {
+  // Earlier describes install their own `useServers` return value, which
+  // outlives them — so this block installs its own and puts the previous
+  // implementation back, rather than trusting whatever leaked in.
+  let restoreUseServers: (() => void) | undefined;
+
+  const serversResult = (ids: string[]): ReturnType<typeof useServers> => ({
+    servers: ids.map((id) => ({ ...SERVER_A, id }) as ServerEntry),
+    loading: false,
+    error: undefined,
+    refresh: vi.fn().mockResolvedValue(undefined),
+    addServer: vi.fn().mockResolvedValue(undefined),
+    updateServer: updateServerSpy,
+    updateServerSettings: updateServerSettingsSpy,
+    removeServer: vi.fn().mockResolvedValue(undefined),
+    reorderServers: vi.fn().mockResolvedValue(undefined),
+    importSource: vi.fn().mockResolvedValue({ servers: {} }),
+  });
+
+  beforeEach(() => {
+    clientInstances.length = 0;
+    const previous = vi.mocked(useServers).getMockImplementation();
+    restoreUseServers = previous
+      ? () => vi.mocked(useServers).mockImplementation(previous)
+      : undefined;
+    updateServerSpy.mockClear();
+    updateServerSettingsSpy.mockClear();
+    vi.mocked(useServers).mockReturnValue(serversResult(["A"]));
+  });
+
+  afterEach(() => {
+    restoreUseServers?.();
+  });
+
+  it("follows the rename so the active id isn't orphaned (#1914)", async () => {
+    // `activeServerId` isn't rendered anywhere, so it's read back through the
+    // one handler that passes it straight to a spy: the pagination toggle
+    // calls `updateServerSettings(activeServerId, …)`.
+    const user = userEvent.setup();
+    updateServerSpy.mockRejectedValueOnce(
+      new ServerListReloadError(
+        "The server was saved, but the server list could not be reloaded: disk full",
+      ),
+    );
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    await user.click(screen.getByText("edit-server"));
+    const idField = await screen.findByLabelText(/Server ID/);
+    await user.clear(idField);
+    await user.type(idField, "A-renamed");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(updateServerSpy).toHaveBeenCalledWith(
+        "A",
+        "A-renamed",
+        expect.anything(),
+      ),
+    );
+    // The rejection still reaches the modal, which stays open showing it.
+    expect(
+      await screen.findByText(/could not be reloaded: disk full/),
+    ).toBeInTheDocument();
+
+    // Now let the row land, as a later successful refresh would, and read the
+    // active id back off the toggle.
+    vi.mocked(useServers).mockReturnValue(serversResult(["A-renamed"]));
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await user.click(screen.getByText("paginated-on"));
+
+    await waitFor(() =>
+      expect(updateServerSettingsSpy).toHaveBeenCalledWith(
+        "A-renamed",
+        expect.objectContaining({ paginatedLists: true }),
+      ),
+    );
   });
 });
 
