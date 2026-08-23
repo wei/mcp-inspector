@@ -118,10 +118,13 @@ export function AppElicitationHost({
 
   return (
     <>
-      {entries.map((entry) => (
+      {entries.map((entry, index) => (
         <AppElicitationFrame
           key={entry.requestId}
           entry={entry}
+          // Only the last-rendered modal is on top, so only it may own the
+          // focus trap, the Escape key and the overlay — see the prop's doc.
+          isTop={index === entries.length - 1}
           sandboxPath={sandboxPath}
           bridgeFactory={bridgeFactory}
           onSettle={onSettle}
@@ -134,6 +137,16 @@ export function AppElicitationHost({
 
 interface AppElicitationFrameProps {
   entry: AppElicitationEntry;
+  /**
+   * Whether this modal is the topmost of the open set.
+   *
+   * Concurrent elicitations mean several are open at once, and each would
+   * otherwise install its own focus trap, Escape handler and overlay — which
+   * fight over the keyboard and let one Escape dismiss more than one pending
+   * request. Only the top one owns those; the rest stay mounted (their apps
+   * keep their bridges and their handshakes) but inert to the keyboard.
+   */
+  isTop: boolean;
   sandboxPath: string;
   bridgeFactory: BridgeFactory;
   onSettle: (requestId: string, result: ElicitResult) => void;
@@ -150,6 +163,7 @@ interface AppElicitationFrameProps {
  */
 function AppElicitationFrame({
   entry,
+  isTop,
   sandboxPath,
   bridgeFactory,
   onSettle,
@@ -221,8 +235,13 @@ function AppElicitationFrame({
   );
 
   return (
-    <ElicitationModal opened onClose={dismiss}>
-      <ElicitationOverlay />
+    <ElicitationModal
+      opened
+      onClose={dismiss}
+      trapFocus={isTop}
+      closeOnEscape={isTop}
+    >
+      {isTop && <ElicitationOverlay />}
       {/* `aria-label` and the `data-*` attributes go on the CONTENT (the
           role="dialog" element), not the Root — the Root is only a portal
           wrapper, so a name placed there never reaches the dialog. Named per

@@ -2483,11 +2483,16 @@ function App() {
         // Sampling / elicitation are on by default; keep the parameterized
         // options off until the UI grows the surface to render them.
         elicit: { form: true, url: true },
-        // Web only: hands form elicitations that name a `ui://` resource to the
-        // MCP App the server chose, and advertises the nested MCP Apps
-        // `elicitation` capability that makes a server willing to send one
-        // (#1854). The native elicitation queue stays the fallback.
-        appElicitation: appElicitationController.render,
+        // Web only, and only when the sandbox renderer is actually available:
+        // supplying this advertises the nested MCP Apps `elicitation`
+        // capability, and a client that cannot host an app must not claim it
+        // (#1854). `sandboxUrl` is undefined while `/api/config` is in flight
+        // and when the sandbox controller could not start, so this connection
+        // simply behaves like the CLI/TUI: the native elicitation queue, with
+        // no claim made to the server.
+        ...(sandboxUrl && {
+          appElicitation: appElicitationController.render,
+        }),
         // Always advertise the roots capability (even with no configured
         // roots) so the server can issue roots/list and receive
         // roots/list_changed; the configured roots are the answer to
@@ -2590,6 +2595,7 @@ function App() {
       onBeforeOAuthRedirect,
       clientConfig,
       appElicitationController.render,
+      sandboxUrl,
     ],
   );
 

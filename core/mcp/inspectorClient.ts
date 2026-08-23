@@ -1436,33 +1436,57 @@ export class InspectorClient extends InspectorClientEventTarget {
             initialStatus: "input_required",
             statusMessage: "Awaiting user input",
           });
+          // Settling the receiver task, shared by both answer routes below so
+          // an app-rendered answer completes the task exactly as a native one
+          // does.
+          const completeTask = (result: ElicitResult) => {
+            record.resolvePayload(result);
+            const updated: Task = {
+              ...record.task,
+              status: "completed",
+              lastUpdatedAt: new Date().toISOString(),
+            };
+            record.task = updated;
+            this.upsertReceiverTask(updated);
+          };
+          const failTask = (error: Error) => {
+            record.rejectPayload(error);
+            const updated: Task = {
+              ...record.task,
+              status: "failed",
+              lastUpdatedAt: new Date().toISOString(),
+              statusMessage: error.message,
+            };
+            record.task = updated;
+            this.upsertReceiverTask(updated);
+          };
           void (async () => {
+            // A task-augmented request is still an `elicitation/create`, so the
+            // app-rendering contract applies to it too (#1854). It cannot go
+            // through `enqueuePendingElicitation` — the response frame has
+            // already been sent as a `CreateTaskResult` and the answer settles
+            // the TASK rather than the request — so the same attempt is made
+            // here, falling back to the native queue exactly as that funnel
+            // does. An abort (disconnect) fails the task rather than reopening
+            // it natively.
+            let appResult: ElicitResult | null;
+            try {
+              appResult = await this.tryAppElicitation(request);
+            } catch (error) {
+              failTask(
+                error instanceof Error ? error : new Error(String(error)),
+              );
+              return;
+            }
+            if (appResult) {
+              completeTask(appResult);
+              return;
+            }
             const elicitationRequest = new ElicitationCreateMessage(
               request,
-              (result) => {
-                record.resolvePayload(result);
-                const now = new Date().toISOString();
-                const updated: Task = {
-                  ...record.task,
-                  status: "completed",
-                  lastUpdatedAt: now,
-                };
-                record.task = updated;
-                this.upsertReceiverTask(updated);
-              },
+              completeTask,
               (id) => this.removePendingElicitation(id),
-              (error) => {
-                record.rejectPayload(error);
-                const now = new Date().toISOString();
-                const updated: Task = {
-                  ...record.task,
-                  status: "failed",
-                  lastUpdatedAt: now,
-                  statusMessage: error.message,
-                };
-                record.task = updated;
-                this.upsertReceiverTask(updated);
-              },
+              failTask,
             );
             this.addPendingElicitation(elicitationRequest);
           })();

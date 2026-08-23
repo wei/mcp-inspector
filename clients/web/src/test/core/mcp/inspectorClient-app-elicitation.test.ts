@@ -95,10 +95,23 @@ class ElicitTransport implements Transport {
     params: Record<string, unknown>,
     timeoutMs = 2000,
   ): Promise<JSONRPCMessage> {
+    return this.sendRequest(id, "elicitation/create", params, timeoutMs);
+  }
+
+  /**
+   * Deliver any server→client request and resolve with the client's reply.
+   * NOT named `send` — that is the Transport method the client calls.
+   */
+  sendRequest(
+    id: number,
+    method: string,
+    params?: Record<string, unknown>,
+    timeoutMs = 2000,
+  ): Promise<JSONRPCMessage> {
     const reply = new Promise<JSONRPCMessage>((resolve) => {
       this.waiters.set(id, resolve);
     });
-    this.deliver({ jsonrpc: "2.0", id, method: "elicitation/create", params });
+    this.deliver({ jsonrpc: "2.0", id, method, ...(params && { params }) });
     let timer: ReturnType<typeof setTimeout>;
     return Promise.race([
       reply,
@@ -123,6 +136,17 @@ function appParams(overrides: Record<string, unknown> = {}) {
     _meta: { ui: { resourceUri: APP_URI } },
     ...overrides,
   };
+}
+
+/** The receiver tasks the client reports over `tasks/list`, by status. */
+async function taskStatuses(
+  transport: ElicitTransport,
+  id: number,
+): Promise<string[]> {
+  const reply = (await transport.sendRequest(id, "tasks/list")) as {
+    result?: { tasks?: { status?: string }[] };
+  };
+  return (reply.result?.tasks ?? []).map((t) => t.status ?? "");
 }
 
 async function connectClient(options: {
@@ -401,6 +425,78 @@ describe("app-rendered elicitation routing (#1854)", () => {
         }),
       });
       await expectNativeFallback(transport, client, 26, appParams());
+      await client.disconnect();
+    });
+  });
+
+  describe("task-augmented inbound requests", () => {
+    /**
+     * A `params.task` elicitation answers the server immediately with a
+     * `CreateTaskResult` and settles the TASK when the user answers, so it
+     * cannot ride `enqueuePendingElicitation`. It is still an
+     * `elicitation/create`, so the app-rendering contract applies to it too.
+     */
+    async function connectWithTasks(
+      transport: ElicitTransport,
+      renderer?: AppElicitationRenderer,
+    ) {
+      const client = new InspectorClient(
+        { type: "stdio", command: "noop", args: [] },
+        {
+          environment: { transport: () => ({ transport }) },
+          elicit: { form: true },
+          receiverTasks: true,
+          ...(renderer && { appElicitation: renderer }),
+        },
+      );
+      await client.connect();
+      return client;
+    }
+
+    const taskParams = () => appParams({ task: { ttl: 60_000 } });
+
+    it("renders the app and completes the task with its result", async () => {
+      const transport = new ElicitTransport();
+      const seen: AppElicitationRequest[] = [];
+      const client = await connectWithTasks(transport, async (request) => {
+        seen.push(request);
+        return { action: "accept", content: { choice: "option-a" } };
+      });
+
+      // The immediate response is the task handle, not the answer.
+      const reply = await transport.elicit(50, taskParams());
+      expect(reply).toMatchObject({
+        id: 50,
+        result: { task: { taskId: expect.any(String) } },
+      });
+
+      await vi.waitFor(() => expect(seen).toHaveLength(1));
+      expect(seen[0].resourceUri).toBe(APP_URI);
+      // The app answered, so the native queue never opened and the task
+      // completed on its own — read back the way a server reads it, over
+      // `tasks/list`.
+      expect(client.getPendingElicitations()).toHaveLength(0);
+      await vi.waitFor(async () =>
+        expect(await taskStatuses(transport, 60)).toContain("completed"),
+      );
+      await client.disconnect();
+    });
+
+    it("falls back to the native queue when the app cannot answer", async () => {
+      const transport = new ElicitTransport();
+      const client = await connectWithTasks(transport, async () => {
+        throw new Error("sandbox unavailable");
+      });
+      await transport.elicit(51, taskParams());
+      await vi.waitFor(() =>
+        expect(client.getPendingElicitations()).toHaveLength(1),
+      );
+      await client
+        .getPendingElicitations()[0]
+        .respond({ action: "accept", content: { choice: "native" } });
+      await vi.waitFor(async () =>
+        expect(await taskStatuses(transport, 61)).toContain("completed"),
+      );
       await client.disconnect();
     });
   });

@@ -193,6 +193,35 @@ describe("AppElicitationHost (#1854)", () => {
     expect(onSettle.mock.calls[0][0]).toBe("req-2");
   });
 
+  it("gives the focus trap, Escape and the overlay to the top modal only", async () => {
+    // Every entry stays mounted (each app keeps its own bridge and handshake),
+    // but only one may own the keyboard — otherwise the traps fight and a
+    // single Escape can dismiss more than one pending request.
+    const first = createMockBridge({});
+    const second = createMockBridge({});
+    const bridges = [first.bridge, second.bridge];
+    const factory = vi.fn(() => bridges.shift()) as unknown as BridgeFactory;
+    const user = userEvent.setup();
+
+    renderWithMantine(
+      <AppElicitationHost
+        entries={[makeEntry("req-1"), makeEntry("req-2")]}
+        sandboxPath="/sandbox.html"
+        bridgeFactory={factory}
+        onSettle={onSettle}
+        onFail={onFail}
+      />,
+    );
+    await flushAsync();
+    expect(screen.getAllByTestId("app-elicitation")).toHaveLength(2);
+
+    await user.keyboard("{Escape}");
+    // Exactly one request is dismissed — the topmost, which is the last one.
+    expect(onFail).toHaveBeenCalledTimes(1);
+    expect(onFail.mock.calls[0][0]).toBe("req-2");
+    expect(onFail.mock.calls[0][1].message).toMatch(/dismissed/);
+  });
+
   it("falls back when the app does not advertise elicitation", async () => {
     const mock = createMockBridge({ elicitation: false });
     renderWithMantine(
