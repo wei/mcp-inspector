@@ -793,6 +793,17 @@ Why it matters, given that these paths are all gitignored and the findings are u
 
 The two coverage guards do **not** catch this, and adding a third is not the fix. `verify:format-coverage` and `verify:typecheck-coverage` assert that first-party source is *covered*; neither asserts that generated output is *excluded* — an asymmetry that is deliberate, since a guard can't distinguish "generated" from "source" without being told, and the ignore lists are already that statement. So this class drifts silently and the check is a human one: **when a build starts writing to a new location, add it to that scope's ignore list in the same change.** The reverse of the guards' rule also holds — never widen an ignore to silence a finding in first-party code, and never add a build directory to a tsconfig `include` to make a generated `.d.ts` resolve (import the source, or fix the build's types).
 
+### Lint has no warning tier
+
+**Every `lint` script runs with `--max-warnings 0`, so a warning fails `validate` exactly as an error does (#2085).** All six scopes carry the flag — each of `clients/{web,cli,tui,launcher}`'s `eslint .`, plus the root's `lint:core` and `lint:shared`.
+
+This exists because the gate's promise — that passing `npm run ci` locally means CI's gates pass — was kept while a real bug walked through it. `react-hooks/exhaustive-deps` ships at `warn` in the recommended set, and two `useCallback`s in `App.tsx` omitted a non-stable `refresh` from their dependency arrays; ESLint printed the right message on both lines on every run, nothing consumed it, and the stale closure was caught only by a review round on #2076. It is the same argument [Build output is never a gate target](#build-output-is-never-a-gate-target) makes from the other direction: a channel nobody fails on is one people learn to skim.
+
+Two consequences worth stating:
+
+- **Do not silence a finding to satisfy the gate.** A warning is now a defect to fix. If a rule genuinely must be waived on a line, use its inline disable comment **with a one-line justification** — the same standard this document sets for `v8 ignore` and for `void` on a floating promise. Widening a `globalIgnores` or dropping a rule to make `lint` pass is not an acceptable fix.
+- **A rule left at `warn` still reads wrong in an editor.** The flag makes severity irrelevant to the *gate*, not to the developer looking at a squiggle. `react-hooks/exhaustive-deps` is therefore set to **`error`** in both React scopes (`clients/web`, `clients/tui`) rather than relying on the CLI flag alone. Prefer `error` for any rule you actually intend to enforce.
+
 ### Typescript instructions
 
 - Use TypeScript for all new code
