@@ -40,8 +40,8 @@ export interface MessageObservable<TMessage = unknown> {
 
 /**
  * Whether `message` is a well-formed `ui/initialize` REQUEST — a JSON-RPC
- * request id, plus the two params the handshake requires (`protocolVersion`,
- * `appInfo`).
+ * request id, plus the three params the handshake requires
+ * (`protocolVersion`, `appInfo`, `appCapabilities`).
  *
  * This is a gate, not a second copy of the bridge's schema: the bridge stays
  * the authority on everything else in the frame. What it has to stop is a
@@ -52,7 +52,7 @@ export interface MessageObservable<TMessage = unknown> {
  */
 function isInitializeRequest(
   message: unknown,
-): message is { params: { appCapabilities?: unknown } } {
+): message is { params: { appCapabilities: Record<string, unknown> } } {
   if (typeof message !== "object" || message === null) return false;
   const frame = message as { id?: unknown; method?: unknown; params?: unknown };
   if (frame.method !== "ui/initialize") return false;
@@ -62,33 +62,38 @@ function isInitializeRequest(
   const params = frame.params as {
     protocolVersion?: unknown;
     appInfo?: unknown;
+    appCapabilities?: unknown;
   };
+  // All three are required by the bridge's own initialize schema, so a frame
+  // missing any of them is one the bridge rejects.
   return (
     typeof params.protocolVersion === "string" &&
     typeof params.appInfo === "object" &&
-    params.appInfo !== null
+    params.appInfo !== null &&
+    typeof params.appCapabilities === "object" &&
+    params.appCapabilities !== null
   );
 }
 
 /**
  * Record `params.appCapabilities` from the view's handshake.
  *
- * Only the FIRST well-formed `ui/initialize` is recorded, mirroring the bridge:
- * it keeps the capabilities it accepted and ignores re-initialization, so a
- * later frame — malformed or not — must not be able to change what this gate
- * reports either. Fail-closed in both directions: a malformed first frame
- * records nothing.
+ * Every *accepted* `ui/initialize` replaces the recorded value, because that is
+ * what the bridge does — on a second handshake (a view double-mounting under
+ * React StrictMode, or reconnecting) it warns and takes the latest appInfo and
+ * capabilities. Freezing this at the first frame would leave the gate reporting
+ * capabilities the bridge no longer holds, in both directions.
+ *
+ * A frame the bridge would *reject* records nothing and leaves the previous
+ * value alone, which is what keeps the gate fail-closed: a malformed initialize
+ * must not be a second, laxer route to setting `elicitation`.
  */
 function recordAdvertisedCapabilities(
   bridge: AppBridge,
   message: unknown,
 ): void {
-  if (rawAppCapabilities.has(bridge)) return;
   if (!isInitializeRequest(message)) return;
-  const advertised = message.params.appCapabilities;
-  if (typeof advertised === "object" && advertised !== null) {
-    rawAppCapabilities.set(bridge, advertised as Record<string, unknown>);
-  }
+  rawAppCapabilities.set(bridge, message.params.appCapabilities);
 }
 
 /**

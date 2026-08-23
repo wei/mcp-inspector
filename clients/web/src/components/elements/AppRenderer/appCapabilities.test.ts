@@ -141,15 +141,39 @@ describe("appCapabilities (#1854)", () => {
     expect(appAdvertisesElicitation(bridge)).toBe(false);
   });
 
-  it("keeps the capabilities from the first handshake, not a later frame", () => {
-    // The bridge keeps what it accepted and ignores re-initialization; this
-    // gate has to agree, or a second frame could change what it reports.
+  it("takes the latest accepted handshake, in both directions", () => {
+    // Verified against ext-apps 1.7.5: a second `ui/initialize` is accepted —
+    // the bridge warns about the double-mount and the latest appInfo and
+    // capabilities REPLACE the previous ones. Freezing this at the first frame
+    // would leave the gate reporting capabilities the bridge no longer holds.
     const bridge = makeBridge({});
     const { transport } = makeTransport();
     observeAppCapabilities(bridge, transport);
+
     transport.onmessage?.(initializeFrame({ availableDisplayModes: [] }));
-    transport.onmessage?.(initializeFrame({ elicitation: {} }));
     expect(appAdvertisesElicitation(bridge)).toBe(false);
+    transport.onmessage?.(initializeFrame({ elicitation: {} }));
+    expect(appAdvertisesElicitation(bridge)).toBe(true);
+    // …and a re-handshake that drops the capability turns it back off.
+    transport.onmessage?.(initializeFrame({}));
+    expect(appAdvertisesElicitation(bridge)).toBe(false);
+  });
+
+  it("leaves a recorded capability alone when a later frame is malformed", () => {
+    // A rejected frame is not a route to changing the gate — in either
+    // direction: it cannot set `elicitation`, and it cannot clear one the
+    // bridge still holds.
+    const bridge = makeBridge({});
+    const { transport } = makeTransport();
+    observeAppCapabilities(bridge, transport);
+    transport.onmessage?.(initializeFrame({ elicitation: {} }));
+    transport.onmessage?.({
+      jsonrpc: "2.0",
+      id: 9,
+      method: "ui/initialize",
+      params: { appCapabilities: {} },
+    } as unknown as JSONRPCMessage);
+    expect(appAdvertisesElicitation(bridge)).toBe(true);
   });
 
   it("keeps bridges independent", () => {
