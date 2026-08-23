@@ -735,13 +735,11 @@ describe("absorbFileSecretsIntoKeyring", () => {
     expect(existsSync(`${filePath}.lock`)).toBe(false);
   });
 
-  it("does not treat an unlistable directory as an empty one (#2082)", async () => {
-    // Only "there is no directory" proves the fresh-install case. A path
-    // whose parent is a *file* answers `readdir` with ENOTDIR — the other
-    // shape of "nothing there" — and must be treated the same, whereas an
-    // EACCES directory that denies listing while still permitting access to
-    // the known `secrets.json` must not be, or the keychain is selected and
-    // those secrets go invisible with nothing said.
+  it("treats ENOTDIR as the fresh-install case, like ENOENT (#2082)", async () => {
+    // A path whose parent is a *file* answers `readdir` with ENOTDIR — the
+    // other shape of "there is no directory here" — so it takes the same
+    // silent path as a missing one. The *unlistable* case is different and is
+    // covered by the test below.
     await fs.writeFile(path.join(tmpDir, "not-a-dir"), "", "utf-8");
     const filePath = path.join(tmpDir, "not-a-dir", "secrets.json");
     process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
@@ -753,6 +751,42 @@ describe("absorbFileSecretsIntoKeyring", () => {
     // ENOTDIR is a fresh-install shape: nothing said, nothing locked.
     expect(warn).not.toHaveBeenCalled();
   });
+
+  // Root bypasses POSIX permission checks, and Windows does not model them
+  // the same way — in either case the directory below stays listable and the
+  // test would assert nothing.
+  const canDenyListing =
+    process.platform !== "win32" && process.getuid?.() !== 0;
+
+  it.skipIf(!canDenyListing)(
+    "does not treat an unlistable directory as an empty one (#2082)",
+    async () => {
+      // The case ENOTDIR does *not* cover, and the reason the catch narrowed
+      // to ENOENT/ENOTDIR rather than swallowing everything. A directory with
+      // `--x` permission denies `readdir` with EACCES while still permitting
+      // access to a *known* name inside it — so reading EACCES as "nothing to
+      // migrate" selects the keychain and leaves those secrets invisible with
+      // nothing said. That asymmetry is real POSIX behaviour, which is why
+      // this drives it with a real mode rather than a stubbed `readdir`.
+      const filePath = await seedFile({ "srv:oauthClientSecret": "from-file" });
+      process.env.MCP_INSPECTOR_SECRET_FILE = filePath;
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      // Write + execute, no read: `readdir` fails, `stat`/`open`/`rename` of a
+      // known name still work — which is exactly what the migration needs.
+      await fs.chmod(tmpDir, 0o300);
+      try {
+        const mod = await loadWithProbe(true);
+        const keyring = new InMemorySecretStore();
+        await mod.absorbFileSecretsIntoKeyring(keyring);
+
+        // It went on and migrated, rather than silently skipping.
+        expect(await keyring.get("srv", "oauthClientSecret")).toBe("from-file");
+      } finally {
+        // Restore before `afterEach`, which needs to list it to remove it.
+        await fs.chmod(tmpDir, 0o700);
+      }
+    },
+  );
 
   it("still adopts an orphan when the live file is absent (#2082)", async () => {
     // The fast path above must not be a `stat` of `secrets.json`: an

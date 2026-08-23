@@ -305,6 +305,37 @@ describe("withSecretFileLock degrades rather than failing", () => {
     expect(existsSync(target)).toBe(false);
   }, 90_000);
 
+  it("refuses rather than degrading when a stale lock cannot be cleared", async () => {
+    // `acquireLock` does not only *create* directories — on finding a stale
+    // one it removes it and retries, and that removal can fail. A stale lock
+    // with anything inside it fails `ENOTEMPTY`, which is not `ELOCKED`, and
+    // treating every non-`ELOCKED` error as "locks do not work here" meant
+    // every Inspector on the box quietly bypassed the *same* stuck lock and
+    // raced its writes — while the release-failure message was telling the
+    // operator saves would keep failing until they cleared it.
+    const target = filePath();
+    const lockPath = `${target}.lock`;
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.mkdir(lockPath);
+    await fs.writeFile(`${lockPath}/stray`, "", "utf-8");
+    // Backdated so it reads as stale — which is what sends `acquireLock` down
+    // the remove-and-retry path rather than straight to `ELOCKED`.
+    const longDead = new Date(Date.now() - 60_000);
+    await fs.utimes(lockPath, longDead, longDead);
+
+    const store = new FileSecretStore({ filePath: target });
+    const err = await store
+      .set("srv", "env:MINE", "1")
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(SecretStoreUnavailableError);
+    expect((err as Error).message).toMatch(/was not saved/);
+    // Nothing written behind the stuck lock, and no "unprotected" warning:
+    // this is a refusal, not a degrade.
+    expect(existsSync(target)).toBe(false);
+    expect(warnings()).not.toContain("not protected");
+  }, 90_000);
+
   it("takes over the lock of a holder that died, rather than failing the save", async () => {
     // The invariant behind refusing on `ELOCKED`: refusing is only defensible
     // because a *crashed* holder resolves on its own first. `RETRY` therefore

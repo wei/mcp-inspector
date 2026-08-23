@@ -163,6 +163,32 @@ export function resetFileLockWarnings(): void {
 }
 
 /**
+ * Is this failure "the lock is there and we could not have it", as opposed to
+ * "locks do not work here"?
+ *
+ * `ELOCKED` is the obvious member, but not the only one, and the difference
+ * decides whether a save **refuses** or **degrades to an unlocked write** —
+ * so getting it wrong is not cosmetic. `acquireLock` does not only *create*
+ * directories: on finding a stale one it removes it and retries, and that
+ * removal can fail — `ENOTEMPTY` for a lock with anything inside it, `EACCES`
+ * or `EROFS` for one we may not touch. Those surface as ordinary non-`ELOCKED`
+ * errors, and treating them as infrastructure failures meant every Inspector
+ * on the box quietly bypassed the *same* stuck lock and raced its writes —
+ * while the release-failure message was telling the operator saves would keep
+ * failing until they cleared it.
+ *
+ * The discriminator is the lock directory itself rather than an errno
+ * taxonomy: **if it exists, something holds it and we must not proceed**; if
+ * it does not, we genuinely could not create one and degrading is the
+ * documented trade (#1848, #1905). That reads the state the decision is
+ * actually about, instead of enumerating error codes per platform and
+ * filesystem — which is the enumeration that let `ENOTEMPTY` through.
+ */
+function isStuckOrHeld(err: unknown, lockPath: string): boolean {
+  return isHeldElsewhere(err) || identifySync(lockPath) !== null;
+}
+
+/**
  * Did `proper-lockfile` decline because someone else holds the lock?
  *
  * A bare cast rather than a guarded narrowing: the only caller is the `catch`
@@ -266,6 +292,23 @@ function guardedFs(
   };
   return {
     ...nodeFs,
+    // **Identity is captured here, not after `lock()` resolves.** `mkdir` is
+    // the moment the directory becomes ours, and it is synchronous with
+    // respect to this process: recording it in the callback, before yielding,
+    // leaves no window. Capturing after the acquire promise settled — as this
+    // did originally — spans the library's own `utimes`/`stat` probe, and a
+    // waiter replacing our directory inside that span would have us record
+    // *the winner's* identity as our own, after which the guard below would
+    // cheerfully delete their lock.
+    mkdir: (
+      p: string,
+      cb: (err: NodeJS.ErrnoException | null) => void,
+    ): void => {
+      nodeFs.mkdir(p, (err) => {
+        if (!err) owned.id = identifySync(lockPath);
+        cb(err);
+      });
+    },
     // Reported as success when refused: the library's bookkeeping should
     // forget this lock either way. Leaving it registered would hand the
     // `signal-exit` handler a record pointing at the winner's directory.
@@ -284,26 +327,6 @@ function guardedFs(
       removeIfMine();
     },
   };
-}
-
-/**
- * What to tell an operator about a lock we could not remove.
- *
- * The blanket "it expires on its own" is **false for `ENOTEMPTY`**, and that
- * is the reachable case rather than a hypothetical: stale takeover reclaims a
- * lock through the same `rmdir`, which also cannot remove a non-empty
- * directory. So a lock directory with anything inside it is not cleaned up by
- * the staleness mechanism, by us, or by the next writer — it stays until
- * somebody deletes it, and every later save fails `ELOCKED` against it.
- *
- * Any other failure leaves a directory the refresher has stopped touching, so
- * the stale path really does reclaim it after {@link STALE_MS}.
- */
-function releaseAdvice(err: unknown, target: string): string {
-  const code = (err as NodeJS.ErrnoException).code;
-  return code === "ENOTEMPTY"
-    ? `It has something inside it, which stale takeover cannot clear either, so saves will keep failing until you remove ${lockPathOf(target)} by hand.`
-    : `It expires on its own after ${STALE_MS / 1000}s.`;
 }
 
 /**
@@ -390,7 +413,7 @@ export async function withSecretFileLock<T>(
       // time, on every save, before degrading. Probing once with no retries
       // separates the two answers at the cost of one syscall: `ELOCKED` is
       // worth waiting out, an infrastructure failure is not.
-      if (!isHeldElsewhere(err)) throw err;
+      if (!isStuckOrHeld(err, lockPathOf(target))) throw err;
       return acquire(target, RETRY, fsShim);
     });
   } catch (err) {
@@ -402,9 +425,9 @@ export async function withSecretFileLock<T>(
     // {@link RETRY}), a holder still there is not one that crashed; it is one
     // that is stuck. Refusing loses nothing — `set` reports it and the user
     // retries — whereas proceeding can lose a secret while reporting success.
-    if (isHeldElsewhere(err)) {
+    if (isStuckOrHeld(err, lockPathOf(target))) {
       throw new SecretStoreUnavailableError(
-        `Could not save to the secrets file at ${target}: another process has held the lock on it for the ${Math.round(RETRY_BUDGET_MS / 1000)} seconds this save waited. Its secrets are intact; the value you just entered was not saved. If no other Inspector is running, remove ${target}.lock and try again.`,
+        `Could not save to the secrets file at ${target}: its lock (${lockPathOf(target)}) was still held after the ${Math.round(RETRY_BUDGET_MS / 1000)} seconds this save waited. Its secrets are intact; the value you just entered was not saved. If no other Inspector is running, remove that lock and try again.`,
       );
     }
     // Everything else is the lock being *unavailable* rather than held — a
@@ -417,9 +440,6 @@ export async function withSecretFileLock<T>(
     );
     return fn();
   }
-  // Now that we hold it, record which directory is ours so the guard above
-  // can refuse to delete anyone else's.
-  owned.id = identifySync(lockPathOf(target));
   try {
     return await fn();
   } finally {
@@ -428,10 +448,15 @@ export async function withSecretFileLock<T>(
     } catch (err) {
       // The body already ran and its result is being returned; turning a
       // completed save into a failure at teardown would be the wrong trade.
-      // But a lock left behind is worth explaining, and the two reasons need
-      // different advice — see `releaseAdvice`.
+      // But a lock left behind is worth explaining.
       warnOnce(
-        `Could not release the lock on the secrets file at ${target} (${describeError(err)}). ${releaseAdvice(err, target)}`,
+        // No branch on the error code, deliberately. Our own guard `stat`s
+        // before removing, so anything reaching here is an `rmdir` that was
+        // refused — and **stale takeover reclaims through that same `rmdir`**,
+        // so whatever blocked ours blocks that too. `ENOTEMPTY` is the
+        // reachable one; `EACCES`, `EPERM` and `EROFS` behave identically.
+        // Promising expiry for "everything else" was wrong for all of them.
+        `Could not release the lock on the secrets file at ${target} (${describeError(err)}). Stale takeover reclaims a lock through the same directory removal, so whatever blocked this blocks that too: saves will keep failing until you remove ${lockPathOf(target)} by hand.`,
       );
     }
   }
