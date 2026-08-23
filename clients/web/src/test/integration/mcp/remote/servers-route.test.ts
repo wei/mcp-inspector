@@ -4,7 +4,8 @@
  * exercises the routes via real HTTP.
  */
 
-import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import pino from "pino";
 import {
   mkdtempSync,
   readFileSync,
@@ -2680,14 +2681,23 @@ describe("plaintext migration against a session-scoped store (#1950)", () => {
     // where "plaintext values are left on disk" is simply false, repeated on
     // every list refresh. A log line that is usually untrue is one people
     // learn to skip, which costs it the occasion it matters.
-    const warn = vi.fn();
-    const logger = {
-      warn,
-      info: vi.fn(),
-      error: vi.fn(),
-      debug: vi.fn(),
-    } as unknown as Parameters<typeof createRemoteApp>[0]["logger"];
+    // A real pino logger writing to a capturing destination, rather than a
+    // four-method object forced through the API type with a double cast: the
+    // cast is prohibited here, and it also erased the fact that the stand-in
+    // was not a `pino.Logger` — so a change to how the server logs (child
+    // loggers, bindings, a different level) would have gone unnoticed.
+    const lines: string[] = [];
+    const logger = pino(
+      { level: "warn" },
+      {
+        write(chunk: string) {
+          lines.push(chunk);
+        },
+      },
+    );
     const sessionMessage = /kept in memory for this session/;
+    const saidSessionWarning = () =>
+      lines.filter((l) => sessionMessage.test(l));
 
     // A catalog with no plaintext secrets: nothing is being preserved.
     const emptyPath = join(tempDir, "empty.json");
@@ -2701,10 +2711,10 @@ describe("plaintext migration against a session-scoped store (#1950)", () => {
     });
     await empty.app.request(new Request("http://test/api/servers"));
     await empty.app.request(new Request("http://test/api/servers"));
-    expect(warn.mock.calls.flat().join(" ").match(sessionMessage)).toBeNull();
+    expect(saidSessionWarning()).toHaveLength(0);
 
     // And with a plaintext secret: said once, not once per read.
-    warn.mockClear();
+    lines.length = 0;
     const withSecret = createRemoteApp({
       dangerouslyOmitAuth: true,
       mcpConfigPath: configPath,
@@ -2714,10 +2724,7 @@ describe("plaintext migration against a session-scoped store (#1950)", () => {
     });
     await withSecret.app.request(new Request("http://test/api/servers"));
     await withSecret.app.request(new Request("http://test/api/servers"));
-    const said = warn.mock.calls.filter((c: unknown[]) =>
-      sessionMessage.test(c.map(String).join(" ")),
-    );
-    expect(said).toHaveLength(1);
+    expect(saidSessionWarning()).toHaveLength(1);
   });
 
   it("aborts the migration when the keychain read fails, preserving mcp.json", async () => {
