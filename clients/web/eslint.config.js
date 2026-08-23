@@ -27,6 +27,14 @@ export default defineConfig([
       ecmaVersion: 2020,
       globals: globals.browser,
     },
+    rules: {
+      // Promoted from the recommended set's `warn` (#2085). A stale-closure
+      // defect was reported correctly on every run and still reached review,
+      // because `lint` fails only on errors. `--max-warnings 0` now fails the
+      // gate either way; this makes the severity read correctly in an editor
+      // too, rather than depending on a CLI flag.
+      "react-hooks/exhaustive-deps": "error",
+    },
   },
   {
     // Test setup files re-export utilities and mix components with helpers — the

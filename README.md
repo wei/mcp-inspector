@@ -378,6 +378,8 @@ Per-client scripts exist too (`validate:web`, `coverage:cli`, `smoke:tui`, …),
 
 **Linting is type-aware.** All five ESLint scopes (`clients/{web,cli,tui,launcher}` plus the root `core/` + shared gate) enable `@typescript-eslint/no-floating-promises` at `error`, so a promise that is neither awaited, returned, `.catch(…)`-terminated, nor explicitly discarded with `void` fails `lint` — and therefore `validate` ([#1959](https://github.com/modelcontextprotocol/inspector/issues/1959)). The rule needs type information, so each scope's config names a parser project; the root scope's is **`tsconfig.lint.json`**, a lint-only project covering `core/**`, `test-servers/src/**`, and `vitest.shared.mts`, which have no tsconfig of their own. It emits nothing and changes no typecheck — but a new first-party TS location added to the root lint scope must be added to its `include`. See **TypeScript instructions** in [`AGENTS.md`](./AGENTS.md) for when `void` is acceptable.
 
+**And lint has no warning tier.** Every `lint` script runs with `--max-warnings 0`, so a warning fails `validate` exactly as an error does ([#2085](https://github.com/modelcontextprotocol/inspector/issues/2085)) — a `warn`-level `react-hooks/exhaustive-deps` finding had otherwise let a stale-closure bug pass the mandatory pre-push gate and reach review. Fix the finding rather than silencing it; if a rule genuinely must be waived, use its inline disable comment with a one-line justification.
+
 For the full testing rules — the ≥90% per-file gate, where test files live, the unit vs. integration vs. storybook projects, and the `v8 ignore` policy — see [`AGENTS.md`](./AGENTS.md).
 
 ## Publishing
