@@ -662,18 +662,17 @@ async function recoverOrphanedSnapshots(filePath: string): Promise<void> {
  * The hand-off body: read the file, copy every entry into the keychain,
  * then delete the file.
  *
- * **The delete is conditional, because there is no lock.** The store's
- * mutations are optimistic (see `FileSecretStore.mutate`), so another
- * Inspector can complete a `set` between our read and our delete — and
- * removing the file then discards a secret whose write reported success,
- * which is the exact loss this migration exists to prevent. So the
- * contents are re-read immediately before the delete and compared against
- * what was copied; if they differ, the new entries are copied too and the
- * comparison is made again.
+ * **It operates on a snapshot, not on the live file.** The caller claims
+ * `secrets.json` with an atomic rename before this runs, so nothing else can
+ * write to what is being read here and a writer that recreates the live path
+ * is simply untouched. This replaced a re-read-and-compare before the
+ * delete, which caught writes that had already landed and was blind to the
+ * one arriving between the check and the `rm`.
  *
- * Bounded, and it declines to delete rather than looping forever: leaving
- * the file in place costs nothing (the keychain-wins rule makes the next
- * run idempotent) while deleting it on a stale comparison costs a secret.
+ * Returns whether the snapshot is fully absorbed — the caller deletes it
+ * only then, and otherwise restores it to the live path. "Nothing to
+ * migrate" reports `false`: no values moved, and the file's presence is what
+ * records which encryption mode this install settled on.
  */
 async function handOff(
   file: FileSecretStore,

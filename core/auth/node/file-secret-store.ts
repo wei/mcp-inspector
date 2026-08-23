@@ -527,25 +527,37 @@ export class FileSecretStore implements SecretStore {
        above returns a reason for anything `decodeParts` would reject. Kept as
        the type narrowing `parts` needs. */
     if (!parts) throw new SecretFileKeyMismatchError(this.filePath, true);
+    // Only the *decryption* may be read as a key problem. Once GCM verifies
+    // the tag the passphrase is proven correct, so anything that fails after
+    // that point is about the contents — and reporting it as a key mismatch
+    // sends the user to restore a passphrase that is working. `asSecretMap`
+    // was already outside this catch for that reason; `JSON.parse` was not,
+    // so a decrypted-but-corrupt payload still blamed the key.
+    let plain: string;
     try {
       const key = await this.deriveKey(parsed.kdf);
       const decipher = crypto.createDecipheriv(CIPHER, key, parts.iv);
       decipher.setAuthTag(parts.tag);
-      const plain = Buffer.concat([
+      plain = Buffer.concat([
         decipher.update(parts.body),
         decipher.final(),
       ]).toString("utf-8");
-      return asSecretMap(JSON.parse(plain), this.filePath);
-    } catch (err) {
-      // A shape refusal is about the *contents*, not the key — it decrypted
-      // fine. Rethrowing it as a key mismatch would send the user to fix a
-      // passphrase that is working.
-      if (err instanceof SecretStoreUnavailableError) throw err;
+    } catch {
       // GCM authentication failure is what a wrong passphrase looks like, and
-      // it is indistinguishable from a tampered/corrupt file — both mean "this
-      // key does not open this file", which is what the message says.
+      // it is indistinguishable from a tampered file — both mean "this key
+      // does not open this file", which is what the message says.
       throw new SecretFileKeyMismatchError(this.filePath, true);
     }
+
+    let payload: unknown;
+    try {
+      payload = JSON.parse(plain);
+    } catch (err) {
+      throw new SecretStoreUnavailableError(
+        `The secrets file at ${this.filePath} decrypted successfully but its contents are not valid JSON: ${err instanceof Error ? err.message : String(err)}. The passphrase is correct; the file itself is corrupt.`,
+      );
+    }
+    return asSecretMap(payload, this.filePath);
   }
 
   private async writeMap(map: Record<string, string>): Promise<void> {

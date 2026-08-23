@@ -255,6 +255,11 @@ export function useInitialConfig(
   }, [load]);
 
   const refresh = useCallback(() => {
+    // `void` because `load` owns its failures — every fetch/parse error is
+    // caught inside it and leaves the fields at their defaults — and because
+    // `refresh` is deliberately synchronous: its callers fire it from
+    // `refreshingPersist`'s `finally`, where a returned promise would be
+    // awaited by a caller that has nothing to do with the result.
     void load();
   }, [load]);
 

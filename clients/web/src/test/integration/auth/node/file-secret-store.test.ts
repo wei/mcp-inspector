@@ -338,6 +338,21 @@ describe("FileSecretStore failure handling", () => {
     );
   });
 
+  it("blames the file, not the passphrase, for a decrypted-but-corrupt payload", async () => {
+    // GCM has already authenticated by this point, so the passphrase is
+    // *proven correct* — telling the user to restore it sends them after a
+    // secret they never lost. `asSecretMap` was already outside the catch for
+    // this reason; `JSON.parse` was not.
+    await writeEncryptedFixtureWithPlaintext("{ not json at all", "right-key");
+    const store = new FileSecretStore({
+      filePath: filePath(),
+      passphrase: "right-key",
+    });
+    await expect(store.set("alpha", "env:A", "1")).rejects.toThrow(
+      /The passphrase is correct; the file itself is corrupt/,
+    );
+  });
+
   it("still blames the passphrase when the envelope is well-formed", async () => {
     // The other half: structure fine, authentication fails. That *is* a key
     // problem and must keep the advice that fits it — the round-16 change
@@ -756,6 +771,21 @@ async function writeEncryptedFixtureWithPayload(
   payload: unknown,
   passphrase: string,
 ): Promise<void> {
+  return writeEncryptedFixtureWithPlaintext(
+    JSON.stringify(payload),
+    passphrase,
+  );
+}
+
+/**
+ * The same, but writing `plaintext` verbatim — so a fixture can carry bytes
+ * that are authentic under the passphrase and still not valid JSON, which
+ * `JSON.stringify` can never produce.
+ */
+async function writeEncryptedFixtureWithPlaintext(
+  plaintext: string,
+  passphrase: string,
+): Promise<void> {
   const salt = crypto.randomBytes(16);
   const kdf = {
     algorithm: "scrypt",
@@ -776,7 +806,7 @@ async function writeEncryptedFixtureWithPayload(
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
   const body = Buffer.concat([
-    cipher.update(JSON.stringify(payload), "utf-8"),
+    cipher.update(plaintext, "utf-8"),
     cipher.final(),
   ]);
   const data = [iv, cipher.getAuthTag(), body]
