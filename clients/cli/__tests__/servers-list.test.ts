@@ -226,6 +226,15 @@ describe("showServerEntry / servers/show", () => {
         // the whole value, not walk into it (#1910).
         "X-Api-Key": { primary: "sk-live-1", fallback: "sk-live-2" },
         nested: { keep: true },
+        // A secret buried under a non-sensitive key. A top-level-only check
+        // would print `accessToken` in full.
+        trace: {
+          id: "t-1",
+          accessToken: "sk-live-3",
+          deeper: { refresh_token: "sk-live-4", ok: 1 },
+        },
+        // Objects inside an array are reached too.
+        attempts: [{ password: "hunter2" }, { attempt: 2 }],
       },
       env: [
         { key: "TOKEN", value: "secret" },
@@ -250,8 +259,15 @@ describe("showServerEntry / servers/show", () => {
       Authorization: "[redacted]",
       "X-Custom": "ok",
       "X-Api-Key": "[redacted]",
-      // A structured value under a non-sensitive key survives intact.
+      // A structured value under a non-sensitive key survives intact...
       nested: { keep: true },
+      // ...but a sensitive key nested inside one does not.
+      trace: {
+        id: "t-1",
+        accessToken: "[redacted]",
+        deeper: { refresh_token: "[redacted]", ok: 1 },
+      },
+      attempts: [{ password: "[redacted]" }, { attempt: 2 }],
     });
     expect(sanitized.env).toEqual([
       { key: "TOKEN", value: "[redacted]" },
