@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { within } from "@testing-library/react";
 import type { InspectorServerSettings } from "@inspector/core/mcp/types.js";
 import { renderWithMantine, screen } from "../../../test/renderWithMantine";
+import { getAceText, setAceText } from "../../../test/aceEditor";
 import {
   ServerSettingsForm,
   type ServerSettingsSection,
@@ -249,8 +250,8 @@ describe("ServerSettingsForm", () => {
       screen.getByText("No custom headers configured"),
     ).toBeInTheDocument();
     // Metadata has no rows to be absent — the editor is always present, and
-    // "none configured" is spelled `{}` in the box itself.
-    expect(screen.getByLabelText("Request metadata JSON")).toHaveValue("{}");
+    // "none configured" is spelled `{}` in it.
+    expect(getAceText()).toBe("{}");
   });
 
   it("invokes onAddHeader when + Add Header is clicked", async () => {
@@ -331,17 +332,15 @@ describe("ServerSettingsForm", () => {
         expandedSections={["metadata"]}
       />,
     );
-    const editor = screen.getByLabelText("Request metadata JSON");
     // The point of #1910: a nested object survives into the editor instead of
     // being flattened into a `{ key, value }` string row.
-    expect(JSON.parse((editor as HTMLTextAreaElement).value)).toEqual({
+    expect(JSON.parse(getAceText())).toEqual({
       userId: "u-1",
       tenant: { id: 7, tags: ["a"] },
     });
   });
 
   it("reports the whole edited object through onMetadataChange", async () => {
-    const user = userEvent.setup();
     const onMetadataChange = vi.fn();
     renderWithMantine(
       <ServerSettingsForm
@@ -351,9 +350,7 @@ describe("ServerSettingsForm", () => {
         expandedSections={["metadata"]}
       />,
     );
-    const editor = screen.getByLabelText("Request metadata JSON");
-    await user.clear(editor);
-    await user.type(editor, '{{"n":[[1,2]}');
+    await setAceText('{"n":[1,2]}');
     expect(onMetadataChange).toHaveBeenLastCalledWith({ n: [1, 2] });
   });
 

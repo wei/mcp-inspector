@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import type { InspectorServerSettings } from "@inspector/core/mcp/types.js";
 import { renderWithMantine, screen } from "../../../test/renderWithMantine";
+import { setAceText } from "../../../test/aceEditor";
 import { ServerSettingsModal } from "./ServerSettingsModal";
 
 const initialSettings: InspectorServerSettings = {
@@ -647,9 +648,7 @@ describe("ServerSettingsModal", () => {
       />,
     );
     await user.click(screen.getByRole("button", { name: "Request Metadata" }));
-    const editor = screen.getByLabelText("Request metadata JSON");
-    await user.clear(editor);
-    await user.type(editor, '{{"trace":{{"id":"abc"}}}');
+    await setAceText('{"trace":{"id":"abc"}}');
     const lastCall = onSettingsChange.mock.calls.at(-1)?.[0];
     // The nested object arrives as an object, not a stringified one — the
     // whole point of #1910.

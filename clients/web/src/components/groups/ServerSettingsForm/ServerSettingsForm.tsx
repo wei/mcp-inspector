@@ -735,8 +735,7 @@ export function ServerSettingsForm({
               strings. Leave it as <Code>{"{}"}</Code> to send none.
             </HintText>
             <JsonObjectInput
-              aria-label="Request metadata JSON"
-              placeholder={'{\n  "example": { "nested": true }\n}'}
+              ariaLabel="Request metadata JSON"
               value={settings.metadata}
               onChange={onMetadataChange}
             />

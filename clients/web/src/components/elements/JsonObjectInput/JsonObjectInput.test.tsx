@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { describe, it, expect, vi } from "vitest";
-import { screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+import { act, screen } from "@testing-library/react";
 import type { JsonObject } from "@inspector/core/json/jsonUtils.js";
 import { renderWithMantine } from "../../../test/renderWithMantine";
+import { aceLabel, getAceText, setAceText } from "../../../test/aceEditor";
 import { JsonObjectInput } from "./JsonObjectInput";
 
 const LABEL = "Payload JSON";
@@ -20,7 +20,7 @@ function Harness({
   return (
     <>
       <JsonObjectInput
-        aria-label={LABEL}
+        ariaLabel={LABEL}
         value={value}
         onChange={(next) => {
           setValue(next);
@@ -32,38 +32,60 @@ function Harness({
   );
 }
 
-function box() {
-  return screen.getByLabelText(LABEL) as HTMLTextAreaElement;
-}
-
 describe("JsonObjectInput", () => {
+  it("names the editor for assistive tech", () => {
+    renderWithMantine(<Harness initial={{}} />);
+    // Ace composes "<label>, Cursor at row N", so the match is by substring —
+    // the position readout is Ace's, the name is ours.
+    expect(screen.getByLabelText(aceLabel(LABEL))).toBeInTheDocument();
+  });
+
+  it("uses Ace's dark theme under a dark color scheme", () => {
+    // The editor picks its Ace theme from the computed scheme rather than
+    // inheriting Mantine tokens, so the dark branch is only exercised by
+    // actually rendering dark.
+    renderWithMantine(<Harness initial={{}} />, { colorScheme: "dark" });
+    // `ace-github-dark`, hyphenated — Ace's cssClass, not the module name
+    // (`theme-github_dark`). The App.css gutter-contrast override keys off this
+    // same class, so getting it wrong silently drops the fix in dark mode.
+    expect(document.querySelector(".ace-github-dark")).not.toBeNull();
+    expect(document.querySelector(".ace-github")).toBeNull();
+  });
+
+  it("uses Ace's light theme under a light color scheme", () => {
+    renderWithMantine(<Harness initial={{}} />, { colorScheme: "light" });
+    expect(document.querySelector(".ace-github")).not.toBeNull();
+    expect(document.querySelector(".ace-github_dark")).toBeNull();
+  });
+
   it("opens with the value serialized two-space, nesting intact", () => {
     renderWithMantine(<Harness initial={{ a: { b: [1, 2] } }} />);
-    expect(box().value).toBe(
+    expect(getAceText()).toBe(
       '{\n  "a": {\n    "b": [\n      1,\n      2\n    ]\n  }\n}',
     );
   });
 
   it("emits the parsed object — a structured value stays structured", async () => {
-    const user = userEvent.setup();
     const onChange = vi.fn();
     renderWithMantine(<Harness initial={{}} onChange={onChange} />);
-    await user.clear(box());
-    await user.type(box(), '{{"trace":{{"id":"x"},"n":3}');
+    await setAceText('{"trace":{"id":"x"},"n":3}');
     expect(onChange).toHaveBeenLastCalledWith({ trace: { id: "x" }, n: 3 });
   });
 
+  // Also the regression test for the paired-event bug `handleChange` coalesces:
+  // `setValue` is a remove followed by an insert, and acting on the remove
+  // emitted `{}` and wiped `keep` before the insert had landed.
   it("shows the text as typed while it is invalid and does not emit", async () => {
-    const user = userEvent.setup();
     const onChange = vi.fn();
     renderWithMantine(<Harness initial={{ keep: "me" }} onChange={onChange} />);
-    // Append a stray character rather than clearing: clearing is itself a
-    // valid edit (it means `{}`) and would emit, which is not what is under
-    // test here.
-    await user.click(box());
-    await user.keyboard("{End}x");
+    await setAceText('{"a":');
+    console.log("[dbg] emitted:", screen.getByTestId("emitted").textContent);
+    console.log(
+      "[dbg] body has error?",
+      document.body.textContent?.includes("Not valid JSON"),
+    );
     // Displayed verbatim — not re-escaped back through JSON.stringify.
-    expect(box().value.endsWith("}x")).toBe(true);
+    expect(getAceText()).toBe('{"a":');
     expect(
       screen.getByText("Not valid JSON — changes are not applied"),
     ).toBeInTheDocument();
@@ -73,36 +95,30 @@ describe("JsonObjectInput", () => {
   });
 
   it("flags valid JSON that is not an object without emitting", async () => {
-    const user = userEvent.setup();
     const onChange = vi.fn();
     renderWithMantine(<Harness initial={{ keep: "me" }} onChange={onChange} />);
-    await user.clear(box());
-    // The clear is a legitimate edit to `{}`; only what follows is under test.
-    expect(onChange).toHaveBeenLastCalledWith({});
-    onChange.mockClear();
-    await user.type(box(), "[[1]");
+    await setAceText("[1]");
     expect(screen.getByText(/Must be a JSON object/)).toBeInTheDocument();
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it("treats a cleared box as the empty object", async () => {
-    const user = userEvent.setup();
+  it("treats a cleared editor as the empty object", async () => {
     const onChange = vi.fn();
     renderWithMantine(<Harness initial={{ a: 1 }} onChange={onChange} />);
-    await user.clear(box());
+    await setAceText("");
     expect(onChange).toHaveBeenLastCalledWith({});
     expect(screen.queryByText(/Not valid JSON/)).toBeNull();
   });
 
   it("re-syncs when the parent's value diverges from the draft", async () => {
     // An external reset (switching servers, a reloaded catalog) must reach the
-    // box; an in-progress edit must not be overwritten by the value it emitted.
+    // editor; an in-progress edit must not be overwritten by what it emitted.
     function Externally() {
       const [value, setValue] = useState<JsonObject>({ a: 1 });
       return (
         <>
           <JsonObjectInput
-            aria-label={LABEL}
+            ariaLabel={LABEL}
             value={value}
             onChange={setValue}
           />
@@ -110,19 +126,18 @@ describe("JsonObjectInput", () => {
         </>
       );
     }
-    const user = userEvent.setup();
     renderWithMantine(<Externally />);
-    await user.click(screen.getByRole("button", { name: "reset" }));
-    expect(JSON.parse(box().value)).toEqual({ b: 2 });
+    await act(async () => {
+      screen.getByRole("button", { name: "reset" }).click();
+    });
+    expect(JSON.parse(getAceText())).toEqual({ b: 2 });
   });
 
   it("leaves an in-progress edit alone when the parent echoes it back", async () => {
-    const user = userEvent.setup();
     renderWithMantine(<Harness initial={{}} />);
-    await user.clear(box());
-    // Typed without the closing brace auto-pair: the text is what the user has
-    // so far, and the echo of the parsed value must not reformat it mid-edit.
-    await user.type(box(), '{{"a":1}');
-    expect(box().value).toBe('{"a":1}');
+    // The parent re-renders with the object this text parsed to; the draft must
+    // not be reformatted out from under the cursor.
+    await setAceText('{"a":1}');
+    expect(getAceText()).toBe('{"a":1}');
   });
 });
