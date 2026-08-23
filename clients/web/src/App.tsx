@@ -4612,13 +4612,21 @@ function App() {
       <ServerImportConfigModal
         opened={importConfigOpen}
         existingIds={existingIds}
-        onClose={() => setImportConfigOpen(false)}
+        // Refreshed once per import batch, not per entry. `useImportClientConfig`
+        // applies every addition and conflict sequentially, and on an encrypted
+        // file store each `/api/config` authenticates the whole file with a
+        // scrypt derivation — so wrapping the per-entry callbacks made a
+        // 20-server import pay 20 serialized KDFs and round trips. Closing is
+        // the batch boundary: the modal must be dismissed before the settings
+        // footer that reads this descriptor can be reached, and closing also
+        // covers a partially-failed batch (#1950 review r26).
+        onClose={() => {
+          setImportConfigOpen(false);
+          refreshInitialConfig();
+        }}
         onFetchSource={importSource}
-        onAddServer={refreshingPersist(
-          addServerHighlighted,
-          refreshInitialConfig,
-        )}
-        onUpdateServer={refreshingPersist(updateServer, refreshInitialConfig)}
+        onAddServer={addServerHighlighted}
+        onUpdateServer={updateServer}
       />
       <ServerImportJsonModal
         opened={importJsonOpen}
