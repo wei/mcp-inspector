@@ -53,6 +53,7 @@ import type {
   MessageEntry,
   ConnectionStatus,
   FetchRequestEntryBase,
+  RequestMetadata,
 } from "@inspector/core/mcp/types.js";
 import type { JsonValue } from "@inspector/core/json/jsonUtils.js";
 import type {
@@ -164,7 +165,7 @@ function settleInFlight(call: Promise<unknown>): InFlightCall {
 /** Get all resources from the client via listResources() (paginates if needed). */
 async function getAllResources(
   client: InspectorClient,
-  metadata?: Record<string, string>,
+  metadata?: RequestMetadata,
 ): Promise<Resource[]> {
   const collected: Resource[] = [];
   let cursor: string | undefined;
@@ -180,7 +181,7 @@ async function getAllResources(
 /** Get all resource templates via listResourceTemplates() (paginates if needed). */
 async function getAllResourceTemplates(
   client: InspectorClient,
-  metadata?: Record<string, string>,
+  metadata?: RequestMetadata,
 ): Promise<ResourceTemplate[]> {
   const collected: ResourceTemplate[] = [];
   let cursor: string | undefined;
@@ -196,7 +197,7 @@ async function getAllResourceTemplates(
 /** Get all prompts via listPrompts() (paginates if needed). */
 async function getAllPrompts(
   client: InspectorClient,
-  metadata?: Record<string, string>,
+  metadata?: RequestMetadata,
 ): Promise<Prompt[]> {
   const collected: Prompt[] = [];
   let cursor: string | undefined;
@@ -386,7 +387,7 @@ describe("InspectorClient", () => {
           serverSettings: {
             headers: [],
             env: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 50,
             requestTimeout: 0,
             taskTtl: 0,
@@ -756,7 +757,7 @@ describe("InspectorClient", () => {
       const initial = {
         headers: [],
         env: [],
-        metadata: [],
+        metadata: {},
         connectionTimeout: 0,
         requestTimeout: 0,
         taskTtl: 0,
@@ -1369,6 +1370,45 @@ describe("InspectorClient", () => {
         tenant: "acme",
         env: "prod",
       });
+      messageLogState.destroy();
+    });
+
+    it("sends a structured default _meta value as JSON, not as a string (#1910)", async () => {
+      // The whole point of #1910: a `_meta` value may be an object, an array,
+      // a number, a boolean or `null`. The Inspector used to type this map as
+      // `Record<string, string>`, so a nested payload could only be sent by
+      // stringifying it — which is a different wire message than the one the
+      // user configured.
+      const structured = {
+        trace: { id: "abc123", sampled: true, hops: [1, 2] },
+        retries: 3,
+        beta: false,
+        unset: null,
+      };
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+          defaultMetadata: structured,
+        },
+      );
+      const messageLogState = new MessageLogState(client);
+      await client.connect();
+      await client.listTools();
+
+      const listToolsReq = messageLogState
+        .getMessages()
+        .find(
+          (m) =>
+            m.direction === "request" &&
+            (m.message as { method?: string }).method === "tools/list",
+        );
+      expect(listToolsReq).toBeDefined();
+      expect(metaOf(listToolsReq!)).toMatchObject(structured);
       messageLogState.destroy();
     });
 
@@ -4241,7 +4281,7 @@ describe("InspectorClient", () => {
         timestamp: Date;
         success: boolean;
         error?: string;
-        metadata?: Record<string, string>;
+        metadata?: RequestMetadata;
       }> = [];
 
       client!.addEventListener(

@@ -17,6 +17,7 @@ import type {
   PendingRequestOrigin,
   ResourceSubscriptionStreamState,
   ExcludedTool,
+  RequestMetadata,
 } from "./types.js";
 import {
   scanXMcpHeaderDeclarations,
@@ -356,8 +357,8 @@ function notificationMethodFromSchema(schema: unknown): string | undefined {
 interface ToolCallRequest {
   tool: Tool;
   args: Record<string, JsonValue>;
-  generalMetadata?: Record<string, string>;
-  toolSpecificMetadata?: Record<string, string>;
+  generalMetadata?: RequestMetadata;
+  toolSpecificMetadata?: RequestMetadata;
   taskOptions?: { ttl?: number };
   options?: { skipOutputValidation?: boolean };
 }
@@ -420,7 +421,7 @@ export class InspectorClient extends InspectorClientEventTarget {
   private progress: boolean;
   private resetTimeoutOnProgress: boolean;
   private requestTimeout: number | undefined;
-  private defaultMetadata: Record<string, string> | undefined;
+  private defaultMetadata: RequestMetadata | undefined;
   private serverSettings: InspectorServerSettings | undefined;
   private versionNegotiation: VersionNegotiationOptions;
   private status: ConnectionStatus = "disconnected";
@@ -1035,7 +1036,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    * injecting an empty `_meta` field.
    */
   private mergeMeta(
-    callMetadata?: Record<string, string>,
+    callMetadata?: RequestMetadata,
   ): Record<string, string> | undefined {
     const defaults = this.defaultMetadata;
     // Modern-era per-request log level (#1629): stamp the opt-in `_meta` key on
@@ -1053,6 +1054,26 @@ export class InspectorClient extends InspectorClientEventTarget {
       ...(callMetadata ?? {}),
     };
     return Object.keys(merged).length > 0 ? merged : undefined;
+  }
+
+  /**
+   * The `progressToken` a caller stamped on its request metadata, when it is
+   * one the SDK will accept.
+   *
+   * `_meta` values are arbitrary JSON (#1910), but `progressToken` is a
+   * reserved key the spec types as `string | number`. Anything else — an
+   * object, an array, `null`, a boolean — is not a token the SDK can correlate
+   * a `notifications/progress` back to, so it is read as "no token" rather than
+   * forwarded. The key still reaches the wire inside `_meta`; this only governs
+   * whether the client wires up a progress callback for it.
+   */
+  private progressTokenOf(
+    metadata: RequestMetadata | undefined,
+  ): ProgressToken | undefined {
+    const token = metadata?.progressToken;
+    return typeof token === "string" || typeof token === "number"
+      ? token
+      : undefined;
   }
 
   private getRequestOptions(
@@ -1110,7 +1131,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    * so the merge/omit branch is defined once.
    */
   private aggregateListParams(
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): { _meta: Record<string, string> } | undefined {
     const effectiveMeta = this.mergeMeta(metadata);
     return effectiveMeta ? { _meta: effectiveMeta } : undefined;
@@ -3405,7 +3426,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   async listTools(
     cursor?: string,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<{ tools: Tool[]; nextCursor?: string }> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -3423,7 +3444,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       this.client!.request(
         { method: "tools/list", params },
         ListToolsResultSchema,
-        this.getRequestOptions(metadata?.progressToken),
+        this.getRequestOptions(this.progressTokenOf(metadata)),
       ),
     );
     const tools = [...(response.tools || [])];
@@ -3444,7 +3465,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   async listAllTools(options?: {
     cacheMode?: CacheMode;
-    metadata?: Record<string, string>;
+    metadata?: RequestMetadata;
   }): Promise<{ tools: Tool[] }> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -3596,7 +3617,7 @@ export class InspectorClient extends InspectorClientEventTarget {
      *  from it so every field except the entries is still validated. */
     resultSchema: z.ZodObject;
     aggregate: () => Promise<T[]>;
-    metadata?: Record<string, string>;
+    metadata?: RequestMetadata;
     /**
      * Filter applied to SALVAGED entries only, to reproduce a filter the SDK's
      * strict aggregate applies for us. Without it the fallback would return a
@@ -3674,7 +3695,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     itemsKey: string;
     itemSchema: z.ZodType<T>;
     resultSchema: z.ZodObject;
-    metadata?: Record<string, string>;
+    metadata?: RequestMetadata;
     err: unknown;
   }): Promise<T[]> {
     const pageSchema = lenientListPageSchema(resultSchema, itemsKey);
@@ -3725,7 +3746,7 @@ export class InspectorClient extends InspectorClientEventTarget {
               : this.client!.request(
                   { method, params },
                   pageSchema,
-                  this.getRequestOptions(metadata?.progressToken),
+                  this.getRequestOptions(this.progressTokenOf(metadata)),
                 ),
           { method },
         );
@@ -3811,7 +3832,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    * stops the walk (non-converging-server guard, mirroring the SDK).
    */
   async refreshExcludedTools(
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<ExcludedTool[]> {
     const excluded: ExcludedTool[] = [];
     // Gated to connections that actually exclude; otherwise this is a pure
@@ -3881,7 +3902,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   private async listToolsForScan(
     cursor: string | undefined,
-    metadata: Record<string, string> | undefined,
+    metadata: RequestMetadata | undefined,
   ): Promise<{
     tools: Tool[];
     nextCursor?: string;
@@ -3924,7 +3945,7 @@ export class InspectorClient extends InspectorClientEventTarget {
               : this.client!.request(
                   { method: "tools/list", params },
                   pageSchema,
-                  this.getRequestOptions(metadata?.progressToken),
+                  this.getRequestOptions(this.progressTokenOf(metadata)),
                 ),
           { method: "tools/list" },
         );
@@ -4016,8 +4037,8 @@ export class InspectorClient extends InspectorClientEventTarget {
   async callTool(
     tool: Tool,
     args: Record<string, JsonValue>,
-    generalMetadata?: Record<string, string>,
-    toolSpecificMetadata?: Record<string, string>,
+    generalMetadata?: RequestMetadata,
+    toolSpecificMetadata?: RequestMetadata,
     taskOptions?: { ttl?: number },
     options?: { skipOutputValidation?: boolean },
   ): Promise<ToolCallInvocation> {
@@ -4245,7 +4266,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     const convertedArgs = this.convertStringToolArgs(tool, args);
 
     // Merge general metadata with tool-specific metadata; tool-specific wins.
-    const callMetadata: Record<string, string> | undefined =
+    const callMetadata: RequestMetadata | undefined =
       generalMetadata || toolSpecificMetadata
         ? { ...(generalMetadata || {}), ...(toolSpecificMetadata || {}) }
         : undefined;
@@ -4270,7 +4291,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     }
 
     const requestOptions = this.getRequestOptions(
-      metadata?.progressToken,
+      this.progressTokenOf(metadata),
       signal,
     );
     this.applyMirroredParamHeaders(tool, convertedArgs, requestOptions);
@@ -4360,11 +4381,11 @@ export class InspectorClient extends InspectorClientEventTarget {
   private dispatchFailedToolCall(
     tool: Tool,
     args: Record<string, JsonValue>,
-    generalMetadata: Record<string, string> | undefined,
-    toolSpecificMetadata: Record<string, string> | undefined,
+    generalMetadata: RequestMetadata | undefined,
+    toolSpecificMetadata: RequestMetadata | undefined,
     errorMessage: string,
   ): void {
-    const callMetadata: Record<string, string> | undefined =
+    const callMetadata: RequestMetadata | undefined =
       generalMetadata || toolSpecificMetadata
         ? { ...(generalMetadata || {}), ...(toolSpecificMetadata || {}) }
         : undefined;
@@ -4848,8 +4869,8 @@ export class InspectorClient extends InspectorClientEventTarget {
   async callToolStream(
     tool: Tool,
     args: Record<string, JsonValue>,
-    generalMetadata?: Record<string, string>,
-    toolSpecificMetadata?: Record<string, string>,
+    generalMetadata?: RequestMetadata,
+    toolSpecificMetadata?: RequestMetadata,
     taskOptions?: { ttl?: number },
   ): Promise<ToolCallInvocation> {
     if (!this.client) {
@@ -4859,7 +4880,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       const convertedArgs = this.convertStringToolArgs(tool, args);
 
       // Merge general metadata with tool-specific metadata; tool-specific wins.
-      const callMetadata: Record<string, string> | undefined =
+      const callMetadata: RequestMetadata | undefined =
         generalMetadata || toolSpecificMetadata
           ? { ...(generalMetadata || {}), ...(toolSpecificMetadata || {}) }
           : undefined;
@@ -4895,7 +4916,9 @@ export class InspectorClient extends InspectorClientEventTarget {
       // attach one here either — doing so would request a progress token (and
       // emit requestorTaskProgress) for task calls only, bypassing the toggle
       // that governs every other call path.
-      const requestOptions = this.getRequestOptions(metadata?.progressToken);
+      const requestOptions = this.getRequestOptions(
+        this.progressTokenOf(metadata),
+      );
       // The task-augmented `tools/call` needs the same SEP-2243 mirroring as the
       // plain one — a strict modern server rejects it with -32020 otherwise.
       this.applyMirroredParamHeaders(tool, convertedArgs, requestOptions);
@@ -5056,7 +5079,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       return invocation;
     } catch (error) {
       // Merge general metadata with tool-specific metadata for error case
-      const callMetadata: Record<string, string> | undefined =
+      const callMetadata: RequestMetadata | undefined =
         generalMetadata || toolSpecificMetadata
           ? { ...(generalMetadata || {}), ...(toolSpecificMetadata || {}) }
           : undefined;
@@ -5086,7 +5109,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   async listResources(
     cursor?: string,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<{ resources: Resource[]; nextCursor?: string }> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -5100,7 +5123,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       this.client!.request(
         { method: "resources/list", params },
         ListResourcesResultSchema,
-        this.getRequestOptions(metadata?.progressToken),
+        this.getRequestOptions(this.progressTokenOf(metadata)),
       ),
     );
     return {
@@ -5117,7 +5140,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   async listAllResources(options?: {
     cacheMode?: CacheMode;
-    metadata?: Record<string, string>;
+    metadata?: RequestMetadata;
   }): Promise<{ resources: Resource[] }> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -5148,7 +5171,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   async readResource(
     uri: string,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<ResourceReadInvocation> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -5167,7 +5190,7 @@ export class InspectorClient extends InspectorClientEventTarget {
           "resources/read",
           params,
           ReadResourceResultSchema,
-          this.getRequestOptions(metadata?.progressToken),
+          this.getRequestOptions(this.progressTokenOf(metadata)),
         ),
       { method: "resources/read" },
     );
@@ -5198,7 +5221,7 @@ export class InspectorClient extends InspectorClientEventTarget {
   async readResourceFromTemplate(
     uriTemplate: string,
     params: Record<string, string>,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<ResourceTemplateReadInvocation> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -5260,7 +5283,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   async listResourceTemplates(
     cursor?: string,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<{ resourceTemplates: ResourceTemplate[]; nextCursor?: string }> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -5275,7 +5298,7 @@ export class InspectorClient extends InspectorClientEventTarget {
         this.client!.request(
           { method: "resources/templates/list", params },
           ListResourceTemplatesResultSchema,
-          this.getRequestOptions(metadata?.progressToken),
+          this.getRequestOptions(this.progressTokenOf(metadata)),
         ),
       { method: "resources/templates/list" },
     );
@@ -5293,7 +5316,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   async listAllResourceTemplates(options?: {
     cacheMode?: CacheMode;
-    metadata?: Record<string, string>;
+    metadata?: RequestMetadata;
   }): Promise<{ resourceTemplates: ResourceTemplate[] }> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -5324,7 +5347,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   async listPrompts(
     cursor?: string,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<{ prompts: Prompt[]; nextCursor?: string }> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -5338,7 +5361,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       this.client!.request(
         { method: "prompts/list", params },
         ListPromptsResultSchema,
-        this.getRequestOptions(metadata?.progressToken),
+        this.getRequestOptions(this.progressTokenOf(metadata)),
       ),
     );
     return {
@@ -5355,7 +5378,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   async listAllPrompts(options?: {
     cacheMode?: CacheMode;
-    metadata?: Record<string, string>;
+    metadata?: RequestMetadata;
   }): Promise<{ prompts: Prompt[] }> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -5388,7 +5411,7 @@ export class InspectorClient extends InspectorClientEventTarget {
   async getPrompt(
     name: string,
     args?: Record<string, JsonValue>,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<PromptGetInvocation> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -5412,7 +5435,7 @@ export class InspectorClient extends InspectorClientEventTarget {
           "prompts/get",
           params,
           GetPromptResultSchema,
-          this.getRequestOptions(metadata?.progressToken),
+          this.getRequestOptions(this.progressTokenOf(metadata)),
         ),
       { method: "prompts/get", toolName: name },
     );
@@ -5451,7 +5474,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     argumentName: string,
     argumentValue: string,
     context?: Record<string, string>,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<{ values: string[]; total?: number; hasMore?: boolean }> {
     if (!this.client) {
       return { values: [] };
@@ -5473,7 +5496,7 @@ export class InspectorClient extends InspectorClientEventTarget {
         () =>
           this.client!.complete(
             params,
-            this.getRequestOptions(metadata?.progressToken),
+            this.getRequestOptions(this.progressTokenOf(metadata)),
           ),
         {
           method: "completion/complete",

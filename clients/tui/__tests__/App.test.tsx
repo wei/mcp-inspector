@@ -340,7 +340,7 @@ function oneEmaHttp(): Record<string, TuiServer> {
       config: { type: "streamable-http", url: "http://localhost:8080/mcp" },
       settings: {
         requestTimeout: 0,
-        metadata: [],
+        metadata: {},
         headers: [],
         env: [],
         roots: [],

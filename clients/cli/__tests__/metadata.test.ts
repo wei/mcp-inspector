@@ -373,16 +373,17 @@ describe("Metadata Tests", () => {
 
         expectCliSuccess(result);
 
-        // Validate metadata values are sent as strings
+        // A JSON-parseable value goes out as that JSON type, not as its
+        // string spelling (#1910) — `_meta` takes any JSON.
         const recordedRequests = server.getRecordedRequests();
         const toolsListRequest = recordedRequests.find(
           (r) => r.method === "tools/list",
         );
         expect(toolsListRequest).toBeDefined();
         expect(toolsListRequest?.metadata).toEqual({
-          integer_value: "42",
-          decimal_value: "3.14159",
-          negative_value: "-10",
+          integer_value: 42,
+          decimal_value: 3.14159,
+          negative_value: -10,
         });
       } finally {
         await server.stop();
@@ -428,7 +429,7 @@ describe("Metadata Tests", () => {
       }
     });
 
-    it("JSON.stringifies object/array metadata (not String → [object Object])", async () => {
+    it("sends object/array/boolean metadata as real JSON, not stringified (#1910)", async () => {
       const server = createTestServerHttp({
         serverInfo: createTestServerInfo(),
         tools: [createEchoTool()],
@@ -456,9 +457,9 @@ describe("Metadata Tests", () => {
           (r) => r.method === "tools/list",
         );
         expect(toolsListRequest?.metadata).toEqual({
-          nested: '{"key":"value"}',
-          list: "[1,2,3]",
-          flag: "true",
+          nested: { key: "value" },
+          list: [1, 2, 3],
+          flag: true,
         });
       } finally {
         await server.stop();
@@ -819,7 +820,7 @@ describe("Metadata Tests", () => {
         );
         expect(toolsListRequest).toBeDefined();
         expect(toolsListRequest?.metadata).toEqual({
-          integration_test: "true",
+          integration_test: true,
           test_phase: "all_methods",
         });
       } finally {
@@ -866,8 +867,8 @@ describe("Metadata Tests", () => {
         );
         expect(toolCallRequest).toBeDefined();
         expect(toolCallRequest?.metadata).toEqual({
-          session_id: "12345",
-          user_id: "67890",
+          session_id: 12345,
+          user_id: 67890,
           timestamp: "2024-01-01T00:00:00Z",
           request_id: "req-abc-123",
           tool_session: "session-xyz-789",
@@ -919,8 +920,8 @@ describe("Metadata Tests", () => {
         expect(toolCallRequest).toBeDefined();
         expect(toolCallRequest?.metadata).toEqual({
           valid_key: "valid_value",
-          numeric_key: "123",
-          boolean_key: "true",
+          numeric_key: 123,
+          boolean_key: true,
           json_key: '\'{"test":"value"}\'', // Single quotes are preserved
           special_key: "!@#$%^&*()",
           unicode_key: "🚀🎉✨",

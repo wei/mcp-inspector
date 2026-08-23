@@ -412,7 +412,7 @@ describe("useServers", () => {
       await result.current.updateServerSettings("alpha", {
         headers: [{ key: "X-Tenant", value: "acme" }],
         env: [],
-        metadata: [{ key: "trace", value: "abc" }],
+        metadata: { trace: "abc" },
         connectionTimeout: 5000,
         requestTimeout: 30000,
         taskTtl: 30000,
@@ -425,7 +425,7 @@ describe("useServers", () => {
       expect(result.current.servers[0]?.settings).toEqual({
         headers: [{ key: "X-Tenant", value: "acme" }],
         env: [],
-        metadata: [{ key: "trace", value: "abc" }],
+        metadata: { trace: "abc" },
         connectionTimeout: 5000,
         requestTimeout: 30000,
         taskTtl: 30000,
@@ -444,7 +444,7 @@ describe("useServers", () => {
     expect(stored.url).toBe("https://x.test/mcp");
     expect(stored).not.toHaveProperty("settings");
     expect(stored.headers).toEqual({ "X-Tenant": "acme" });
-    expect(stored.metadata).toEqual([{ key: "trace", value: "abc" }]);
+    expect(stored.metadata).toEqual({ trace: "abc" });
     expect(stored.connectionTimeout).toBe(5000);
     expect(stored.requestTimeout).toBe(30000);
     expect(stored.taskTtl).toBe(30000);
@@ -461,7 +461,7 @@ describe("useServers", () => {
         await result.current.updateServerSettings("nonexistent", {
           headers: [],
           env: [],
-          metadata: [],
+          metadata: {},
           connectionTimeout: 0,
           requestTimeout: 0,
           taskTtl: 0,
@@ -511,7 +511,7 @@ describe("useServers", () => {
     expect(result.current.servers[0]?.settings).toEqual({
       headers: [{ key: "X-Keep", value: "yes" }],
       env: [],
-      metadata: [],
+      metadata: {},
       connectionTimeout: 0,
       requestTimeout: 0,
       // Absent taskTtl on disk reads back as the product default for the form.

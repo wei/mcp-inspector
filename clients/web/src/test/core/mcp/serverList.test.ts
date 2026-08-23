@@ -11,6 +11,7 @@ import {
   mcpConfigToServerEntries,
   mergeSecretsIntoStored,
   normalizeServerType,
+  normalizeStoredMetadata,
   oauthAuthorizationParamsFromSettings,
   oauthEndpointOverridesFromSettings,
   serverEntriesToMcpConfig,
@@ -240,7 +241,7 @@ describe("serverEntriesToMcpConfig", () => {
   });
 
   it("round-trips a populated set of Inspector-extension fields (post-#1358 flat shape)", () => {
-    // Disk shape: top-level `headers` (Record), `metadata` (pair-array),
+    // Disk shape: top-level `headers` (Record), `metadata` (JSON object),
     // numeric timeouts, nested `oauth`. Round-trip must preserve the on-
     // disk shape byte-equivalent so a hand-edited file is stable.
     const original: MCPConfig = {
@@ -249,7 +250,7 @@ describe("serverEntriesToMcpConfig", () => {
           type: "streamable-http",
           url: "https://x.test/mcp",
           headers: { Authorization: "Bearer xyz" },
-          metadata: [{ key: "tenant", value: "acme" }],
+          metadata: { tenant: "acme", limits: { rps: 10 } },
           connectionTimeout: 30000,
           requestTimeout: 60000,
           oauth: {
@@ -581,7 +582,7 @@ describe("serverEntriesToMcpConfig", () => {
       headers: [{ key: "X-Tenant", value: "acme" }],
       // Non-stdio server → empty env mirror in memory (for the form)
       env: [],
-      metadata: [],
+      metadata: {},
       connectionTimeout: 0,
       requestTimeout: 0,
       // Absent taskTtl on disk → product default in memory (for the form)
@@ -663,7 +664,7 @@ describe("serverEntriesToMcpConfig", () => {
             { key: "   ", value: "whitespace" },
           ],
           env: [],
-          metadata: [],
+          metadata: {},
           connectionTimeout: 0,
           requestTimeout: 0,
           taskTtl: 0,
@@ -690,7 +691,7 @@ describe("serverEntriesToMcpConfig", () => {
         settings: {
           headers: [],
           env: [],
-          metadata: [],
+          metadata: {},
           connectionTimeout: 0,
           requestTimeout: 0,
           taskTtl: 0,
@@ -719,7 +720,7 @@ describe("serverEntriesToMcpConfig", () => {
         settings: {
           headers: [],
           env: [],
-          metadata: [],
+          metadata: {},
           connectionTimeout: 0,
           requestTimeout: 0,
           taskTtl: 0,
@@ -758,7 +759,7 @@ describe("serverEntriesToMcpConfig", () => {
         settings: {
           headers: [],
           env: [],
-          metadata: [],
+          metadata: {},
           connectionTimeout: 0,
           requestTimeout: 0,
           taskTtl: 0,
@@ -785,7 +786,7 @@ describe("serverEntriesToMcpConfig", () => {
         settings: {
           headers: [],
           env: [],
-          metadata: [],
+          metadata: {},
           connectionTimeout: 0,
           requestTimeout: 0,
           taskTtl: 0,
@@ -1163,7 +1164,7 @@ describe("enterpriseManaged oauth settings", () => {
     const stored = inspectorSettingsToStoredFields({
       headers: [],
       env: [],
-      metadata: [],
+      metadata: {},
       connectionTimeout: 0,
       requestTimeout: 0,
       taskTtl: 60000,
@@ -1180,7 +1181,7 @@ describe("enterpriseManaged oauth settings", () => {
     const stored = inspectorSettingsToStoredFields({
       headers: [],
       env: [],
-      metadata: [],
+      metadata: {},
       connectionTimeout: 0,
       requestTimeout: 0,
       taskTtl: 60000,
@@ -1196,7 +1197,7 @@ describe("oauthOnInsufficientScope (SEP-2350)", () => {
   const baseSettings = {
     headers: [],
     env: [],
-    metadata: [],
+    metadata: {},
     connectionTimeout: 0,
     requestTimeout: 0,
     taskTtl: 60000,
@@ -1374,6 +1375,109 @@ describe("oauthOnInsufficientScope (SEP-2350)", () => {
   });
 });
 
+describe("normalizeStoredMetadata (#1910)", () => {
+  let warn: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    warn.mockRestore();
+  });
+
+  it("passes an object through, values of any JSON type intact", () => {
+    const meta = {
+      s: "a",
+      n: 1,
+      b: false,
+      z: null,
+      arr: [1, { k: 2 }],
+      o: { deep: true },
+    };
+    expect(normalizeStoredMetadata(meta)).toEqual(meta);
+  });
+
+  it("copies rather than aliasing the stored object", () => {
+    // The settings object is edited in place by the form; sharing the
+    // reference with the parsed catalog would mutate it behind the caller.
+    const meta = { a: 1 };
+    const out = normalizeStoredMetadata(meta);
+    out.b = 2;
+    expect(meta).toEqual({ a: 1 });
+  });
+
+  it("reads the pre-#1910 pair array so an existing mcp.json keeps working", () => {
+    expect(
+      normalizeStoredMetadata([
+        { key: "tenant", value: "acme" },
+        { key: "n", value: 3 },
+      ]),
+    ).toEqual({ tenant: "acme", n: 3 });
+  });
+
+  it("skips a blank-key legacy pair", () => {
+    expect(
+      normalizeStoredMetadata([
+        { key: "", value: "orphan" },
+        { key: "  ", value: "orphan" },
+        { key: "kept", value: "yes" },
+      ]),
+    ).toEqual({ kept: "yes" });
+  });
+
+  it("reads a legacy pair with no value as an empty string", () => {
+    expect(normalizeStoredMetadata([{ key: "k" }])).toEqual({ k: "" });
+  });
+
+  it("drops a malformed legacy entry with a warning, keeping its siblings", () => {
+    expect(
+      normalizeStoredMetadata([
+        "nope",
+        null,
+        { value: "no key" },
+        { key: "kept", value: 1 },
+      ]),
+    ).toEqual({ kept: 1 });
+    expect(warn).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    ["undefined", undefined],
+    ["null", null],
+  ])("reads %s as the empty object without warning", (_label, input) => {
+    expect(normalizeStoredMetadata(input)).toEqual({});
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a string", "oops"],
+    ["a number", 7],
+    ["a boolean", true],
+  ])("drops %s with a warning", (_label, input) => {
+    expect(normalizeStoredMetadata(input)).toEqual({});
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("migrates a legacy file to the object shape on the next write", () => {
+    // Read side accepts the pair array; write side emits only the object, so
+    // one round-trip is the migration.
+    const entries = mcpConfigToServerEntries({
+      mcpServers: {
+        legacy: {
+          type: "streamable-http",
+          url: "https://x.test/mcp",
+          metadata: [{ key: "tenant", value: "acme" }] as unknown as Record<
+            string,
+            never
+          >,
+        },
+      },
+    });
+    expect(entries[0]?.settings?.metadata).toEqual({ tenant: "acme" });
+    const round = serverEntriesToMcpConfig(entries);
+    expect(round.mcpServers.legacy?.metadata).toEqual({ tenant: "acme" });
+  });
+});
+
 describe("envRecordToPairs / envPairsToRecord", () => {
   it("envRecordToPairs preserves key insertion order", () => {
     expect(envRecordToPairs({ B: "2", A: "1" })).toEqual([
@@ -1469,7 +1573,7 @@ describe("stdio env / cwd mirroring", () => {
       headers: [],
       env: [{ key: "API_KEY", value: "secret" }],
       cwd: "/srv/app",
-      metadata: [],
+      metadata: {},
       connectionTimeout: 0,
       requestTimeout: 0,
       taskTtl: 60000,

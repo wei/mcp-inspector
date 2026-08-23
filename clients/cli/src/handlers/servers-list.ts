@@ -157,10 +157,15 @@ export function sanitizeServerSettings(
       key: h.key,
       value: isSensitiveHeader(h.key) ? REDACTED : h.value,
     })),
-    metadata: (settings.metadata ?? []).map((m) => ({
-      key: m.key,
-      value: isSensitiveHeader(m.key) ? REDACTED : m.value,
-    })),
+    // Metadata is a JSON object whose values may be any JSON (#1910), so the
+    // redaction replaces the whole value rather than a string — a sensitive
+    // key holding an object must not leak through its members.
+    metadata: Object.fromEntries(
+      Object.entries(settings.metadata ?? {}).map(([key, value]) => [
+        key,
+        isSensitiveHeader(key) ? REDACTED : value,
+      ]),
+    ),
     env: (settings.env ?? []).map((e) => ({
       key: e.key,
       value: REDACTED,

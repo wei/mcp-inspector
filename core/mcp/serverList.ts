@@ -15,6 +15,7 @@ import {
 import type { Root } from "@modelcontextprotocol/client";
 import type {
   InspectorServerSettings,
+  RequestMetadata,
   MCPConfig,
   MCPServerConfig,
   ServerEntry,
@@ -28,6 +29,7 @@ import {
   envSecretField,
 } from "../auth/secret-fields.js";
 import { toRecord } from "../json/jsonUtils.js";
+import type { JsonValue } from "../json/jsonUtils.js";
 
 // The full set of valid `type` discriminator values, used to reject anything
 // else read off disk so unknown strings can't propagate to narrowing sites.
@@ -195,6 +197,60 @@ export function envPairsToRecord(
 }
 
 /**
+ * Read a server's `metadata` off disk into the in-memory `RequestMetadata`
+ * object, accepting both the current object shape and the pre-#1910
+ * `{ key, value }[]` pair array.
+ *
+ * The pair array is the shape every `mcp.json` written before #1910 carries, so
+ * dropping it would silently stop sending a user's configured `_meta` on the
+ * first read of an existing file. It is read here and never written back:
+ * `inspectorSettingsToStoredFields` emits only the object form, so the file is
+ * migrated the next time the entry is saved.
+ *
+ * Anything else — a string, a number, an array of non-pairs — is not metadata
+ * the Inspector can send, so it is dropped with a warning rather than half-
+ * interpreted, following `cleanRoots` / `cleanAuthorizationParams` above. A
+ * pair whose key is blank is skipped for the same reason the write side omits
+ * it: `_meta` has no meaningful empty key.
+ */
+export function normalizeStoredMetadata(
+  metadata: StoredMCPServer["metadata"] | unknown,
+): RequestMetadata {
+  if (metadata === undefined || metadata === null) return {};
+
+  if (Array.isArray(metadata)) {
+    const out: RequestMetadata = {};
+    for (const entry of metadata) {
+      if (
+        typeof entry !== "object" ||
+        entry === null ||
+        typeof (entry as { key?: unknown }).key !== "string"
+      ) {
+        console.warn(
+          "Ignoring malformed legacy metadata entry (expected `{ key, value }`):",
+          entry,
+        );
+        continue;
+      }
+      const { key, value } = entry as { key: string; value?: JsonValue };
+      if (key.trim() === "") continue;
+      out[key] = value ?? "";
+    }
+    return out;
+  }
+
+  if (typeof metadata === "object") {
+    return { ...(metadata as RequestMetadata) };
+  }
+
+  console.warn(
+    "Ignoring malformed `metadata` (expected a JSON object):",
+    metadata,
+  );
+  return {};
+}
+
+/**
  * Validate a server's `oauth.authorizationParams` as it comes off disk, or
  * `undefined` when there is nothing usable. (#2018)
  *
@@ -349,7 +405,7 @@ export function storedFieldsToInspectorSettings(
   const settings: InspectorServerSettings = {
     headers: headersPairs,
     env: envRecordToPairs(stored.env),
-    metadata: stored.metadata ?? [],
+    metadata: normalizeStoredMetadata(stored.metadata),
     connectionTimeout: stored.connectionTimeout ?? 0,
     requestTimeout: stored.requestTimeout ?? 0,
     // Unlike the timeouts (0 = "SDK default"), task TTL has a concrete product
@@ -458,9 +514,11 @@ export function inspectorSettingsToStoredFields(
     out.headers = headersRecord;
   }
 
-  const metadataFiltered = settings.metadata.filter((m) => m.key.trim() !== "");
-  if (metadataFiltered.length > 0) {
-    out.metadata = metadataFiltered;
+  // Blank-key entries can't exist in the object form (an object has no blank
+  // key the user can leave mid-edit, the way a `{key,value}` row could), so
+  // there is nothing to filter — only the empty-object case to omit.
+  if (Object.keys(settings.metadata).length > 0) {
+    out.metadata = settings.metadata;
   }
 
   if (settings.connectionTimeout > 0) {

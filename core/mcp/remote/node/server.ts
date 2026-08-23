@@ -41,6 +41,7 @@ import {
 } from "../../types.js";
 import type {
   InspectorServerSettings,
+  RequestMetadata,
   MCPConfig,
   MCPServerConfig,
   StdioServerConfig,
@@ -1212,6 +1213,11 @@ export function createRemoteApp(
   // credentials are intentionally lost on first read (hard cutover per
   // #1358 decision 4). Users re-enter via the form or hand-edit into the
   // flat shape.
+  // A plain JSON object — the container `_meta` requires. Values are
+  // deliberately unchecked: `_meta` takes arbitrary JSON (#1910), and anything
+  // that survived `JSON.parse` already is.
+  const isJsonObject = (v: unknown): v is RequestMetadata =>
+    v !== null && typeof v === "object" && !Array.isArray(v);
   const isStringRecord = (v: unknown): v is Record<string, string> => {
     if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
     for (const val of Object.values(v as Record<string, unknown>)) {
@@ -1324,10 +1330,18 @@ export function createRemoteApp(
         );
         delete valObj.headers;
       }
-      if ("metadata" in valObj && !isKvArray(valObj.metadata)) {
+      // A JSON object post-#1910; the pre-#1910 `{ key, value }[]` pair array
+      // is still accepted so an existing file keeps working (it is normalized
+      // by `normalizeStoredMetadata` on the way into the settings shape, and
+      // rewritten as an object on the next save).
+      if (
+        "metadata" in valObj &&
+        !isJsonObject(valObj.metadata) &&
+        !isKvArray(valObj.metadata)
+      ) {
         logWarn(
           { route: "/api/servers", id, droppedKey: "metadata" },
-          "Dropping malformed `metadata` field — expected `Array<{ key: string, value: string }>`.",
+          "Dropping malformed `metadata` field — expected a JSON object.",
         );
         delete valObj.metadata;
       }
@@ -1556,10 +1570,14 @@ export function createRemoteApp(
         error: "settings.headers must be an array of { key, value }",
       };
     }
-    if (!isKvArray(obj.metadata)) {
+    // `_meta` takes any JSON, so metadata crosses the wire as a plain JSON
+    // object rather than the `{ key, value }` rows headers/env still use
+    // (#1910). Only the container is checked — the values are arbitrary JSON
+    // by design, and anything that survived `c.req.json()` already is.
+    if (!isJsonObject(obj.metadata)) {
       return {
         ok: false,
-        error: "settings.metadata must be an array of { key, value }",
+        error: "settings.metadata must be a JSON object",
       };
     }
     // env is optional on the wire (older clients / non-stdio servers won't send
@@ -1735,7 +1753,7 @@ export function createRemoteApp(
       // Absent → empty list, matching the read side. The write-through drops
       // empty-key rows and clears `config.env` when the list is empty.
       env: isKvArray(obj.env) ? obj.env : [],
-      metadata: obj.metadata as { key: string; value: string }[],
+      metadata: obj.metadata as RequestMetadata,
       connectionTimeout: obj.connectionTimeout as number,
       requestTimeout: obj.requestTimeout as number,
       // Absent → product default, matching the read side

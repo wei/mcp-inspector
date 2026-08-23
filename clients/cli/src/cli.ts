@@ -33,7 +33,6 @@ import { consumeMethodOutcome } from "./handlers/consume-outcome.js";
 import { runMethod } from "./handlers/run-method.js";
 import {
   isOneShotMethod,
-  metaValueToString,
   ONE_SHOT_METHODS,
   type MethodArgs,
 } from "./handlers/method-types.js";
@@ -999,22 +998,12 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
     promptName: options.promptName,
     promptArgs: options.promptArgs,
     logLevel: options.logLevel,
-    metadata: options.metadata
-      ? Object.fromEntries(
-          Object.entries(options.metadata).map(([key, value]) => [
-            key,
-            metaValueToString(value),
-          ]),
-        )
-      : undefined,
-    toolMeta: options.toolMetadata
-      ? Object.fromEntries(
-          Object.entries(options.toolMetadata).map(([key, value]) => [
-            key,
-            metaValueToString(value),
-          ]),
-        )
-      : undefined,
+    // `--metadata`/`--tool-metadata` values are parsed as JSON, and `_meta`
+    // takes any JSON — so they go through unflattened (#1910). They used to be
+    // squeezed through `metaValueToString`, which sent `{"a":1}` as the
+    // *string* `'{"a":1}'`.
+    metadata: options.metadata,
+    toolMeta: options.toolMetadata,
     appInfo: options.appInfo === true,
     format: options.format,
   };

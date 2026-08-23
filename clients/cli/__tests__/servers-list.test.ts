@@ -219,10 +219,14 @@ describe("showServerEntry / servers/show", () => {
         { key: "Authorization", value: "Bearer x" },
         { key: "X-Custom", value: "ok" },
       ],
-      metadata: [
-        { key: "Authorization", value: "Bearer meta" },
-        { key: "X-Custom", value: "ok" },
-      ],
+      metadata: {
+        Authorization: "Bearer meta",
+        "X-Custom": "ok",
+        // A structured value under a sensitive key: the redaction must replace
+        // the whole value, not walk into it (#1910).
+        "X-Api-Key": { primary: "sk-live-1", fallback: "sk-live-2" },
+        nested: { keep: true },
+      },
       env: [
         { key: "TOKEN", value: "secret" },
         { key: "", value: "still-secret" },
@@ -242,10 +246,13 @@ describe("showServerEntry / servers/show", () => {
       { key: "Authorization", value: "[redacted]" },
       { key: "X-Custom", value: "ok" },
     ]);
-    expect(sanitized.metadata).toEqual([
-      { key: "Authorization", value: "[redacted]" },
-      { key: "X-Custom", value: "ok" },
-    ]);
+    expect(sanitized.metadata).toEqual({
+      Authorization: "[redacted]",
+      "X-Custom": "ok",
+      "X-Api-Key": "[redacted]",
+      // A structured value under a non-sensitive key survives intact.
+      nested: { keep: true },
+    });
     expect(sanitized.env).toEqual([
       { key: "TOKEN", value: "[redacted]" },
       { key: "", value: "[redacted]" },

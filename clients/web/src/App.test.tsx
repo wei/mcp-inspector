@@ -1635,7 +1635,7 @@ const settingsWithRoots = (
 ): InspectorServerSettings => ({
   headers: [],
   env: [],
-  metadata: [],
+  metadata: {},
   connectionTimeout: 0,
   requestTimeout: 0,
   taskTtl: 60000,

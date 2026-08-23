@@ -389,7 +389,7 @@ describe("InspectorClient coverage backfill", () => {
           serverSettings: {
             headers: [],
             env: [],
-            metadata: [{ key: "x-test", value: "1" }],
+            metadata: { "x-test": "1" },
             connectionTimeout: 0,
             requestTimeout: 0,
             taskTtl: 0,
@@ -655,7 +655,7 @@ describe("InspectorClient coverage backfill", () => {
           serverSettings: {
             headers: [],
             env: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 1,
             requestTimeout: 0,
             taskTtl: 0,
