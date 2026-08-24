@@ -183,9 +183,17 @@ export function evaluateClient({
     ];
   }
 
-  return violations.map(
-    (v) =>
-      `${name}: "${v.pkg}" is declared external but was inlined (${v.reason}).`,
+  // Word the failure for where the candidate came from. A root dependency that
+  // is missing from the `external` list — #2067's own shape — is not "declared
+  // external", and saying so would send the reader looking for a declaration
+  // that is precisely what is absent.
+  const declared = new Set(externals);
+  return violations.map((v) =>
+    declared.has(v.pkg)
+      ? `${name}: "${v.pkg}" is declared external but was inlined (${v.reason}).`
+      : `${name}: "${v.pkg}" is a root runtime dependency, so it must stay ` +
+        `external, but it was inlined (${v.reason}). Add it to this client's ` +
+        `tsup \`external\` list.`,
   );
 }
 

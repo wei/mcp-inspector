@@ -202,9 +202,15 @@ function toUndiciRequest(
  * `fetch` slot, so undici is never imported and the built-in `fetch` is used as
  * before.
  *
- * The env is read once, when this is called; undici's `EnvHttpProxyAgent` then
- * owns per-request `NO_PROXY` matching. The agent itself is created lazily on
- * the first request so that merely constructing a client costs nothing.
+ * The env is read once, when this is called, to decide *whether* to proxy at
+ * all. The agent itself is created lazily on the first request, so merely
+ * constructing a client costs nothing — and note that `EnvHttpProxyAgent`
+ * captures the proxy URLs at *its* construction (measured), evaluating only
+ * `NO_PROXY` per request. That is invisible in production, where the
+ * environment does not change mid-process, but it means a test that mutates
+ * `HTTP_PROXY` after any request has already been made is talking to an agent
+ * that is not listening: the proxy suites isolate these variables for a whole
+ * file so nothing can build the process-wide agent before they do.
  *
  * This belongs at the *bottom* of a client's fetch stack — the Node clients'
  * `environment.fetch` — because proxying now means substituting the fetch rather

@@ -28,6 +28,41 @@ import { createServer, request, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
 describe("Transport", () => {
+  /**
+   * Proxy variables are cleared for the WHOLE file, not just the proxy tests.
+   *
+   * `createProxyFetch`'s `EnvHttpProxyAgent` is memoized process-wide and captures
+   * its proxy URLs when it is constructed (only `NO_PROXY` is re-read per
+   * request). So on a machine with an ambient `HTTP_PROXY`, any earlier test that
+   * makes a real connection would build that agent against the ambient proxy, and
+   * a later test setting `HTTP_PROXY` to its own server would be talking to an
+   * agent that is not listening. Clearing up front means nothing can build the
+   * singleton before the proxy tests do.
+   */
+  const AMBIENT_PROXY_VARS = [
+    "HTTP_PROXY",
+    "http_proxy",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "NO_PROXY",
+    "no_proxy",
+  ] as const;
+  const ambientProxyEnv: Record<string, string | undefined> = {};
+
+  beforeAll(() => {
+    for (const name of AMBIENT_PROXY_VARS) {
+      ambientProxyEnv[name] = process.env[name];
+      delete process.env[name];
+    }
+  });
+
+  afterAll(() => {
+    for (const name of AMBIENT_PROXY_VARS) {
+      const previous = ambientProxyEnv[name];
+      if (previous === undefined) delete process.env[name];
+      else process.env[name] = previous;
+    }
+  });
   describe("getServerType", () => {
     it("should return stdio for stdio config", () => {
       const config: MCPServerConfig = {

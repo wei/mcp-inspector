@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { afterAll, beforeAll, describe, it, expect, vi } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,23 +26,42 @@ import {
 import type { MCPServerConfig } from "@inspector/core/mcp/index.js";
 import { createServer, request } from "node:http";
 
-/**
- * Every proxy variable undici's EnvHttpProxyAgent consults. The proxy test
- * clears all of them rather than only setting HTTP_PROXY: the agent prefers the
- * lowercase forms and honors NO_PROXY dynamically, so an ambient value in the
- * developer's or CI's environment could route the request elsewhere, or bypass
- * the test's proxy entirely, and fail the assertion for the wrong reason.
- */
-const PROXY_ENV_VARS = [
-  "HTTP_PROXY",
-  "http_proxy",
-  "HTTPS_PROXY",
-  "https_proxy",
-  "NO_PROXY",
-  "no_proxy",
-] as const;
-
 describe("CLI Tests", () => {
+  /**
+   * Proxy variables are cleared for the WHOLE file, not just the proxy tests.
+   *
+   * `createProxyFetch`'s `EnvHttpProxyAgent` is memoized process-wide and captures
+   * its proxy URLs when it is constructed (only `NO_PROXY` is re-read per
+   * request). So on a machine with an ambient `HTTP_PROXY`, any earlier test that
+   * makes a real connection would build that agent against the ambient proxy, and
+   * a later test setting `HTTP_PROXY` to its own server would be talking to an
+   * agent that is not listening. Clearing up front means nothing can build the
+   * singleton before the proxy tests do.
+   */
+  const AMBIENT_PROXY_VARS = [
+    "HTTP_PROXY",
+    "http_proxy",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "NO_PROXY",
+    "no_proxy",
+  ] as const;
+  const ambientProxyEnv: Record<string, string | undefined> = {};
+
+  beforeAll(() => {
+    for (const name of AMBIENT_PROXY_VARS) {
+      ambientProxyEnv[name] = process.env[name];
+      delete process.env[name];
+    }
+  });
+
+  afterAll(() => {
+    for (const name of AMBIENT_PROXY_VARS) {
+      const previous = ambientProxyEnv[name];
+      if (previous === undefined) delete process.env[name];
+      else process.env[name] = previous;
+    }
+  });
   describe("Basic CLI Mode", () => {
     it("should execute tools/list successfully", async () => {
       const { command, args } = getTestMcpServerCommand();
@@ -382,11 +401,6 @@ describe("CLI Tests", () => {
         });
         req.pipe(upstream);
       });
-      const savedProxyEnv: Record<string, string | undefined> = {};
-      for (const name of PROXY_ENV_VARS) {
-        savedProxyEnv[name] = process.env[name];
-        delete process.env[name];
-      }
       try {
         await server.start();
         await new Promise<void>((r) => proxy.listen(0, "127.0.0.1", () => r()));
@@ -407,11 +421,10 @@ describe("CLI Tests", () => {
         expect(seen.length).toBeGreaterThan(0);
         expect(seen.every((u) => u.startsWith(server.url))).toBe(true);
       } finally {
-        for (const name of PROXY_ENV_VARS) {
-          const previous = savedProxyEnv[name];
-          if (previous === undefined) delete process.env[name];
-          else process.env[name] = previous;
-        }
+        // Only this test's own variable is cleared here. The ambient ones are
+        // restored by the file-level afterAll, so the memoized agent can never
+        // be left bound to this now-closed proxy for a later test.
+        delete process.env.HTTP_PROXY;
         await new Promise<void>((r) => proxy.close(() => r()));
         await server.stop();
       }

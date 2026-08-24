@@ -232,6 +232,31 @@ describe("evaluateClient", () => {
       ],
     });
     assert.equal(failures.length, 1);
+    // Worded for where the candidate came from: `undici` is NOT in this
+    // client's `external` list here — that absence IS the bug — so a message
+    // saying it "is declared external" would send the reader looking for a
+    // declaration that is precisely what is missing.
+    assert.match(
+      failures[0],
+      /"undici" is a root runtime dependency, so it must stay external, but it was inlined/,
+    );
+    assert.doesNotMatch(failures[0], /is declared external but was inlined/);
+  });
+
+  test("uses the declared-external wording when the package IS in the list", () => {
+    const failures = evaluateClient({
+      name: "web",
+      build: "clients/web/build",
+      externals: ["undici"],
+      rootDependencies: ["undici"],
+      files: [
+        {
+          name: "index.js",
+          source: banner("../../node_modules/undici/index.js"),
+        },
+      ],
+    });
+    assert.equal(failures.length, 1);
     assert.match(failures[0], /"undici" is declared external but was inlined/);
   });
 
