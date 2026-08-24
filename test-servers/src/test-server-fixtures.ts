@@ -1617,8 +1617,15 @@ export function createMcpAppDemoTool(): ToolDefinition {
  * `_meta.ui.csp` (no external connect/resource domains) and a sample
  * `permissions` block so `--app-info` and the host's CSP enforcement both have
  * something to read.
+ *
+ * `domain` is the spec field by which a server asks its host for a stable,
+ * dedicated origin (#2056). Omitted by default so the default opaque-origin
+ * render stays the thing this fixture exercises; pass one to drive the
+ * dedicated-origin path instead. Its *value* is not an address the Inspector
+ * serves — the spec makes the format host-dependent, and the Inspector reads
+ * any non-empty string as "give me a real origin".
  */
-export function createMcpAppDemoResource(): ResourceDefinition {
+export function createMcpAppDemoResource(domain?: string): ResourceDefinition {
   return {
     name: "mcp_app_demo_widget",
     uri: MCP_APP_DEMO_URI,
@@ -1630,6 +1637,7 @@ export function createMcpAppDemoResource(): ResourceDefinition {
         csp: { connectDomains: [], resourceDomains: [] },
         permissions: { clipboard: false },
         prefersBorder: true,
+        ...(domain ? { domain } : {}),
       },
     },
   };

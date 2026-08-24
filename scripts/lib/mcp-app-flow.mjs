@@ -225,6 +225,18 @@ export async function loadChromium(repoRoot) {
  * Throws with the last observed `data-app-status` / `data-app-error` rather than
  * a bare timeout, so a failure names its stage.
  *
+ * Three knobs exist for `smoke:web:app`'s second phase (#2056), which
+ * re-navigates the *same* page to a second server declaring `_meta.ui.domain`:
+ *
+ *   - `expectDeepLink` — the token gate is only worth asserting on the first
+ *     navigate. A re-navigate that were rejected fails at the connect wait
+ *     anyway, and phase 2's real subject is the origin, not the gate.
+ *   - `what` — the noun in the ready-failure message, so a phase-2 timeout does
+ *     not read as a phase-1 one.
+ *   - `extraDiagnostics` — appended to that message. Phase 2 lists the page's
+ *     frames, which is what distinguishes "the app never rendered" from "it
+ *     rendered at the wrong origin".
+ *
  * Takes only the small slice of Playwright's `page` it uses (`goto`, `locator`
  * → `waitFor`/`getAttribute`/`count`), which is what lets its failure paths be
  * unit-tested against a stand-in — a smoke only ever exercises its happy path.
@@ -232,6 +244,9 @@ export async function loadChromium(repoRoot) {
 export async function driveAppFlow({
   page,
   url,
+  expectDeepLink = true,
+  what = "app",
+  extraDiagnostics = null,
   gotoTimeoutMs = 30_000,
   connectTimeoutMs = 45_000,
   readyTimeoutMs = 45_000,
@@ -247,13 +262,15 @@ export async function driveAppFlow({
   }
 
   // 1. The deep link must be accepted (not rejected by the token gate).
-  const status = page.locator('[data-testid="connection-status"]');
-  await status.waitFor({ state: "attached", timeout: gotoTimeoutMs });
-  const deeplink = await status.getAttribute("data-deeplink");
-  if (deeplink !== "parsed") {
-    throw new Error(
-      `deep link was not accepted (data-deeplink="${deeplink}") — expected "parsed"`,
-    );
+  if (expectDeepLink) {
+    const status = page.locator('[data-testid="connection-status"]');
+    await status.waitFor({ state: "attached", timeout: gotoTimeoutMs });
+    const deeplink = await status.getAttribute("data-deeplink");
+    if (deeplink !== "parsed") {
+      throw new Error(
+        `deep link was not accepted (data-deeplink="${deeplink}") — expected "parsed"`,
+      );
+    }
   }
 
   // 2. Connected to the test server.
@@ -273,10 +290,11 @@ export async function driveAppFlow({
       ? await form.getAttribute("data-app-status")
       : "(no apps-form)";
     const appError = present ? await form.getAttribute("data-app-error") : null;
+    const extra = extraDiagnostics ? await extraDiagnostics() : "";
     throw new Error(
-      `app never reached data-app-status="ready" (last: "${appStatus}"` +
+      `${what} never reached data-app-status="ready" (last: "${appStatus}"` +
         `${appError ? `, data-app-error="${appError}"` : ""}) — the sandbox proxy ` +
-        `or the UI-protocol bridge failed to complete`,
+        `or the UI-protocol bridge failed to complete${extra ? ` — ${extra}` : ""}`,
     );
   }
 }

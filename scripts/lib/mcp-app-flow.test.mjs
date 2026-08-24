@@ -154,6 +154,42 @@ describe("driveAppFlow", () => {
     );
   });
 
+  it("skips the deep-link gate when the caller re-navigates an open page", async () => {
+    // smoke:web:app phase 2 (#2056) re-navigates the SAME page to a second
+    // server. The gate was proven on the first navigate, and a rejected
+    // re-navigate fails at the connect wait anyway — so a stale/absent
+    // data-deeplink must not fail the phase.
+    const plan = happyPlan();
+    plan[STATUS] = { attrs: {} };
+    await driveAppFlow({
+      page: fakePage(plan),
+      url: "http://x/",
+      expectDeepLink: false,
+    });
+  });
+
+  it("names the phase and appends its diagnostics on a ready timeout", async () => {
+    // A phase-2 timeout that read as a phase-1 one would send the reader to the
+    // wrong half of the smoke; the frame list is what separates "never
+    // rendered" from "rendered at the wrong origin".
+    const plan = happyPlan();
+    plan[READY] = { waitFails: true };
+    plan[FORM] = { count: 1, attrs: { "data-app-status": "loading" } };
+    await assert.rejects(
+      driveAppFlow({
+        page: fakePage(plan),
+        url: "http://x/",
+        what: "dedicated-origin app",
+        extraDiagnostics: () => "frames: a, b",
+      }),
+      (err) => {
+        assert.match(err.message, /^dedicated-origin app never reached/);
+        assert.match(err.message, /frames: a, b$/);
+        return true;
+      },
+    );
+  });
+
   it("says so when the apps form never mounted at all", async () => {
     const plan = happyPlan();
     plan[READY] = { waitFails: true };

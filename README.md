@@ -143,6 +143,7 @@ Each config below is a ready-made server for exercising one feature by hand. Loa
 | ----------------------------------------- | --------------------------------------------------- | ---------------------------------------------------------------------- |
 | `mcp-app-http.json` **(legacy era)**      | An MCP App (UI resource + app tool) in the Apps tab | [#1859](https://github.com/modelcontextprotocol/inspector/issues/1859) |
 | `app-elicitation-http.json` **(legacy era)** | An MCP App rendering a form elicitation           | [#1854](https://github.com/modelcontextprotocol/inspector/issues/1854) |
+| `mcp-app-domain-http.json` **(legacy era)** | An MCP App asking for a dedicated origin (`_meta.ui.domain`) | [#2056](https://github.com/modelcontextprotocol/inspector/issues/2056) |
 | `modern-mrtr-http.json`                   | A single MRTR round-trip                           | —                                                                      |
 | `mrtr-showcase-http.json`                 | Every MRTR preset in one server                    | [#1860](https://github.com/modelcontextprotocol/inspector/issues/1860) |
 | `modern-network-http.json`                | Network tab: `Mcp-*` headers + error taxonomy      | [#1628](https://github.com/modelcontextprotocol/inspector/issues/1628) |
@@ -164,6 +165,16 @@ Each config below is a ready-made server for exercising one feature by hand. Loa
 Open the Apps tab, select `mcp_app_demo`, give it a title and click **Open App**: the widget renders inside the sandbox iframe and exercises the host-side UI protocol surface — host-context render, `size-changed`, `ui/message`, and a log line into the **App logs** panel. Because the widget is served through the sandbox proxy page, this config is also what reproduces [#1859](https://github.com/modelcontextprotocol/inspector/issues/1859) (a missing `clients/web/static/sandbox_proxy.html` surfaces here as a "Sandbox not loaded" message in place of the widget) — a failure that only ever appeared in an installed package, never in the repo.
 
 For the scripted version of the same flow (`--app-info` probe → deep link → rendered widget), see [Reviewing an MCP App](./docs/mcp-app-review.md).
+
+#### An App's dedicated origin
+
+`mcp-app-domain-http.json` serves the same `mcp_app_demo` widget as above, with one addition: its UI resource declares `_meta.ui.domain`. Plain streamable-HTTP; connect with the **default (legacy)** protocol era.
+
+That field is how a server asks its host for a stable, dedicated origin. Without one, an App renders into a `srcdoc` frame sandboxed without `allow-same-origin`, so its document has an *opaque* origin and every request it makes carries `Origin: null` — which no CORS policy, OAuth callback, or API-key allowlist can admit ([#2056](https://github.com/modelcontextprotocol/inspector/issues/2056)).
+
+Open the Apps tab and run `mcp_app_demo`. The widget renders identically to `mcp-app-http.json` — the difference is not visual. Inspect the inner iframe in devtools: on this server it is served from `http://127.0.0.1:6278/app-document/<id>` and `location.origin` is that real origin, where on `mcp-app-http.json` it is `about:srcdoc` with an origin of `null`. (The host is whatever the Inspector bound to — `127.0.0.1` by default, an *address* rather than the name `localhost`, for the reason `resolve-bind-host.ts` documents.)
+
+The spec makes `domain`'s format **host-dependent**, and the Inspector owns no domain infrastructure — so it reads any non-empty value as a *request* rather than an address, and answers with a real loopback origin of its own. See [MCP App dedicated origins](./clients/web/README.md#mcp-app-dedicated-origins-metauidomain) for the full contract, including what the one shared origin does and does not isolate, and how every failure falls back to the default render rather than blanking the app.
 
 #### App-rendered form elicitations
 
@@ -466,7 +477,14 @@ docker run --rm -p 127.0.0.1:6274:6274 -p 127.0.0.1:6275:6275 \
   ghcr.io/modelcontextprotocol/inspector
 ```
 
-Publish it on the **same port number** inside and out. The sandbox URL is handed to the browser via `/api/config` as `http://localhost:<container port>/sandbox`, so remapping it (`-p 9000:6275`) advertises a port the browser can't reach; use `-e MCP_SANDBOX_PORT=9000 -p 127.0.0.1:9000:9000` instead.
+**And `6278` if your app declares `_meta.ui.domain`.** That is the spec field a server uses to ask its host for a stable, dedicated origin — without one the app runs at an opaque origin and its requests carry `Origin: null`, which no CORS / OAuth-callback / API-key allowlist can admit. The Inspector answers the request with a real loopback origin on a third listener, `MCP_APP_ORIGIN_PORT` (default `6278`); apps that declare no `domain` never touch it. **Publish it if you use one** — this is the one failure that does not fall back: the backend publishes fine (its listener bound inside the container), so it hands the browser a URL on a port the browser cannot reach, and that app's frame stays **blank**. The cross-origin navigation failure is not observable from the page, so there is no opaque-origin fallback and no console warning here; those cover the failures the *backend* can see (no listener, a port that never bound, an older backend). See [MCP App dedicated origins](./clients/web/README.md#mcp-app-dedicated-origins-metauidomain) for the host-specific contract and its isolation trade-offs.
+
+```bash
+docker run --rm -p 127.0.0.1:6274:6274 -p 127.0.0.1:6275:6275 -p 127.0.0.1:6278:6278 \
+  ghcr.io/modelcontextprotocol/inspector
+```
+
+Publish each on the **same port number** inside and out. The sandbox URL is handed to the browser via `/api/config` as `http://localhost:<container port>/sandbox`, so remapping it (`-p 9000:6275`) advertises a port the browser can't reach; use `-e MCP_SANDBOX_PORT=9000 -p 127.0.0.1:9000:9000` instead. The same holds for the app origin: the URL a published app document is served from is built from the port the container bound, so remap with `-e MCP_APP_ORIGIN_PORT=9001 -p 127.0.0.1:9001:9001` rather than with `-p` alone.
 
 **Keep the `127.0.0.1:` prefix on the published port.** A bare `-p 6274:6274` publishes on **every host interface**, putting the Inspector on your local network. The container's `HOST=0.0.0.0` is a separate concern — it governs the _container's_ interfaces, not the host's — so the `DANGEROUSLY_BIND_ALL_INTERFACES` opt-in that guards a wildcard bind outside a container does not cover this. It matters more here than for an ordinary web app: the backend spawns processes on request, `GET /` embeds the API token into the served HTML, and a request arriving with **no** `Origin` header skips the origin allow-list entirely — so for any non-browser client the API token is the only guard. Publishing wider needs a real access-control boundary in front of the Inspector — a reverse proxy that authenticates, an SSH tunnel, a private network. Setting your own `MCP_INSPECTOR_API_TOKEN` does **not** substitute: `GET /` discloses whatever token is in use, so a custom one is harvested exactly as easily as a generated one.
 

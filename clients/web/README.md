@@ -19,7 +19,7 @@ The `server/` directory holds the Node-only backend:
 - **`web-server-config.ts`** — env parsing, the `GET /api/config` payload, the startup banner, the default origin allow-list.
 - **`resolve-bind-host.ts`** — the shared bind-host guard (refuses an all-interfaces `HOST` unless `DANGEROUSLY_BIND_ALL_INTERFACES`), used by both bind points (`web-server-config.ts` + `vite.config.ts`); see [Host binding & the origin allow-list](#host-binding--the-origin-allow-list).
 - **`inject-auth-token.ts`** — embeds the API token into the served `index.html` (see [Auth token](#auth-token)).
-- **`sandbox-controller.ts`** — the MCP Apps sandbox HTTP server; **`ensure-web-build.ts`** — builds `dist/` on demand for prod `--web`; **`vite-base-config.ts`** — shared `optimizeDeps` exclusions.
+- **`sandbox-controller.ts`** — the MCP Apps sandbox HTTP server; **`app-origin-controller.ts`** — the dedicated app-origin server for `_meta.ui.domain` (see [MCP App dedicated origins](#mcp-app-dedicated-origins-metauidomain)); **`ensure-web-build.ts`** — builds `dist/` on demand for prod `--web`; **`vite-base-config.ts`** — shared `optimizeDeps` exclusions.
 - **`browser-externalized-builtin-gate.ts`** — Vite-agnostic build-gate logic that fails `vite build` when a Node built-in reaches the browser bundle (#1769); the thin Vite plugin wiring lives in `vite.config.ts`. It sits under `server/` (rather than `src/`) as the home for Node-only, build-time tooling — it's imported by the Vite config, never by the browser — alongside the other `vite-*` config helpers here.
 
 ## Development
@@ -134,6 +134,97 @@ Three further params extend the deep link to pre-select — and optionally auto-
 | `autoOpen` | **Same CSRF gate as `autoConnect`** — must equal the session token. When set, "Open App" fires automatically (a tool call from a URL), so the token gate is mandatory. Without a match the app is pre-selected but not opened.                               |
 
 The app-side render lifecycle is observable through the [MCP Apps screen automation contract](#mcp-apps-screen-automation-contract) above (`data-app-status="ready"`), so a driver can `waitForSelector` the whole `connect → open → ready` chain deterministically.
+
+## MCP App dedicated origins (`_meta.ui.domain`)
+
+By default an MCP App is rendered by handing its HTML to the sandbox proxy as
+`srcdoc`, inside an iframe sandboxed **without** `allow-same-origin`. That is
+the isolation model from #1565 and it stays the default — but it gives the app
+document an *opaque* origin, so every request it makes carries `Origin: null`.
+An app whose backend allowlists origins (CORS, an OAuth callback, an API-key
+allowlist) can't work that way, which is what the spec's `_meta.ui.domain`
+exists to solve: a server uses it to ask its host for a stable, dedicated
+origin.
+
+**The Inspector's host-specific contract.** The spec makes `domain`'s format
+host-dependent ("servers MUST consult host-specific documentation"), and the
+Inspector owns no domain infrastructure — it cannot serve
+`my-app.example.com`. So it treats the field as a **request, not an address**:
+
+- Any **non-empty** `domain` string opts the resource in. The value itself is
+  not parsed, matched, or reserved — declare whatever your production host
+  expects.
+- The Inspector answers with a real HTTP origin on loopback:
+  `http://<host>:<MCP_APP_ORIGIN_PORT>`, default **`6278`** — in the same
+  `627x` family as the web port `6274` and the sandbox port `6275`, so the
+  three forward together. It is **not** `6276`: that is the fixed loopback
+  OAuth callback the CLI and TUI listen on, which OAuth apps pre-register and
+  which therefore cannot move. `6277` is skipped as v1's retired proxy port.
+- The app document is served from there under an unguessable path, its
+  per-app CSP delivered as a real response **header** (stronger than the
+  `<meta>` the `srcdoc` path relies on) plus a `frame-ancestors` that admits
+  only the two origins in its real ancestor chain — the sandbox proxy that
+  frames it, **and** the Inspector page that frames the proxy. Both are
+  required, not belt-and-braces: `frame-ancestors` is checked against every
+  ancestor, so omitting the Inspector's own origin blocks the frame outright
+  (see `appDocumentEmbedders`).
+- The inner iframe is granted `allow-same-origin` on this path **only** —
+  that is what makes the origin real rather than opaque. It is not a
+  weakening of #1565: the listener is on its own port, so the app is
+  cross-origin to both the sandbox proxy and the Inspector, and same-origin
+  policy blocks the reach either way. The proxy refuses the grant outright if
+  the URL's origin equals its own, and the grant is never reachable from the
+  server-supplied `sandbox` string, which is still stripped.
+
+**It is one shared origin, not one per app.** Every domain-declaring app is
+served from the same port, keyed by path. That delivers the property the field
+is *for* — a real, allowlistable origin — without minting a port or a DNS name
+per app, at the cost of not being a per-app isolation boundary: two such apps
+share `localStorage`, `sessionStorage`, and cookies for that origin.
+
+**And the separate port does not isolate cookies from the rest of loopback.**
+A distinct port makes a distinct *origin*, so the origin-scoped surfaces —
+DOM/scripting access, `localStorage`, `sessionStorage`, IndexedDB — are isolated
+from the sandbox proxy and from the Inspector page. **Cookies are not
+origin-scoped**: they are keyed by host and path, ignoring port. An app served
+here therefore shares the `127.0.0.1` cookie jar with the Inspector on `6274`
+and with anything else on loopback — it can read any non-`HttpOnly` cookie set
+for that host, and set `Path=/` cookies those services will receive.
+
+This is not a hole in the Inspector's own auth: the API token travels in the
+`x-mcp-remote-auth` header and lives in a `window` global and `sessionStorage`,
+neither of which another origin can read. Closing the cookie gap properly needs
+a distinct *host*, which this listener cannot mint (the Inspector owns no DNS,
+and a second loopback address is not portable) — so it is stated rather than
+papered over. Don't run the Inspector beside a loopback service whose session
+cookie you would not hand to an app under test.
+
+**Every failure falls back rather than blanking the app.** No app-origin
+listener, a port that never bound, an older backend with no
+`POST /api/app-document` route, a network error — each renders the app the
+default (opaque-origin) way and logs a console warning naming `_meta.ui.domain`.
+Losing the real origin degrades what the app can reach; losing the app itself
+would be worse.
+
+**One failure is outside that guarantee, deliberately: a published document the
+browser cannot reach.** Every case above is one the *host* observes — publishing
+returned nothing, so it falls back before choosing a render path. If publishing
+succeeds and the browser then cannot load the URL (the port is not forwarded, or
+a collision moved the listener to a dynamic port that is not), the frame stays
+blank instead. There is no honest signal to fall back on: the navigation is
+cross-origin, so `onerror` never fires for an HTTP error, `onload` fires for the
+error page too, and nothing about the document is readable. The alternatives are
+a timeout — which races an app that is merely slow, and "recovers" it by
+re-running it at an opaque origin, executing its side effects twice — or a
+reachability probe on every render, which proves the port answers rather than
+that this fetch will. So the cause is removed instead of guessed at: every
+documented remote workflow forwards the port (see below, the Docker section of
+the root README, and the SSH recipe in `docs/mcp-app-review.md`).
+
+**Forward `6278` too** if you need this off loopback (a container, a tunnel).
+As with the sandbox port, a taken port falls back to an OS-assigned one with a
+loud warning — the app still renders, but the origin an app's backend was told
+to allowlist is then wrong, which is what the warning tells you.
 
 ## Theme (`src/theme/`)
 

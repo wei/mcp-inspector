@@ -554,6 +554,7 @@ describe("--print-handoff", () => {
           MCP_INSPECTOR_API_TOKEN: "tok123",
           CLIENT_PORT: "16274",
           MCP_SANDBOX_PORT: "16275",
+          MCP_APP_ORIGIN_PORT: "16278",
           MCP_STORAGE_DIR: "/tmp/inspector-storage",
           MCP_INSPECTOR_OAUTH_STATE_PATH: "",
         },
@@ -574,6 +575,9 @@ describe("--print-handoff", () => {
     expect(out.deepLink).toContain("transport=http");
     expect(out.portForwardCmd).toContain("--tcp 16274:16274");
     expect(out.portForwardCmd).toContain("--tcp 16275:16275");
+    // The dedicated app origin (#2056) forwards with the other two — an app
+    // declaring `_meta.ui.domain` is unreachable without it.
+    expect(out.portForwardCmd).toContain("--tcp 16278:16278");
     expect(out.oauthStatePath).toBe(
       join("/tmp/inspector-storage", "oauth.json"),
     );
