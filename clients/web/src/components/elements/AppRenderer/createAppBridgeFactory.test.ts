@@ -86,27 +86,28 @@ const fakeClient = { name: "sdk-client" } as unknown as Client;
 /**
  * A UI resource read result. `meta` is the MCP Apps sandbox metadata, which the
  * spec nests under the `_meta` bag's `ui` key — the helper wraps it so every
- * test drives the real wire shape. `opts.at` places it on the result instead of
- * the content block, and `opts.flat` writes it to `_meta` unnested (the
- * non-conforming shape the host must ignore).
+ * test drives the real wire shape. `opts.flat` writes it to `_meta` unnested
+ * instead (the non-conforming shape the host must ignore).
  */
 function uiResource(
   text: string | undefined,
   meta?: Record<string, unknown>,
-  opts: { at?: "content" | "result"; flat?: boolean } = {},
+  opts: { flat?: boolean } = {},
 ): ReadResourceResult {
-  const bag = meta ? { _meta: opts.flat ? meta : { ui: meta } } : {};
-  const onResult = opts.at === "result";
   return {
-    ...(onResult ? bag : {}),
     contents: [
       {
         uri: "ui://weather/app.html",
         ...(text === undefined ? {} : { text }),
-        ...(onResult ? {} : bag),
+        ...(meta ? { _meta: opts.flat ? meta : { ui: meta } } : {}),
       },
     ],
   } as ReadResourceResult;
+}
+
+/** The `_meta` of a `resources/list` entry, as `getListedResourceMeta` returns it. */
+function listedMeta(meta: Record<string, unknown>): { ui: unknown } {
+  return { ui: meta };
 }
 
 async function flush(): Promise<void> {
@@ -241,22 +242,54 @@ describe("createAppBridgeFactory", () => {
     });
   });
 
-  it("falls back to the result-level _meta.ui when the content block carries none", async () => {
-    // The spec allows the sandbox metadata at either level; a server that only
-    // stamps the result must still get its connectDomains honored.
-    const readResource = vi.fn().mockResolvedValue(
-      uiResource(
-        "<h1>x</h1>",
-        {
-          permissions: { camera: {} },
-          csp: { connectDomains: ["https://api.example.com"] },
-        },
-        { at: "result" },
-      ),
+  it("falls back to the resources/list entry's _meta.ui when the content block carries none", async () => {
+    // ext-apps documents the listing-level `_meta.ui` as the static default for
+    // a UI resource, so an app declaring its CSP only there must still have it
+    // honored.
+    const readResource = vi.fn().mockResolvedValue(uiResource("<h1>x</h1>"));
+    const getListedResourceMeta = vi.fn().mockReturnValue(
+      listedMeta({
+        permissions: { camera: {} },
+        csp: { connectDomains: ["https://api.example.com"] },
+      }),
     );
     const factory = createAppBridgeFactory({
       getClient: () => fakeClient,
       readResource,
+      getListedResourceMeta,
+    });
+    await factory(makeIframe(), { kind: "tool", tool });
+    const bridge = bridgeInstances[0];
+    bridge.emit("sandboxready");
+    await flush();
+
+    expect(getListedResourceMeta).toHaveBeenCalledWith("ui://weather/app.html");
+    const call = bridge.sendSandboxResourceReady.mock.calls[0][0] as {
+      html: string;
+      permissions: unknown;
+    };
+    expect(call.permissions).toEqual({ camera: {} });
+    expect(call.html).toContain("connect-src https://api.example.com");
+  });
+
+  it("prefers the read content item's _meta.ui over the listing entry's", async () => {
+    // The listing value is only a default: a content item that carries its own
+    // `_meta.ui` wins outright, rather than being merged with it.
+    const readResource = vi.fn().mockResolvedValue(
+      uiResource("<h1>x</h1>", {
+        csp: { connectDomains: ["https://read.example.com"] },
+      }),
+    );
+    const getListedResourceMeta = vi.fn().mockReturnValue(
+      listedMeta({
+        permissions: { camera: {} },
+        csp: { connectDomains: ["https://listed.example.com"] },
+      }),
+    );
+    const factory = createAppBridgeFactory({
+      getClient: () => fakeClient,
+      readResource,
+      getListedResourceMeta,
     });
     await factory(makeIframe(), { kind: "tool", tool });
     const bridge = bridgeInstances[0];
@@ -267,8 +300,31 @@ describe("createAppBridgeFactory", () => {
       html: string;
       permissions: unknown;
     };
-    expect(call.permissions).toEqual({ camera: {} });
-    expect(call.html).toContain("connect-src https://api.example.com");
+    expect(call.html).toContain("connect-src https://read.example.com");
+    expect(call.html).not.toContain("listed.example.com");
+    expect(call.permissions).toBeUndefined();
+  });
+
+  it("renders with no sandbox hints when neither the content item nor the listing has _meta.ui", async () => {
+    // A host with no resource listing (or one not covering this URI) is
+    // unaffected: the optional dep is simply absent.
+    const readResource = vi.fn().mockResolvedValue(uiResource("<h1>x</h1>"));
+    const factory = createAppBridgeFactory({
+      getClient: () => fakeClient,
+      readResource,
+      getListedResourceMeta: () => undefined,
+    });
+    await factory(makeIframe(), { kind: "tool", tool });
+    const bridge = bridgeInstances[0];
+    bridge.emit("sandboxready");
+    await flush();
+
+    const call = bridge.sendSandboxResourceReady.mock.calls[0][0] as {
+      html: string;
+      permissions: unknown;
+    };
+    expect(call.permissions).toBeUndefined();
+    expect(call.html).toContain("connect-src &#39;none&#39;");
   });
 
   it("ignores sandbox metadata written unnested on _meta", async () => {

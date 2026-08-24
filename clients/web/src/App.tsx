@@ -25,6 +25,7 @@ import type {
   LoggingMessageNotification,
   Progress,
   ProgressToken,
+  Resource,
   Task,
   Tool,
 } from "@modelcontextprotocol/client";
@@ -784,10 +785,24 @@ function App() {
       });
   }, [configBaseUrl]);
 
+  // The `resources/list` entries, read lazily by the App bridge factories below.
+  // ext-apps treats a listing entry's `_meta.ui` as the static default for its
+  // UI resource (a read content item's own `_meta.ui` wins), so the sandbox CSP
+  // has to be able to see it. A ref rather than a dependency: `resources` is
+  // derived further down this component, and the factories only read it inside
+  // an async sandboxready handler, long after any render that produced it.
+  const listedResourcesRef = useRef<Resource[]>([]);
+  const getListedResourceMeta = useCallback(
+    (uri: string) =>
+      listedResourcesRef.current.find((r) => r.uri === uri)?._meta,
+    [],
+  );
+
   const sandboxBridgeFactory = useMemo(
     () =>
       createAppBridgeFactory({
         getClient: () => inspectorClient?.getAppRendererClient() ?? null,
+        getListedResourceMeta,
         readResource: async (uri) => {
           if (!inspectorClient) throw new Error("No MCP client connected.");
           const invocation = await inspectorClient.readResource(uri);
@@ -807,7 +822,7 @@ function App() {
           });
         },
       }),
-    [inspectorClient],
+    [inspectorClient, getListedResourceMeta],
   );
 
   // App-rendered form elicitations (#1854). The controller is created once and
@@ -861,6 +876,7 @@ function App() {
       createAppBridgeFactory({
         advertiseElicitation: true,
         getClient: () => inspectorClient?.getAppRendererClient() ?? null,
+        getListedResourceMeta,
         readResource: async (uri) => {
           if (!inspectorClient) throw new Error("No MCP client connected.");
           const invocation = await inspectorClient.readResource(uri);
@@ -877,7 +893,7 @@ function App() {
           });
         },
       }),
-    [inspectorClient],
+    [inspectorClient, getListedResourceMeta],
   );
   /**
    * Close the previous client's session and open one for the client being
@@ -1238,6 +1254,7 @@ function App() {
   const tools = toolsPagination.items;
   const prompts = promptsPagination.items;
   const resources = resourcesPagination.items;
+  listedResourcesRef.current = resources;
   const {
     tasks,
     refresh: refreshTasks,

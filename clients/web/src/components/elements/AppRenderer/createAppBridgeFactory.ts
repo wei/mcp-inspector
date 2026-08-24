@@ -89,6 +89,15 @@ export interface AppBridgeFactoryDeps {
    */
   onResourceError?: (err: Error) => void;
   /**
+   * The `_meta` of the `resources/list` entry for `uri`, when the host has that
+   * listing. ext-apps treats the listing-level `_meta.ui` as the static default
+   * for a UI resource, so an app that declares its CSP only there must still
+   * get it honored; a read content item's own `_meta.ui` wins over it. Omitted
+   * (or returning undefined) simply means no default — the host that has no
+   * resource listing, or whose listing does not include this URI, is unaffected.
+   */
+  getListedResourceMeta?: (uri: string) => object | undefined;
+  /**
    * Advertise `hostCapabilities.elicitation` — "this host can forward a
    * form-mode `elicitation/create` to the app and return its result to the
    * server" (#1854).
@@ -120,10 +129,17 @@ function uiMeta(meta: object | undefined): McpUiResourceMeta | undefined {
 
 /**
  * First text content block of a UI resource, plus its `_meta.ui` sandbox hints.
- * The spec allows the metadata at either the content-block or the result level,
- * so fall back to the result's own `_meta.ui` when the block carries none.
+ *
+ * `listedMeta` is the `_meta` of the matching `resources/list` entry, which
+ * ext-apps documents as the static default a host can review at connection
+ * time; a `resources/read` content item carrying its own `_meta.ui` takes
+ * precedence over it (`McpUiAppResourceConfig`). Nothing else is consulted —
+ * in particular the read RESULT's own `_meta` is not a documented carrier.
  */
-function extractHtmlAndMeta(result: ReadResourceResult): {
+function extractHtmlAndMeta(
+  result: ReadResourceResult,
+  listedMeta?: object,
+): {
   html: string;
   meta: McpUiResourceMeta | undefined;
 } {
@@ -132,7 +148,7 @@ function extractHtmlAndMeta(result: ReadResourceResult): {
     if (typeof text === "string") {
       return {
         html: text,
-        meta: uiMeta(content._meta) ?? uiMeta(result._meta),
+        meta: uiMeta(content._meta) ?? uiMeta(listedMeta),
       };
     }
   }
@@ -293,7 +309,10 @@ export function createAppBridgeFactory(
           const uri = resolveSourceUri(source);
           if (!uri) return;
           const result = await deps.readResource(uri);
-          const { html, meta } = extractHtmlAndMeta(result);
+          const { html, meta } = extractHtmlAndMeta(
+            result,
+            deps.getListedResourceMeta?.(uri),
+          );
           // Build the per-app CSP host-side: filter the requested sources to
           // ones the host accepts, render the policy string, and wrap the
           // app's HTML in a fixed shell whose first <head> child is the CSP
