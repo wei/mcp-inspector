@@ -1254,6 +1254,13 @@ function App() {
   const tools = toolsPagination.items;
   const prompts = promptsPagination.items;
   const resources = resourcesPagination.items;
+  // Whatever the resource list currently holds — every page in the default
+  // aggregate mode, only the pages fetched so far under `paginatedLists`. The
+  // listing is a documented *default* that a read content item overrides, and
+  // an app whose entry sits on an unfetched page simply falls back to no hints
+  // (`connect-src 'none'`), exactly as before this wiring existed. Walking the
+  // whole list to close that would issue the very requests the user opted out
+  // of by turning pagination on, so the setting wins.
   listedResourcesRef.current = resources;
   const {
     tasks,

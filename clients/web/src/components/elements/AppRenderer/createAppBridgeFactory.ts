@@ -17,6 +17,7 @@ import type {
 } from "@modelcontextprotocol/client";
 import {
   approveCspSources,
+  approveSandboxPermissions,
   buildSandboxCspPolicy,
   wrapSandboxedHtml,
 } from "../../../utils/sandbox-csp";
@@ -324,23 +325,25 @@ export function createAppBridgeFactory(
           // sendSandboxResourceReady: the view only sends ui/initialize once it
           // has the HTML, so the bridge reflects this in the initialize result.
           const approvedCsp = approveCspSources(meta?.csp);
-          // NOTE on the CSP-vs-permissions asymmetry: `csp` is injection-filtered
-          // by approveCspSources because its sources are interpolated into the
-          // CSP <meta> content string. `permissions` is NOT filtered here — it is
-          // a structured object (camera/microphone/geolocation/clipboardWrite
-          // booleans), and its only consumer is the sandbox proxy's
-          // buildAllowAttribute(), which maps each known key to a fixed
-          // Permissions-Policy token and ignores anything else. Untrusted values
-          // therefore can't reach the iframe `sandbox`/`allow` attribute as raw
-          // text (that layer, and the allow-same-origin strip, is owned by the
-          // sandbox-hardening work in #1565), so no source-style allowlist applies.
+          // Both halves of the app-supplied sandbox config are screened, for
+          // different reasons. `csp` is injection-filtered by approveCspSources
+          // because its sources are interpolated into the CSP <meta> content
+          // string. `permissions` can't reach the `sandbox`/`allow` attribute as
+          // raw text — the proxy maps each known key to a fixed Permissions-Policy
+          // token — but it tests those keys for TRUTHINESS, so a non-boolean
+          // (`camera: "false"`) would read as a grant; approveSandboxPermissions
+          // reduces the bag to the keys actually requested. The `allow-same-origin`
+          // strip and the rest of that layer stay owned by #1565.
+          const approvedPermissions = approveSandboxPermissions(
+            meta?.permissions,
+          );
           hostCapabilities.sandbox = {
-            permissions: meta?.permissions,
+            permissions: approvedPermissions,
             csp: approvedCsp,
           };
           await bridge.sendSandboxResourceReady({
             html: wrapSandboxedHtml(html, buildSandboxCspPolicy(approvedCsp)),
-            permissions: meta?.permissions,
+            permissions: approvedPermissions,
           });
         } catch (err) {
           const error = err instanceof Error ? err : new Error(String(err));

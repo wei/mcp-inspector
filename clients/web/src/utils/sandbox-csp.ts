@@ -1,4 +1,7 @@
-import type { McpUiResourceCsp } from "@modelcontextprotocol/ext-apps/app-bridge";
+import type {
+  McpUiResourceCsp,
+  McpUiResourcePermissions,
+} from "@modelcontextprotocol/ext-apps/app-bridge";
 
 /**
  * Allowed shapes for a CSP source-expression supplied by an app's
@@ -73,6 +76,65 @@ export function approveCspSources(
     if (accepted.length > 0) approved[key] = accepted;
   }
   return approved;
+}
+
+/** The permission-key analog of {@link exhaustiveCspKeys}; same compile-time completeness proof. */
+function exhaustivePermissionKeys<
+  const T extends readonly (keyof McpUiResourcePermissions)[],
+>(
+  keys: T &
+    (keyof McpUiResourcePermissions extends T[number] ? unknown : never),
+): T {
+  return keys;
+}
+
+const PERMISSION_KEYS = exhaustivePermissionKeys([
+  "camera",
+  "microphone",
+  "geolocation",
+  "clipboardWrite",
+]);
+
+/**
+ * Filter an app-supplied {@link McpUiResourcePermissions} down to the keys the
+ * host will forward to the sandbox proxy, keeping only those the app actually
+ * *requested*.
+ *
+ * The proxy's `buildAllowAttribute()` tests each key for **truthiness**, so an
+ * unvalidated bag lets a non-boolean stand in for a grant: `{ camera: "false" }`
+ * — a plausible way for a server to mean "off" — is truthy and would switch the
+ * `allow` attribute on. `_meta` is untrusted input, so the value is screened
+ * here rather than at the point of use. A key counts as requested when it
+ * carries the spec's empty-object marker (`camera: {}`), or `true` as the
+ * obvious shorthand; everything else — `false`, any string, `null`, a number —
+ * is dropped, as is any key outside the four the proxy knows.
+ *
+ * Returns undefined when nothing survives, so the notification and the
+ * `hostCapabilities.sandbox` echo carry no permissions at all rather than an
+ * empty object.
+ */
+export function approveSandboxPermissions(
+  permissions: McpUiResourcePermissions | undefined,
+): McpUiResourcePermissions | undefined {
+  if (!permissions) return undefined;
+  const approved: McpUiResourcePermissions = {};
+  let granted = false;
+  for (const key of PERMISSION_KEYS) {
+    const requested: unknown = permissions[key];
+    if (
+      requested === true ||
+      (typeof requested === "object" && requested !== null)
+    ) {
+      approved[key] = {};
+      granted = true;
+    } else if (requested !== undefined && requested !== false) {
+      console.warn(
+        `[mcp-app sandbox] dropping unrecognized "${key}" permission value:`,
+        requested,
+      );
+    }
+  }
+  return granted ? approved : undefined;
 }
 
 function joinSources(list: string[] | undefined, fallback: string): string {

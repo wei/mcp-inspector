@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import {
   SAFE_CSP_SOURCE,
   approveCspSources,
+  approveSandboxPermissions,
   buildSandboxCspPolicy,
   escapeHtmlAttr,
   wrapSandboxedHtml,
 } from "./sandbox-csp";
+import type { McpUiResourcePermissions } from "@modelcontextprotocol/ext-apps/app-bridge";
 
 describe("SAFE_CSP_SOURCE", () => {
   it.each([
@@ -78,6 +80,52 @@ describe("approveCspSources", () => {
         connectDomains: "https://x.com" as unknown as string[],
       }),
     ).toEqual({});
+  });
+});
+
+describe("approveSandboxPermissions", () => {
+  it("keeps the spec's empty-object marker and `true` as shorthand", () => {
+    expect(
+      approveSandboxPermissions({
+        camera: {},
+        microphone: true as unknown as Record<string, never>,
+      }),
+    ).toEqual({ camera: {}, microphone: {} });
+  });
+
+  it("drops a truthy non-marker value the proxy would have honored", () => {
+    // The proxy's buildAllowAttribute() tests each key for truthiness, so the
+    // string "false" — a plausible way for a server to mean "off" — would
+    // otherwise switch the camera on.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(
+      approveSandboxPermissions({
+        camera: "false",
+        geolocation: 1,
+        microphone: null,
+      } as unknown as McpUiResourcePermissions),
+    ).toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(3);
+    warn.mockRestore();
+  });
+
+  it("drops `false` without warning, and ignores unknown keys", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(
+      approveSandboxPermissions({
+        camera: false,
+        midi: {},
+        clipboardWrite: {},
+      } as unknown as McpUiResourcePermissions),
+    ).toEqual({ clipboardWrite: {} });
+    // `false` is an explicit refusal, not a malformed value.
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("returns undefined for no permissions at all", () => {
+    expect(approveSandboxPermissions(undefined)).toBeUndefined();
+    expect(approveSandboxPermissions({})).toBeUndefined();
   });
 });
 
