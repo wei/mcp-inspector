@@ -377,7 +377,35 @@ export function buildWebServerConfig(
       "");
 
   const sandboxPort = resolveSandboxPort();
-  const appOriginPort = resolveAppOriginPort();
+  // The app-origin listener starts BEFORE the web server binds (both in prod
+  // `startHonoServer` and in the Vite plugin), so a configured collision is not
+  // a harmless race — the app origin wins the port and the Inspector itself
+  // then dies with EADDRINUSE. `CLIENT_PORT=6278` is now such a config, and it
+  // was perfectly valid before this feature existed.
+  //
+  // Resolved to a dynamic port rather than by refusing to boot: of the three
+  // listeners this is the only one that can move (the sandbox URL and the web
+  // port are both advertised to the browser as fixed), and its own EADDRINUSE
+  // path already degrades this way. Losing a predictable app origin costs an
+  // app declaring `_meta.ui.domain` its forwarded port; refusing to boot costs
+  // the user the whole Inspector over a feature they may not be using.
+  const requestedAppOriginPort = resolveAppOriginPort();
+  const appOriginCollidesWith =
+    requestedAppOriginPort !== 0 &&
+    (requestedAppOriginPort === port
+      ? "the web server (CLIENT_PORT)"
+      : requestedAppOriginPort === sandboxPort
+        ? "the MCP Apps sandbox (MCP_SANDBOX_PORT)"
+        : null);
+  if (appOriginCollidesWith) {
+    console.warn(
+      `App origin: port ${requestedAppOriginPort} is already ${appOriginCollidesWith}; ` +
+        `using an OS-assigned port instead. Apps declaring _meta.ui.domain will still ` +
+        `render, but the origin they are served from is no longer predictable — set ` +
+        `MCP_APP_ORIGIN_PORT to a free one if your app's backend allowlists it.`,
+    );
+  }
+  const appOriginPort = appOriginCollidesWith ? 0 : requestedAppOriginPort;
 
   let logger: Logger | undefined;
   if (process.env.MCP_LOG_FILE) {

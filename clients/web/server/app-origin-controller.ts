@@ -298,12 +298,15 @@ export function createAppOriginController(
 
         server.listen(port, host, () => {
           const addr = server!.address();
-          const actualPort =
-            typeof addr === "object" && addr !== null && "port" in addr
-              ? addr.port
-              : /* v8 ignore next -- unreachable for a TCP listen; `address()`
-                   returns AddressInfo. */
-                (addr as unknown as number);
+          /* v8 ignore next 4 -- unreachable for a TCP listen: inside the
+             `listening` callback `address()` returns an AddressInfo. The guard
+             is a narrowing for the string (pipe/socket) and null members of the
+             return type, not a case this listener can produce. */
+          if (typeof addr !== "object" || addr === null) {
+            settle({ port: 0, url: "" });
+            return;
+          }
+          const actualPort = addr.port;
           // A wildcard bind isn't reachable as `http://0.0.0.0:PORT`, but it
           // does serve loopback — advertise `localhost` there, and otherwise
           // the same canonical host the origin allow-list emits.

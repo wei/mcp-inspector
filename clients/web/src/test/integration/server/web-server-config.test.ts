@@ -314,6 +314,42 @@ describe("buildWebServerConfigFromEnv", () => {
     expect(buildWebServerConfigFromEnv().appOriginPort).toBe(9300);
   });
 
+  it.each([
+    ["the web server", "CLIENT_PORT", "the web server (CLIENT_PORT)"],
+    [
+      "the sandbox",
+      "MCP_SANDBOX_PORT",
+      "the MCP Apps sandbox (MCP_SANDBOX_PORT)",
+    ],
+  ])(
+    "yields a dynamic app-origin port when it collides with %s",
+    (_label, envVar, expectedReason) => {
+      // The app-origin listener starts BEFORE the web server binds, so a
+      // configured collision is not a race it loses — it WINS the port and the
+      // Inspector then dies with EADDRINUSE. `CLIENT_PORT=6278` was a valid
+      // config before this feature existed.
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        process.env[envVar] = "6500";
+        process.env.MCP_APP_ORIGIN_PORT = "6500";
+        expect(buildWebServerConfigFromEnv().appOriginPort).toBe(0);
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(expectedReason),
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
+    },
+  );
+
+  it("leaves an explicit dynamic app-origin port alone", () => {
+    // 0 means "OS-assigned" for both, so two zeros are not a collision.
+    process.env.CLIENT_PORT = "6274";
+    process.env.MCP_SANDBOX_PORT = "0";
+    process.env.MCP_APP_ORIGIN_PORT = "0";
+    expect(buildWebServerConfigFromEnv().appOriginPort).toBe(0);
+  });
+
   it("sets MCP_STORAGE_DIR when present", () => {
     process.env.MCP_STORAGE_DIR = "/tmp/storage";
     expect(buildWebServerConfigFromEnv().storageDir).toBe("/tmp/storage");

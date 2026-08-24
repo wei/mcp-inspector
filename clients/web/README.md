@@ -189,6 +189,21 @@ default (opaque-origin) way and logs a console warning naming `_meta.ui.domain`.
 Losing the real origin degrades what the app can reach; losing the app itself
 would be worse.
 
+**One failure is outside that guarantee, deliberately: a published document the
+browser cannot reach.** Every case above is one the *host* observes — publishing
+returned nothing, so it falls back before choosing a render path. If publishing
+succeeds and the browser then cannot load the URL (the port is not forwarded, or
+a collision moved the listener to a dynamic port that is not), the frame stays
+blank instead. There is no honest signal to fall back on: the navigation is
+cross-origin, so `onerror` never fires for an HTTP error, `onload` fires for the
+error page too, and nothing about the document is readable. The alternatives are
+a timeout — which races an app that is merely slow, and "recovers" it by
+re-running it at an opaque origin, executing its side effects twice — or a
+reachability probe on every render, which proves the port answers rather than
+that this fetch will. So the cause is removed instead of guessed at: every
+documented remote workflow forwards the port (see below, the Docker section of
+the root README, and the SSH recipe in `docs/mcp-app-review.md`).
+
 **Forward `6278` too** if you need this off loopback (a container, a tunnel).
 As with the sandbox port, a taken port falls back to an OS-assigned one with a
 loud warning — the app still renders, but the origin an app's backend was told

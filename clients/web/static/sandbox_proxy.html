@@ -197,14 +197,24 @@
                 console.warn("[Sandbox] ignoring unparseable src:", src);
               }
             }
-            // The app origin MUST differ from this proxy's own — otherwise
-            // granting allow-same-origin below would put the untrusted app in
-            // this realm, exactly the escape the double-iframe model exists to
-            // prevent. Refuse rather than degrade quietly: this is a host
-            // misconfiguration, not app input.
-            if (srcUrl && srcUrl.origin === window.location.origin) {
+            // The app origin MUST differ from BOTH trusted origins — this
+            // proxy's own and the Inspector page above it. Granting
+            // allow-same-origin below is what makes the app's origin real, and
+            // an app sharing the proxy's origin would land in this realm
+            // outright; one sharing the HOST's origin is no better, since
+            // same-origin with the top document means direct access to
+            // `window.top`, its DOM and its storage — the cross-origin frame in
+            // between buys nothing once the inner document is same-origin with
+            // the thing it is trying to reach. Either is a host
+            // misconfiguration, not app input, so refuse rather than degrade
+            // quietly.
+            if (
+              srcUrl &&
+              (srcUrl.origin === window.location.origin ||
+                srcUrl.origin === EXPECTED_HOST_ORIGIN)
+            ) {
               console.error(
-                "[Sandbox] refusing a src on the proxy's own origin:",
+                "[Sandbox] refusing a src on a trusted origin:",
                 srcUrl.origin,
               );
               srcUrl = null;
