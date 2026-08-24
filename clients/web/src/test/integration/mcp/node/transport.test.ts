@@ -467,6 +467,11 @@ describe("Transport", () => {
             res.end();
             return;
           }
+          if (req.url === "/redirect") {
+            res.writeHead(302, { location: `${originUrl}/landed` });
+            res.end();
+            return;
+          }
           res.writeHead(200, { "content-type": "text/plain", "x-origin": "1" });
           res.end("hello from origin");
         });
@@ -550,6 +555,37 @@ describe("Transport", () => {
         const res = await proxyFetch!(`${originUrl}/no-content`);
         expect(res.status).toBe(204);
         expect(res.body).toBeNull();
+      });
+
+      it("reports url/redirected/type after following a redirect", async () => {
+        // A rebuilt Response cannot carry these through its constructor, so they
+        // are reinstated explicitly. Without that, a proxied response reports
+        // `url: ""` and `redirected: false` even when undici did follow a
+        // redirect — a fetch-contract regression only proxy users would see.
+        clearProxyEnv();
+        process.env.HTTP_PROXY = proxyUrl;
+        const proxyFetch = createProxyFetch();
+
+        const res = await proxyFetch!(`${originUrl}/redirect`);
+        expect(res.status).toBe(200);
+        expect(res.url).toBe(`${originUrl}/landed`);
+        expect(res.redirected).toBe(true);
+        expect(res.type).toBe("basic");
+      });
+
+      it("honors a Request's own redirect mode", async () => {
+        // The Request carries options the adapter must not drop on the way into
+        // undici. `redirect: "manual"` is the visible one: lose it and a caller
+        // asking to see the 302 silently gets the followed 200 instead.
+        clearProxyEnv();
+        process.env.HTTP_PROXY = proxyUrl;
+        const proxyFetch = createProxyFetch();
+
+        const res = await proxyFetch!(
+          new Request(`${originUrl}/redirect`, { redirect: "manual" }),
+        );
+        expect(res.status).toBe(302);
+        expect(res.redirected).toBe(false);
       });
 
       it("accepts a URL instance and forwards the init", async () => {

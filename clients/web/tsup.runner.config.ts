@@ -44,6 +44,12 @@ export default defineConfig({
     "proper-lockfile",
     "@modelcontextprotocol/client",
     "@modelcontextprotocol/core",
+    // Root-declared and reached through `core/mcp/apps.ts`, so it must be
+    // external here like every other root runtime dependency — which client
+    // actually reaches it is a function of what `core/` imports, not of this
+    // client's own code, so all three lists carry it (AGENTS.md). The CLI was
+    // inlining it; the #2067 guard surfaced that.
+    "@modelcontextprotocol/ext-apps",
   ],
   esbuildOptions(options) {
     options.alias = {

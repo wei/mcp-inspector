@@ -9,6 +9,14 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { existsSync, readdirSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const repoRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+);
 
 import {
   BUNDLED_CLIENTS,
@@ -263,13 +271,38 @@ describe("evaluateClient", () => {
 });
 
 describe("BUNDLED_CLIENTS", () => {
-  test("covers every tsup-bundled client", () => {
-    // `clients/launcher` is plain tsc and emits no bundle, so it is deliberately
-    // absent. If a fourth bundled client appears, it must be enrolled here.
-    assert.deepEqual(BUNDLED_CLIENTS.map((c) => c.name).sort(), [
-      "cli",
-      "tui",
-      "web",
-    ]);
+  test("is enrolled from what is actually on disk, not from itself", () => {
+    // Asserting the hard-coded list equals a hard-coded copy of itself proves
+    // nothing — adding `clients/foo` with a tsup build would leave it green
+    // while the new bundle went unchecked. So the expected set is DISCOVERED:
+    // a client is tsup-bundled iff it ships a tsup config. `clients/launcher`
+    // is plain tsc, emits no bundle, and is correctly absent.
+    const clientsDir = path.join(repoRoot, "clients");
+    const discovered = readdirSync(clientsDir)
+      .filter((name) =>
+        readdirSync(path.join(clientsDir, name)).some((f) =>
+          /^tsup(\..+)?\.config\.ts$/.test(f),
+        ),
+      )
+      .sort();
+
+    assert.ok(discovered.length > 0, "no tsup-bundled clients discovered");
+    assert.deepEqual(
+      BUNDLED_CLIENTS.map((c) => c.name).sort(),
+      discovered,
+      "BUNDLED_CLIENTS is out of sync with the clients that ship a tsup config",
+    );
+  });
+
+  test("points each client at a config and build dir that exist", () => {
+    for (const client of BUNDLED_CLIENTS) {
+      assert.ok(
+        existsSync(path.join(repoRoot, client.config)),
+        `${client.name}: missing ${client.config}`,
+      );
+      // The build dir is produced by `npm run build`; only assert the path is
+      // under the client, since the guard itself reports a missing build.
+      assert.match(client.build, new RegExp(`^clients/${client.name}/`));
+    }
   });
 });

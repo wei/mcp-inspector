@@ -67,14 +67,22 @@ const NULL_BODY_STATUSES: ReadonlySet<number> = new Set([
  *
  * The body passes through as a `ReadableStream` rather than being buffered, so
  * SSE responses (the streamable-HTTP transport's whole event channel) still
- * stream. `url` and `redirected` are not carried over — the `Response`
- * constructor cannot set them — which is safe here only because nothing in this
- * repo or the SDK reads either.
+ * stream.
+ *
+ * `url`, `redirected`, and `type` are restored afterwards with
+ * `defineProperty`, because the `Response` constructor cannot set them and a
+ * rebuilt response would otherwise report `url: ""` and `redirected: false`
+ * even after undici followed a redirect — a fetch-contract regression visible
+ * only to proxy users. `core/auth/endpointOverrides.ts` guards the same three
+ * properties by declining to rebuild at all; this adapter has no such choice,
+ * since the response arrives from the wrong realm, so it reinstates them
+ * instead. They shadow the prototype getters as own properties, which is what
+ * `Response` exposes them as to a consumer.
  */
 function toGlobalResponse(res: UndiciResponse): Response {
   const headers = new Headers();
   for (const [key, value] of res.headers) headers.append(key, value);
-  return new Response(
+  const out = new Response(
     NULL_BODY_STATUSES.has(res.status) ? null : asBodyInit(res.body),
     {
       status: res.status,
@@ -82,6 +90,18 @@ function toGlobalResponse(res: UndiciResponse): Response {
       headers,
     },
   );
+  for (const [key, value] of [
+    ["url", res.url],
+    ["redirected", res.redirected],
+    ["type", res.type],
+  ] as const) {
+    Object.defineProperty(out, key, {
+      value,
+      configurable: true,
+      enumerable: false,
+    });
+  }
+  return out;
 }
 
 /**
@@ -153,6 +173,19 @@ function toUndiciRequest(
         // the DOM `RequestInit`, so it rides along as an extra property.
         ...(input.body ? { body: input.body, duplex: "half" } : {}),
         signal: input.signal,
+        // Everything else the Request carries. Dropping these would silently
+        // change fetch semantics under a proxy — most visibly `redirect`, where
+        // a `new Request(url, { redirect: "manual" })` would start following
+        // redirects instead of surfacing them.
+        redirect: input.redirect,
+        cache: input.cache,
+        credentials: input.credentials,
+        integrity: input.integrity,
+        keepalive: input.keepalive,
+        mode: input.mode,
+        referrer: input.referrer,
+        referrerPolicy: input.referrerPolicy,
+        // An explicit `init` still wins, per the fetch contract.
         ...init,
       },
     ];

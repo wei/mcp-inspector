@@ -169,7 +169,11 @@ v2/main/
 │   │   │                               #   server.json parser, strategy registry + well-known
 │   │   │                               #   paths, strategy-agnostic merge. Pure/isomorphic;
 │   │   │                               #   used by the web file-upload path + /api/import-source.
-│   │   ├── node/                       # Node stdio transport factory
+│   │   ├── node/                       # Node stdio transport factory, plus proxyFetch.ts
+│   │   │                               #   (the shared HTTPS_PROXY/HTTP_PROXY/NO_PROXY
+│   │   │                               #   fetch every Node client installs as its
+│   │   │                               #   `environment.fetch`, and the web backend as the
+│   │   │                               #   createTransportNode default — #2067)
 │   │   ├── remote/                     # Browser HTTP/SSE transport + remote logger/fetch
 │   │   │   └── node/                   # Hono-based remote server backend (used by remote/ above)
 │   │   └── state/                      # InspectorClient state stores consumed by core/react/
