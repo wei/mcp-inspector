@@ -31,7 +31,10 @@ import {
   FetchRequestLogState,
   StderrLogState,
 } from "@inspector/core/mcp/state/index.js";
-import { createTransportNode } from "@inspector/core/mcp/node/index.js";
+import {
+  createProxyFetch,
+  createTransportNode,
+} from "@inspector/core/mcp/node/index.js";
 import { useInspectorClient } from "@inspector/core/react/useInspectorClient.js";
 import { useManagedTools } from "@inspector/core/react/useManagedTools.js";
 import { useManagedResources } from "@inspector/core/react/useManagedResources.js";
@@ -290,6 +293,10 @@ function App({
         const environment: InspectorClientEnvironment = {
           transport: createTransportNode,
           logger: getTuiLogger(),
+          // Bottom of the fetch stack, so InspectorClient's wrappers compose
+          // over it and OAuth requests are proxied too (#2067). Undefined when
+          // no proxy env var is set.
+          fetch: createProxyFetch(),
         };
         // Per-server default `_meta` is already a JSON object (#1910) — no
         // pair-array flattening left to do; `{}` means "no defaults".

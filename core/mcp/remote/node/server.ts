@@ -26,6 +26,7 @@ import type { Context, Env, Next } from "hono";
 import { streamSSE } from "hono/streaming";
 import { watch as chokidarWatch, type FSWatcher } from "chokidar";
 import { createTransportNode } from "../../node/transport.js";
+import { createProxyFetch } from "../../node/proxyFetch.js";
 import type {
   RemoteConnectRequest,
   RemoteSendRequest,
@@ -1055,7 +1056,14 @@ export function createRemoteApp(
     }
 
     try {
-      const res = await fetch(url, {
+      // Proxy-aware, not the bare global. This route is the browser's ONLY way
+      // out to the network: the web client's `environment.fetch` is
+      // `createRemoteFetch()`, which forwards OAuth discovery and token
+      // requests here. Left on the global `fetch`, a corporate-proxy user could
+      // connect to a server but never authorize against it — and Node's native
+      // `NODE_USE_ENV_PROXY` does not cover them either, being unsupported at
+      // our 22.19 engine floor (#2067).
+      const res = await (createProxyFetch() ?? fetch)(url, {
         method,
         headers: new Headers(headers),
         body: reqBody,

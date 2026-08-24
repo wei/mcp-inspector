@@ -207,4 +207,6 @@ In every case, exposing the Inspector beyond loopback also means anyone who can 
 
 ## HTTP proxy support
 
-The web backend connects to remote MCP servers through the shared Node transport (`core/mcp/node/transport.ts`), which honors the conventional proxy environment variables: `HTTPS_PROXY` / `HTTP_PROXY` (and their lowercase forms) select the proxy, and `NO_PROXY` exempts hosts. Routing is powered by [`undici`](https://www.npmjs.com/package/undici)'s `EnvHttpProxyAgent`, imported lazily only when a proxy variable is set, so runs without a proxy configured pay no cost. See the CLI README for more detail.
+The web backend connects to remote MCP servers through the shared Node fetch (`core/mcp/node/proxyFetch.ts`), which honors the conventional proxy environment variables: `HTTPS_PROXY` / `HTTP_PROXY` (and their lowercase forms) select the proxy, and `NO_PROXY` exempts hosts. Routing uses [`undici`](https://www.npmjs.com/package/undici)'s own `fetch` bound to its `EnvHttpProxyAgent`, imported lazily only when a proxy variable is set, so runs without a proxy configured pay no cost.
+
+The proxy sits at the **bottom** of the fetch stack rather than wrapping the transport's fetch, and both undici halves must come from the same copy — see [HTTP proxy support](../cli/README.md#http-proxy-support) in the CLI README for why ([#2067](https://github.com/modelcontextprotocol/inspector/issues/2067)).
