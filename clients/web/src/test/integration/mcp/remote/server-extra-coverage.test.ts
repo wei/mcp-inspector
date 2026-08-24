@@ -12,7 +12,16 @@
  *   - GET fast-path re-check when a concurrent write removed the plaintext
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -292,6 +301,37 @@ describe("server.ts supplemental coverage", () => {
     let target: ServerType;
     let targetUrl: string;
 
+    // Isolate the WHOLE suite from the developer's (or CI's) proxy environment.
+    // Setting only uppercase HTTP_PROXY in the one proxy test would not be
+    // enough: undici's EnvHttpProxyAgent prefers lowercase `http_proxy`, and
+    // honors NO_PROXY dynamically, so an ambient value could route the request
+    // elsewhere or bypass the proxy and fail the assertion. Suite-level rather
+    // than per-test because the agent is memoized process-wide once built.
+    const PROXY_VARS = [
+      "HTTP_PROXY",
+      "http_proxy",
+      "HTTPS_PROXY",
+      "https_proxy",
+      "NO_PROXY",
+      "no_proxy",
+    ] as const;
+    const savedProxyEnv: Partial<Record<string, string | undefined>> = {};
+
+    beforeAll(() => {
+      for (const name of PROXY_VARS) {
+        savedProxyEnv[name] = process.env[name];
+        delete process.env[name];
+      }
+    });
+
+    afterAll(() => {
+      for (const name of PROXY_VARS) {
+        const previous = savedProxyEnv[name];
+        if (previous === undefined) delete process.env[name];
+        else process.env[name] = previous;
+      }
+    });
+
     beforeEach(async () => {
       h = await start();
       // A tiny upstream HTTP server we can point /api/fetch at.
@@ -379,7 +419,6 @@ describe("server.ts supplemental coverage", () => {
         typeof proxyAddr === "object" && proxyAddr !== null
           ? proxyAddr.port
           : 0;
-      const previous = process.env.HTTP_PROXY;
       process.env.HTTP_PROXY = `http://127.0.0.1:${proxyPort}`;
 
       try {
@@ -391,8 +430,7 @@ describe("server.ts supplemental coverage", () => {
         expect(res.status).toBe(200);
         expect(seen).toEqual([`${targetUrl}/plain`]);
       } finally {
-        if (previous === undefined) delete process.env.HTTP_PROXY;
-        else process.env.HTTP_PROXY = previous;
+        delete process.env.HTTP_PROXY;
         await new Promise<void>((r) => proxy.close(() => r()));
       }
     });

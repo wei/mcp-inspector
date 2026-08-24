@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 
 import {
   BUNDLED_CLIENTS,
+  evaluateClient,
   parseExternals,
   findInlinedExternals,
 } from "./verify-bundle-externals.mjs";
@@ -149,6 +150,71 @@ describe("findInlinedExternals", () => {
     });
     assert.equal(noBanners, true);
     assert.deepEqual(violations, []);
+  });
+});
+
+describe("evaluateClient", () => {
+  const banner = (p) => `// ${p}\nvar x = 1;\n`;
+  const clean = [
+    { name: "index.js", source: banner("../../core/mcp/index.ts") },
+  ];
+
+  test("fails closed when no externals could be parsed", () => {
+    // A tsup refactor — `external: EXTERNALS`, or a line break after the colon —
+    // makes parseExternals return nothing. Checking zero packages and reporting
+    // success would silently disable the guard on a change that looks harmless.
+    const failures = evaluateClient({
+      name: "web",
+      build: "clients/web/build",
+      externals: [],
+      files: clean,
+    });
+    assert.equal(failures.length, 1);
+    assert.match(failures[0], /no `external` entries could be parsed/);
+  });
+
+  test("fails when the bundle carries no module banners", () => {
+    const failures = evaluateClient({
+      name: "cli",
+      build: "clients/cli/build",
+      externals: ["undici"],
+      files: [{ name: "index.js", source: "var a=1;" }],
+    });
+    assert.equal(failures.length, 1);
+    assert.match(failures[0], /no esbuild module banners/);
+  });
+
+  test("reports one failure per inlined package", () => {
+    const failures = evaluateClient({
+      name: "tui",
+      build: "clients/tui/build",
+      externals: ["undici", "pino"],
+      files: [
+        {
+          name: "index.js",
+          source:
+            banner("../../node_modules/undici/index.js") +
+            banner("../../node_modules/pino/pino.js"),
+        },
+      ],
+    });
+    assert.equal(failures.length, 2);
+    assert.match(
+      failures[0],
+      /tui: "undici" is declared external but was inlined/,
+    );
+  });
+
+  test("passes a clean bundle", () => {
+    assert.deepEqual(
+      evaluateClient({
+        name: "web",
+        build: "clients/web/build",
+        externals: ["undici"],
+        files: clean,
+      }),
+      [],
+    );
   });
 });
 

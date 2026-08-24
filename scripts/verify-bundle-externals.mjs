@@ -133,6 +133,40 @@ export function findInlinedExternals({ externals, files }) {
   return { noBanners: false, violations };
 }
 
+/**
+ * The per-client verdict, as pure data so every branch is unit-testable.
+ *
+ * Note it **fails closed on an empty `external` list**. `parseExternals` keys
+ * off the literal text `external: [`, so an ordinary tsup refactor — hoisting
+ * the array to a constant, or a line break after the colon — would make it
+ * return nothing, and a guard that checks zero packages reports success. Every
+ * enrolled bundle has externals today, so "none parsed" means the parser lost
+ * track of the config, not that the invariant holds.
+ */
+export function evaluateClient({ name, build, externals, files }) {
+  if (externals.length === 0) {
+    return [
+      `${name}: no \`external\` entries could be parsed from its tsup config. ` +
+        `Every bundled client has some, so this means the config no longer matches ` +
+        `what parseExternals() reads (it keys off the literal text "external: ["). ` +
+        `Update the parser rather than leaving the guard checking nothing.`,
+    ];
+  }
+
+  const { noBanners, violations } = findInlinedExternals({ externals, files });
+  if (noBanners) {
+    return [
+      `${name}: ${build} has no esbuild module banners, so this guard cannot see ` +
+        `what was inlined. Has minification been enabled for this bundle?`,
+    ];
+  }
+
+  return violations.map(
+    (v) =>
+      `${name}: "${v.pkg}" is declared external but was inlined (${v.reason}).`,
+  );
+}
+
 function main() {
   const failures = [];
   for (const client of BUNDLED_CLIENTS) {
@@ -153,34 +187,31 @@ function main() {
         name,
         source: readFileSync(join(buildDir, name), "utf8"),
       }));
-    const { noBanners, violations } = findInlinedExternals({
-      externals,
-      files,
-    });
-    if (noBanners) {
-      failures.push(
-        `${client.name}: ${client.build} has no esbuild module banners, so this guard ` +
-          `cannot see what was inlined. Has minification been enabled for this bundle?`,
-      );
-      continue;
-    }
-    for (const v of violations) {
-      failures.push(
-        `${client.name}: "${v.pkg}" is declared external but was inlined (${v.reason}).`,
-      );
-    }
+    failures.push(
+      ...evaluateClient({
+        name: client.name,
+        build: client.build,
+        externals,
+        files,
+      }),
+    );
   }
 
   if (failures.length > 0) {
     console.error("verify:bundle-externals FAILED\n");
     for (const f of failures) console.error(`  - ${f}`);
-    console.error(
-      "\nAn externalized package must resolve from the consumer's install. If it was\n" +
-        "inlined, esbuild rewrote its specifier to a relative chunk that no user-side\n" +
-        "install can satisfy — and a CommonJS package inlined into an ESM bundle throws\n" +
-        '`Dynamic require of "..." is not supported` on first use (#2067).\n' +
-        "Add the package to that client's tsup `external` list.",
-    );
+    // Only for a real inlining — the other two failure modes (nothing parsed,
+    // no banners) are about the guard losing sight of the bundle, and "add the
+    // package to `external`" would be the wrong instruction for either.
+    if (failures.some((f) => f.includes("was inlined"))) {
+      console.error(
+        "\nAn externalized package must resolve from the consumer's install. If it was\n" +
+          "inlined, esbuild rewrote its specifier to a relative chunk that no user-side\n" +
+          "install can satisfy — and a CommonJS package inlined into an ESM bundle throws\n" +
+          '`Dynamic require of "..." is not supported` on first use (#2067).\n' +
+          "Add the package to that client's tsup `external` list.",
+      );
+    }
     process.exit(1);
   }
 
