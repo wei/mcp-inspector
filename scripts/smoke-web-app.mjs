@@ -8,6 +8,13 @@
  * unexercised by any smoke. This closes that gap: it drives the full
  * **connect → open app → widget ready** chain against a real MCP App server.
  *
+ * A second phase (#2056) drives the same app declaring `_meta.ui.domain`, and
+ * asserts the thing that field exists for: the app document is served from the
+ * backend's dedicated app-origin listener and runs at a REAL origin, not the
+ * opaque one whose requests carry `Origin: null`. Both phases end at
+ * `data-app-status="ready"`, so only reading the inner frame's own
+ * `location.origin` can tell them apart.
+ *
  * The assertion is the `data-app-status="ready"` contract documented in
  * clients/web/README.md ("MCP Apps screen automation contract"): the renderer
  * only reports `ready` once the widget has loaded inside the sandbox iframe and
@@ -72,6 +79,14 @@ const appConfig = join(
   "configs",
   "mcp-app-http.json",
 );
+// The same demo app, with `_meta.ui.domain` declared (#2056). Phase 2 drives it
+// to prove the dedicated-origin path end to end.
+const appDomainConfig = join(
+  repoRoot,
+  "test-servers",
+  "configs",
+  "mcp-app-domain-http.json",
+);
 // The path clients/web/server/sandbox-controller.ts resolves at runtime, from
 // the built runner at clients/web/build/. Kept in sync with the `join(__dirname,
 // "../static/sandbox_proxy.html")` there.
@@ -104,6 +119,7 @@ const FATAL_CONSOLE = /^Uncaught\b|Failed to fetch dynamically imported module/;
 let mcpUrl = null;
 
 let mcpServer = null;
+let domainMcpServer = null;
 let browser = null;
 const server = startProdWebServer({
   host: HOST,
@@ -126,6 +142,14 @@ async function shutdown() {
     const child = mcpServer;
     mcpServer = null;
     await stopChild(child, { label: "smoke:web:app", what: "MCP test server" });
+  }
+  if (domainMcpServer) {
+    const child = domainMcpServer;
+    domainMcpServer = null;
+    await stopChild(child, {
+      label: "smoke:web:app",
+      what: "MCP test server (domain)",
+    });
   }
 }
 
@@ -176,15 +200,18 @@ function ensureTestServer() {
  * createTestServerHttp resolves through findAvailablePort(), which walks upward
  * when the configured value is taken.
  */
-async function startMcpServer() {
+async function startMcpServer(
+  config = appConfig,
+  publish = (child) => {
+    mcpServer = child;
+  },
+) {
   const { match } = await startAnnouncedChild({
     command: process.execPath,
-    args: [composableServer, "--config", appConfig],
+    args: [composableServer, "--config", config],
     cwd: repoRoot,
     pattern: /listening at (http:\/\/\S+)/i,
-    onSpawn: (child) => {
-      mcpServer = child;
-    },
+    onSpawn: publish,
     what: `MCP test server (${composableServer})`,
   });
   return { url: match[1] };
@@ -256,10 +283,11 @@ try {
   // Deep link: connect, switch to the Apps tab, pre-select the app tool, and
   // fire "Open App". autoConnect/autoOpen must equal the session token (CSRF
   // gate). Shape owned by clients/web/README.md#deep-link-auto-connect.
-  const url =
-    `${server.baseUrl}/?serverUrl=${encodeURIComponent(mcpUrl)}` +
+  const deepLink = (target) =>
+    `${server.baseUrl}/?serverUrl=${encodeURIComponent(target)}` +
     `&transport=http&autoConnect=${TOKEN}&openApp=${APP_TOOL}` +
     `&appArgs=${encodeAppArgs({ title: "smoke:web:app" })}&autoOpen=${TOKEN}`;
+  const url = deepLink(mcpUrl);
 
   const drive = async () => {
     const response = await page.goto(url, {
@@ -309,10 +337,88 @@ try {
     }
   };
 
+  /**
+   * Phase 2 (#2056): the same app, this time declaring `_meta.ui.domain`.
+   *
+   * Phase 1 proves the default render works; it cannot distinguish it from the
+   * dedicated-origin render, because both end at `data-app-status="ready"`. The
+   * thing #2056 is actually about is the *origin the app document runs at* — an
+   * opaque origin sends `Origin: null`, which no CORS / OAuth-callback /
+   * API-key allowlist can admit. So this phase asserts the two facts that only
+   * hold on the dedicated path: the inner frame was navigated to a published
+   * document on the backend's app-origin listener, and the document's own
+   * `location.origin` is a real origin rather than the literal "null".
+   *
+   * It reuses the running web server and browser page — only a second MCP
+   * server and a second deep-link navigate are added.
+   */
+  const driveDedicatedOrigin = async () => {
+    const { url: domainUrl } = await startMcpServer(
+      appDomainConfig,
+      (child) => {
+        domainMcpServer = child;
+      },
+    );
+    await page.goto(deepLink(domainUrl), {
+      waitUntil: "domcontentloaded",
+      timeout: 30_000,
+    });
+    await page
+      .locator('[data-testid="connection-status"][data-status="connected"]')
+      .waitFor({ state: "attached", timeout: 45_000 });
+    try {
+      await page
+        .locator('[data-testid="apps-form"][data-app-status="ready"]')
+        .waitFor({ state: "attached", timeout: 45_000 });
+    } catch {
+      const form = page.locator('[data-testid="apps-form"]');
+      const appStatus = (await form.count())
+        ? await form.getAttribute("data-app-status")
+        : "(no apps-form)";
+      const appError = (await form.count())
+        ? await form.getAttribute("data-app-error")
+        : null;
+      throw new Error(
+        `dedicated-origin app never reached data-app-status="ready" (last: ` +
+          `"${appStatus}"${appError ? `, data-app-error="${appError}"` : ""}) — ` +
+          `frames: ${page
+            .frames()
+            .map((f) => f.url() || "(blank)")
+            .join(", ")}`,
+      );
+    }
+
+    const appFrame = page
+      .frames()
+      .find((f) => /\/app-document\/[0-9a-f]{32}$/.test(f.url()));
+    if (!appFrame) {
+      throw new Error(
+        "app declaring _meta.ui.domain was not served from the dedicated app " +
+          `origin — no frame at /app-document/<id> (frames: ${page
+            .frames()
+            .map((f) => f.url() || "(blank)")
+            .join(", ")})`,
+      );
+    }
+    const origin = await appFrame.evaluate(() => window.location.origin);
+    if (!/^http:\/\/[^/]+$/.test(origin)) {
+      throw new Error(
+        `app document ran at origin "${origin}" — expected a real http origin. ` +
+          "An opaque origin sends `Origin: null`, which is the bug #2056 fixes.",
+      );
+    }
+    return { origin, url: appFrame.url() };
+  };
+
   // Race against launcher death so a mid-run server crash is reported as the
   // real cause instead of a downstream timeout.
+  let dedicated = null;
   try {
     await Promise.race([server.whenChildExits(), drive()]);
+    dedicated = await Promise.race([
+      server.whenChildExits(),
+      driveDedicatedOrigin(),
+    ]);
   } catch (err) {
     const diagnostics = [
       ...pageErrors,
@@ -345,7 +451,9 @@ try {
 
   console.log(
     `smoke:web:app OK — connected to ${mcpUrl}, opened "${APP_TOOL}", ` +
-      `widget reached data-app-status="ready" through the sandbox proxy`,
+      `widget reached data-app-status="ready" through the sandbox proxy; ` +
+      `and an app declaring _meta.ui.domain rendered from the dedicated origin ` +
+      `${dedicated?.origin} (${dedicated?.url})`,
   );
   await shutdown();
   process.exit(0);

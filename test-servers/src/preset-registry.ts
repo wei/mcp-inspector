@@ -253,7 +253,7 @@ function resolveResourcePreset(
     case "numbered_resources":
       return createNumberedResources(Number(get("count")) || 3);
     case "mcp_app_demo_widget":
-      return createMcpAppDemoResource();
+      return createMcpAppDemoResource(get("domain") as string | undefined);
     case "choose_option_app":
       return createAppElicitationResource();
     case "rfc6570_base":

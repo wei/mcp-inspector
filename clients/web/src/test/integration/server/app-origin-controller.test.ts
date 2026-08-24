@@ -19,7 +19,7 @@ import {
   DEFAULT_APP_ORIGIN_PORT,
   parseDocumentId,
   resolveAppOriginPort,
-  sandboxOriginList,
+  appDocumentEmbedders,
 } from "../../../../server/app-origin-controller.js";
 
 describe("resolveAppOriginPort", () => {
@@ -85,20 +85,37 @@ describe("parseDocumentId", () => {
   });
 });
 
-describe("sandboxOriginList", () => {
-  it("reduces the sandbox URL to its origin", () => {
-    expect(sandboxOriginList("http://127.0.0.1:6275/sandbox")).toEqual([
+describe("appDocumentEmbedders", () => {
+  it("admits the sandbox proxy AND the Inspector page", () => {
+    // `frame-ancestors` is checked against EVERY ancestor, not just the parent:
+    // the document is framed by the proxy, which is framed by the app page.
+    // Omitting the app page's origin blocks the frame outright (it renders as a
+    // chrome-error frame that never reaches the bridge).
+    expect(
+      appDocumentEmbedders("http://127.0.0.1:6275/sandbox", [
+        "http://127.0.0.1:6274",
+        "http://localhost:6274",
+      ]),
+    ).toEqual([
       "http://127.0.0.1:6275",
+      "http://127.0.0.1:6274",
+      "http://localhost:6274",
+    ]);
+  });
+
+  it("still returns the allow-list when the sandbox never bound", () => {
+    expect(appDocumentEmbedders(null, ["http://127.0.0.1:6274"])).toEqual([
+      "http://127.0.0.1:6274",
     ]);
   });
 
   it.each([[null], [undefined], [""]])(
-    "returns undefined for %j so frame-ancestors falls back to loopback",
+    "returns undefined for %j with no allow-list, so frame-ancestors falls back to loopback",
     (value) => {
       // Not `[]`: an empty list would make the directive `'none'` and block the
       // app frame outright, which is worse than a permissive loopback fallback.
       expect(
-        sandboxOriginList(value as string | null | undefined),
+        appDocumentEmbedders(value as string | null | undefined),
       ).toBeUndefined();
     },
   );

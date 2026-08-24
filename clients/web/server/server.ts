@@ -18,7 +18,7 @@ import { formatHostForUrl } from "../../../core/node/hostUrl.ts";
 import { createSandboxController } from "./sandbox-controller.js";
 import {
   createAppOriginController,
-  sandboxOriginList,
+  appDocumentEmbedders,
 } from "./app-origin-controller.js";
 import { injectAuthToken } from "./inject-auth-token.js";
 import type { WebServerConfig } from "./web-server-config.js";
@@ -54,7 +54,10 @@ export async function startHonoServer(
   const appOriginController = createAppOriginController({
     port: config.appOriginPort,
     host: config.sandboxHost,
-    embedderOrigins: sandboxOriginList(sandboxController.getUrl()),
+    embedderOrigins: appDocumentEmbedders(
+      sandboxController.getUrl(),
+      config.allowedOrigins,
+    ),
   });
   await appOriginController.start();
 

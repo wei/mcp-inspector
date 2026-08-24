@@ -75,23 +75,33 @@ const MAX_DOCUMENTS = 32;
 const DOCUMENT_TTL_MS = 60 * 60 * 1000;
 
 /**
- * The sandbox proxy's origin as a one-entry list for
- * {@link AppOriginControllerOptions.embedderOrigins}, or `undefined` when the
- * sandbox never bound (its controller degrades to a null URL). Passing
- * `undefined` is what makes the app-origin `frame-ancestors` fall back to
- * loopback rather than to `'none'`, which would block the frame outright.
+ * The origins that may appear in a published document's ancestor chain, for
+ * {@link AppOriginControllerOptions.embedderOrigins}.
+ *
+ * There are **two**, and getting this wrong blocks the frame outright: CSP's
+ * `frame-ancestors` is checked against *every* ancestor, not just the immediate
+ * parent. A published document is framed by the sandbox proxy, which is itself
+ * framed by the Inspector app page — so the directive has to admit the proxy's
+ * origin **and** the app's, which is exactly the backend's origin allow-list.
+ *
+ * `undefined` when neither is known, which makes the directive fall back to the
+ * loopback family rather than to `'none'`.
  */
-export function sandboxOriginList(
+export function appDocumentEmbedders(
   sandboxUrl: string | null | undefined,
+  allowedOrigins?: string[],
 ): string[] | undefined {
-  if (!sandboxUrl) return undefined;
-  try {
-    return [new URL(sandboxUrl).origin];
-  } catch {
-    /* v8 ignore next -- the sandbox controller only ever emits a URL it built
-       itself; an unparseable value would be a bug there, not input. */
-    return undefined;
+  const origins: string[] = [];
+  if (sandboxUrl) {
+    try {
+      origins.push(new URL(sandboxUrl).origin);
+    } catch {
+      /* v8 ignore next -- the sandbox controller only ever emits a URL it built
+         itself; an unparseable value would be a bug there, not input. */
+    }
   }
+  origins.push(...(allowedOrigins ?? []));
+  return origins.length > 0 ? origins : undefined;
 }
 
 export interface AppOriginControllerOptions {

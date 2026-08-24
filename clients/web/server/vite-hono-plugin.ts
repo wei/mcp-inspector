@@ -18,7 +18,7 @@ import { createRemoteApp } from "../../../core/mcp/remote/node/server.ts";
 import { createSandboxController } from "./sandbox-controller.js";
 import {
   createAppOriginController,
-  sandboxOriginList,
+  appDocumentEmbedders,
 } from "./app-origin-controller.js";
 import { injectAuthToken } from "./inject-auth-token.js";
 import type { WebServerConfig } from "./web-server-config.js";
@@ -77,7 +77,10 @@ export function honoMiddlewarePlugin(config: WebServerConfig): Plugin {
       const appOriginController = createAppOriginController({
         port: config.appOriginPort,
         host: config.sandboxHost,
-        embedderOrigins: sandboxOriginList(sandboxController.getUrl()),
+        embedderOrigins: appDocumentEmbedders(
+          sandboxController.getUrl(),
+          config.allowedOrigins,
+        ),
       });
       await appOriginController.start();
       // Resolved before the API is built so `/api/config` and the banner
