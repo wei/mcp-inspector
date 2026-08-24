@@ -550,17 +550,26 @@ describe("AppRenderer", () => {
       // many ticks happy-dom takes to deliver the MutationObserver callback is
       // load-dependent, so under a full parallel run the observer can still be
       // pending here. Observed failing exactly once that way, with 0 calls.
-      await waitFor(() =>
-        expect(bridge.sendHostContextChange).toHaveBeenCalledWith(
-          expect.objectContaining({
-            theme: "dark",
-            styles: expect.objectContaining({
-              variables: expect.objectContaining({
-                "--color-background-primary": "#101113",
+      //
+      // The default 1000ms then turned out not to be enough either — it failed
+      // twice in a row in `npm run ci` (at ~1021ms, still 0 calls) while
+      // passing every time this file runs alone, which is the signature of a
+      // budget that is too tight rather than of a broken observer. Raised
+      // rather than retried: a `waitFor` that is generous costs nothing on the
+      // passing path, since it returns as soon as the assertion holds.
+      await waitFor(
+        () =>
+          expect(bridge.sendHostContextChange).toHaveBeenCalledWith(
+            expect.objectContaining({
+              theme: "dark",
+              styles: expect.objectContaining({
+                variables: expect.objectContaining({
+                  "--color-background-primary": "#101113",
+                }),
               }),
             }),
-          }),
-        ),
+          ),
+        { timeout: 5000 },
       );
     } finally {
       getComputedStyleSpy.mockRestore();

@@ -7,6 +7,7 @@ import type {
   McpUiDisplayMode,
   McpUiHostCapabilities,
   McpUiResourceMeta,
+  McpUiSandboxResourceReadyNotification,
 } from "@modelcontextprotocol/ext-apps/app-bridge";
 import type { Client } from "@modelcontextprotocol/client";
 import type {
@@ -108,6 +109,21 @@ export interface AppBridgeFactoryDeps {
    * there would tell the app something untrue about what its host will do.
    */
   advertiseElicitation?: boolean;
+  /**
+   * Publish a wrapped app document to the backend's dedicated app-origin
+   * listener and resolve with the URL to load it from, or `null` when the
+   * backend can't host one (#2056).
+   *
+   * Only consulted for a UI resource that declares `_meta.ui.domain` — the
+   * spec field by which a server asks its host for a stable, dedicated origin
+   * so its requests carry a real `Origin` instead of `null`. Optional: a
+   * factory without it (and a `null` result from one with it) renders every
+   * app the default way, under an opaque origin.
+   */
+  publishAppDocument?: (doc: {
+    html: string;
+    csp?: string;
+  }) => Promise<string | null>;
 }
 
 /**
@@ -172,6 +188,20 @@ function extractHtmlAndMeta(
     }
   }
   throw new Error("UI resource has no text (HTML) content");
+}
+
+/**
+ * Whether a UI resource asked for a dedicated origin (#2056).
+ *
+ * Any non-empty `domain` string counts. The spec is explicit that the field's
+ * format is host-dependent — hosts publish their own rules, and the examples it
+ * gives (`{hash}.claudemcpcontent.com`, `www-example-com.oaiusercontent.com`)
+ * are each one host's convention. The Inspector's convention is that the value
+ * is a *request*, not an address: it grants a real loopback origin and does not
+ * try to honor the specific name, which it could not serve anyway.
+ */
+function wantsDedicatedOrigin(meta: McpUiResourceMeta | undefined): boolean {
+  return typeof meta?.domain === "string" && meta.domain.trim() !== "";
 }
 
 /**
@@ -359,10 +389,43 @@ export function createAppBridgeFactory(
             permissions: approvedPermissions,
             csp: approvedCsp,
           };
-          await bridge.sendSandboxResourceReady({
-            html: wrapSandboxedHtml(html, buildSandboxCspPolicy(approvedCsp)),
+          const policy = buildSandboxCspPolicy(approvedCsp);
+          const wrapped = wrapSandboxedHtml(html, policy);
+          // `_meta.ui.domain` (#2056): the resource is asking to be served
+          // from a stable, dedicated origin rather than rendered into the
+          // default opaque-origin srcdoc frame, because an opaque origin sends
+          // `Origin: null` and no CORS / OAuth-callback / API-key allowlist can
+          // admit that. The spec makes the field's format host-dependent and
+          // the Inspector owns no domain infrastructure, so what it honors the
+          // request WITH is a real loopback origin — any non-empty domain opts
+          // in, and the string itself is not interpreted (see the app-origin
+          // controller for the host-specific contract).
+          //
+          // A `null` back means the backend has no such listener (an older
+          // backend, or one whose port never bound). Fall back to srcdoc: the
+          // app loses its real origin, which is a degradation the developer
+          // can see and act on — losing the app entirely is not.
+          const dedicated = wantsDedicatedOrigin(meta);
+          const src = dedicated
+            ? await deps.publishAppDocument?.({ html: wrapped, csp: policy })
+            : undefined;
+          if (dedicated && !src) {
+            console.warn(
+              "[mcp-app] resource declares _meta.ui.domain but no dedicated app origin is available; rendering under an opaque origin (requests will send `Origin: null`).",
+            );
+          }
+          // `src` is an Inspector-specific extension to the (internal)
+          // sandbox-resource-ready params, which ext-apps types but does not
+          // validate — the bridge forwards the params object verbatim. Declared
+          // as an intersection rather than cast so the extra key stays typed.
+          const readyParams: McpUiSandboxResourceReadyNotification["params"] & {
+            src?: string;
+          } = {
+            html: wrapped,
             permissions: approvedPermissions,
-          });
+            ...(src ? { src } : {}),
+          };
+          await bridge.sendSandboxResourceReady(readyParams);
         } catch (err) {
           const error = err instanceof Error ? err : new Error(String(err));
           console.error(

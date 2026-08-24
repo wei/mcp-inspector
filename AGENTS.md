@@ -15,6 +15,34 @@ v2/main/
 │   │   │                               #   start-vite-dev-server.ts (in-process Vite starter for the launcher),
 │   │   │                               #   web-server-config.ts (env parsing + initial-config payload + banner),
 │   │   │                               #   sandbox-controller.ts (MCP Apps sandbox HTTP server),
+│   │                               #   app-origin-controller.ts (the DEDICATED APP ORIGIN for
+│   │                               #     `_meta.ui.domain` — #2056. The default render hands an
+│   │                               #     app's HTML to the proxy as `srcdoc` in a frame with no
+│   │                               #     `allow-same-origin`, so the document has an OPAQUE origin
+│   │                               #     and every request it makes sends `Origin: null`; no CORS /
+│   │                               #     OAuth-callback / API-key allowlist can admit that, which is
+│   │                               #     what the spec field exists to fix. `domain` is explicitly
+│   │                               #     HOST-DEPENDENT and the Inspector owns no domain
+│   │                               #     infrastructure, so it treats any non-empty value as a
+│   │                               #     REQUEST, not an address, and answers with a real loopback
+│   │                               #     origin on its own port (MCP_APP_ORIGIN_PORT, default 6278).
+│   │                               #     ONE SHARED origin, path-keyed per document — a real,
+│   │                               #     allowlistable origin without a port or DNS name per app,
+│   │                               #     and therefore NOT a per-app isolation boundary (two such
+│   │                               #     apps share its localStorage/cookies). The inner frame is
+│   │                               #     granted `allow-same-origin` on THIS path only, which is
+│   │                               #     what makes the origin real; that is not a #1565 regression
+│   │                               #     because the listener is on its own port, so the app stays
+│   │                               #     cross-origin to both the proxy and the Inspector — the
+│   │                               #     proxy refuses the grant if the URL's origin equals its own,
+│   │                               #     and it is never reachable from the server-supplied
+│   │                               #     `sandbox` string, which is still stripped. The browser
+│   │                               #     hands the wrapped bytes back through the authenticated
+│   │                               #     `POST /api/app-document` (core/mcp/remote/node/server.ts)
+│   │                               #     because only it holds the MCP connection. EVERY failure —
+│   │                               #     no listener, port never bound, older backend, network
+│   │                               #     error — falls back to the srcdoc render with a warning
+│   │                               #     rather than blanking the app),
 │   │   │                               #   inject-auth-token.ts (embeds the API token into served index.html),
 │   │   │                               #   vite-base-config.ts (shared optimizeDeps exclusions),
 │   │   │                               #   resolve-bind-host.ts (bind-host POLICY: defaults to
