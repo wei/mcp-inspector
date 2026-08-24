@@ -100,7 +100,29 @@ export interface AppBridgeFactoryDeps {
   advertiseElicitation?: boolean;
 }
 
-/** First text content block of a UI resource, plus its `_meta` (sandbox hints). */
+/**
+ * The MCP Apps sandbox hints (`csp`, `permissions`, …) nested under a `_meta`
+ * bag's `ui` key. `McpUiResourceMeta` describes the value of `_meta.ui`, NOT
+ * `_meta` itself — reading `_meta` directly leaves every field `undefined`, so
+ * a spec-conforming app's declared `connectDomains` never reach the generated
+ * CSP and it renders under `connect-src 'none'` (#2055). This mirrors the tool
+ * side, where `getToolUiResourceUri` already reads `_meta.ui.resourceUri`.
+ */
+function uiMeta(meta: object | undefined): McpUiResourceMeta | undefined {
+  // `_meta` is typed with an index signature, which has no properties in common
+  // with a `{ ui?: unknown }` parameter — hence the cast rather than a narrower
+  // parameter type. Reading one key off an untyped bag is safe.
+  const ui = (meta as { ui?: unknown } | undefined)?.ui;
+  return ui !== null && typeof ui === "object"
+    ? (ui as McpUiResourceMeta)
+    : undefined;
+}
+
+/**
+ * First text content block of a UI resource, plus its `_meta.ui` sandbox hints.
+ * The spec allows the metadata at either the content-block or the result level,
+ * so fall back to the result's own `_meta.ui` when the block carries none.
+ */
 function extractHtmlAndMeta(result: ReadResourceResult): {
   html: string;
   meta: McpUiResourceMeta | undefined;
@@ -110,7 +132,7 @@ function extractHtmlAndMeta(result: ReadResourceResult): {
     if (typeof text === "string") {
       return {
         html: text,
-        meta: content._meta as McpUiResourceMeta | undefined,
+        meta: uiMeta(content._meta) ?? uiMeta(result._meta),
       };
     }
   }

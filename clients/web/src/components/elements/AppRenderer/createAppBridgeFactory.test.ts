@@ -83,16 +83,27 @@ function makeIframe(hasWindow = true): HTMLIFrameElement {
 
 const fakeClient = { name: "sdk-client" } as unknown as Client;
 
+/**
+ * A UI resource read result. `meta` is the MCP Apps sandbox metadata, which the
+ * spec nests under the `_meta` bag's `ui` key — the helper wraps it so every
+ * test drives the real wire shape. `opts.at` places it on the result instead of
+ * the content block, and `opts.flat` writes it to `_meta` unnested (the
+ * non-conforming shape the host must ignore).
+ */
 function uiResource(
   text: string | undefined,
   meta?: Record<string, unknown>,
+  opts: { at?: "content" | "result"; flat?: boolean } = {},
 ): ReadResourceResult {
+  const bag = meta ? { _meta: opts.flat ? meta : { ui: meta } } : {};
+  const onResult = opts.at === "result";
   return {
+    ...(onResult ? bag : {}),
     contents: [
       {
         uri: "ui://weather/app.html",
         ...(text === undefined ? {} : { text }),
-        ...(meta ? { _meta: meta } : {}),
+        ...(onResult ? {} : bag),
       },
     ],
   } as ReadResourceResult;
@@ -228,6 +239,66 @@ describe("createAppBridgeFactory", () => {
       permissions: { geolocation: {} },
       csp: { connectDomains: ["https://api.example.com"] },
     });
+  });
+
+  it("falls back to the result-level _meta.ui when the content block carries none", async () => {
+    // The spec allows the sandbox metadata at either level; a server that only
+    // stamps the result must still get its connectDomains honored.
+    const readResource = vi.fn().mockResolvedValue(
+      uiResource(
+        "<h1>x</h1>",
+        {
+          permissions: { camera: {} },
+          csp: { connectDomains: ["https://api.example.com"] },
+        },
+        { at: "result" },
+      ),
+    );
+    const factory = createAppBridgeFactory({
+      getClient: () => fakeClient,
+      readResource,
+    });
+    await factory(makeIframe(), { kind: "tool", tool });
+    const bridge = bridgeInstances[0];
+    bridge.emit("sandboxready");
+    await flush();
+
+    const call = bridge.sendSandboxResourceReady.mock.calls[0][0] as {
+      html: string;
+      permissions: unknown;
+    };
+    expect(call.permissions).toEqual({ camera: {} });
+    expect(call.html).toContain("connect-src https://api.example.com");
+  });
+
+  it("ignores sandbox metadata written unnested on _meta", async () => {
+    // `McpUiResourceMeta` describes the value of `_meta.ui`, not `_meta`. A bag
+    // whose keys sit at the top level is not the spec shape, so it must not be
+    // read as one — reading it there is what produced #2055 in reverse.
+    const readResource = vi
+      .fn()
+      .mockResolvedValue(
+        uiResource(
+          "<h1>x</h1>",
+          { csp: { connectDomains: ["https://api.example.com"] } },
+          { flat: true },
+        ),
+      );
+    const factory = createAppBridgeFactory({
+      getClient: () => fakeClient,
+      readResource,
+    });
+    await factory(makeIframe(), { kind: "tool", tool });
+    const bridge = bridgeInstances[0];
+    bridge.emit("sandboxready");
+    await flush();
+
+    const call = bridge.sendSandboxResourceReady.mock.calls[0][0] as {
+      html: string;
+    };
+    expect(call.html).not.toContain("api.example.com");
+    // The policy is rendered into an HTML attribute, so quotes arrive escaped.
+    expect(call.html).toContain("connect-src &#39;none&#39;");
   });
 
   it("does not mutate the shared HOST_CAPABILITIES when echoing the approved sandbox", async () => {
