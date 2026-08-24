@@ -386,7 +386,7 @@ async function replayProtocolRequest(
 const EMPTY_SETTINGS: InspectorServerSettings = {
   headers: [],
   env: [],
-  metadata: [],
+  metadata: {},
   connectionTimeout: 0,
   requestTimeout: 0,
   taskTtl: DEFAULT_TASK_TTL_MS,
@@ -2536,13 +2536,9 @@ function App() {
       const activeCimdUrl = getActiveCimdClientMetadataUrl(clientConfig);
       // Flatten the persisted settings into the InspectorClient options shape.
       // Empty / zero values stay unset so the SDK defaults apply.
-      const defaultMetadata = savedSettings?.metadata
-        ? Object.fromEntries(
-            savedSettings.metadata
-              .filter((m) => m.key.trim() !== "")
-              .map((m) => [m.key, m.value]),
-          )
-        : undefined;
+      // Per-server default `_meta` is already a JSON object (#1910) — no
+      // pair-array flattening left to do; `{}` means "no defaults".
+      const defaultMetadata = savedSettings?.metadata;
       const serverAuthorizationParams = savedSettings
         ? oauthAuthorizationParamsFromSettings(savedSettings)
         : undefined;

@@ -4,6 +4,7 @@ import {
   Alert,
   Button,
   Checkbox,
+  Code,
   Flex,
   Group,
   NumberInput,
@@ -13,11 +14,13 @@ import {
   TextInput,
 } from "@mantine/core";
 import { ClearButton } from "../../elements/ClearButton/ClearButton";
+import { JsonObjectInput } from "../../elements/JsonObjectInput/JsonObjectInput";
 import type { ProtocolEra } from "@modelcontextprotocol/client";
 import type {
   InspectorServerSettings,
   ModernLogLevel,
   OAuthSettings,
+  RequestMetadata,
   ServerProtocolEra,
   ServerType,
 } from "@inspector/core/mcp/types.js";
@@ -78,9 +81,12 @@ export interface ServerSettingsFormProps {
   onRemoveEnv: (index: number) => void;
   onEnvChange: (index: number, key: string, value: string) => void;
   onCwdChange: (value: string) => void;
-  onAddMetadata: () => void;
-  onRemoveMetadata: (index: number) => void;
-  onMetadataChange: (index: number, key: string, value: string) => void;
+  /**
+   * Replace the whole default-`_meta` payload. Not the `(index, key, value)`
+   * row callback the header/env editors use — metadata is edited as a JSON
+   * object, since a `_meta` value may be any JSON (#1910).
+   */
+  onMetadataChange: (metadata: RequestMetadata) => void;
   onTimeoutChange: (
     field: "connectionTimeout" | "requestTimeout" | "taskTtl",
     value: number,
@@ -434,8 +440,6 @@ export function ServerSettingsForm({
   onRemoveEnv,
   onEnvChange,
   onCwdChange,
-  onAddMetadata,
-  onRemoveMetadata,
   onMetadataChange,
   onTimeoutChange,
   onAutoRefreshChange,
@@ -724,22 +728,23 @@ export function ServerSettingsForm({
         <Accordion.Control>Request Metadata</Accordion.Control>
         <Accordion.Panel>
           <Stack gap="md">
-            <Group justify="space-between">
-              <HintText>
-                Metadata sent with every MCP request (included in _meta field)
-              </HintText>
-              <AddButton onClick={onAddMetadata}>+ Add Metadata</AddButton>
-            </Group>
-            {settings.metadata.length === 0 ? (
-              <EmptyHint>No request metadata configured</EmptyHint>
-            ) : (
-              <KeyValueRows
-                items={settings.metadata}
-                entityLabel="metadata entry"
-                onChange={onMetadataChange}
-                onRemove={onRemoveMetadata}
-              />
-            )}
+            <HintText>
+              Metadata merged into the <Code>_meta</Code> field of every MCP
+              request to this server, as a JSON object. Values may be any JSON —
+              objects, arrays, numbers, booleans, <Code>null</Code> — not just
+              strings. Leave it as <Code>{"{}"}</Code> to send none. The keys
+              the protocol reserves keep their own shape:{" "}
+              <Code>progressToken</Code> must be a string or a safe integer (one
+              JavaScript can represent exactly), and{" "}
+              <Code>io.modelcontextprotocol/related-task</Code> an object with a
+              string <Code>taskId</Code>. A reserved key that does not match is
+              dropped from the request rather than sent.
+            </HintText>
+            <JsonObjectInput
+              ariaLabel="Request metadata JSON"
+              value={settings.metadata}
+              onChange={onMetadataChange}
+            />
           </Stack>
         </Accordion.Panel>
       </Accordion.Item>

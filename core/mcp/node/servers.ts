@@ -49,7 +49,7 @@ export function headersToServerSettings(
   return {
     headers: Object.entries(headers).map(([key, value]) => ({ key, value })),
     env: [],
-    metadata: [],
+    metadata: {},
     connectionTimeout: 0,
     requestTimeout: 0,
     taskTtl: DEFAULT_TASK_TTL_MS,

@@ -1,4 +1,5 @@
 import type { JsonValue } from "@inspector/core/mcp/index.js";
+import type { RequestMetadata } from "@inspector/core/mcp/types.js";
 import type { AppInfo } from "@inspector/core/mcp/apps.js";
 import type { LoggingLevel } from "@modelcontextprotocol/client";
 import type { OutputFormat } from "./format-output.js";
@@ -20,8 +21,8 @@ export type MethodArgs = {
   logLevel?: LoggingLevel;
   toolName?: string;
   toolArg?: Record<string, JsonValue>;
-  toolMeta?: Record<string, string>;
-  metadata?: Record<string, string>;
+  toolMeta?: RequestMetadata;
+  metadata?: RequestMetadata;
   appInfo?: boolean;
   format?: OutputFormat;
   /** Task id for tasks/get, tasks/cancel, tasks/result. */
@@ -109,14 +110,4 @@ export type OneShotMethod = (typeof ONE_SHOT_METHODS)[number];
 
 export function isOneShotMethod(method: string): method is OneShotMethod {
   return (ONE_SHOT_METHODS as readonly string[]).includes(method);
-}
-
-/**
- * Encode a metadata / tool-metadata value for MethodArgs (string map).
- * Strings pass through; objects/arrays use JSON.stringify so structure is kept
- * (avoids String(obj) → "[object Object]").
- */
-export function metaValueToString(value: JsonValue): string {
-  if (typeof value === "string") return value;
-  return JSON.stringify(value);
 }

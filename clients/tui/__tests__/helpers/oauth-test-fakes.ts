@@ -19,7 +19,7 @@ export function makeFakeServerSettings(
 ): InspectorServerSettings {
   return {
     headers: [],
-    metadata: [],
+    metadata: {},
     env: [],
     connectionTimeout: 0,
     requestTimeout: 0,
