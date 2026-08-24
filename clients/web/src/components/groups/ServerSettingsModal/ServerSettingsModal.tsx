@@ -5,6 +5,7 @@ import type {
   InspectorServerSettings,
   ModernLogLevel,
   OAuthSettings,
+  RequestMetadata,
   ServerProtocolEra,
   ServerType,
 } from "@inspector/core/mcp/types.js";
@@ -155,24 +156,7 @@ export function ServerSettingsModal({
     onSettingsChange({ ...settings, cwd: value });
   }
 
-  function handleAddMetadata() {
-    onSettingsChange({
-      ...settings,
-      metadata: [...settings.metadata, { key: "", value: "" }],
-    });
-  }
-
-  function handleRemoveMetadata(index: number) {
-    onSettingsChange({
-      ...settings,
-      metadata: settings.metadata.filter((_, i) => i !== index),
-    });
-  }
-
-  function handleMetadataChange(index: number, key: string, value: string) {
-    const metadata = settings.metadata.map((m, i) =>
-      i === index ? { key, value } : m,
-    );
+  function handleMetadataChange(metadata: RequestMetadata) {
     onSettingsChange({ ...settings, metadata });
   }
 
@@ -303,8 +287,6 @@ export function ServerSettingsModal({
             onRemoveEnv={handleRemoveEnv}
             onEnvChange={handleEnvChange}
             onCwdChange={handleCwdChange}
-            onAddMetadata={handleAddMetadata}
-            onRemoveMetadata={handleRemoveMetadata}
             onMetadataChange={handleMetadataChange}
             onTimeoutChange={handleTimeoutChange}
             onAutoRefreshChange={handleAutoRefreshChange}

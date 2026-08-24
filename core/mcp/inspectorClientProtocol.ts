@@ -21,6 +21,7 @@ import type {
   ToolCallInvocation,
   ResourceSubscriptionStreamState,
   ExcludedTool,
+  RequestMetadata,
 } from "./types.js";
 import type {
   CacheMode,
@@ -82,19 +83,19 @@ export interface InspectorClientProtocol extends InspectorClientEventTarget {
   // Paginated list methods used by managed/paged state stores
   listTools(
     cursor?: string,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<{ tools: Tool[]; nextCursor?: string }>;
   listPrompts(
     cursor?: string,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<{ prompts: Prompt[]; nextCursor?: string }>;
   listResources(
     cursor?: string,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<{ resources: Resource[]; nextCursor?: string }>;
   listResourceTemplates(
     cursor?: string,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<{ resourceTemplates: ResourceTemplate[]; nextCursor?: string }>;
   listRequestorTasks(
     cursor?: string,
@@ -126,41 +127,41 @@ export interface InspectorClientProtocol extends InspectorClientEventTarget {
   // `cacheMode` uses the SDK default ('use').
   listAllTools(options?: {
     cacheMode?: CacheMode;
-    metadata?: Record<string, string>;
+    metadata?: RequestMetadata;
   }): Promise<{ tools: Tool[] }>;
   listAllPrompts(options?: {
     cacheMode?: CacheMode;
-    metadata?: Record<string, string>;
+    metadata?: RequestMetadata;
   }): Promise<{ prompts: Prompt[] }>;
   listAllResources(options?: {
     cacheMode?: CacheMode;
-    metadata?: Record<string, string>;
+    metadata?: RequestMetadata;
   }): Promise<{ resources: Resource[] }>;
   listAllResourceTemplates(options?: {
     cacheMode?: CacheMode;
-    metadata?: Record<string, string>;
+    metadata?: RequestMetadata;
   }): Promise<{ resourceTemplates: ResourceTemplate[] }>;
 
   // Invocation methods used by paged result panels
   callTool(
     tool: Tool,
     args: Record<string, JsonValue>,
-    generalMetadata?: Record<string, string>,
-    toolSpecificMetadata?: Record<string, string>,
+    generalMetadata?: RequestMetadata,
+    toolSpecificMetadata?: RequestMetadata,
   ): Promise<ToolCallInvocation>;
   readResource(
     uri: string,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<ResourceReadInvocation>;
   readResourceFromTemplate(
     uriTemplate: string,
     params: Record<string, string>,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<ResourceTemplateReadInvocation>;
   getPrompt(
     name: string,
     params?: Record<string, string>,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<PromptGetInvocation>;
 
   // Misc surface required by hooks/state
@@ -182,6 +183,6 @@ export interface InspectorClientProtocol extends InspectorClientEventTarget {
     argumentName: string,
     argumentValue: string,
     context?: Record<string, string>,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<{ values: string[]; total?: number; hasMore?: boolean }>;
 }

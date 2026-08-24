@@ -2,12 +2,13 @@ import { describe, it, expect, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import type { InspectorServerSettings } from "@inspector/core/mcp/types.js";
 import { renderWithMantine, screen } from "../../../test/renderWithMantine";
+import { setAceText } from "../../../test/aceEditor";
 import { ServerSettingsModal } from "./ServerSettingsModal";
 
 const initialSettings: InspectorServerSettings = {
   headers: [{ key: "Authorization", value: "Bearer abc" }],
   env: [],
-  metadata: [{ key: "userId", value: "u-1" }],
+  metadata: { userId: "u-1" },
   connectionTimeout: 30000,
   requestTimeout: 60000,
   taskTtl: 60000,
@@ -21,7 +22,7 @@ const initialSettings: InspectorServerSettings = {
 const emptySettings: InspectorServerSettings = {
   headers: [],
   env: [],
-  metadata: [],
+  metadata: {},
   connectionTimeout: 30000,
   requestTimeout: 60000,
   taskTtl: 60000,
@@ -308,76 +309,6 @@ describe("ServerSettingsModal", () => {
       onSettingsChange.mock.calls[onSettingsChange.mock.calls.length - 1][0];
     expect(lastCall.headers[0].key).toBe("Authorization");
     expect(lastCall.headers[0].value).toContain("Bearer abc");
-  });
-
-  it("calls onSettingsChange when adding metadata after expanding the section", async () => {
-    const user = userEvent.setup();
-    const onSettingsChange = vi.fn();
-    renderWithMantine(
-      <ServerSettingsModal
-        opened
-        settings={emptySettings}
-        serverType="streamable-http"
-        isStdio={false}
-        onClose={vi.fn()}
-        onSettingsChange={onSettingsChange}
-      />,
-    );
-    await user.click(screen.getByRole("button", { name: "Request Metadata" }));
-    await user.click(screen.getByRole("button", { name: "+ Add Metadata" }));
-    expect(onSettingsChange).toHaveBeenCalledWith({
-      ...emptySettings,
-      metadata: [{ key: "", value: "" }],
-    });
-  });
-
-  it("calls onSettingsChange when removing metadata", async () => {
-    const user = userEvent.setup();
-    const onSettingsChange = vi.fn();
-    renderWithMantine(
-      <ServerSettingsModal
-        opened
-        settings={initialSettings}
-        serverType="streamable-http"
-        isStdio={false}
-        onClose={vi.fn()}
-        onSettingsChange={onSettingsChange}
-      />,
-    );
-    await user.click(screen.getByRole("button", { name: "Request Metadata" }));
-    // Both the header and metadata rows have a remove button; each is named
-    // for the row it belongs to, so no positional guess is needed.
-    await user.click(
-      screen.getByRole("button", {
-        name: "Remove metadata entry, userId, row 1",
-      }),
-    );
-    expect(onSettingsChange).toHaveBeenCalledWith({
-      ...initialSettings,
-      metadata: [],
-    });
-  });
-
-  it("calls onSettingsChange when typing in metadata key/value", async () => {
-    const user = userEvent.setup();
-    const onSettingsChange = vi.fn();
-    renderWithMantine(
-      <ServerSettingsModal
-        opened
-        settings={initialSettings}
-        serverType="streamable-http"
-        isStdio={false}
-        onClose={vi.fn()}
-        onSettingsChange={onSettingsChange}
-      />,
-    );
-    await user.click(screen.getByRole("button", { name: "Request Metadata" }));
-    const valueInput = screen.getByDisplayValue("u-1");
-    await user.type(valueInput, "9");
-    expect(onSettingsChange).toHaveBeenCalled();
-    const lastCall =
-      onSettingsChange.mock.calls[onSettingsChange.mock.calls.length - 1][0];
-    expect(lastCall.metadata[0].key).toBe("userId");
   });
 
   it("calls onSettingsChange when changing timeouts", async () => {
@@ -703,20 +634,13 @@ describe("ServerSettingsModal", () => {
     expect(lastCall.headers[1]).toEqual({ key: "B", value: "2" });
   });
 
-  it("preserves sibling rows when editing one of several metadata entries", async () => {
+  it("replaces the whole metadata object when the JSON editor changes", async () => {
     const user = userEvent.setup();
     const onSettingsChange = vi.fn();
-    const twoMeta: InspectorServerSettings = {
-      ...emptySettings,
-      metadata: [
-        { key: "m1", value: "v1" },
-        { key: "m2", value: "v2" },
-      ],
-    };
     renderWithMantine(
       <ServerSettingsModal
         opened
-        settings={twoMeta}
+        settings={emptySettings}
         serverType="streamable-http"
         isStdio={false}
         onClose={vi.fn()}
@@ -724,9 +648,13 @@ describe("ServerSettingsModal", () => {
       />,
     );
     await user.click(screen.getByRole("button", { name: "Request Metadata" }));
-    await user.type(screen.getByDisplayValue("v1"), "x");
+    await setAceText('{"trace":{"id":"abc"}}');
     const lastCall = onSettingsChange.mock.calls.at(-1)?.[0];
-    expect(lastCall.metadata[1]).toEqual({ key: "m2", value: "v2" });
+    // The nested object arrives as an object, not a stringified one — the
+    // whole point of #1910.
+    expect(lastCall.metadata).toEqual({ trace: { id: "abc" } });
+    // Every other setting is carried through untouched.
+    expect(lastCall.headers).toEqual(emptySettings.headers);
   });
 
   it("preserves sibling rows when editing one of several roots", async () => {

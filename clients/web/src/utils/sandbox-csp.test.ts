@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   SAFE_CSP_SOURCE,
   approveCspSources,
+  approveSandboxPermissions,
   buildSandboxCspPolicy,
   escapeHtmlAttr,
   wrapSandboxedHtml,
@@ -78,6 +79,62 @@ describe("approveCspSources", () => {
         connectDomains: "https://x.com" as unknown as string[],
       }),
     ).toEqual({});
+  });
+});
+
+describe("approveSandboxPermissions", () => {
+  it("keeps the spec's empty-object marker for each known key", () => {
+    expect(
+      approveSandboxPermissions({ camera: {}, clipboardWrite: {} }),
+    ).toEqual({ camera: {}, clipboardWrite: {} });
+  });
+
+  it("drops a truthy non-marker the proxy would have honored", () => {
+    // buildAllowAttribute() tests each key for truthiness, so the string
+    // "false" — a plausible way for a server to mean "off" — would otherwise
+    // switch the camera on. `true` is rejected too: it is not a marker the
+    // spec defines, and guessing in the granting direction is the wrong bet.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(
+      approveSandboxPermissions({
+        camera: "false",
+        microphone: true,
+        geolocation: 1,
+        clipboardWrite: [],
+      }),
+    ).toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(4);
+    warn.mockRestore();
+  });
+
+  it("accepts a non-empty object, since `{}` is the spec's extension point", () => {
+    // The key's presence is the request; a field the host doesn't know can't
+    // narrow it, and rejecting it would drop grants from servers written
+    // against a newer spec. The value is normalized to `{}` on the way out.
+    expect(approveSandboxPermissions({ camera: { enabled: false } })).toEqual({
+      camera: {},
+    });
+  });
+
+  it("drops `false` without warning, and ignores unknown keys", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(
+      approveSandboxPermissions({
+        camera: false,
+        midi: {},
+        clipboardWrite: {},
+      }),
+    ).toEqual({ clipboardWrite: {} });
+    // `false` is an explicit refusal, not a malformed value.
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("returns undefined when there is nothing to grant", () => {
+    expect(approveSandboxPermissions(undefined)).toBeUndefined();
+    expect(approveSandboxPermissions(null)).toBeUndefined();
+    expect(approveSandboxPermissions("camera")).toBeUndefined();
+    expect(approveSandboxPermissions({})).toBeUndefined();
   });
 });
 

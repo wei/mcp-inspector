@@ -16,6 +16,7 @@
 import type { InspectorClientProtocol } from "../inspectorClientProtocol.js";
 import type { Resource } from "@modelcontextprotocol/client";
 import { isTerminalStatus } from "../types.js";
+import type { RequestMetadata } from "../types.js";
 import { TypedEventTarget } from "../typedEventTarget.js";
 import type { PagePaginationState } from "./pagedToolsState.js";
 
@@ -113,7 +114,7 @@ export class PagedResourcesState extends TypedEventTarget<PagedResourcesStateEve
 
   async loadPage(
     cursor?: string,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<LoadPageResult> {
     const c = this.client;
     if (!c || c.getStatus() !== "connected") {

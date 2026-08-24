@@ -30,7 +30,7 @@ describe("headersToServerSettings", () => {
     expect(settings?.headers).toEqual([
       { key: "Authorization", value: "Bearer t" },
     ]);
-    expect(settings?.metadata).toEqual([]);
+    expect(settings?.metadata).toEqual({});
     expect(settings?.roots).toEqual([]);
   });
 });

@@ -102,7 +102,13 @@ const h = vi.hoisted(() => {
   // handler for the event (the common single-server case).
   type EventEntry = { client: unknown; fn: (event: unknown) => void };
   const clientEvents = new Map<string, Set<EventEntry>>();
-  const clientInstances: Array<{ cfg?: { type?: string; url?: string } }> = [];
+  const clientInstances: Array<{
+    cfg?: { type?: string; url?: string };
+    // The options the mount effect built for this server. Captured so a test
+    // can assert what was actually handed to the client — `defaultMetadata`
+    // in particular, which is otherwise invisible to a render-only assertion.
+    opts?: { defaultMetadata?: unknown };
+  }> = [];
   const fireClientEvent = (event: string, detail?: unknown) => {
     clientEvents.get(event)?.forEach((e) => e.fn({ detail }));
   };
@@ -127,8 +133,13 @@ const h = vi.hoisted(() => {
   }
   class FakeClient {
     cfg: { type?: string; url?: string } | undefined;
-    constructor(config?: { type?: string; url?: string }) {
+    opts: { defaultMetadata?: unknown } | undefined;
+    constructor(
+      config?: { type?: string; url?: string },
+      opts?: { defaultMetadata?: unknown },
+    ) {
       this.cfg = config;
+      this.opts = opts;
       clientInstances.push(this);
     }
     // Derive the transport type from the server config the client was built
@@ -340,7 +351,7 @@ function oneEmaHttp(): Record<string, TuiServer> {
       config: { type: "streamable-http", url: "http://localhost:8080/mcp" },
       settings: {
         requestTimeout: 0,
-        metadata: [],
+        metadata: {},
         headers: [],
         env: [],
         roots: [],
@@ -393,10 +404,10 @@ function httpWithSettings(): Record<string, TuiServer> {
       config: { type: "streamable-http", url: "http://x" },
       settings: {
         requestTimeout: 5000,
-        metadata: [
-          { key: "team", value: "alpha" },
-          { key: "  ", value: "ignored" },
-        ],
+        // Object-shaped with a nested value (#1910) — the shape the TUI now
+        // forwards verbatim. As a pair array this would have reached the wire
+        // as numeric `_meta` keys.
+        metadata: { team: "alpha", trace: { id: "abc", hops: [1, 2] } },
         oauthClientId: "cid",
         oauthClientSecret: "secret",
         oauthScopes: "read write",
@@ -1114,6 +1125,13 @@ describe("App (input handling, focus, effects)", () => {
   it("builds a client with saved settings (metadata, oauth, timeout)", async () => {
     const r = await mount(httpWithSettings());
     await expectFrame(r, "MCP Servers");
+    // Not just "it mounted": the saved metadata must reach the client as the
+    // same object, nesting intact (#1910).
+    const web = h.clientInstances.find((c) => c.cfg?.url === "http://x");
+    expect(web?.opts?.defaultMetadata).toEqual({
+      team: "alpha",
+      trace: { id: "abc", hops: [1, 2] },
+    });
   });
 
   it("passes top-level oauth client credentials into an http client", async () => {

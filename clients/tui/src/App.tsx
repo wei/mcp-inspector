@@ -291,13 +291,9 @@ function App({
           transport: createTransportNode,
           logger: getTuiLogger(),
         };
-        const defaultMetadata = savedSettings?.metadata
-          ? Object.fromEntries(
-              savedSettings.metadata
-                .filter((m) => m.key.trim() !== "")
-                .map((m) => [m.key, m.value]),
-            )
-          : undefined;
+        // Per-server default `_meta` is already a JSON object (#1910) — no
+        // pair-array flattening left to do; `{}` means "no defaults".
+        const defaultMetadata = savedSettings?.metadata;
         const clientAuthOptions = buildRunnerClientAuthOptions(
           clientConfig,
           savedSettings,

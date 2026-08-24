@@ -1,4 +1,10 @@
 import { Client } from "@modelcontextprotocol/client";
+// The protocol's own schemas for the reserved `_meta` members, so the client
+// validates against the SDK rather than a restatement of it that can drift.
+import {
+  ProgressTokenSchema,
+  RequestMetaSchema,
+} from "@modelcontextprotocol/core";
 import type {
   MCPServerConfig,
   StderrLogEntry,
@@ -17,6 +23,7 @@ import type {
   PendingRequestOrigin,
   ResourceSubscriptionStreamState,
   ExcludedTool,
+  RequestMetadata,
 } from "./types.js";
 import {
   scanXMcpHeaderDeclarations,
@@ -356,8 +363,8 @@ function notificationMethodFromSchema(schema: unknown): string | undefined {
 interface ToolCallRequest {
   tool: Tool;
   args: Record<string, JsonValue>;
-  generalMetadata?: Record<string, string>;
-  toolSpecificMetadata?: Record<string, string>;
+  generalMetadata?: RequestMetadata;
+  toolSpecificMetadata?: RequestMetadata;
   taskOptions?: { ttl?: number };
   options?: { skipOutputValidation?: boolean };
 }
@@ -368,6 +375,69 @@ interface ToolCallRequest {
 // server can't spin a tight zero-delay loop; a successful acknowledgement resets
 // the count, and past the cap we give up (mark the stream ended) rather than
 // retry a persistently-failing re-list forever.
+/**
+ * A one-word name for a JSON value's type, for diagnostics that must not
+ * disclose the value itself.
+ */
+function describeJsonType(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+/**
+ * Whether a `_meta.progressToken` value is one the protocol allows.
+ *
+ * Delegates to the SDK's own `ProgressTokenSchema` rather than restating it.
+ * A hand-rolled check drifts: this was `Number.isInteger` until review pointed
+ * out that zod 4's `.int()` rejects anything past `Number.MAX_SAFE_INTEGER`,
+ * so an unsafe integer passed here and was rejected by the server instead.
+ */
+function isProgressToken(value: unknown): value is ProgressToken {
+  return ProgressTokenSchema.safeParse(value).success;
+}
+
+/**
+ * Drop the reserved `_meta` members whose value the protocol will not accept.
+ *
+ * Most of `_meta` is arbitrary JSON (#1910), but a few keys are **reserved**
+ * and carry their own schema — `progressToken` (a string or a safe integer;
+ * zod's `.int()` rejects anything past `Number.MAX_SAFE_INTEGER`) and
+ * `io.modelcontextprotocol/related-task` (`{ taskId: string }`) in the pinned
+ * SDK. Before the widening every value was a string, so only `progressToken`
+ * could even be wrong; now any of them can, and one bad reserved member makes a
+ * conforming server reject the **whole request** rather than ignore the key.
+ *
+ * Validated with the SDK's `RequestMetaSchema` instead of a hand-maintained
+ * list, which is the point: the schema is loose, so unknown keys pass through
+ * untouched, and a member the SDK constrains in a later release is covered here
+ * without anyone remembering to add it. Zod reports the offending top-level key
+ * as `issue.path[0]`, so only that member is removed — siblings survive, and
+ * the request stays well-formed because every reserved member is optional.
+ */
+function dropInvalidReservedMeta(
+  meta: RequestMetadata,
+  logger: InspectorLogger,
+): RequestMetadata {
+  const result = RequestMetaSchema.safeParse(meta);
+  if (result.success) return meta;
+
+  const cleaned = { ...meta };
+  for (const issue of result.error.issues) {
+    const key = issue.path[0];
+    if (typeof key !== "string" || !(key in cleaned)) continue;
+    // The key and the reason, never the value: `_meta` can carry credentials,
+    // and this logger is persisted by real clients (the TUI writes it to
+    // `~/.mcp-inspector/auth.log`).
+    logger.warn(
+      { key, received: describeJsonType(cleaned[key]) },
+      "Dropping reserved `_meta` member — it does not match the protocol schema.",
+    );
+    delete cleaned[key];
+  }
+  return cleaned;
+}
+
 const MODERN_RECONNECT_BASE_MS = 500;
 const MODERN_RECONNECT_MAX_MS = 15_000;
 const MODERN_RECONNECT_MAX_ATTEMPTS = 8;
@@ -420,7 +490,7 @@ export class InspectorClient extends InspectorClientEventTarget {
   private progress: boolean;
   private resetTimeoutOnProgress: boolean;
   private requestTimeout: number | undefined;
-  private defaultMetadata: Record<string, string> | undefined;
+  private defaultMetadata: RequestMetadata | undefined;
   private serverSettings: InspectorServerSettings | undefined;
   private versionNegotiation: VersionNegotiationOptions;
   private status: ConnectionStatus = "disconnected";
@@ -1035,8 +1105,8 @@ export class InspectorClient extends InspectorClientEventTarget {
    * injecting an empty `_meta` field.
    */
   private mergeMeta(
-    callMetadata?: Record<string, string>,
-  ): Record<string, string> | undefined {
+    callMetadata?: RequestMetadata,
+  ): RequestMetadata | undefined {
     const defaults = this.defaultMetadata;
     // Modern-era per-request log level (#1629): stamp the opt-in `_meta` key on
     // every request so the server emits `notifications/message` on this
@@ -1052,7 +1122,29 @@ export class InspectorClient extends InspectorClientEventTarget {
       ...(logMeta ?? {}),
       ...(callMetadata ?? {}),
     };
-    return Object.keys(merged).length > 0 ? merged : undefined;
+    // Reserved members carry their own schemas even though the rest of `_meta`
+    // is arbitrary JSON, and one bad reserved value makes a conforming server
+    // reject the whole request. See `dropInvalidReservedMeta`.
+    const sanitized = dropInvalidReservedMeta(merged, this.logger);
+    return Object.keys(sanitized).length > 0 ? sanitized : undefined;
+  }
+
+  /**
+   * The `progressToken` a caller stamped on its request metadata, when it is
+   * one the SDK will accept.
+   *
+   * This governs only **callback correlation** — whether the client wires up an
+   * `onprogress` for the request. Keeping an invalid value off the **wire** is
+   * a separate concern handled in {@link mergeMeta}, which deletes the member
+   * from the outgoing `_meta` so a conforming server is never sent something
+   * `ProgressTokenSchema` rejects. The two use the same {@link isProgressToken}
+   * predicate, so they cannot disagree about what counts as valid.
+   */
+  private progressTokenOf(
+    metadata: RequestMetadata | undefined,
+  ): ProgressToken | undefined {
+    const token = metadata?.progressToken;
+    return isProgressToken(token) ? token : undefined;
   }
 
   private getRequestOptions(
@@ -1110,8 +1202,8 @@ export class InspectorClient extends InspectorClientEventTarget {
    * so the merge/omit branch is defined once.
    */
   private aggregateListParams(
-    metadata?: Record<string, string>,
-  ): { _meta: Record<string, string> } | undefined {
+    metadata?: RequestMetadata,
+  ): { _meta: RequestMetadata } | undefined {
     const effectiveMeta = this.mergeMeta(metadata);
     return effectiveMeta ? { _meta: effectiveMeta } : undefined;
   }
@@ -3405,7 +3497,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   async listTools(
     cursor?: string,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<{ tools: Tool[]; nextCursor?: string }> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -3423,7 +3515,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       this.client!.request(
         { method: "tools/list", params },
         ListToolsResultSchema,
-        this.getRequestOptions(metadata?.progressToken),
+        this.getRequestOptions(this.progressTokenOf(metadata)),
       ),
     );
     const tools = [...(response.tools || [])];
@@ -3444,7 +3536,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   async listAllTools(options?: {
     cacheMode?: CacheMode;
-    metadata?: Record<string, string>;
+    metadata?: RequestMetadata;
   }): Promise<{ tools: Tool[] }> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -3596,7 +3688,7 @@ export class InspectorClient extends InspectorClientEventTarget {
      *  from it so every field except the entries is still validated. */
     resultSchema: z.ZodObject;
     aggregate: () => Promise<T[]>;
-    metadata?: Record<string, string>;
+    metadata?: RequestMetadata;
     /**
      * Filter applied to SALVAGED entries only, to reproduce a filter the SDK's
      * strict aggregate applies for us. Without it the fallback would return a
@@ -3674,7 +3766,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     itemsKey: string;
     itemSchema: z.ZodType<T>;
     resultSchema: z.ZodObject;
-    metadata?: Record<string, string>;
+    metadata?: RequestMetadata;
     err: unknown;
   }): Promise<T[]> {
     const pageSchema = lenientListPageSchema(resultSchema, itemsKey);
@@ -3725,7 +3817,7 @@ export class InspectorClient extends InspectorClientEventTarget {
               : this.client!.request(
                   { method, params },
                   pageSchema,
-                  this.getRequestOptions(metadata?.progressToken),
+                  this.getRequestOptions(this.progressTokenOf(metadata)),
                 ),
           { method },
         );
@@ -3811,7 +3903,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    * stops the walk (non-converging-server guard, mirroring the SDK).
    */
   async refreshExcludedTools(
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<ExcludedTool[]> {
     const excluded: ExcludedTool[] = [];
     // Gated to connections that actually exclude; otherwise this is a pure
@@ -3881,7 +3973,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   private async listToolsForScan(
     cursor: string | undefined,
-    metadata: Record<string, string> | undefined,
+    metadata: RequestMetadata | undefined,
   ): Promise<{
     tools: Tool[];
     nextCursor?: string;
@@ -3924,7 +4016,7 @@ export class InspectorClient extends InspectorClientEventTarget {
               : this.client!.request(
                   { method: "tools/list", params },
                   pageSchema,
-                  this.getRequestOptions(metadata?.progressToken),
+                  this.getRequestOptions(this.progressTokenOf(metadata)),
                 ),
           { method: "tools/list" },
         );
@@ -4016,8 +4108,8 @@ export class InspectorClient extends InspectorClientEventTarget {
   async callTool(
     tool: Tool,
     args: Record<string, JsonValue>,
-    generalMetadata?: Record<string, string>,
-    toolSpecificMetadata?: Record<string, string>,
+    generalMetadata?: RequestMetadata,
+    toolSpecificMetadata?: RequestMetadata,
     taskOptions?: { ttl?: number },
     options?: { skipOutputValidation?: boolean },
   ): Promise<ToolCallInvocation> {
@@ -4245,7 +4337,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     const convertedArgs = this.convertStringToolArgs(tool, args);
 
     // Merge general metadata with tool-specific metadata; tool-specific wins.
-    const callMetadata: Record<string, string> | undefined =
+    const callMetadata: RequestMetadata | undefined =
       generalMetadata || toolSpecificMetadata
         ? { ...(generalMetadata || {}), ...(toolSpecificMetadata || {}) }
         : undefined;
@@ -4258,7 +4350,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     const callParams: {
       name: string;
       arguments: Record<string, JsonValue>;
-      _meta?: Record<string, string>;
+      _meta?: RequestMetadata;
       task?: { ttl: number };
     } = {
       name: tool.name,
@@ -4270,7 +4362,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     }
 
     const requestOptions = this.getRequestOptions(
-      metadata?.progressToken,
+      this.progressTokenOf(metadata),
       signal,
     );
     this.applyMirroredParamHeaders(tool, convertedArgs, requestOptions);
@@ -4360,11 +4452,11 @@ export class InspectorClient extends InspectorClientEventTarget {
   private dispatchFailedToolCall(
     tool: Tool,
     args: Record<string, JsonValue>,
-    generalMetadata: Record<string, string> | undefined,
-    toolSpecificMetadata: Record<string, string> | undefined,
+    generalMetadata: RequestMetadata | undefined,
+    toolSpecificMetadata: RequestMetadata | undefined,
     errorMessage: string,
   ): void {
-    const callMetadata: Record<string, string> | undefined =
+    const callMetadata: RequestMetadata | undefined =
       generalMetadata || toolSpecificMetadata
         ? { ...(generalMetadata || {}), ...(toolSpecificMetadata || {}) }
         : undefined;
@@ -4848,8 +4940,8 @@ export class InspectorClient extends InspectorClientEventTarget {
   async callToolStream(
     tool: Tool,
     args: Record<string, JsonValue>,
-    generalMetadata?: Record<string, string>,
-    toolSpecificMetadata?: Record<string, string>,
+    generalMetadata?: RequestMetadata,
+    toolSpecificMetadata?: RequestMetadata,
     taskOptions?: { ttl?: number },
   ): Promise<ToolCallInvocation> {
     if (!this.client) {
@@ -4859,7 +4951,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       const convertedArgs = this.convertStringToolArgs(tool, args);
 
       // Merge general metadata with tool-specific metadata; tool-specific wins.
-      const callMetadata: Record<string, string> | undefined =
+      const callMetadata: RequestMetadata | undefined =
         generalMetadata || toolSpecificMetadata
           ? { ...(generalMetadata || {}), ...(toolSpecificMetadata || {}) }
           : undefined;
@@ -4895,7 +4987,9 @@ export class InspectorClient extends InspectorClientEventTarget {
       // attach one here either — doing so would request a progress token (and
       // emit requestorTaskProgress) for task calls only, bypassing the toggle
       // that governs every other call path.
-      const requestOptions = this.getRequestOptions(metadata?.progressToken);
+      const requestOptions = this.getRequestOptions(
+        this.progressTokenOf(metadata),
+      );
       // The task-augmented `tools/call` needs the same SEP-2243 mirroring as the
       // plain one — a strict modern server rejects it with -32020 otherwise.
       this.applyMirroredParamHeaders(tool, convertedArgs, requestOptions);
@@ -5056,7 +5150,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       return invocation;
     } catch (error) {
       // Merge general metadata with tool-specific metadata for error case
-      const callMetadata: Record<string, string> | undefined =
+      const callMetadata: RequestMetadata | undefined =
         generalMetadata || toolSpecificMetadata
           ? { ...(generalMetadata || {}), ...(toolSpecificMetadata || {}) }
           : undefined;
@@ -5086,7 +5180,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   async listResources(
     cursor?: string,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<{ resources: Resource[]; nextCursor?: string }> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -5100,7 +5194,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       this.client!.request(
         { method: "resources/list", params },
         ListResourcesResultSchema,
-        this.getRequestOptions(metadata?.progressToken),
+        this.getRequestOptions(this.progressTokenOf(metadata)),
       ),
     );
     return {
@@ -5117,7 +5211,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   async listAllResources(options?: {
     cacheMode?: CacheMode;
-    metadata?: Record<string, string>;
+    metadata?: RequestMetadata;
   }): Promise<{ resources: Resource[] }> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -5148,7 +5242,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   async readResource(
     uri: string,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<ResourceReadInvocation> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -5167,7 +5261,7 @@ export class InspectorClient extends InspectorClientEventTarget {
           "resources/read",
           params,
           ReadResourceResultSchema,
-          this.getRequestOptions(metadata?.progressToken),
+          this.getRequestOptions(this.progressTokenOf(metadata)),
         ),
       { method: "resources/read" },
     );
@@ -5198,7 +5292,7 @@ export class InspectorClient extends InspectorClientEventTarget {
   async readResourceFromTemplate(
     uriTemplate: string,
     params: Record<string, string>,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<ResourceTemplateReadInvocation> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -5260,7 +5354,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   async listResourceTemplates(
     cursor?: string,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<{ resourceTemplates: ResourceTemplate[]; nextCursor?: string }> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -5275,7 +5369,7 @@ export class InspectorClient extends InspectorClientEventTarget {
         this.client!.request(
           { method: "resources/templates/list", params },
           ListResourceTemplatesResultSchema,
-          this.getRequestOptions(metadata?.progressToken),
+          this.getRequestOptions(this.progressTokenOf(metadata)),
         ),
       { method: "resources/templates/list" },
     );
@@ -5293,7 +5387,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   async listAllResourceTemplates(options?: {
     cacheMode?: CacheMode;
-    metadata?: Record<string, string>;
+    metadata?: RequestMetadata;
   }): Promise<{ resourceTemplates: ResourceTemplate[] }> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -5324,7 +5418,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   async listPrompts(
     cursor?: string,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<{ prompts: Prompt[]; nextCursor?: string }> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -5338,7 +5432,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       this.client!.request(
         { method: "prompts/list", params },
         ListPromptsResultSchema,
-        this.getRequestOptions(metadata?.progressToken),
+        this.getRequestOptions(this.progressTokenOf(metadata)),
       ),
     );
     return {
@@ -5355,7 +5449,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   async listAllPrompts(options?: {
     cacheMode?: CacheMode;
-    metadata?: Record<string, string>;
+    metadata?: RequestMetadata;
   }): Promise<{ prompts: Prompt[] }> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -5388,7 +5482,7 @@ export class InspectorClient extends InspectorClientEventTarget {
   async getPrompt(
     name: string,
     args?: Record<string, JsonValue>,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<PromptGetInvocation> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -5412,7 +5506,7 @@ export class InspectorClient extends InspectorClientEventTarget {
           "prompts/get",
           params,
           GetPromptResultSchema,
-          this.getRequestOptions(metadata?.progressToken),
+          this.getRequestOptions(this.progressTokenOf(metadata)),
         ),
       { method: "prompts/get", toolName: name },
     );
@@ -5451,7 +5545,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     argumentName: string,
     argumentValue: string,
     context?: Record<string, string>,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<{ values: string[]; total?: number; hasMore?: boolean }> {
     if (!this.client) {
       return { values: [] };
@@ -5473,7 +5567,7 @@ export class InspectorClient extends InspectorClientEventTarget {
         () =>
           this.client!.complete(
             params,
-            this.getRequestOptions(metadata?.progressToken),
+            this.getRequestOptions(this.progressTokenOf(metadata)),
           ),
         {
           method: "completion/complete",
