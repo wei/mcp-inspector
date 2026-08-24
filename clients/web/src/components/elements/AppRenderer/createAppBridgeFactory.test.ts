@@ -483,6 +483,141 @@ describe("createAppBridgeFactory", () => {
     expect(call.html).toContain("connect-src &#39;none&#39;");
   });
 
+  describe("_meta.ui.domain — dedicated origin (#2056)", () => {
+    // An app rendered under the default opaque origin sends `Origin: null`, so
+    // no CORS / OAuth-callback / API-key allowlist can admit it. `domain` is
+    // how a server asks its host for a real one; the Inspector answers with a
+    // URL on its own app-origin listener and passes it as `src`.
+
+    it("publishes the wrapped document and passes its URL as `src`", async () => {
+      const readResource = vi.fn().mockResolvedValue(
+        uiResource("<h1>weather</h1>", {
+          domain: "my-app.example.com",
+          csp: { connectDomains: ["https://api.example.com"] },
+        }),
+      );
+      const publishAppDocument = vi
+        .fn<(doc: { html: string; csp?: string }) => Promise<string | null>>()
+        .mockResolvedValue("http://localhost:6276/app-document/abc");
+      const factory = createAppBridgeFactory({
+        getClient: () => fakeClient,
+        readResource,
+        publishAppDocument,
+      });
+      await factory(makeIframe(), { kind: "tool", tool });
+      bridgeInstances[0].emit("sandboxready");
+      await flush();
+
+      // What is published is the SAME wrapped document the srcdoc path would
+      // have rendered, plus the policy as a separate string so the backend can
+      // serve it as a real response header.
+      const published = publishAppDocument.mock.calls[0][0];
+      expect(published.html).toContain("<body><h1>weather</h1></body>");
+      expect(published.csp).toContain("connect-src https://api.example.com");
+
+      const call = bridgeInstances[0].sendSandboxResourceReady.mock
+        .calls[0][0] as { html: string; src?: string };
+      expect(call.src).toBe("http://localhost:6276/app-document/abc");
+      // `html` still rides along: a proxy that ignores `src` renders the app
+      // rather than a blank frame.
+      expect(call.html).toBe(published.html);
+    });
+
+    it.each([
+      ["an empty domain", ""],
+      ["a whitespace-only domain", "   "],
+      ["a non-string domain", 42],
+    ])("does not take the dedicated path for %s", async (_label, domain) => {
+      const publishAppDocument = vi
+        .fn<(doc: { html: string; csp?: string }) => Promise<string | null>>()
+        .mockResolvedValue("http://localhost:6276/app-document/abc");
+      const factory = createAppBridgeFactory({
+        getClient: () => fakeClient,
+        readResource: vi
+          .fn()
+          .mockResolvedValue(uiResource("<h1>x</h1>", { domain })),
+        publishAppDocument,
+      });
+      await factory(makeIframe(), { kind: "tool", tool });
+      bridgeInstances[0].emit("sandboxready");
+      await flush();
+      expect(publishAppDocument).not.toHaveBeenCalled();
+      expect(
+        bridgeInstances[0].sendSandboxResourceReady.mock.calls[0][0],
+      ).not.toHaveProperty("src");
+    });
+
+    it("never publishes a resource that declares no domain", async () => {
+      const publishAppDocument = vi
+        .fn<(doc: { html: string; csp?: string }) => Promise<string | null>>()
+        .mockResolvedValue("http://localhost:6276/app-document/abc");
+      const factory = createAppBridgeFactory({
+        getClient: () => fakeClient,
+        readResource: vi.fn().mockResolvedValue(uiResource("<h1>x</h1>")),
+        publishAppDocument,
+      });
+      await factory(makeIframe(), { kind: "tool", tool });
+      bridgeInstances[0].emit("sandboxready");
+      await flush();
+      expect(publishAppDocument).not.toHaveBeenCalled();
+    });
+
+    it("falls back to srcdoc, warning, when the backend cannot host the document", async () => {
+      // A backend with no app-origin listener. Losing the real origin degrades
+      // what the app can reach and the developer needs to see why — losing the
+      // app itself would be worse.
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const factory = createAppBridgeFactory({
+          getClient: () => fakeClient,
+          readResource: vi
+            .fn()
+            .mockResolvedValue(
+              uiResource("<h1>x</h1>", { domain: "my-app.example.com" }),
+            ),
+          publishAppDocument: vi.fn().mockResolvedValue(null),
+        });
+        await factory(makeIframe(), { kind: "tool", tool });
+        bridgeInstances[0].emit("sandboxready");
+        await flush();
+        const call = bridgeInstances[0].sendSandboxResourceReady.mock
+          .calls[0][0] as { html: string; src?: string };
+        expect(call.src).toBeUndefined();
+        expect(call.html).toContain("<body><h1>x</h1></body>");
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining("_meta.ui.domain"),
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("falls back to srcdoc when the factory was given no publisher at all", async () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const factory = createAppBridgeFactory({
+          getClient: () => fakeClient,
+          readResource: vi
+            .fn()
+            .mockResolvedValue(
+              uiResource("<h1>x</h1>", { domain: "my-app.example.com" }),
+            ),
+        });
+        await factory(makeIframe(), { kind: "tool", tool });
+        bridgeInstances[0].emit("sandboxready");
+        await flush();
+        expect(
+          bridgeInstances[0].sendSandboxResourceReady.mock.calls[0][0],
+        ).not.toHaveProperty("src");
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining("_meta.ui.domain"),
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+  });
+
   it("does not mutate the shared HOST_CAPABILITIES when echoing the approved sandbox", async () => {
     // The factory builds a per-app copy ({ ...HOST_CAPABILITIES }) so the
     // sandbox echo never leaks across apps/renders. Lock that in: after a

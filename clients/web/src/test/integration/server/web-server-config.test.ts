@@ -26,6 +26,7 @@ const MUTATED_ENV_KEYS = [
   "MCP_STORAGE_DIR",
   "ALLOWED_ORIGINS",
   "MCP_SANDBOX_PORT",
+  "MCP_APP_ORIGIN_PORT",
   "SERVER_PORT",
   "MCP_LOG_FILE",
   "MCP_AUTO_OPEN_ENABLED",
@@ -43,6 +44,7 @@ const baseConfig = (): WebServerConfig => ({
   storageDir: undefined,
   allowedOrigins: ["http://localhost:6274"],
   sandboxPort: 0,
+  appOriginPort: 0,
   sandboxHost: "127.0.0.1",
   logger: undefined,
   autoOpen: false,
@@ -299,6 +301,17 @@ describe("buildWebServerConfigFromEnv", () => {
     process.env.MCP_SANDBOX_PORT = "";
     process.env.SERVER_PORT = "9100";
     expect(buildWebServerConfigFromEnv().sandboxPort).toBe(9100);
+  });
+
+  it("resolves appOriginPort from MCP_APP_ORIGIN_PORT, defaulting to 6276", () => {
+    // The dedicated app origin (#2056). Deliberately NOT sharing the sandbox's
+    // SERVER_PORT fallback: it is a different listener and must be pinnable
+    // (and forwardable) on its own.
+    delete process.env.MCP_APP_ORIGIN_PORT;
+    process.env.SERVER_PORT = "9100";
+    expect(buildWebServerConfigFromEnv().appOriginPort).toBe(6276);
+    process.env.MCP_APP_ORIGIN_PORT = "9300";
+    expect(buildWebServerConfigFromEnv().appOriginPort).toBe(9300);
   });
 
   it("sets MCP_STORAGE_DIR when present", () => {

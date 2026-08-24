@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="color-scheme" content="light dark" />
-    <!-- Isolation model: the inner iframe is sandboxed WITHOUT
+    <!-- Isolation model: by default the inner iframe is sandboxed WITHOUT
          `allow-same-origin`, so the untrusted app runs under an opaque
          ("null") origin. That is the structural boundary — the app cannot
          touch this proxy's DOM, window, or cookies, so it cannot bypass its
@@ -14,6 +14,18 @@
          ("allow-scripts allow-forms") may be narrowed per app via the
          resource-ready message's `sandbox` field; `allow-same-origin` is
          always stripped from a server-supplied value.
+
+         Dedicated-origin exception (#2056): an app whose UI resource declares
+         `_meta.ui.domain` is instead served from the host's own app-origin
+         listener, handed to us as the resource-ready message's `src`. That
+         frame IS granted `allow-same-origin` — an opaque origin sends
+         `Origin: null`, which defeats the CORS / OAuth-callback / API-key
+         allowlists the field exists to support. The boundary is preserved by
+         the origin itself rather than by opacity: the listener is on its own
+         port, so the app is cross-origin to this proxy and to the host, and
+         the grant is refused outright if the URL's origin equals this page's.
+         The grant is host-driven — it is never reachable from the server's
+         own `sandbox` string, which is still stripped.
 
          Network/resource egress from the inner document is constrained by a
          Content-Security-Policy that the HOST builds and bakes into the
@@ -85,13 +97,21 @@
       // This is the origin we expect all parent messages to come from.
       const EXPECTED_HOST_ORIGIN = new URL(document.referrer).origin;
 
-      // The inner iframe is sandboxed without allow-same-origin, so its
-      // document has an opaque origin and every postMessage from it arrives
+      // The inner iframe is sandboxed without allow-same-origin by default, so
+      // its document has an opaque origin and every postMessage from it arrives
       // with event.origin === "null" (the literal string). That value is
       // checked below as a defense-in-depth assertion; the actual identity
       // proof is `event.source === inner.contentWindow`, which a sibling
       // frame cannot forge.
-      const INNER_ORIGIN = "null";
+      //
+      // The dedicated-origin path (#2056) is the one exception: when the host
+      // supplies a `src` on its own app-origin listener, the frame is granted
+      // allow-same-origin so the app has a REAL origin — which is the entire
+      // point, since an opaque origin sends `Origin: null` and defeats any
+      // CORS / OAuth-callback / API-key allowlist the app's backend applies.
+      // `innerOrigin` is then that URL's origin, and the assertion above still
+      // holds against it.
+      let innerOrigin = "null";
 
       // Security self-test: verify iframe isolation is working correctly.
       // This MUST throw a SecurityError -- if `window.top` is accessible, the sandbox
@@ -158,7 +178,37 @@
           }
 
           if (event.data && event.data.method === RESOURCE_READY_NOTIFICATION) {
-            const { html, sandbox, permissions } = event.data.params;
+            const { html, sandbox, permissions, src } = event.data.params;
+            // The host asked for the dedicated-origin path: it published the
+            // wrapped document to its own app-origin listener and is handing
+            // us the URL. Only an absolute http(s) URL is honored — anything
+            // else (a relative path, a `javascript:` or `data:` URL) falls
+            // through to the srcdoc path below rather than being navigated to.
+            let srcUrl = null;
+            if (typeof src === "string") {
+              try {
+                const parsed = new URL(src);
+                if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+                  srcUrl = parsed;
+                } else {
+                  console.warn("[Sandbox] ignoring non-http(s) src:", src);
+                }
+              } catch (e) {
+                console.warn("[Sandbox] ignoring unparseable src:", src);
+              }
+            }
+            // The app origin MUST differ from this proxy's own — otherwise
+            // granting allow-same-origin below would put the untrusted app in
+            // this realm, exactly the escape the double-iframe model exists to
+            // prevent. Refuse rather than degrade quietly: this is a host
+            // misconfiguration, not app input.
+            if (srcUrl && srcUrl.origin === window.location.origin) {
+              console.error(
+                "[Sandbox] refusing a src on the proxy's own origin:",
+                srcUrl.origin,
+              );
+              srcUrl = null;
+            }
             if (typeof sandbox === "string") {
               // Never grant allow-same-origin even if the server asks for it —
               // that would let the untrusted app reach this proxy's DOM and
@@ -179,13 +229,34 @@
               }
               inner.setAttribute("sandbox", safeTokens.join(" "));
             }
+            if (srcUrl) {
+              // Re-grant what the strip above removes unconditionally. Safe
+              // here and only here: the document is served from a DIFFERENT
+              // origin than this proxy (asserted above), so same-origin policy
+              // still denies it this realm's DOM — it gains its own origin,
+              // not ours.
+              const tokens = (inner.getAttribute("sandbox") || "")
+                .split(/\s+/)
+                .filter(Boolean);
+              if (!tokens.some((t) => t.toLowerCase() === "allow-same-origin")) {
+                tokens.push("allow-same-origin");
+              }
+              inner.setAttribute("sandbox", tokens.join(" "));
+            }
             // Set Permission Policy allow attribute if permissions are requested
             const allowAttribute = buildAllowAttribute(permissions);
             if (allowAttribute) {
               console.log("[Sandbox] Setting allow attribute:", allowAttribute);
               inner.setAttribute("allow", allowAttribute);
             }
-            if (typeof html === "string") {
+            if (srcUrl) {
+              // Navigate to the host's app-origin URL. The per-app CSP is
+              // delivered as a real response header there (stronger than the
+              // <meta> the srcdoc path relies on), so no wrapping applies here
+              // — this proxy still never parses the untrusted bytes.
+              innerOrigin = srcUrl.origin;
+              inner.src = srcUrl.href;
+            } else if (typeof html === "string") {
               // The host has already wrapped the app's HTML in a fixed shell
               // whose first <head> child is the CSP <meta>; assign it verbatim.
               // srcdoc is the only delivery path that works without
@@ -198,7 +269,16 @@
             }
           } else {
             if (inner && inner.contentWindow) {
-              inner.contentWindow.postMessage(event.data, "*");
+              // Target the inner frame's real origin on the dedicated-origin
+              // path, so a frame that navigated itself elsewhere stops
+              // receiving host messages. The opaque default has no targetable
+              // origin ("null" is not a valid targetOrigin), so it keeps "*" —
+              // safe there because the frame is `srcdoc` and cannot navigate
+              // to another origin's document without allow-top-navigation.
+              inner.contentWindow.postMessage(
+                event.data,
+                innerOrigin === "null" ? "*" : innerOrigin,
+              );
             }
           }
         } else if (event.source === inner.contentWindow) {
@@ -207,12 +287,12 @@
           // sandbox means its origin serialises as the literal string "null";
           // assert that as defense-in-depth so a future change that
           // accidentally re-grants allow-same-origin is caught here.
-          if (event.origin !== INNER_ORIGIN) {
+          if (event.origin !== innerOrigin) {
             console.error(
               "[Sandbox] Rejecting message from inner iframe with unexpected origin:",
               event.origin,
-              "expected opaque:",
-              INNER_ORIGIN,
+              "expected:",
+              innerOrigin,
             );
             return;
           }

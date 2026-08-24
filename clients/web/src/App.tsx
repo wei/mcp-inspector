@@ -148,6 +148,7 @@ import {
 import { clearScrollMemory } from "./hooks/useScrollMemory";
 import type { AppRendererHandle } from "./components/elements/AppRenderer/AppRenderer";
 import { createAppBridgeFactory } from "./components/elements/AppRenderer/createAppBridgeFactory";
+import { publishAppDocument } from "./lib/publishAppDocument";
 import { AppElicitationHost } from "./components/elements/AppElicitation/AppElicitationHost";
 import {
   AppElicitationController,
@@ -808,9 +809,23 @@ function App() {
     [],
   );
 
+  // `_meta.ui.domain` support (#2056): hand a wrapped app document to the
+  // backend so it can serve it from a dedicated origin, giving the app's
+  // requests a real `Origin`. Resolves `null` on any backend that can't, and
+  // the factory then renders the app the default (opaque-origin) way.
+  const publishDocument = useCallback(
+    (doc: { html: string; csp?: string }) =>
+      publishAppDocument(doc, {
+        baseUrl: configBaseUrl,
+        authToken: getAuthToken(),
+      }),
+    [configBaseUrl],
+  );
+
   const sandboxBridgeFactory = useMemo(
     () =>
       createAppBridgeFactory({
+        publishAppDocument: publishDocument,
         getClient: () => inspectorClient?.getAppRendererClient() ?? null,
         getListedResourceMeta,
         readResource: async (uri) => {
@@ -832,7 +847,7 @@ function App() {
           });
         },
       }),
-    [inspectorClient, getListedResourceMeta],
+    [inspectorClient, getListedResourceMeta, publishDocument],
   );
 
   // App-rendered form elicitations (#1854). The controller is created once and
@@ -885,6 +900,7 @@ function App() {
     () =>
       createAppBridgeFactory({
         advertiseElicitation: true,
+        publishAppDocument: publishDocument,
         getClient: () => inspectorClient?.getAppRendererClient() ?? null,
         getListedResourceMeta,
         readResource: async (uri) => {
@@ -903,7 +919,7 @@ function App() {
           });
         },
       }),
-    [inspectorClient, getListedResourceMeta],
+    [inspectorClient, getListedResourceMeta, publishDocument],
   );
   /**
    * Close the previous client's session and open one for the client being

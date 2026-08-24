@@ -19,6 +19,7 @@ import type { SecretStorageInfo } from "../../../core/auth/secret-storage-info.t
 import { secretStorageSummary } from "../../../core/auth/secret-storage-info.ts";
 import { readInspectorVersionSafe } from "../../../core/node/version.ts";
 import { resolveSandboxPort } from "./sandbox-controller.js";
+import { resolveAppOriginPort } from "./app-origin-controller.js";
 import { resolveBindHostname } from "./resolve-bind-host.js";
 import {
   canonicalUrlHost,
@@ -66,6 +67,13 @@ export interface WebServerConfig {
   /** Sandbox port (0 = dynamic). */
   sandboxPort: number;
   sandboxHost: string;
+  /**
+   * Port for the dedicated app origin (#2056) — the listener that serves an
+   * MCP App declaring `_meta.ui.domain` so its requests carry a real `Origin`
+   * instead of `null`. `0` = dynamic. Bound on {@link sandboxHost}, the same
+   * address the sandbox uses.
+   */
+  appOriginPort: number;
   logger: Logger | undefined;
   /** When true, open browser after server starts. */
   autoOpen: boolean;
@@ -369,6 +377,7 @@ export function buildWebServerConfig(
       "");
 
   const sandboxPort = resolveSandboxPort();
+  const appOriginPort = resolveAppOriginPort();
 
   let logger: Logger | undefined;
   if (process.env.MCP_LOG_FILE) {
@@ -439,6 +448,7 @@ export function buildWebServerConfig(
       : defaultAllowedOrigins(hostname, port),
     sandboxPort,
     sandboxHost: hostname,
+    appOriginPort,
     logger,
     autoOpen: resolveAutoOpen(),
   };

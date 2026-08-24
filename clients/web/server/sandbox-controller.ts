@@ -70,7 +70,21 @@ const CSP_HOST_SOURCE = /^[a-z][a-z0-9+.-]*:\/\/[^\s;,'"[\]*]+$/i;
  * header can't be corrupted.
  */
 export function sandboxFrameAncestors(allowedOrigins?: string[]): string {
-  const valid = (allowedOrigins ?? []).filter((o) => CSP_HOST_SOURCE.test(o));
+  return frameAncestorsDirective(allowedOrigins);
+}
+
+/**
+ * Build a `frame-ancestors` directive from a caller-supplied origin list,
+ * dropping malformed entries ({@link CSP_HOST_SOURCE}) and falling back to
+ * {@link LOOPBACK_FRAME_ANCESTORS} when nothing valid remains.
+ *
+ * Shared with the app-origin server (#2056), which restricts a published app
+ * document to being framed by the sandbox proxy. Same grammar, same failure
+ * mode — a directive whose only source is invalid degrades to `'none'` and
+ * blocks the frame — so the two derive it here rather than each rolling one.
+ */
+export function frameAncestorsDirective(origins?: string[]): string {
+  const valid = (origins ?? []).filter((o) => CSP_HOST_SOURCE.test(o));
   const sources = valid.length > 0 ? valid : LOOPBACK_FRAME_ANCESTORS;
   return `frame-ancestors ${sources.join(" ")}`;
 }

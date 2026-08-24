@@ -256,6 +256,23 @@ export interface RemoteServerOptions {
   /** Optional sandbox URL for MCP Apps tab. When set, GET /api/config includes sandboxUrl. */
   sandboxUrl?: string;
 
+  /**
+   * Publish a fully-wrapped MCP App document to the backend's dedicated
+   * app-origin listener and return the URL to load it from (#2056). When set,
+   * `POST /api/app-document` is served; when absent — or when it returns
+   * `null`, meaning the listener never bound — the route answers 503 and the
+   * browser falls back to the default opaque-origin `srcdoc` render.
+   *
+   * Supplied by the web backends only. It is an option rather than a route
+   * built here because the listener is a `clients/web/server` concern; this
+   * module owns nothing but the authenticated seam the browser reaches it
+   * through.
+   */
+  publishAppDocument?: (doc: {
+    html: string;
+    csp?: string;
+  }) => { url: string } | null;
+
   /** Initial config for GET /api/config. Caller must pass this (e.g. from webServerConfigToInitialPayload(config)). */
   initialConfig: InitialConfigPayload;
 
@@ -279,6 +296,15 @@ export interface RemoteServerOptions {
    */
   secretStorageResolver?: () => Promise<SecretStorageInfo | undefined>;
 }
+
+/**
+ * Upper bound on a single MCP App document accepted by `POST /api/app-document`
+ * (#2056). Counted in UTF-16 code units, which is what `String.length` gives —
+ * a loose but cheap proxy for bytes, and it only has to keep a runaway or
+ * hostile payload from being pinned in the backend's memory. Generous: a real
+ * app inlines its own scripts and styles into this one document.
+ */
+const MAX_APP_DOCUMENT_CHARS = 8 * 1024 * 1024;
 
 export interface CreateRemoteAppResult {
   /** The Hono app */
@@ -705,6 +731,45 @@ export function createRemoteApp(
       ...(options.sandboxUrl ? { sandboxUrl: options.sandboxUrl } : {}),
     };
     return c.json(payload);
+  });
+
+  /**
+   * Hand the backend a wrapped MCP App document and get back the URL its
+   * dedicated origin serves it from (#2056).
+   *
+   * The browser is what holds the document — it read the `ui://` resource over
+   * the MCP connection and wrapped it — so the only way it can reach a real
+   * HTTP origin is to hand the bytes back. This route is the authenticated
+   * seam for that; the returned URL is unguessable and is served by a separate
+   * listener on its own port, which is what makes the app's origin real
+   * instead of opaque.
+   */
+  app.post("/api/app-document", async (c) => {
+    const publish = options.publishAppDocument;
+    if (!publish) {
+      return c.json({ error: "App-origin hosting is not available" }, 503);
+    }
+    let body: { html?: unknown; csp?: unknown };
+    try {
+      body = (await c.req.json()) as { html?: unknown; csp?: unknown };
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    const { html, csp } = body;
+    if (typeof html !== "string" || html === "") {
+      return c.json({ error: "Missing html" }, 400);
+    }
+    if (csp !== undefined && typeof csp !== "string") {
+      return c.json({ error: "csp must be a string" }, 400);
+    }
+    if (html.length > MAX_APP_DOCUMENT_CHARS) {
+      return c.json({ error: "Document too large" }, 413);
+    }
+    const published = publish({ html, csp });
+    if (!published) {
+      return c.json({ error: "App-origin hosting is not available" }, 503);
+    }
+    return c.json(published);
   });
 
   app.post("/api/mcp/connect", async (c) => {
