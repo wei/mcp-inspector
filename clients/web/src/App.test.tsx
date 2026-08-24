@@ -355,6 +355,29 @@ vi.mock("@inspector/core/react/useSettingsDraft.js", () => ({
   })),
 }));
 
+// --- App bridge factory spy (#2055) -----------------------------------------
+// Passes through to the real factory but records the deps App hands it, so a
+// test can drive `getListedResourceMeta` — the wiring that carries a
+// `resources/list` entry's `_meta.ui` into the sandbox CSP. Without this the
+// bridge-factory unit tests would still pass while App stopped supplying it.
+const appBridgeFactoryDeps: AppBridgeFactoryDeps[] = [];
+vi.mock(
+  "./components/elements/AppRenderer/createAppBridgeFactory",
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import("./components/elements/AppRenderer/createAppBridgeFactory")
+      >();
+    return {
+      ...actual,
+      createAppBridgeFactory: (deps: AppBridgeFactoryDeps) => {
+        appBridgeFactoryDeps.push(deps);
+        return actual.createAppBridgeFactory(deps);
+      },
+    };
+  },
+);
+
 // --- InspectorView double ---------------------------------------------------
 // Surfaces each piece of session-scoped state under test and exposes buttons
 // that invoke the App's connect / call-tool / get-prompt / read-resource /
@@ -590,6 +613,8 @@ import type {
   MessageEntry,
   ServerEntry,
 } from "@inspector/core/mcp/types.js";
+import type { AppBridgeFactoryDeps } from "./components/elements/AppRenderer/createAppBridgeFactory";
+import { useManagedResources } from "@inspector/core/react/useManagedResources.js";
 
 // Default useInspectorClient return — capabilities empty (no task tool calls).
 // Individual tests override via vi.mocked(...).mockReturnValue(...).
@@ -3114,6 +3139,51 @@ describe("App background command rejections (#2049)", () => {
       expect(rejections.seen).toEqual([]);
     } finally {
       rejections.stop();
+    }
+  });
+});
+
+describe("App MCP App listed-resource metadata wiring (#2055)", () => {
+  beforeEach(() => {
+    appBridgeFactoryDeps.length = 0;
+  });
+
+  afterEach(() => {
+    // The hook mock is module-level and shared, so put the empty-list default
+    // back rather than leaving a populated list for whatever runs next.
+    vi.mocked(useManagedResources).mockReturnValue({
+      resources: [],
+      refresh: vi.fn(),
+      clearListChanged: vi.fn(),
+    } as unknown as ReturnType<typeof useManagedResources>);
+  });
+
+  it("hands the bridge factory a getListedResourceMeta reading the resources/list entries", async () => {
+    // ext-apps treats a listing entry's `_meta.ui` as the static default for a
+    // UI resource, so the App has to surface the listing to the bridge — the
+    // factory's own tests inject the dep and cannot see this wiring break.
+    const listedMeta = {
+      ui: { csp: { connectDomains: ["https://api.example.com"] } },
+    };
+    vi.mocked(useManagedResources).mockReturnValue({
+      resources: [
+        { uri: "ui://weather/app.html", name: "app", _meta: listedMeta },
+      ],
+      refresh: vi.fn(),
+      clearListChanged: vi.fn(),
+    } as unknown as ReturnType<typeof useManagedResources>);
+
+    renderWithMantine(<App />);
+    await waitFor(() => expect(appBridgeFactoryDeps.length).toBeGreaterThan(0));
+
+    // Every factory App builds gets the wiring, not just the Apps-tab one.
+    for (const deps of appBridgeFactoryDeps) {
+      expect(deps.getListedResourceMeta?.("ui://weather/app.html")).toEqual(
+        listedMeta,
+      );
+      expect(
+        deps.getListedResourceMeta?.("ui://other/app.html"),
+      ).toBeUndefined();
     }
   });
 });
