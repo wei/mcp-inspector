@@ -7,6 +7,7 @@ import {
   Select,
   Stack,
   Text,
+  rem,
   Textarea,
   type TextareaProps,
   TextInput,
@@ -14,6 +15,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type ChangeEvent,
@@ -75,7 +77,10 @@ const MultilineStringInput = Textarea.withProps({
 function EnlargedStringField(props: TextareaProps) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  useEffect(() => {
+  // Layout, not passive: a passive effect runs after paint, so the browser would
+  // present at least one frame with focus on the document body — long enough for
+  // a fast Tab to land somewhere else entirely.
+  useLayoutEffect(() => {
     const node = inputRef.current;
     /* v8 ignore next -- an effect runs after mount, so the ref is always set */
     if (!node) return;
@@ -90,10 +95,20 @@ function EnlargedStringField(props: TextareaProps) {
 // them on one line inside a section only wide enough for the two.
 const FieldActions = Group.withProps({ gap: 2, wrap: "nowrap" });
 
-// Widths of the string field's right section, which has to be declared rather
-// than measured. One button's worth, and two.
-const ONE_ACTION_WIDTH = 34;
-const TWO_ACTION_WIDTH = 62;
+// Width of the string field's right section, which Mantine takes as a number it
+// cannot derive from its content. Built from the parts rather than written as a
+// pixel total, so it stays right if a button or the gap changes, and emitted as
+// `rem` so it tracks a user's root font size rather than pinning to CSS pixels.
+// The two button widths are what they measure at their current sizes (ActionIcon
+// `sm` and CloseButton's default); the inset keeps them off the field's edge.
+const ENLARGE_WIDTH = 22;
+const CLEAR_WIDTH = 28;
+const ACTION_GAP = 2;
+const SECTION_INSET = 6;
+const ONE_ACTION_WIDTH = rem(CLEAR_WIDTH + SECTION_INSET);
+const TWO_ACTION_WIDTH = rem(
+  ENLARGE_WIDTH + ACTION_GAP + CLEAR_WIDTH + SECTION_INSET,
+);
 
 function serializeJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
