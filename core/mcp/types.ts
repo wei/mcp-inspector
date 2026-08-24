@@ -181,6 +181,15 @@ export type StoredMCPServer = MCPServerConfig & {
     /** SEP-2350 step-up policy for `403 insufficient_scope` (default `reauthorize`). */
     onInsufficientScope?: OnInsufficientScopePolicy;
     /**
+     * Whether the Inspector declares the `refresh_token` grant when it
+     * registers. Defaults to `true`; only `false` is written to disk, so an
+     * entry that never touched the setting keeps a minimal diff. Turning it off
+     * also stops the SDK adding `offline_access` to the requested scope and
+     * `prompt=consent` to the authorization request. Inspector-specific.
+     * (#2068)
+     */
+    requestRefreshToken?: boolean;
+    /**
      * Custom query parameters appended to the OAuth **authorization request**
      * (never the token request) — e.g. Keycloak's `kc_idp_hint`, OIDC's
      * `login_hint` / `prompt` / `acr_values`, Auth0's `audience`. Reserved,
@@ -588,6 +597,11 @@ export interface OAuthSettings {
   tokenUrl?: string;
   enterpriseManaged?: boolean;
   onInsufficientScope?: OnInsufficientScopePolicy;
+  /**
+   * Whether to declare the `refresh_token` grant (#2068). Optional for the same
+   * reason as `authorizationParams`; `undefined` means the default, on.
+   */
+  requestRefreshToken?: boolean;
 }
 
 /**
@@ -773,6 +787,14 @@ export interface InspectorServerSettings {
    * server's HTTP transport. Defaults to `reauthorize` when unset.
    */
   oauthOnInsufficientScope?: OnInsufficientScopePolicy;
+  /**
+   * Whether the Inspector declares the `refresh_token` grant in its OAuth
+   * client metadata for this server. `undefined` (the default) means on;
+   * persisted as `oauth.requestRefreshToken` only when explicitly off. Turning
+   * it off also drops the SDK's automatic `offline_access` scope and the
+   * `prompt=consent` it forces — the Entra admin-consent failure in #2068.
+   */
+  oauthRequestRefreshToken?: boolean;
   /**
    * When true, connect via the configured enterprise IdP (EMA) instead of
    * interactive OAuth to the MCP authorization server. Per-server OAuth
@@ -1160,6 +1182,11 @@ export interface InspectorClientOptions {
      */
     authorizationUrl?: string;
     tokenUrl?: string;
+    /**
+     * Declare the `refresh_token` grant in the registered client metadata
+     * (#2068). Defaults to `true` when omitted.
+     */
+    requestRefreshToken?: boolean;
   };
 
   /**

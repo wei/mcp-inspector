@@ -706,7 +706,49 @@ describe("ServerSettingsForm", () => {
       authorizationUrl: "",
       tokenUrl: "",
       enterpriseManaged: false,
+      requestRefreshToken: true,
     });
+  });
+
+  // #2068 — the refresh-token opt-out. On by default; unchecking it is what
+  // stops the SDK adding `offline_access` and then `prompt=consent`.
+  it("renders Request refresh token checked by default", () => {
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={emptySettings}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(screen.getByLabelText("Request refresh token")).toBeChecked();
+  });
+
+  it("renders Request refresh token unchecked when the server opted out", () => {
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{ ...emptySettings, oauthRequestRefreshToken: false }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(screen.getByLabelText("Request refresh token")).not.toBeChecked();
+  });
+
+  it("toggles Request refresh token through onOAuthChange", async () => {
+    const user = userEvent.setup();
+    const onOAuthChange = vi.fn();
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        onOAuthChange={onOAuthChange}
+        settings={emptySettings}
+        expandedSections={["oauth"]}
+      />,
+    );
+    await user.click(screen.getByLabelText("Request refresh token"));
+    expect(onOAuthChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ requestRefreshToken: false }),
+    );
   });
 
   // #2018 — custom authorization-request parameters.
@@ -1112,6 +1154,7 @@ describe("ServerSettingsForm", () => {
       authorizationUrl: "",
       tokenUrl: "",
       enterpriseManaged: true,
+      requestRefreshToken: true,
     });
   });
 
@@ -1219,6 +1262,7 @@ describe("ServerSettingsForm", () => {
       authorizationUrl: "",
       tokenUrl: "",
       enterpriseManaged: false,
+      requestRefreshToken: true,
     });
   });
 

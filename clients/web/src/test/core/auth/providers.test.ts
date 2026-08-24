@@ -464,6 +464,48 @@ describe("OAuthNavigation", () => {
       expect(provider.clientMetadata.application_type).toBe("native");
     });
 
+    describe("requestRefreshToken (#2068)", () => {
+      function makeProviderWithRefresh(
+        requestRefreshToken: boolean | undefined,
+      ): BaseOAuthClientProvider {
+        return new BaseOAuthClientProvider(SERVER, {
+          storage: makeStorage(),
+          redirectUrlProvider: new MutableRedirectUrlProvider(),
+          navigation: new CallbackNavigation(vi.fn()),
+          requestRefreshToken,
+        });
+      }
+
+      it("declares the refresh_token grant by default", () => {
+        expect(makeProvider(makeStorage()).clientMetadata.grant_types).toEqual([
+          "authorization_code",
+          "refresh_token",
+        ]);
+      });
+
+      it("declares the refresh_token grant when explicitly enabled", () => {
+        expect(
+          makeProviderWithRefresh(true).clientMetadata.grant_types,
+        ).toEqual(["authorization_code", "refresh_token"]);
+      });
+
+      it("treats an omitted setting as enabled", () => {
+        expect(
+          makeProviderWithRefresh(undefined).clientMetadata.grant_types,
+        ).toEqual(["authorization_code", "refresh_token"]);
+      });
+
+      // The point of the opt-out: the SDK's determineScope() only appends
+      // `offline_access` when the client metadata declares `refresh_token`, and
+      // startAuthorization() only forces `prompt=consent` when `offline_access`
+      // is in scope. Dropping the grant is what breaks that chain.
+      it("drops the refresh_token grant when disabled", () => {
+        expect(
+          makeProviderWithRefresh(false).clientMetadata.grant_types,
+        ).toEqual(["authorization_code"]);
+      });
+    });
+
     describe("SEP-2352 issuer threading", () => {
       it("forwards ctx.issuer to storage on clientInformation/tokens reads", async () => {
         const storage = makeStorage();

@@ -105,6 +105,21 @@ export type OAuthProviderConfig = {
    * unaffected.
    */
   authorizationParams?: Record<string, string>;
+  /**
+   * Whether to declare the `refresh_token` grant in the registered client
+   * metadata (#2068). Defaults to `true`; set `false` to register (and
+   * authorize) as an authorization-code-only client.
+   *
+   * This is not merely cosmetic. The SDK's `determineScope()` appends
+   * `offline_access` to the effective scope whenever the authorization server
+   * advertises it **and** the client metadata declares `refresh_token`, and
+   * `startAuthorization()` then appends `prompt=consent` whenever
+   * `offline_access` is in scope. Against Microsoft Entra ID, that forced
+   * consent prompt routes a non-admin user into the admin-consent workflow and
+   * fails with `AADSTS90094` even after a tenant admin has consented. Dropping
+   * the grant here breaks that chain at its source.
+   */
+  requestRefreshToken?: boolean;
 };
 
 /**
@@ -126,6 +141,8 @@ export class BaseOAuthClientProvider implements OAuthClientProvider {
   public clientMetadataUrl?: string;
   /** Custom authorization-request parameters (#2018). Authorize URL only. */
   protected authorizationParams?: Record<string, string>;
+  /** Declare the `refresh_token` grant in {@link clientMetadata} (#2068). */
+  protected requestRefreshToken: boolean;
 
   constructor(serverUrl: string, oauthConfig: OAuthProviderConfig) {
     this.serverUrl = serverUrl;
@@ -134,6 +151,7 @@ export class BaseOAuthClientProvider implements OAuthClientProvider {
     this.navigation = oauthConfig.navigation;
     this.clientMetadataUrl = oauthConfig.clientMetadataUrl;
     this.authorizationParams = oauthConfig.authorizationParams;
+    this.requestRefreshToken = oauthConfig.requestRefreshToken ?? true;
   }
 
   /**
@@ -186,7 +204,13 @@ export class BaseOAuthClientProvider implements OAuthClientProvider {
     const metadata: OAuthClientMetadata = {
       redirect_uris: this.redirect_uris,
       token_endpoint_auth_method: "none",
-      grant_types: ["authorization_code", "refresh_token"],
+      // #2068: `refresh_token` is declared by default, and dropped when the
+      // server's "Request refresh token" setting is off — which also stops the
+      // SDK adding `offline_access` (and therefore `prompt=consent`) to the
+      // authorization request. See `OAuthProviderConfig.requestRefreshToken`.
+      grant_types: this.requestRefreshToken
+        ? ["authorization_code", "refresh_token"]
+        : ["authorization_code"],
       response_types: ["code"],
       client_name: "MCP Inspector",
       client_uri: "https://github.com/modelcontextprotocol/inspector",

@@ -518,6 +518,8 @@ export function ServerSettingsForm({
       tokenUrl: settings.oauthTokenUrl ?? "",
       enterpriseManaged: settings.enterpriseManaged ?? false,
       onInsufficientScope: settings.oauthOnInsufficientScope,
+      // Unset means the default, on — only an explicit opt-out is stored.
+      requestRefreshToken: settings.oauthRequestRefreshToken ?? true,
     };
   }
 
@@ -877,6 +879,17 @@ export function ServerSettingsForm({
                       }
                     />
                   ) : null
+                }
+              />
+              <Checkbox
+                label="Request refresh token"
+                description="When checked, the Inspector registers with the refresh_token grant so it can renew access tokens without a new sign-in. Uncheck it for authorization servers where that grant forces an unwanted consent prompt — the SDK adds offline_access to the requested scope whenever the grant is declared, and then prompt=consent to the authorization request. On Microsoft Entra ID that routes a non-admin user into the admin-consent workflow (AADSTS90094) even after a tenant admin has consented."
+                checked={settings.oauthRequestRefreshToken ?? true}
+                onChange={(e) =>
+                  onOAuthChange({
+                    ...currentOAuth(),
+                    requestRefreshToken: e.currentTarget.checked,
+                  })
                 }
               />
               <Stack gap="xs">

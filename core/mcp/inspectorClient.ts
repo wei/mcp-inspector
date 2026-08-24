@@ -6330,6 +6330,8 @@ export class InspectorClient extends InspectorClientEventTarget {
     /** Endpoint overrides applied to the discovered AS metadata (#1906). */
     authorizationUrl?: string;
     tokenUrl?: string;
+    /** Declare the `refresh_token` grant in client metadata (#2068). */
+    requestRefreshToken?: boolean;
   }): void {
     if (!this.oauthManager) {
       throw new Error(

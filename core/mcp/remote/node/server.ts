@@ -1391,6 +1391,7 @@ export function createRemoteApp(
     authorizationUrl?: string;
     tokenUrl?: string;
     enterpriseManaged?: boolean;
+    requestRefreshToken?: boolean;
   } => {
     if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
     const o = v as Record<string, unknown>;
@@ -1415,6 +1416,14 @@ export function createRemoteApp(
     if (
       o.enterpriseManaged !== undefined &&
       typeof o.enterpriseManaged !== "boolean"
+    ) {
+      return false;
+    }
+    // #2068 — shape only; the read side keeps just an explicit `false`, so a
+    // stray `true` from a hand-edited file reads back as the default anyway.
+    if (
+      o.requestRefreshToken !== undefined &&
+      typeof o.requestRefreshToken !== "boolean"
     ) {
       return false;
     }
@@ -1531,7 +1540,7 @@ export function createRemoteApp(
       if ("oauth" in valObj && !isOauthObject(valObj.oauth)) {
         logWarn(
           { route: "/api/servers", id, droppedKey: "oauth" },
-          "Dropping malformed `oauth` field — expected `{ clientId?, clientSecret?, scopes?, authorizationParams?, authorizationUrl?, tokenUrl?, enterpriseManaged?, onInsufficientScope? }`.",
+          "Dropping malformed `oauth` field — expected `{ clientId?, clientSecret?, scopes?, authorizationParams?, authorizationUrl?, tokenUrl?, enterpriseManaged?, onInsufficientScope?, requestRefreshToken? }`.",
         );
         delete valObj.oauth;
       }
@@ -1833,6 +1842,15 @@ export function createRemoteApp(
       };
     }
     if (
+      obj.oauthRequestRefreshToken !== undefined &&
+      typeof obj.oauthRequestRefreshToken !== "boolean"
+    ) {
+      return {
+        ok: false,
+        error: "settings.oauthRequestRefreshToken must be a boolean",
+      };
+    }
+    if (
       obj.oauthOnInsufficientScope !== undefined &&
       obj.oauthOnInsufficientScope !== "reauthorize" &&
       obj.oauthOnInsufficientScope !== "throw"
@@ -1958,6 +1976,11 @@ export function createRemoteApp(
     }
     if (obj.enterpriseManaged === true) {
       value.enterpriseManaged = true;
+    }
+    // #2068: the default is on, so only the explicit opt-out is carried; a
+    // `true` on the wire reads back as unset, which means the same thing.
+    if (obj.oauthRequestRefreshToken === false) {
+      value.oauthRequestRefreshToken = false;
     }
     if (
       obj.oauthOnInsufficientScope === "reauthorize" ||

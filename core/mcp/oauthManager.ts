@@ -98,6 +98,8 @@ export class OAuthManager {
     authorizationParams?: Record<string, string>;
     authorizationUrl?: string;
     tokenUrl?: string;
+    /** Declare the `refresh_token` grant in client metadata (#2068). */
+    requestRefreshToken?: boolean;
   }): void {
     this.oauthConfig = {
       ...this.oauthConfig,
@@ -169,6 +171,10 @@ export class OAuthManager {
       // read from mcp.json, and nothing in the flow needs to persist or union
       // them.
       authorizationParams: this.oauthConfig.authorizationParams,
+      // #2068: per-server opt-out of the `refresh_token` grant. Like
+      // `authorizationParams` this is pure config off mcp.json, so it lives on
+      // the provider rather than in OAuth storage.
+      requestRefreshToken: this.oauthConfig.requestRefreshToken,
     });
 
     provider.setEventTarget(this.params.getEventTarget());
