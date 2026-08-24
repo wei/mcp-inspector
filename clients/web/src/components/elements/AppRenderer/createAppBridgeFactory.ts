@@ -111,21 +111,31 @@ export interface AppBridgeFactoryDeps {
 }
 
 /**
- * The MCP Apps sandbox hints (`csp`, `permissions`, …) nested under a `_meta`
- * bag's `ui` key. `McpUiResourceMeta` describes the value of `_meta.ui`, NOT
- * `_meta` itself — reading `_meta` directly leaves every field `undefined`, so
- * a spec-conforming app's declared `connectDomains` never reach the generated
- * CSP and it renders under `connect-src 'none'` (#2055). This mirrors the tool
- * side, where `getToolUiResourceUri` already reads `_meta.ui.resourceUri`.
+ * The MCP Apps sandbox hints (`csp`, `permissions`, …) a single `_meta` bag
+ * declares under its `ui` key, or undefined when that bag declares none.
+ *
+ * The two "no hints" cases are deliberately distinguished by the return type:
+ * a bag with no `ui` key at all returns undefined (this carrier is silent —
+ * keep looking), while a bag whose `ui` is malformed returns `{ meta:
+ * undefined }` (this carrier spoke, and what it said is unusable — stop). Were
+ * they conflated, a content item declaring `ui: null` would fall through to a
+ * broader carrier and be granted whatever *that* one asked for, which is both
+ * the wrong precedence and the wrong direction to fail in.
+ *
+ * `McpUiResourceMeta` describes the value of `_meta.ui`, NOT `_meta` itself —
+ * reading `_meta` directly leaves every field undefined, so a spec-conforming
+ * app's declared `connectDomains` never reach the generated CSP and it renders
+ * under `connect-src 'none'` (#2055). This mirrors the tool side, where
+ * `getToolUiResourceUri` already reads `_meta.ui.resourceUri`.
  */
-function uiMeta(meta: object | undefined): McpUiResourceMeta | undefined {
-  // `_meta` is typed with an index signature, which has no properties in common
-  // with a `{ ui?: unknown }` parameter — hence the cast rather than a narrower
-  // parameter type. Reading one key off an untyped bag is safe.
-  const ui = (meta as { ui?: unknown } | undefined)?.ui;
-  return ui !== null && typeof ui === "object"
-    ? (ui as McpUiResourceMeta)
-    : undefined;
+function uiMeta(
+  bag: object | undefined,
+): { meta: McpUiResourceMeta | undefined } | undefined {
+  if (bag === undefined || !("ui" in bag)) return undefined;
+  const ui: unknown = (bag as { ui: unknown }).ui;
+  const wellFormed =
+    ui !== null && typeof ui === "object" && !Array.isArray(ui);
+  return { meta: wellFormed ? (ui as McpUiResourceMeta) : undefined };
 }
 
 /**
@@ -140,9 +150,11 @@ function uiMeta(meta: object | undefined): McpUiResourceMeta | undefined {
  *    documents as the static default a host reviews at connection time, and
  *    which a read content item explicitly takes precedence over.
  *
- * Whichever is found first wins outright — the levels are not merged, since a
- * server that restates only `csp` at the more specific level means that to be
- * the whole grant, not a patch over the broader one.
+ * The first carrier that *declares* a `ui` key decides, and its value is used
+ * outright — the levels are not merged, since a server that restates only
+ * `csp` at the more specific level means that to be the whole grant, not a
+ * patch over the broader one. A carrier declaring a malformed `ui` decides
+ * too, for "no hints"; see {@link uiMeta}.
  */
 function extractHtmlAndMeta(
   result: ReadResourceResult,
@@ -154,11 +166,9 @@ function extractHtmlAndMeta(
   for (const content of result.contents) {
     const text = (content as { text?: unknown }).text;
     if (typeof text === "string") {
-      return {
-        html: text,
-        meta:
-          uiMeta(content._meta) ?? uiMeta(result._meta) ?? uiMeta(listedMeta),
-      };
+      const carried =
+        uiMeta(content._meta) ?? uiMeta(result._meta) ?? uiMeta(listedMeta);
+      return { html: text, meta: carried?.meta };
     }
   }
   throw new Error("UI resource has no text (HTML) content");

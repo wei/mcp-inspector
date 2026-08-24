@@ -392,6 +392,67 @@ describe("createAppBridgeFactory", () => {
     expect(call.html).toContain("connect-src &#39;none&#39;");
   });
 
+  it("prefers the content item's _meta.ui over both broader carriers", async () => {
+    // Pins the full three-way order — content item > result envelope > listing
+    // — which no single-fallback case can: swapping the first two operands
+    // would still satisfy them.
+    const result = uiResource("<h1>x</h1>", {
+      csp: { connectDomains: ["https://content.example.com"] },
+    });
+    (result as { _meta?: unknown })._meta = {
+      ui: { csp: { connectDomains: ["https://envelope.example.com"] } },
+    };
+    const factory = createAppBridgeFactory({
+      getClient: () => fakeClient,
+      readResource: vi.fn().mockResolvedValue(result),
+      getListedResourceMeta: () =>
+        listedMeta({ csp: { connectDomains: ["https://listed.example.com"] } }),
+    });
+    await factory(makeIframe(), { kind: "tool", tool });
+    const bridge = bridgeInstances[0];
+    bridge.emit("sandboxready");
+    await flush();
+
+    const call = bridge.sendSandboxResourceReady.mock.calls[0][0] as {
+      html: string;
+    };
+    expect(call.html).toContain("connect-src https://content.example.com");
+    expect(call.html).not.toContain("envelope.example.com");
+    expect(call.html).not.toContain("listed.example.com");
+  });
+
+  it("stops at a carrier whose _meta.ui is malformed rather than falling through", async () => {
+    // A declared-but-unusable `ui` is that carrier's answer. Falling through
+    // would grant whatever a BROADER carrier asked for — wrong precedence, and
+    // the wrong direction to fail in.
+    const readResource = vi
+      .fn()
+      .mockResolvedValue(
+        uiResource("<h1>x</h1>", { ui: null }, { flat: true }),
+      );
+    const factory = createAppBridgeFactory({
+      getClient: () => fakeClient,
+      readResource,
+      getListedResourceMeta: () =>
+        listedMeta({
+          permissions: { camera: {} },
+          csp: { connectDomains: ["https://listed.example.com"] },
+        }),
+    });
+    await factory(makeIframe(), { kind: "tool", tool });
+    const bridge = bridgeInstances[0];
+    bridge.emit("sandboxready");
+    await flush();
+
+    const call = bridge.sendSandboxResourceReady.mock.calls[0][0] as {
+      html: string;
+      permissions: unknown;
+    };
+    expect(call.permissions).toBeUndefined();
+    expect(call.html).not.toContain("listed.example.com");
+    expect(call.html).toContain("connect-src &#39;none&#39;");
+  });
+
   it("ignores sandbox metadata written unnested on _meta", async () => {
     // `McpUiResourceMeta` describes the value of `_meta.ui`, not `_meta`. A bag
     // whose keys sit at the top level is not the spec shape, so it must not be

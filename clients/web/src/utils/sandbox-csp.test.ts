@@ -107,6 +107,15 @@ describe("approveSandboxPermissions", () => {
     warn.mockRestore();
   });
 
+  it("accepts a non-empty object, since `{}` is the spec's extension point", () => {
+    // The key's presence is the request; a field the host doesn't know can't
+    // narrow it, and rejecting it would drop grants from servers written
+    // against a newer spec. The value is normalized to `{}` on the way out.
+    expect(approveSandboxPermissions({ camera: { enabled: false } })).toEqual({
+      camera: {},
+    });
+  });
+
   it("drops `false` without warning, and ignores unknown keys", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     expect(

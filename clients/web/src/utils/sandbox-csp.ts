@@ -106,13 +106,21 @@ const PERMISSION_KEYS = exhaustivePermissionKeys([
  * the `unknown` parameter: this is the boundary that decides what the shape is,
  * not a consumer of an already-validated one.
  *
- * A key counts as requested only when it carries the spec's empty-object marker
- * (`camera: {}` — {@link McpUiResourcePermissions} defines every permission that
- * way). Everything else fails closed: `true`, `false`, any string, `null`, a
- * number, an array, and any key outside the four the proxy knows. `true` in
- * particular looks like a harmless shorthand, but honoring an undocumented one
- * means a server typo turns an iframe permission ON, which is the wrong
- * direction to guess in.
+ * A key counts as requested only when its value is an **object** — the marker
+ * {@link McpUiResourcePermissions} defines for every permission is `{}`, and
+ * presence of that object is the request. Everything else fails closed:
+ * `true`, `false`, any string, `null`, a number, an array, and any key outside
+ * the four the proxy knows. `true` in particular looks like a harmless
+ * shorthand, but honoring an undocumented one means a server typo turns an
+ * iframe permission ON, which is the wrong direction to guess in.
+ *
+ * The object is not required to be *empty*. `{}` is a type with no fields yet,
+ * not a promise there will never be any — it is precisely the spec's extension
+ * point, so rejecting `{ camera: { … } }` would fail closed the day a
+ * permission gains an option, silently dropping grants from servers written
+ * against the newer spec. The value is normalized to `{}` on the way out
+ * either way, so an unrecognized field can't reach the proxy; what it cannot
+ * do is *narrow* a grant the key's presence already asked for.
  *
  * Returns undefined when nothing survives, so the notification and the
  * `hostCapabilities.sandbox` echo carry no permissions at all rather than an
