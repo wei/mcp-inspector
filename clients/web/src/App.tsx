@@ -2841,6 +2841,7 @@ function App() {
     if (!params.successful) {
       const pendingId = resumeSnapshot?.serverId;
       if (pendingId) {
+        setFailedServerId(pendingId);
         queueMicrotask(() => {
           showReAuthBanner(pendingId, generateOAuthErrorDescription(params));
         });
@@ -2876,6 +2877,7 @@ function App() {
         await webOAuthStorage.load();
       } catch (err) {
         connectStartRef.current = undefined;
+        setFailedServerId(server.id);
         queueMicrotask(() => {
           showReAuthBanner(server.id, err instanceof Error ? err : String(err));
         });
@@ -2891,6 +2893,13 @@ function App() {
         });
       } catch (err) {
         connectStartRef.current = undefined;
+        // The token exchange (or the re-handshake behind it) failed. Flag the
+        // server (#1621) so the monitoring sidebar opens onto the OAuth
+        // requests that explain it (#2108) — the rebuilt client restored the
+        // pre-redirect `auth` fetch entries from the session, so discovery,
+        // DCR and the token exchange are all there. Set before the
+        // classification fan-out below so every arm carries it.
+        setFailedServerId(server.id);
         if (isEmaClientNotConfiguredError(err)) {
           notifications.show({
             title: `Cannot connect to "${server.name}"`,
@@ -3091,6 +3100,13 @@ function App() {
               });
               return;
             }
+            // The connect attempt failed, same as any other handshake error —
+            // flag the card (#1621) and, with it, open the monitoring sidebar
+            // onto the OAuth requests that explain the failure (#2108). This
+            // leg never reaches the `"error"` connection status (the
+            // `disconnect()` above settles it at `"disconnected"`), so this
+            // flag is the only signal the view has that a connect attempt died.
+            setFailedServerId(id);
             const message =
               authErr instanceof Error ? authErr.message : String(authErr);
             setConnectErrorMessage(message);

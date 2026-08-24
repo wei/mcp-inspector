@@ -54,6 +54,10 @@ vi.mock("@inspector/core/mcp/index.js", async (importOriginal) => {
   // Same one-shot arming for the `/oauth/callback` token exchange, so a test can
   // exercise the callback-leg failure paths (#1808).
   let nextResumeRejection: unknown = null;
+  // And for `authenticate()`, the pre-redirect OAuth leg (discovery + DCR), so a
+  // test can exercise a failure there — the case that never reaches the "error"
+  // connection status (#2108).
+  let nextAuthenticateRejection: unknown = null;
   class FakeInspectorClient extends EventTarget {
     connect = vi.fn(() => {
       if (nextConnectRejection !== null) {
@@ -108,6 +112,14 @@ vi.mock("@inspector/core/mcp/index.js", async (importOriginal) => {
       }
       return Promise.resolve(undefined);
     });
+    authenticate = vi.fn(() => {
+      if (nextAuthenticateRejection !== null) {
+        const err = nextAuthenticateRejection;
+        nextAuthenticateRejection = null;
+        return Promise.reject(err);
+      }
+      return Promise.resolve(undefined);
+    });
     checkAuthChallengeSatisfied = vi.fn().mockResolvedValue(true);
     clearOAuthTokens = vi.fn().mockResolvedValue(undefined);
   }
@@ -128,6 +140,10 @@ vi.mock("@inspector/core/mcp/index.js", async (importOriginal) => {
     // Test-only: arm the next resumeAfterOAuth() to reject (callback-leg failure).
     __rejectNextResumeAfterOAuth: (err: unknown) => {
       nextResumeRejection = err;
+    },
+    // Test-only: arm the next authenticate() to reject (pre-redirect OAuth leg).
+    __rejectNextAuthenticate: (err: unknown) => {
+      nextAuthenticateRejection = err;
     },
   };
 });
@@ -692,6 +708,10 @@ const rejectNextResumeAfterOAuth = (
   }
 ).__rejectNextResumeAfterOAuth;
 
+const rejectNextAuthenticate = (
+  McpIndex as unknown as { __rejectNextAuthenticate: (err: unknown) => void }
+).__rejectNextAuthenticate;
+
 const fetchLogInstances = (
   FetchLogModule as unknown as { __fetchLogInstances: EventTarget[] }
 ).__fetchLogInstances;
@@ -713,6 +733,33 @@ describe("App failed-connection card border (#1621)", () => {
 
     await waitFor(() =>
       expect(screen.getByTestId("errored-server")).toHaveTextContent("A"),
+    );
+  });
+
+  // An OAuth leg that fails never reaches the `"error"` connection status — the
+  // handler tears the client down, leaving the session `"disconnected"` — so the
+  // flag is the only signal downstream that a connect attempt died. Without it
+  // the monitoring sidebar stays shut on exactly the failure the Network tab
+  // exists to explain (#2108).
+  it("flags the server when the OAuth authorization leg fails (#2108)", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+    expect(screen.getByTestId("errored-server")).toHaveTextContent("none");
+
+    // 401 from the server -> App starts the authorization-code flow, whose
+    // discovery/DCR round-trip then fails (e.g. an invalid
+    // `/.well-known/oauth-authorization-server`).
+    rejectNextConnect(Object.assign(new Error("HTTP 401"), { status: 401 }));
+    rejectNextAuthenticate(new Error("discovery failed"));
+    await user.click(screen.getByText("connect"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("errored-server")).toHaveTextContent("A"),
+    );
+    expect(notificationsMock.show).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: expect.stringContaining("OAuth authorization failed"),
+      }),
     );
   });
 
@@ -2452,6 +2499,41 @@ describe("App OAuth callback issuer-binding failures (#1808)", () => {
     // The raw SDK wording never reaches the user.
     expect(screen.queryByText(/discoveryState/)).not.toBeInTheDocument();
     expect(screen.queryByText("Re-authentication required")).toBeNull();
+  });
+
+  // The callback leg is a connect attempt too, so a failure there must flag the
+  // server — that is what opens the monitoring sidebar onto the OAuth requests
+  // (discovery, DCR and the token exchange, restored from the pre-redirect
+  // session) rather than leaving the user with only a banner (#2108).
+  it("flags the server when the callback leg fails (#2108)", async () => {
+    renderCallbackWithFailure(new Error("token exchange rejected"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("errored-server")).toHaveTextContent("A"),
+    );
+  });
+
+  // The other callback arm: the provider redirected back with an error instead
+  // of a code, so no token exchange is even attempted. Still a connect attempt
+  // that failed, so the server carries the same flag (#2108).
+  it("flags the server when the provider returns an error to the callback (#2108)", async () => {
+    writeOAuthResumeSnapshot({
+      version: 1,
+      serverId: "A",
+      activeTab: "Tools",
+      authKind: "reauth",
+      tabUi: {},
+    });
+    window.history.replaceState(
+      {},
+      "",
+      `${OAUTH_CALLBACK_PATH}?error=access_denied`,
+    );
+    renderWithMantine(<App />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("errored-server")).toHaveTextContent("A"),
+    );
   });
 
   it("clears the stale OAuth state and reconnects when the affordance is used", async () => {
