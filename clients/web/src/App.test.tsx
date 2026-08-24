@@ -368,6 +368,29 @@ vi.mock("@inspector/core/react/useSettingsDraft.js", () => ({
   })),
 }));
 
+// --- App bridge factory spy (#2055) -----------------------------------------
+// Passes through to the real factory but records the deps App hands it, so a
+// test can drive `getListedResourceMeta` — the wiring that carries a
+// `resources/list` entry's `_meta.ui` into the sandbox CSP. Without this the
+// bridge-factory unit tests would still pass while App stopped supplying it.
+const appBridgeFactoryDeps: AppBridgeFactoryDeps[] = [];
+vi.mock(
+  "./components/elements/AppRenderer/createAppBridgeFactory",
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import("./components/elements/AppRenderer/createAppBridgeFactory")
+      >();
+    return {
+      ...actual,
+      createAppBridgeFactory: (deps: AppBridgeFactoryDeps) => {
+        appBridgeFactoryDeps.push(deps);
+        return actual.createAppBridgeFactory(deps);
+      },
+    };
+  },
+);
+
 // --- InspectorView double ---------------------------------------------------
 // Surfaces each piece of session-scoped state under test and exposes buttons
 // that invoke the App's connect / call-tool / get-prompt / read-resource /
@@ -617,6 +640,10 @@ import type {
   MessageEntry,
   ServerEntry,
 } from "@inspector/core/mcp/types.js";
+import type { AppBridgeFactoryDeps } from "./components/elements/AppRenderer/createAppBridgeFactory";
+import { useManagedResources } from "@inspector/core/react/useManagedResources.js";
+import type { UseManagedResourcesResult } from "@inspector/core/react/useManagedResources.js";
+import type { Resource } from "@modelcontextprotocol/client";
 
 // Default useInspectorClient return — capabilities empty (no task tool calls).
 // Individual tests override via vi.mocked(...).mockReturnValue(...).
@@ -3371,6 +3398,69 @@ describe("App background command rejections (#2049)", () => {
       expect(rejections.seen).toEqual([]);
     } finally {
       rejections.stop();
+    }
+  });
+});
+
+/** A complete `useManagedResources` return, so the mock stays type-checked against the hook's contract. */
+function managedResourcesResult(
+  resources: Resource[],
+): UseManagedResourcesResult {
+  return {
+    error: null,
+    resources,
+    listChanged: false,
+    refresh: vi.fn().mockResolvedValue(resources),
+    clearListChanged: vi.fn(),
+  };
+}
+
+describe("App MCP App listed-resource metadata wiring (#2055)", () => {
+  beforeEach(() => {
+    appBridgeFactoryDeps.length = 0;
+  });
+
+  afterEach(() => {
+    // The hook mock is module-level and shared, so put the empty-list default
+    // back rather than leaving a populated list for whatever runs next.
+    vi.mocked(useManagedResources).mockReturnValue(managedResourcesResult([]));
+  });
+
+  it("hands the bridge factory a getListedResourceMeta reading the resources/list entries", async () => {
+    // ext-apps treats a listing entry's `_meta.ui` as the static default for a
+    // UI resource, so the App has to surface the listing to the bridge — the
+    // factory's own tests inject the dep and cannot see this wiring break.
+    const listedMeta = {
+      ui: { csp: { connectDomains: ["https://api.example.com"] } },
+    };
+    vi.mocked(useManagedResources).mockReturnValue(
+      managedResourcesResult([
+        { uri: "ui://weather/app.html", name: "app", _meta: listedMeta },
+      ]),
+    );
+
+    renderWithMantine(<App />);
+
+    // App builds two factories, differing only in `advertiseElicitation`. Wait
+    // for BOTH by that flag rather than for a count: waiting on "at least one"
+    // would still pass with the wiring stripped from either call site, since
+    // the other's deps sit in the same array.
+    const appsFactory = () =>
+      appBridgeFactoryDeps.find((d) => !d.advertiseElicitation);
+    const elicitationFactory = () =>
+      appBridgeFactoryDeps.find((d) => d.advertiseElicitation === true);
+    await waitFor(() => {
+      expect(appsFactory()).toBeDefined();
+      expect(elicitationFactory()).toBeDefined();
+    });
+
+    for (const deps of [appsFactory(), elicitationFactory()]) {
+      expect(deps?.getListedResourceMeta?.("ui://weather/app.html")).toEqual(
+        listedMeta,
+      );
+      expect(
+        deps?.getListedResourceMeta?.("ui://other/app.html"),
+      ).toBeUndefined();
     }
   });
 });

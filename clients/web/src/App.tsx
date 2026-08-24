@@ -25,6 +25,7 @@ import type {
   LoggingMessageNotification,
   Progress,
   ProgressToken,
+  Resource,
   Task,
   Tool,
 } from "@modelcontextprotocol/client";
@@ -787,10 +788,31 @@ function App() {
       });
   }, [configBaseUrl]);
 
+  // The `resources/list` entries, read lazily by the App bridge factories below.
+  // ext-apps treats a listing entry's `_meta.ui` as the static default for its
+  // UI resource (a read content item's own `_meta.ui` wins), so the sandbox CSP
+  // has to be able to see it. A ref rather than a dependency: `resources` is
+  // derived further down this component, and the factories only read it inside
+  // an async sandboxready handler, long after any render that produced it.
+  const listedResourcesRef = useRef<Resource[]>([]);
+  // Best-effort by construction: this reads the list as it stands when the app
+  // opens, and does not distinguish "no entry for this URI" from "the list
+  // hasn't arrived yet". Both yield no hints, which is the same outcome as
+  // having no listing carrier at all. Blocking the render on list readiness
+  // instead would mean waiting on a request that, for a server advertising no
+  // `resources` capability or whose list errored, never resolves — trading a
+  // missing default for an app that never renders.
+  const getListedResourceMeta = useCallback(
+    (uri: string) =>
+      listedResourcesRef.current.find((r) => r.uri === uri)?._meta,
+    [],
+  );
+
   const sandboxBridgeFactory = useMemo(
     () =>
       createAppBridgeFactory({
         getClient: () => inspectorClient?.getAppRendererClient() ?? null,
+        getListedResourceMeta,
         readResource: async (uri) => {
           if (!inspectorClient) throw new Error("No MCP client connected.");
           const invocation = await inspectorClient.readResource(uri);
@@ -810,7 +832,7 @@ function App() {
           });
         },
       }),
-    [inspectorClient],
+    [inspectorClient, getListedResourceMeta],
   );
 
   // App-rendered form elicitations (#1854). The controller is created once and
@@ -864,6 +886,7 @@ function App() {
       createAppBridgeFactory({
         advertiseElicitation: true,
         getClient: () => inspectorClient?.getAppRendererClient() ?? null,
+        getListedResourceMeta,
         readResource: async (uri) => {
           if (!inspectorClient) throw new Error("No MCP client connected.");
           const invocation = await inspectorClient.readResource(uri);
@@ -880,7 +903,7 @@ function App() {
           });
         },
       }),
-    [inspectorClient],
+    [inspectorClient, getListedResourceMeta],
   );
   /**
    * Close the previous client's session and open one for the client being
@@ -1241,6 +1264,14 @@ function App() {
   const tools = toolsPagination.items;
   const prompts = promptsPagination.items;
   const resources = resourcesPagination.items;
+  // Whatever the resource list currently holds — every page in the default
+  // aggregate mode, only the pages fetched so far under `paginatedLists`. The
+  // listing is a documented *default* that a read content item overrides, and
+  // an app whose entry sits on an unfetched page simply falls back to no hints
+  // (`connect-src 'none'`), exactly as before this wiring existed. Walking the
+  // whole list to close that would issue the very requests the user opted out
+  // of by turning pagination on, so the setting wins.
+  listedResourcesRef.current = resources;
   const {
     tasks,
     refresh: refreshTasks,

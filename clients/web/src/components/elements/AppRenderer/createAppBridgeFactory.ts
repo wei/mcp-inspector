@@ -17,6 +17,7 @@ import type {
 } from "@modelcontextprotocol/client";
 import {
   approveCspSources,
+  approveSandboxPermissions,
   buildSandboxCspPolicy,
   wrapSandboxedHtml,
 } from "../../../utils/sandbox-csp";
@@ -89,6 +90,15 @@ export interface AppBridgeFactoryDeps {
    */
   onResourceError?: (err: Error) => void;
   /**
+   * The `_meta` of the `resources/list` entry for `uri`, when the host has that
+   * listing. ext-apps treats the listing-level `_meta.ui` as the static default
+   * for a UI resource, so an app that declares its CSP only there must still
+   * get it honored; a read content item's own `_meta.ui` wins over it. Omitted
+   * (or returning undefined) simply means no default — the host that has no
+   * resource listing, or whose listing does not include this URI, is unaffected.
+   */
+  getListedResourceMeta?: (uri: string) => object | undefined;
+  /**
    * Advertise `hostCapabilities.elicitation` — "this host can forward a
    * form-mode `elicitation/create` to the app and return its result to the
    * server" (#1854).
@@ -100,18 +110,65 @@ export interface AppBridgeFactoryDeps {
   advertiseElicitation?: boolean;
 }
 
-/** First text content block of a UI resource, plus its `_meta` (sandbox hints). */
-function extractHtmlAndMeta(result: ReadResourceResult): {
+/**
+ * The MCP Apps sandbox hints (`csp`, `permissions`, …) a single `_meta` bag
+ * declares under its `ui` key, or undefined when that bag declares none.
+ *
+ * The two "no hints" cases are deliberately distinguished by the return type:
+ * a bag with no `ui` key at all returns undefined (this carrier is silent —
+ * keep looking), while a bag whose `ui` is malformed returns `{ meta:
+ * undefined }` (this carrier spoke, and what it said is unusable — stop). Were
+ * they conflated, a content item declaring `ui: null` would fall through to a
+ * broader carrier and be granted whatever *that* one asked for, which is both
+ * the wrong precedence and the wrong direction to fail in.
+ *
+ * `McpUiResourceMeta` describes the value of `_meta.ui`, NOT `_meta` itself —
+ * reading `_meta` directly leaves every field undefined, so a spec-conforming
+ * app's declared `connectDomains` never reach the generated CSP and it renders
+ * under `connect-src 'none'` (#2055). This mirrors the tool side, where
+ * `getToolUiResourceUri` already reads `_meta.ui.resourceUri`.
+ */
+function uiMeta(
+  bag: object | undefined,
+): { meta: McpUiResourceMeta | undefined } | undefined {
+  if (bag === undefined || !("ui" in bag)) return undefined;
+  const ui: unknown = (bag as { ui: unknown }).ui;
+  const wellFormed =
+    ui !== null && typeof ui === "object" && !Array.isArray(ui);
+  return { meta: wellFormed ? (ui as McpUiResourceMeta) : undefined };
+}
+
+/**
+ * First text content block of a UI resource, plus its `_meta.ui` sandbox hints.
+ *
+ * ext-apps exposes three carriers, and they are consulted most-specific first:
+ *
+ * 1. the **read content item**'s own `_meta.ui`;
+ * 2. the **read result envelope**'s — `McpUiReadResourceResult` (what a
+ *    `registerAppResource` callback returns) types `_meta.ui` at that level;
+ * 3. the matching **`resources/list` entry**'s, which `McpUiAppResourceConfig`
+ *    documents as the static default a host reviews at connection time, and
+ *    which a read content item explicitly takes precedence over.
+ *
+ * The first carrier that *declares* a `ui` key decides, and its value is used
+ * outright — the levels are not merged, since a server that restates only
+ * `csp` at the more specific level means that to be the whole grant, not a
+ * patch over the broader one. A carrier declaring a malformed `ui` decides
+ * too, for "no hints"; see {@link uiMeta}.
+ */
+function extractHtmlAndMeta(
+  result: ReadResourceResult,
+  listedMeta?: object,
+): {
   html: string;
   meta: McpUiResourceMeta | undefined;
 } {
   for (const content of result.contents) {
     const text = (content as { text?: unknown }).text;
     if (typeof text === "string") {
-      return {
-        html: text,
-        meta: content._meta as McpUiResourceMeta | undefined,
-      };
+      const carried =
+        uiMeta(content._meta) ?? uiMeta(result._meta) ?? uiMeta(listedMeta);
+      return { html: text, meta: carried?.meta };
     }
   }
   throw new Error("UI resource has no text (HTML) content");
@@ -271,7 +328,10 @@ export function createAppBridgeFactory(
           const uri = resolveSourceUri(source);
           if (!uri) return;
           const result = await deps.readResource(uri);
-          const { html, meta } = extractHtmlAndMeta(result);
+          const { html, meta } = extractHtmlAndMeta(
+            result,
+            deps.getListedResourceMeta?.(uri),
+          );
           // Build the per-app CSP host-side: filter the requested sources to
           // ones the host accepts, render the policy string, and wrap the
           // app's HTML in a fixed shell whose first <head> child is the CSP
@@ -283,23 +343,25 @@ export function createAppBridgeFactory(
           // sendSandboxResourceReady: the view only sends ui/initialize once it
           // has the HTML, so the bridge reflects this in the initialize result.
           const approvedCsp = approveCspSources(meta?.csp);
-          // NOTE on the CSP-vs-permissions asymmetry: `csp` is injection-filtered
-          // by approveCspSources because its sources are interpolated into the
-          // CSP <meta> content string. `permissions` is NOT filtered here — it is
-          // a structured object (camera/microphone/geolocation/clipboardWrite
-          // booleans), and its only consumer is the sandbox proxy's
-          // buildAllowAttribute(), which maps each known key to a fixed
-          // Permissions-Policy token and ignores anything else. Untrusted values
-          // therefore can't reach the iframe `sandbox`/`allow` attribute as raw
-          // text (that layer, and the allow-same-origin strip, is owned by the
-          // sandbox-hardening work in #1565), so no source-style allowlist applies.
+          // Both halves of the app-supplied sandbox config are screened, for
+          // different reasons. `csp` is injection-filtered by approveCspSources
+          // because its sources are interpolated into the CSP <meta> content
+          // string. `permissions` can't reach the `sandbox`/`allow` attribute as
+          // raw text — the proxy maps each known key to a fixed Permissions-Policy
+          // token — but it tests those keys for TRUTHINESS, so a non-boolean
+          // (`camera: "false"`) would read as a grant; approveSandboxPermissions
+          // reduces the bag to the keys actually requested. The `allow-same-origin`
+          // strip and the rest of that layer stay owned by #1565.
+          const approvedPermissions = approveSandboxPermissions(
+            meta?.permissions,
+          );
           hostCapabilities.sandbox = {
-            permissions: meta?.permissions,
+            permissions: approvedPermissions,
             csp: approvedCsp,
           };
           await bridge.sendSandboxResourceReady({
             html: wrapSandboxedHtml(html, buildSandboxCspPolicy(approvedCsp)),
-            permissions: meta?.permissions,
+            permissions: approvedPermissions,
           });
         } catch (err) {
           const error = err instanceof Error ? err : new Error(String(err));
