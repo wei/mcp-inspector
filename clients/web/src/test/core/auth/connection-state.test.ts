@@ -319,6 +319,35 @@ describe("isAccessTokenProvablyUnexpired", () => {
     ).toBe(false);
   });
 
+  it("is false for a two-segment token whose payload decodes to an exp", () => {
+    // jwtExpiresAtMs only requires two dot-separated segments, so a structured
+    // opaque token carrying a decodable `{"exp":...}` would otherwise read as
+    // proof of validity. isJwtFormat is what rejects it.
+    const payload = btoa(JSON.stringify({ exp: nowSec() + 3600 }))
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+    expect(
+      isAccessTokenProvablyUnexpired({
+        access_token: `opaque.${payload}`,
+        token_type: "Bearer",
+      }),
+    ).toBe(false);
+  });
+
+  it("is false for a four-segment token carrying a decodable exp", () => {
+    const payload = btoa(JSON.stringify({ exp: nowSec() + 3600 }))
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+    expect(
+      isAccessTokenProvablyUnexpired({
+        access_token: `header.${payload}.sig.extra`,
+        token_type: "Bearer",
+      }),
+    ).toBe(false);
+  });
+
   it("is false when there is no access token", () => {
     expect(isAccessTokenProvablyUnexpired(undefined)).toBe(false);
     expect(
