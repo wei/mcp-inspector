@@ -8,6 +8,7 @@ import {
   Stack,
   Text,
   Textarea,
+  type TextareaProps,
   TextInput,
 } from "@mantine/core";
 import {
@@ -57,6 +58,33 @@ const MultilineStringInput = Textarea.withProps({
   maxRows: 12,
   rightSectionPointerEvents: "auto",
 });
+
+/**
+ * A string field that has just been enlarged (#2042).
+ *
+ * Exists only to take focus on mount. This component mounts as a direct
+ * consequence of the user activating the enlarge button — which unmounts in the
+ * same commit, taking the focused element with it. Without this, a keyboard user
+ * who activates it is left with focus on the document body, and the next Tab
+ * restarts from the top of the page rather than continuing through the form.
+ *
+ * The caret is placed at the end of whatever was already typed, since focusing a
+ * pre-filled text control does not agree across browsers on where it lands, and
+ * the one answer that is never right is "before the text the user just wrote".
+ */
+function EnlargedStringField(props: TextareaProps) {
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    const node = inputRef.current;
+    /* v8 ignore next -- an effect runs after mount, so the ref is always set */
+    if (!node) return;
+    node.focus();
+    node.setSelectionRange(node.value.length, node.value.length);
+  }, []);
+
+  return <MultilineStringInput {...props} ref={inputRef} />;
+}
 
 // Holds the buttons a string field stacks in its `rightSection`. `nowrap` keeps
 // them on one line inside a section only wide enough for the two.
@@ -666,7 +694,7 @@ export function SchemaForm({
       // gone rather than disabled — there is nothing left for it to do.
       if (enlargedFields.has(fieldName)) {
         return (
-          <MultilineStringInput
+          <EnlargedStringField
             key={fieldName}
             {...sharedProps}
             rightSectionWidth={ONE_ACTION_WIDTH}
@@ -684,6 +712,7 @@ export function SchemaForm({
           rightSection={
             <FieldActions>
               <EnlargeButton
+                ariaLabel={`Enlarge ${label}`}
                 onClick={() =>
                   setEnlargedFields(
                     (previous) => new Set([...previous, fieldName]),

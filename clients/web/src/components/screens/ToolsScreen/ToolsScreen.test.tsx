@@ -111,7 +111,7 @@ describe("ToolsScreen", () => {
     const rows = screen.getAllByText("get_weather");
     await user.click(rows[1] as HTMLElement);
     // The second copy's own field renders — the first copy's does not.
-    expect(screen.getByLabelText(/zip/i)).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: /zip/i })).toBeInTheDocument();
     expect(screen.queryByLabelText(/city/i)).toBeNull();
 
     await user.click(screen.getByRole("button", { name: /Execute/ }));
@@ -137,7 +137,7 @@ describe("ToolsScreen", () => {
     renderWithMantine(<ControlledToolsScreen onCallTool={onCallTool} />);
     await user.click(screen.getByText("gamma"));
     // gamma seeds { mode: "fast" }; editing the field flows through onUiChange.
-    const field = screen.getByLabelText(/mode/i);
+    const field = screen.getByRole("textbox", { name: /mode/i });
     await user.clear(field);
     await user.type(field, "slow");
     await user.click(screen.getByRole("button", { name: /Execute/ }));

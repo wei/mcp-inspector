@@ -24,7 +24,7 @@ describe("SchemaForm", () => {
     renderWithMantine(
       <SchemaForm schema={schema} values={{}} onChange={onChange} />,
     );
-    const input = screen.getByLabelText(/Name/);
+    const input = screen.getByRole("textbox", { name: /Name/ });
     await user.type(input, "a");
     expect(onChange).toHaveBeenCalledWith({ name: "a" });
   });
@@ -669,7 +669,7 @@ describe("SchemaForm", () => {
     );
     expect(screen.getByText("Address")).toBeInTheDocument();
     expect(screen.getByText("Street and city")).toBeInTheDocument();
-    expect(screen.getByLabelText(/Street/)).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: /Street/ })).toBeInTheDocument();
   });
 
   it("propagates nested object changes back to top-level onChange", async () => {
@@ -690,7 +690,7 @@ describe("SchemaForm", () => {
     renderWithMantine(
       <SchemaForm schema={schema} values={{}} onChange={onChange} />,
     );
-    await user.type(screen.getByLabelText(/Street/), "1");
+    await user.type(screen.getByRole("textbox", { name: /Street/ }), "1");
     expect(onChange).toHaveBeenCalled();
     const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1][0];
     expect(lastCall.address).toEqual({ street: "1" });
@@ -881,7 +881,7 @@ describe("SchemaForm", () => {
         disabled
       />,
     );
-    expect(screen.getByLabelText(/Name/)).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: /Name/ })).toBeDisabled();
     expect(screen.getByLabelText("Active")).toBeDisabled();
   });
 
@@ -895,7 +895,9 @@ describe("SchemaForm", () => {
     renderWithMantine(
       <SchemaForm schema={schema} values={{}} onChange={vi.fn()} />,
     );
-    expect(screen.getByLabelText(/rawField/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("textbox", { name: /rawField/ }),
+    ).toBeInTheDocument();
   });
 
   it("renders nothing inside the form when properties are missing", () => {
@@ -1027,7 +1029,7 @@ describe("SchemaForm nullable unions", () => {
     renderWithMantine(
       <SchemaForm schema={schema} values={{}} onChange={onChange} />,
     );
-    await user.type(screen.getByLabelText(/Note/), "a");
+    await user.type(screen.getByRole("textbox", { name: /Note/ }), "a");
     expect(onChange).toHaveBeenCalledWith({ note: "a" });
   });
 
@@ -1096,7 +1098,7 @@ describe("SchemaForm nullable unions", () => {
     renderWithMantine(
       <SchemaForm schema={schema} values={{}} onChange={onChange} />,
     );
-    await user.type(screen.getByLabelText(/Nick/), "z");
+    await user.type(screen.getByRole("textbox", { name: /Nick/ }), "z");
     expect(onChange).toHaveBeenCalledWith({ profile: { nick: "z" } });
   });
 
@@ -1202,7 +1204,7 @@ describe("SchemaForm nullable unions", () => {
     renderWithMantine(
       <SchemaForm schema={schema} values={{}} onChange={vi.fn()} />,
     );
-    expect(screen.getByLabelText(/Mode/).tagName).toBe("INPUT");
+    expect(screen.getByRole("textbox", { name: /Mode/ }).tagName).toBe("INPUT");
   });
 
   it("still renders a MultiSelect when every anyOf branch has a distinct const", () => {
@@ -1541,7 +1543,9 @@ describe("JSON editor escaping (#1853, #1856, #1885)", () => {
       <EscapingHarness schema={schema} initial={{ note: "" }} />,
     );
 
-    const jsonInput = screen.getByLabelText(/Note/) as HTMLTextAreaElement;
+    const jsonInput = screen.getByRole("textbox", {
+      name: /Note/,
+    }) as HTMLTextAreaElement;
     await user.click(jsonInput);
     await user.keyboard("{End}a");
 
@@ -1816,17 +1820,21 @@ describe("SchemaForm multiline strings (#2042)", () => {
 
   it("renders a single-line input with an enlarge button by default", () => {
     renderWithMantine(<StringHarness />);
-    expect(screen.getByLabelText(/Note/).tagName).toBe("INPUT");
-    expect(screen.getByRole("button", { name: "Enlarge" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: /Note/ }).tagName).toBe("INPUT");
+    expect(
+      screen.getByRole("button", { name: "Enlarge Note" }),
+    ).toBeInTheDocument();
   });
 
   it("swaps the input for a text area that accepts newlines", async () => {
     const user = userEvent.setup();
     renderWithMantine(<StringHarness />);
 
-    await user.click(screen.getByRole("button", { name: "Enlarge" }));
+    await user.click(screen.getByRole("button", { name: "Enlarge Note" }));
 
-    const textarea = screen.getByLabelText(/Note/) as HTMLTextAreaElement;
+    const textarea = screen.getByRole("textbox", {
+      name: /Note/,
+    }) as HTMLTextAreaElement;
     expect(textarea.tagName).toBe("TEXTAREA");
     await user.type(textarea, "one{Enter}two");
     expect(textarea.value).toBe("one\ntwo");
@@ -1835,16 +1843,19 @@ describe("SchemaForm multiline strings (#2042)", () => {
   it("carries the constraints of the field it replaced", async () => {
     const user = userEvent.setup();
     renderWithMantine(<StringHarness />);
-    await user.click(screen.getByRole("button", { name: "Enlarge" }));
-    expect(screen.getByLabelText(/Note/)).toHaveAttribute("maxlength", "40");
+    await user.click(screen.getByRole("button", { name: "Enlarge Note" }));
+    expect(screen.getByRole("textbox", { name: /Note/ })).toHaveAttribute(
+      "maxlength",
+      "40",
+    );
   });
 
   it("is one-way — the enlarge button is gone once used", async () => {
     const user = userEvent.setup();
     renderWithMantine(<StringHarness />);
-    await user.click(screen.getByRole("button", { name: "Enlarge" }));
+    await user.click(screen.getByRole("button", { name: "Enlarge Note" }));
     expect(
-      screen.queryByRole("button", { name: "Enlarge" }),
+      screen.queryByRole("button", { name: "Enlarge Note" }),
     ).not.toBeInTheDocument();
   });
 
@@ -1852,9 +1863,11 @@ describe("SchemaForm multiline strings (#2042)", () => {
     const user = userEvent.setup();
     renderWithMantine(<StringHarness />);
 
-    await user.type(screen.getByLabelText(/Note/), "typed");
-    await user.click(screen.getByRole("button", { name: "Enlarge" }));
-    const textarea = screen.getByLabelText(/Note/) as HTMLTextAreaElement;
+    await user.type(screen.getByRole("textbox", { name: /Note/ }), "typed");
+    await user.click(screen.getByRole("button", { name: "Enlarge Note" }));
+    const textarea = screen.getByRole("textbox", {
+      name: /Note/,
+    }) as HTMLTextAreaElement;
     expect(textarea.value).toBe("typed");
 
     await user.click(screen.getByRole("button", { name: "Clear" }));
@@ -1867,7 +1880,7 @@ describe("SchemaForm multiline strings (#2042)", () => {
     expect(
       screen.queryByRole("button", { name: "Clear" }),
     ).not.toBeInTheDocument();
-    await user.type(screen.getByLabelText(/Note/), "x");
+    await user.type(screen.getByRole("textbox", { name: /Note/ }), "x");
     expect(screen.getByRole("button", { name: "Clear" })).toBeInTheDocument();
   });
 
@@ -1877,19 +1890,68 @@ describe("SchemaForm multiline strings (#2042)", () => {
     const user = userEvent.setup();
     const { rerender } = renderWithMantine(<StringHarness resetKey="tool-a" />);
 
-    await user.click(screen.getByRole("button", { name: "Enlarge" }));
-    expect(screen.getByLabelText(/Note/).tagName).toBe("TEXTAREA");
+    await user.click(screen.getByRole("button", { name: "Enlarge Note" }));
+    expect(screen.getByRole("textbox", { name: /Note/ }).tagName).toBe(
+      "TEXTAREA",
+    );
 
     rerender(<StringHarness resetKey="tool-b" />);
-    expect(screen.getByLabelText(/Note/).tagName).toBe("INPUT");
+    expect(screen.getByRole("textbox", { name: /Note/ }).tagName).toBe("INPUT");
   });
 
   it("stays enlarged while resetKey is unchanged", async () => {
     const user = userEvent.setup();
     const { rerender } = renderWithMantine(<StringHarness resetKey="tool-a" />);
 
-    await user.click(screen.getByRole("button", { name: "Enlarge" }));
+    await user.click(screen.getByRole("button", { name: "Enlarge Note" }));
     rerender(<StringHarness resetKey="tool-a" />);
-    expect(screen.getByLabelText(/Note/).tagName).toBe("TEXTAREA");
+    expect(screen.getByRole("textbox", { name: /Note/ }).tagName).toBe(
+      "TEXTAREA",
+    );
+  });
+
+  it("gives each field's enlarge button a distinct accessible name", () => {
+    renderWithMantine(
+      <SchemaForm
+        schema={{
+          type: "object",
+          properties: {
+            note: { type: "string", title: "Note" },
+            summary: { type: "string", title: "Summary" },
+          },
+        }}
+        values={{}}
+        onChange={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Enlarge Note" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Enlarge Summary" }),
+    ).toBeInTheDocument();
+  });
+
+  // The button unmounts in the same commit that mounts the text area, so
+  // without an explicit hand-off a keyboard user is left focused on nothing.
+  it("moves focus into the text area, caret last, when activated", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<StringHarness />);
+
+    await user.type(screen.getByRole("textbox", { name: /Note/ }), "typed");
+    await user.tab();
+    expect(screen.getByRole("button", { name: "Enlarge Note" })).toHaveFocus();
+    await user.keyboard("{Enter}");
+
+    const textarea = screen.getByRole("textbox", {
+      name: /Note/,
+    }) as HTMLTextAreaElement;
+    expect(textarea.tagName).toBe("TEXTAREA");
+    expect(textarea).toHaveFocus();
+    expect(textarea.selectionStart).toBe("typed".length);
+
+    // And the caret really is at the end: typing appends rather than prepends.
+    await user.keyboard("{Enter}more");
+    expect(textarea.value).toBe("typed\nmore");
   });
 });
