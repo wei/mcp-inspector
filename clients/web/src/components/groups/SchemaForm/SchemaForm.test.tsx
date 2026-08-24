@@ -1954,4 +1954,19 @@ describe("SchemaForm multiline strings (#2042)", () => {
     await user.keyboard("{Enter}more");
     expect(textarea.value).toBe("typed\nmore");
   });
+
+  // A disabled form (a tool call in flight) must be inert as a whole: a live
+  // button there would swap in a text area that mounts disabled, cannot take
+  // focus, and so drops keyboard focus to the document.
+  it("disables the enlarge button along with the field", () => {
+    renderWithMantine(
+      <SchemaForm
+        schema={stringSchema}
+        values={{}}
+        onChange={vi.fn()}
+        disabled
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Enlarge Note" })).toBeDisabled();
+  });
 });

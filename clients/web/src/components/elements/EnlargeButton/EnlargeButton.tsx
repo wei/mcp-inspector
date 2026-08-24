@@ -11,6 +11,12 @@ export interface EnlargeButtonProps {
    * tell them apart; the visible tooltip stays the plain verb.
    */
   ariaLabel?: string;
+  /**
+   * Mirrors the disabled state of the input this sits in. A live button on a
+   * disabled field would still swap in the text area — which mounts disabled and
+   * cannot take focus, dropping keyboard focus to the document.
+   */
+  disabled?: boolean;
 }
 
 const EnlargeActionIcon = ActionIcon.withProps({
@@ -34,10 +40,18 @@ const EnlargeActionIcon = ActionIcon.withProps({
  * of the tab order without cost; entering multiline mode has none, so removing
  * this one would put the feature out of reach of keyboard users entirely.
  */
-export function EnlargeButton({ onClick, ariaLabel }: EnlargeButtonProps) {
+export function EnlargeButton({
+  onClick,
+  ariaLabel,
+  disabled,
+}: EnlargeButtonProps) {
   return (
     <Tooltip label="Enlarge">
-      <EnlargeActionIcon aria-label={ariaLabel ?? "Enlarge"} onClick={onClick}>
+      <EnlargeActionIcon
+        aria-label={ariaLabel ?? "Enlarge"}
+        disabled={disabled}
+        onClick={onClick}
+      >
         <ImEnlarge2 size={12} />
       </EnlargeActionIcon>
     </Tooltip>

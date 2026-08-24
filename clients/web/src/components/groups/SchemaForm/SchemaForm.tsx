@@ -713,6 +713,7 @@ export function SchemaForm({
             <FieldActions>
               <EnlargeButton
                 ariaLabel={`Enlarge ${label}`}
+                disabled={disabled}
                 onClick={() =>
                   setEnlargedFields(
                     (previous) => new Set([...previous, fieldName]),

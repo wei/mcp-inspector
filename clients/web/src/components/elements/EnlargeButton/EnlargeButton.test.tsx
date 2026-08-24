@@ -33,4 +33,14 @@ describe("EnlargeButton", () => {
       screen.getByRole("button", { name: "Enlarge Query" }),
     ).toBeInTheDocument();
   });
+
+  it("is inert when the field it belongs to is disabled", async () => {
+    const user = userEvent.setup();
+    const onClick = vi.fn();
+    renderWithMantine(<EnlargeButton onClick={onClick} disabled />);
+    const button = screen.getByRole("button", { name: "Enlarge" });
+    expect(button).toBeDisabled();
+    await user.click(button);
+    expect(onClick).not.toHaveBeenCalled();
+  });
 });
