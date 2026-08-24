@@ -1307,7 +1307,7 @@ describe("useServers", () => {
         result.current.updateServerSettings(existing, {
           headers: [],
           env: [],
-          metadata: [],
+          metadata: {},
           roots: [],
           connectionTimeout: 5000,
           requestTimeout: 30000,
