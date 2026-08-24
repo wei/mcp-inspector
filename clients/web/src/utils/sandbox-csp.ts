@@ -41,11 +41,15 @@ const CSP_KEYS = exhaustiveCspKeys([
 
 /**
  * Filter an app-supplied {@link McpUiResourceCsp} down to the entries the host
- * will actually enforce. Entries that don't parse as a source expression are
- * dropped (and warned), and the resulting object contains only keys with at
- * least one accepted source. The return value is what the host echoes back to
- * the view via `hostCapabilities.sandbox.csp` so the app sees what was granted,
- * not what it asked for.
+ * will actually enforce. The accepted subset is the origin forms
+ * {@link SAFE_CSP_SOURCE} matches — `scheme://host[:port][/path]`, a bare or
+ * wildcard host, a scheme such as `data:`, and `*`. Anything outside it is
+ * dropped (and warned) — including a CSP keyword like `'unsafe-eval'`, which
+ * is a perfectly valid source expression in CSP but not something these
+ * origin-list fields can express. The resulting object contains only keys with
+ * at least one accepted source, and is what the host echoes back to the view
+ * via `hostCapabilities.sandbox.csp` so the app sees what was granted, not what
+ * it asked for.
  *
  * NOTE: this screens each source for *injection safety* only — it does NOT
  * bound the *breadth* of a grant. A bare `*` (and a scheme-wildcard host) is a
@@ -59,11 +63,9 @@ const CSP_KEYS = exhaustiveCspKeys([
  *
  * The drop warning is worded accordingly: it names the field the entry came
  * from and states the shape expected, and makes no claim about the *safety* of
- * the value. These four fields are origin lists, so the usual cause of a drop
- * is an entry that simply isn't an origin — a CSP keyword such as
- * `'unsafe-eval'` has no field in the contract to be requested through. Saying
- * "unsafe" instead read as a security verdict this check never makes, and sent
- * #2012 chasing an XSS regression that wasn't one (#2064).
+ * the value. Saying "unsafe" instead read as a security verdict this check
+ * never makes, and sent #2012 chasing an XSS regression that wasn't one, when
+ * the entry had merely been the wrong kind of thing for the field (#2064).
  */
 export function approveCspSources(
   csp: McpUiResourceCsp | undefined,
