@@ -615,6 +615,8 @@ import type {
 } from "@inspector/core/mcp/types.js";
 import type { AppBridgeFactoryDeps } from "./components/elements/AppRenderer/createAppBridgeFactory";
 import { useManagedResources } from "@inspector/core/react/useManagedResources.js";
+import type { UseManagedResourcesResult } from "@inspector/core/react/useManagedResources.js";
+import type { Resource } from "@modelcontextprotocol/client";
 
 // Default useInspectorClient return — capabilities empty (no task tool calls).
 // Individual tests override via vi.mocked(...).mockReturnValue(...).
@@ -3143,6 +3145,19 @@ describe("App background command rejections (#2049)", () => {
   });
 });
 
+/** A complete `useManagedResources` return, so the mock stays type-checked against the hook's contract. */
+function managedResourcesResult(
+  resources: Resource[],
+): UseManagedResourcesResult {
+  return {
+    error: null,
+    resources,
+    listChanged: false,
+    refresh: vi.fn().mockResolvedValue(resources),
+    clearListChanged: vi.fn(),
+  };
+}
+
 describe("App MCP App listed-resource metadata wiring (#2055)", () => {
   beforeEach(() => {
     appBridgeFactoryDeps.length = 0;
@@ -3151,11 +3166,7 @@ describe("App MCP App listed-resource metadata wiring (#2055)", () => {
   afterEach(() => {
     // The hook mock is module-level and shared, so put the empty-list default
     // back rather than leaving a populated list for whatever runs next.
-    vi.mocked(useManagedResources).mockReturnValue({
-      resources: [],
-      refresh: vi.fn(),
-      clearListChanged: vi.fn(),
-    } as unknown as ReturnType<typeof useManagedResources>);
+    vi.mocked(useManagedResources).mockReturnValue(managedResourcesResult([]));
   });
 
   it("hands the bridge factory a getListedResourceMeta reading the resources/list entries", async () => {
@@ -3165,13 +3176,11 @@ describe("App MCP App listed-resource metadata wiring (#2055)", () => {
     const listedMeta = {
       ui: { csp: { connectDomains: ["https://api.example.com"] } },
     };
-    vi.mocked(useManagedResources).mockReturnValue({
-      resources: [
+    vi.mocked(useManagedResources).mockReturnValue(
+      managedResourcesResult([
         { uri: "ui://weather/app.html", name: "app", _meta: listedMeta },
-      ],
-      refresh: vi.fn(),
-      clearListChanged: vi.fn(),
-    } as unknown as ReturnType<typeof useManagedResources>);
+      ]),
+    );
 
     renderWithMantine(<App />);
     await waitFor(() => expect(appBridgeFactoryDeps.length).toBeGreaterThan(0));
