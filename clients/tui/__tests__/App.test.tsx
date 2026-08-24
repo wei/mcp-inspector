@@ -232,6 +232,10 @@ vi.mock("@inspector/core/mcp/state/index.js", () => ({
 }));
 vi.mock("@inspector/core/mcp/node/index.js", () => ({
   createTransportNode: vi.fn(),
+  // Returns undefined for "no proxy configured", which is what the real one
+  // does with no proxy env var set — so `environment.fetch` stays unset and the
+  // client falls back to the built-in fetch, exactly as before #2067.
+  createProxyFetch: vi.fn(() => undefined),
 }));
 vi.mock("@inspector/core/react/useInspectorClient.js", () => ({
   useInspectorClient: h.useInspectorClient,

@@ -1,0 +1,173 @@
+/**
+ * Guards the mirror of the "must be bundled" rule: a dependency a client
+ * declares **external** must still be external in the built bundle.
+ *
+ * AGENTS.md has a rule for dependencies that MUST be inlined — the
+ * React-rendering ones (#1952) — and nothing at all for the opposite direction,
+ * which is how #2067 shipped. `undici` was declared only in the root and
+ * `clients/cli` manifests, and tsup auto-externalizes just what the *nearest*
+ * manifest declares, so esbuild inlined 1.05 MB of it into the web and TUI
+ * bundles. Inlining a CommonJS package into an ESM bundle is not merely wasteful:
+ * esbuild rewrites `import("undici")` to a relative chunk whose `require("assert")`
+ * hits its `__require` shim and throws `Dynamic require of "assert" is not
+ * supported`. Because the specifier was rewritten at build time, no user-side
+ * install can ever satisfy it — the package is unloadable by construction, and
+ * every proxied connection failed with a message telling users to install a
+ * package that was already there.
+ *
+ * The check is deliberately on the **built output**, not the config: the config
+ * is what a reviewer reads, but the emitted chunk is what ships, and the two
+ * disagreed for four releases. It is also derived from each client's own
+ * `external` list rather than a list maintained here, so a newly externalized
+ * package is covered without editing this file.
+ *
+ * Nothing else catches this class. The unit and integration tests run against
+ * source with a real `undici` on the resolution path; the smokes run the built
+ * tree but never set a proxy env var, so the lazy `import()` never executes.
+ */
+
+import { readdirSync, readFileSync, existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+/**
+ * Clients that ship a tsup bundle, with the config to read `external` from and
+ * the build directory to inspect. `clients/launcher` is plain `tsc` — it emits
+ * no bundle and inlines nothing — so it has nothing to check.
+ */
+export const BUNDLED_CLIENTS = [
+  {
+    name: "web",
+    config: "clients/web/tsup.runner.config.ts",
+    build: "clients/web/build",
+  },
+  {
+    name: "cli",
+    config: "clients/cli/tsup.config.ts",
+    build: "clients/cli/build",
+  },
+  {
+    name: "tui",
+    config: "clients/tui/tsup.config.ts",
+    build: "clients/tui/build",
+  },
+];
+
+/**
+ * Extracts the string literals of a tsup config's `external: [...]` array.
+ *
+ * Reading the config as *text* rather than importing it keeps this guard free of
+ * the client's own toolchain (tsup, esbuild, and — for the TUI — a plugin that
+ * reads `ink-form` off disk at module load). Only bare string entries are
+ * collected; a regex entry such as `/^@inspector\/core/` is a `noExternal`
+ * pattern in practice and has no package name to look for.
+ */
+export function parseExternals(source) {
+  const start = source.indexOf("external: [");
+  if (start === -1) return [];
+  let depth = 0;
+  let end = -1;
+  for (let i = source.indexOf("[", start); i < source.length; i++) {
+    if (source[i] === "[") depth++;
+    else if (source[i] === "]") {
+      depth--;
+      if (depth === 0) {
+        end = i;
+        break;
+      }
+    }
+  }
+  if (end === -1) return [];
+  const body = source.slice(start, end);
+  // Strip comments first: the entries are documented at length, and a package
+  // name quoted inside prose would otherwise read as an entry.
+  const withoutComments = body
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\n]*/g, "");
+  return [...withoutComments.matchAll(/"([^"]+)"|'([^']+)'/g)]
+    .map((m) => m[1] ?? m[2])
+    .filter((name) => name !== "external: [");
+}
+
+/**
+ * The chunk esbuild emits for an inlined package is named after the package's
+ * last path segment plus a hash — `undici-HXPKCIY3.js`,
+ * `@scope/name` → `name-XXXXXXXX.js` — and the rewritten specifier in the entry
+ * is the matching relative path. Either one present means the package was
+ * inlined despite being declared external.
+ */
+export function findInlinedExternals({ externals, buildFiles, entrySource }) {
+  const violations = [];
+  for (const pkg of externals) {
+    const base = pkg.split("/").pop();
+    const chunk = buildFiles.find((f) =>
+      new RegExp(`^${escapeRegExp(base)}-[A-Za-z0-9_]+\\.js$`).test(f),
+    );
+    if (chunk) {
+      violations.push({ pkg, reason: `emitted chunk ${chunk}` });
+      continue;
+    }
+    if (
+      entrySource.includes(`"./${base}-`) ||
+      entrySource.includes(`'./${base}-`)
+    ) {
+      violations.push({
+        pkg,
+        reason: "entry imports a rewritten relative chunk",
+      });
+    }
+  }
+  return violations;
+}
+
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function main() {
+  const failures = [];
+  for (const client of BUNDLED_CLIENTS) {
+    const buildDir = join(repoRoot, client.build);
+    const entry = join(buildDir, "index.js");
+    if (!existsSync(entry)) {
+      failures.push(
+        `${client.name}: ${client.build}/index.js is missing — run \`npm run build\` first.`,
+      );
+      continue;
+    }
+    const externals = parseExternals(
+      readFileSync(join(repoRoot, client.config), "utf8"),
+    );
+    const violations = findInlinedExternals({
+      externals,
+      buildFiles: readdirSync(buildDir),
+      entrySource: readFileSync(entry, "utf8"),
+    });
+    for (const v of violations) {
+      failures.push(
+        `${client.name}: "${v.pkg}" is declared external but was inlined (${v.reason}).`,
+      );
+    }
+  }
+
+  if (failures.length > 0) {
+    console.error("verify:bundle-externals FAILED\n");
+    for (const f of failures) console.error(`  - ${f}`);
+    console.error(
+      "\nAn externalized package must resolve from the consumer's install. If it was\n" +
+        "inlined, esbuild rewrote its specifier to a relative chunk that no user-side\n" +
+        "install can satisfy — and a CommonJS package inlined into an ESM bundle throws\n" +
+        '`Dynamic require of "..." is not supported` on first use (#2067).\n' +
+        "Add the package to that client's tsup `external` list.",
+    );
+    process.exit(1);
+  }
+
+  console.log(
+    `verify:bundle-externals OK — ${BUNDLED_CLIENTS.length} bundles, no externalized package inlined.`,
+  );
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) main();

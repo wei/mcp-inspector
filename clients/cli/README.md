@@ -88,9 +88,15 @@ The file is the only durable way to give a run its roots: there is no roots flag
 
 ### HTTP proxy support
 
-Connections to remote HTTP/SSE servers honor the conventional proxy environment variables: `HTTPS_PROXY` / `HTTP_PROXY` (and their lowercase forms) select the proxy, and `NO_PROXY` exempts hosts. This applies to the Node transport shared by the CLI and the web backend — no inspector-specific flag is needed. When a proxy variable is set, outbound requests are routed through undici's `EnvHttpProxyAgent`.
+Connections to remote HTTP/SSE servers honor the conventional proxy environment variables: `HTTPS_PROXY` / `HTTP_PROXY` (and their lowercase forms) select the proxy, and `NO_PROXY` exempts hosts. This applies to every Node client — CLI, TUI, and the web backend — with no inspector-specific flag. It also covers **OAuth discovery and token requests**, which run through the same fetch.
 
-Proxy routing is powered by the [`undici`](https://www.npmjs.com/package/undici) package (`^8.5.0`, which requires Node `>= 22.19.0` — the inspector's supported floor). It is imported lazily only when a proxy variable is set, so runs without a proxy configured pay no cost.
+Proxy routing is powered by the [`undici`](https://www.npmjs.com/package/undici) package (declared in the **root** manifest only; `^8.x` requires Node `>= 22.19.0`, the Inspector's supported floor). It is imported lazily on the first request and only when a proxy variable is set, so runs without a proxy configured pay no cost.
+
+**Both halves of the pair come from userland undici — its `fetch` _and_ its `EnvHttpProxyAgent` ([#2067](https://github.com/modelcontextprotocol/inspector/issues/2067)).** The obvious-looking alternative is to hand the agent to Node's built-in `fetch` as a `dispatcher`, which is what v2.0.0–2.3.0 did. That couples two _different copies_ of undici at the dispatcher handler interface, and that interface is not stable across majors: Node 22 embeds undici 6, Node 24 embeds 7, Node 26 embeds 8. A userland undici 8 agent handed a built-in undici 7 handler is rejected outright — `fetch failed: invalid onRequestStart method` — and the request never leaves the process. Keeping both sides inside one copy is what makes proxying work unchanged from the Node 22.19 floor through Node 26. (Node's own `NODE_USE_ENV_PROXY` is not a substitute: it is unsupported at our 22.19 engine floor.)
+
+Because undici's `Response` is a different class from `globalThis.Response`, the proxied fetch re-wraps each response as a genuine global `Response`, streaming preserved. Without that, `res instanceof Response` is `false` for callers that test it — including the MCP SDK, whose OAuth error formatter would degrade every message to `Raw body: [object Response]`.
+
+`undici` is declared **only** in the root `package.json`, and every client's tsup config lists it as `external`. Both halves matter: tsup auto-externalizes what the _nearest_ manifest declares, so without the explicit entry the web and TUI bundles inlined it — and a CommonJS package inlined into an ESM bundle throws `Dynamic require of "assert" is not supported` the first time it is used. `npm run verify:bundle-externals` is the durable guard.
 
 ## Options
 

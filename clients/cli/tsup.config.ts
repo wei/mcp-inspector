@@ -20,6 +20,14 @@ export default defineConfig({
   // Bundle core source; leave npm deps external.
   noExternal: [/^@inspector\/core/],
   external: [
+    // `undici` MUST stay external. It is CommonJS, so inlining it rewrites
+    // `import("undici")` to a relative chunk whose `require("assert")` hits
+    // esbuild's ESM `__require` shim and throws "Dynamic require of \"assert\"
+    // is not supported" — and because the specifier was rewritten at build time,
+    // no user-side install can ever satisfy it (#2067). It is declared in the
+    // ROOT manifest only, so tsup cannot infer this from a nearest-manifest
+    // lookup; the entry has to be explicit.
+    "undici",
     "@napi-rs/keyring",
     // Root-declared (see the repo's dependency-placement rule) and CJS, which
     // is the combination that bites: tsup externalizes what the *client's*

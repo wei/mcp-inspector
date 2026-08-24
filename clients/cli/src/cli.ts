@@ -17,6 +17,7 @@ import { clearStoredAuthForRelogin } from "./clear-stored-auth-for-relogin.js";
 import { InspectorClient } from "@inspector/core/mcp/index.js";
 import { cleanRoots } from "@inspector/core/mcp/serverList.js";
 import {
+  createProxyFetch,
   createTransportNode,
   loadServerEntries,
   selectServerEntry,
@@ -122,6 +123,11 @@ async function callMethod(
 
   const environment: InspectorClientEnvironment = {
     transport: createTransportNode,
+    // Proxy support sits at the bottom of the fetch stack so InspectorClient's
+    // wrappers compose over it — and so OAuth discovery/token requests, which
+    // also run through `environment.fetch`, are proxied too (#2067). Undefined
+    // when no proxy env var is set, which leaves the built-in fetch in place.
+    fetch: createProxyFetch(),
   };
   const redirectUrlProvider = new MutableRedirectUrlProvider();
   // Disarmed until the CLI-owned interactive OAuth flow runs — SDK `auth()`

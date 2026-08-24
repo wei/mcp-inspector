@@ -13,68 +13,7 @@ import { SSEClientTransport } from "@modelcontextprotocol/client";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { createFetchTracker } from "../fetchTracking.js";
 import { createAuthChallengeInterceptFetch } from "./authChallengeFetch.js";
-import type { Dispatcher } from "undici";
-
-/** Node's `RequestInit` plus the undici-specific `dispatcher` option. */
-type NodeRequestInit = RequestInit & { dispatcher?: Dispatcher };
-
-/** Standard proxy env vars, in the precedence undici's EnvHttpProxyAgent uses. */
-const PROXY_ENV_VARS = [
-  "HTTPS_PROXY",
-  "https_proxy",
-  "HTTP_PROXY",
-  "http_proxy",
-] as const;
-
-/**
- * First proxy URL found in the environment, or `undefined` if none is set.
- * Exported for tests and so callers can decide whether proxying is in effect.
- */
-export function readProxyEnv(): string | undefined {
-  for (const name of PROXY_ENV_VARS) {
-    const value = process.env[name];
-    if (value && value.trim() !== "") return value;
-  }
-  return undefined;
-}
-
-/**
- * Wraps a fetch function so outbound HTTP/HTTPS requests honor the standard
- * `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` environment variables.
- *
- * Node's built-in `fetch` (the bundled undici) accepts a `dispatcher` option
- * in `RequestInit`; undici's `EnvHttpProxyAgent` reads the proxy env vars and
- * routes per-request, so a single dispatcher covers both schemes and respects
- * `NO_PROXY`. The `undici` package is loaded lazily on first call so callers
- * that never set a proxy env var (TUI, web backend) need no extra dependency.
- * If the proxy is configured but `undici` is unavailable, the wrapper throws
- * with an actionable message rather than silently ignoring the env var.
- */
-export function withProxyDispatcher(baseFetch: typeof fetch): typeof fetch {
-  if (readProxyEnv() === undefined) return baseFetch;
-
-  let dispatcherPromise: Promise<Dispatcher> | undefined;
-  const getDispatcher = (): Promise<Dispatcher> => {
-    dispatcherPromise ??= import("undici").then(
-      ({ EnvHttpProxyAgent }) => new EnvHttpProxyAgent(),
-      (cause: unknown) => {
-        throw new Error(
-          "HTTPS_PROXY / HTTP_PROXY is set but the `undici` package is not " +
-            "available. Install it (it ships with the CLI client) or unset the " +
-            "proxy env var.",
-          { cause },
-        );
-      },
-    );
-    return dispatcherPromise;
-  };
-
-  const proxiedFetch: typeof fetch = async (input, init) => {
-    const dispatcher = await getDispatcher();
-    return baseFetch(input, { ...init, dispatcher } as NodeRequestInit);
-  };
-  return proxiedFetch;
-}
+import { createProxyFetch } from "./proxyFetch.js";
 
 /**
  * Build the wire `headers` record from `settings.headers`, dropping rows with
@@ -112,9 +51,12 @@ export function createTransportNode(
     interceptAuthChallenges = false,
   } = options;
 
-  // Proxy-wrap first so the auth-challenge interceptor observes responses from
-  // the (optionally proxied) network call.
-  const baseFetch = withProxyDispatcher(optionsFetchFn ?? globalThis.fetch);
+  // `optionsFetchFn` is the caller's whole fetch stack and already sits on top of
+  // a proxy-aware base when one is needed — the Node clients install
+  // `createProxyFetch()` as `environment.fetch`, and `InspectorClient` wraps
+  // that. The fallback is for the one caller that supplies nothing: the web
+  // backend (`core/mcp/remote/node/server.ts`), which calls this directly.
+  const baseFetch = optionsFetchFn ?? createProxyFetch() ?? globalThis.fetch;
   const fetchWithOptionalAuthIntercept = interceptAuthChallenges
     ? createAuthChallengeInterceptFetch(baseFetch)
     : baseFetch;
