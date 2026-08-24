@@ -1432,6 +1432,23 @@ describe("normalizeStoredMetadata (#1910)", () => {
     });
   });
 
+  it.each([
+    ["the object form", { __proto__: { polluted: true } } as unknown],
+    [
+      "a hand-edited file's object form",
+      JSON.parse('{"__proto__":{"polluted":true}}'),
+    ],
+    ["the legacy pair form", [{ key: "__proto__", value: { polluted: true } }]],
+  ])("stores a `__proto__` key from %s as an own property", (_label, input) => {
+    // Plain assignment hits the prototype setter: the entry vanishes and, for
+    // an object value, the result gets a caller-controlled prototype. Both
+    // branches must define rather than set — the object branch regressed once
+    // when it changed from a spread to a per-key loop.
+    const out = normalizeStoredMetadata(input);
+    expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
   it("stores a legacy `__proto__` key as an own property", () => {
     // Plain assignment would hit the prototype setter: the entry would vanish
     // (and an object value would mutate the prototype) instead of being stored.

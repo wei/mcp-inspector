@@ -242,16 +242,7 @@ export function normalizeStoredMetadata(
       // migration as `null`. Only a genuinely absent `value` becomes `""`.
       const resolved = value === undefined ? "" : value;
       if (!keepSerializable(key, resolved)) continue;
-      // `defineProperty` rather than `out[key] = …` because a legacy key of
-      // `__proto__` would otherwise hit the prototype setter — silently
-      // dropping the entry (or, for an object value, mutating the prototype)
-      // instead of storing an own property under that name.
-      Object.defineProperty(out, key, {
-        value: resolved,
-        writable: true,
-        enumerable: true,
-        configurable: true,
-      });
+      defineMetadataKey(out, key, resolved);
     }
     return out;
   }
@@ -264,7 +255,7 @@ export function normalizeStoredMetadata(
     // value does not cost the rest.
     const out: RequestMetadata = {};
     for (const [key, value] of Object.entries(metadata as RequestMetadata)) {
-      if (keepSerializable(key, value)) out[key] = value;
+      if (keepSerializable(key, value)) defineMetadataKey(out, key, value);
     }
     return out;
   }
@@ -273,6 +264,34 @@ export function normalizeStoredMetadata(
     `Ignoring malformed \`metadata\` (expected a JSON object, got ${describeJsonType(metadata)}).`,
   );
   return {};
+}
+
+/**
+ * Store a metadata key as an **own** property.
+ *
+ * `out[key] = value` invokes the prototype setter for the key `"__proto__"`,
+ * so the entry vanishes on reload and — for an object value — the returned
+ * metadata is given a caller-controlled prototype. `_meta` keys come from a
+ * file a user (or something that wrote that file) controls, so `"__proto__"`
+ * is a key that can genuinely arrive.
+ *
+ * Both branches of `normalizeStoredMetadata` go through this rather than each
+ * spelling it out. The object branch was originally a spread — safe, because
+ * spread defines rather than sets — and rewriting it into a per-key loop for
+ * value filtering silently reintroduced the hazard the legacy branch had
+ * already fixed. One mechanism is what stops that recurring.
+ */
+function defineMetadataKey(
+  out: RequestMetadata,
+  key: string,
+  value: JsonValue,
+): void {
+  Object.defineProperty(out, key, {
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
 }
 
 /**
