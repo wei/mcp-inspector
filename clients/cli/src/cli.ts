@@ -169,6 +169,17 @@ async function callMethod(
     // the change at all: the SDK refuses `roots/list_changed` from a client
     // that never declared it, which `setRoots` logged as a send failure (#1797).
     roots: cleanRoots(serverSettings?.roots ?? []),
+    // Per-server default `_meta` from mcp.json, exactly as web (`App.tsx`) and
+    // the TUI pass it — the setting belongs to the server, not to the client
+    // that happens to read it, and `InspectorClient` only reads the option
+    // rather than falling back to `serverSettings.metadata` (#2093). Already a
+    // JSON object (#1910), so there is no pair-array flattening left to do;
+    // `{}` means "no defaults". `--metadata` stays per-invocation and wins on a
+    // key collision, since call-time keys override defaults in `mergeMeta`.
+    ...(serverSettings?.metadata &&
+      Object.keys(serverSettings.metadata).length > 0 && {
+        defaultMetadata: serverSettings.metadata,
+      }),
     serverSettings,
     // Per-server protocol era (SEP §7.8) from mcp.json → SDK versionNegotiation.
     // Absent era defaults to legacy in the InspectorClient constructor (#1626).
