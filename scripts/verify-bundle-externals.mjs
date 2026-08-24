@@ -92,38 +92,45 @@ export function parseExternals(source) {
 }
 
 /**
- * The chunk esbuild emits for an inlined package is named after the package's
- * last path segment plus a hash — `undici-HXPKCIY3.js`,
- * `@scope/name` → `name-XXXXXXXX.js` — and the rewritten specifier in the entry
- * is the matching relative path. Either one present means the package was
- * inlined despite being declared external.
+ * Every module esbuild inlines is emitted under a `// <path>` banner naming its
+ * source file, so a package that was bundled despite being declared external
+ * leaves `// ../../node_modules/<pkg>/…` lines behind. Matching on those covers
+ * **both** shapes this can take: a separate `<pkg>-HASH.js` chunk (what a
+ * dynamically `import()`ed CommonJS package produces, which is what #2067 was)
+ * and a statically-imported package folded straight into `index.js`, which
+ * emits no chunk at all and would otherwise pass unnoticed.
+ *
+ * Reading banners means the guard depends on unminified output. That is true of
+ * every client bundle today and is asserted rather than assumed: a build with no
+ * banners at all fails as `noBanners` instead of silently reporting a clean
+ * result, so turning on `minify` surfaces here rather than quietly retiring the
+ * check.
  */
-export function findInlinedExternals({ externals, buildFiles, entrySource }) {
+export function findInlinedExternals({ externals, files }) {
+  const banners = files.flatMap((file) =>
+    [...file.source.matchAll(/^\/\/ (\S+)$/gm)].map((m) => ({
+      file: file.name,
+      path: m[1],
+    })),
+  );
+  if (banners.length === 0) {
+    return { noBanners: true, violations: [] };
+  }
+
   const violations = [];
   for (const pkg of externals) {
-    const base = pkg.split("/").pop();
-    const chunk = buildFiles.find((f) =>
-      new RegExp(`^${escapeRegExp(base)}-[A-Za-z0-9_]+\\.js$`).test(f),
-    );
-    if (chunk) {
-      violations.push({ pkg, reason: `emitted chunk ${chunk}` });
-      continue;
-    }
-    if (
-      entrySource.includes(`"./${base}-`) ||
-      entrySource.includes(`'./${base}-`)
-    ) {
+    // The trailing slash is load-bearing: without it `undici` matches
+    // `undici-types`, a @types transitive that is legitimately present.
+    const needle = `node_modules/${pkg}/`;
+    const hit = banners.find((b) => b.path.includes(needle));
+    if (hit) {
       violations.push({
         pkg,
-        reason: "entry imports a rewritten relative chunk",
+        reason: `inlined into ${hit.file} (e.g. ${hit.path})`,
       });
     }
   }
-  return violations;
-}
-
-function escapeRegExp(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return { noBanners: false, violations };
 }
 
 function main() {
@@ -140,11 +147,23 @@ function main() {
     const externals = parseExternals(
       readFileSync(join(repoRoot, client.config), "utf8"),
     );
-    const violations = findInlinedExternals({
+    const files = readdirSync(buildDir)
+      .filter((f) => f.endsWith(".js"))
+      .map((name) => ({
+        name,
+        source: readFileSync(join(buildDir, name), "utf8"),
+      }));
+    const { noBanners, violations } = findInlinedExternals({
       externals,
-      buildFiles: readdirSync(buildDir),
-      entrySource: readFileSync(entry, "utf8"),
+      files,
     });
+    if (noBanners) {
+      failures.push(
+        `${client.name}: ${client.build} has no esbuild module banners, so this guard ` +
+          `cannot see what was inlined. Has minification been enabled for this bundle?`,
+      );
+      continue;
+    }
     for (const v of violations) {
       failures.push(
         `${client.name}: "${v.pkg}" is declared external but was inlined (${v.reason}).`,

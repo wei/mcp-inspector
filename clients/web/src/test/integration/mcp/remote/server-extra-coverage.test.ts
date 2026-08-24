@@ -341,6 +341,62 @@ describe("server.ts supplemental coverage", () => {
       await stop(h);
     });
 
+    it("routes the outbound request through HTTP_PROXY (#2067)", async () => {
+      // /api/fetch is the browser's ONLY way out to the network — the web
+      // client's `environment.fetch` is `createRemoteFetch()`, which forwards
+      // OAuth discovery and token requests here. On the bare global `fetch` a
+      // corporate-proxy user could connect to a server but never authorize
+      // against it, and Node's native NODE_USE_ENV_PROXY does not cover them
+      // (unsupported at the 22.19 engine floor).
+      const { createServer } = await import("node:http");
+      const { request } = await import("node:http");
+      const seen: string[] = [];
+      const proxy = createServer((req, res) => {
+        seen.push(req.url ?? "");
+        const u = new URL(req.url ?? "");
+        const up = request(
+          {
+            host: u.hostname,
+            port: u.port,
+            path: u.pathname + u.search,
+            method: req.method,
+            headers: req.headers,
+          },
+          (r) => {
+            res.writeHead(r.statusCode ?? 502, r.headers);
+            r.pipe(res);
+          },
+        );
+        up.on("error", () => {
+          res.writeHead(502);
+          res.end();
+        });
+        req.pipe(up);
+      });
+      await new Promise<void>((r) => proxy.listen(0, "127.0.0.1", () => r()));
+      const proxyAddr = proxy.address();
+      const proxyPort =
+        typeof proxyAddr === "object" && proxyAddr !== null
+          ? proxyAddr.port
+          : 0;
+      const previous = process.env.HTTP_PROXY;
+      process.env.HTTP_PROXY = `http://127.0.0.1:${proxyPort}`;
+
+      try {
+        const res = await fetch(`${h.baseUrl}/api/fetch`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ url: `${targetUrl}/plain` }),
+        });
+        expect(res.status).toBe(200);
+        expect(seen).toEqual([`${targetUrl}/plain`]);
+      } finally {
+        if (previous === undefined) delete process.env.HTTP_PROXY;
+        else process.env.HTTP_PROXY = previous;
+        await new Promise<void>((r) => proxy.close(() => r()));
+      }
+    });
+
     it("forwards method + headers and returns the response body", async () => {
       const res = await fetch(`${h.baseUrl}/api/fetch`, {
         method: "POST",

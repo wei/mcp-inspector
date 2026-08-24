@@ -51,61 +51,104 @@ describe("parseExternals", () => {
 });
 
 describe("findInlinedExternals", () => {
-  test("flags an emitted chunk named after the package", () => {
-    // The exact shape #2067 shipped: `undici-HXPKCIY3.js` beside index.js.
-    const v = findInlinedExternals({
+  const banner = (p) => `// ${p}\nvar x = 1;\n`;
+
+  test("flags a package inlined as its own chunk", () => {
+    // The exact shape #2067 shipped: a dynamically import()ed CommonJS package
+    // emitted as `undici-HXPKCIY3.js` beside index.js.
+    const { violations } = findInlinedExternals({
       externals: ["undici"],
-      buildFiles: ["index.js", "undici-HXPKCIY3.js"],
-      entrySource: "",
+      files: [
+        {
+          name: "index.js",
+          source: banner("../../core/mcp/node/transport.ts"),
+        },
+        {
+          name: "undici-HXPKCIY3.js",
+          source: banner("../../node_modules/undici/lib/core/symbols.js"),
+        },
+      ],
     });
-    assert.equal(v.length, 1);
-    assert.equal(v[0].pkg, "undici");
-    assert.match(v[0].reason, /undici-HXPKCIY3\.js/);
+    assert.equal(violations.length, 1);
+    assert.equal(violations[0].pkg, "undici");
+    assert.match(violations[0].reason, /undici-HXPKCIY3\.js/);
   });
 
-  test("flags a rewritten relative specifier in the entry", () => {
-    // Belt to the chunk-name brace: if esbuild ever names the chunk differently,
-    // the rewritten import in the entry still gives the inlining away.
-    const v = findInlinedExternals({
-      externals: ["undici"],
-      buildFiles: ["index.js"],
-      entrySource: 'await import("./undici-ABC123.js")',
+  test("flags a package inlined straight into the entry, with no chunk", () => {
+    // A *statically* imported package is folded into index.js and emits no
+    // chunk at all, so a chunk-name check would miss it entirely. The banner is
+    // what gives it away.
+    const { violations } = findInlinedExternals({
+      externals: ["pino"],
+      files: [
+        {
+          name: "index.js",
+          source:
+            banner("../../core/mcp/index.ts") +
+            banner("../../node_modules/pino/pino.js"),
+        },
+      ],
     });
-    assert.equal(v.length, 1);
-    assert.match(v[0].reason, /rewritten relative chunk/);
-  });
-
-  test("matches a scoped package on its last segment", () => {
-    const v = findInlinedExternals({
-      externals: ["@napi-rs/keyring"],
-      buildFiles: ["index.js", "keyring-QQ11.js"],
-      entrySource: "",
-    });
-    assert.equal(v.length, 1);
-    assert.equal(v[0].pkg, "@napi-rs/keyring");
+    assert.equal(violations.length, 1);
+    assert.equal(violations[0].pkg, "pino");
+    assert.match(violations[0].reason, /index\.js/);
   });
 
   test("passes a genuinely external package", () => {
-    assert.deepEqual(
-      findInlinedExternals({
-        externals: ["undici", "pino"],
-        buildFiles: ["index.js"],
-        entrySource: 'await import("undici"); import "pino";',
-      }),
-      [],
-    );
+    const { noBanners, violations } = findInlinedExternals({
+      externals: ["undici", "pino"],
+      files: [
+        {
+          name: "index.js",
+          source:
+            banner("../../core/mcp/node/proxyFetch.ts") +
+            'await import("undici");\nimport "pino";\n',
+        },
+      ],
+    });
+    assert.equal(noBanners, false);
+    assert.deepEqual(violations, []);
   });
 
-  test("does not mistake an unrelated chunk for the package", () => {
-    // `undici-types` is a @types transitive; a substring match would flag it.
-    assert.deepEqual(
-      findInlinedExternals({
-        externals: ["undici"],
-        buildFiles: ["index.js", "undici-types-AA22.js"],
-        entrySource: "",
-      }),
-      [],
-    );
+  test("does not mistake a same-prefix package for the external", () => {
+    // `undici-types` is a @types transitive and is legitimately inlined; the
+    // trailing slash in the needle is what keeps it from reading as `undici`.
+    const { violations } = findInlinedExternals({
+      externals: ["undici"],
+      files: [
+        {
+          name: "index.js",
+          source: banner("../../node_modules/undici-types/index.js"),
+        },
+      ],
+    });
+    assert.deepEqual(violations, []);
+  });
+
+  test("matches a scoped package on its full name", () => {
+    const { violations } = findInlinedExternals({
+      externals: ["@napi-rs/keyring"],
+      files: [
+        {
+          name: "index.js",
+          source: banner("../../node_modules/@napi-rs/keyring/index.js"),
+        },
+      ],
+    });
+    assert.equal(violations.length, 1);
+    assert.equal(violations[0].pkg, "@napi-rs/keyring");
+  });
+
+  test("reports noBanners rather than a clean pass when banners are absent", () => {
+    // The guard reads esbuild's `// <path>` module banners, so minified output
+    // would make every bundle look clean. That must fail loudly instead —
+    // otherwise enabling `minify` silently retires the check.
+    const { noBanners, violations } = findInlinedExternals({
+      externals: ["undici"],
+      files: [{ name: "index.js", source: "var a=1;var b=2;" }],
+    });
+    assert.equal(noBanners, true);
+    assert.deepEqual(violations, []);
   });
 });
 
