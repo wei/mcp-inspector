@@ -27,8 +27,28 @@
  * the spec field is *for* (a real, allowlistable origin) without minting a port
  * — or a DNS name — per app. The consequence is that this origin is **not** a
  * per-app isolation boundary: two apps served here share `localStorage`,
- * `sessionStorage`, and cookies for it. They remain isolated from the sandbox
- * proxy and from the Inspector itself, which are different origins.
+ * `sessionStorage`, and cookies for it.
+ *
+ * ## What the separate port does and does not isolate
+ *
+ * A distinct port makes a distinct **origin**, so the usual origin-scoped
+ * surfaces are isolated from the sandbox proxy and from the Inspector page:
+ * DOM and scripting access, `localStorage`, `sessionStorage`, IndexedDB.
+ *
+ * **Cookies are the exception, and they are not isolated.** Cookies are scoped
+ * by host (and path), not by port — so an app served here shares the
+ * `127.0.0.1` cookie jar with the Inspector on `6274` and with every other
+ * service on loopback. It can read any non-`HttpOnly` cookie set for that host
+ * and set `Path=/` cookies those services will receive.
+ *
+ * That is a real caveat, but it is not a hole in the Inspector's own auth: the
+ * API token travels in the `x-mcp-remote-auth` header and is held in a
+ * `window` global and `sessionStorage`, both of which a different origin
+ * cannot read. Closing the cookie gap properly needs a distinct *host*, which
+ * this listener cannot mint — the Inspector owns no DNS, and a second loopback
+ * address is not portable. So it is documented rather than papered over; do
+ * not run the Inspector beside a loopback service whose session cookie you
+ * would not hand to an app under test.
  *
  * ## Why granting `allow-same-origin` here is not a regression
  *
@@ -76,6 +96,21 @@ export const DEFAULT_APP_ORIGIN_PORT = 6278;
 
 /** Documents kept at once. Oldest is evicted past this; see {@link publish}. */
 const MAX_DOCUMENTS = 32;
+
+/**
+ * Total retained document size, in UTF-16 code units, across every live entry.
+ *
+ * {@link MAX_DOCUMENTS} alone bounds the *count*, and the route admits up to
+ * 8Mi code units per document — so the count bound permits ~256Mi retained for
+ * a full hour, enough to OOM a memory-limited Inspector on documents a server
+ * chose the size of. Both bounds apply; whichever binds first evicts.
+ *
+ * 64Mi is roughly a full complement of ordinary widgets (a real app document is
+ * tens to hundreds of KiB) or a couple of pathological ones. An app large
+ * enough to evict its predecessors still renders — the frame fetches its `src`
+ * immediately, long before anything could push it out.
+ */
+const MAX_RETAINED_CHARS = 64 * 1024 * 1024;
 
 /**
  * How long a published document stays fetchable. An iframe fetches its `src`
@@ -192,6 +227,8 @@ export function parseDocumentId(url: string | undefined): string | null {
 
 interface StoredDocument extends AppDocument {
   expiresAt: number;
+  /** Retained size in UTF-16 code units, against {@link MAX_RETAINED_CHARS}. */
+  size: number;
 }
 
 export function createAppOriginController(
@@ -206,13 +243,25 @@ export function createAppOriginController(
 
   // Insertion-ordered, so the first key is the oldest entry.
   const documents = new Map<string, StoredDocument>();
+  // Running sum of every live entry's `size`, kept in step with the map on
+  // every insert and every delete. Tracked rather than recomputed: eviction
+  // runs per publish and summing the map there would be O(n) on a hot path.
+  let retainedChars = 0;
+
+  /** The single removal seam, so the running total cannot drift from the map. */
+  function drop(id: string): void {
+    const doc = documents.get(id);
+    if (!doc) return;
+    retainedChars -= doc.size;
+    documents.delete(id);
+  }
 
   const FRAME_ANCESTORS = frameAncestorsDirective(embedderOrigins);
 
   /** Drop everything past its TTL. Cheap: the map is bounded by MAX_DOCUMENTS. */
   function evictExpired(now: number): void {
     for (const [id, doc] of documents) {
-      if (doc.expiresAt <= now) documents.delete(id);
+      if (doc.expiresAt <= now) drop(id);
     }
   }
 
@@ -235,7 +284,7 @@ export function createAppOriginController(
           const id = req.method === "GET" ? parseDocumentId(req.url) : null;
           const doc = id ? documents.get(id) : undefined;
           if (!doc || doc.expiresAt <= Date.now()) {
-            if (id) documents.delete(id);
+            if (id) drop(id);
             res.writeHead(404, { "Content-Type": "text/plain" });
             res.end("Not Found");
             return;
@@ -293,6 +342,7 @@ export function createAppOriginController(
           server = null;
           origin = null;
           documents.clear();
+          retainedChars = 0;
           settle({ port: 0, url: "" });
         });
 
@@ -322,6 +372,7 @@ export function createAppOriginController(
 
     async close(): Promise<void> {
       documents.clear();
+      retainedChars = 0;
       if (!server) return;
       return new Promise((resolve) => {
         server!.close(() => {
@@ -340,17 +391,23 @@ export function createAppOriginController(
       if (!origin) return null;
       const now = Date.now();
       evictExpired(now);
-      // Bound the map even if nothing has expired: drop the oldest entry. An
-      // evicted document's frame has long since loaded, and the alternative is
-      // an unbounded store fed by every app the user opens in a session.
-      while (documents.size >= MAX_DOCUMENTS) {
+      const size = doc.html.length + (doc.csp?.length ?? 0);
+      // Bound the store even if nothing has expired: drop oldest-first until
+      // BOTH the count and the retained-size budget have room. An evicted
+      // document's frame has long since loaded, and the alternative is a store
+      // fed — in count and in bytes — by whatever the servers under test send.
+      while (
+        documents.size >= MAX_DOCUMENTS ||
+        (documents.size > 0 && retainedChars + size > MAX_RETAINED_CHARS)
+      ) {
         const oldest = documents.keys().next();
-        /* v8 ignore next -- `size >= MAX_DOCUMENTS` guarantees a first key. */
+        /* v8 ignore next -- both loop conditions require a non-empty map. */
         if (oldest.done) break;
-        documents.delete(oldest.value);
+        drop(oldest.value);
       }
       const id = randomBytes(16).toString("hex");
-      documents.set(id, { ...doc, expiresAt: now + DOCUMENT_TTL_MS });
+      documents.set(id, { ...doc, expiresAt: now + DOCUMENT_TTL_MS, size });
+      retainedChars += size;
       return { url: `${origin}${DOC_PATH_PREFIX}${id}` };
     },
   };

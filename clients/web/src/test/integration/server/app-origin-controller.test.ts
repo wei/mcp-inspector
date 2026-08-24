@@ -238,6 +238,30 @@ describe("createAppOriginController", () => {
     expect((await fetch(first.url)).status).toBe(404);
   });
 
+  it("evicts against a retained-size budget, not just the entry count", async () => {
+    // The count bound alone permits MAX_DOCUMENTS * 8Mi retained for an hour,
+    // on documents a server under test chooses the size of. Publish a few
+    // large ones — well under the 32-entry cap — and the earliest must stop
+    // being served.
+    const c = createAppOriginController({ port: 0, host: "127.0.0.1" });
+    controller = c;
+    const { url } = await c.start();
+    // 24Mi each: three fit under no count bound, but the third pushes total
+    // retained past the 64Mi budget and the first has to go.
+    const big = "x".repeat(24 * 1024 * 1024);
+    const first = c.publish({ html: big });
+    const second = c.publish({ html: big });
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    const third = c.publish({ html: big });
+    expect(third).not.toBeNull();
+
+    expect((await fetch(first!.url)).status).toBe(404);
+    // The newest is always served — its frame is about to fetch it.
+    expect((await fetch(third!.url)).status).toBe(200);
+    expect(url).toBe(c.getOrigin());
+  });
+
   it("404s a document past its TTL", async () => {
     // Fake `Date` ONLY — the TTL is the sole thing that reads it, and faking
     // the timer queue too would deadlock the real HTTP round-trip below.

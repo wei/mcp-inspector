@@ -182,6 +182,23 @@ is *for* — a real, allowlistable origin — without minting a port or a DNS na
 per app, at the cost of not being a per-app isolation boundary: two such apps
 share `localStorage`, `sessionStorage`, and cookies for that origin.
 
+**And the separate port does not isolate cookies from the rest of loopback.**
+A distinct port makes a distinct *origin*, so the origin-scoped surfaces —
+DOM/scripting access, `localStorage`, `sessionStorage`, IndexedDB — are isolated
+from the sandbox proxy and from the Inspector page. **Cookies are not
+origin-scoped**: they are keyed by host and path, ignoring port. An app served
+here therefore shares the `127.0.0.1` cookie jar with the Inspector on `6274`
+and with anything else on loopback — it can read any non-`HttpOnly` cookie set
+for that host, and set `Path=/` cookies those services will receive.
+
+This is not a hole in the Inspector's own auth: the API token travels in the
+`x-mcp-remote-auth` header and lives in a `window` global and `sessionStorage`,
+neither of which another origin can read. Closing the cookie gap properly needs
+a distinct *host*, which this listener cannot mint (the Inspector owns no DNS,
+and a second loopback address is not portable) — so it is stated rather than
+papered over. Don't run the Inspector beside a loopback service whose session
+cookie you would not hand to an app under test.
+
 **Every failure falls back rather than blanking the app.** No app-origin
 listener, a port that never bound, an older backend with no
 `POST /api/app-document` route, a network error — each renders the app the
