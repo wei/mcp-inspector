@@ -273,8 +273,15 @@ export function createAppOriginController(
             console.error("App origin server error:", err);
           }
           // Degrade rather than reject: `publish` then returns null and the
-          // renderer keeps working on the default srcdoc path.
+          // renderer keeps working on the default srcdoc path. Clearing
+          // `origin` is what makes that true — `publish` gates on it, not on
+          // `server`, so an error arriving AFTER a successful listen would
+          // otherwise keep minting URLs on a dead listener and the browser
+          // would never take the promised fallback. Dropping the documents
+          // with it releases their memory, since nothing can fetch them now.
           server = null;
+          origin = null;
+          documents.clear();
           settle({ port: 0, url: "" });
         });
 

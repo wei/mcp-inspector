@@ -337,6 +337,58 @@ describe("createAppOriginController", () => {
     }
   });
 
+  it("stops minting URLs when the listener errors AFTER it bound", async () => {
+    // `publish` gates on `origin`, not on `server`. An error arriving once the
+    // listener is live must therefore clear `origin` too — otherwise the
+    // browser keeps being handed URLs on a dead port and never takes the
+    // srcdoc fallback the caller is promised.
+    vi.resetModules();
+    let emitter!: EventEmitter;
+    vi.doMock("node:http", async () => {
+      const actual =
+        await vi.importActual<typeof import("node:http")>("node:http");
+      return {
+        ...actual,
+        createServer: () => {
+          emitter = new EventEmitter();
+          return Object.assign(emitter, {
+            listen: (_p: number, _h: string, cb?: () => void) =>
+              setImmediate(() => cb?.()),
+            address: () => ({
+              address: "127.0.0.1",
+              family: "IPv4",
+              port: 6276,
+            }),
+            close: (cb?: () => void) => cb?.(),
+          });
+        },
+      };
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const mod = await import("../../../../server/app-origin-controller.js");
+      const c = mod.createAppOriginController({
+        port: 6276,
+        host: "127.0.0.1",
+      });
+      await c.start();
+      expect(c.getOrigin()).toBe("http://127.0.0.1:6276");
+      expect(c.publish({ html: "<p>x</p>" })).not.toBeNull();
+
+      emitter.emit(
+        "error",
+        Object.assign(new Error("boom"), { code: "EPIPE" }),
+      );
+
+      expect(c.getOrigin()).toBeNull();
+      expect(c.publish({ html: "<p>x</p>" })).toBeNull();
+    } finally {
+      errorSpy.mockRestore();
+      vi.doUnmock("node:http");
+      vi.resetModules();
+    }
+  });
+
   it("gives up after one retry when the dynamic fallback also fails", async () => {
     // Guards the `retriedDynamic` latch. A real `listen(0)` effectively always
     // succeeds, so a claimed port only ever produces ONE EADDRINUSE — under

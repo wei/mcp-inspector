@@ -85,6 +85,20 @@ describe("createRemoteApp POST /api/app-document", () => {
   });
 
   it.each([
+    ["a JSON null body", "null"],
+    ["a JSON array body", "[1,2]"],
+  ])("rejects %s with 400 rather than a 500", async (_label, raw) => {
+    // Both parse cleanly, so the try/catch above sees nothing — destructuring
+    // them is what used to throw, outside it, turning a bad shape into a 500.
+    const publish = vi
+      .fn<(doc: { html: string; csp?: string }) => { url: string } | null>()
+      .mockReturnValue({ url: "http://x/y" });
+    const res = await appWith(publish).request(post(raw));
+    expect(res.status).toBe(400);
+    expect(publish).not.toHaveBeenCalled();
+  });
+
+  it.each([
     ["missing html", {}],
     ["empty html", { html: "" }],
     ["non-string html", { html: 42 }],

@@ -749,13 +749,24 @@ export function createRemoteApp(
     if (!publish) {
       return c.json({ error: "App-origin hosting is not available" }, 503);
     }
-    let body: { html?: unknown; csp?: unknown };
+    let parsed: unknown;
     try {
-      body = (await c.req.json()) as { html?: unknown; csp?: unknown };
+      parsed = await c.req.json();
     } catch {
       return c.json({ error: "Invalid JSON body" }, 400);
     }
-    const { html, csp } = body;
+    // `null` and `[1,2]` are both valid JSON, so `c.req.json()` resolving is
+    // not proof there is an object to destructure — and destructuring `null`
+    // here would throw OUTSIDE the try above, turning a malformed body into a
+    // 500 instead of the 400 every other bad shape gets.
+    if (
+      parsed === null ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed)
+    ) {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    const { html, csp } = parsed as { html?: unknown; csp?: unknown };
     if (typeof html !== "string" || html === "") {
       return c.json({ error: "Missing html" }, 400);
     }

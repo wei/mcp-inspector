@@ -254,6 +254,14 @@
               // delivered as a real response header there (stronger than the
               // <meta> the srcdoc path relies on), so no wrapping applies here
               // — this proxy still never parses the untrusted bytes.
+              //
+              // Drop any `srcdoc` a previous render left behind first: it takes
+              // precedence over `src`, so a frame that had rendered an opaque
+              // document would keep showing it and never load this URL. Not
+              // reachable today (each render remounts the iframe, which reloads
+              // this document), but the cost of being wrong about that later is
+              // an app silently rendering the wrong bytes.
+              inner.removeAttribute("srcdoc");
               innerOrigin = srcUrl.origin;
               inner.src = srcUrl.href;
             } else if (typeof html === "string") {
@@ -265,6 +273,20 @@
               // boundary). Known trade-off: a small set of libraries (e.g.
               // CesiumJS Map) don't initialise correctly under srcdoc — that
               // is accepted in exchange for the isolation guarantee.
+              //
+              // Restore the opaque-origin posture first. A frame that
+              // previously took the dedicated-origin path still carries
+              // `allow-same-origin`, and `innerOrigin` still names that origin;
+              // assigning `srcdoc` under those would put the untrusted document
+              // in THIS proxy's realm — the exact escape the double-iframe
+              // model exists to prevent. The sandbox attribute is read at
+              // navigation time and assigning `srcdoc` is the navigation, so
+              // stripping it here takes effect for the document being loaded.
+              const fallbackTokens = (inner.getAttribute("sandbox") || "")
+                .split(/\s+/)
+                .filter((t) => t && t.toLowerCase() !== "allow-same-origin");
+              inner.setAttribute("sandbox", fallbackTokens.join(" "));
+              innerOrigin = "null";
               inner.srcdoc = html;
             }
           } else {

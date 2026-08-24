@@ -160,7 +160,11 @@ Inspector owns no domain infrastructure — it cannot serve
 - The app document is served from there under an unguessable path, its
   per-app CSP delivered as a real response **header** (stronger than the
   `<meta>` the `srcdoc` path relies on) plus a `frame-ancestors` that admits
-  only the sandbox proxy.
+  only the two origins in its real ancestor chain — the sandbox proxy that
+  frames it, **and** the Inspector page that frames the proxy. Both are
+  required, not belt-and-braces: `frame-ancestors` is checked against every
+  ancestor, so omitting the Inspector's own origin blocks the frame outright
+  (see `appDocumentEmbedders`).
 - The inner iframe is granted `allow-same-origin` on this path **only** —
   that is what makes the origin real rather than opaque. It is not a
   weakening of #1565: the listener is on its own port, so the app is

@@ -79,9 +79,11 @@ export function sandboxFrameAncestors(allowedOrigins?: string[]): string {
  * {@link LOOPBACK_FRAME_ANCESTORS} when nothing valid remains.
  *
  * Shared with the app-origin server (#2056), which restricts a published app
- * document to being framed by the sandbox proxy. Same grammar, same failure
- * mode — a directive whose only source is invalid degrades to `'none'` and
- * blocks the frame — so the two derive it here rather than each rolling one.
+ * document to being framed by the sandbox proxy and the Inspector page above
+ * it. Same grammar, same fallback — an all-invalid list yields the loopback
+ * family rather than an empty source list, since a `frame-ancestors` with no
+ * sources means `'none'` and would block the frame outright — so the two
+ * derive it here rather than each rolling one.
  */
 export function frameAncestorsDirective(origins?: string[]): string {
   const valid = (origins ?? []).filter((o) => CSP_HOST_SOURCE.test(o));

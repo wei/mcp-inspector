@@ -10,12 +10,16 @@
 import { describe, it, expect, vi } from "vitest";
 import { publishAppDocument } from "./publishAppDocument";
 
+/**
+ * A real `Response`, not a shaped literal. The platform implementation is
+ * available here, so building one keeps `ok`/`status`/`json()` honest rather
+ * than asserting a hand-written object is a Response.
+ */
 function jsonResponse(body: unknown, status = 200): Response {
-  return {
-    ok: status >= 200 && status < 300,
+  return new Response(JSON.stringify(body), {
     status,
-    json: async () => body,
-  } as unknown as Response;
+    headers: { "Content-Type": "application/json" },
+  });
 }
 
 describe("publishAppDocument", () => {
@@ -88,13 +92,11 @@ describe("publishAppDocument", () => {
   });
 
   it("resolves null when the response body is not JSON", async () => {
-    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => {
-        throw new Error("not json");
-      },
-    } as unknown as Response);
+    // A real 200 whose body is not JSON, so `json()` rejects for the reason
+    // the production path has to survive rather than because a stub threw.
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response("not json", { status: 200 }));
     await expect(
       publishAppDocument(
         { html: "<p>app</p>" },

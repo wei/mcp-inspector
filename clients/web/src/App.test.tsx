@@ -391,6 +391,24 @@ vi.mock(
   },
 );
 
+// --- publishAppDocument spy (#2056) -----------------------------------------
+// The dedicated-origin publisher App hands both bridge factories. Mocked at the
+// module so a test can assert the wiring is live — the factory's own tests
+// inject the dep and cannot see App failing to supply it.
+const publishAppDocumentMock =
+  vi.fn<
+    (
+      doc: { html: string; csp?: string },
+      opts: { baseUrl: string; authToken?: string },
+    ) => Promise<string | null>
+  >();
+vi.mock("./lib/publishAppDocument", () => ({
+  publishAppDocument: (
+    doc: { html: string; csp?: string },
+    opts: { baseUrl: string; authToken?: string },
+  ) => publishAppDocumentMock(doc, opts),
+}));
+
 // --- InspectorView double ---------------------------------------------------
 // Surfaces each piece of session-scoped state under test and exposes buttons
 // that invoke the App's connect / call-tool / get-prompt / read-resource /
@@ -3461,6 +3479,42 @@ describe("App MCP App listed-resource metadata wiring (#2055)", () => {
       expect(
         deps?.getListedResourceMeta?.("ui://other/app.html"),
       ).toBeUndefined();
+    }
+  });
+
+  it("hands BOTH bridge factories a working publishAppDocument (#2056)", async () => {
+    // Both call sites pass the same `publishDocument`, and the end-to-end smoke
+    // only covers the Apps-screen one — so without this the elicitation
+    // factory's `publishAppDocument` could be dropped and every test stays
+    // green while a domain-declaring elicitation app silently loses its real
+    // origin. Assert it is not merely present but actually reaches the lib.
+    publishAppDocumentMock.mockResolvedValue(
+      "http://127.0.0.1:6276/app-document/deadbeef",
+    );
+
+    renderWithMantine(<App />);
+
+    const appsFactory = () =>
+      appBridgeFactoryDeps.find((d) => !d.advertiseElicitation);
+    const elicitationFactory = () =>
+      appBridgeFactoryDeps.find((d) => d.advertiseElicitation === true);
+    await waitFor(() => {
+      expect(appsFactory()).toBeDefined();
+      expect(elicitationFactory()).toBeDefined();
+    });
+
+    for (const deps of [appsFactory(), elicitationFactory()]) {
+      publishAppDocumentMock.mockClear();
+      await expect(
+        deps?.publishAppDocument?.({
+          html: "<p>app</p>",
+          csp: "default-src 'none'",
+        }),
+      ).resolves.toBe("http://127.0.0.1:6276/app-document/deadbeef");
+      expect(publishAppDocumentMock).toHaveBeenCalledWith(
+        { html: "<p>app</p>", csp: "default-src 'none'" },
+        expect.objectContaining({ baseUrl: expect.any(String) }),
+      );
     }
   });
 });
