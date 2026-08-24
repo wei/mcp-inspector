@@ -143,6 +143,7 @@ Each config below is a ready-made server for exercising one feature by hand. Loa
 | ----------------------------------------- | --------------------------------------------------- | ---------------------------------------------------------------------- |
 | `mcp-app-http.json` **(legacy era)**      | An MCP App (UI resource + app tool) in the Apps tab | [#1859](https://github.com/modelcontextprotocol/inspector/issues/1859) |
 | `app-elicitation-http.json` **(legacy era)** | An MCP App rendering a form elicitation           | [#1854](https://github.com/modelcontextprotocol/inspector/issues/1854) |
+| `mcp-app-domain-http.json` **(legacy era)** | An MCP App asking for a dedicated origin (`_meta.ui.domain`) | [#2056](https://github.com/modelcontextprotocol/inspector/issues/2056) |
 | `modern-mrtr-http.json`                   | A single MRTR round-trip                           | —                                                                      |
 | `mrtr-showcase-http.json`                 | Every MRTR preset in one server                    | [#1860](https://github.com/modelcontextprotocol/inspector/issues/1860) |
 | `modern-network-http.json`                | Network tab: `Mcp-*` headers + error taxonomy      | [#1628](https://github.com/modelcontextprotocol/inspector/issues/1628) |
@@ -164,6 +165,16 @@ Each config below is a ready-made server for exercising one feature by hand. Loa
 Open the Apps tab, select `mcp_app_demo`, give it a title and click **Open App**: the widget renders inside the sandbox iframe and exercises the host-side UI protocol surface — host-context render, `size-changed`, `ui/message`, and a log line into the **App logs** panel. Because the widget is served through the sandbox proxy page, this config is also what reproduces [#1859](https://github.com/modelcontextprotocol/inspector/issues/1859) (a missing `clients/web/static/sandbox_proxy.html` surfaces here as a "Sandbox not loaded" message in place of the widget) — a failure that only ever appeared in an installed package, never in the repo.
 
 For the scripted version of the same flow (`--app-info` probe → deep link → rendered widget), see [Reviewing an MCP App](./docs/mcp-app-review.md).
+
+#### An App's dedicated origin
+
+`mcp-app-domain-http.json` serves the same `mcp_app_demo` widget as above, with one addition: its UI resource declares `_meta.ui.domain`. Plain streamable-HTTP; connect with the **default (legacy)** protocol era.
+
+That field is how a server asks its host for a stable, dedicated origin. Without one, an App renders into a `srcdoc` frame sandboxed without `allow-same-origin`, so its document has an *opaque* origin and every request it makes carries `Origin: null` — which no CORS policy, OAuth callback, or API-key allowlist can admit ([#2056](https://github.com/modelcontextprotocol/inspector/issues/2056)).
+
+Open the Apps tab and run `mcp_app_demo`. The widget renders identically to `mcp-app-http.json` — the difference is not visual. Inspect the inner iframe in devtools: on this server it is served from `http://localhost:6276/app-document/<id>` and `location.origin` is that real origin, where on `mcp-app-http.json` it is `about:srcdoc` with an origin of `null`.
+
+The spec makes `domain`'s format **host-dependent**, and the Inspector owns no domain infrastructure — so it reads any non-empty value as a *request* rather than an address, and answers with a real loopback origin of its own. See [MCP App dedicated origins](./clients/web/README.md#mcp-app-dedicated-origins-metauidomain) for the full contract, including what the one shared origin does and does not isolate, and how every failure falls back to the default render rather than blanking the app.
 
 #### App-rendered form elicitations
 
