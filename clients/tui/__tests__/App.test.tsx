@@ -250,8 +250,8 @@ vi.mock("@inspector/core/mcp/node/index.js", () => ({
   // Defaults to undefined — "no proxy configured", which is what the real one
   // returns with no proxy env var set, so `environment.fetch` stays unset and
   // the client falls back to the built-in fetch, exactly as before #2067. A
-  // test can point `h.proxyFetchResult` at a sentinel to exercise the other
-  // branch.
+  // test can point `h.proxyFetchState.current` at a sentinel to exercise the
+  // other branch.
   createProxyFetch: vi.fn(() => h.proxyFetchState.current),
 }));
 vi.mock("@inspector/core/react/useInspectorClient.js", () => ({
@@ -1635,7 +1635,7 @@ describe("App (OAuth result branches)", () => {
     // what makes InspectorClient's own wrappers compose OVER the proxy instead
     // of discarding it — delete it and TUI proxy support silently disappears
     // while every other test stays green.
-    const sentinel = (async () => new Response("")) as unknown as typeof fetch;
+    const sentinel: typeof fetch = async () => new Response("");
     h.proxyFetchState.current = sentinel;
     await mount(oneHttp());
     expect(h.clientInstances.length).toBeGreaterThan(0);
