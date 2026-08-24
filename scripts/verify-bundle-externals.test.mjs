@@ -205,12 +205,56 @@ describe("evaluateClient", () => {
     );
   });
 
+  test("flags a root dependency even when the external list omits it", () => {
+    // THE #2067 SHAPE, and the reason the candidate set is not just `externals`.
+    // `undici` was missing from the web and TUI external lists — that omission
+    // WAS the bug — so a guard driven only by those lists would have inspected
+    // the inlined 1.05MB bundle and reported success. Removing a package from an
+    // `external` list must not remove it from scrutiny.
+    const failures = evaluateClient({
+      name: "web",
+      build: "clients/web/build",
+      externals: ["pino"],
+      rootDependencies: ["undici", "pino"],
+      files: [
+        {
+          name: "undici-HXPKCIY3.js",
+          source: banner("../../node_modules/undici/lib/core/symbols.js"),
+        },
+      ],
+    });
+    assert.equal(failures.length, 1);
+    assert.match(failures[0], /"undici" is declared external but was inlined/);
+  });
+
+  test("does not flag a deliberately inlined package that is not a root dependency", () => {
+    // The TUI inlines `ink-form` / `ink-scroll-view` on purpose (#1952). They are
+    // declared in the TUI's own manifest, never at the root, which is exactly
+    // what keeps them out of the candidate set.
+    assert.deepEqual(
+      evaluateClient({
+        name: "tui",
+        build: "clients/tui/build",
+        externals: ["react", "ink"],
+        rootDependencies: ["react"],
+        files: [
+          {
+            name: "index.js",
+            source: banner("../../node_modules/ink-form/lib/Form.js"),
+          },
+        ],
+      }),
+      [],
+    );
+  });
+
   test("passes a clean bundle", () => {
     assert.deepEqual(
       evaluateClient({
         name: "web",
         build: "clients/web/build",
         externals: ["undici"],
+        rootDependencies: ["undici"],
         files: clean,
       }),
       [],

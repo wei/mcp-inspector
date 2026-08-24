@@ -136,14 +136,32 @@ export function findInlinedExternals({ externals, files }) {
 /**
  * The per-client verdict, as pure data so every branch is unit-testable.
  *
- * Note it **fails closed on an empty `external` list**. `parseExternals` keys
- * off the literal text `external: [`, so an ordinary tsup refactor — hoisting
- * the array to a constant, or a line break after the colon — would make it
- * return nothing, and a guard that checks zero packages reports success. Every
- * enrolled bundle has externals today, so "none parsed" means the parser lost
- * track of the config, not that the invariant holds.
+ * The candidate set is the **union of two independently-derived lists**, and the
+ * second is what makes this guard cover #2067 rather than merely its regression:
+ *
+ * - `externals` — what the client's tsup config declares. Catches a package that
+ *   was meant to stay out and got pulled in anyway.
+ * - `rootDependencies` — the root manifest's runtime dependencies. These are
+ *   root-declared *by rule* (see AGENTS.md), reached through `core/`, and must be
+ *   external in every client bundle. Deriving them independently is essential,
+ *   because #2067 was a **missing** declaration: `undici` was absent from the web
+ *   and TUI `external` lists, so a check driven only by those lists would have
+ *   looked at the inlined 1.05MB bundle and reported success. Removing a package
+ *   from an `external` list must not be able to remove it from scrutiny.
+ *
+ * It also **fails closed on an empty `external` list**. `parseExternals` keys off
+ * the literal text `external: [`, so an ordinary tsup refactor — hoisting the
+ * array to a constant, or a line break after the colon — would make it return
+ * nothing. Every enrolled bundle has externals today, so "none parsed" means the
+ * parser lost track of the config, not that the invariant holds.
  */
-export function evaluateClient({ name, build, externals, files }) {
+export function evaluateClient({
+  name,
+  build,
+  externals,
+  rootDependencies = [],
+  files,
+}) {
   if (externals.length === 0) {
     return [
       `${name}: no \`external\` entries could be parsed from its tsup config. ` +
@@ -153,7 +171,11 @@ export function evaluateClient({ name, build, externals, files }) {
     ];
   }
 
-  const { noBanners, violations } = findInlinedExternals({ externals, files });
+  const candidates = [...new Set([...externals, ...rootDependencies])];
+  const { noBanners, violations } = findInlinedExternals({
+    externals: candidates,
+    files,
+  });
   if (noBanners) {
     return [
       `${name}: ${build} has no esbuild module banners, so this guard cannot see ` +
@@ -169,6 +191,10 @@ export function evaluateClient({ name, build, externals, files }) {
 
 function main() {
   const failures = [];
+  const rootDependencies = Object.keys(
+    JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"))
+      .dependencies ?? {},
+  );
   for (const client of BUNDLED_CLIENTS) {
     const buildDir = join(repoRoot, client.build);
     const entry = join(buildDir, "index.js");
@@ -192,6 +218,7 @@ function main() {
         name: client.name,
         build: client.build,
         externals,
+        rootDependencies,
         files,
       }),
     );

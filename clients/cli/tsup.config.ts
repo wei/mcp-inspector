@@ -38,6 +38,12 @@ export default defineConfig({
     "proper-lockfile",
     "@modelcontextprotocol/client",
     "@modelcontextprotocol/core",
+    // Root-declared and reached through `core/mcp/apps.ts`, so it must be
+    // external here like every other root runtime dependency — it was being
+    // inlined (dragging the transitive v1 SDK and zod-to-json-schema with it),
+    // which the #2067 guard surfaced. ESM, so it was not failing the way
+    // `undici` did; the rule is what it violated.
+    "@modelcontextprotocol/ext-apps",
     "commander",
     "pino",
   ],
