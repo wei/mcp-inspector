@@ -30,6 +30,7 @@ import {
 } from "../auth/secret-fields.js";
 import { toRecord } from "../json/jsonUtils.js";
 import type { JsonValue } from "../json/jsonUtils.js";
+import { isSerializableJson } from "../json/jsonUtils.js";
 
 // The full set of valid `type` discriminator values, used to reject anything
 // else read off disk so unknown strings can't propagate to narrowing sites.
@@ -226,9 +227,12 @@ export function normalizeStoredMetadata(
         entry === null ||
         typeof (entry as { key?: unknown }).key !== "string"
       ) {
+        // Structural message only — never the entry. A malformed legacy row
+        // still holds whatever the user put in it, which for `_meta` can be a
+        // credential, and this goes to the console of every client that reads
+        // the catalog.
         console.warn(
-          "Ignoring malformed legacy metadata entry (expected `{ key, value }`):",
-          entry,
+          "Ignoring malformed legacy metadata entry (expected `{ key, value }`).",
         );
         continue;
       }
@@ -236,13 +240,14 @@ export function normalizeStoredMetadata(
       if (key.trim() === "") continue;
       // `??`, not `||`: `null` is a legal `_meta` value and must survive the
       // migration as `null`. Only a genuinely absent `value` becomes `""`.
-      //
+      const resolved = value === undefined ? "" : value;
+      if (!keepSerializable(key, resolved)) continue;
       // `defineProperty` rather than `out[key] = …` because a legacy key of
       // `__proto__` would otherwise hit the prototype setter — silently
       // dropping the entry (or, for an object value, mutating the prototype)
       // instead of storing an own property under that name.
       Object.defineProperty(out, key, {
-        value: value === undefined ? "" : value,
+        value: resolved,
         writable: true,
         enumerable: true,
         configurable: true,
@@ -252,14 +257,49 @@ export function normalizeStoredMetadata(
   }
 
   if (typeof metadata === "object") {
-    return { ...(metadata as RequestMetadata) };
+    // A hand-edited catalog reaches this untouched by any editor, so it is a
+    // real source of values that parse but cannot be sent — `1e400` becomes
+    // `Infinity`, which the next serialization writes as `null`. Same
+    // invariant the web editor and the CLI enforce, applied per key so one bad
+    // value does not cost the rest.
+    const out: RequestMetadata = {};
+    for (const [key, value] of Object.entries(metadata as RequestMetadata)) {
+      if (keepSerializable(key, value)) out[key] = value;
+    }
+    return out;
   }
 
   console.warn(
-    "Ignoring malformed `metadata` (expected a JSON object):",
-    metadata,
+    `Ignoring malformed \`metadata\` (expected a JSON object, got ${describeJsonType(metadata)}).`,
   );
   return {};
+}
+
+/**
+ * Whether a metadata value can be sent as written, warning by key when it
+ * cannot.
+ *
+ * Names the key and the offending type, never the value: `_meta` carries
+ * whatever the user configured, credentials included, and these warnings reach
+ * ordinary console output.
+ */
+function keepSerializable(key: string, value: unknown): boolean {
+  if (isSerializableJson(value)) return true;
+  console.warn(
+    `Ignoring metadata key "${key}" — its value is not JSON that can be sent ` +
+      `(got ${describeJsonType(value)}; note \`1e400\` parses to Infinity).`,
+  );
+  return false;
+}
+
+/** A one-word type name for a diagnostic that must not disclose the value. */
+function describeJsonType(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  if (typeof value === "number" && !Number.isFinite(value)) {
+    return Number.isNaN(value) ? "NaN" : "a non-finite number";
+  }
+  return typeof value;
 }
 
 /**

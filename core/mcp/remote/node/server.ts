@@ -1213,9 +1213,18 @@ export function createRemoteApp(
   // credentials are intentionally lost on first read (hard cutover per
   // #1358 decision 4). Users re-enter via the form or hand-edit into the
   // flat shape.
-  // A plain JSON object — the container `_meta` requires. Values are
-  // deliberately unchecked: `_meta` takes arbitrary JSON (#1910), and anything
-  // that survived `JSON.parse` already is.
+  // The *container* `_meta` requires — a plain JSON object.
+  //
+  // Value-level validity is deliberately not checked here. Values are
+  // arbitrary JSON (#1910), and the one class that survives `JSON.parse` yet
+  // cannot be sent — a non-finite number, from a literal like `1e400` in a
+  // hand-edited catalog — is filtered **per key** by
+  // `normalizeStoredMetadata`, which every read routes through. Rejecting the
+  // whole field here instead would cost a user every other key they had
+  // configured, for one bad value.
+  //
+  // Note the wire cannot carry the bad case at all: a client's own
+  // `JSON.stringify` turns `Infinity` into `null` before the request is sent.
   const isJsonObject = (v: unknown): v is RequestMetadata =>
     v !== null && typeof v === "object" && !Array.isArray(v);
   const isStringRecord = (v: unknown): v is Record<string, string> => {

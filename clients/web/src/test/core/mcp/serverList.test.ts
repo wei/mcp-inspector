@@ -1477,6 +1477,44 @@ describe("normalizeStoredMetadata (#1910)", () => {
     expect(warn).toHaveBeenCalledTimes(1);
   });
 
+  it("drops a value that parses but cannot be sent, keeping its siblings", () => {
+    // A hand-edited catalog reaches this untouched by any editor, so it is a
+    // real source of `1e400` — which parses to Infinity and serializes to null.
+    const out = normalizeStoredMetadata(
+      JSON.parse('{"good":1,"bad":1e400,"alsoGood":{"n":2}}'),
+    );
+    expect(out).toEqual({ good: 1, alsoGood: { n: 2 } });
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops a non-serializable value nested inside an object", () => {
+    const out = normalizeStoredMetadata(JSON.parse('{"a":{"deep":[1e400]}}'));
+    expect(out).toEqual({});
+  });
+
+  it("applies the same check to a legacy pair value", () => {
+    const out = normalizeStoredMetadata([
+      { key: "ok", value: 1 },
+      { key: "bad", value: JSON.parse("1e400") },
+    ]);
+    expect(out).toEqual({ ok: 1 });
+  });
+
+  it("never prints the offending value in a warning", () => {
+    // `_meta` can hold credentials, and these warnings go to ordinary console
+    // output — so a diagnostic may name the key and the type, never the value.
+    normalizeStoredMetadata([
+      { value: { accessToken: "sk-live-nope" } },
+      { key: "leaky", value: JSON.parse('{"token":1e400}') },
+    ]);
+    normalizeStoredMetadata("sk-live-also-nope");
+    const printed = JSON.stringify(warn.mock.calls);
+    expect(printed).not.toContain("sk-live");
+    expect(printed).not.toContain("accessToken");
+    // The key is still named, so the warning stays actionable.
+    expect(printed).toContain("leaky");
+  });
+
   it("migrates a legacy file to the object shape on the next write", () => {
     // Read side accepts the pair array; write side emits only the object, so
     // one round-trip is the migration.

@@ -911,6 +911,34 @@ describe("Metadata Tests", () => {
       }
     });
 
+    it("names the key but never the value when rejecting", async () => {
+      // The pair can carry a credential, and this message reaches stderr and
+      // CI logs.
+      const server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createEchoTool()],
+      });
+      try {
+        await server.start();
+        const result = await runCli([
+          server.url,
+          "--cli",
+          "--method",
+          "tools/list",
+          "--metadata",
+          'credentials={"accessToken":"sk-live-nope","n":1e400}',
+          "--transport",
+          "http",
+        ]);
+        const output = `${result.stderr}${result.stdout}`;
+        expect(result.exitCode).not.toBe(0);
+        expect(output).toContain("credentials");
+        expect(output).not.toContain("sk-live");
+      } finally {
+        await server.stop();
+      }
+    });
+
     it("should handle metadata parsing validation", async () => {
       const server = createTestServerHttp({
         serverInfo: createTestServerInfo(),

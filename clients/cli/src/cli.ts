@@ -504,8 +504,11 @@ function parseKeyValuePair(
   // and better than falling back to the literal string, which would also not
   // be what was asked for.
   if (!isSerializableJson(parsedValue)) {
+    // Names the key, never the value: the pair can carry a credential
+    // (`credentials={"accessToken":"…","n":1e400}`) and this message lands in
+    // stderr and CI logs.
     throw new Error(
-      `Invalid parameter value: ${value}. Numbers must be finite (a value like 1e400 overflows and cannot be sent).`,
+      `Invalid value for "${key}": numbers must be finite (a literal like 1e400 overflows to Infinity and cannot be sent).`,
     );
   }
 
