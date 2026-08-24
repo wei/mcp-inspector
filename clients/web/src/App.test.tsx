@@ -220,16 +220,29 @@ const SERVER_A = {
 const { updateServerSettingsSpy } = vi.hoisted(() => ({
   updateServerSettingsSpy: vi.fn(() => Promise.resolve()),
 }));
+
+// Same idea for the edit-modal rename path (#1914): the test needs to make the
+// PUT's *reload* fail, which only a spy it controls can do.
+const { updateServerSpy, addServerSpy } = vi.hoisted(() => ({
+  updateServerSpy: vi.fn(() => Promise.resolve()),
+  addServerSpy: vi.fn(() => Promise.resolve()),
+}));
 // Stable spy for the tools list-changed acknowledgement, so a test can assert
 // the paginated Refresh clears the indicator (#1721).
 const { clearToolsListChangedSpy } = vi.hoisted(() => ({
   clearToolsListChangedSpy: vi.fn(),
 }));
-vi.mock("@inspector/core/react/useServers.js", () => ({
+vi.mock("@inspector/core/react/useServers.js", async (importOriginal) => ({
+  // `ServerListReloadError` is a real class the pagination toggle branches on
+  // with `instanceof`, so it must be the genuine one — a stub would make the
+  // check vacuously false and the #1914 branch untestable (#1914 review r1).
+  ...(await importOriginal<
+    typeof import("@inspector/core/react/useServers.js")
+  >()),
   useServers: vi.fn(() => ({
     servers: [SERVER_A],
-    addServer: vi.fn(),
-    updateServer: vi.fn(),
+    addServer: addServerSpy,
+    updateServer: updateServerSpy,
     updateServerSettings: updateServerSettingsSpy,
     removeServer: vi.fn(),
   })),
@@ -412,6 +425,9 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
     onClearCompletedTasks: () => void;
     onRefreshTasks: () => void;
     onServerSettings: (id: string) => void;
+    onServerEdit: (id: string) => void;
+    onServerAdd: () => void;
+    highlightedServerIds?: string[];
     onClearProtocol: () => void;
     onReplayProtocol: (id: string) => void;
     onTogglePinProtocol: (id: string) => void;
@@ -537,6 +553,14 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
       </button>
       <button onClick={() => props.onSetLogLevel("debug")}>set-level</button>
       <button onClick={() => props.onServerSettings("A")}>open-settings</button>
+      {/* The real server grid (and its Add / Edit controls) lives inside this
+          mocked view, so the config modal is only reachable through these
+          callbacks — and the highlight batch only observable through this prop. */}
+      <button onClick={() => props.onServerEdit("A")}>edit-server</button>
+      <button onClick={() => props.onServerAdd()}>add-server</button>
+      <span data-testid="highlighted-servers">
+        {(props.highlightedServerIds ?? []).join(",") || "none"}
+      </span>
       <span data-testid="pinned-history">
         {Array.from(props.pinnedProtocolIds ?? []).join(",")}
       </span>
@@ -584,7 +608,10 @@ import { usePagedTools } from "@inspector/core/react/usePagedTools.js";
 import { useMessageLog } from "@inspector/core/react/useMessageLog.js";
 import { useInspectorClient } from "@inspector/core/react/useInspectorClient.js";
 import { useSettingsDraft } from "@inspector/core/react/useSettingsDraft.js";
-import { useServers } from "@inspector/core/react/useServers.js";
+import {
+  ServerListReloadError,
+  useServers,
+} from "@inspector/core/react/useServers.js";
 import type {
   InspectorServerSettings,
   MessageEntry,
@@ -2962,6 +2989,236 @@ describe("App paginated list pagination toggle (#1721)", () => {
       paginatedLists?: boolean;
     };
     expect(lastPush?.paginatedLists).toBe(true);
+  });
+
+  it("treats a modal save whose list reload failed as landed (#1914 + #2089)", async () => {
+    // A `ServerListReloadError` rejects *after* the PUT landed, so the save is
+    // on disk. It has to be recorded as the last landed write and applied like
+    // any other settled one — the failure path would roll the UI, the live
+    // client and the modal's seed back to a value disk no longer holds.
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+    if (!draftOptions) throw new Error("useSettingsDraft was never called");
+    updateServerSettingsSpy.mockRejectedValueOnce(
+      new ServerListReloadError(
+        "The server was saved, but the server list could not be reloaded: disk full",
+      ),
+    );
+    const saved: InspectorServerSettings = {
+      ...settingsWithRoots([]),
+      paginatedLists: true,
+    };
+    await act(async () => {
+      await draftOptions.onPersist("A", saved).catch(() => undefined);
+    });
+
+    // `servers` is mocked to a fixed entry here — exactly what a failed reload
+    // leaves — so both of these read the record rather than the entry.
+    expect(draftOptions.resolveInitial("A")).toEqual(
+      expect.objectContaining({ paginatedLists: true }),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true"),
+    );
+  });
+
+  it("keeps the optimistic toggle when only the list reload failed (#1914)", async () => {
+    // The mirror of the test above. `refreshAfterWrite` rejects with a
+    // `ServerListReloadError` when the PUT landed and only reading the list
+    // back failed — the setting IS on disk, so the #1721 rollback would put
+    // the UI and the live client on the value the user just changed away
+    // from, and contradict what a reload would show.
+    const user = userEvent.setup();
+    updateServerSettingsSpy.mockRejectedValueOnce(
+      new ServerListReloadError(
+        "The server was saved, but the server list could not be reloaded: disk full",
+      ),
+    );
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    await user.click(screen.getByText("paginated-on"));
+    await waitFor(() =>
+      expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true"),
+    );
+    // Give the rejection a turn to land, then confirm nothing reverted it.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true");
+    // Single intersection assertion rather than the `as unknown as` this file
+    // uses elsewhere: the fake client really is an EventTarget, and widening
+    // it keeps that relationship instead of erasing it (#1914 r2).
+    const client = clientInstances[0] as EventTarget & {
+      setServerSettings: ReturnType<typeof vi.fn>;
+    };
+    const lastPush = client.setServerSettings.mock.calls.at(-1)?.[0] as {
+      paginatedLists?: boolean;
+    };
+    expect(lastPush?.paginatedLists).toBe(true);
+  });
+});
+
+// A post-write reload failure rejects *after* the write landed, so every piece
+// of state `onConfigSubmit` used to apply on the resolve path has to be applied
+// on the reject path too — the rename target and the highlight batch both
+// describe a row that really is on disk (#1914 review r2 / r3).
+describe("App config submit with a failed list reload (#1914)", () => {
+  // Earlier describes install their own `useServers` return value, which
+  // outlives them — so this block installs its own and puts the previous
+  // implementation back, rather than trusting whatever leaked in.
+  let restoreUseServers: (() => void) | undefined;
+
+  const serversResult = (ids: string[]): ReturnType<typeof useServers> => ({
+    servers: ids.map((id) => ({ ...SERVER_A, id }) as ServerEntry),
+    loading: false,
+    error: undefined,
+    refresh: vi.fn().mockResolvedValue(undefined),
+    addServer: addServerSpy,
+    updateServer: updateServerSpy,
+    updateServerSettings: updateServerSettingsSpy,
+    removeServer: vi.fn().mockResolvedValue(undefined),
+    reorderServers: vi.fn().mockResolvedValue(undefined),
+    importSource: vi.fn().mockResolvedValue({ servers: {} }),
+  });
+
+  beforeEach(() => {
+    clientInstances.length = 0;
+    const previous = vi.mocked(useServers).getMockImplementation();
+    restoreUseServers = previous
+      ? () => vi.mocked(useServers).mockImplementation(previous)
+      : undefined;
+    updateServerSpy.mockClear();
+    addServerSpy.mockClear();
+    updateServerSettingsSpy.mockClear();
+    vi.mocked(useServers).mockReturnValue(serversResult(["A"]));
+  });
+
+  afterEach(() => {
+    restoreUseServers?.();
+  });
+
+  it("follows the rename so the active id isn't orphaned (#1914)", async () => {
+    // `activeServerId` isn't rendered anywhere, so it's read back through the
+    // one handler that passes it straight to a spy: the pagination toggle
+    // calls `updateServerSettings(activeServerId, …)`.
+    const user = userEvent.setup();
+    updateServerSpy.mockRejectedValueOnce(
+      new ServerListReloadError(
+        "The server was saved, but the server list could not be reloaded: disk full",
+      ),
+    );
+    const { rerender } = renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    await user.click(screen.getByText("edit-server"));
+    const idField = await screen.findByLabelText(/Server ID/);
+    await user.clear(idField);
+    await user.type(idField, "A-renamed");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(updateServerSpy).toHaveBeenCalledWith(
+        "A",
+        "A-renamed",
+        expect.anything(),
+      ),
+    );
+    // The rejection still reaches the modal, which stays open showing it.
+    expect(
+      await screen.findByText(/could not be reloaded: disk full/),
+    ).toBeInTheDocument();
+
+    // Now let the row land, as the SSE refresh the write itself triggers
+    // would. The modal's target ("A") is gone, so it closes rather than
+    // blanking its own form — `initialId`/`initialConfig` would go undefined
+    // and ServerConfigModal's reset would wipe the open form and the error
+    // it is showing (#1914 r3).
+    vi.mocked(useServers).mockReturnValue(serversResult(["A-renamed"]));
+    rerender(<App />);
+    await waitFor(() =>
+      expect(screen.queryByLabelText(/Server ID/)).not.toBeInTheDocument(),
+    );
+
+    // With the modal gone, read the active id back off the toggle.
+    await user.click(screen.getByText("paginated-on"));
+    await waitFor(() =>
+      expect(updateServerSettingsSpy).toHaveBeenCalledWith(
+        "A-renamed",
+        expect.objectContaining({ paginatedLists: true }),
+      ),
+    );
+  });
+
+  it("labels a settings save whose reload failed as saved, not failed (#1914)", () => {
+    // The settings draft debounces and flushes on close, so this toast is the
+    // user's only signal — a flush that rejects usually does so after the
+    // modal is gone. `useSettingsDraft` is mocked here, so the App's `onError`
+    // is invoked directly with the options it was handed.
+    renderWithMantine(<App />);
+    const onError = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0].onError;
+    expect(onError).toBeDefined();
+
+    act(() => {
+      onError!(
+        "A",
+        new ServerListReloadError(
+          "The server was saved, but the server list could not be reloaded: disk full",
+        ),
+      );
+    });
+    expect(notificationsMock.show).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Saved settings for "A", but the server list did not reload',
+        message: expect.stringContaining("disk full"),
+      }),
+    );
+
+    // A genuinely failed write still reads as a failure.
+    act(() => {
+      onError!("A", new Error("disk full"));
+    });
+    expect(notificationsMock.show).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Failed to save settings for "A"' }),
+    );
+  });
+
+  it("keeps a successful add in the highlight batch when the reload failed (#1914)", async () => {
+    // `addServerHighlighted` marked the new id only after `addServer`
+    // resolved. The row is on disk either way, so on a reload failure it has
+    // to be marked from the catch — the next successful refresh is what
+    // renders it, and it would otherwise arrive unhighlighted.
+    const user = userEvent.setup();
+    addServerSpy.mockRejectedValueOnce(
+      new ServerListReloadError(
+        "The server was added, but the server list could not be reloaded: disk full",
+      ),
+    );
+    renderWithMantine(<App />);
+    expect(screen.getByTestId("highlighted-servers")).toHaveTextContent("none");
+
+    await user.click(screen.getByText("add-server"));
+    await user.type(await screen.findByLabelText(/Server ID/), "brand-new");
+    await user.type(screen.getByLabelText(/^Command/), "node");
+    await user.click(screen.getByRole("button", { name: "Add" }));
+
+    await waitFor(() =>
+      expect(addServerSpy).toHaveBeenCalledWith("brand-new", expect.anything()),
+    );
+    expect(
+      await screen.findByText(/could not be reloaded: disk full/),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByTestId("highlighted-servers")).toHaveTextContent(
+        "brand-new",
+      ),
+    );
   });
 });
 
