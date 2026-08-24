@@ -96,38 +96,46 @@ const PERMISSION_KEYS = exhaustivePermissionKeys([
 ]);
 
 /**
- * Filter an app-supplied {@link McpUiResourcePermissions} down to the keys the
- * host will forward to the sandbox proxy, keeping only those the app actually
- * *requested*.
+ * Filter an app-supplied permissions bag down to the keys the host will forward
+ * to the sandbox proxy, keeping only those the app actually *requested*.
  *
  * The proxy's `buildAllowAttribute()` tests each key for **truthiness**, so an
- * unvalidated bag lets a non-boolean stand in for a grant: `{ camera: "false" }`
+ * unvalidated bag lets a non-marker stand in for a grant: `{ camera: "false" }`
  * — a plausible way for a server to mean "off" — is truthy and would switch the
- * `allow` attribute on. `_meta` is untrusted input, so the value is screened
- * here rather than at the point of use. A key counts as requested when it
- * carries the spec's empty-object marker (`camera: {}`), or `true` as the
- * obvious shorthand; everything else — `false`, any string, `null`, a number —
- * is dropped, as is any key outside the four the proxy knows.
+ * `allow` attribute on. `_meta` is untrusted input of no declared type, hence
+ * the `unknown` parameter: this is the boundary that decides what the shape is,
+ * not a consumer of an already-validated one.
+ *
+ * A key counts as requested only when it carries the spec's empty-object marker
+ * (`camera: {}` — {@link McpUiResourcePermissions} defines every permission that
+ * way). Everything else fails closed: `true`, `false`, any string, `null`, a
+ * number, an array, and any key outside the four the proxy knows. `true` in
+ * particular looks like a harmless shorthand, but honoring an undocumented one
+ * means a server typo turns an iframe permission ON, which is the wrong
+ * direction to guess in.
  *
  * Returns undefined when nothing survives, so the notification and the
  * `hostCapabilities.sandbox` echo carry no permissions at all rather than an
  * empty object.
  */
 export function approveSandboxPermissions(
-  permissions: McpUiResourcePermissions | undefined,
+  permissions: unknown,
 ): McpUiResourcePermissions | undefined {
-  if (!permissions) return undefined;
+  if (typeof permissions !== "object" || permissions === null) return undefined;
+  const bag: Record<string, unknown> = { ...permissions };
   const approved: McpUiResourcePermissions = {};
   let granted = false;
   for (const key of PERMISSION_KEYS) {
-    const requested: unknown = permissions[key];
+    const requested = bag[key];
+    if (requested === undefined || requested === false) continue;
     if (
-      requested === true ||
-      (typeof requested === "object" && requested !== null)
+      typeof requested === "object" &&
+      requested !== null &&
+      !Array.isArray(requested)
     ) {
       approved[key] = {};
       granted = true;
-    } else if (requested !== undefined && requested !== false) {
+    } else {
       console.warn(
         `[mcp-app sandbox] dropping unrecognized "${key}" permission value:`,
         requested,
