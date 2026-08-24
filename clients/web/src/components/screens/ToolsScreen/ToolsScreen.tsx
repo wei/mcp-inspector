@@ -258,6 +258,9 @@ export function ToolsScreen({
           <ContentCard>
             <ToolDetailPanel
               tool={selectedTool}
+              // The row key, not the name — a server may list the same tool
+              // name twice (#1957), and the panel is reused across selections.
+              resetKey={selectedToolKey}
               formValues={formValues}
               isExecuting={isExecuting}
               progress={callState?.progress}

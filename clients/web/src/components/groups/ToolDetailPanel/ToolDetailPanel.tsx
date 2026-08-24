@@ -55,6 +55,15 @@ export interface ToolDetailPanelProps {
   /** Receives the effective run-as-task decision for this execution. */
   onExecute: (runAsTask: boolean) => void;
   onCancel: () => void;
+  /**
+   * Identity of the selected *row*, which is not the tool name: a server may
+   * repeat a name, and `ToolsScreen` disambiguates those rows with a key of its
+   * own (#1957). Passed straight to `SchemaFormProps.resetKey`, so switching
+   * between two same-named tools drops the first one's in-progress field text
+   * and enlarged fields. Falls back to the name, which is the right answer for
+   * any caller whose list cannot repeat one.
+   */
+  resetKey?: string;
 }
 
 // Outer column: title/annotations pin at top, the Execute footer pins at the
@@ -201,6 +210,7 @@ export function ToolDetailPanel({
   onFormChange,
   onExecute,
   onCancel,
+  resetKey,
 }: ToolDetailPanelProps) {
   const { name, title, description, icons, annotations, inputSchema } = tool;
   // Narrow the SDK protocol schema to the form renderer's schema type.
@@ -333,10 +343,10 @@ export function ToolDetailPanel({
             values={formValues}
             onChange={onFormChange}
             disabled={isExecuting}
-            // This panel is reused across tool selections rather than remounted,
-            // so the form needs the tool name to drop another tool's
-            // in-progress field text. See SchemaFormProps.resetKey.
-            resetKey={name}
+            // This panel is reused across tool selections rather than
+            // remounted, so the form needs a per-selection key to drop another
+            // tool's in-progress field text. See SchemaFormProps.resetKey.
+            resetKey={resetKey ?? name}
             onValidityChange={setHasInvalidDraft}
           />
 

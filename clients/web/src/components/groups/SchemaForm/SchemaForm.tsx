@@ -1,15 +1,27 @@
 import {
   Checkbox,
+  Group,
   JsonInput,
   MultiSelect,
   NumberInput,
   Select,
   Stack,
   Text,
+  rem,
+  Textarea,
+  type TextareaProps,
   TextInput,
 } from "@mantine/core";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+} from "react";
 import { ClearButton } from "../../elements/ClearButton/ClearButton";
+import { EnlargeButton } from "../../elements/EnlargeButton/EnlargeButton";
 import { useValueChange } from "../../../hooks/useValueChange";
 import type {
   InspectorFormSchema,
@@ -37,6 +49,66 @@ const SchemaJsonInput = JsonInput.withProps({
   formatOnBlur: true,
   autosize: true,
 });
+
+// A string field after its enlarge button has been used (#2042). `autosize`
+// grows it with the text rather than fixing a height the value may not fit, and
+// `maxRows` caps that growth so a long value scrolls inside the field instead of
+// pushing the rest of the form off screen.
+const MultilineStringInput = Textarea.withProps({
+  autosize: true,
+  minRows: 3,
+  maxRows: 12,
+  rightSectionPointerEvents: "auto",
+});
+
+/**
+ * A string field that has just been enlarged (#2042).
+ *
+ * Exists only to take focus on mount. This component mounts as a direct
+ * consequence of the user activating the enlarge button — which unmounts in the
+ * same commit, taking the focused element with it. Without this, a keyboard user
+ * who activates it is left with focus on the document body, and the next Tab
+ * restarts from the top of the page rather than continuing through the form.
+ *
+ * The caret is placed at the end of whatever was already typed, since focusing a
+ * pre-filled text control does not agree across browsers on where it lands, and
+ * the one answer that is never right is "before the text the user just wrote".
+ */
+function EnlargedStringField(props: TextareaProps) {
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // Layout, not passive: a passive effect runs after paint, so the browser would
+  // present at least one frame with focus on the document body — long enough for
+  // a fast Tab to land somewhere else entirely.
+  useLayoutEffect(() => {
+    const node = inputRef.current;
+    /* v8 ignore next -- an effect runs after mount, so the ref is always set */
+    if (!node) return;
+    node.focus();
+    node.setSelectionRange(node.value.length, node.value.length);
+  }, []);
+
+  return <MultilineStringInput {...props} ref={inputRef} />;
+}
+
+// Holds the buttons a string field stacks in its `rightSection`. `nowrap` keeps
+// them on one line inside a section only wide enough for the two.
+const FieldActions = Group.withProps({ gap: 2, wrap: "nowrap" });
+
+// Width of the string field's right section, which Mantine takes as a number it
+// cannot derive from its content. Built from the parts rather than written as a
+// pixel total, so it stays right if a button or the gap changes, and emitted as
+// `rem` so it tracks a user's root font size rather than pinning to CSS pixels.
+// The two button widths are what they measure at their current sizes (ActionIcon
+// `sm` and CloseButton's default); the inset keeps them off the field's edge.
+const ENLARGE_WIDTH = 22;
+const CLEAR_WIDTH = 28;
+const ACTION_GAP = 2;
+const SECTION_INSET = 6;
+const ONE_ACTION_WIDTH = rem(CLEAR_WIDTH + SECTION_INSET);
+const TWO_ACTION_WIDTH = rem(
+  ENLARGE_WIDTH + ACTION_GAP + CLEAR_WIDTH + SECTION_INSET,
+);
 
 function serializeJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
@@ -507,6 +579,19 @@ export function SchemaForm({
     () => new Set(),
   );
 
+  // The names of string fields the user has enlarged into a multiline text area
+  // (#2042). One-way by design — see EnlargeButton — so a name only ever enters
+  // this set.
+  const [enlargedFields, setEnlargedFields] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+
+  // Enlarging is a property of the field the user enlarged, not of the field
+  // *name*, so it must not carry across to another entity's same-named field —
+  // the same reasoning `resetKey` documents for the number field's draft. Reset
+  // during render rather than in an effect so no frame paints the wrong shape.
+  useValueChange(resetKey, () => setEnlargedFields(new Set()));
+
   // Stable so a field's reporting effect subscribes once, not per render. The
   // updater returns the previous set unchanged when nothing moved, which is
   // what makes a nested form's inline callback safe to call repeatedly.
@@ -604,24 +689,54 @@ export function SchemaForm({
 
     // plain string
     if (fieldSchema.type === "string") {
+      const clearButton = rawValue ? (
+        <ClearButton onClick={() => handleFieldChange(fieldName, "")} />
+      ) : null;
+      const sharedProps = {
+        label,
+        description,
+        withAsterisk: isRequired,
+        disabled,
+        value: (rawValue as string) ?? "",
+        minLength: fieldSchema.minLength,
+        maxLength: fieldSchema.maxLength,
+        onChange: (
+          event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>,
+        ) => handleFieldChange(fieldName, event.currentTarget.value),
+      };
+
+      // Already enlarged: a text area, and no way back. The enlarge button is
+      // gone rather than disabled — there is nothing left for it to do.
+      if (enlargedFields.has(fieldName)) {
+        return (
+          <EnlargedStringField
+            key={fieldName}
+            {...sharedProps}
+            rightSectionWidth={ONE_ACTION_WIDTH}
+            rightSection={clearButton}
+          />
+        );
+      }
+
       return (
         <TextInput
           key={fieldName}
-          label={label}
-          description={description}
-          withAsterisk={isRequired}
-          disabled={disabled}
-          value={(rawValue as string) ?? ""}
-          minLength={fieldSchema.minLength}
-          maxLength={fieldSchema.maxLength}
-          onChange={(event) =>
-            handleFieldChange(fieldName, event.currentTarget.value)
-          }
+          {...sharedProps}
           rightSectionPointerEvents="auto"
+          rightSectionWidth={clearButton ? TWO_ACTION_WIDTH : ONE_ACTION_WIDTH}
           rightSection={
-            rawValue ? (
-              <ClearButton onClick={() => handleFieldChange(fieldName, "")} />
-            ) : null
+            <FieldActions>
+              <EnlargeButton
+                ariaLabel={`Enlarge ${label}`}
+                disabled={disabled}
+                onClick={() =>
+                  setEnlargedFields(
+                    (previous) => new Set([...previous, fieldName]),
+                  )
+                }
+              />
+              {clearButton}
+            </FieldActions>
           }
         />
       );
