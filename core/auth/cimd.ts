@@ -14,11 +14,18 @@ import type { BaseOAuthClientProvider } from "./providers.js";
  * accepts an already-stored `client_id` (including `http://` URLs used by local
  * dev/test metadata servers). Production CIMD metadata documents should still
  * use HTTPS per SEP-991.
+ *
+ * `resourceMetadataUrl` is the RFC 9728 document advertised by the
+ * `WWW-Authenticate` challenge, when the caller has one. It matters here and
+ * not only in `auth()`: this runs *before* SDK `auth()`, so without it the
+ * pre-registration probe would do its own default-location discovery and miss
+ * a document served from a non-default path (#2071).
  */
 export async function ensureCimdClientRegistration(params: {
   serverUrl: string;
   provider: BaseOAuthClientProvider;
   fetchFn?: typeof fetch;
+  resourceMetadataUrl?: URL;
 }): Promise<void> {
   const clientMetadataUrl = params.provider.clientMetadataUrl?.trim();
   if (!clientMetadataUrl) return;
@@ -30,6 +37,7 @@ export async function ensureCimdClientRegistration(params: {
   try {
     resourceMetadata = await discoverOAuthProtectedResourceMetadata(
       params.serverUrl,
+      { resourceMetadataUrl: params.resourceMetadataUrl },
     );
   } catch {
     resourceMetadata = undefined;

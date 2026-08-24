@@ -153,6 +153,7 @@ Each config below is a ready-made server for exercising one feature by hand. Loa
 | `nullable-fields-http.json`               | Tools tab: nullable (`anyOf` + `null`) arguments   | [#1928](https://github.com/modelcontextprotocol/inspector/issues/1928) |
 | `rfc6570-templates-http.json`             | Resources tab: RFC 6570 resource-template expansion | [#1919](https://github.com/modelcontextprotocol/inspector/issues/1919) |
 | `advertised-extensions-http.json`         | Tool registration gated on advertised extensions    | [#1739](https://github.com/modelcontextprotocol/inspector/issues/1739) |
+| `oauth-custom-resource-metadata-http.json` **(legacy era)** | OAuth discovery driven by the challenge's `resource_metadata` | [#2071](https://github.com/modelcontextprotocol/inspector/issues/2071) |
 | `logging-{legacy,modern}-http.json`       | Logging, both eras                                  | [#1629](https://github.com/modelcontextprotocol/inspector/issues/1629) |
 | `subscriptions-{legacy,modern}-http.json` | Resource subscriptions, both eras                   | [#1630](https://github.com/modelcontextprotocol/inspector/issues/1630) |
 | `tasks-{legacy,modern}-http.json`         | Tasks, both eras                                    | [#1631](https://github.com/modelcontextprotocol/inspector/issues/1631) |
@@ -315,6 +316,21 @@ Requiredness is a property of the **expression**, not the variable: RFC 6570 dro
 3. The client now advertises no extensions, the server never enables `get_weather`, and the Tools list shows only `echo`.
 
 This is the debugging knob for a server legitimately changing tool registration based on what the client advertises. Legacy stateful leg only — the modern per-request leg has no persistent `oninitialized`.
+
+#### OAuth `resource_metadata` at a non-default path
+
+`oauth-custom-resource-metadata-http.json` is an OAuth-protected server (combined AS + resource, DCR enabled) that serves its RFC 9728 protected-resource metadata document **only** from `/custom/protected-resource`, and advertises it on every 401:
+
+```http
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer resource_metadata="http://127.0.0.1:8082/custom/protected-resource"
+```
+
+The default `/.well-known/oauth-protected-resource` route is deliberately left unserved, so a client that ignores the advertised URL cannot discover the document at all. Plain streamable-HTTP — connect with the **default (legacy)** protocol era.
+
+Add the server, click **Connect**, and watch the Inspector's first protected-resource metadata request in the Network tab: it must go to `/custom/protected-resource`. On the broken build the challenge's `resource_metadata` was parsed and then dropped before the SDK's `auth()` ever saw it ([#2071](https://github.com/modelcontextprotocol/inspector/issues/2071)), so discovery probed locations derived from the MCP server URL, 404'd, and authorization failed for any server that puts the document somewhere other than the well-known path.
+
+The value now rides the normalized `AuthChallenge` as a string — it has to be serializable, because the web client's challenge crosses the remote-backend boundary as JSON — and is converted to a `URL` at the OAuth boundary, where it is handed to `auth()` as `resourceMetadataUrl` and to the CIMD pre-registration probe, which runs *before* `auth()` and would otherwise do its own default-location discovery. A malformed value is ignored rather than surfaced, matching the SDK's own `WWW-Authenticate` parser: discovery falls back to the default locations instead of failing the whole authorization on a bad header. The callback leg needs nothing extra — SDK `auth()` persists the URL in its discovery state, so it survives both the web full-page redirect and the CLI/TUI loopback callback.
 
 #### Logging, both eras
 

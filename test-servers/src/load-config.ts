@@ -19,6 +19,8 @@ export interface ConfigFileOAuth {
   mode?: "combined" | "protected-resource";
   authorizationServers?: string[];
   resource?: string;
+  /** Serve RFC 9728 metadata from this path and advertise it on 401 (#2071). */
+  resourceMetadataPath?: string;
   issuerUrl?: string;
   accessTokenIssuers?: string[];
   jwksUri?: string;
@@ -199,6 +201,15 @@ function validateConfig(
           );
         }
       }
+    }
+    const metadataPath = oauth.resourceMetadataPath;
+    if (
+      metadataPath !== undefined &&
+      (typeof metadataPath !== "string" || !metadataPath.startsWith("/"))
+    ) {
+      throw new Error(
+        `Invalid config in ${filePath}: oauth.resourceMetadataPath must be an absolute path starting with "/"`,
+      );
     }
     if (transportType === "stdio" && oauth.enabled === true) {
       throw new Error(

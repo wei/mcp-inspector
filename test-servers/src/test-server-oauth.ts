@@ -28,6 +28,23 @@ export function getOAuthMode(
 }
 
 /**
+ * The `WWW-Authenticate` challenge sent with every 401.
+ *
+ * RFC 9728 §5.1: a resource server advertises where its protected-resource
+ * metadata lives via the `resource_metadata` parameter. Only emitted when the
+ * config moves that document off the well-known path — otherwise the bare
+ * `Bearer` challenge keeps the existing fixtures byte-identical.
+ */
+function bearerChallenge(config: OAuthConfig, req: Request): string {
+  const path = config.resourceMetadataPath;
+  if (!path) {
+    return "Bearer";
+  }
+  const requestBaseUrl = `${req.protocol}://${req.get("host")}`;
+  return `Bearer resource_metadata="${new URL(path, requestBaseUrl).href}"`;
+}
+
+/**
  * Set up OAuth routes on an Express application
  * This adds all OAuth endpoints (authorization, token, metadata, etc.)
  *
@@ -76,7 +93,7 @@ export function createBearerTokenMiddleware(
       // For streamable-http, the SDK checks response status and throws StreamableHTTPError with code 401
       res.status(401);
       res.setHeader("Content-Type", "application/json");
-      res.setHeader("WWW-Authenticate", "Bearer");
+      res.setHeader("WWW-Authenticate", bearerChallenge(config, req));
       // Return a JSON-RPC error response format that the SDK will recognize
       res.json({
         jsonrpc: "2.0",
@@ -113,7 +130,7 @@ export function createBearerTokenMiddleware(
       // Return 401 - the SDK's transport should detect this and throw an error
       res.status(401);
       res.setHeader("Content-Type", "application/json");
-      res.setHeader("WWW-Authenticate", "Bearer");
+      res.setHeader("WWW-Authenticate", bearerChallenge(config, req));
       // Return a JSON-RPC error response format that the SDK will recognize
       res.json({
         jsonrpc: "2.0",
@@ -184,9 +201,12 @@ function setupMetadataEndpoints(
     );
   }
 
-  // OAuth Protected Resource Metadata
+  // OAuth Protected Resource Metadata. `resourceMetadataPath` moves the
+  // document off the well-known path entirely (rather than serving both), so
+  // a client that ignores the advertised `resource_metadata` URL gets a 404
+  // — see the field's doc comment.
   app.get(
-    "/.well-known/oauth-protected-resource",
+    config.resourceMetadataPath ?? "/.well-known/oauth-protected-resource",
     (req: Request, res: Response) => {
       const requestBaseUrl = `${req.protocol}://${req.get("host")}`;
       const resourceUrl = config.resource ?? new URL("/", requestBaseUrl).href;

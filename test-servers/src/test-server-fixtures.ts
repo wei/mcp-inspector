@@ -2902,6 +2902,11 @@ export function createOAuthTestServerConfig(options: {
   supportCIMD?: boolean;
   tokenExpirationSeconds?: number;
   supportRefreshTokens?: boolean;
+  /**
+   * Move the RFC 9728 metadata document off the well-known path and advertise
+   * it via `WWW-Authenticate: Bearer resource_metadata="…"` (#2071).
+   */
+  resourceMetadataPath?: string;
 }): Partial<ServerConfig> {
   return {
     oauth: {
@@ -2909,6 +2914,9 @@ export function createOAuthTestServerConfig(options: {
       mode: "combined",
       requireAuth: options.requireAuth ?? false,
       scopesSupported: options.scopesSupported ?? ["mcp"],
+      ...(options.resourceMetadataPath
+        ? { resourceMetadataPath: options.resourceMetadataPath }
+        : {}),
       staticClients: options.staticClients,
       supportDCR: options.supportDCR ?? false,
       supportCIMD: options.supportCIMD ?? false,

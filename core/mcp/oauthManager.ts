@@ -39,6 +39,7 @@ import type {
   HandleAuthChallengeOptions,
 } from "../auth/challenge.js";
 import {
+  challengeResourceMetadataUrl,
   parseScopeString,
   unionAuthorizationScopes,
 } from "../auth/challenge.js";
@@ -729,10 +730,17 @@ export class OAuthManager {
 
     provider.clearCapturedAuthUrl();
 
+    // RFC 9728: honor the metadata document the challenge advertised rather
+    // than probing the default locations derived from the MCP server URL
+    // (#2071). The SDK persists it in its discovery state, so the callback leg
+    // recovers it without our passing it again.
+    const resourceMetadataUrl = challengeResourceMetadataUrl(enriched);
+
     await ensureCimdClientRegistration({
       serverUrl,
       provider,
       fetchFn: this.params.effectiveAuthFetch,
+      resourceMetadataUrl,
     });
 
     const scopeForAuth =
@@ -750,6 +758,7 @@ export class OAuthManager {
         serverUrl,
         scope: scopeForAuth,
         fetchFn: this.params.effectiveAuthFetch,
+        resourceMetadataUrl,
         ...(enriched.reason === "insufficient_scope" && {
           forceReauthorization: isStrictScopeSuperset(
             scopeForAuth,
@@ -879,6 +888,7 @@ export class OAuthManager {
         serverUrl,
         scope: scopeForAuth,
         fetchFn: this.params.effectiveAuthFetch,
+        resourceMetadataUrl: challengeResourceMetadataUrl(enriched),
         forceReauthorization: true,
       });
     } finally {
