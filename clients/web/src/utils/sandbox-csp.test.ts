@@ -67,6 +67,29 @@ describe("approveCspSources", () => {
     warn.mockRestore();
   });
 
+  it("names the offending field and states the expected shape, without calling the value unsafe", () => {
+    // #2064: the filter screens for injection safety only, so the message must
+    // not read as a verdict on the value. These four fields are origin lists,
+    // so the real cause is almost always "not an origin" — a CSP keyword has
+    // no field in the contract to be requested through. Naming the key also
+    // tells an app declaring several lists which one the bad entry was in.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    approveCspSources({
+      connectDomains: ["'unsafe-eval'"],
+      frameDomains: ["<script>"],
+    });
+    const messages = warn.mock.calls.map(([message]) => String(message));
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toContain('"connectDomains"');
+    expect(messages[1]).toContain('"frameDomains"');
+    for (const message of messages) {
+      expect(message).toContain("expected an origin");
+      expect(message).not.toContain("unsafe");
+    }
+    expect(warn.mock.calls[0]?.[1]).toBe("'unsafe-eval'");
+    warn.mockRestore();
+  });
+
   it("omits a key when every entry is rejected", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     expect(approveCspSources({ connectDomains: ['"; x'] })).toEqual({});
