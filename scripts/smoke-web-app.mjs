@@ -15,12 +15,9 @@
  * `data-app-status="ready"`, so only reading the inner frame's own
  * `location.origin` can tell them apart.
  *
- * The assertion is the `data-app-status="ready"` contract documented in
- * clients/web/README.md ("MCP Apps screen automation contract"): the renderer
- * only reports `ready` once the widget has loaded inside the sandbox iframe and
- * fired `notifications/initialized` back through the bridge. So a single
- * attribute covers the whole path — sandbox controller serving the proxy page,
- * the proxy loading the UI resource, and the bridge completing its handshake.
+ * The flow both phases share lives in `lib/mcp-app-flow.mjs`, shared with
+ * `pack:verify` (#2003) — see that header for why it is shared rather than
+ * copied, and for the `data-app-status="ready"` contract the assertion rests on.
  *
  * ── What this does and does NOT catch ───────────────────────────────────────
  *
@@ -31,11 +28,12 @@
  * smoke would have stayed green through that entire bug.
  *
  * The packaging dimension is owned by `npm run pack:verify`, which asserts the
- * file both in the tarball packlist and on disk after a real install. Keep both:
- * pack:verify proves the file *ships*, this proves the App path *works*. Neither
- * subsumes the other, and the failure this one is positioned to catch is a
- * regression in the sandbox/bridge code itself — which pack:verify, driving only
- * `GET /`, would not notice.
+ * file in the tarball packlist and on disk after a real install — and, since
+ * #2003, drives phase 1's flow against the **installed** bin. Keep both:
+ * pack:verify covers the published artifact, this covers the repo tree on every
+ * `npm run ci`, where pack:verify (network-bound, local/release-only) does not
+ * run — and this is the only one of the two that drives phase 2. Neither
+ * subsumes the other.
  *
  * As a cheap extra, this does assert the proxy page exists at the location the
  * runtime resolves it from (`clients/web/build/../static/…`, see
@@ -43,59 +41,31 @@
  * renamed* without its reader being updated, a repo-tree failure pack:verify
  * would only find later.
  *
- * Playwright is resolved with a `createRequire` based at clients/web/package.json
- * rather than a bare `import("playwright")` — a bare ESM specifier resolves
- * relative to scripts/, not the cwd, so `cd clients/web` in the npm script would
- * NOT make it resolvable. Same gotcha as smoke:web:browser; see its header.
- *
  * Expects `clients/web/dist` and `clients/launcher/build` to be built first —
  * the validate / CI ordering guarantees this. `test-servers/build` is built on
  * demand if missing, as in smoke:cli.
  */
 
-import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { startProdWebServer } from "./lib/prod-web-server.mjs";
 import { stopChild } from "./lib/child-cleanup.mjs";
-import { startAnnouncedChild } from "./lib/announced-child.mjs";
-import { resolveNodeBin } from "./lib/resolve-node-bin.mjs";
+import {
+  APP_TOOL,
+  attachPageDiagnostics,
+  buildAppDeepLink,
+  driveAppFlow,
+  loadChromium,
+  sandboxProxyPageFor,
+  startMcpAppServer,
+} from "./lib/mcp-app-flow.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
-const requireFromWeb = createRequire(
-  resolve(repoRoot, "clients/web/package.json"),
-);
+const LABEL = "smoke:web:app";
 
-const composableServer = join(
-  repoRoot,
-  "test-servers",
-  "build",
-  "server-composable.js",
-);
-const appConfig = join(
-  repoRoot,
-  "test-servers",
-  "configs",
-  "mcp-app-http.json",
-);
-// The same demo app, with `_meta.ui.domain` declared (#2056). Phase 2 drives it
-// to prove the dedicated-origin path end to end.
-const appDomainConfig = join(
-  repoRoot,
-  "test-servers",
-  "configs",
-  "mcp-app-domain-http.json",
-);
-// The path clients/web/server/sandbox-controller.ts resolves at runtime, from
-// the built runner at clients/web/build/. Kept in sync with the `join(__dirname,
-// "../static/sandbox_proxy.html")` there.
-const sandboxProxyPage = join(
-  repoRoot,
-  "clients",
-  "web",
-  "static",
-  "sandbox_proxy.html",
+// Resolved exactly as the runtime does, from the built runner's directory.
+const sandboxProxyPage = sandboxProxyPageFor(
+  join(repoRoot, "clients", "web", "build"),
 );
 
 const HOST = "127.0.0.1";
@@ -104,18 +74,8 @@ const HOST = "127.0.0.1";
 // can't EADDRINUSE this one. The three run back-to-back in `npm run smoke`.
 const PORT = process.env.SMOKE_WEB_APP_PORT ?? "6297";
 const TOKEN = "smoke-web-app-token";
-const APP_TOOL = "mcp_app_demo";
-// Console messages that are the async half of the uncaught-crash class (an
-// unhandled rejection or a failed dynamic import). Hard failures; every other
-// console error is a diagnostic, so benign font-CDN / React-warning noise can't
-// flake CI. Kept identical to smoke-web-browser.mjs, which documents the
-// reasoning at length.
-const FATAL_CONSOLE = /^Uncaught\b|Failed to fetch dynamically imported module/;
-// The URL the test server announces on startup. NOT derived from the config's
-// port: createTestServerHttp resolves its port with findAvailablePort(), which
-// walks UPWARD from the configured value when it's taken — so the config port is
-// a starting hint, not a guarantee, and assuming it makes this smoke fail
-// whenever anything else holds that port. The announced line is authoritative.
+// The URL each test server announces on startup — authoritative over the
+// config's port; see startMcpAppServer.
 let mcpUrl = null;
 
 let mcpServer = null;
@@ -125,7 +85,7 @@ const server = startProdWebServer({
   host: HOST,
   port: PORT,
   token: TOKEN,
-  label: "smoke:web:app",
+  label: LABEL,
 });
 
 async function shutdown() {
@@ -141,115 +101,25 @@ async function shutdown() {
   if (mcpServer) {
     const child = mcpServer;
     mcpServer = null;
-    await stopChild(child, { label: "smoke:web:app", what: "MCP test server" });
+    await stopChild(child, { label: LABEL, what: "MCP test server" });
   }
   if (domainMcpServer) {
     const child = domainMcpServer;
     domainMcpServer = null;
-    await stopChild(child, {
-      label: "smoke:web:app",
-      what: "MCP test server (domain)",
-    });
+    await stopChild(child, { label: LABEL, what: "MCP test server (domain)" });
   }
 }
 
 async function fail(message) {
-  console.error(`smoke:web:app FAILED — ${message}`);
+  console.error(`${LABEL} FAILED — ${message}`);
   await shutdown();
   process.exit(1);
-}
-
-/** Build the composable test server bundle if it isn't present yet. */
-function ensureTestServer() {
-  if (existsSync(composableServer)) return;
-  console.log(
-    "smoke:web:app — building test-servers (missing build output)...",
-  );
-  // The root-installed tsc, run via this Node — `npx` is a `.cmd` shim on
-  // Windows that a shell-free spawnSync can't start (ENOENT — #1939).
-  const r = spawnSync(
-    process.execPath,
-    [
-      resolveNodeBin("typescript", "tsc", repoRoot),
-      "-p",
-      "test-servers",
-      "--noCheck",
-    ],
-    { cwd: repoRoot, stdio: "inherit" },
-  );
-  if (r.status !== 0 || !existsSync(composableServer)) {
-    throw new Error(
-      "could not build the test servers (test-servers/build/server-composable.js). " +
-        "Run `npm run test-servers:build` from clients/web.",
-    );
-  }
-}
-
-/**
- * Spawn the MCP App test server and wait for it to announce its URL.
- *
- * The spawn/readiness ownership lives in `lib/announced-child.mjs` so the
- * failure path is testable: this smoke's happy path always gets the
- * announcement, so nothing here could prove that a child which stays alive
- * through the readiness timeout is still reachable by `shutdown()` — the case
- * that used to orphan a live server holding its port (#2000). `onSpawn`
- * publishes the child to `mcpServer` before the wait, so every throw path is
- * covered by teardown.
- *
- * The announced URL is authoritative rather than the config's port:
- * createTestServerHttp resolves through findAvailablePort(), which walks upward
- * when the configured value is taken.
- */
-async function startMcpServer(
-  config = appConfig,
-  publish = (child) => {
-    mcpServer = child;
-  },
-) {
-  const { match } = await startAnnouncedChild({
-    command: process.execPath,
-    args: [composableServer, "--config", config],
-    cwd: repoRoot,
-    pattern: /listening at (http:\/\/\S+)/i,
-    onSpawn: publish,
-    what: `MCP test server (${composableServer})`,
-  });
-  return { url: match[1] };
-}
-
-/** base64url(JSON) — the appArgs encoding the deep link expects. */
-function encodeAppArgs(args) {
-  return Buffer.from(JSON.stringify(args))
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
-}
-
-async function loadChromium() {
-  let chromium;
-  try {
-    ({ chromium } = requireFromWeb("playwright"));
-  } catch (err) {
-    // Not resolvable means devDependencies are missing — fixed by `npm install`
-    // at the repo root, NOT by `playwright install` (which fetches binaries).
-    throw new Error(
-      `could not resolve the Playwright package from clients/web — run \`npm install\` at the repo root (${err instanceof Error ? err.message : String(err)})`,
-    );
-  }
-  try {
-    return await chromium.launch({ headless: true });
-  } catch (err) {
-    throw new Error(
-      `chromium failed to launch — on a bare Linux box run \`npx playwright install --with-deps chromium\` for the system libraries (${err instanceof Error ? err.message : String(err)})`,
-    );
-  }
 }
 
 try {
   // Cheap structural check first: the sandbox proxy page must exist where the
   // runtime looks for it. Fails fast with a clear cause instead of surfacing as
-  // an opaque "app never reached ready" 30s timeout below.
+  // an opaque "app never reached ready" 45s timeout below.
   if (!existsSync(sandboxProxyPage)) {
     await fail(
       `sandbox proxy page missing at ${sandboxProxyPage} — clients/web/server/sandbox-controller.ts ` +
@@ -258,84 +128,35 @@ try {
     );
   }
 
-  ensureTestServer();
-  // `startMcpServer` publishes the child to `mcpServer` itself, so teardown
-  // reaches it even when this throws before returning.
-  ({ url: mcpUrl } = await startMcpServer());
-  await server.waitForReady();
-  browser = await loadChromium();
-  const page = await browser.newPage();
-
-  // Uncaught *synchronous* page errors. Their *async* twin — an unhandled
-  // rejection or a failed dynamic import — is not a `pageerror`; Chromium
-  // reports it on the console channel instead, so both are captured and both
-  // are hard failures. Same split as smoke:web:browser; see FATAL_CONSOLE there.
-  const pageErrors = [];
-  const consoleErrors = [];
-  page.on("pageerror", (err) =>
-    pageErrors.push(err instanceof Error ? err.message : String(err)),
-  );
-  page.on("console", (msg) => {
-    if (msg.type() === "error") consoleErrors.push(msg.text());
+  // `startMcpAppServer` publishes the child through `onSpawn` itself, so
+  // teardown reaches it even when this throws before returning (#2000).
+  mcpUrl = await startMcpAppServer({
+    repoRoot,
+    onSpawn: (child) => {
+      mcpServer = child;
+    },
+    label: LABEL,
   });
-  const fatalConsole = () => consoleErrors.filter((m) => FATAL_CONSOLE.test(m));
+  await server.waitForReady();
+  browser = await loadChromium(repoRoot);
+  const page = await browser.newPage();
+  const diagnostics = attachPageDiagnostics(page);
 
-  // Deep link: connect, switch to the Apps tab, pre-select the app tool, and
-  // fire "Open App". autoConnect/autoOpen must equal the session token (CSRF
-  // gate). Shape owned by clients/web/README.md#deep-link-auto-connect.
   const deepLink = (target) =>
-    `${server.baseUrl}/?serverUrl=${encodeURIComponent(target)}` +
-    `&transport=http&autoConnect=${TOKEN}&openApp=${APP_TOOL}` +
-    `&appArgs=${encodeAppArgs({ title: "smoke:web:app" })}&autoOpen=${TOKEN}`;
-  const url = deepLink(mcpUrl);
-
-  const drive = async () => {
-    const response = await page.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: 30_000,
+    buildAppDeepLink({
+      baseUrl: server.baseUrl,
+      mcpUrl: target,
+      token: TOKEN,
+      appArgs: { title: LABEL },
     });
-    if (!response || !response.ok()) {
-      throw new Error(
-        `GET / returned HTTP ${response ? response.status() : "no response"}`,
-      );
-    }
 
-    // 1. The deep link must be accepted (not rejected by the token gate).
-    const status = page.locator('[data-testid="connection-status"]');
-    await status.waitFor({ state: "attached", timeout: 30_000 });
-    const deeplink = await status.getAttribute("data-deeplink");
-    if (deeplink !== "parsed") {
-      throw new Error(
-        `deep link was not accepted (data-deeplink="${deeplink}") — expected "parsed"`,
-      );
-    }
-
-    // 2. Connected to the test server.
-    await page
-      .locator('[data-testid="connection-status"][data-status="connected"]')
-      .waitFor({ state: "attached", timeout: 45_000 });
-
-    // 3. The widget rendered inside the sandbox and completed its handshake.
-    //    This is the load-bearing assertion — see the header comment.
-    try {
-      await page
-        .locator('[data-testid="apps-form"][data-app-status="ready"]')
-        .waitFor({ state: "attached", timeout: 45_000 });
-    } catch {
-      const form = page.locator('[data-testid="apps-form"]');
-      const appStatus = (await form.count())
-        ? await form.getAttribute("data-app-status")
-        : "(no apps-form)";
-      const appError = (await form.count())
-        ? await form.getAttribute("data-app-error")
-        : null;
-      throw new Error(
-        `app never reached data-app-status="ready" (last: "${appStatus}"` +
-          `${appError ? `, data-app-error="${appError}"` : ""}) — the sandbox proxy ` +
-          `or the UI-protocol bridge failed to complete`,
-      );
-    }
-  };
+  /** The frames a failure should name, so "never rendered" reads differently
+   *  from "rendered at the wrong origin". */
+  const frameList = () =>
+    `frames: ${page
+      .frames()
+      .map((f) => f.url() || "(blank)")
+      .join(", ")}`;
 
   /**
    * Phase 2 (#2056): the same app, this time declaring `_meta.ui.domain`.
@@ -350,43 +171,26 @@ try {
    * `location.origin` is a real origin rather than the literal "null".
    *
    * It reuses the running web server and browser page — only a second MCP
-   * server and a second deep-link navigate are added.
+   * server and a second deep-link navigate are added. The deep-link gate is not
+   * re-asserted (`expectDeepLink: false`): it was proven on the first navigate,
+   * and a rejected one would fail at the connect wait regardless.
    */
   const driveDedicatedOrigin = async () => {
-    const { url: domainUrl } = await startMcpServer(
-      appDomainConfig,
-      (child) => {
+    const domainUrl = await startMcpAppServer({
+      repoRoot,
+      config: "mcp-app-domain-http",
+      onSpawn: (child) => {
         domainMcpServer = child;
       },
-    );
-    await page.goto(deepLink(domainUrl), {
-      waitUntil: "domcontentloaded",
-      timeout: 30_000,
+      label: LABEL,
     });
-    await page
-      .locator('[data-testid="connection-status"][data-status="connected"]')
-      .waitFor({ state: "attached", timeout: 45_000 });
-    try {
-      await page
-        .locator('[data-testid="apps-form"][data-app-status="ready"]')
-        .waitFor({ state: "attached", timeout: 45_000 });
-    } catch {
-      const form = page.locator('[data-testid="apps-form"]');
-      const appStatus = (await form.count())
-        ? await form.getAttribute("data-app-status")
-        : "(no apps-form)";
-      const appError = (await form.count())
-        ? await form.getAttribute("data-app-error")
-        : null;
-      throw new Error(
-        `dedicated-origin app never reached data-app-status="ready" (last: ` +
-          `"${appStatus}"${appError ? `, data-app-error="${appError}"` : ""}) — ` +
-          `frames: ${page
-            .frames()
-            .map((f) => f.url() || "(blank)")
-            .join(", ")}`,
-      );
-    }
+    await driveAppFlow({
+      page,
+      url: deepLink(domainUrl),
+      expectDeepLink: false,
+      what: "dedicated-origin app",
+      extraDiagnostics: frameList,
+    });
 
     const appFrame = page
       .frames()
@@ -394,10 +198,7 @@ try {
     if (!appFrame) {
       throw new Error(
         "app declaring _meta.ui.domain was not served from the dedicated app " +
-          `origin — no frame at /app-document/<id> (frames: ${page
-            .frames()
-            .map((f) => f.url() || "(blank)")
-            .join(", ")})`,
+          `origin — no frame at /app-document/<id> (${frameList()})`,
       );
     }
     const origin = await appFrame.evaluate(() => window.location.origin);
@@ -414,43 +215,44 @@ try {
   // real cause instead of a downstream timeout.
   let dedicated = null;
   try {
-    await Promise.race([server.whenChildExits(), drive()]);
+    await Promise.race([
+      server.whenChildExits(),
+      driveAppFlow({ page, url: deepLink(mcpUrl) }),
+    ]);
     dedicated = await Promise.race([
       server.whenChildExits(),
       driveDedicatedOrigin(),
     ]);
   } catch (err) {
-    const diagnostics = [
-      ...pageErrors,
-      ...fatalConsole().map((m) => `console: ${m}`),
+    const notes = [
+      ...diagnostics.pageErrors,
+      ...diagnostics.fatalConsole().map((m) => `console: ${m}`),
     ];
     await fail(
       `${err instanceof Error ? err.message : String(err)}${
-        diagnostics.length
-          ? ` — page diagnostics: ${diagnostics.join("; ")}`
-          : ""
+        notes.length ? ` — page diagnostics: ${notes.join("; ")}` : ""
       }`,
     );
   }
 
   // Hard failures: any uncaught sync page error, plus the console errors that
   // are the async half of the same class.
-  const fatal = [...pageErrors, ...fatalConsole()];
+  const fatal = diagnostics.fatal();
   if (fatal.length > 0) {
     await fail(`app logged uncaught error(s): ${fatal.join("; ")}`);
   }
 
   // Non-fatal console errors: surface them so a real problem isn't invisible,
   // without failing on benign subresource/warning noise.
-  const benignConsole = consoleErrors.filter((m) => !FATAL_CONSOLE.test(m));
-  if (benignConsole.length > 0) {
+  const benign = diagnostics.benignConsole();
+  if (benign.length > 0) {
     console.log(
-      `smoke:web:app note — ${benignConsole.length} non-fatal console error(s): ${benignConsole.join("; ")}`,
+      `${LABEL} note — ${benign.length} non-fatal console error(s): ${benign.join("; ")}`,
     );
   }
 
   console.log(
-    `smoke:web:app OK — connected to ${mcpUrl}, opened "${APP_TOOL}", ` +
+    `${LABEL} OK — connected to ${mcpUrl}, opened "${APP_TOOL}", ` +
       `widget reached data-app-status="ready" through the sandbox proxy; ` +
       `and an app declaring _meta.ui.domain rendered from the dedicated origin ` +
       `${dedicated?.origin} (${dedicated?.url})`,
