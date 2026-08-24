@@ -303,13 +303,13 @@ describe("buildWebServerConfigFromEnv", () => {
     expect(buildWebServerConfigFromEnv().sandboxPort).toBe(9100);
   });
 
-  it("resolves appOriginPort from MCP_APP_ORIGIN_PORT, defaulting to 6276", () => {
+  it("resolves appOriginPort from MCP_APP_ORIGIN_PORT, defaulting to 6278", () => {
     // The dedicated app origin (#2056). Deliberately NOT sharing the sandbox's
     // SERVER_PORT fallback: it is a different listener and must be pinnable
     // (and forwardable) on its own.
     delete process.env.MCP_APP_ORIGIN_PORT;
     process.env.SERVER_PORT = "9100";
-    expect(buildWebServerConfigFromEnv().appOriginPort).toBe(6276);
+    expect(buildWebServerConfigFromEnv().appOriginPort).toBe(6278);
     process.env.MCP_APP_ORIGIN_PORT = "9300";
     expect(buildWebServerConfigFromEnv().appOriginPort).toBe(9300);
   });

@@ -172,7 +172,7 @@ For the scripted version of the same flow (`--app-info` probe → deep link → 
 
 That field is how a server asks its host for a stable, dedicated origin. Without one, an App renders into a `srcdoc` frame sandboxed without `allow-same-origin`, so its document has an *opaque* origin and every request it makes carries `Origin: null` — which no CORS policy, OAuth callback, or API-key allowlist can admit ([#2056](https://github.com/modelcontextprotocol/inspector/issues/2056)).
 
-Open the Apps tab and run `mcp_app_demo`. The widget renders identically to `mcp-app-http.json` — the difference is not visual. Inspect the inner iframe in devtools: on this server it is served from `http://127.0.0.1:6276/app-document/<id>` and `location.origin` is that real origin, where on `mcp-app-http.json` it is `about:srcdoc` with an origin of `null`. (The host is whatever the Inspector bound to — `127.0.0.1` by default, an *address* rather than the name `localhost`, for the reason `resolve-bind-host.ts` documents.)
+Open the Apps tab and run `mcp_app_demo`. The widget renders identically to `mcp-app-http.json` — the difference is not visual. Inspect the inner iframe in devtools: on this server it is served from `http://127.0.0.1:6278/app-document/<id>` and `location.origin` is that real origin, where on `mcp-app-http.json` it is `about:srcdoc` with an origin of `null`. (The host is whatever the Inspector bound to — `127.0.0.1` by default, an *address* rather than the name `localhost`, for the reason `resolve-bind-host.ts` documents.)
 
 The spec makes `domain`'s format **host-dependent**, and the Inspector owns no domain infrastructure — so it reads any non-empty value as a *request* rather than an address, and answers with a real loopback origin of its own. See [MCP App dedicated origins](./clients/web/README.md#mcp-app-dedicated-origins-metauidomain) for the full contract, including what the one shared origin does and does not isolate, and how every failure falls back to the default render rather than blanking the app.
 
@@ -477,10 +477,10 @@ docker run --rm -p 127.0.0.1:6274:6274 -p 127.0.0.1:6275:6275 \
   ghcr.io/modelcontextprotocol/inspector
 ```
 
-**And `6276` if your app declares `_meta.ui.domain`.** That is the spec field a server uses to ask its host for a stable, dedicated origin — without one the app runs at an opaque origin and its requests carry `Origin: null`, which no CORS / OAuth-callback / API-key allowlist can admit. The Inspector answers the request with a real loopback origin on a third listener, `MCP_APP_ORIGIN_PORT` (default `6276`); apps that declare no `domain` never touch it. An app that declares one and can't reach it still renders — at an opaque origin, with a console warning. See [MCP App dedicated origins](./clients/web/README.md#mcp-app-dedicated-origins-metauidomain) for the host-specific contract and its isolation trade-offs.
+**And `6278` if your app declares `_meta.ui.domain`.** That is the spec field a server uses to ask its host for a stable, dedicated origin — without one the app runs at an opaque origin and its requests carry `Origin: null`, which no CORS / OAuth-callback / API-key allowlist can admit. The Inspector answers the request with a real loopback origin on a third listener, `MCP_APP_ORIGIN_PORT` (default `6278`); apps that declare no `domain` never touch it. An app that declares one and can't reach it still renders — at an opaque origin, with a console warning. See [MCP App dedicated origins](./clients/web/README.md#mcp-app-dedicated-origins-metauidomain) for the host-specific contract and its isolation trade-offs.
 
 ```bash
-docker run --rm -p 127.0.0.1:6274:6274 -p 127.0.0.1:6275:6275 -p 127.0.0.1:6276:6276 \
+docker run --rm -p 127.0.0.1:6274:6274 -p 127.0.0.1:6275:6275 -p 127.0.0.1:6278:6278 \
   ghcr.io/modelcontextprotocol/inspector
 ```
 

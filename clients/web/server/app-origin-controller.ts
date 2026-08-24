@@ -57,11 +57,22 @@ import { frameAncestorsDirective } from "./sandbox-controller.js";
 /**
  * The default app-origin listen port — **fixed**, for the same reason
  * `DEFAULT_SANDBOX_PORT` is: a port that changes per run can never be named in
- * a dev container's `forwardPorts`, a `docker run -p`, or an SSH tunnel. `6276`
- * sits next to the web (`6274`) and sandbox (`6275`) ports so the three forward
- * together.
+ * a dev container's `forwardPorts`, a `docker run -p`, or an SSH tunnel.
+ *
+ * **Not 6276, and not 6277.** `6276` is already taken, by the fixed loopback
+ * OAuth callback the CLI and TUI listen on
+ * (`RUNNER_OAUTH_CALLBACK_DEFAULT_PORT`) — fixed precisely so an OAuth app can
+ * pre-register `http://127.0.0.1:6276/oauth/callback`, which means it is the
+ * one port here that CANNOT move when something else takes it first. Binding it
+ * would let a running `--web` (started at login, holding the port) break a
+ * later `--cli`/`--tui` OAuth flow at its registered redirect URI — and the
+ * handoff recipe in `docs/mcp-app-review.md` has those two running side by
+ * side. Of the two listeners this listener is the one with a documented
+ * dynamic fallback, so it is the one that yields. `6277` is skipped because it
+ * was v1's MCP proxy port, which the migration guide tells people to stop
+ * forwarding; reusing it would make that instruction wrong.
  */
-export const DEFAULT_APP_ORIGIN_PORT = 6276;
+export const DEFAULT_APP_ORIGIN_PORT = 6278;
 
 /** Documents kept at once. Oldest is evicted past this; see {@link publish}. */
 const MAX_DOCUMENTS = 32;
@@ -142,7 +153,7 @@ export interface AppOriginController {
 /**
  * A usable listen port from a raw env value, or `undefined` if it isn't a plain
  * integer in `0`–`65535`. Mirrors `sandbox-controller`'s parser: `^\d+$` rejects
- * `parseInt`'s partial parses (`6276abc`) and the bound keeps an out-of-range
+ * `parseInt`'s partial parses (`6278abc`) and the bound keeps an out-of-range
  * value from reaching `server.listen`, which throws synchronously.
  */
 function parseListenPort(raw: string | undefined): number | undefined {

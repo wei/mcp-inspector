@@ -27,13 +27,13 @@ describe("publishAppDocument", () => {
     const fetchFn = vi
       .fn<typeof fetch>()
       .mockResolvedValue(
-        jsonResponse({ url: "http://localhost:6276/app-document/abc" }),
+        jsonResponse({ url: "http://localhost:6278/app-document/abc" }),
       );
     const url = await publishAppDocument(
       { html: "<p>app</p>", csp: "default-src 'none'" },
       { baseUrl: "http://localhost:6274", authToken: "tok", fetchFn },
     );
-    expect(url).toBe("http://localhost:6276/app-document/abc");
+    expect(url).toBe("http://localhost:6278/app-document/abc");
     expect(fetchFn).toHaveBeenCalledWith(
       "http://localhost:6274/api/app-document",
       expect.objectContaining({

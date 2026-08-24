@@ -155,8 +155,11 @@ Inspector owns no domain infrastructure — it cannot serve
   not parsed, matched, or reserved — declare whatever your production host
   expects.
 - The Inspector answers with a real HTTP origin on loopback:
-  `http://<host>:<MCP_APP_ORIGIN_PORT>`, default **`6276`** (beside the web
-  port `6274` and the sandbox port `6275`, so the three forward together).
+  `http://<host>:<MCP_APP_ORIGIN_PORT>`, default **`6278`** — in the same
+  `627x` family as the web port `6274` and the sandbox port `6275`, so the
+  three forward together. It is **not** `6276`: that is the fixed loopback
+  OAuth callback the CLI and TUI listen on, which OAuth apps pre-register and
+  which therefore cannot move. `6277` is skipped as v1's retired proxy port.
 - The app document is served from there under an unguessable path, its
   per-app CSP delivered as a real response **header** (stronger than the
   `<meta>` the `srcdoc` path relies on) plus a `frame-ancestors` that admits
@@ -186,7 +189,7 @@ default (opaque-origin) way and logs a console warning naming `_meta.ui.domain`.
 Losing the real origin degrades what the app can reach; losing the app itself
 would be worse.
 
-**Forward `6276` too** if you need this off loopback (a container, a tunnel).
+**Forward `6278` too** if you need this off loopback (a container, a tunnel).
 As with the sandbox port, a taken port falls back to an OS-assigned one with a
 loud warning — the app still renders, but the origin an app's backend was told
 to allowlist is then wrong, which is what the warning tells you.

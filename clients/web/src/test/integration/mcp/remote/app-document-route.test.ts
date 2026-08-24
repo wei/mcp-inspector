@@ -37,13 +37,13 @@ describe("createRemoteApp POST /api/app-document", () => {
   it("publishes the document and returns the URL", async () => {
     const publish = vi
       .fn<(doc: { html: string; csp?: string }) => { url: string } | null>()
-      .mockReturnValue({ url: "http://localhost:6276/app-document/abc" });
+      .mockReturnValue({ url: "http://localhost:6278/app-document/abc" });
     const res = await appWith(publish).request(
       post({ html: "<h1>hi</h1>", csp: "default-src 'none'" }),
     );
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toEqual({
-      url: "http://localhost:6276/app-document/abc",
+      url: "http://localhost:6278/app-document/abc",
     });
     expect(publish).toHaveBeenCalledWith({
       html: "<h1>hi</h1>",
@@ -54,7 +54,7 @@ describe("createRemoteApp POST /api/app-document", () => {
   it("accepts a document with no csp", async () => {
     const publish = vi
       .fn<(doc: { html: string; csp?: string }) => { url: string } | null>()
-      .mockReturnValue({ url: "http://localhost:6276/app-document/abc" });
+      .mockReturnValue({ url: "http://localhost:6278/app-document/abc" });
     const res = await appWith(publish).request(post({ html: "<h1>hi</h1>" }));
     expect(res.status).toBe(200);
     expect(publish).toHaveBeenCalledWith({
@@ -109,6 +109,46 @@ describe("createRemoteApp POST /api/app-document", () => {
       .mockReturnValue({ url: "http://x/y" });
     const res = await appWith(publish).request(post(body));
     expect(res.status).toBe(400);
+    expect(publish).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a CR/LF-carrying csp", "default-src 'none'\r\nX-Evil: 1"],
+    ["a NUL-carrying csp", "default-src 'none'\u0000"],
+  ])("rejects %s with 400", async (_label, csp) => {
+    // The controller hands `csp` to `res.writeHead()` verbatim. Node throws
+    // ERR_INVALID_CHAR there SYNCHRONOUSLY, inside the handler for a later,
+    // unrelated request — so accepting one here turns a bad publish into a
+    // thrown listener rather than a 400 anyone can see.
+    const publish = vi
+      .fn<(doc: { html: string; csp?: string }) => { url: string } | null>()
+      .mockReturnValue({ url: "http://x/y" });
+    const res = await appWith(publish).request(post({ html: "<p>x</p>", csp }));
+    expect(res.status).toBe(400);
+    expect(publish).not.toHaveBeenCalled();
+  });
+
+  it("rejects an oversized csp with 413 — it is retained per document", async () => {
+    const publish = vi
+      .fn<(doc: { html: string; csp?: string }) => { url: string } | null>()
+      .mockReturnValue({ url: "http://x/y" });
+    const res = await appWith(publish).request(
+      post({ html: "<p>x</p>", csp: "a".repeat(8 * 1024 + 1) }),
+    );
+    expect(res.status).toBe(413);
+    expect(publish).not.toHaveBeenCalled();
+  });
+
+  it("rejects an oversized BODY before parsing it", async () => {
+    // Distinct from the document check below, which only runs once the whole
+    // request has been buffered and parsed — and only bounds `html`.
+    const publish = vi
+      .fn<(doc: { html: string; csp?: string }) => { url: string } | null>()
+      .mockReturnValue({ url: "http://x/y" });
+    const res = await appWith(publish).request(
+      post(`{"junk":"${"x".repeat(24 * 1024 * 1024 + 1024)}"}`),
+    );
+    expect(res.status).toBe(413);
     expect(publish).not.toHaveBeenCalled();
   });
 

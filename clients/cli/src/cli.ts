@@ -452,6 +452,11 @@ function buildHandoff(
     : canonicalUrlHost(host);
   const clientPort = process.env.CLIENT_PORT || "6274";
   const sandboxPort = process.env.MCP_SANDBOX_PORT || "6275";
+  // The dedicated app origin (#2056). Forwarded alongside the other two: an App
+  // whose UI resource declares `_meta.ui.domain` is served from this port and
+  // the browser reaches it DIRECTLY, so a handoff that forwards only 6274/6275
+  // renders that app from an unreachable origin.
+  const appOriginPort = process.env.MCP_APP_ORIGIN_PORT || "6278";
   // Treat an empty MCP_INSPECTOR_API_TOKEN the same as unset — an empty token
   // can't satisfy the deep-link autoConnect gate.
   const apiToken = process.env.MCP_INSPECTOR_API_TOKEN || undefined;
@@ -469,7 +474,7 @@ function buildHandoff(
   return {
     serverUrl: normalizedUrl,
     deepLink: `http://${linkHost}:${clientPort}/?${params.toString()}`,
-    portForwardCmd: `coder port-forward <workspace> --tcp ${clientPort}:${clientPort} --tcp ${sandboxPort}:${sandboxPort}`,
+    portForwardCmd: `coder port-forward <workspace> --tcp ${clientPort}:${clientPort} --tcp ${sandboxPort}:${sandboxPort} --tcp ${appOriginPort}:${appOriginPort}`,
     oauthStatePath: statePath,
     apiToken: apiToken ?? null,
     note:

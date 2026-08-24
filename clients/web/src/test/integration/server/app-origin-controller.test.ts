@@ -21,6 +21,7 @@ import {
   resolveAppOriginPort,
   appDocumentEmbedders,
 } from "../../../../server/app-origin-controller.js";
+import { RUNNER_OAUTH_CALLBACK_DEFAULT_PORT } from "@inspector/core/auth/node/runner-oauth-callback.js";
 
 describe("resolveAppOriginPort", () => {
   const saved = process.env.MCP_APP_ORIGIN_PORT;
@@ -34,6 +35,19 @@ describe("resolveAppOriginPort", () => {
     expect(resolveAppOriginPort()).toBe(DEFAULT_APP_ORIGIN_PORT);
   });
 
+  it("does not default to the runners' fixed OAuth callback port", () => {
+    // Both listeners are fixed-by-default and both live in the 627x family, so
+    // the next free number is the obvious pick for each — which is how they
+    // collided. This one can move (it warns and retries on a dynamic port);
+    // the OAuth callback cannot, because apps pre-register
+    // `http://127.0.0.1:<that port>/oauth/callback`. A `--web` holding the
+    // port would therefore break a later `--cli`/`--tui` OAuth flow, and the
+    // handoff recipe runs those side by side.
+    expect(DEFAULT_APP_ORIGIN_PORT).not.toBe(
+      RUNNER_OAUTH_CALLBACK_DEFAULT_PORT,
+    );
+  });
+
   it("honors a valid MCP_APP_ORIGIN_PORT, including an explicit 0", () => {
     process.env.MCP_APP_ORIGIN_PORT = "9200";
     expect(resolveAppOriginPort()).toBe(9200);
@@ -41,7 +55,7 @@ describe("resolveAppOriginPort", () => {
     expect(resolveAppOriginPort()).toBe(0);
   });
 
-  it.each(["6276abc", "70000", "-1", "nope", "  "])(
+  it.each(["6278abc", "70000", "-1", "nope", "  "])(
     "warns and falls back for an invalid value %j",
     (value) => {
       const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -357,7 +371,7 @@ describe("createAppOriginController", () => {
             address: () => ({
               address: "127.0.0.1",
               family: "IPv4",
-              port: 6276,
+              port: 6278,
             }),
             close: (cb?: () => void) => cb?.(),
           });
@@ -368,11 +382,11 @@ describe("createAppOriginController", () => {
     try {
       const mod = await import("../../../../server/app-origin-controller.js");
       const c = mod.createAppOriginController({
-        port: 6276,
+        port: 6278,
         host: "127.0.0.1",
       });
       await c.start();
-      expect(c.getOrigin()).toBe("http://127.0.0.1:6276");
+      expect(c.getOrigin()).toBe("http://127.0.0.1:6278");
       expect(c.publish({ html: "<p>x</p>" })).not.toBeNull();
 
       emitter.emit(

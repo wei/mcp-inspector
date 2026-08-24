@@ -25,7 +25,7 @@ v2/main/
 │   │                               #     HOST-DEPENDENT and the Inspector owns no domain
 │   │                               #     infrastructure, so it treats any non-empty value as a
 │   │                               #     REQUEST, not an address, and answers with a real loopback
-│   │                               #     origin on its own port (MCP_APP_ORIGIN_PORT, default 6276).
+│   │                               #     origin on its own port (MCP_APP_ORIGIN_PORT, default 6278).
 │   │                               #     ONE SHARED origin, path-keyed per document — a real,
 │   │                               #     allowlistable origin without a port or DNS name per app,
 │   │                               #     and therefore NOT a per-app isolation boundary (two such

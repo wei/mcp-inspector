@@ -498,7 +498,7 @@ describe("createAppBridgeFactory", () => {
       );
       const publishAppDocument = vi
         .fn<(doc: { html: string; csp?: string }) => Promise<string | null>>()
-        .mockResolvedValue("http://localhost:6276/app-document/abc");
+        .mockResolvedValue("http://localhost:6278/app-document/abc");
       const factory = createAppBridgeFactory({
         getClient: () => fakeClient,
         readResource,
@@ -517,7 +517,7 @@ describe("createAppBridgeFactory", () => {
 
       const call = bridgeInstances[0].sendSandboxResourceReady.mock
         .calls[0][0] as { html: string; src?: string };
-      expect(call.src).toBe("http://localhost:6276/app-document/abc");
+      expect(call.src).toBe("http://localhost:6278/app-document/abc");
       // `html` still rides along: a proxy that ignores `src` renders the app
       // rather than a blank frame.
       expect(call.html).toBe(published.html);
@@ -530,7 +530,7 @@ describe("createAppBridgeFactory", () => {
     ])("does not take the dedicated path for %s", async (_label, domain) => {
       const publishAppDocument = vi
         .fn<(doc: { html: string; csp?: string }) => Promise<string | null>>()
-        .mockResolvedValue("http://localhost:6276/app-document/abc");
+        .mockResolvedValue("http://localhost:6278/app-document/abc");
       const factory = createAppBridgeFactory({
         getClient: () => fakeClient,
         readResource: vi
@@ -550,7 +550,7 @@ describe("createAppBridgeFactory", () => {
     it("never publishes a resource that declares no domain", async () => {
       const publishAppDocument = vi
         .fn<(doc: { html: string; csp?: string }) => Promise<string | null>>()
-        .mockResolvedValue("http://localhost:6276/app-document/abc");
+        .mockResolvedValue("http://localhost:6278/app-document/abc");
       const factory = createAppBridgeFactory({
         getClient: () => fakeClient,
         readResource: vi.fn().mockResolvedValue(uiResource("<h1>x</h1>")),

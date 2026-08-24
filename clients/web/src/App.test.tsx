@@ -3489,7 +3489,7 @@ describe("App MCP App listed-resource metadata wiring (#2055)", () => {
     // green while a domain-declaring elicitation app silently loses its real
     // origin. Assert it is not merely present but actually reaches the lib.
     publishAppDocumentMock.mockResolvedValue(
-      "http://127.0.0.1:6276/app-document/deadbeef",
+      "http://127.0.0.1:6278/app-document/deadbeef",
     );
 
     renderWithMantine(<App />);
@@ -3510,7 +3510,7 @@ describe("App MCP App listed-resource metadata wiring (#2055)", () => {
           html: "<p>app</p>",
           csp: "default-src 'none'",
         }),
-      ).resolves.toBe("http://127.0.0.1:6276/app-document/deadbeef");
+      ).resolves.toBe("http://127.0.0.1:6278/app-document/deadbeef");
       expect(publishAppDocumentMock).toHaveBeenCalledWith(
         { html: "<p>app</p>", csp: "default-src 'none'" },
         expect.objectContaining({ baseUrl: expect.any(String) }),
