@@ -41,11 +41,15 @@ const CSP_KEYS = exhaustiveCspKeys([
 
 /**
  * Filter an app-supplied {@link McpUiResourceCsp} down to the entries the host
- * will actually enforce. Unsafe values are dropped (and warned), and the
- * resulting object contains only keys with at least one accepted source. The
- * return value is what the host echoes back to the view via
- * `hostCapabilities.sandbox.csp` so the app sees what was granted, not what it
- * asked for.
+ * will actually enforce. The accepted subset is the origin forms
+ * {@link SAFE_CSP_SOURCE} matches — `scheme://host[:port][/path]`, a bare or
+ * wildcard host, a scheme such as `data:`, and `*`. Anything outside it is
+ * dropped (and warned) — including a CSP keyword like `'unsafe-eval'`, which
+ * is a perfectly valid source expression in CSP but not something these
+ * origin-list fields can express. The resulting object contains only keys with
+ * at least one accepted source, and is what the host echoes back to the view
+ * via `hostCapabilities.sandbox.csp` so the app sees what was granted, not what
+ * it asked for.
  *
  * NOTE: this screens each source for *injection safety* only — it does NOT
  * bound the *breadth* of a grant. A bare `*` (and a scheme-wildcard host) is a
@@ -56,6 +60,12 @@ const CSP_KEYS = exhaustiveCspKeys([
  * ambient credentials and nothing to exfiltrate beyond what the app already
  * received; "approved" therefore means "cannot break out of the meta
  * attribute," not "restrictive."
+ *
+ * The drop warning is worded accordingly: it names the field the entry came
+ * from and states the shape expected, and makes no claim about the *safety* of
+ * the value. Saying "unsafe" instead read as a security verdict this check
+ * never makes, and sent #2012 chasing an XSS regression that wasn't one, when
+ * the entry had merely been the wrong kind of thing for the field (#2064).
  */
 export function approveCspSources(
   csp: McpUiResourceCsp | undefined,
@@ -70,7 +80,12 @@ export function approveCspSources(
       if (typeof entry === "string" && SAFE_CSP_SOURCE.test(entry)) {
         accepted.push(entry);
       } else {
-        console.warn("[mcp-app sandbox] dropping unsafe CSP source:", entry);
+        console.warn(
+          `[mcp-app sandbox] dropping "${key}" entry (expected an origin such ` +
+            `as https://example.com or https://*.example.com, a scheme such as ` +
+            `data:, or *):`,
+          entry,
+        );
       }
     }
     if (accepted.length > 0) approved[key] = accepted;
