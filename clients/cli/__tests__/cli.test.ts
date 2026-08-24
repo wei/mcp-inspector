@@ -24,6 +24,23 @@ import {
   createTestServerInfo,
 } from "@modelcontextprotocol/inspector-test-server";
 import type { MCPServerConfig } from "@inspector/core/mcp/index.js";
+import { createServer, request } from "node:http";
+
+/**
+ * Every proxy variable undici's EnvHttpProxyAgent consults. The proxy test
+ * clears all of them rather than only setting HTTP_PROXY: the agent prefers the
+ * lowercase forms and honors NO_PROXY dynamically, so an ambient value in the
+ * developer's or CI's environment could route the request elsewhere, or bypass
+ * the test's proxy entirely, and fail the assertion for the wrong reason.
+ */
+const PROXY_ENV_VARS = [
+  "HTTP_PROXY",
+  "http_proxy",
+  "HTTPS_PROXY",
+  "https_proxy",
+  "NO_PROXY",
+  "no_proxy",
+] as const;
 
 describe("CLI Tests", () => {
   describe("Basic CLI Mode", () => {
@@ -322,6 +339,81 @@ describe("CLI Tests", () => {
         expect(result.stderr).toMatch(/--catalog cannot be combined/);
       } finally {
         deleteConfigFile(catalogPath);
+      }
+    });
+  });
+
+  describe("HTTP proxy (#2067)", () => {
+    it("routes the MCP connection through HTTP_PROXY (#2067)", async () => {
+      // Proxy support is one line in cli.ts — `fetch: createProxyFetch()` on the
+      // environment — and it is what puts the proxy at the BOTTOM of the fetch
+      // stack, where InspectorClient's own wrappers compose over it rather than
+      // discarding it. `InspectorClient` sets `fetchFn` unconditionally, so the
+      // transport-level fallback never fires for this client; delete that line
+      // and CLI proxy support disappears with every core test still green.
+      //
+      // Asserted behaviorally, through a real forwarding proxy, rather than by
+      // inspecting the environment object: the bug this replaces was a runtime
+      // dispatch failure that no structural assertion would have caught.
+      const server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createEchoTool()],
+      });
+      const seen: string[] = [];
+      const proxy = createServer((req, res) => {
+        seen.push(req.url ?? "");
+        const target = new URL(req.url ?? "");
+        const upstream = request(
+          {
+            host: target.hostname,
+            port: target.port,
+            path: target.pathname + target.search,
+            method: req.method,
+            headers: req.headers,
+          },
+          (up) => {
+            res.writeHead(up.statusCode ?? 502, up.headers);
+            up.pipe(res);
+          },
+        );
+        upstream.on("error", () => {
+          res.writeHead(502);
+          res.end();
+        });
+        req.pipe(upstream);
+      });
+      const savedProxyEnv: Record<string, string | undefined> = {};
+      for (const name of PROXY_ENV_VARS) {
+        savedProxyEnv[name] = process.env[name];
+        delete process.env[name];
+      }
+      try {
+        await server.start();
+        await new Promise<void>((r) => proxy.listen(0, "127.0.0.1", () => r()));
+        const addr = proxy.address();
+        const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+        process.env.HTTP_PROXY = `http://127.0.0.1:${port}`;
+
+        const result = await runCli([
+          server.url,
+          "--cli",
+          "--method",
+          "tools/list",
+        ]);
+
+        expectCliSuccess(result);
+        expect(JSON.stringify(expectValidJson(result))).toContain("echo");
+        // The point of the test: it did not go direct.
+        expect(seen.length).toBeGreaterThan(0);
+        expect(seen.every((u) => u.startsWith(server.url))).toBe(true);
+      } finally {
+        for (const name of PROXY_ENV_VARS) {
+          const previous = savedProxyEnv[name];
+          if (previous === undefined) delete process.env[name];
+          else process.env[name] = previous;
+        }
+        await new Promise<void>((r) => proxy.close(() => r()));
+        await server.stop();
       }
     });
   });

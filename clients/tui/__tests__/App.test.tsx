@@ -102,7 +102,14 @@ const h = vi.hoisted(() => {
   // handler for the event (the common single-server case).
   type EventEntry = { client: unknown; fn: (event: unknown) => void };
   const clientEvents = new Map<string, Set<EventEntry>>();
-  const clientInstances: Array<{ cfg?: { type?: string; url?: string } }> = [];
+  const clientInstances: Array<{
+    cfg?: { type?: string; url?: string };
+    opts?: { environment?: { fetch?: unknown } };
+  }> = [];
+  // What the mocked `createProxyFetch` returns. `undefined` is the real
+  // behavior with no proxy env var set; a test points this at a sentinel to
+  // exercise the proxy-configured branch (#2067).
+  const proxyFetchState: { current: unknown } = { current: undefined };
   const fireClientEvent = (event: string, detail?: unknown) => {
     clientEvents.get(event)?.forEach((e) => e.fn({ detail }));
   };
@@ -127,8 +134,15 @@ const h = vi.hoisted(() => {
   }
   class FakeClient {
     cfg: { type?: string; url?: string } | undefined;
-    constructor(config?: { type?: string; url?: string }) {
+    // Kept so a test can assert what App.tsx put in the environment — the proxy
+    // fetch wiring (#2067) is otherwise invisible to these mock-driven tests.
+    opts: { environment?: { fetch?: unknown } } | undefined;
+    constructor(
+      config?: { type?: string; url?: string },
+      opts?: { environment?: { fetch?: unknown } },
+    ) {
       this.cfg = config;
+      this.opts = opts;
       clientInstances.push(this);
     }
     // Derive the transport type from the server config the client was built
@@ -183,6 +197,7 @@ const h = vi.hoisted(() => {
   }
   return {
     ctrl,
+    proxyFetchState,
     connect,
     disconnect,
     openUrl,
@@ -232,10 +247,12 @@ vi.mock("@inspector/core/mcp/state/index.js", () => ({
 }));
 vi.mock("@inspector/core/mcp/node/index.js", () => ({
   createTransportNode: vi.fn(),
-  // Returns undefined for "no proxy configured", which is what the real one
-  // does with no proxy env var set — so `environment.fetch` stays unset and the
-  // client falls back to the built-in fetch, exactly as before #2067.
-  createProxyFetch: vi.fn(() => undefined),
+  // Defaults to undefined — "no proxy configured", which is what the real one
+  // returns with no proxy env var set, so `environment.fetch` stays unset and
+  // the client falls back to the built-in fetch, exactly as before #2067. A
+  // test can point `h.proxyFetchResult` at a sentinel to exercise the other
+  // branch.
+  createProxyFetch: vi.fn(() => h.proxyFetchState.current),
 }));
 vi.mock("@inspector/core/react/useInspectorClient.js", () => ({
   useInspectorClient: h.useInspectorClient,
@@ -637,6 +654,7 @@ beforeEach(() => {
   h.callbackStop.mockClear();
   h.clientEvents.clear();
   h.clientInstances.length = 0;
+  h.proxyFetchState.current = undefined;
   h.runner.override = null;
   h.clientSpies.authenticate.mockReset();
   h.clientSpies.authenticate.mockResolvedValue(
@@ -1610,6 +1628,27 @@ describe("App (OAuth result branches)", () => {
       challenge: { reason: "unauthorized" },
     });
     await expectFrame(r, "Authorization updated. Retry your action");
+  });
+
+  it("installs the proxy fetch as environment.fetch when a proxy is configured", async () => {
+    // The bottom-of-stack wiring for #2067. It is one line in App.tsx and it is
+    // what makes InspectorClient's own wrappers compose OVER the proxy instead
+    // of discarding it — delete it and TUI proxy support silently disappears
+    // while every other test stays green.
+    const sentinel = (async () => new Response("")) as unknown as typeof fetch;
+    h.proxyFetchState.current = sentinel;
+    await mount(oneHttp());
+    expect(h.clientInstances.length).toBeGreaterThan(0);
+    expect(h.clientInstances[0]!.opts?.environment?.fetch).toBe(sentinel);
+  });
+
+  it("leaves environment.fetch unset when no proxy is configured", async () => {
+    // The default path must stay on the built-in fetch — a wrapper installed
+    // unconditionally would put every TUI user behind an undici fetch.
+    h.proxyFetchState.current = undefined;
+    await mount(oneHttp());
+    expect(h.clientInstances.length).toBeGreaterThan(0);
+    expect(h.clientInstances[0]!.opts?.environment?.fetch).toBeUndefined();
   });
 
   it("ignores auth lifecycle events from a non-selected server", async () => {

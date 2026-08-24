@@ -919,7 +919,12 @@ export interface InspectorClientEnvironment {
   /**
    * Optional fetch function for HTTP requests (OAuth discovery/token exchange and
    * MCP transport). When provided, used for both auth and transport to bypass CORS.
-   * - Node: undefined (uses global fetch)
+   * - Node: `createProxyFetch()` (core/mcp/node/proxyFetch.ts) — a proxy-aware
+   *   fetch when `HTTPS_PROXY`/`HTTP_PROXY` is set, and `undefined` otherwise,
+   *   which leaves the built-in global fetch in place. This is the BOTTOM of the
+   *   fetch stack: `InspectorClient` wraps whatever it finds here, so proxying
+   *   composes with request tracking and the OAuth endpoint overrides instead of
+   *   being discarded by them (#2067).
    * - Browser: createRemoteFetch
    */
   fetch?: typeof fetch;
