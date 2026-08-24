@@ -131,11 +131,18 @@ function uiMeta(meta: object | undefined): McpUiResourceMeta | undefined {
 /**
  * First text content block of a UI resource, plus its `_meta.ui` sandbox hints.
  *
- * `listedMeta` is the `_meta` of the matching `resources/list` entry, which
- * ext-apps documents as the static default a host can review at connection
- * time; a `resources/read` content item carrying its own `_meta.ui` takes
- * precedence over it (`McpUiAppResourceConfig`). Nothing else is consulted —
- * in particular the read RESULT's own `_meta` is not a documented carrier.
+ * ext-apps exposes three carriers, and they are consulted most-specific first:
+ *
+ * 1. the **read content item**'s own `_meta.ui`;
+ * 2. the **read result envelope**'s — `McpUiReadResourceResult` (what a
+ *    `registerAppResource` callback returns) types `_meta.ui` at that level;
+ * 3. the matching **`resources/list` entry**'s, which `McpUiAppResourceConfig`
+ *    documents as the static default a host reviews at connection time, and
+ *    which a read content item explicitly takes precedence over.
+ *
+ * Whichever is found first wins outright — the levels are not merged, since a
+ * server that restates only `csp` at the more specific level means that to be
+ * the whole grant, not a patch over the broader one.
  */
 function extractHtmlAndMeta(
   result: ReadResourceResult,
@@ -149,7 +156,8 @@ function extractHtmlAndMeta(
     if (typeof text === "string") {
       return {
         html: text,
-        meta: uiMeta(content._meta) ?? uiMeta(listedMeta),
+        meta:
+          uiMeta(content._meta) ?? uiMeta(result._meta) ?? uiMeta(listedMeta),
       };
     }
   }

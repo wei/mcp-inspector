@@ -3183,15 +3183,26 @@ describe("App MCP App listed-resource metadata wiring (#2055)", () => {
     );
 
     renderWithMantine(<App />);
-    await waitFor(() => expect(appBridgeFactoryDeps.length).toBeGreaterThan(0));
 
-    // Every factory App builds gets the wiring, not just the Apps-tab one.
-    for (const deps of appBridgeFactoryDeps) {
-      expect(deps.getListedResourceMeta?.("ui://weather/app.html")).toEqual(
+    // App builds two factories, differing only in `advertiseElicitation`. Wait
+    // for BOTH by that flag rather than for a count: waiting on "at least one"
+    // would still pass with the wiring stripped from either call site, since
+    // the other's deps sit in the same array.
+    const appsFactory = () =>
+      appBridgeFactoryDeps.find((d) => !d.advertiseElicitation);
+    const elicitationFactory = () =>
+      appBridgeFactoryDeps.find((d) => d.advertiseElicitation === true);
+    await waitFor(() => {
+      expect(appsFactory()).toBeDefined();
+      expect(elicitationFactory()).toBeDefined();
+    });
+
+    for (const deps of [appsFactory(), elicitationFactory()]) {
+      expect(deps?.getListedResourceMeta?.("ui://weather/app.html")).toEqual(
         listedMeta,
       );
       expect(
-        deps.getListedResourceMeta?.("ui://other/app.html"),
+        deps?.getListedResourceMeta?.("ui://other/app.html"),
       ).toBeUndefined();
     }
   });

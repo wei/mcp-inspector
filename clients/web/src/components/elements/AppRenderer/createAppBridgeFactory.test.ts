@@ -86,20 +86,24 @@ const fakeClient = { name: "sdk-client" } as unknown as Client;
 /**
  * A UI resource read result. `meta` is the MCP Apps sandbox metadata, which the
  * spec nests under the `_meta` bag's `ui` key — the helper wraps it so every
- * test drives the real wire shape. `opts.flat` writes it to `_meta` unnested
- * instead (the non-conforming shape the host must ignore).
+ * test drives the real wire shape. `opts.at` places the bag on the result
+ * envelope (`McpUiReadResourceResult`) instead of the content item, and
+ * `opts.flat` writes it unnested (the non-conforming shape the host ignores).
  */
 function uiResource(
   text: string | undefined,
   meta?: Record<string, unknown>,
-  opts: { flat?: boolean } = {},
+  opts: { at?: "content" | "result"; flat?: boolean } = {},
 ): ReadResourceResult {
+  const bag = meta ? { _meta: opts.flat ? meta : { ui: meta } } : {};
+  const onResult = opts.at === "result";
   return {
+    ...(onResult ? bag : {}),
     contents: [
       {
         uri: "ui://weather/app.html",
         ...(text === undefined ? {} : { text }),
-        ...(meta ? { _meta: opts.flat ? meta : { ui: meta } } : {}),
+        ...(onResult ? {} : bag),
       },
     ],
   } as ReadResourceResult;
@@ -240,6 +244,67 @@ describe("createAppBridgeFactory", () => {
       permissions: { geolocation: {} },
       csp: { connectDomains: ["https://api.example.com"] },
     });
+  });
+
+  it("falls back to the read result's _meta.ui when the content item carries none", async () => {
+    // `McpUiReadResourceResult` — what a registerAppResource callback returns —
+    // types `_meta.ui` at the envelope level, so a server stamping it there
+    // must have it honored.
+    const readResource = vi.fn().mockResolvedValue(
+      uiResource(
+        "<h1>x</h1>",
+        {
+          permissions: { microphone: {} },
+          csp: { connectDomains: ["https://envelope.example.com"] },
+        },
+        { at: "result" },
+      ),
+    );
+    const factory = createAppBridgeFactory({
+      getClient: () => fakeClient,
+      readResource,
+    });
+    await factory(makeIframe(), { kind: "tool", tool });
+    const bridge = bridgeInstances[0];
+    bridge.emit("sandboxready");
+    await flush();
+
+    const call = bridge.sendSandboxResourceReady.mock.calls[0][0] as {
+      html: string;
+      permissions: unknown;
+    };
+    expect(call.permissions).toEqual({ microphone: {} });
+    expect(call.html).toContain("connect-src https://envelope.example.com");
+  });
+
+  it("prefers the read result's _meta.ui over the listing entry's", async () => {
+    // Precedence runs most-specific first: content item, then the result
+    // envelope, then the listing default.
+    const readResource = vi
+      .fn()
+      .mockResolvedValue(
+        uiResource(
+          "<h1>x</h1>",
+          { csp: { connectDomains: ["https://envelope.example.com"] } },
+          { at: "result" },
+        ),
+      );
+    const factory = createAppBridgeFactory({
+      getClient: () => fakeClient,
+      readResource,
+      getListedResourceMeta: () =>
+        listedMeta({ csp: { connectDomains: ["https://listed.example.com"] } }),
+    });
+    await factory(makeIframe(), { kind: "tool", tool });
+    const bridge = bridgeInstances[0];
+    bridge.emit("sandboxready");
+    await flush();
+
+    const call = bridge.sendSandboxResourceReady.mock.calls[0][0] as {
+      html: string;
+    };
+    expect(call.html).toContain("connect-src https://envelope.example.com");
+    expect(call.html).not.toContain("listed.example.com");
   });
 
   it("falls back to the resources/list entry's _meta.ui when the content block carries none", async () => {
