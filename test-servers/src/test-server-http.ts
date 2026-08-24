@@ -83,7 +83,18 @@ export interface RecordedRequest {
   method: string;
   params?: Record<string, unknown>;
   headers?: Record<string, string>;
-  metadata?: Record<string, string>;
+  /**
+   * The request's `_meta`, recorded verbatim. Values are arbitrary JSON —
+   * objects, arrays, numbers, booleans, `null` — not just strings (#1910), so
+   * a test asserting on a structured value gets a contract that matches what
+   * the recorder actually holds.
+   *
+   * Typed as `unknown` values rather than `@inspector/core`'s
+   * `RequestMetadata`: this package compiles standalone (`tsc -p test-servers`,
+   * NodeNext, no `paths`), so it has no `@inspector/core` alias to import
+   * through.
+   */
+  metadata?: Record<string, unknown>;
   response: unknown;
   timestamp: number;
 }

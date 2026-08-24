@@ -551,7 +551,7 @@ describe("server.ts supplemental coverage", () => {
 
     const base = {
       headers: [],
-      metadata: [],
+      metadata: {},
       connectionTimeout: 0,
       requestTimeout: 0,
     };
@@ -985,7 +985,7 @@ describe("server.ts supplemental coverage", () => {
             config: { type: "streamable-http", url: "https://x.test/mcp" },
             settings: {
               headers: [],
-              metadata: [],
+              metadata: {},
               connectionTimeout: 0,
               requestTimeout: 0,
               oauthClientSecret: "shh",
@@ -1133,7 +1133,7 @@ describe("server.ts supplemental coverage", () => {
             config: { type: "streamable-http", url: "https://x.test/mcp" },
             settings: {
               headers: [],
-              metadata: [],
+              metadata: {},
               connectionTimeout: 0,
               requestTimeout: 0,
               oauthClientSecret: "new-secret",

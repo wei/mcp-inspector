@@ -3,6 +3,7 @@ import { act, render, type RenderOptions } from "@testing-library/react";
 import { MantineProvider, type MantineColorScheme } from "@mantine/core";
 import { afterEach, expect, vi } from "vitest";
 import { theme } from "../theme/theme";
+import { cssVariablesResolver } from "../theme/cssVariables";
 
 // Options accepted by both render helpers: the standard RTL options (minus
 // `wrapper`, which we own) plus an optional forced `colorScheme`. The default
@@ -30,7 +31,12 @@ export type MantineTransitionsRenderOptions = MantineRenderOptions & {
 function makeWrapper(env: "test" | "default", colorScheme: MantineColorScheme) {
   return function Wrapper({ children }: { children: ReactNode }) {
     return (
-      <MantineProvider theme={theme} defaultColorScheme={colorScheme} env={env}>
+      <MantineProvider
+        theme={theme}
+        defaultColorScheme={colorScheme}
+        env={env}
+        cssVariablesResolver={cssVariablesResolver}
+      >
         {children}
       </MantineProvider>
     );

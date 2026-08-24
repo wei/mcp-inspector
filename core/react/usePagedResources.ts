@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import type { InspectorClientProtocol } from "../mcp/inspectorClientProtocol.js";
+import type { RequestMetadata } from "../mcp/types.js";
 import type {
   PagedResourcesState,
   PagedResourcesStateEventMap,
@@ -23,7 +24,7 @@ export interface UsePagedResourcesResult {
   error: Error | null;
   loadPage: (
     cursor?: string,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ) => Promise<LoadPageResult>;
   clear: () => void;
 }
@@ -90,7 +91,7 @@ export function usePagedResources(
   const loadPage = useCallback(
     async (
       cursor?: string,
-      metadata?: Record<string, string>,
+      metadata?: RequestMetadata,
     ): Promise<LoadPageResult> => {
       if (!pagedResourcesState || !client) {
         return { resources: [], nextCursor: undefined };

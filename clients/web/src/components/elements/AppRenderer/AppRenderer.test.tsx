@@ -1,5 +1,5 @@
 import { createRef, StrictMode } from "react";
-import { act } from "@testing-library/react";
+import { act, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { AppBridge } from "@modelcontextprotocol/ext-apps/app-bridge";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/client";
@@ -546,15 +546,21 @@ describe("AppRenderer", () => {
         // MutationObserver callbacks are delivered on a microtask.
         await Promise.resolve();
       });
-      expect(bridge.sendHostContextChange).toHaveBeenCalledWith(
-        expect.objectContaining({
-          theme: "dark",
-          styles: expect.objectContaining({
-            variables: expect.objectContaining({
-              "--color-background-primary": "#101113",
+      // `waitFor`, not a bare assertion after the single microtask above: how
+      // many ticks happy-dom takes to deliver the MutationObserver callback is
+      // load-dependent, so under a full parallel run the observer can still be
+      // pending here. Observed failing exactly once that way, with 0 calls.
+      await waitFor(() =>
+        expect(bridge.sendHostContextChange).toHaveBeenCalledWith(
+          expect.objectContaining({
+            theme: "dark",
+            styles: expect.objectContaining({
+              variables: expect.objectContaining({
+                "--color-background-primary": "#101113",
+              }),
             }),
           }),
-        }),
+        ),
       );
     } finally {
       getComputedStyleSpy.mockRestore();

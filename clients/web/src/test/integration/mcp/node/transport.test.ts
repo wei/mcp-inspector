@@ -263,7 +263,7 @@ describe("Transport", () => {
             { key: "", value: "ignored-empty-key" },
           ],
           env: [],
-          metadata: [],
+          metadata: {},
           connectionTimeout: 0,
           requestTimeout: 0,
           taskTtl: 0,
@@ -312,7 +312,7 @@ describe("Transport", () => {
       const baseSettings: InspectorServerSettings = {
         headers: [],
         env: [],
-        metadata: [],
+        metadata: {},
         connectionTimeout: 0,
         requestTimeout: 0,
         taskTtl: 0,
@@ -350,7 +350,7 @@ describe("Transport", () => {
         const settings: InspectorServerSettings = {
           headers: [{ key: "X-Tenant", value: "acme" }],
           env: [],
-          metadata: [],
+          metadata: {},
           connectionTimeout: 0,
           requestTimeout: 0,
           taskTtl: 0,
@@ -395,7 +395,7 @@ describe("Transport", () => {
       const settings: InspectorServerSettings = {
         headers: [],
         env: [],
-        metadata: [],
+        metadata: {},
         connectionTimeout: 0,
         requestTimeout: 0,
         taskTtl: 0,
