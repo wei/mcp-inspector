@@ -1790,3 +1790,106 @@ describe("SchemaForm defaulted fields (#2026)", () => {
     expect(jsonInput.value).toBe('[\n  "z"\n]');
   });
 });
+
+// A plain `<input>` swallows Enter, so a string argument could not be given a
+// value containing newlines (#2042). Each string field carries an enlarge button
+// that swaps it for a text area, one-way.
+describe("SchemaForm multiline strings (#2042)", () => {
+  const stringSchema: InspectorFormSchema = {
+    type: "object",
+    properties: {
+      note: { type: "string", title: "Note", maxLength: 40 },
+    },
+  };
+
+  function StringHarness({ resetKey }: { resetKey?: string }) {
+    const [values, setValues] = useState<Record<string, unknown>>({});
+    return (
+      <SchemaForm
+        schema={stringSchema}
+        values={values}
+        onChange={setValues}
+        resetKey={resetKey}
+      />
+    );
+  }
+
+  it("renders a single-line input with an enlarge button by default", () => {
+    renderWithMantine(<StringHarness />);
+    expect(screen.getByLabelText(/Note/).tagName).toBe("INPUT");
+    expect(screen.getByRole("button", { name: "Enlarge" })).toBeInTheDocument();
+  });
+
+  it("swaps the input for a text area that accepts newlines", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<StringHarness />);
+
+    await user.click(screen.getByRole("button", { name: "Enlarge" }));
+
+    const textarea = screen.getByLabelText(/Note/) as HTMLTextAreaElement;
+    expect(textarea.tagName).toBe("TEXTAREA");
+    await user.type(textarea, "one{Enter}two");
+    expect(textarea.value).toBe("one\ntwo");
+  });
+
+  it("carries the constraints of the field it replaced", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<StringHarness />);
+    await user.click(screen.getByRole("button", { name: "Enlarge" }));
+    expect(screen.getByLabelText(/Note/)).toHaveAttribute("maxlength", "40");
+  });
+
+  it("is one-way — the enlarge button is gone once used", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<StringHarness />);
+    await user.click(screen.getByRole("button", { name: "Enlarge" }));
+    expect(
+      screen.queryByRole("button", { name: "Enlarge" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the clear button working after enlarging", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<StringHarness />);
+
+    await user.type(screen.getByLabelText(/Note/), "typed");
+    await user.click(screen.getByRole("button", { name: "Enlarge" }));
+    const textarea = screen.getByLabelText(/Note/) as HTMLTextAreaElement;
+    expect(textarea.value).toBe("typed");
+
+    await user.click(screen.getByRole("button", { name: "Clear" }));
+    expect(textarea.value).toBe("");
+  });
+
+  it("shows no clear button until the field holds a value", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<StringHarness />);
+    expect(
+      screen.queryByRole("button", { name: "Clear" }),
+    ).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText(/Note/), "x");
+    expect(screen.getByRole("button", { name: "Clear" })).toBeInTheDocument();
+  });
+
+  // Enlarging belongs to the field the user enlarged, not to its name — the
+  // same reasoning resetKey documents for the number field's draft.
+  it("goes back to a single-line input when resetKey moves to another entity", async () => {
+    const user = userEvent.setup();
+    const { rerender } = renderWithMantine(<StringHarness resetKey="tool-a" />);
+
+    await user.click(screen.getByRole("button", { name: "Enlarge" }));
+    expect(screen.getByLabelText(/Note/).tagName).toBe("TEXTAREA");
+
+    rerender(<StringHarness resetKey="tool-b" />);
+    expect(screen.getByLabelText(/Note/).tagName).toBe("INPUT");
+  });
+
+  it("stays enlarged while resetKey is unchanged", async () => {
+    const user = userEvent.setup();
+    const { rerender } = renderWithMantine(<StringHarness resetKey="tool-a" />);
+
+    await user.click(screen.getByRole("button", { name: "Enlarge" }));
+    rerender(<StringHarness resetKey="tool-a" />);
+    expect(screen.getByLabelText(/Note/).tagName).toBe("TEXTAREA");
+  });
+});
