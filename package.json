@@ -74,7 +74,7 @@
     "smoke:web:app": "cd clients/web && npx playwright install chromium && node ../../scripts/smoke-web-app.mjs",
     "smoke:web:elicit": "cd clients/web && npx playwright install chromium && node ../../scripts/smoke-web-elicitation.mjs",
     "smoke:launcher": "node scripts/smoke-launcher.mjs",
-    "pack:verify": "node scripts/pack-and-verify.mjs",
+    "pack:verify": "cd clients/web && npx playwright install chromium && cd ../.. && node scripts/pack-and-verify.mjs",
     "prepack": "npm run build",
     "postinstall": "node scripts/install-clients.mjs"
   },
