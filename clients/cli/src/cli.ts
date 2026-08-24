@@ -24,6 +24,8 @@ import {
   parseHeaderPair,
 } from "@inspector/core/mcp/node/index.js";
 import type { JsonValue } from "@inspector/core/mcp/index.js";
+import type { StrictJsonValue } from "@inspector/core/json/jsonUtils.js";
+import { isSerializableJson } from "@inspector/core/json/jsonUtils.js";
 import {
   canonicalUrlHost,
   isAllInterfacesHost,
@@ -33,7 +35,6 @@ import { consumeMethodOutcome } from "./handlers/consume-outcome.js";
 import { runMethod } from "./handlers/run-method.js";
 import {
   isOneShotMethod,
-  metaValueToString,
   ONE_SHOT_METHODS,
   type MethodArgs,
 } from "./handlers/method-types.js";
@@ -474,8 +475,8 @@ function buildHandoff(
 
 function parseKeyValuePair(
   value: string,
-  previous: Record<string, JsonValue> = {},
-): Record<string, JsonValue> {
+  previous: Record<string, StrictJsonValue> = {},
+): Record<string, StrictJsonValue> {
   const parts = value.split("=");
   const key = parts[0];
   const val = parts.slice(1).join("=");
@@ -486,11 +487,29 @@ function parseKeyValuePair(
     );
   }
 
-  let parsedValue: JsonValue;
+  // `StrictJsonValue`: `JSON.parse` cannot produce `undefined`, and these values
+  // become `_meta`, which must reach the wire exactly as written (#1910).
+  let parsedValue: StrictJsonValue;
   try {
-    parsedValue = JSON.parse(val) as JsonValue;
+    parsedValue = JSON.parse(val) as StrictJsonValue;
   } catch {
+    // Not JSON at all — a bare word or an unquoted string. Sent as a string,
+    // which is what the user plainly meant.
     parsedValue = val;
+  }
+
+  // Valid JSON syntax is not the same as sendable JSON: `1e400` parses to
+  // `Infinity`, which `JSON.stringify` writes as `null`. Rejecting is better
+  // than accepting the flag and silently transmitting a different value —
+  // and better than falling back to the literal string, which would also not
+  // be what was asked for.
+  if (!isSerializableJson(parsedValue)) {
+    // Names the key, never the value: the pair can carry a credential
+    // (`credentials={"accessToken":"…","n":1e400}`) and this message lands in
+    // stderr and CI logs.
+    throw new Error(
+      `Invalid value for "${key}": numbers must be finite (a literal like 1e400 overflows to Infinity and cannot be sent).`,
+    );
   }
 
   return { ...previous, [key as string]: parsedValue };
@@ -736,8 +755,8 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
     promptName?: string;
     promptArgs?: Record<string, JsonValue>;
     logLevel?: LoggingLevel;
-    metadata?: Record<string, JsonValue>;
-    toolMetadata?: Record<string, JsonValue>;
+    metadata?: Record<string, StrictJsonValue>;
+    toolMetadata?: Record<string, StrictJsonValue>;
     cwd?: string;
     transport?: "sse" | "http" | "stdio";
     serverUrl?: string;
@@ -999,22 +1018,12 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
     promptName: options.promptName,
     promptArgs: options.promptArgs,
     logLevel: options.logLevel,
-    metadata: options.metadata
-      ? Object.fromEntries(
-          Object.entries(options.metadata).map(([key, value]) => [
-            key,
-            metaValueToString(value),
-          ]),
-        )
-      : undefined,
-    toolMeta: options.toolMetadata
-      ? Object.fromEntries(
-          Object.entries(options.toolMetadata).map(([key, value]) => [
-            key,
-            metaValueToString(value),
-          ]),
-        )
-      : undefined,
+    // `--metadata`/`--tool-metadata` values are parsed as JSON, and `_meta`
+    // takes any JSON — so they go through unflattened (#1910). They used to be
+    // squeezed through `metaValueToString`, which sent `{"a":1}` as the
+    // *string* `'{"a":1}'`.
+    metadata: options.metadata,
+    toolMeta: options.toolMetadata,
     appInfo: options.appInfo === true,
     format: options.format,
   };

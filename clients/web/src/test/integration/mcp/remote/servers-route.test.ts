@@ -425,10 +425,11 @@ describe("/api/servers routes", () => {
           // Wire envelope unchanged from #1353: pair-array headers, flat
           // oauth* fields. Backend splats these into the flat disk shape:
           // object headers, nested oauth, plus the inspector-only fields
-          // at the top level.
+          // at the top level. Metadata is the exception — it crosses as a
+          // JSON object, since a `_meta` value may be any JSON (#1910).
           settings: {
             headers: [{ key: "Authorization", value: "Bearer xyz" }],
-            metadata: [{ key: "tenant", value: "acme" }],
+            metadata: { tenant: "acme", limits: { rps: 10 } },
             connectionTimeout: 30000,
             requestTimeout: 60000,
             oauthClientId: "client-abc",
@@ -442,7 +443,7 @@ describe("/api/servers routes", () => {
       // Disk shape: flat, no `settings` wrapper, object headers, nested oauth.
       expect(stored).not.toHaveProperty("settings");
       expect(stored.headers).toEqual({ Authorization: "Bearer xyz" });
-      expect(stored.metadata).toEqual([{ key: "tenant", value: "acme" }]);
+      expect(stored.metadata).toEqual({ tenant: "acme", limits: { rps: 10 } });
       expect(stored.connectionTimeout).toBe(30000);
       expect(stored.requestTimeout).toBe(60000);
       expect(stored.oauth).toEqual({
@@ -462,7 +463,7 @@ describe("/api/servers routes", () => {
           config: { type: "streamable-http", url: "https://x.test/mcp" },
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             oauthAuthorizationParams: [
@@ -488,7 +489,7 @@ describe("/api/servers routes", () => {
           config: { type: "streamable-http", url: "https://x.test/mcp" },
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             oauthAuthorizationParams: { kc_idp_hint: "corp" },
@@ -509,7 +510,7 @@ describe("/api/servers routes", () => {
           config: { type: "streamable-http", url: "https://x.test/mcp" },
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             oauthAuthorizationUrl: "https://staging.test/authorize",
@@ -534,7 +535,7 @@ describe("/api/servers routes", () => {
           config: { type: "streamable-http", url: "https://x.test/mcp" },
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             oauthAuthorizationUrl: "",
@@ -557,7 +558,7 @@ describe("/api/servers routes", () => {
           config: { type: "streamable-http", url: "https://x.test/mcp" },
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             oauthTokenUrl: 42,
@@ -583,7 +584,7 @@ describe("/api/servers routes", () => {
           config: { type: "streamable-http", url: "https://x.test/mcp" },
           settings: {
             headers: [{ key: "X-Tenant", value: "acme" }],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 45000,
           },
@@ -617,7 +618,7 @@ describe("/api/servers routes", () => {
         body: JSON.stringify({
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             autoRefreshOnListChanged: true,
@@ -649,7 +650,7 @@ describe("/api/servers routes", () => {
         body: JSON.stringify({
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             autoRefreshOnListChanged: false,
@@ -671,7 +672,7 @@ describe("/api/servers routes", () => {
           config: { type: "stdio", command: "node" },
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             autoRefreshOnListChanged: "yes",
@@ -696,7 +697,7 @@ describe("/api/servers routes", () => {
         body: JSON.stringify({
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             maxFetchRequests: 5000,
@@ -724,7 +725,7 @@ describe("/api/servers routes", () => {
         body: JSON.stringify({
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             maxFetchRequests: 0,
@@ -756,7 +757,7 @@ describe("/api/servers routes", () => {
         body: JSON.stringify({
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             maxFetchRequests: 1000,
@@ -778,7 +779,7 @@ describe("/api/servers routes", () => {
           config: { type: "stdio", command: "node" },
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             maxFetchRequests: -5,
@@ -884,7 +885,7 @@ describe("/api/servers routes", () => {
           // headers should be an array of {key, value}; "oops" is a string.
           settings: {
             headers: "oops",
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
           },
@@ -915,7 +916,7 @@ describe("/api/servers routes", () => {
           // write lock and apply only the settings patch.
           settings: {
             headers: [{ key: "X-Tenant", value: "acme" }],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
           },
@@ -957,7 +958,7 @@ describe("/api/servers routes", () => {
           config: { type: "streamable-http", url: "https://x.test/mcp" },
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             oauthClientId: "",
@@ -983,7 +984,7 @@ describe("/api/servers routes", () => {
           config: { type: "stdio", command: "node" },
           settings: {
             headers: [{ key: "X-A", value: "1" }],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             // Unknown stowaway — must not survive the validator.
@@ -1101,7 +1102,7 @@ describe("/api/servers routes", () => {
               url: "https://x.test/mcp",
               settings: {
                 headers: [{ key: "X-Tenant", value: "acme" }],
-                metadata: [],
+                metadata: {},
                 connectionTimeout: 30000,
                 requestTimeout: 0,
                 oauthClientId: "client-abc",
@@ -1207,7 +1208,7 @@ describe("/api/servers routes", () => {
           config: { type: "stdio", command: "node" },
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             roots: [
@@ -1255,7 +1256,7 @@ describe("/api/servers routes", () => {
           config: { type: "stdio", command: "node" },
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             roots: [{ uri: "  " }],
@@ -1285,7 +1286,7 @@ describe("/api/servers routes", () => {
           config: { type: "stdio", command: "node" },
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             // uri must be a string.
@@ -1336,7 +1337,7 @@ describe("/api/servers routes", () => {
               { key: "Authorization", value: "Bearer the-token" },
               { key: "X-Tenant", value: "acme" },
             ],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
           },
@@ -1368,7 +1369,7 @@ describe("/api/servers routes", () => {
         body: JSON.stringify({
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             env: [{ key: "API_KEY", value: "abc-123" }],
@@ -1416,7 +1417,7 @@ describe("/api/servers routes", () => {
         body: JSON.stringify({
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 5000,
             requestTimeout: 0,
           },
@@ -1484,7 +1485,7 @@ describe("/api/servers routes", () => {
         body: JSON.stringify({
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             env: [],
@@ -1516,7 +1517,7 @@ describe("/api/servers routes", () => {
         body: JSON.stringify({
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             env: [
@@ -1587,7 +1588,7 @@ describe("/api/servers routes", () => {
         body: JSON.stringify({
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             env: "nope",
@@ -1614,7 +1615,7 @@ describe("/api/servers routes", () => {
         body: JSON.stringify({
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             env: [],
@@ -1642,7 +1643,7 @@ describe("/api/servers routes", () => {
         body: JSON.stringify({
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             env: [],
@@ -1675,7 +1676,7 @@ describe("/api/servers routes", () => {
         body: JSON.stringify({
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             env: [{ key: "API_KEY", value: "abc" }],
@@ -1775,7 +1776,7 @@ describe("/api/servers routes", () => {
           config: { type: "streamable-http", url: "https://x.test/mcp" },
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             oauthClientId: "cid",
@@ -1935,7 +1936,7 @@ describe("/api/servers routes", () => {
         body: JSON.stringify({
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             oauthClientId: "cid",
@@ -2327,7 +2328,7 @@ describe("/api/servers routes", () => {
             config: { type: "streamable-http", url: "https://x.test/mcp" },
             settings: {
               headers: [],
-              metadata: [],
+              metadata: {},
               connectionTimeout: 0,
               requestTimeout: 0,
               oauthClientId: "cid",
@@ -2361,7 +2362,7 @@ describe("/api/servers routes", () => {
             config: { type: "streamable-http", url: "https://x.test/mcp" },
             settings: {
               headers: [],
-              metadata: [],
+              metadata: {},
               connectionTimeout: 0,
               requestTimeout: 0,
               oauthClientId: "cid",
@@ -2658,7 +2659,7 @@ describe("a config-only PUT must not delete stored secrets (#2083)", () => {
           settings: {
             headers: [],
             env: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 30000,
             requestTimeout: 60000,
             taskTtl: 60000,
@@ -2726,7 +2727,7 @@ describe("a config-only PUT must not delete stored secrets (#2083)", () => {
           settings: {
             headers: [],
             env: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 30000,
             requestTimeout: 60000,
             taskTtl: 60000,
@@ -2879,7 +2880,7 @@ describe("plaintext migration against a session-scoped store (#1950)", () => {
           settings: {
             headers: [],
             env: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 45000,
             requestTimeout: 60000,
             taskTtl: 60000,
@@ -2927,7 +2928,7 @@ describe("plaintext migration against a session-scoped store (#1950)", () => {
           settings: {
             headers: [],
             env: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 30000,
             requestTimeout: 60000,
             taskTtl: 60000,

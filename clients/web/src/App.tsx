@@ -99,7 +99,10 @@ import {
 } from "@inspector/core/auth/index.js";
 import { RemoteInspectorClientStorage } from "@inspector/core/mcp/remote/index.js";
 import { useInspectorClient } from "@inspector/core/react/useInspectorClient.js";
-import { useServers } from "@inspector/core/react/useServers.js";
+import {
+  ServerListReloadError,
+  useServers,
+} from "@inspector/core/react/useServers.js";
 import { useSettingsDraft } from "@inspector/core/react/useSettingsDraft.js";
 import { useClientSettingsDraft } from "@inspector/core/react/useClientSettingsDraft.js";
 import { useEmaIdpLoginState } from "@inspector/core/react/useEmaIdpLoginState.js";
@@ -387,7 +390,7 @@ async function replayProtocolRequest(
 const EMPTY_SETTINGS: InspectorServerSettings = {
   headers: [],
   env: [],
-  metadata: [],
+  metadata: {},
   connectionTimeout: 0,
   requestTimeout: 0,
   taskTtl: DEFAULT_TASK_TTL_MS,
@@ -2567,13 +2570,9 @@ function App() {
       const activeCimdUrl = getActiveCimdClientMetadataUrl(clientConfig);
       // Flatten the persisted settings into the InspectorClient options shape.
       // Empty / zero values stay unset so the SDK defaults apply.
-      const defaultMetadata = savedSettings?.metadata
-        ? Object.fromEntries(
-            savedSettings.metadata
-              .filter((m) => m.key.trim() !== "")
-              .map((m) => [m.key, m.value]),
-          )
-        : undefined;
+      // Per-server default `_meta` is already a JSON object (#1910) — no
+      // pair-array flattening left to do; `{}` means "no defaults".
+      const defaultMetadata = savedSettings?.metadata;
       const serverAuthorizationParams = savedSettings
         ? oauthAuthorizationParamsFromSettings(savedSettings)
         : undefined;
@@ -3866,30 +3865,46 @@ function App() {
       // are ordered by when they were issued rather than by which one's list
       // reload finished first (#2089).
       const write = lastPersistedSettings.begin(activeServerId);
+      // This value is on disk now. Remember it as the rollback baseline for
+      // whatever is written next, since the `servers` entry it was derived
+      // from will keep describing the old value if the reload behind this
+      // write — or any later one — fails (#2089).
+      //
+      // Re-apply it when this write is the settled one: an overlapping toggle
+      // that failed *first* rolled the UI and the live client back to a
+      // baseline this write has since replaced, and if the list read behind
+      // this write failed too, nothing else would ever correct them. Through
+      // the *current* client, not this continuation's closure: a reconnect to
+      // the same server passes the id check while the captured instance is
+      // already destroyed.
+      const settlePaginationWrite = () => {
+        const settled = write.landed(next);
+        if (settled && activeServerIdRef.current === activeServerId) {
+          setPaginatedListsOverride(next.paginatedLists ?? false);
+          applyLiveServerSettings(next);
+        }
+      };
       void refreshingPersist(updateServerSettings, refreshInitialConfig)(
         activeServerId,
         next,
       )
-        .then(() => {
-          // This value is on disk now. Remember it as the rollback baseline for
-          // whatever is written next, since the `servers` entry it was derived
-          // from will keep describing the old value if the reload behind this
-          // write — or any later one — fails (#2089).
-          //
-          // Re-apply it when this write is the settled one: an overlapping
-          // toggle that failed *first* rolled the UI and the live client back
-          // to a baseline this write has since replaced, and if the list read
-          // behind this write failed too, nothing else would ever correct them.
-          // Through the *current* client, not this continuation's closure: a
-          // reconnect to the same server passes the id check while the captured
-          // instance is already destroyed.
-          const settled = write.landed(next);
-          if (settled && activeServerIdRef.current === activeServerId) {
-            setPaginatedListsOverride(next.paginatedLists ?? false);
-            applyLiveServerSettings(next);
-          }
-        })
+        .then(settlePaginationWrite)
         .catch((err: unknown) => {
+          // A `ServerListReloadError` means the PUT landed and only reading the
+          // list back failed, so the new setting IS on disk (#1914). That is a
+          // landed write, not a failed one: rolling back would put the UI and
+          // the live client on the *old* value and contradict disk. Settle it
+          // exactly as the success path does and report only the failed reload.
+          if (err instanceof ServerListReloadError) {
+            settlePaginationWrite();
+            notifications.show({
+              title:
+                "Pagination setting saved, but the server list did not reload",
+              message: err.message,
+              color: "red",
+            });
+            return;
+          }
           // This write is over and never reached disk, so it stops counting as
           // in flight: an earlier write still running is the settled state once
           // it lands, and is what re-applies the UI this rollback is about to
@@ -4217,8 +4232,20 @@ function App() {
   // opens (see the menu handlers).
   const addServerHighlighted = useCallback(
     async (id: string, config: MCPServerConfig) => {
-      await addServer(id, config);
-      setHighlightedServerIds((ids) => (ids.includes(id) ? ids : [...ids, id]));
+      const markAdded = () =>
+        setHighlightedServerIds((ids) =>
+          ids.includes(id) ? ids : [...ids, id],
+        );
+      try {
+        await addServer(id, config);
+      } catch (err) {
+        // A failed list reload still means the row is on disk, so it belongs
+        // in the highlight batch — the next successful refresh is what
+        // renders it, and it would otherwise arrive unmarked (#1914 r2).
+        if (err instanceof ServerListReloadError) markAdded();
+        throw err;
+      }
+      markAdded();
     },
     [addServer],
   );
@@ -4228,10 +4255,24 @@ function App() {
     async (id: string, config: MCPServerConfig) => {
       if (configModal?.mode === "edit" && configModal.targetId) {
         const originalId = configModal.targetId;
-        await updateServer(originalId, id, config);
-        if (originalId === activeServerId && id !== originalId) {
-          setActiveServerId(id);
+        const followRename = () => {
+          if (originalId === activeServerId && id !== originalId) {
+            setActiveServerId(id);
+          }
+        };
+        try {
+          await updateServer(originalId, id, config);
+        } catch (err) {
+          // A `ServerListReloadError` means the PUT landed and only reading
+          // the list back failed — the rename IS on disk. The active
+          // selection has to follow it anyway, or the next successful
+          // refresh leaves `activeServerId` pointing at an id that no longer
+          // exists (#1914 r2). Still rethrow, so the modal shows the reload
+          // error rather than closing as if nothing happened.
+          if (err instanceof ServerListReloadError) followRename();
+          throw err;
         }
+        followRename();
         return;
       }
       // add or clone
@@ -4255,6 +4296,30 @@ function App() {
     if (!configModal?.targetId) return undefined;
     return servers.find((s) => s.id === configModal.targetId);
   }, [configModal, servers]);
+
+  // An edit/clone modal whose target has left the list can no longer render a
+  // coherent form: `initialId`/`initialConfig` go undefined, and
+  // ServerConfigModal's own `useValueChange` reset then blanks the open form
+  // *and* clears the error it is showing.
+  //
+  // Only reachable since #1914 made the modal stay open on a failed post-write
+  // reload: rename A → B, the PUT lands, the reload fails, and the modal sits
+  // there targeting A. The write itself is what triggers the backend's change
+  // broadcast, so the SSE-driven background refresh that lands B (and drops A)
+  // is the *likely* next event, not a remote one. Closing is right — the edit
+  // is on disk and the list now agrees — and it covers the ordinary case too,
+  // where an external mcp.json edit removes the server being edited.
+  //
+  // Adjusted during render rather than in an effect (see `useValueChange`), so
+  // no frame ever paints the blanked form.
+  useValueChange(
+    configModal?.mode === "add" || configModal?.targetId === undefined
+      ? true
+      : servers.some((s) => s.id === configModal.targetId),
+    (targetPresent) => {
+      if (!targetPresent) setConfigModal(null);
+    },
+  );
 
   const settingsModalTarget = useMemo(() => {
     if (!settingsModalTargetId) return undefined;
@@ -4306,12 +4371,27 @@ function App() {
       // flush can put two saves for one server in flight, and the later-issued
       // one describes disk however the two happen to finish (#2089).
       const write = lastPersistedSettings.begin(id);
+      const settleSettingsWrite = () => {
+        const settled = write.landed(value);
+        if (settled && activeServerIdRef.current === id) {
+          setPaginatedListsOverride(value.paginatedLists ?? false);
+          applyLiveServerSettings(value);
+        }
+      };
       try {
         await refreshingPersist(updateServerSettings, refreshInitialConfig)(
           id,
           value,
         );
       } catch (err) {
+        // A `ServerListReloadError` means the PUT landed and only reading the
+        // list back failed, so this write did reach disk (#1914): record it
+        // like the success path below instead of rolling anything back, and
+        // rethrow so `onError` can say the reload — not the save — failed.
+        if (err instanceof ServerListReloadError) {
+          settleSettingsWrite();
+          throw err;
+        }
         // Stop counting as in flight before the rejection goes on to
         // `onError` — an earlier write still running settles the state once it
         // lands, and cannot know that while this one looks pending (#2089).
@@ -4338,11 +4418,7 @@ function App() {
       // toggle failing while this save is in flight rolls the UI and the live
       // client back to a baseline this save then replaces on disk, so a settled
       // save has to re-apply itself exactly as a settled toggle does (#2089).
-      const settled = write.landed(value);
-      if (settled && activeServerIdRef.current === id) {
-        setPaginatedListsOverride(value.paginatedLists ?? false);
-        applyLiveServerSettings(value);
-      }
+      settleSettingsWrite();
     },
     // Surface failures via toast — the modal usually closes
     // immediately on user dismiss, so a silent fail-on-flush would
@@ -4350,7 +4426,14 @@ function App() {
     // didn't (especially painful for the OAuth client secret).
     onError: (id, err) => {
       notifications.show({
-        title: `Failed to save settings for "${id}"`,
+        // A `ServerListReloadError` means the PUT landed and only reading the
+        // list back failed, so "Failed to save" would be false — and this
+        // toast is the user's only signal here, since the modal has usually
+        // closed by the time a flush rejects (#1914 r3).
+        title:
+          err instanceof ServerListReloadError
+            ? `Saved settings for "${id}", but the server list did not reload`
+            : `Failed to save settings for "${id}"`,
         message: err instanceof Error ? err.message : String(err),
         color: "red",
       });

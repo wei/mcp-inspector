@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import type { InspectorClientProtocol } from "../mcp/inspectorClientProtocol.js";
+import type { RequestMetadata } from "../mcp/types.js";
 import type {
   PagedResourceTemplatesState,
   PagedResourceTemplatesStateEventMap,
@@ -12,7 +13,7 @@ export interface UsePagedResourceTemplatesResult {
   resourceTemplates: ResourceTemplate[];
   loadPage: (
     cursor?: string,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ) => Promise<LoadPageResult>;
   clear: () => void;
 }
@@ -58,7 +59,7 @@ export function usePagedResourceTemplates(
   const loadPage = useCallback(
     async (
       cursor?: string,
-      metadata?: Record<string, string>,
+      metadata?: RequestMetadata,
     ): Promise<LoadPageResult> => {
       if (!pagedResourceTemplatesState || !client) {
         return { resourceTemplates: [], nextCursor: undefined };

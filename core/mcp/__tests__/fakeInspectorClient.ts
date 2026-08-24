@@ -36,6 +36,7 @@ import type {
   ResourceSubscriptionStreamState,
   ToolCallInvocation,
   ExcludedTool,
+  RequestMetadata,
 } from "../types.js";
 import { INACTIVE_SUBSCRIPTION_STREAM_STATE } from "../types.js";
 import type { MalformedListItem } from "../listSalvage.js";
@@ -145,25 +146,25 @@ export class FakeInspectorClient
   listAllTools = vi.fn(
     async (_options?: {
       cacheMode?: CacheMode;
-      metadata?: Record<string, string>;
+      metadata?: RequestMetadata;
     }) => ({ tools: drainPages(this.toolPages, "tools") }),
   );
   listAllPrompts = vi.fn(
     async (_options?: {
       cacheMode?: CacheMode;
-      metadata?: Record<string, string>;
+      metadata?: RequestMetadata;
     }) => ({ prompts: drainPages(this.promptPages, "prompts") }),
   );
   listAllResources = vi.fn(
     async (_options?: {
       cacheMode?: CacheMode;
-      metadata?: Record<string, string>;
+      metadata?: RequestMetadata;
     }) => ({ resources: drainPages(this.resourcePages, "resources") }),
   );
   listAllResourceTemplates = vi.fn(
     async (_options?: {
       cacheMode?: CacheMode;
-      metadata?: Record<string, string>;
+      metadata?: RequestMetadata;
     }) => ({
       resourceTemplates: drainPages(
         this.resourceTemplatePages,
@@ -224,7 +225,7 @@ export class FakeInspectorClient
       _argumentName: string,
       _argumentValue: string,
       _context?: Record<string, string>,
-      _metadata?: Record<string, string>,
+      _metadata?: RequestMetadata,
     ): Promise<{ values: string[]; total?: number; hasMore?: boolean }> => ({
       values: [],
     }),

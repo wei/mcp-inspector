@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { within } from "@testing-library/react";
 import type { InspectorServerSettings } from "@inspector/core/mcp/types.js";
 import { renderWithMantine, screen } from "../../../test/renderWithMantine";
+import { getAceText, setAceText } from "../../../test/aceEditor";
 import {
   ServerSettingsForm,
   type ServerSettingsSection,
@@ -22,7 +23,7 @@ function clearButtonFor(input: HTMLElement): HTMLElement {
 const emptySettings: InspectorServerSettings = {
   headers: [],
   env: [],
-  metadata: [],
+  metadata: {},
   connectionTimeout: 30000,
   requestTimeout: 60000,
   taskTtl: 60000,
@@ -33,7 +34,7 @@ const emptySettings: InspectorServerSettings = {
 const populatedSettings: InspectorServerSettings = {
   headers: [{ key: "Authorization", value: "Bearer abc" }],
   env: [],
-  metadata: [{ key: "userId", value: "u-1" }],
+  metadata: { userId: "u-1", tenant: { id: 7, tags: ["a"] } },
   connectionTimeout: 30000,
   requestTimeout: 60000,
   taskTtl: 60000,
@@ -63,8 +64,6 @@ const baseHandlers = {
   onRemoveEnv: vi.fn(),
   onEnvChange: vi.fn(),
   onCwdChange: vi.fn(),
-  onAddMetadata: vi.fn(),
-  onRemoveMetadata: vi.fn(),
   onMetadataChange: vi.fn(),
   onTimeoutChange: vi.fn(),
   onAutoRefreshChange: vi.fn(),
@@ -239,7 +238,7 @@ describe("ServerSettingsForm", () => {
     expect(screen.getByText("Log Level per Request")).toBeInTheDocument();
   });
 
-  it("shows empty hints for headers and metadata when no entries exist", () => {
+  it("shows the empty hint for headers, and an empty JSON object for metadata", () => {
     renderWithMantine(
       <ServerSettingsForm
         {...baseHandlers}
@@ -250,9 +249,9 @@ describe("ServerSettingsForm", () => {
     expect(
       screen.getByText("No custom headers configured"),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText("No request metadata configured"),
-    ).toBeInTheDocument();
+    // Metadata has no rows to be absent — the editor is always present, and
+    // "none configured" is spelled `{}` in it.
+    expect(getAceText()).toBe("{}");
   });
 
   it("invokes onAddHeader when + Add Header is clicked", async () => {
@@ -268,21 +267,6 @@ describe("ServerSettingsForm", () => {
     );
     await user.click(screen.getByRole("button", { name: "+ Add Header" }));
     expect(onAddHeader).toHaveBeenCalledTimes(1);
-  });
-
-  it("invokes onAddMetadata when + Add Metadata is clicked", async () => {
-    const user = userEvent.setup();
-    const onAddMetadata = vi.fn();
-    renderWithMantine(
-      <ServerSettingsForm
-        {...baseHandlers}
-        onAddMetadata={onAddMetadata}
-        settings={emptySettings}
-        expandedSections={["metadata"]}
-      />,
-    );
-    await user.click(screen.getByRole("button", { name: "+ Add Metadata" }));
-    expect(onAddMetadata).toHaveBeenCalledTimes(1);
   });
 
   it("invokes onHeaderChange when typing in header value input", async () => {
@@ -340,29 +324,34 @@ describe("ServerSettingsForm", () => {
     expect(onRemoveHeader).toHaveBeenCalledWith(0);
   });
 
-  it("invokes onMetadataChange and onRemoveMetadata for metadata rows", async () => {
-    const user = userEvent.setup();
-    const onMetadataChange = vi.fn();
-    const onRemoveMetadata = vi.fn();
+  it("renders the configured metadata as formatted JSON, nested values included", () => {
     renderWithMantine(
       <ServerSettingsForm
         {...baseHandlers}
-        onMetadataChange={onMetadataChange}
-        onRemoveMetadata={onRemoveMetadata}
         settings={populatedSettings}
         expandedSections={["metadata"]}
       />,
     );
-    const valueInput = screen.getByDisplayValue("u-1");
-    await user.type(valueInput, "Z");
-    expect(onMetadataChange).toHaveBeenCalled();
+    // The point of #1910: a nested object survives into the editor instead of
+    // being flattened into a `{ key, value }` string row.
+    expect(JSON.parse(getAceText())).toEqual({
+      userId: "u-1",
+      tenant: { id: 7, tags: ["a"] },
+    });
+  });
 
-    await user.click(
-      screen.getByRole("button", {
-        name: "Remove metadata entry, userId, row 1",
-      }),
+  it("reports the whole edited object through onMetadataChange", async () => {
+    const onMetadataChange = vi.fn();
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        onMetadataChange={onMetadataChange}
+        settings={emptySettings}
+        expandedSections={["metadata"]}
+      />,
     );
-    expect(onRemoveMetadata).toHaveBeenCalledWith(0);
+    await setAceText('{"n":[1,2]}');
+    expect(onMetadataChange).toHaveBeenLastCalledWith({ n: [1, 2] });
   });
 
   it("invokes onTimeoutChange when typing in connection timeout", async () => {
@@ -1468,23 +1457,6 @@ describe("ServerSettingsForm", () => {
       screen.getByRole("button", { name: "Clear stored OAuth state" }),
     );
     expect(onClearStoredOAuth).toHaveBeenCalledTimes(1);
-  });
-
-  it("clears a metadata value via its Clear button (onMetadataChange with empty value)", async () => {
-    const user = userEvent.setup();
-    const onMetadataChange = vi.fn();
-    renderWithMantine(
-      <ServerSettingsForm
-        {...baseHandlers}
-        onMetadataChange={onMetadataChange}
-        settings={populatedSettings}
-        expandedSections={["metadata"]}
-      />,
-    );
-    // populatedSettings has one metadata { key: "userId", value: "u-1" }
-    const valueInput = screen.getByDisplayValue("u-1");
-    await user.click(clearButtonFor(valueInput));
-    expect(onMetadataChange).toHaveBeenCalledWith(0, "userId", "");
   });
 
   it("omits the Clear buttons for an empty header key/value row", () => {

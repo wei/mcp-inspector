@@ -6,10 +6,10 @@ This README covers what's specific to the web client. For the repo-wide picture 
 
 ## Two halves: `src/` (browser) and `server/` (Node)
 
-| Path | Runs in | Purpose |
-| --- | --- | --- |
-| `src/` | browser | The React SPA — components, hooks, theme, entry (`main.tsx`). |
-| `server/` | Node | The dev/prod backend wiring (never imported by the browser). |
+| Path      | Runs in | Purpose                                                       |
+| --------- | ------- | ------------------------------------------------------------- |
+| `src/`    | browser | The React SPA — components, hooks, theme, entry (`main.tsx`). |
+| `server/` | Node    | The dev/prod backend wiring (never imported by the browser).  |
 
 The `server/` directory holds the Node-only backend:
 
@@ -47,12 +47,12 @@ Two artifacts come out, both of which ship in the published package:
 
 Components live under `src/components/` in four layers, smallest to largest:
 
-| Layer | Count | What it is |
-| --- | --- | --- |
-| `elements/` | ~31 | Leaf presentational pieces (badges, buttons, toggles) over Mantine primitives. |
-| `groups/` | ~63 | Composite pieces (cards, panels, modals, control bars). |
-| `screens/` | ~11 | Full tab screens (Tools, Resources, Servers, monitoring screens…). |
-| `views/` | 1 | `InspectorView` — the top-level layout that composes the screens. |
+| Layer       | Count | What it is                                                                     |
+| ----------- | ----- | ------------------------------------------------------------------------------ |
+| `elements/` | ~31   | Leaf presentational pieces (badges, buttons, toggles) over Mantine primitives. |
+| `groups/`   | ~63   | Composite pieces (cards, panels, modals, control bars).                        |
+| `screens/`  | ~11   | Full tab screens (Tools, Resources, Servers, monitoring screens…).             |
+| `views/`    | 1     | `InspectorView` — the top-level layout that composes the screens.              |
 
 Every screen and element has a `*.stories.tsx` (see [Storybook](#storybook)). Styling follows the Mantine-first rules in [`AGENTS.md`](../../AGENTS.md) — theme variants and component props over CSS, `--inspector-*` tokens over raw colors.
 
@@ -74,23 +74,23 @@ Nothing _enforces_ the boundary — no path alias keys off it, and the coverage 
 
 The Apps screen exposes a small, stable set of `data-testid` / `data-*` attributes so an automated driver (deep-link auto-open, CI review harness) can `waitForSelector` on a deterministic signal instead of sleeping. Treat these as a public contract — drivers depend on them staying stable:
 
-| Attribute | Where | Meaning |
-| --- | --- | --- |
-| `data-testid="apps-form"` | Apps content card | The container that carries the status/error attributes below. |
-| `data-app-status` | on `apps-form` | Renderer lifecycle: `idle` (nothing running) → `loading` (bridge building / `ui/initialize` in flight) → `ready` (view fired `notifications/initialized`) → `error` (bridge factory threw/rejected). Poll for `ready`. |
-| `data-app-error` | on `apps-form` | The failure reason string when `data-app-status="error"` (e.g. no connected client); absent otherwise. |
-| `data-testid="apps-error"` | error panel | Rendered below the frame when the app fails to load (factory throw/reject); shows the reason so the failure isn't a silent blank frame. |
-| `data-testid="open-app"` | Open App button | Launches the selected app. |
-| `data-testid="apps-stage"` | Stage-partial button | Snapshots the current form values for progressive-render testing. |
-| `data-testid="apps-messages"` | messages panel | `ui/message` submissions from the running view. |
-| `data-testid="apps-logs"` | app-logs panel | `notifications/message` log entries (default-expanded). |
+| Attribute                     | Where                | Meaning                                                                                                                                                                                                                |
+| ----------------------------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `data-testid="apps-form"`     | Apps content card    | The container that carries the status/error attributes below.                                                                                                                                                          |
+| `data-app-status`             | on `apps-form`       | Renderer lifecycle: `idle` (nothing running) → `loading` (bridge building / `ui/initialize` in flight) → `ready` (view fired `notifications/initialized`) → `error` (bridge factory threw/rejected). Poll for `ready`. |
+| `data-app-error`              | on `apps-form`       | The failure reason string when `data-app-status="error"` (e.g. no connected client); absent otherwise.                                                                                                                 |
+| `data-testid="apps-error"`    | error panel          | Rendered below the frame when the app fails to load (factory throw/reject); shows the reason so the failure isn't a silent blank frame.                                                                                |
+| `data-testid="open-app"`      | Open App button      | Launches the selected app.                                                                                                                                                                                             |
+| `data-testid="apps-stage"`    | Stage-partial button | Snapshots the current form values for progressive-render testing.                                                                                                                                                      |
+| `data-testid="apps-messages"` | messages panel       | `ui/message` submissions from the running view.                                                                                                                                                                        |
+| `data-testid="apps-logs"`     | app-logs panel       | `notifications/message` log entries (default-expanded).                                                                                                                                                                |
 
 App-rendered **elicitations** (#1854) render through the same `AppRenderer` but outside the Apps screen — one modal per request, from `AppElicitationHost` — and carry their own pair:
 
-| Attribute | Where | Meaning |
-| --- | --- | --- |
+| Attribute                       | Where                 | Meaning                                                                                                                                                                                          |
+| ------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `data-testid="app-elicitation"` | the elicitation modal | One per in-flight app-rendered elicitation. **Absent** means the request was answered by the native elicitation form instead, which is what a driver asserts to prove the negotiation gate held. |
-| `data-app-elicitation-status` | on `app-elicitation` | The same `AppRendererStatus` for that modal's app. `ready` is when the host forwards the `elicitation/create` through its bridge. |
+| `data-app-elicitation-status`   | on `app-elicitation`  | The same `AppRendererStatus` for that modal's app. `ready` is when the host forwards the `elicitation/create` through its bridge.                                                                |
 
 `scripts/smoke-web-elicitation.mjs` drives both halves against the public fixture (`test-servers/configs/app-elicitation-http.json` and its `-native-` sibling).
 
@@ -104,20 +104,20 @@ A driver (launcher, CLI `--print-handoff`, CI review harness) can reach a **conn
 http://127.0.0.1:6274/?serverUrl=<url>&transport=http|sse&autoConnect=<token>
 ```
 
-| Param | Meaning |
-| --- | --- |
-| `serverUrl` | The MCP server URL. Restricted to `http:` / `https:` (a crafted `javascript:` / `data:` / `file:` value is rejected). Canonicalized via `URL.href` so it matches the OAuth store's key form. |
-| `transport` | `http` (streamable-HTTP, the default) or `sse`. Unknown values fall back to `http`. |
+| Param         | Meaning                                                                                                                                                                                                                                                                                                                      |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `serverUrl`   | The MCP server URL. Restricted to `http:` / `https:` (a crafted `javascript:` / `data:` / `file:` value is rejected). Canonicalized via `URL.href` so it matches the OAuth store's key form.                                                                                                                                 |
+| `transport`   | `http` (streamable-HTTP, the default) or `sse`. Unknown values fall back to `http`.                                                                                                                                                                                                                                          |
 | `autoConnect` | **CSRF gate.** Must equal the per-launch `MCP_INSPECTOR_API_TOKEN`. The token is random per launch and only known to whatever started the server, so a third-party-minted link cannot satisfy it — this is the same exposure surface as the existing `?MCP_INSPECTOR_API_TOKEN=` param. Without a match the link is ignored. |
 
 The deep link upserts a stable `deep-link` catalog row (so a reload reconnects to the same row instead of accumulating duplicates) and connects. Connection-level outcomes are surfaced on the `AppShell.Header` as a machine-readable contract, so a driver can `waitForSelector` and read the failure reason without scraping a transient toast:
 
-| Attribute | Where | Meaning |
-| --- | --- | --- |
-| `data-testid="connection-status"` | header | The element carrying the attributes below. |
-| `data-status` | on `connection-status` | The live `ConnectionStatus` (`disconnected` → `connecting` → `connected` / `error`). Poll for `connected`. |
-| `data-error-message` | on `connection-status` | Why the last connect failed (handshake error, OAuth-start failure, deep-link automation failure); absent when there is no error. |
-| `data-deeplink` | on `connection-status` | `parsed` (a valid deep link drove this load), `rejected` (deep-link params present but the token/serverUrl gate failed), or `none`. Lets a driver distinguish "no deep link" from "rejected" — both otherwise leave `data-status` idle. |
+| Attribute                         | Where                  | Meaning                                                                                                                                                                                                                                 |
+| --------------------------------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `data-testid="connection-status"` | header                 | The element carrying the attributes below.                                                                                                                                                                                              |
+| `data-status`                     | on `connection-status` | The live `ConnectionStatus` (`disconnected` → `connecting` → `connected` / `error`). Poll for `connected`.                                                                                                                              |
+| `data-error-message`              | on `connection-status` | Why the last connect failed (handshake error, OAuth-start failure, deep-link automation failure); absent when there is no error.                                                                                                        |
+| `data-deeplink`                   | on `connection-status` | `parsed` (a valid deep link drove this load), `rejected` (deep-link params present but the token/serverUrl gate failed), or `none`. Lets a driver distinguish "no deep link" from "rejected" — both otherwise leave `data-status` idle. |
 
 ### Landing on a rendered app
 
@@ -127,11 +127,11 @@ Three further params extend the deep link to pre-select — and optionally auto-
 …&openApp=<toolName>&appArgs=<base64url(JSON)>&autoOpen=<token>
 ```
 
-| Param | Meaning |
-| --- | --- |
-| `openApp` | The app-tool name. Once the connection is up and the tool appears in the app list, the inspector switches to the Apps tab and pre-selects it. |
-| `appArgs` | `base64url(JSON)` object of form values. Merged **over** the tool's schema defaults (`collectSchemaDefaults`) so a required-with-default field isn't left blank — which would otherwise disable "Open App". Malformed / non-object values fall back to `{}`. |
-| `autoOpen` | **Same CSRF gate as `autoConnect`** — must equal the session token. When set, "Open App" fires automatically (a tool call from a URL), so the token gate is mandatory. Without a match the app is pre-selected but not opened. |
+| Param      | Meaning                                                                                                                                                                                                                                                      |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `openApp`  | The app-tool name. Once the connection is up and the tool appears in the app list, the inspector switches to the Apps tab and pre-selects it.                                                                                                                |
+| `appArgs`  | `base64url(JSON)` object of form values. Merged **over** the tool's schema defaults (`collectSchemaDefaults`) so a required-with-default field isn't left blank — which would otherwise disable "Open App". Malformed / non-object values fall back to `{}`. |
+| `autoOpen` | **Same CSRF gate as `autoConnect`** — must equal the session token. When set, "Open App" fires automatically (a tool call from a URL), so the token gate is mandatory. Without a match the app is pre-selected but not opened.                               |
 
 The app-side render lifecycle is observable through the [MCP Apps screen automation contract](#mcp-apps-screen-automation-contract) above (`data-app-status="ready"`), so a driver can `waitForSelector` the whole `connect → open → ready` chain deterministically.
 
@@ -139,15 +139,29 @@ The app-side render lifecycle is observable through the [MCP Apps screen automat
 
 Each customized Mantine component has a `Theme<Name>.ts` file (`Button.ts`, `Text.ts`, …, ~21 total) exporting a `Theme<Name>` constant; the barrel `index.ts` re-exports them and `theme.ts` assembles the `MantineProvider` theme. Theme files hold app-wide defaults and **variants** (flat CSS-in-JS); only pseudo-selectors, nested child selectors, keyframes, and native-HTML styling belong in `App.css`. Element components import from `@mantine/core` (never from `theme/`) — the theme layer is applied transparently by the provider.
 
+**`cssVariables.ts` is the third piece, beside the component files and `App.css`.** It holds overrides for the CSS variables `MantineProvider` injects at runtime, which `App.css` cannot reach: the provider appends its generated `<style>` after the stylesheet imports, so a `:root` rule there loses on source order at equal specificity. `cssVariablesResolver` is the supported seam. It is passed at **all three** `MantineProvider` sites — the app (`main.tsx`), the Storybook preview, and `renderWithMantine` — so the running app, the stories, and the tests cannot disagree about a token's value. It currently corrects `--mantine-color-error`, whose Mantine defaults fail WCAG AA in both schemes at the size input error text renders.
+
+## Code editing (`JsonObjectInput`)
+
+Payloads whose _values_ may be arbitrary JSON — `_meta` is the case that forced it ([#1910](https://github.com/modelcontextprotocol/inspector/issues/1910)) — are edited with **Ace** (`react-ace` + `ace-builds`, declared in this client because they render React) rather than the key/value rows used for headers and env, which cannot express an object value. Ace brings code folding, brace auto-closing, and per-line error annotation from its JSON worker.
+
+Three integration details are load-bearing:
+
+- **The worker is imported as `?url`** so Vite emits it as an asset. Without it Ace fetches `worker-json.js` from a path that does not exist in a bundled app and silently loses its annotations.
+- **The gutter's colors are overridden in `App.css`**, keyed off Ace's cssClass (`ace-github` / `ace-github-dark` — _not_ the `theme-github_dark` module name). Ace's own themes are 1.89:1 and 4.13:1 there, both under AA, and folding needs the gutter so it cannot simply be hidden.
+- **The label and error are wired to Ace's hidden textarea by hand.** `Input.Wrapper` associates a _Mantine_ input through context; Ace renders its own DOM, so the id, `aria-invalid` and `aria-describedby` are set on the textarea in an effect.
+
+**Testing it is split by necessity.** Ace's input path does not work under happy-dom — `userEvent.type` reaches the textarea and produces no edit — so a keyboard test in the unit project passes while asserting nothing. Unit tests drive the editor instance through `src/test/aceEditor.ts`; real keyboard behaviour lives in the Storybook play functions, which run in Chromium.
+
 ## Testing
 
 Tests run under three Vitest **projects** (configured in `vite.config.ts`), each in the right environment:
 
-| Project | Env | Scope | Script |
-| --- | --- | --- | --- |
-| `unit` | happy-dom | Components, hooks, utils (`*.test.tsx` beside the source) | `npm test` |
-| `integration` | node | `@inspector/core` + transports + auth, spawning the real stdio test server (`src/test/integration/**`) | `npm run test:integration` |
-| `storybook` | real Chromium | Story **play functions** as interaction tests | `npm run test:storybook` |
+| Project       | Env           | Scope                                                                                                  | Script                     |
+| ------------- | ------------- | ------------------------------------------------------------------------------------------------------ | -------------------------- |
+| `unit`        | happy-dom     | Components, hooks, utils (`*.test.tsx` beside the source)                                              | `npm test`                 |
+| `integration` | node          | `@inspector/core` + transports + auth, spawning the real stdio test server (`src/test/integration/**`) | `npm run test:integration` |
+| `storybook`   | real Chromium | Story **play functions** as interaction tests                                                          | `npm run test:storybook`   |
 
 - `npm test` runs the fast **unit** project (happy-dom). `test:watch` for the loop.
 - **Integration** tests run in a real Node env (no happy-dom, 30s timeouts) and spawn `test-servers/build/test-server-stdio.js` as a subprocess, so `pretest`/the coverage script build the test servers first (`test-servers:build`).

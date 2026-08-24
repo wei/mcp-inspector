@@ -361,7 +361,7 @@ describe("RemoteClientTransport", () => {
     const settings = {
       headers: [{ key: "X-Tenant", value: "acme" }],
       env: [],
-      metadata: [],
+      metadata: {},
       connectionTimeout: 0,
       requestTimeout: 0,
       taskTtl: 0,
