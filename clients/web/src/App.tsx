@@ -792,6 +792,13 @@ function App() {
   // derived further down this component, and the factories only read it inside
   // an async sandboxready handler, long after any render that produced it.
   const listedResourcesRef = useRef<Resource[]>([]);
+  // Best-effort by construction: this reads the list as it stands when the app
+  // opens, and does not distinguish "no entry for this URI" from "the list
+  // hasn't arrived yet". Both yield no hints, which is the same outcome as
+  // having no listing carrier at all. Blocking the render on list readiness
+  // instead would mean waiting on a request that, for a server advertising no
+  // `resources` capability or whose list errored, never resolves — trading a
+  // missing default for an app that never renders.
   const getListedResourceMeta = useCallback(
     (uri: string) =>
       listedResourcesRef.current.find((r) => r.uri === uri)?._meta,
