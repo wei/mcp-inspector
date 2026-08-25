@@ -913,7 +913,7 @@ export function ServerSettingsForm({
               />
               <Checkbox
                 label="Request refresh token"
-                description={`When checked, the Inspector registers with the refresh_token grant so it can renew access tokens without a new sign-in. Unchecking it stops the SDK adding offline_access to the requested scope, and so stops the prompt=consent it forces — on Microsoft Entra ID that prompt routes a non-admin user into the admin-consent workflow (AADSTS90094) even after a tenant admin has consented. It removes only that automatic scope: an offline_access you configure in Scopes still forces the prompt. Applies on the next connect, and does not revoke a refresh token already issued or reach a registration the authorization server already holds.${refreshTokenEmaNote}`}
+                description={`Registers the refresh_token grant, so access tokens renew without a new sign-in. Uncheck it for authorization servers that reject the offline_access scope and forced consent prompt the grant brings with it. Applies on the next connect.${refreshTokenEmaNote}`}
                 checked={settings.oauthRequestRefreshToken ?? true}
                 onChange={handleRequestRefreshTokenChange}
               />
