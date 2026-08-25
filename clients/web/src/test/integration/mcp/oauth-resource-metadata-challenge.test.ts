@@ -11,7 +11,9 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { discoverOAuthProtectedResourceMetadata } from "@modelcontextprotocol/client";
@@ -28,6 +30,7 @@ import {
   challengeResourceMetadataUrl,
   parseAuthChallengeFromResponse,
 } from "@inspector/core/auth/challenge.js";
+import type { AuthChallenge } from "@inspector/core/auth/challenge.js";
 import { InspectorClient } from "@inspector/core/mcp/inspectorClient.js";
 import { createTransportNode } from "@inspector/core/mcp/node/transport.js";
 import {
@@ -35,16 +38,18 @@ import {
   type RedirectUrlProvider,
 } from "@inspector/core/auth/providers.js";
 import { NodeOAuthStorage } from "@inspector/core/auth/node/storage-node.js";
-import type { MCPServerConfig } from "@inspector/core/mcp/types.js";
 
 const METADATA_PATH = "/custom/protected-resource";
 const STATIC_CLIENT_ID = "test-2071-resource-metadata";
 const STATIC_CLIENT_SECRET = "test-2071-secret";
 const REDIRECT_URL = "http://localhost:3000/oauth/callback";
+/** Fixed, since this one is asserted against a server of its own. */
+const METADATA_URL_LITERAL = "http://127.0.0.1:3001/custom/protected-resource";
 
 describe("OAuth challenge resource_metadata (RFC 9728)", () => {
   let mcpServer: TestServerHttp | null = null;
   let serverUrl = "";
+  let storageDir = "";
 
   beforeAll(async () => {
     mcpServer = new TestServerHttp({
@@ -67,12 +72,17 @@ describe("OAuth challenge resource_metadata (RFC 9728)", () => {
     });
     const port = await mcpServer.start();
     serverUrl = `http://localhost:${port}`;
+    storageDir = mkdtempSync(join(tmpdir(), "mcp-inspector-2071-"));
     await waitForOAuthWellKnown(serverUrl);
   }, 30_000);
 
   afterAll(async () => {
     await mcpServer?.stop();
     mcpServer = null;
+    if (storageDir) {
+      rmSync(storageDir, { recursive: true, force: true });
+      storageDir = "";
+    }
   }, 30_000);
 
   it("advertises the non-default metadata URL on the 401 challenge", async () => {
@@ -120,30 +130,27 @@ describe("OAuth challenge resource_metadata (RFC 9728)", () => {
     // the CLI/TUI runner calls `authenticate()` with nothing in hand. The
     // observed-challenge path is what carries the URL across that gap.
     const requested: string[] = [];
-    const spyFetch = vi.fn(
-      async (input: RequestInfo | URL, init?: RequestInit) => {
-        requested.push(String(input instanceof Request ? input.url : input));
-        return fetch(input as RequestInfo, init);
-      },
-    ) as unknown as typeof fetch;
+    const spyFetch: typeof fetch = async (input, init) => {
+      requested.push(input instanceof Request ? input.url : String(input));
+      return fetch(input, init);
+    };
 
     const redirectUrlProvider: RedirectUrlProvider = {
       getRedirectUrl: () => REDIRECT_URL,
     };
 
     const client = new InspectorClient(
-      {
-        type: "streamable-http",
-        url: `${serverUrl}/mcp`,
-      } as MCPServerConfig,
+      { type: "streamable-http", url: `${serverUrl}/mcp` },
       {
         environment: {
           transport: createTransportNode,
           fetch: spyFetch,
           oauth: {
-            storage: new NodeOAuthStorage(
-              join(tmpdir(), `mcp-oauth-${process.pid}-2071.json`),
-            ),
+            // A fresh path per run. SDK `auth()` persists its discovery
+            // state — the advertised metadata URL included — so a reused file
+            // would let a watch-mode rerun satisfy discovery from the cache
+            // and pass even with the observer plumbing removed (Copilot).
+            storage: new NodeOAuthStorage(join(storageDir, "oauth.json")),
             navigation: new ConsoleNavigation(),
             redirectUrlProvider,
           },
@@ -172,6 +179,52 @@ describe("OAuth challenge resource_metadata (RFC 9728)", () => {
     ).toEqual([]);
 
     await client.disconnect();
+  }, 30_000);
+
+  it("observes the SSE challenge through a caller-supplied eventSourceInit.fetch", async () => {
+    // That explicit fetch is deliberately not proxy- or intercept-wrapped, so
+    // it used to bypass the observer entirely and a first-time legacy SSE
+    // authorization lost the advertised URL the same way (Copilot).
+    const sseServer = createServer((_req, res) => {
+      res.writeHead(401, {
+        "WWW-Authenticate": `Bearer resource_metadata="${METADATA_URL_LITERAL}"`,
+      });
+      res.end();
+    });
+    await new Promise<void>((resolve) => sseServer.listen(0, resolve));
+    const address = sseServer.address();
+    /* v8 ignore next 3 -- listen(0) on a TCP socket always yields an AddressInfo */
+    if (address === null || typeof address === "string") {
+      throw new Error("expected a TCP address");
+    }
+
+    const explicitFetch = vi.fn<typeof fetch>((input, init) =>
+      fetch(input, init),
+    );
+    const observed: AuthChallenge[] = [];
+
+    try {
+      const { transport } = createTransportNode(
+        {
+          type: "sse",
+          url: `http://127.0.0.1:${address.port}/sse`,
+          eventSourceInit: { fetch: explicitFetch },
+        },
+        {
+          onAuthChallengeObserved: (challenge) => observed.push(challenge),
+        },
+      );
+
+      await expect(transport.start()).rejects.toThrow();
+      await transport.close().catch(() => {});
+    } finally {
+      await new Promise<void>((resolve) => sseServer.close(() => resolve()));
+    }
+
+    expect(explicitFetch).toHaveBeenCalled();
+    expect(observed).toContainEqual(
+      expect.objectContaining({ resourceMetadataUrl: METADATA_URL_LITERAL }),
+    );
   }, 30_000);
 
   it("keeps the showcase config valid and carrying the custom path", () => {

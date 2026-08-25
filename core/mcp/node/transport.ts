@@ -119,15 +119,18 @@ export function createTransportNode(
   // Proxy-wrap first so the auth-challenge interceptor observes responses from
   // the (optionally proxied) network call.
   const baseFetch = withProxyDispatcher(optionsFetchFn ?? globalThis.fetch);
+  // Purely passive, so — unlike proxying and interception — it is safe to
+  // apply to any fetch, including a caller's explicit one.
+  const withChallengeObserver = (inner: typeof fetch): typeof fetch =>
+    onAuthChallengeObserved
+      ? createAuthChallengeObserverFetch(inner, onAuthChallengeObserved)
+      : inner;
   // The observer sits *under* the interceptor so it still reports the
   // challenge on the path where interception throws — and, more to the point,
   // on the legacy first-auth path where interception is off entirely.
-  const observedFetch = onAuthChallengeObserved
-    ? createAuthChallengeObserverFetch(baseFetch, onAuthChallengeObserved)
-    : baseFetch;
   const fetchWithOptionalAuthIntercept = interceptAuthChallenges
-    ? createAuthChallengeInterceptFetch(observedFetch)
-    : observedFetch;
+    ? createAuthChallengeInterceptFetch(withChallengeObserver(baseFetch))
+    : withChallengeObserver(baseFetch);
 
   if (serverType === "stdio") {
     const stdioConfig = config as StdioServerConfig;
@@ -160,9 +163,15 @@ export function createTransportNode(
     // A caller-supplied eventSourceInit.fetch wins as-is (explicit fetch is not
     // re-wrapped for proxying); the default path uses fetchWithOptionalAuthIntercept
     // (the proxy-aware baseFetch plus the optional auth-challenge intercept).
-    const sseFetch =
-      (sseConfig.eventSourceInit?.fetch as typeof fetch) ||
-      fetchWithOptionalAuthIntercept;
+    // The challenge observer is applied either way: it is passive, and without
+    // it a first-time legacy SSE authorization through an explicit fetch would
+    // lose the challenge's `resource_metadata` the same way (Copilot).
+    const configuredSseFetch = sseConfig.eventSourceInit?.fetch as
+      | typeof fetch
+      | undefined;
+    const sseFetch = configuredSseFetch
+      ? withChallengeObserver(configuredSseFetch)
+      : fetchWithOptionalAuthIntercept;
     const trackedFetch = onFetchRequest
       ? createFetchTracker(sseFetch, {
           trackRequest: onFetchRequest,
