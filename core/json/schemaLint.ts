@@ -306,16 +306,20 @@ interface WalkContext {
  * schema, so this costs almost nothing in practice. If it ever matters, the
  * refinement is to resolve each `$ref` against the enclosing base and compare
  * with the declared ids — not to drop the guard.
+ *
+ * Descends through {@link forEachSubschema} — **subschema positions only**.
+ * A scan over every object value would also reach instance data, where an
+ * `$id` key declares nothing: `examples: [{"$id": "payload-field"}]` would
+ * otherwise switch this rule off for the entire document.
  */
 function declaresAnyId(node: unknown, depth = 0): boolean {
   if (depth > MAX_DEPTH || !isRecord(node)) return false;
   if (typeof node.$id === "string" && node.$id !== "") return true;
-  return Object.values(node).some((value) => {
-    if (Array.isArray(value)) {
-      return value.some((entry) => declaresAnyId(entry, depth + 1));
-    }
-    return declaresAnyId(value, depth + 1);
+  let found = false;
+  forEachSubschema(node, "", (child) => {
+    if (!found) found = declaresAnyId(child, depth + 1);
   });
+  return found;
 }
 
 function add(
@@ -334,6 +338,53 @@ function add(
     issue,
     suggestion,
   });
+}
+
+/**
+ * Call `visit` once for every position under `node` that JSON Schema treats as
+ * a **subschema** — and only those.
+ *
+ * The single traversal both {@link walk} and {@link declaresAnyId} run on, so
+ * the two cannot disagree about what counts as a schema. That matters more
+ * than the deduplication: an independent scan that descended through *every*
+ * object value would also reach instance data — `examples: [{"$id": "x"}]`,
+ * a `default`, a `const` — where `$id` is just a payload key and declares no
+ * embedded resource. Reading one there would suppress `remote-ref` for the
+ * whole document.
+ */
+function forEachSubschema(
+  node: SchemaRecord,
+  path: string,
+  visit: (child: unknown, childPath: string, keyword: string) => void,
+): void {
+  for (const key of SUBSCHEMA_MAP_KEYWORDS) {
+    const map = node[key];
+    if (!isRecord(map)) continue;
+    for (const [name, sub] of Object.entries(map)) {
+      visit(sub, childPath(childPath(path, key), name), key);
+    }
+  }
+
+  for (const key of SUBSCHEMA_ARRAY_KEYWORDS) {
+    const arr = node[key];
+    if (!Array.isArray(arr)) continue;
+    arr.forEach((sub, i) => {
+      visit(sub, indexPath(childPath(path, key), i), key);
+    });
+  }
+
+  for (const key of SUBSCHEMA_KEYWORDS) {
+    if (!(key in node)) continue;
+    const value = node[key];
+    // Draft-04 tuple form: `items` may be an array of schemas.
+    if (key === "items" && Array.isArray(value)) {
+      value.forEach((sub, i) => {
+        visit(sub, indexPath(childPath(path, key), i), key);
+      });
+      continue;
+    }
+    visit(value, childPath(path, key), key);
+  }
 }
 
 /**
@@ -380,34 +431,9 @@ function walk(
 
   lintNode(node, path, keyword, ctx);
 
-  for (const key of SUBSCHEMA_MAP_KEYWORDS) {
-    const map = node[key];
-    if (!isRecord(map)) continue;
-    for (const [name, sub] of Object.entries(map)) {
-      walk(sub, childPath(childPath(path, key), name), key, depth + 1, ctx);
-    }
-  }
-
-  for (const key of SUBSCHEMA_ARRAY_KEYWORDS) {
-    const arr = node[key];
-    if (!Array.isArray(arr)) continue;
-    arr.forEach((sub, i) => {
-      walk(sub, indexPath(childPath(path, key), i), key, depth + 1, ctx);
-    });
-  }
-
-  for (const key of SUBSCHEMA_KEYWORDS) {
-    if (!(key in node)) continue;
-    const value = node[key];
-    // Draft-04 tuple form: `items` may be an array of schemas.
-    if (key === "items" && Array.isArray(value)) {
-      value.forEach((sub, i) => {
-        walk(sub, indexPath(childPath(path, key), i), key, depth + 1, ctx);
-      });
-      continue;
-    }
-    walk(value, childPath(path, key), key, depth + 1, ctx);
-  }
+  forEachSubschema(node, path, (child, childPathValue, childKeyword) => {
+    walk(child, childPathValue, childKeyword, depth + 1, ctx);
+  });
 }
 
 /** Rules that apply to a single schema object, ignoring its children. */

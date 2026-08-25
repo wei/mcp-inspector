@@ -46,7 +46,10 @@ export async function emitResult(
     await awaitableLog(JSON.stringify(result, null, 2) + "\n");
   }
 
-  if (lint) writeSchemaLintReport(lint, args.strict === true);
+  // Awaited: the throw below (and the CLI's own exit path) reaches
+  // `process.exit()` immediately, which discards anything still buffered on a
+  // piped stderr.
+  if (lint) await writeSchemaLintReport(lint, args.strict === true);
 
   if ((result as { isError?: unknown }).isError === true) {
     throw new CliExitCodeError(

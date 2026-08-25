@@ -164,11 +164,29 @@ on **stderr**, and exits `6` if any is error-severity:
 mcp-inspector --cli <server> --method tools/list --strict
 ```
 
+Complete output against the `unportable-schemas-http.json` showcase — one
+block per finding, then the summary:
+
 ```text
 Error: tool "get_temp"
   Path: outputSchema.properties.data
   Issue: Bare `true` used where a schema object is expected.
   Suggestion: Declare what the value actually is — e.g. `{"type": "object", "additionalProperties": true}` for a free-form object. That narrows the schema deliberately; `true` accepts any JSON value at all.
+
+Warning: tool "echo"
+  Path: inputSchema.properties.show_ids
+  Issue: `type` is an array (["null","boolean"]). The array form is legal JSON Schema, but several MCP clients read `type` as a single string and either reject the tool or drop the constraint.
+  Suggestion: Split it into `anyOf` branches, each with a single `type` — `{"anyOf": [{"type": "null"}, {"type": "boolean"}]}`. (Making the property optional instead is a different contract: absent is not the same as `null`.)
+
+Warning: tool "echo"
+  Path: inputSchema.properties.opts
+  Issue: Schema carries no validation keyword at all, so it accepts any value — the object-literal spelling of a bare `true`.
+  Suggestion: Declare what the value actually is — e.g. `{"type": "object", "additionalProperties": true}` for a free-form object. That narrows the schema deliberately, which is the point: as written it constrains nothing.
+
+Warning: tool "add"
+  Path: inputSchema.properties.a
+  Issue: `$ref` points outside this document (`https://example.com/schemas/number.json`). Clients do not fetch remote schemas, so the constraint is dropped or the tool is rejected.
+  Suggestion: Inline the referenced schema, or move it into `$defs` and reference it as `#/$defs/<name>`.
 
 1 error, 3 warnings across 3 tools.
 ```

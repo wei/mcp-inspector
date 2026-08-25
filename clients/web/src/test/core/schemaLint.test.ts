@@ -492,6 +492,32 @@ describe("lintToolSchemas — remote-ref", () => {
     ).toEqual([]);
   });
 
+  it.each([
+    ["examples", { examples: [{ $id: "payload-field" }] }],
+    ["default", { default: { $id: "payload-field" } }],
+    ["const", { const: { $id: "payload-field" } }],
+    ["enum", { enum: [{ $id: "payload-field" }] }],
+  ])(
+    "is not disabled by an $id that is instance data under %s",
+    (_label, dataCarrier) => {
+      // `$id` inside `examples`/`default`/`const`/`enum` is a payload key, not
+      // an embedded schema resource — reading one there would switch this rule
+      // off for the whole document.
+      const findings = lintToolSchemas(
+        tool({
+          inputSchema: {
+            type: "object",
+            properties: {
+              a: { type: "string", ...dataCarrier },
+              b: { $ref: "https://example.com/s.json" },
+            },
+          },
+        }),
+      );
+      expect(rules(findings)).toEqual(["remote-ref"]);
+    },
+  );
+
   it("still fires when no $id is declared anywhere", () => {
     const findings = lintToolSchemas(
       tool({

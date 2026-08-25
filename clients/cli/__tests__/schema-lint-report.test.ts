@@ -61,8 +61,11 @@ describe("writeSchemaLintReport", () => {
   beforeEach(() => {
     stderr = "";
     originalWrite = process.stderr.write;
-    process.stderr.write = ((chunk: unknown): boolean => {
+    process.stderr.write = ((chunk: unknown, ...rest: unknown[]): boolean => {
       stderr += typeof chunk === "string" ? chunk : String(chunk);
+      (
+        rest.find((r) => typeof r === "function") as (() => void) | undefined
+      )?.();
       return true;
     }) as typeof process.stderr.write;
   });
@@ -71,23 +74,45 @@ describe("writeSchemaLintReport", () => {
     process.stderr.write = originalWrite;
   });
 
-  it("writes nothing at all when there are no findings", () => {
-    writeSchemaLintReport([], true);
+  it("writes nothing at all when there are no findings", async () => {
+    await writeSchemaLintReport([], true);
     expect(stderr).toBe("");
   });
 
-  it("writes a one-line hint without --strict", () => {
-    writeSchemaLintReport(lintListResult(DIRTY_LIST), false);
+  it("writes a one-line hint without --strict", async () => {
+    await writeSchemaLintReport(lintListResult(DIRTY_LIST), false);
     expect(stderr.trimEnd().split("\n")).toHaveLength(1);
     expect(stderr).toContain("Re-run with --strict");
   });
 
-  it("writes the full report under --strict", () => {
-    writeSchemaLintReport(lintListResult(DIRTY_LIST), true);
+  it("writes the full report under --strict", async () => {
+    await writeSchemaLintReport(lintListResult(DIRTY_LIST), true);
     expect(stderr).toContain('Error: tool "info"');
     expect(stderr).toContain("Path: outputSchema.properties.data");
     expect(stderr).toContain("Suggestion: ");
     expect(stderr).not.toContain("Re-run with --strict");
+  });
+
+  it("resolves only once stderr has taken the write", async () => {
+    // Both CLI exit paths call `process.exit()` as soon as the work returns,
+    // which discards anything still buffered on a piped stderr. The report is
+    // only safe if this settles on the write callback rather than fire-and-
+    // forget, so the fake defers its callback to a later tick.
+    let flushed = false;
+    process.stderr.write = ((
+      chunk: unknown,
+      cb?: (err?: Error | null) => void,
+    ): boolean => {
+      stderr += typeof chunk === "string" ? chunk : String(chunk);
+      setTimeout(() => {
+        flushed = true;
+        cb?.();
+      }, 0);
+      return false;
+    }) as typeof process.stderr.write;
+
+    await writeSchemaLintReport(lintListResult(DIRTY_LIST), true);
+    expect(flushed).toBe(true);
   });
 });
 
@@ -109,8 +134,11 @@ describe("emitResult — schema lint wiring (#1005)", () => {
       )?.();
       return true;
     }) as typeof process.stdout.write;
-    process.stderr.write = ((chunk: unknown): boolean => {
+    process.stderr.write = ((chunk: unknown, ...rest: unknown[]): boolean => {
       stderr += typeof chunk === "string" ? chunk : String(chunk);
+      (
+        rest.find((r) => typeof r === "function") as (() => void) | undefined
+      )?.();
       return true;
     }) as typeof process.stderr.write;
   });

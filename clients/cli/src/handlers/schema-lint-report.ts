@@ -5,6 +5,7 @@ import {
   summarizeFindings,
   type ToolSchemaFindings,
 } from "@inspector/core/json/schemaLint.js";
+import { awaitableError } from "../utils/awaitable-log.js";
 import type { McpResponse } from "./method-types.js";
 
 /**
@@ -47,16 +48,16 @@ export function lintListResult(result: McpResponse): ToolSchemaFindings[] {
  * lint should still learn it found something, but a multi-page report nobody
  * requested would be worse than silence.
  */
-export function writeSchemaLintReport(
+export async function writeSchemaLintReport(
   results: readonly ToolSchemaFindings[],
   strict: boolean,
-): void {
+): Promise<void> {
   if (results.length === 0) return;
   if (!strict) {
-    process.stderr.write(
+    await awaitableError(
       `Schema portability: ${summarizeFindings(results)}. Re-run with --strict for details.\n`,
     );
     return;
   }
-  process.stderr.write(`${formatSchemaLintReport(results)}\n`);
+  await awaitableError(`${formatSchemaLintReport(results)}\n`);
 }
