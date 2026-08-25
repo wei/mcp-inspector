@@ -331,25 +331,12 @@ export class OAuthManager {
       );
     }
 
-    // #2068 — record the filtered request so `completeOAuthFlow` can persist
-    // it. `resolvePersistedScopeAfterGrant` falls back to the requested scope
-    // when the token response omits `scope` (RFC 6749 §5.1: omitted means the
-    // grant matched the request), and without this that fallback is `undefined`
-    // on the ordinary leg — only step-up ever set it. The old
-    // `offline_access` would then stay in storage, so the scope never
-    // self-heals and later satisfaction checks still read it as granted.
-    //
-    // Only when the filter is in effect. With the grant declared there is
-    // nothing to heal, and persisting a request the AS did not confirm would be
-    // a behavior change beyond this setting.
-    if (this.oauthConfig.requestRefreshToken === false && requestedScope) {
-      this.pendingAuthorizationScope = requestedScope;
-    }
-
     const capturedUrl = provider.getCapturedAuthUrl();
     if (!capturedUrl) {
       throw new Error("Failed to capture authorization URL");
     }
+
+    this.recordAuthorizationRequestScope(capturedUrl, requestedScope);
 
     const stateParam = capturedUrl.searchParams.get("state");
     if (stateParam && this.params.onBeforeOAuthRedirect) {
@@ -369,6 +356,36 @@ export class OAuthManager {
     return capturedUrl;
   }
 
+  /**
+   * Remember what an interactive authorization asked for, so the callback can
+   * apply RFC 6749 §5.1 — a token response that omits `scope` granted exactly
+   * the requested scope (#2117). Without it, an ordinary grant whose AS echoes
+   * no scope leaves the previous stored scope standing as though it were what
+   * the current token carries.
+   *
+   * The authorize URL is the authority, not the scope handed to `auth()`: the
+   * SDK augments the request with `offline_access` when the AS advertises it
+   * and the client asks for a refresh token, so the input can be a strict
+   * subset of what was actually requested. The fallback covers an authorize
+   * URL that carries no `scope` parameter at all.
+   *
+   * This composes with the #2068 refresh-token opt-out rather than defeating
+   * it. The SDK's augmentation is gated on `clientMetadata.grant_types`
+   * including `refresh_token`, which the provider drops when the opt-out is
+   * on — so with the grant declined the URL carries the *filtered* scope, and
+   * that is what gets persisted. #2068 recorded the same value here behind a
+   * `requestRefreshToken === false` gate; reading the URL makes the gate
+   * unnecessary, so one wire case now has one persistence behavior instead of
+   * two selected by a checkbox (#2117).
+   */
+  private recordAuthorizationRequestScope(
+    authorizationUrl: URL,
+    requestedScope: string | undefined,
+  ): void {
+    this.pendingAuthorizationScope =
+      authorizationUrl.searchParams.get("scope")?.trim() || requestedScope;
+  }
+
   async completeOAuthFlow(
     authorizationCode: string,
     iss?: string,
@@ -380,22 +397,13 @@ export class OAuthManager {
         const config = scopeForMint
           ? { ...emaConfig, scope: scopeForMint }
           : emaConfig;
-        const tokens = await completeEmaIdpAuthorizationAndMint(
+        // The EMA flow persists the granted scope alongside the tokens, for
+        // every mint rather than only this one — see saveMintedTokens.
+        const { tokens } = await completeEmaIdpAuthorizationAndMint(
           config,
           authorizationCode,
           iss,
         );
-        const requestedScope = this.pendingAuthorizationScope;
-        const scopeToPersist = resolvePersistedScopeAfterGrant(
-          tokens.scope,
-          requestedScope,
-        );
-        if (scopeToPersist) {
-          await this.requireStorage().saveScope(
-            this.getServerUrl(),
-            scopeToPersist,
-          );
-        }
         this.pendingAuthorizationScope = undefined;
         const completedAt = Date.now();
         this.oauthFlowState = {
@@ -892,9 +900,12 @@ export class OAuthManager {
       };
     }
 
-    if (enriched.reason === "insufficient_scope" && scopeForAuth) {
-      this.pendingAuthorizationScope = scopeForAuth;
-    }
+    // Every interactive redirect from here lands back in completeOAuthFlow,
+    // so every one of them needs its request recorded — not just the step-up
+    // (#2117). A plain `unauthorized` / `token_expired` challenge can request
+    // a scope that differs from what storage holds, and used to persist
+    // nothing when the AS answered without a `scope`.
+    this.recordAuthorizationRequestScope(capturedUrl, scopeForAuth);
 
     const clientInfo = await provider.clientInformation();
     await this.recordAuthorizationCodeFlowState(

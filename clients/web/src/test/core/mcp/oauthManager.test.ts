@@ -736,9 +736,137 @@ describe("OAuthManager", () => {
     });
   });
 
+  describe("persisting the requested scope after an ordinary grant (#2117)", () => {
+    function capturedUrlWithScope(scope?: string): URL {
+      const url = new URL("https://auth.example.com/authorize?state=abc");
+      if (scope !== undefined) {
+        url.searchParams.set("scope", scope);
+      }
+      return url;
+    }
+
+    async function authorizeThenComplete(
+      storedScope: string | undefined,
+      tokenScope: string | undefined,
+      authorizeUrlScope?: string,
+    ) {
+      mockedMcpAuth.mockResolvedValue("REDIRECT");
+      const params = createMockParams();
+      storageOf(params).getScope.mockResolvedValue(storedScope);
+      storageOf(params).getClientInformation.mockResolvedValue({
+        client_id: "cid",
+      });
+      const manager = new OAuthManager(params);
+      const captureSpy = vi
+        .spyOn(
+          (await import("@inspector/core/auth/providers.js"))
+            .BaseOAuthClientProvider.prototype,
+          "getCapturedAuthUrl",
+        )
+        .mockReturnValue(capturedUrlWithScope(authorizeUrlScope));
+
+      await manager.authenticate();
+
+      mockedMcpAuth.mockResolvedValue("AUTHORIZED");
+      storageOf(params).getTokens.mockResolvedValue({
+        access_token: "access",
+        token_type: "Bearer",
+        ...(tokenScope === undefined ? {} : { scope: tokenScope }),
+      });
+      storageOf(params).saveScope.mockClear();
+
+      await manager.completeOAuthFlow("code");
+      captureSpy.mockRestore();
+      return params;
+    }
+
+    it("persists the requested scope when the token response omits scope", async () => {
+      const params = await authorizeThenComplete("mcp weather:read", undefined);
+
+      expect(storageOf(params).saveScope).toHaveBeenCalledWith(
+        SERVER_URL,
+        "mcp weather:read",
+      );
+    });
+
+    it("still prefers the granted scope when the AS echoes one", async () => {
+      const params = await authorizeThenComplete("mcp weather:read", "mcp");
+
+      expect(storageOf(params).saveScope).toHaveBeenCalledWith(
+        SERVER_URL,
+        "mcp",
+      );
+    });
+
+    it("records the request for a plain challenge redirect too, not just step-up", async () => {
+      // A `token_expired` / `unauthorized` challenge can return an interactive
+      // redirect whose callback lands in this same completeOAuthFlow. It used
+      // to record nothing, so a silent token response left the old stored
+      // scope standing — the same defect on a sibling entry point.
+      mockedMcpAuth.mockResolvedValue("REDIRECT");
+      const params = createMockParams();
+      storageOf(params).getScope.mockResolvedValue("stale:scope");
+      storageOf(params).getClientInformation.mockResolvedValue({
+        client_id: "cid",
+      });
+      const manager = new OAuthManager(params);
+      manager.setOAuthConfig({ scope: "catalog:scope" });
+      const captureSpy = vi
+        .spyOn(
+          (await import("@inspector/core/auth/providers.js"))
+            .BaseOAuthClientProvider.prototype,
+          "getCapturedAuthUrl",
+        )
+        .mockReturnValue(capturedUrlWithScope("catalog:scope offline_access"));
+
+      const outcome = await manager.handleAuthChallenge({
+        reason: "token_expired",
+      });
+      expect(outcome.kind).toBe("interactive");
+
+      mockedMcpAuth.mockResolvedValue("AUTHORIZED");
+      storageOf(params).getTokens.mockResolvedValue({
+        access_token: "access",
+        token_type: "Bearer",
+      });
+      storageOf(params).saveScope.mockClear();
+
+      await manager.completeOAuthFlow("code");
+
+      expect(storageOf(params).saveScope).toHaveBeenCalledWith(
+        SERVER_URL,
+        "catalog:scope offline_access",
+      );
+      captureSpy.mockRestore();
+    });
+
+    it("persists nothing when neither the request nor the response names a scope", async () => {
+      const params = await authorizeThenComplete(undefined, undefined);
+
+      expect(storageOf(params).saveScope).not.toHaveBeenCalled();
+    });
+
+    it("persists the scope the authorize URL actually carried, not the provider's", async () => {
+      // The SDK augments the request with `offline_access` when the AS
+      // advertises it and the client wants a refresh token, so the authorize
+      // URL is a superset of `provider.scope`. Persisting the provider's copy
+      // would understate the grant the AS implied by staying silent.
+      const params = await authorizeThenComplete(
+        "mcp",
+        undefined,
+        "mcp offline_access",
+      );
+
+      expect(storageOf(params).saveScope).toHaveBeenCalledWith(
+        SERVER_URL,
+        "mcp offline_access",
+      );
+    });
+  });
+
   describe("completeOAuthFlow (EMA)", () => {
     it("mints resource tokens via the EMA path and dispatches complete", async () => {
-      const tokens = { access_token: "EMA", token_type: "Bearer" };
+      const tokens = { access_token: "EMA", token_type: "Bearer" as const };
       const params = createMockParams({
         enterpriseManagedAuth: {
           idp: {
@@ -753,7 +881,7 @@ describe("OAuthManager", () => {
 
       const mintSpy = vi
         .spyOn(emaFlow, "completeEmaIdpAuthorizationAndMint")
-        .mockResolvedValue(tokens);
+        .mockResolvedValue({ tokens });
 
       await manager.completeOAuthFlow("ema-code");
 
@@ -1146,6 +1274,14 @@ describe("OAuthManager", () => {
     // populated that fallback. So a filtered request whose AS omitted `scope`
     // persisted nothing, the stale `offline_access` survived in storage, and
     // the "self-healing" this feature documents never happened.
+    //
+    // #2068 fixed that only while the opt-out was on, which was the case where
+    // a stale scope caused a user-visible failure. #2117 dropped the gate, so
+    // the recording is now unconditional and reads the authorize URL rather
+    // than the provider — see `recordAuthorizationRequestScope`. The filter
+    // still applies with the opt-out on, because the SDK's `offline_access`
+    // augmentation is gated on the `refresh_token` grant type the provider
+    // drops there.
     describe("persisting the filtered scope after an ordinary grant (#2068)", () => {
       async function completeWith(
         tokenScope: string | undefined,
@@ -1197,12 +1333,18 @@ describe("OAuthManager", () => {
         );
       });
 
-      // With the grant declared there is nothing to heal, so the ordinary leg
-      // keeps its previous behavior rather than persisting an unconfirmed
-      // request.
-      it("does not persist a request the AS never confirmed while the grant is on", async () => {
+      // #2117 inverted this. #2068 gated the recording on the opt-out being
+      // on, so with the grant declared the ordinary leg persisted nothing;
+      // that gate is gone, and one wire case now has one behavior rather than
+      // two selected by a checkbox. Persisting here records no new claim: the
+      // request is what storage already held, so this rewrites the same value
+      // rather than asserting a scope the AS never mentioned.
+      it("persists the request even with the grant on, matching what storage held", async () => {
         const storage = await completeWith(undefined, undefined);
-        expect(storage.saveScope).not.toHaveBeenCalled();
+        expect(storage.saveScope).toHaveBeenLastCalledWith(
+          SERVER_URL,
+          "mcp offline_access",
+        );
       });
     });
 
@@ -1748,7 +1890,10 @@ describe("OAuthManager", () => {
         .mockResolvedValue(authUrl);
       const mintSpy = vi
         .spyOn(emaFlow, "completeEmaIdpAuthorizationAndMint")
-        .mockResolvedValue({ access_token: "tok", token_type: "Bearer" });
+        .mockResolvedValue({
+          tokens: { access_token: "tok", token_type: "Bearer" },
+          requestedScope: "mcp tools:read weather:read",
+        });
       const params = createMockParams({
         enterpriseManagedAuth: {
           idp: {
@@ -1783,10 +1928,9 @@ describe("OAuthManager", () => {
         "auth-code",
         "https://idp.example.com",
       );
-      expect(storageOf(params).saveScope).toHaveBeenCalledWith(
-        SERVER_URL,
-        "mcp tools:read weather:read",
-      );
+      // Persisting the granted scope is the EMA flow's job (saveMintedTokens),
+      // and it is mocked here -- the union reaching its config, asserted just
+      // above, is what this test owns. emaFlow.test.ts covers the persistence.
 
       silentSpy.mockRestore();
       startSpy.mockRestore();
