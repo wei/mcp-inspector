@@ -890,74 +890,6 @@ describe("OAuthManager", () => {
       expect(manager.getOAuthFlowStep()).toBe("complete");
       mintSpy.mockRestore();
     });
-
-    it("persists the minted scope request when the mint response omits scope (#2117)", async () => {
-      const params = createMockParams({
-        enterpriseManagedAuth: {
-          idp: {
-            issuer: "https://idp.example.com",
-            clientId: "app-client",
-            clientSecret: "secret",
-          },
-        },
-      });
-      params.initialConfig.scope = "mcp weather:read";
-      storageOf(params).getScope.mockResolvedValue(undefined);
-      const manager = new OAuthManager(params);
-      manager.setOAuthConfig({ enterpriseManaged: true });
-
-      const mintSpy = vi
-        .spyOn(emaFlow, "completeEmaIdpAuthorizationAndMint")
-        .mockResolvedValue({
-          tokens: { access_token: "EMA", token_type: "Bearer" },
-          requestedScope: "mcp weather:read",
-        });
-      storageOf(params).saveScope.mockClear();
-
-      await manager.completeOAuthFlow("ema-code");
-
-      expect(storageOf(params).saveScope).toHaveBeenCalledWith(
-        SERVER_URL,
-        "mcp weather:read",
-      );
-      mintSpy.mockRestore();
-    });
-
-    it("persists a mint scope that came from resource metadata, not config (#2117)", async () => {
-      // With neither a configured nor a stored scope, discoverEmaResourceContext
-      // resolves the request from the protected resource metadata's
-      // `scopes_supported`. That value never reaches the manager's own
-      // `scopeForMint`, so only what the mint reports can be persisted.
-      const params = createMockParams({
-        enterpriseManagedAuth: {
-          idp: {
-            issuer: "https://idp.example.com",
-            clientId: "app-client",
-            clientSecret: "secret",
-          },
-        },
-      });
-      params.initialConfig.scope = undefined;
-      storageOf(params).getScope.mockResolvedValue(undefined);
-      const manager = new OAuthManager(params);
-      manager.setOAuthConfig({ enterpriseManaged: true });
-
-      const mintSpy = vi
-        .spyOn(emaFlow, "completeEmaIdpAuthorizationAndMint")
-        .mockResolvedValue({
-          tokens: { access_token: "EMA", token_type: "Bearer" },
-          requestedScope: "mcp:read mcp:write",
-        });
-      storageOf(params).saveScope.mockClear();
-
-      await manager.completeOAuthFlow("ema-code");
-
-      expect(storageOf(params).saveScope).toHaveBeenCalledWith(
-        SERVER_URL,
-        "mcp:read mcp:write",
-      );
-      mintSpy.mockRestore();
-    });
   });
 
   describe("trySilentEnterpriseManagedAuth", () => {
@@ -1823,10 +1755,9 @@ describe("OAuthManager", () => {
         "auth-code",
         "https://idp.example.com",
       );
-      expect(storageOf(params).saveScope).toHaveBeenCalledWith(
-        SERVER_URL,
-        "mcp tools:read weather:read",
-      );
+      // Persisting the granted scope is the EMA flow's job (saveMintedTokens),
+      // and it is mocked here -- the union reaching its config, asserted just
+      // above, is what this test owns. emaFlow.test.ts covers the persistence.
 
       silentSpy.mockRestore();
       startSpy.mockRestore();

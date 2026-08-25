@@ -70,6 +70,8 @@ function createMemoryStorage(
     saveTokens: vi.fn(async (url: string, tokens) => {
       savedTokens[url] = tokens;
     }),
+    getScope: vi.fn(async () => undefined),
+    saveScope: vi.fn(),
     clear: vi.fn(),
     clearEnterpriseManagedResourceServers: vi.fn(),
   } as unknown as OAuthStorage;
@@ -186,7 +188,7 @@ describe("emaFlow", () => {
     const idToken = jwtWithExp(exp);
     idpSessions[IDP_ISSUER] = { idToken };
 
-    const tokens = await mintEmaResourceTokens(
+    const { tokens } = await mintEmaResourceTokens(
       { ...baseConfig(storage), fetchFn: mockEmaFetch(idToken) },
       resourceContext(),
     );
@@ -318,7 +320,7 @@ describe("emaFlow", () => {
       },
     );
 
-    const tokens = await mintEmaResourceTokens(
+    const { tokens } = await mintEmaResourceTokens(
       { ...baseConfig(storage), fetchFn },
       resourceContext(),
     );
@@ -349,7 +351,7 @@ describe("emaFlow", () => {
     const idToken = jwtWithExp(exp);
     idpSessions[IDP_ISSUER] = { idToken };
 
-    const tokens = await mintEmaResourceTokens({
+    const { tokens } = await mintEmaResourceTokens({
       ...baseConfig(storage),
       fetchFn: mockEmaFetch(idToken),
     });
@@ -472,6 +474,45 @@ describe("emaFlow", () => {
       SERVER_URL,
       expect.objectContaining({ access_token: "resource-access-token" }),
       { enterpriseManaged: true },
+    );
+  });
+
+  it("trySilentEmaAuth persists the scope its mint asked for (#2117)", async () => {
+    // The silent path is how an initial EMA authentication completes when the
+    // IdP session is still cached, so it is a moment a newly configured scope
+    // first takes effect -- and the mock AS answers without a `scope`.
+    const idToken = jwtWithExp(Math.floor(Date.now() / 1000) + 3600);
+    const storage = createMemoryStorage({ [IDP_ISSUER]: { idToken } });
+    const fetchFn = mockEmaFetch(idToken);
+
+    const result = await trySilentEmaAuth({
+      ...baseConfig(storage),
+      scope: "mcp weather:read",
+      fetchFn,
+    });
+
+    expect(result.status).toBe("success");
+    expect(storage.saveScope).toHaveBeenCalledWith(
+      SERVER_URL,
+      "mcp weather:read",
+    );
+  });
+
+  it("refreshEmaResourceTokens persists the scope its mint asked for (#2117)", async () => {
+    const idToken = jwtWithExp(Math.floor(Date.now() / 1000) + 3600);
+    const storage = createMemoryStorage({ [IDP_ISSUER]: { idToken } });
+    const fetchFn = mockEmaFetch(idToken);
+
+    const tokens = await refreshEmaResourceTokens({
+      ...baseConfig(storage),
+      scope: "mcp weather:read",
+      fetchFn,
+    });
+
+    expect(tokens?.access_token).toBe("resource-access-token");
+    expect(storage.saveScope).toHaveBeenCalledWith(
+      SERVER_URL,
+      "mcp weather:read",
     );
   });
 

@@ -376,26 +376,13 @@ export class OAuthManager {
         const config = scopeForMint
           ? { ...emaConfig, scope: scopeForMint }
           : emaConfig;
-        const { tokens, requestedScope } =
-          await completeEmaIdpAuthorizationAndMint(
-            config,
-            authorizationCode,
-            iss,
-          );
-        // The mint reports what it actually asked for, which is neither
-        // `pendingAuthorizationScope` (undefined on the ordinary leg) nor
-        // always `scopeForMint` — with no configured or stored scope the
-        // resource metadata's `scopes_supported` is what gets requested.
-        const scopeToPersist = resolvePersistedScopeAfterGrant(
-          tokens.scope,
-          requestedScope,
+        // The EMA flow persists the granted scope alongside the tokens, for
+        // every mint rather than only this one — see saveMintedTokens.
+        const { tokens } = await completeEmaIdpAuthorizationAndMint(
+          config,
+          authorizationCode,
+          iss,
         );
-        if (scopeToPersist) {
-          await this.requireStorage().saveScope(
-            this.getServerUrl(),
-            scopeToPersist,
-          );
-        }
         this.pendingAuthorizationScope = undefined;
         const completedAt = Date.now();
         this.oauthFlowState = {
