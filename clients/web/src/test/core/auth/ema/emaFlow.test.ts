@@ -378,7 +378,7 @@ describe("emaFlow", () => {
     // Seed code verifier / client info / metadata for the callback exchange.
     await startEmaIdpAuthorization(config);
 
-    const tokens = await completeEmaIdpAuthorizationAndMint(
+    const { tokens } = await completeEmaIdpAuthorizationAndMint(
       config,
       "auth-code",
       IDP_ISSUER,
@@ -390,6 +390,43 @@ describe("emaFlow", () => {
       expect.objectContaining({ access_token: "resource-access-token" }),
       { enterpriseManaged: true },
     );
+  });
+
+  it("completeEmaIdpAuthorizationAndMint reports a metadata-derived scope (#2117)", async () => {
+    // With no configured scope, discoverEmaResourceContext resolves the
+    // request from the protected resource metadata's `scopes_supported`. That
+    // is what both exchanges send, so it is what an omitted `scope` in the
+    // response implies was granted -- and the caller can only apply RFC 6749
+    // 5.1 if the flow hands it back.
+    const idToken = jwtWithExp(Math.floor(Date.now() / 1000) + 3600);
+    const storage = createMemoryStorage();
+    const inner = mockEmaFetch(idToken);
+    const fetchFn = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).includes("/.well-known/oauth-protected-resource")) {
+          return new Response(
+            JSON.stringify({
+              resource: MCP_RESOURCE,
+              authorization_servers: [AS_ISSUER],
+              scopes_supported: ["mcp:read", "mcp:write"],
+            }),
+          );
+        }
+        return inner(input, init);
+      },
+    );
+    const config = { ...baseConfig(storage), scope: undefined, fetchFn };
+
+    await startEmaIdpAuthorization(config);
+
+    const { tokens, requestedScope } = await completeEmaIdpAuthorizationAndMint(
+      config,
+      "auth-code",
+      IDP_ISSUER,
+    );
+
+    expect(tokens.access_token).toBe("resource-access-token");
+    expect(requestedScope).toBe("mcp:read mcp:write");
   });
 
   it("completeEmaIdpAuthorizationAndMint wraps leg 1 errors", async () => {

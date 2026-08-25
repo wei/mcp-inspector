@@ -798,6 +798,48 @@ describe("OAuthManager", () => {
       );
     });
 
+    it("records the request for a plain challenge redirect too, not just step-up", async () => {
+      // A `token_expired` / `unauthorized` challenge can return an interactive
+      // redirect whose callback lands in this same completeOAuthFlow. It used
+      // to record nothing, so a silent token response left the old stored
+      // scope standing — the same defect on a sibling entry point.
+      mockedMcpAuth.mockResolvedValue("REDIRECT");
+      const params = createMockParams();
+      storageOf(params).getScope.mockResolvedValue("stale:scope");
+      storageOf(params).getClientInformation.mockResolvedValue({
+        client_id: "cid",
+      });
+      const manager = new OAuthManager(params);
+      manager.setOAuthConfig({ scope: "catalog:scope" });
+      const captureSpy = vi
+        .spyOn(
+          (await import("@inspector/core/auth/providers.js"))
+            .BaseOAuthClientProvider.prototype,
+          "getCapturedAuthUrl",
+        )
+        .mockReturnValue(capturedUrlWithScope("catalog:scope offline_access"));
+
+      const outcome = await manager.handleAuthChallenge({
+        reason: "token_expired",
+      });
+      expect(outcome.kind).toBe("interactive");
+
+      mockedMcpAuth.mockResolvedValue("AUTHORIZED");
+      storageOf(params).getTokens.mockResolvedValue({
+        access_token: "access",
+        token_type: "Bearer",
+      });
+      storageOf(params).saveScope.mockClear();
+
+      await manager.completeOAuthFlow("code");
+
+      expect(storageOf(params).saveScope).toHaveBeenCalledWith(
+        SERVER_URL,
+        "catalog:scope offline_access",
+      );
+      captureSpy.mockRestore();
+    });
+
     it("persists nothing when neither the request nor the response names a scope", async () => {
       const params = await authorizeThenComplete(undefined, undefined);
 
@@ -824,7 +866,7 @@ describe("OAuthManager", () => {
 
   describe("completeOAuthFlow (EMA)", () => {
     it("mints resource tokens via the EMA path and dispatches complete", async () => {
-      const tokens = { access_token: "EMA", token_type: "Bearer" };
+      const tokens = { access_token: "EMA", token_type: "Bearer" as const };
       const params = createMockParams({
         enterpriseManagedAuth: {
           idp: {
@@ -839,7 +881,7 @@ describe("OAuthManager", () => {
 
       const mintSpy = vi
         .spyOn(emaFlow, "completeEmaIdpAuthorizationAndMint")
-        .mockResolvedValue(tokens);
+        .mockResolvedValue({ tokens });
 
       await manager.completeOAuthFlow("ema-code");
 
@@ -866,7 +908,10 @@ describe("OAuthManager", () => {
 
       const mintSpy = vi
         .spyOn(emaFlow, "completeEmaIdpAuthorizationAndMint")
-        .mockResolvedValue({ access_token: "EMA", token_type: "Bearer" });
+        .mockResolvedValue({
+          tokens: { access_token: "EMA", token_type: "Bearer" },
+          requestedScope: "mcp weather:read",
+        });
       storageOf(params).saveScope.mockClear();
 
       await manager.completeOAuthFlow("ema-code");
@@ -874,6 +919,42 @@ describe("OAuthManager", () => {
       expect(storageOf(params).saveScope).toHaveBeenCalledWith(
         SERVER_URL,
         "mcp weather:read",
+      );
+      mintSpy.mockRestore();
+    });
+
+    it("persists a mint scope that came from resource metadata, not config (#2117)", async () => {
+      // With neither a configured nor a stored scope, discoverEmaResourceContext
+      // resolves the request from the protected resource metadata's
+      // `scopes_supported`. That value never reaches the manager's own
+      // `scopeForMint`, so only what the mint reports can be persisted.
+      const params = createMockParams({
+        enterpriseManagedAuth: {
+          idp: {
+            issuer: "https://idp.example.com",
+            clientId: "app-client",
+            clientSecret: "secret",
+          },
+        },
+      });
+      params.initialConfig.scope = undefined;
+      storageOf(params).getScope.mockResolvedValue(undefined);
+      const manager = new OAuthManager(params);
+      manager.setOAuthConfig({ enterpriseManaged: true });
+
+      const mintSpy = vi
+        .spyOn(emaFlow, "completeEmaIdpAuthorizationAndMint")
+        .mockResolvedValue({
+          tokens: { access_token: "EMA", token_type: "Bearer" },
+          requestedScope: "mcp:read mcp:write",
+        });
+      storageOf(params).saveScope.mockClear();
+
+      await manager.completeOAuthFlow("ema-code");
+
+      expect(storageOf(params).saveScope).toHaveBeenCalledWith(
+        SERVER_URL,
+        "mcp:read mcp:write",
       );
       mintSpy.mockRestore();
     });
@@ -1704,7 +1785,10 @@ describe("OAuthManager", () => {
         .mockResolvedValue(authUrl);
       const mintSpy = vi
         .spyOn(emaFlow, "completeEmaIdpAuthorizationAndMint")
-        .mockResolvedValue({ access_token: "tok", token_type: "Bearer" });
+        .mockResolvedValue({
+          tokens: { access_token: "tok", token_type: "Bearer" },
+          requestedScope: "mcp tools:read weather:read",
+        });
       const params = createMockParams({
         enterpriseManagedAuth: {
           idp: {

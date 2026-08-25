@@ -124,11 +124,26 @@ export async function startEmaIdpAuthorization(
   return authorizationUrl;
 }
 
+/**
+ * The outcome of a completed EMA authorization.
+ *
+ * `requestedScope` is the scope the mint actually asked for, which is not
+ * always `config.scope`: when neither the server config nor storage supplies
+ * one, {@link discoverEmaResourceContext} resolves it from the protected
+ * resource metadata's `scopes_supported`. Callers need that resolved value to
+ * apply RFC 6749 §5.1 — a token response that omits `scope` granted exactly
+ * what was requested — so it is returned rather than left inside the flow.
+ */
+export interface EmaAuthorizationResult {
+  tokens: OAuthTokens;
+  requestedScope?: string;
+}
+
 export async function completeEmaIdpAuthorizationAndMint(
   config: EmaFlowConfig,
   authorizationCode: string,
   iss?: string,
-): Promise<OAuthTokens> {
+): Promise<EmaAuthorizationResult> {
   try {
     await completeIdpOidcAuthorization({
       idp: config.idp,
@@ -146,8 +161,17 @@ export async function completeEmaIdpAuthorizationAndMint(
   }
 
   let tokens: OAuthTokens;
+  // Resolve the resource context here rather than inside the mint, so the
+  // scope it settles on is visible to the caller. It is passed straight
+  // through, so this costs no extra discovery.
+  let resourceContext: EmaResourceContext;
   try {
-    tokens = await mintEmaResourceTokens(config);
+    resourceContext = await discoverEmaResourceContext(
+      config.serverUrl,
+      config.scope,
+      config.fetchFn,
+    );
+    tokens = await mintEmaResourceTokens(config, resourceContext);
   } catch (err) {
     throw wrapEmaMintError(err);
   }
@@ -155,7 +179,7 @@ export async function completeEmaIdpAuthorizationAndMint(
   await config.storage.saveTokens(config.serverUrl, tokens, {
     enterpriseManaged: true,
   });
-  return tokens;
+  return { tokens, requestedScope: resourceContext.scope };
 }
 
 /** Re-run legs 2–3 on 401 when IdP session is still valid. */

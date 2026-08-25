@@ -324,20 +324,7 @@ export class OAuthManager {
       throw new Error("Failed to capture authorization URL");
     }
 
-    // RFC 6749 §5.1: an omitted `scope` in the token response means the grant
-    // is identical to what was requested. Carry the request across the
-    // redirect so completeOAuthFlow has that fallback to persist (#2117) —
-    // the step-up paths already do this, and without it an ordinary grant
-    // whose AS echoes no scope leaves the previous stored scope standing as
-    // if it were still what the current token carries.
-    //
-    // Read it off the authorize URL rather than from `provider.scope`: the
-    // SDK augments the request with `offline_access` when the AS advertises
-    // it and the client asks for a refresh token, so the provider's scope can
-    // be a strict subset of what was actually asked for — and persisting the
-    // subset would understate the grant in exactly the way this fixes.
-    this.pendingAuthorizationScope =
-      capturedUrl.searchParams.get("scope")?.trim() || requestedScope;
+    this.recordAuthorizationRequestScope(capturedUrl, requestedScope);
 
     const stateParam = capturedUrl.searchParams.get("state");
     if (stateParam && this.params.onBeforeOAuthRedirect) {
@@ -357,6 +344,27 @@ export class OAuthManager {
     return capturedUrl;
   }
 
+  /**
+   * Remember what an interactive authorization asked for, so the callback can
+   * apply RFC 6749 §5.1 — a token response that omits `scope` granted exactly
+   * the requested scope (#2117). Without it, an ordinary grant whose AS echoes
+   * no scope leaves the previous stored scope standing as though it were what
+   * the current token carries.
+   *
+   * The authorize URL is the authority, not the scope handed to `auth()`: the
+   * SDK augments the request with `offline_access` when the AS advertises it
+   * and the client asks for a refresh token, so the input can be a strict
+   * subset of what was actually requested. The fallback covers an authorize
+   * URL that carries no `scope` parameter at all.
+   */
+  private recordAuthorizationRequestScope(
+    authorizationUrl: URL,
+    requestedScope: string | undefined,
+  ): void {
+    this.pendingAuthorizationScope =
+      authorizationUrl.searchParams.get("scope")?.trim() || requestedScope;
+  }
+
   async completeOAuthFlow(
     authorizationCode: string,
     iss?: string,
@@ -368,18 +376,19 @@ export class OAuthManager {
         const config = scopeForMint
           ? { ...emaConfig, scope: scopeForMint }
           : emaConfig;
-        const tokens = await completeEmaIdpAuthorizationAndMint(
-          config,
-          authorizationCode,
-          iss,
-        );
-        // `scopeForMint` — not `pendingAuthorizationScope` — is what the
-        // mint actually asked for, so it is the RFC 6749 §5.1 fallback here
-        // (the two differ on the ordinary leg, where only the config carries
-        // a scope).
+        const { tokens, requestedScope } =
+          await completeEmaIdpAuthorizationAndMint(
+            config,
+            authorizationCode,
+            iss,
+          );
+        // The mint reports what it actually asked for, which is neither
+        // `pendingAuthorizationScope` (undefined on the ordinary leg) nor
+        // always `scopeForMint` — with no configured or stored scope the
+        // resource metadata's `scopes_supported` is what gets requested.
         const scopeToPersist = resolvePersistedScopeAfterGrant(
           tokens.scope,
-          scopeForMint,
+          requestedScope,
         );
         if (scopeToPersist) {
           await this.requireStorage().saveScope(
@@ -859,9 +868,12 @@ export class OAuthManager {
       };
     }
 
-    if (enriched.reason === "insufficient_scope" && scopeForAuth) {
-      this.pendingAuthorizationScope = scopeForAuth;
-    }
+    // Every interactive redirect from here lands back in completeOAuthFlow,
+    // so every one of them needs its request recorded — not just the step-up
+    // (#2117). A plain `unauthorized` / `token_expired` challenge can request
+    // a scope that differs from what storage holds, and used to persist
+    // nothing when the AS answered without a `scope`.
+    this.recordAuthorizationRequestScope(capturedUrl, scopeForAuth);
 
     const clientInfo = await provider.clientInformation();
     await this.recordAuthorizationCodeFlowState(
