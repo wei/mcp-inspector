@@ -173,7 +173,7 @@ handler adds one more stderr line after this, the
 Error: tool "get_temp"
   Path: outputSchema.properties.data
   Issue: Bare `true` used where a schema object is expected.
-  Suggestion: Declare what the value actually is — e.g. `{"type": "object", "additionalProperties": true}` for a free-form object. That narrows the schema deliberately; `true` accepts any JSON value at all.
+  Suggestion: Declare what the value actually is — e.g. `{"type": "object", "additionalProperties": true}` for a free-form object. That is a deliberate change of contract, not an equivalent rewrite: `true` accepts any JSON value at all.
 
 Warning: tool "echo"
   Path: inputSchema.properties.show_ids
@@ -183,7 +183,7 @@ Warning: tool "echo"
 Warning: tool "echo"
   Path: inputSchema.properties.opts
   Issue: Schema carries no validation keyword at all, so it accepts any value — the object-literal spelling of a bare `true`.
-  Suggestion: Declare what the value actually is — e.g. `{"type": "object", "additionalProperties": true}` for a free-form object. That narrows the schema deliberately, which is the point: as written it constrains nothing.
+  Suggestion: Declare what the value actually is — e.g. `{"type": "object", "additionalProperties": true}` for a free-form object. That is a deliberate change of contract, which is the point: as written it constrains nothing.
 
 Warning: tool "add"
   Path: inputSchema.properties.a

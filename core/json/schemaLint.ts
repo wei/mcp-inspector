@@ -396,6 +396,31 @@ function forEachSubschema(
 }
 
 /**
+ * What to replace a bare `true` with — which depends on the keyword above it.
+ *
+ * `{}` and `true` are the same schema, so `{}` is always the *exact* rewrite.
+ * It is normally not what to advise, because `{}` is the very shape
+ * `untyped-schema` flags — hence the usual advice to declare a real type.
+ *
+ * Under `not` that reverses. `{"not": true}` rejects every value; swapping in
+ * `{"type": "object", …}` leaves the parent rejecting only objects, so every
+ * non-object now passes — the enclosing contract is **widened**, not narrowed.
+ * `{}` is exempt from `untyped-schema` in that position for the same reason,
+ * so it is both exact and safe to recommend there.
+ *
+ * Everywhere else the replacement is described as a deliberate *change* rather
+ * than a narrowing: in an ordinary property position it does narrow, but under
+ * a conditional (`if`) it redirects which branch applies, and a suggestion has
+ * no business claiming an effect it cannot guarantee.
+ */
+function booleanTrueSuggestion(keyword: string | undefined): string {
+  if (keyword === "not") {
+    return "Use `{}`, the object form of the always-true schema — under `not` that is an exact replacement. (Declaring a concrete type here would instead let every value of another type through.)";
+  }
+  return 'Declare what the value actually is — e.g. `{"type": "object", "additionalProperties": true}` for a free-form object. That is a deliberate change of contract, not an equivalent rewrite: `true` accepts any JSON value at all.';
+}
+
+/**
  * Visit one schema position. `keyword` is the parent keyword this node sits
  * under (undefined at the root), which is what decides whether a bare boolean
  * is idiomatic here or a portability defect.
@@ -418,11 +443,7 @@ function walk(
       path,
       `Bare \`${String(node)}\` used where a schema object is expected.`,
       node
-        ? // `true` accepts any JSON value, and no portable object form says
-          // exactly that — `{}` is the same shape this lint flags as untyped.
-          // So the advice is to narrow, and it says so rather than implying an
-          // equivalent rewrite.
-          'Declare what the value actually is — e.g. `{"type": "object", "additionalProperties": true}` for a free-form object. That narrows the schema deliberately; `true` accepts any JSON value at all.'
+        ? booleanTrueSuggestion(keyword)
         : // `false` in a property position means the property is FORBIDDEN.
           // Deleting the entry is not the same thing: with `additionalProperties`
           // absent (default `true`) the property becomes allowed with any value,
@@ -505,7 +526,10 @@ function lintNode(
       "warning",
       path,
       "Schema carries no validation keyword at all, so it accepts any value — the object-literal spelling of a bare `true`.",
-      'Declare what the value actually is — e.g. `{"type": "object", "additionalProperties": true}` for a free-form object. That narrows the schema deliberately, which is the point: as written it constrains nothing.',
+      // "changes", not "narrows": in an ordinary property position it does
+      // narrow, but under a conditional (`if`) a typed replacement redirects
+      // which branch applies rather than tightening anything.
+      'Declare what the value actually is — e.g. `{"type": "object", "additionalProperties": true}` for a free-form object. That is a deliberate change of contract, which is the point: as written it constrains nothing.',
     );
   }
 }

@@ -132,6 +132,45 @@ describe("lintToolSchemas — boolean-schema", () => {
     expect(findings[0]!.suggestion).toContain("additionalProperties");
   });
 
+  it("suggests `{}` for a bare true under not, where a typed schema would widen", () => {
+    // `{"not": true}` rejects every value. Swapping in `{"type": "object", …}`
+    // leaves the parent rejecting only objects, so every non-object would then
+    // pass — the enclosing contract is widened, not narrowed. `{}` is the
+    // exact replacement, and is exempt from `untyped-schema` in that position.
+    const findings = lintToolSchemas(
+      tool({
+        inputSchema: { type: "object", properties: { a: { not: true } } },
+      }),
+    );
+    expect(rules(findings)).toEqual(["boolean-schema"]);
+    expect(findings[0]!.suggestion).toContain("exact replacement");
+    expect(findings[0]!.suggestion).not.toContain('"additionalProperties"');
+  });
+
+  it("never claims a bare-true replacement narrows the contract", () => {
+    // It narrows in an ordinary property position and does not under `not` or
+    // `if`, so the wording must not assert an effect it cannot guarantee.
+    const findings = lintToolSchemas(
+      tool({
+        inputSchema: {
+          type: "object",
+          properties: { a: true, b: { not: true }, c: { if: true } },
+        },
+      }),
+    );
+    // Four: a bare `true` in each of the three positions, plus `c` itself
+    // being unconstrained — a lone `if` asserts nothing without a `then`.
+    expect(rules(findings)).toEqual([
+      "boolean-schema",
+      "boolean-schema",
+      "untyped-schema",
+      "boolean-schema",
+    ]);
+    for (const finding of findings) {
+      expect(finding.suggestion).not.toMatch(/narrow/i);
+    }
+  });
+
   it("suggests the always-false object form for a bare false", () => {
     // `properties: {a: false}` forbids the property. Deleting the entry would
     // *permit* it with any value under the default `additionalProperties`, so
