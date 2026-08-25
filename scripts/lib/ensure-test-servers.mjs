@@ -21,14 +21,17 @@
  * smokes that take tens of seconds and a `pack:verify` that does a real
  * `npm install` from the registry.
  *
- * ⚠️ Unconditional emit is not a clean: `--noCheck` emit leaves the stale `.js`
- * of a *deleted* `src` file behind, and no path here removes it. That is
- * unchanged from before (the old early-return only skipped the build; it never
- * cleaned either), and it is a loud failure rather than a silent one — an
- * import of a removed module fails at the consumer. Fixing it properly means
- * `tsc -b` with `composite`, which forces `declaration` on and drops
- * `--noCheck`; not worth it for this. `rm -rf test-servers/build` if you have
- * deleted a source file.
+ * ⚠️ Unconditional emit is not a clean, and this is the one hole it does NOT
+ * close. `--noCheck` emit leaves the stale `.js` of a *deleted* `src` file
+ * behind, and no path here removes it — the post-build existence checks pass
+ * against that stale file, so if anything still imports the deleted module it
+ * silently keeps running the old code. That is the same failure class as the
+ * one this helper fixes, so do not read the unconditional build as covering it.
+ * (It is unchanged from before: the old early return only skipped the build, it
+ * never cleaned either.) Fixing it properly means `tsc -b` with `composite`,
+ * which forces `declaration` on and drops `--noCheck`; not worth it for this.
+ * **`rm -rf test-servers/build` after deleting or renaming a source file** —
+ * the `.tsbuildinfo` lives inside `build/` precisely so that clean is real.
  *
  * The root-installed tsc is run via this Node — `npx` is a `.cmd` shim on
  * Windows that a shell-free spawnSync can't start (ENOENT — #1939). That is

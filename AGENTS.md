@@ -266,9 +266,14 @@ v2/main/
 │                                       #   silently drove the previous fixture — reported not as
 │                                       #   staleness but as a product failure in whatever the
 │                                       #   smoke was checking. Unconditional emit is still not a
-│                                       #   clean: a DELETED src file leaves its stale `.js`
-│                                       #   behind, so `rm -rf test-servers/build` after one —
-│                                       #   #2111;
+│                                       #   clean, and that is the one hole it does NOT close: a
+│                                       #   DELETED src file leaves its stale `.js` behind, the
+│                                       #   existence checks pass against it, and anything still
+│                                       #   importing that module SILENTLY runs the old code — the
+│                                       #   same failure class. So `rm -rf test-servers/build`
+│                                       #   after deleting or renaming a source file; the
+│                                       #   `.tsbuildinfo` is pinned inside `build/` so that
+│                                       #   clean actually invalidates the cache — #2111;
 │                                       #   resolve-node-bin.mjs resolves a
 │                                       #   package's bin through its own package.json, so the
 │                                       #   verify/smoke scripts spawn it with `process.execPath`
