@@ -42,8 +42,11 @@
  * would only find later.
  *
  * Expects `clients/web/dist` and `clients/launcher/build` to be built first —
- * the validate / CI ordering guarantees this. `test-servers/build` is built on
- * demand if missing, as in smoke:cli.
+ * the validate / CI ordering guarantees this. `test-servers/build` is rebuilt on
+ * every run, as in smoke:cli — see `scripts/lib/ensure-test-servers.mjs` for why
+ * presence isn't freshness. This smoke is the one that found that out: a
+ * `v2/main` merge touching `preset-registry.ts` made it report the dedicated
+ * app-origin path as broken when it was really driving the pre-merge fixture.
  */
 
 import { existsSync } from "node:fs";

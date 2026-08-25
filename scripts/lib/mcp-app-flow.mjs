@@ -29,12 +29,13 @@
  * smoke-web-browser.mjs; see its header.
  */
 
-import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { startAnnouncedChild } from "./announced-child.mjs";
-import { resolveNodeBin } from "./resolve-node-bin.mjs";
+import {
+  ensureTestServers,
+  testServerEntryPath,
+} from "./ensure-test-servers.mjs";
 
 /** The App tool the `mcp-app-http.json` fixture serves. */
 export const APP_TOOL = "mcp_app_demo";
@@ -51,7 +52,7 @@ export const FATAL_CONSOLE =
 
 /** Path to the composable test server build, relative to the repo root. */
 export function composableServerPath(repoRoot) {
-  return join(repoRoot, "test-servers", "build", "server-composable.js");
+  return testServerEntryPath(repoRoot, "composable");
 }
 
 /** Path to a `test-servers/configs/<name>.json` fixture. */
@@ -71,31 +72,15 @@ export function sandboxProxyPageFor(webBuildDir) {
 }
 
 /**
- * Build the composable test server bundle if it isn't present yet.
- *
- * The root-installed tsc is run via this Node — `npx` is a `.cmd` shim on
- * Windows that a shell-free spawnSync can't start (ENOENT — #1939).
+ * Build the composable test server bundle. Unconditional per process — see
+ * `ensure-test-servers.mjs` for why presence is not freshness (#2111).
  */
 export function ensureComposableTestServer(repoRoot, label) {
-  const entry = composableServerPath(repoRoot);
-  if (existsSync(entry)) return entry;
-  console.log(`${label} — building test-servers (missing build output)...`);
-  const r = spawnSync(
-    process.execPath,
-    [
-      resolveNodeBin("typescript", "tsc", repoRoot),
-      "-p",
-      "test-servers",
-      "--noCheck",
-    ],
-    { cwd: repoRoot, stdio: "inherit" },
-  );
-  if (r.status !== 0 || !existsSync(entry)) {
-    throw new Error(
-      "could not build the test servers (test-servers/build/server-composable.js). " +
-        "Run `npm run test-servers:build` from clients/web.",
-    );
-  }
+  const [entry] = ensureTestServers({
+    repoRoot,
+    label,
+    requires: ["composable"],
+  });
   return entry;
 }
 

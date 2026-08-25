@@ -256,6 +256,24 @@ v2/main/
 │                                       #   caller's teardown reaches it on every throw path —
 │                                       #   the readiness timeout included, which is what used
 │                                       #   to orphan a live server holding its port — #2000;
+│                                       #   ensure-test-servers.mjs is the ONE place
+│                                       #   `test-servers/build` is produced for a script
+│                                       #   consumer, and it builds UNCONDITIONALLY (once per
+│                                       #   process per repo root): the five hand-rolled copies
+│                                       #   it replaced each returned early when the output was
+│                                       #   already on disk, so after the first run an edit to
+│                                       #   `test-servers/src` was never picked up and the smoke
+│                                       #   silently drove the previous fixture — reported not as
+│                                       #   staleness but as a product failure in whatever the
+│                                       #   smoke was checking. Unconditional emit is still not a
+│                                       #   clean, and that is the one hole it does NOT close: a
+│                                       #   DELETED src file leaves its stale `.js` behind, the
+│                                       #   existence checks pass against it, and anything still
+│                                       #   importing that module SILENTLY runs the old code — the
+│                                       #   same failure class. So `rm -rf test-servers/build`
+│                                       #   after deleting or renaming a source file; the
+│                                       #   `.tsbuildinfo` is pinned inside `build/` so that
+│                                       #   clean actually invalidates the cache — #2111;
 │                                       #   resolve-node-bin.mjs resolves a
 │                                       #   package's bin through its own package.json, so the
 │                                       #   verify/smoke scripts spawn it with `process.execPath`
@@ -264,7 +282,9 @@ v2/main/
 │                                       #   the exception — its children are `npm` itself and the
 │                                       #   installed `.bin` shim, neither resolvable that way, so
 │                                       #   it keeps a Windows shell and quotes its generated
-│                                       #   paths via win-shell-args.mjs — #1939). Prettier-gated via
+│                                       #   paths via win-shell-args.mjs — #1939, though its
+│                                       #   test-server build now goes through the shared helper
+│                                       #   like everyone else's). Prettier-gated via
 │                                       #   `format:check:scripts`; its own pure parsers are
 │                                       #   unit-tested by `npm run test:scripts` (node --test).
 ├── specification/                      # Build specification
