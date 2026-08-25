@@ -2902,13 +2902,6 @@ function App() {
         });
       } catch (err) {
         connectStartRef.current = undefined;
-        // The token exchange (or the re-handshake behind it) failed. Flag the
-        // server (#1621) so the monitoring sidebar opens onto the OAuth
-        // requests that explain it (#2108) — the rebuilt client restored the
-        // pre-redirect `auth` fetch entries from the session, so discovery,
-        // DCR and the token exchange are all there. Set before the
-        // classification fan-out below so every arm carries it.
-        setFailedServerId(server.id);
         if (isEmaClientNotConfiguredError(err)) {
           notifications.show({
             title: `Cannot connect to "${server.name}"`,
@@ -2918,6 +2911,19 @@ function App() {
           });
           return;
         }
+        // The token exchange (or the re-handshake behind it) failed. Flag the
+        // server (#1621) so the monitoring sidebar opens onto the OAuth
+        // requests that explain it (#2108) — the rebuilt client restored the
+        // pre-redirect `auth` fetch entries from the session, so discovery,
+        // DCR and the token exchange are all there.
+        //
+        // Below the EMA guard, not above it: an unconfigured enterprise client
+        // is a *configuration* error rather than a failed attempt, and both
+        // connect-path arms already return on it without flagging. Flagging it
+        // only here would make the three disagree about what the red border
+        // means. Above every other arm, so the classification fan-out that
+        // follows carries it whichever way it goes.
+        setFailedServerId(server.id);
         // SEP-2352 issuer binding (#1808). Two very different failures share
         // one SDK error class, so classify before falling through to the
         // generic re-auth banner (whose detail line would otherwise be the raw

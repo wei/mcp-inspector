@@ -14,6 +14,7 @@ import {
 } from "./test/renderWithMantine";
 import userEvent from "@testing-library/user-event";
 import { AuthRecoveryRequiredError } from "@inspector/core/auth/challenge.js";
+import { RemoteOAuthStorage } from "@inspector/core/auth/remote/storage-remote.js";
 
 // Spy on the toast layer so the progress-notification tests can assert the
 // show/update calls without mounting Mantine's <Notifications/> portal.
@@ -63,6 +64,10 @@ vi.mock("@inspector/core/mcp/index.js", async (importOriginal) => {
   // test can exercise a failure there — the case that never reaches the "error"
   // connection status (#2108).
   let nextAuthenticateRejection: unknown = null;
+  // And for the auth-recovery challenge check, whose *rejection* is a distinct
+  // control-flow decision from its resolving `false` (#2108): a throw is
+  // surfaced as a failed attempt rather than falling through to the redirect.
+  let nextChallengeCheckRejection: unknown = null;
   class FakeInspectorClient extends EventTarget {
     connect = vi.fn(() => {
       if (connectRejections.length > 0) {
@@ -123,7 +128,14 @@ vi.mock("@inspector/core/mcp/index.js", async (importOriginal) => {
       }
       return Promise.resolve(undefined);
     });
-    checkAuthChallengeSatisfied = vi.fn().mockResolvedValue(true);
+    checkAuthChallengeSatisfied = vi.fn(() => {
+      if (nextChallengeCheckRejection !== null) {
+        const err = nextChallengeCheckRejection;
+        nextChallengeCheckRejection = null;
+        return Promise.reject(err);
+      }
+      return Promise.resolve(true);
+    });
     clearOAuthTokens = vi.fn().mockResolvedValue(undefined);
   }
   const instances: FakeInspectorClient[] = [];
@@ -148,6 +160,10 @@ vi.mock("@inspector/core/mcp/index.js", async (importOriginal) => {
     // Test-only: arm the next authenticate() to reject (pre-redirect OAuth leg).
     __rejectNextAuthenticate: (err: unknown) => {
       nextAuthenticateRejection = err;
+    },
+    // Test-only: arm the next checkAuthChallengeSatisfied() to reject.
+    __rejectNextChallengeCheck: (err: unknown) => {
+      nextChallengeCheckRejection = err;
     },
   };
 });
@@ -710,12 +726,15 @@ type ArmingHooks = typeof McpIndex & {
   __rejectNextConnect: (err: unknown) => void;
   __rejectNextResumeAfterOAuth: (err: unknown) => void;
   __rejectNextAuthenticate: (err: unknown) => void;
+  __rejectNextChallengeCheck: (err: unknown) => void;
 };
 
 const { __rejectNextConnect: rejectNextConnect } = McpIndex as ArmingHooks;
 const { __rejectNextResumeAfterOAuth: rejectNextResumeAfterOAuth } =
   McpIndex as ArmingHooks;
 const { __rejectNextAuthenticate: rejectNextAuthenticate } =
+  McpIndex as ArmingHooks;
+const { __rejectNextChallengeCheck: rejectNextChallengeCheck } =
   McpIndex as ArmingHooks;
 
 const fetchLogInstances = (
@@ -797,6 +816,37 @@ describe("App failed-connection card border (#1621)", () => {
         title: expect.stringContaining("Failed to connect"),
       }),
     );
+  });
+
+  // The other half of the guarded arm. A *rejecting* challenge check is not the
+  // same as one that resolves `false`: the latter means "re-authorize", the
+  // former means the check itself broke, so it is surfaced rather than used as
+  // grounds to navigate the whole page to the auth server.
+  it("surfaces a rejecting challenge check instead of redirecting (#2108)", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+
+    rejectNextConnect(
+      new AuthRecoveryRequiredError(
+        new URL("https://as.example.com/authorize"),
+        { reason: "unauthorized" },
+      ),
+    );
+    rejectNextChallengeCheck(new Error("challenge check failed"));
+    await user.click(screen.getByText("connect"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("errored-server")).toHaveTextContent("A"),
+    );
+    expect(notificationsMock.show).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: expect.stringContaining("Failed to connect"),
+        message: "challenge check failed",
+      }),
+    );
+    // No redirect was prepared: `prepareOAuthRedirect` persists a resume
+    // snapshot before navigating, and nothing wrote one.
+    expect(readOAuthResumeSnapshot()).toBeUndefined();
   });
 
   it("clears the flag when a new connection attempt starts", async () => {
@@ -2547,6 +2597,38 @@ describe("App OAuth callback issuer-binding failures (#1808)", () => {
     await waitFor(() =>
       expect(screen.getByTestId("errored-server")).toHaveTextContent("A"),
     );
+  });
+
+  // The callback leg can also die before the token exchange, if the persisted
+  // OAuth state cannot be read back at all. Spied on the prototype rather than
+  // mocked at the module, so every other test keeps the real storage.
+  it("flags the server when the OAuth storage fails to load (#2108)", async () => {
+    const loadSpy = vi
+      .spyOn(RemoteOAuthStorage.prototype, "load")
+      .mockRejectedValueOnce(new Error("storage unavailable"));
+    try {
+      writeOAuthResumeSnapshot({
+        version: 1,
+        serverId: "A",
+        activeTab: "Tools",
+        authKind: "reauth",
+        tabUi: {},
+      });
+      window.history.replaceState({}, "", `${OAUTH_CALLBACK_PATH}?code=test`);
+      renderWithMantine(<App />);
+
+      await waitFor(() =>
+        expect(screen.getByTestId("errored-server")).toHaveTextContent("A"),
+      );
+      // Red border only, by design: this arm returns before a client is built,
+      // so nothing restores the Network log — and a failed local read of
+      // `oauth.json` would not be in it anyway.
+      expect(
+        await screen.findByText(/storage unavailable/),
+      ).toBeInTheDocument();
+    } finally {
+      loadSpy.mockRestore();
+    }
   });
 
   // The other callback arm: the provider redirected back with an error instead
