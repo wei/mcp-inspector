@@ -818,9 +818,11 @@ describe("ServerSettingsForm", () => {
     ).not.toBeInTheDocument();
   });
 
-  // #2068 — EMA never builds the Inspector's OAuth provider at all; it
-  // authorizes against the enterprise IdP with a fixed `openid offline_access`.
-  // The checkbox therefore cannot affect that request and must say so.
+  // #2068 — EMA wraps this provider and forwards its `clientMetadata`, so the
+  // setting is not ignored outright; what it cannot change is the IdP
+  // authorization leg's fixed `openid offline_access` scope. That leg is the
+  // one the user signs in through, so the checkbox cannot affect EMA's consent
+  // behavior and must say so.
   it("says the refresh-token setting is not applied under EMA", () => {
     const { rerender } = renderWithMantine(
       <ServerSettingsForm
@@ -830,7 +832,7 @@ describe("ServerSettingsForm", () => {
       />,
     );
     expect(
-      screen.getByText(/which this setting does not reach/),
+      screen.getByText(/which this setting cannot change/),
     ).toBeInTheDocument();
 
     rerender(
@@ -841,7 +843,7 @@ describe("ServerSettingsForm", () => {
       />,
     );
     expect(
-      screen.queryByText(/which this setting does not reach/),
+      screen.queryByText(/which this setting cannot change/),
     ).not.toBeInTheDocument();
   });
 

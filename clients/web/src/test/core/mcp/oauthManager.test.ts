@@ -1703,6 +1703,28 @@ describe("OAuthManager", () => {
       ]);
     });
 
+    // #2068 round 5 — the provider-level test for "storage is never rewritten"
+    // could not see this: `createOAuthProvider` reads `provider.scope` (the
+    // filtered getter) and seeds storage when it comes back undefined. A
+    // persisted scope of `offline_access` alone therefore used to be silently
+    // overwritten by the configured scope, which is the one thing the filter
+    // promises not to do. Exercised through the manager, where the seeding
+    // branch actually lives.
+    it("does not overwrite a persisted scope that filters down to nothing", async () => {
+      const params = createMockParams();
+      const storage = params.initialConfig.storage;
+      if (!storage) throw new Error("expected mock storage");
+      vi.mocked(storage.getScope).mockResolvedValue("offline_access");
+
+      const manager = new OAuthManager(params);
+      manager.setOAuthConfig({ requestRefreshToken: false, scope: "mcp" });
+      const provider = await manager.createOAuthProviderForTransport();
+
+      expect(storage.saveScope).not.toHaveBeenCalled();
+      // Still requests the configured scope, without the declined token.
+      expect(provider.clientMetadata.scope).toBe("mcp");
+    });
+
     it("declares the refresh_token grant when the opt-out is not configured", async () => {
       const manager = new OAuthManager(createMockParams());
 

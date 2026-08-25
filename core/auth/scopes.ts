@@ -55,9 +55,24 @@ export function scopeForDeclinedRefreshGrant(
     .trim()
     .split(/\s+/)
     .filter((token) => token !== "" && token !== OFFLINE_ACCESS_SCOPE);
-  // An all-`offline_access` scope collapses to undefined rather than "", so the
-  // SDK falls back to its own resolution instead of requesting an empty scope.
-  return kept.length > 0 ? kept.join(" ") : undefined;
+  if (kept.length > 0) return kept.join(" ");
+
+  // Filtering removed everything (the persisted scope was `offline_access`
+  // alone). Returning `undefined` here would be read as "nothing stored" by
+  // `OAuthManager.createOAuthProvider`, whose seeding branch then *writes* the
+  // configured scope to storage — turning this request-only filter into a
+  // silent overwrite of the persisted value, so re-enabling the grant could no
+  // longer restore it. Hand back the configured scope instead: it is the right
+  // thing to request, and it leaves storage alone.
+  // Cannot itself contain `offline_access`: that case returned unchanged above.
+  const fallback = configuredScope?.trim();
+  if (fallback) return fallback;
+
+  // Nothing configured either, so there is no value to preserve and the seeding
+  // branch is inert (it requires a configured scope). `undefined` rather than
+  // `""` so the SDK falls back to its own resolution instead of requesting an
+  // empty scope.
+  return undefined;
 }
 
 /**

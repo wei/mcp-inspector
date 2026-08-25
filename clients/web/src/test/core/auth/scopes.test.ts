@@ -97,8 +97,23 @@ describe("scopeForDeclinedRefreshGrant (#2068)", () => {
 
   // Requesting `scope=` empty is not the same as omitting it; collapse to
   // undefined so the SDK falls back to its own resolution.
-  it("collapses to undefined when offline_access was the only scope", () => {
+  it("collapses to undefined when nothing is left and nothing is configured", () => {
     expect(scopeForDeclinedRefreshGrant("offline_access", "")).toBeUndefined();
+    expect(
+      scopeForDeclinedRefreshGrant("offline_access", undefined),
+    ).toBeUndefined();
+  });
+
+  // Returning undefined here would read as "nothing stored" to
+  // OAuthManager.createOAuthProvider, whose seeding branch writes the
+  // configured scope to storage — turning a request-only filter into a silent
+  // overwrite. The configured scope is both the right request and inert to that
+  // branch.
+  it("falls back to the configured scope rather than emptying out", () => {
+    expect(scopeForDeclinedRefreshGrant("offline_access", "mcp")).toBe("mcp");
+    expect(
+      scopeForDeclinedRefreshGrant("  offline_access  ", "  mcp tools:read "),
+    ).toBe("mcp tools:read");
   });
 
   it("passes an absent scope through", () => {

@@ -539,13 +539,15 @@ export function ServerSettingsForm({
     .includes("offline_access");
   const refreshTokenOptedOut = settings.oauthRequestRefreshToken === false;
 
-  // #2068 — suppressed under EMA for a different reason than the endpoint
-  // overrides: that leg never builds a BaseOAuthClientProvider at all. It
-  // authorizes against the enterprise IdP with its own fixed scope, so this
-  // checkbox cannot influence the request. Say so rather than leaving a control
-  // that looks effective, matching how the overrides annotate themselves.
+  // #2068 — annotated under EMA. Not because the provider is bypassed (EMA
+  // wraps a BaseOAuthClientProvider and forwards its `clientMetadata`), but
+  // because the IdP authorization leg — the one the user signs in through —
+  // uses a fixed `openid offline_access` scope this setting cannot change. The
+  // control therefore cannot affect EMA's consent behavior, which is the whole
+  // reason to touch it. Say so rather than leave it looking effective, matching
+  // how the endpoint overrides annotate themselves.
   const refreshTokenEmaNote = settings.enterpriseManaged
-    ? " Not applied while Enterprise-managed authorization is on: that flow authorizes against the enterprise IdP with its own scope, which this setting does not reach."
+    ? " Not applied while Enterprise-managed authorization is on: that flow signs in against the enterprise IdP using its own fixed scope, which this setting cannot change."
     : "";
 
   const rejectedParamKeys = authorizationParams
