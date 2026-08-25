@@ -304,8 +304,8 @@ mishandled by real MCP clients:
 Plain streamable-HTTP — connect with the **default (legacy)** protocol era.
 Every tool here is still **runnable**: the override replaces only the
 *advertised* schema, and the flagship bare-`true` rides `get_temp` (which
-returns structured content) rather than `echo` — see the caveat under
-[Try it](#unportable-tool-schemas) below.
+returns structured content) rather than `echo` — see the ⚠️ caveat at the end
+of this section for why that placement matters.
 
 The Inspector is where a server author looks first, so a construct that will
 fail downstream is named here rather than passed through silently. All three

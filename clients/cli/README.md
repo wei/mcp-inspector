@@ -165,13 +165,20 @@ mcp-inspector --cli <server> --method tools/list --strict
 ```
 
 ```text
-Error: tool "info"
+Error: tool "get_temp"
   Path: outputSchema.properties.data
   Issue: Bare `true` used where a schema object is expected.
-  Suggestion: Spell the "anything" schema out — `{"type": "object", "additionalProperties": true}` …
+  Suggestion: Declare what the value actually is — e.g. `{"type": "object", "additionalProperties": true}` for a free-form object. That narrows the schema deliberately; `true` accepts any JSON value at all.
 
-1 error, 3 warnings across 2 tools.
+1 error, 3 warnings across 3 tools.
 ```
+
+Note the shape of that suggestion. Where a replacement genuinely narrows the
+schema it says so, rather than implying an equivalent rewrite — and where an
+equivalent exists it gives that instead: an array-form `type` becomes `anyOf`
+branches (not "drop it from `required`", since absent is not the same as
+`null`), and a bare `false` becomes `{"not": {}}` (not "delete the entry",
+which would *permit* the property under the default `additionalProperties`).
 
 Severity decides the exit code, not the report: **errors** are constructs a
 shipping MCP client refuses outright (a bare `true` or `false` where a schema
@@ -302,7 +309,7 @@ prose from stderr:
 | `3`  | Server requires authentication (401/403, `WWW-Authenticate`, OAuth).          |
 | `4`  | Server unreachable (DNS, connection refused, timeout, `fetch failed`).        |
 | `5`  | Tool error (`tools/call` returned `isError:true`, or the tool was not found). |
-| `6`  | `--strict` found an error-severity tool-schema portability problem.            |
+| `6`  | `--strict` found an error-severity tool-schema portability problem (`schema_unportable` — the schema is valid JSON Schema, just not portable). |
 
 On any non-zero exit the CLI also writes a single JSON line to **stderr** — the
 `ErrorEnvelope`:

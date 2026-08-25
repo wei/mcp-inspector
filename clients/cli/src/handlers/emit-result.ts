@@ -62,10 +62,13 @@ export async function emitResult(
   if (args.strict && lint) {
     const { errors } = countFindings(lint);
     if (errors > 0) {
+      // "unportable", not "invalid": these schemas are valid JSON Schema and
+      // are merely refused by some clients, so an envelope code of
+      // `schema_invalid` would tell an automated caller the wrong thing.
       throw new CliExitCodeError(
-        EXIT_CODES.SCHEMA_INVALID,
-        `${errors} tool schema error${errors === 1 ? "" : "s"} found (--strict).`,
-        { code: "schema_invalid" },
+        EXIT_CODES.SCHEMA_UNPORTABLE,
+        `${errors} tool schema portability error${errors === 1 ? "" : "s"} found (--strict).`,
+        { code: "schema_unportable" },
       );
     }
   }

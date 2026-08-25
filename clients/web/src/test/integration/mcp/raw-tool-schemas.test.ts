@@ -1,7 +1,9 @@
 import { describe, it, expect, afterEach } from "vitest";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { InspectorClient } from "@inspector/core/mcp/inspectorClient.js";
 import { createTransportNode } from "@inspector/core/mcp/node/transport.js";
-import { lintTools } from "@inspector/core/json/schemaLint.js";
+import { countFindings, lintTools } from "@inspector/core/json/schemaLint.js";
 import {
   createTestServerHttp,
   type TestServerHttp,
@@ -9,6 +11,8 @@ import {
   createEchoTool,
   createGetWeatherTool,
   createGetTempTool,
+  loadConfig,
+  resolveConfig,
 } from "@modelcontextprotocol/inspector-test-server";
 import type { ServerConfig } from "@modelcontextprotocol/inspector-test-server";
 
@@ -209,6 +213,49 @@ describe("rawToolSchemas override (#1005)", () => {
     await expect(connected.callTool(echo, { message: "hi" })).rejects.toThrow(
       /returned no structured content/,
     );
+  });
+
+  it("serves the shape the showcase config declares", async () => {
+    // Covers the JSON → ConfigFile → ServerConfig plumbing, not just the
+    // in-process option: a config file is how the manual repro and the
+    // screenshots in #1005 are produced, and `resolveConfig` forwarding
+    // `rawToolSchemas` is a line nothing else exercises. Without this, the
+    // shipped fixture could silently lose its overrides while every other
+    // test in this file stayed green.
+    const configPath = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      "../../../../../../test-servers/configs/unportable-schemas-http.json",
+    );
+    const resolved = resolveConfig(loadConfig(configPath));
+    expect(Object.keys(resolved.rawToolSchemas ?? {}).sort()).toEqual([
+      "add",
+      "echo",
+      "get_temp",
+    ]);
+
+    // Let the harness pick the port instead of the config's fixed one, so this
+    // test can't collide with a manually-running showcase server.
+    const started = await start({
+      tools: resolved.tools,
+      rawToolSchemas: resolved.rawToolSchemas,
+    });
+    const connected = await connect(started.url);
+
+    const { tools } = await connected.listAllTools();
+    // The exact verdict the README and the PR screenshots claim: one error on
+    // get_temp, warnings on echo and add, get_weather clean.
+    const results = lintTools(tools);
+    expect(
+      results.map((r) => ({
+        tool: r.toolName,
+        rules: r.findings.map((f) => f.rule).sort(),
+      })),
+    ).toEqual([
+      { tool: "get_temp", rules: ["boolean-schema"] },
+      { tool: "echo", rules: ["type-union", "untyped-schema"] },
+      { tool: "add", rules: ["remote-ref"] },
+    ]);
+    expect(countFindings(results)).toEqual({ errors: 1, warnings: 3 });
   });
 
   it("keeps a structured-content tool callable under an outputSchema override", async () => {

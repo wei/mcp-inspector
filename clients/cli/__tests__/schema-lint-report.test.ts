@@ -128,8 +128,11 @@ describe("emitResult — schema lint wiring (#1005)", () => {
     });
     await expect(promise).rejects.toBeInstanceOf(CliExitCodeError);
     await promise.catch((e: CliExitCodeError) => {
-      expect(e.exitCode).toBe(EXIT_CODES.SCHEMA_INVALID);
-      expect(e.envelope?.code).toBe("schema_invalid");
+      expect(e.exitCode).toBe(EXIT_CODES.SCHEMA_UNPORTABLE);
+      // Not `schema_invalid`: the lint reports schemas that ARE valid JSON
+      // Schema and are merely unportable, so the code an automated caller
+      // branches on must not claim otherwise.
+      expect(e.envelope?.code).toBe("schema_unportable");
     });
     // The result still goes to stdout; only the report is on stderr.
     expect(JSON.parse(stdout)).toEqual(DIRTY_LIST);
