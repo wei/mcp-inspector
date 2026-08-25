@@ -57,10 +57,13 @@ import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { hasExited, removeSafe, stopChild } from "./lib/child-cleanup.mjs";
 import {
+  ensureTestServers,
+  testServerEntryPath,
+} from "./lib/ensure-test-servers.mjs";
+import {
   APP_TOOL,
   attachPageDiagnostics,
   buildAppDeepLink,
-  composableServerPath,
   driveAppFlow,
   loadChromium,
   startMcpAppServer,
@@ -68,13 +71,7 @@ import {
 import { winShellArgs } from "./lib/win-shell-args.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
-const testServer = join(
-  repoRoot,
-  "test-servers",
-  "build",
-  "test-server-stdio.js",
-);
-const composableServer = composableServerPath(repoRoot);
+const testServer = testServerEntryPath(repoRoot, "stdio");
 
 // Mirrors INSPECTOR_API_TOKEN_GLOBAL in core/mcp/remote/constants.ts; kept as a
 // literal because this plain .mjs script can't import the TS source.
@@ -146,22 +143,23 @@ function runInherit(command, args, cwd = repoRoot) {
 }
 
 /**
- * Build the bundled test servers if they aren't present yet — both the stdio
- * entry (step 4b) and the composable one (step 5). One `tsc -p test-servers`
- * emits both, so this builds once and checks each entry.
+ * Build the bundled test servers — both the stdio entry (step 4b) and the
+ * composable one (step 5). One `tsc -p test-servers` emits both, and the shared
+ * helper is unconditional-per-process, so the second call here is a no-op while
+ * a fresh run always picks up an edit to `test-servers/src` (#2111). It also
+ * runs tsc through `process.execPath` rather than the `npx` this used to shell
+ * out to, which is what made this one script unrunnable on Windows (#1939).
  */
 function ensureTestServer() {
-  if (existsSync(testServer) && existsSync(composableServer)) return;
-  step("building test-servers (missing build output)...");
-  const status = runInherit("npx", ["tsc", "-p", "test-servers", "--noCheck"]);
-  if (
-    status !== 0 ||
-    !existsSync(testServer) ||
-    !existsSync(composableServer)
-  ) {
-    fail(
-      "could not build the test servers (test-servers/build/{test-server-stdio,server-composable}.js)",
-    );
+  try {
+    ensureTestServers({
+      repoRoot,
+      label: "pack:verify",
+      log: step,
+      requires: ["stdio", "composable"],
+    });
+  } catch (e) {
+    fail(e.message);
   }
 }
 
