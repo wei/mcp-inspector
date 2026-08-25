@@ -2902,6 +2902,13 @@ function App() {
         });
       } catch (err) {
         connectStartRef.current = undefined;
+        // `resumeAfterOAuth` carries the reconnect, and that reconnect can
+        // reject with an auth-recovery error — which holds the status at
+        // `"connecting"` instead of moving it to `"error"`. Nothing downstream
+        // of here ends the attempt, so without this the toggle is stuck and the
+        // active-server lock is never released. Before the EMA guard, since a
+        // stuck session is worth clearing whichever way the error classifies.
+        await client.disconnect().catch(() => {});
         if (isEmaClientNotConfiguredError(err)) {
           notifications.show({
             title: `Cannot connect to "${server.name}"`,
@@ -3088,6 +3095,15 @@ function App() {
             // the same as the challenge being *unsatisfied*, and navigating the
             // whole page away on the strength of an error would bury it.
             connectStartRef.current = undefined;
+            // Tear the session down before reporting, as the sibling OAuth
+            // catch below does. The outer `connect()` rejected with an
+            // auth-recovery error, which deliberately holds the status at
+            // `"connecting"` rather than moving it to `"error"` — so if the
+            // challenge check is what rejected, nothing else ever ends the
+            // attempt and the toggle spins while the active-server lock is
+            // held. The fetch log survives a disconnect, so the Network
+            // diagnostics this issue is about are unaffected.
+            await client.disconnect().catch(() => {});
             setFailedServerId(id);
             const message =
               recoveryErr instanceof Error

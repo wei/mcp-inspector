@@ -718,7 +718,7 @@ const clientInstances = (
   McpIndex as unknown as { __clientInstances: EventTarget[] }
 ).__clientInstances;
 
-// The mock factory adds three test-only arming hooks to the module namespace.
+// The mock factory adds four test-only arming hooks to the module namespace.
 // Intersecting with `typeof McpIndex` keeps the real module's shape checked and
 // narrows this to a single cast — `as unknown as` would discard the former and
 // is what AGENTS.md rules out.
@@ -847,6 +847,13 @@ describe("App failed-connection card border (#1621)", () => {
     // No redirect was prepared: `prepareOAuthRedirect` persists a resume
     // snapshot before navigating, and nothing wrote one.
     expect(readOAuthResumeSnapshot()).toBeUndefined();
+    // And the attempt was ended. The outer connect rejected with an
+    // auth-recovery error, which holds the status at "connecting", so without
+    // an explicit teardown here the toggle would spin forever.
+    const client = clientInstances[0] as EventTarget & {
+      disconnect: ReturnType<typeof vi.fn>;
+    };
+    expect(client.disconnect).toHaveBeenCalled();
   });
 
   it("clears the flag when a new connection attempt starts", async () => {
@@ -2597,6 +2604,12 @@ describe("App OAuth callback issuer-binding failures (#1808)", () => {
     await waitFor(() =>
       expect(screen.getByTestId("errored-server")).toHaveTextContent("A"),
     );
+    // `resumeAfterOAuth` carries the reconnect, which can reject while holding
+    // the status at "connecting", so the attempt is torn down explicitly.
+    const client = clientInstances[0] as EventTarget & {
+      disconnect: ReturnType<typeof vi.fn>;
+    };
+    await waitFor(() => expect(client.disconnect).toHaveBeenCalled());
   });
 
   // The callback leg can also die before the token exchange, if the persisted
