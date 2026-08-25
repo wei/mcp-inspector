@@ -92,9 +92,10 @@ const built = new Set();
  *
  * Unconditional per *process*, not per call: `pack-and-verify.mjs` asks twice
  * (once for the stdio entry, once for the composable one) and one `tsc` pass
- * emits both, so a second call within the same run is a no-op. A fresh process
- * always rebuilds, which is the whole point — that is what makes an edit to
- * `test-servers/src` reach the next smoke.
+ * emits both, so a second call within the same run skips the build. A fresh
+ * process always rebuilds, which is the whole point — that is what makes an
+ * edit to `test-servers/src` reach the next smoke. The *existence* assertion is
+ * not cached, because a later call can name an entry the first one didn't.
  *
  * `log` receives the bare message; the default prefixes it with `label`, which
  * is what a caller owning its own prefixed logger (pack-and-verify's `step`)
@@ -113,16 +114,29 @@ export function ensureTestServers({
   exists = existsSync,
 }) {
   const paths = requires.map((name) => testServerEntryPath(repoRoot, name));
-  if (built.has(repoRoot)) return paths;
+
+  // A cached call can name an entry the first one didn't, so the existence
+  // assertion runs on every call. Skipping it on the cache hit would return a
+  // path to a file tsc never emitted, and the consumer would then fail with
+  // exactly the opaque ERR_MODULE_NOT_FOUND this helper exists to replace.
+  if (built.has(repoRoot)) {
+    assertEmitted(paths, exists, 0);
+    return paths;
+  }
 
   log("building test-servers...");
   const status = run(repoRoot);
+  assertEmitted(paths, exists, status);
+  built.add(repoRoot);
+  return paths;
+}
+
+/** Throw the shared actionable message unless tsc succeeded and emitted each path. */
+function assertEmitted(paths, exists, status) {
   const missing = paths.filter((p) => !exists(p));
   if (status !== 0 || missing.length) {
     throw new Error(buildFailureMessage(missing));
   }
-  built.add(repoRoot);
-  return paths;
 }
 
 /** Test-only: forget which roots this process has built. */

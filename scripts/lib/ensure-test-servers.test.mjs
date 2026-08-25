@@ -94,6 +94,18 @@ describe("ensureTestServers", () => {
     assert.deepEqual(paths, [testServerEntryPath(ROOT, "composable")]);
   });
 
+  it("still asserts existence on a cache hit that names a new entry", () => {
+    // The build is cached; the assertion is not. A second caller asking for an
+    // entry the first didn't must not be handed a path tsc never emitted.
+    const absent = testServerEntryPath(ROOT, "composable");
+    const present = (p) => p !== absent;
+    callEnsure({ requires: ["stdio"], present });
+    assert.throws(
+      () => callEnsure({ requires: ["composable"], present }),
+      (e) => e.message.includes(absent),
+    );
+  });
+
   it("builds again for a different repo root", () => {
     const calls = [];
     callEnsure({ calls });
