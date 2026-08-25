@@ -13,6 +13,8 @@ import {
   act,
 } from "./test/renderWithMantine";
 import userEvent from "@testing-library/user-event";
+import { AuthRecoveryRequiredError } from "@inspector/core/auth/challenge.js";
+import { RemoteOAuthStorage } from "@inspector/core/auth/remote/storage-remote.js";
 
 // Spy on the toast layer so the progress-notification tests can assert the
 // show/update calls without mounting Mantine's <Notifications/> portal.
@@ -48,18 +50,28 @@ const { messageLogClear } = vi.hoisted(() => ({ messageLogClear: vi.fn() }));
 vi.mock("@inspector/core/mcp/index.js", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("@inspector/core/mcp/index.js")>();
-  // When set, the next `connect()` rejects with this value (one-shot), so a test
-  // can exercise the handshake-failure path. Cleared after it fires.
-  let nextConnectRejection: unknown = null;
+  // Each armed value makes one `connect()` reject, in FIFO order, so a test can
+  // exercise the handshake-failure path — or a two-connect sequence such as the
+  // auth-recovery retry, where the first call rejects with the recovery error
+  // and the retry behind it fails too. A queue rather than a single slot: with
+  // one slot the second arming would overwrite the first, and the retry would
+  // silently succeed.
+  const connectRejections: unknown[] = [];
   // Same one-shot arming for the `/oauth/callback` token exchange, so a test can
   // exercise the callback-leg failure paths (#1808).
   let nextResumeRejection: unknown = null;
+  // And for `authenticate()`, the pre-redirect OAuth leg (discovery + DCR), so a
+  // test can exercise a failure there — the case that never reaches the "error"
+  // connection status (#2108).
+  let nextAuthenticateRejection: unknown = null;
+  // And for the auth-recovery challenge check, whose *rejection* is a distinct
+  // control-flow decision from its resolving `false` (#2108): a throw is
+  // surfaced as a failed attempt rather than falling through to the redirect.
+  let nextChallengeCheckRejection: unknown = null;
   class FakeInspectorClient extends EventTarget {
     connect = vi.fn(() => {
-      if (nextConnectRejection !== null) {
-        const err = nextConnectRejection;
-        nextConnectRejection = null;
-        return Promise.reject(err);
+      if (connectRejections.length > 0) {
+        return Promise.reject(connectRejections.shift());
       }
       return Promise.resolve(undefined);
     });
@@ -108,7 +120,22 @@ vi.mock("@inspector/core/mcp/index.js", async (importOriginal) => {
       }
       return Promise.resolve(undefined);
     });
-    checkAuthChallengeSatisfied = vi.fn().mockResolvedValue(true);
+    authenticate = vi.fn(() => {
+      if (nextAuthenticateRejection !== null) {
+        const err = nextAuthenticateRejection;
+        nextAuthenticateRejection = null;
+        return Promise.reject(err);
+      }
+      return Promise.resolve(undefined);
+    });
+    checkAuthChallengeSatisfied = vi.fn(() => {
+      if (nextChallengeCheckRejection !== null) {
+        const err = nextChallengeCheckRejection;
+        nextChallengeCheckRejection = null;
+        return Promise.reject(err);
+      }
+      return Promise.resolve(true);
+    });
     clearOAuthTokens = vi.fn().mockResolvedValue(undefined);
   }
   const instances: FakeInspectorClient[] = [];
@@ -122,12 +149,21 @@ vi.mock("@inspector/core/mcp/index.js", async (importOriginal) => {
     // Test-only handle so the test can grab the live instance and fire events.
     __clientInstances: instances,
     // Test-only: arm the next connect() to reject (handshake-failure path).
+    // Call it more than once to arm consecutive calls.
     __rejectNextConnect: (err: unknown) => {
-      nextConnectRejection = err;
+      connectRejections.push(err);
     },
     // Test-only: arm the next resumeAfterOAuth() to reject (callback-leg failure).
     __rejectNextResumeAfterOAuth: (err: unknown) => {
       nextResumeRejection = err;
+    },
+    // Test-only: arm the next authenticate() to reject (pre-redirect OAuth leg).
+    __rejectNextAuthenticate: (err: unknown) => {
+      nextAuthenticateRejection = err;
+    },
+    // Test-only: arm the next checkAuthChallengeSatisfied() to reject.
+    __rejectNextChallengeCheck: (err: unknown) => {
+      nextChallengeCheckRejection = err;
     },
   };
 });
@@ -432,6 +468,7 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
     readResourceState?: { status?: string };
     currentLogLevel?: string;
     activeTab?: string;
+    activeServer?: string;
     erroredServerId?: string;
     initializeResult?: { serverInfo: { name: string; version: string } };
     onActiveTabChange: (tab: string) => void;
@@ -513,6 +550,7 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
       <span data-testid="errored-server">
         {props.erroredServerId ?? "none"}
       </span>
+      <span data-testid="active-server">{props.activeServer ?? "none"}</span>
       <button onClick={() => props.onActiveTabChange("Servers")}>
         switch-servers-tab
       </button>
@@ -683,15 +721,24 @@ const clientInstances = (
   McpIndex as unknown as { __clientInstances: EventTarget[] }
 ).__clientInstances;
 
-const rejectNextConnect = (
-  McpIndex as unknown as { __rejectNextConnect: (err: unknown) => void }
-).__rejectNextConnect;
+// The mock factory adds four test-only arming hooks to the module namespace.
+// Intersecting with `typeof McpIndex` keeps the real module's shape checked and
+// narrows this to a single cast — `as unknown as` would discard the former and
+// is what AGENTS.md rules out.
+type ArmingHooks = typeof McpIndex & {
+  __rejectNextConnect: (err: unknown) => void;
+  __rejectNextResumeAfterOAuth: (err: unknown) => void;
+  __rejectNextAuthenticate: (err: unknown) => void;
+  __rejectNextChallengeCheck: (err: unknown) => void;
+};
 
-const rejectNextResumeAfterOAuth = (
-  McpIndex as unknown as {
-    __rejectNextResumeAfterOAuth: (err: unknown) => void;
-  }
-).__rejectNextResumeAfterOAuth;
+const { __rejectNextConnect: rejectNextConnect } = McpIndex as ArmingHooks;
+const { __rejectNextResumeAfterOAuth: rejectNextResumeAfterOAuth } =
+  McpIndex as ArmingHooks;
+const { __rejectNextAuthenticate: rejectNextAuthenticate } =
+  McpIndex as ArmingHooks;
+const { __rejectNextChallengeCheck: rejectNextChallengeCheck } =
+  McpIndex as ArmingHooks;
 
 const fetchLogInstances = (
   FetchLogModule as unknown as { __fetchLogInstances: EventTarget[] }
@@ -829,6 +876,101 @@ describe("App failed-connection card border (#1621)", () => {
     await waitFor(() =>
       expect(screen.getByTestId("errored-server")).toHaveTextContent("A"),
     );
+  });
+
+  // An OAuth leg that fails never reaches the `"error"` connection status — the
+  // handler tears the client down, leaving the session `"disconnected"` — so the
+  // flag is the only signal downstream that a connect attempt died. Without it
+  // the monitoring sidebar stays shut on exactly the failure the Network tab
+  // exists to explain (#2108).
+  it("flags the server when the OAuth authorization leg fails (#2108)", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+    expect(screen.getByTestId("errored-server")).toHaveTextContent("none");
+
+    // 401 from the server -> App starts the authorization-code flow, whose
+    // discovery/DCR round-trip then fails (e.g. an invalid
+    // `/.well-known/oauth-authorization-server`).
+    rejectNextConnect(Object.assign(new Error("HTTP 401"), { status: 401 }));
+    rejectNextAuthenticate(new Error("discovery failed"));
+    await user.click(screen.getByText("connect"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("errored-server")).toHaveTextContent("A"),
+    );
+    expect(notificationsMock.show).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: expect.stringContaining("OAuth authorization failed"),
+      }),
+    );
+  });
+
+  // The auth-recovery arm re-connects from inside the outer `catch`, so before
+  // #2108 a rejection there escaped `onToggleConnection` entirely as an
+  // unhandled rejection: no toast, no red border, no sidebar.
+  it("flags the server when the satisfied-challenge retry fails (#2108)", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+
+    // First connect asks for recovery; the fake reports the challenge already
+    // satisfied, so App retries the connect — and that retry fails.
+    rejectNextConnect(
+      new AuthRecoveryRequiredError(
+        new URL("https://as.example.com/authorize"),
+        {
+          reason: "unauthorized",
+        },
+      ),
+    );
+    rejectNextConnect(new Error("handshake failed after re-authorization"));
+    await user.click(screen.getByText("connect"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("errored-server")).toHaveTextContent("A"),
+    );
+    expect(notificationsMock.show).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: expect.stringContaining("Failed to connect"),
+      }),
+    );
+  });
+
+  // The other half of the guarded arm. A *rejecting* challenge check is not the
+  // same as one that resolves `false`: the latter means "re-authorize", the
+  // former means the check itself broke, so it is surfaced rather than used as
+  // grounds to navigate the whole page to the auth server.
+  it("surfaces a rejecting challenge check instead of redirecting (#2108)", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+
+    rejectNextConnect(
+      new AuthRecoveryRequiredError(
+        new URL("https://as.example.com/authorize"),
+        { reason: "unauthorized" },
+      ),
+    );
+    rejectNextChallengeCheck(new Error("challenge check failed"));
+    await user.click(screen.getByText("connect"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("errored-server")).toHaveTextContent("A"),
+    );
+    expect(notificationsMock.show).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: expect.stringContaining("Failed to connect"),
+        message: "challenge check failed",
+      }),
+    );
+    // No redirect was prepared: `prepareOAuthRedirect` persists a resume
+    // snapshot before navigating, and nothing wrote one.
+    expect(readOAuthResumeSnapshot()).toBeUndefined();
+    // And the attempt was ended. The outer connect rejected with an
+    // auth-recovery error, which holds the status at "connecting", so without
+    // an explicit teardown here the toggle would spin forever.
+    const client = clientInstances[0] as EventTarget & {
+      disconnect: ReturnType<typeof vi.fn>;
+    };
+    expect(client.disconnect).toHaveBeenCalled();
   });
 
   it("clears the flag when a new connection attempt starts", async () => {
@@ -2567,6 +2709,92 @@ describe("App OAuth callback issuer-binding failures (#1808)", () => {
     // The raw SDK wording never reaches the user.
     expect(screen.queryByText(/discoveryState/)).not.toBeInTheDocument();
     expect(screen.queryByText("Re-authentication required")).toBeNull();
+  });
+
+  // The callback leg is a connect attempt too, so a failure there must flag the
+  // server — that is what opens the monitoring sidebar onto the OAuth requests
+  // (discovery, DCR and the token exchange, restored from the pre-redirect
+  // session) rather than leaving the user with only a banner (#2108).
+  it("flags the server when the callback leg fails (#2108)", async () => {
+    renderCallbackWithFailure(new Error("token exchange rejected"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("errored-server")).toHaveTextContent("A"),
+    );
+    // The active server is deliberately retained. "Authorize again" on the
+    // re-auth banner only hands `clearServerOAuthState` the live client when
+    // the banner's server is the active one, so releasing it here would leave
+    // the stale tokens on the client that holds them. Asserted so a later
+    // "cleanup" of the apparent leak fails here rather than silently breaking
+    // the recovery.
+    expect(screen.getByTestId("active-server")).toHaveTextContent("A");
+    // The teardown still runs, for the case where the reconnect is what
+    // rejected and the status really is left at "connecting".
+    const client = clientInstances[0] as EventTarget & {
+      disconnect: ReturnType<typeof vi.fn>;
+    };
+    await waitFor(() => expect(client.disconnect).toHaveBeenCalled());
+  });
+
+  // The callback leg can also die before the token exchange, if the persisted
+  // OAuth state cannot be read back at all. Spied on the prototype rather than
+  // mocked at the module, so every other test keeps the real storage.
+  it("flags the server when the OAuth storage fails to load (#2108)", async () => {
+    const loadSpy = vi
+      .spyOn(RemoteOAuthStorage.prototype, "load")
+      .mockRejectedValueOnce(new Error("storage unavailable"));
+    try {
+      writeOAuthResumeSnapshot({
+        version: 1,
+        serverId: "A",
+        activeTab: "Tools",
+        authKind: "reauth",
+        tabUi: {},
+      });
+      window.history.replaceState({}, "", `${OAUTH_CALLBACK_PATH}?code=test`);
+      renderWithMantine(<App />);
+
+      await waitFor(() =>
+        expect(screen.getByTestId("errored-server")).toHaveTextContent("A"),
+      );
+      // Red border only, by design: this arm returns before a client is built,
+      // so nothing restores the Network log — and a failed local read of
+      // `oauth.json` would not be in it anyway.
+      expect(
+        await screen.findByText(/storage unavailable/),
+      ).toBeInTheDocument();
+    } finally {
+      loadSpy.mockRestore();
+    }
+  });
+
+  // The other callback arm: the provider redirected back with an error instead
+  // of a code, so no token exchange is even attempted. Still a connect attempt
+  // that failed, so the server carries the same flag (#2108).
+  //
+  // The flag is deliberately all this asserts. That arm returns before a client
+  // is rebuilt, so no Network entries are restored and the content-gated column
+  // stays shut — which is right here: the provider's `error` param is the whole
+  // diagnostic and the re-auth banner is already showing it. Asserting a
+  // sidebar would be asserting behavior this arm should not have.
+  it("flags the server when the provider returns an error to the callback (#2108)", async () => {
+    writeOAuthResumeSnapshot({
+      version: 1,
+      serverId: "A",
+      activeTab: "Tools",
+      authKind: "reauth",
+      tabUi: {},
+    });
+    window.history.replaceState(
+      {},
+      "",
+      `${OAUTH_CALLBACK_PATH}?error=access_denied`,
+    );
+    renderWithMantine(<App />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("errored-server")).toHaveTextContent("A"),
+    );
   });
 
   it("clears the stale OAuth state and reconnects when the affordance is used", async () => {

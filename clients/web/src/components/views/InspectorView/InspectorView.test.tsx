@@ -1689,6 +1689,87 @@ describe("InspectorView", () => {
       expect(screen.queryByRole("radio", { name: "Console" })).toBeNull();
     });
 
+    // An OAuth failure is torn down by the parent, so the session rests at
+    // "disconnected" rather than "error" — the status gate the failure column
+    // used to carry never saw it, and the requests explaining the failure were
+    // unreachable (#2108). The parent's `erroredServerId` is the signal instead.
+    it("opens the monitoring sidebar to Network when OAuth fails without an error status (#2108)", async () => {
+      const { rerender } = renderWithMantine(
+        <StatefulInspectorViewHost
+          {...makeProps({
+            servers: [httpServer],
+            activeServer: "beta",
+            connectionStatus: "connecting",
+          })}
+        />,
+      );
+      expect(
+        screen.queryByRole("button", { name: "Close monitoring sidebar" }),
+      ).toBeNull();
+
+      rerender(
+        <StatefulInspectorViewHost
+          {...makeProps({
+            servers: [httpServer],
+            // The failure's teardown clears the active server and settles the
+            // session at "disconnected" — never "error".
+            activeServer: undefined,
+            erroredServerId: "beta",
+            connectionStatus: "disconnected",
+            initializeResult: undefined,
+            network: [
+              {
+                id: "a1",
+                timestamp: new Date(),
+                method: "GET",
+                url: "https://as.example.com/.well-known/oauth-authorization-server",
+                requestHeaders: {},
+                responseStatus: 404,
+                responseStatusText: "Not Found",
+                category: "auth",
+              },
+            ],
+          })}
+        />,
+      );
+
+      expect(
+        await screen.findByRole("button", { name: "Close monitoring sidebar" }),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("radio", { name: "Network" })).toBeChecked();
+    });
+
+    it("does not re-open the sidebar on a mount that starts already flagged (#2108)", () => {
+      // Same props as the failure above, but as the *initial* render: there is
+      // no transition, so a user who closed the column isn't fought on remount.
+      renderWithMantine(
+        <StatefulInspectorViewHost
+          {...makeProps({
+            servers: [httpServer],
+            activeServer: undefined,
+            erroredServerId: "beta",
+            connectionStatus: "disconnected",
+            initializeResult: undefined,
+            network: [
+              {
+                id: "a1",
+                timestamp: new Date(),
+                method: "GET",
+                url: "https://as.example.com/.well-known/oauth-authorization-server",
+                requestHeaders: {},
+                responseStatus: 404,
+                responseStatusText: "Not Found",
+                category: "auth",
+              },
+            ],
+          })}
+        />,
+      );
+      expect(
+        screen.queryByRole("button", { name: "Close monitoring sidebar" }),
+      ).toBeNull();
+    });
+
     it("surfaces Console (stderr), not Network, in the failure column for a stdio server (#1621)", async () => {
       const stdioErr: ServerEntry = {
         id: "beta",
