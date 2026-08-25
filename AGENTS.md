@@ -162,15 +162,22 @@ v2/main/
 │   │                                   #   constructs that are legal JSON Schema and are
 │   │                                   #   refused or mishandled by real MCP clients (a bare
 │   │                                   #   `true` in `properties`, an array-form `type`, a
-│   │                                   #   remote `$ref`, a schema carrying no validation
-│   │                                   #   keyword, a non-object root). Deliberately NOT a
-│   │                                   #   validator: a census of 617 public servers found 0
-│   │                                   #   that fail the SDK's own parse, so a conformance
-│   │                                   #   check reports nothing on real servers. ONE verdict
-│   │                                   #   for all three clients — the CLI's `--strict` report
-│   │                                   #   (exit 6), the TUI's tool detail pane, the web Tools
-│   │                                   #   tab — so they cannot disagree about what is
-│   │                                   #   portable; the report TEXT is shared too — #1005)
+│   │                                   #   remote `$ref`, a schema carrying no constraining
+│   │                                   #   keyword). Deliberately NOT a validator: a census of
+│   │                                   #   617 public servers found 0 that fail the SDK's own
+│   │                                   #   parse, so a conformance check reports nothing on
+│   │                                   #   real servers. Equally deliberately it has NO
+│   │                                   #   "inputSchema must be an object" rule, even though
+│   │                                   #   MCP requires that: the SDK types inputSchema with
+│   │                                   #   `type: literal("object")`, so such a tool fails
+│   │                                   #   ListToolsResultSchema and salvageListItems drops it
+│   │                                   #   before any client sees it — a rule that cannot fire
+│   │                                   #   is worse than none, because the docs then claim a
+│   │                                   #   check the tool does not perform. ONE verdict for all
+│   │                                   #   three clients — the CLI's `--strict` report (exit 6),
+│   │                                   #   the TUI's tool detail pane, the web Tools tab — so
+│   │                                   #   they cannot disagree about what is portable; the
+│   │                                   #   report TEXT is shared too — #1005)
 │   ├── logging/                        # Silent pino logger singleton
 │   ├── mcp/                            # InspectorClient runtime + state stores
 │   │                                   #   (uriTemplate.ts: RFC 6570 parse/classify/expand.

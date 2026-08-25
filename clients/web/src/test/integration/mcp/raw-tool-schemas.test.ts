@@ -110,6 +110,24 @@ describe("rawToolSchemas override (#1005)", () => {
     ]);
   });
 
+  it("drops a tool whose inputSchema root is not an object, before any client sees it", async () => {
+    // This is why `schemaLint` has no "inputSchema must be an object" rule.
+    // The SDK types `inputSchema` with `type: literal("object")`, so such a
+    // tool fails `ListToolsResultSchema` and `salvageListItems` removes it —
+    // no client can pass it to the lint, and a rule for it could never fire.
+    // If this ever starts returning the tool, that rule becomes worth adding
+    // back and this test is the signal.
+    const started = await start({
+      rawToolSchemas: {
+        echo: { inputSchema: { type: "array", items: { type: "string" } } },
+      },
+    });
+    const connected = await connect(started.url);
+
+    const { tools } = await connected.listAllTools();
+    expect(tools.map((t) => t.name)).toEqual(["get_weather"]);
+  });
+
   it("leaves an unnamed tool's real schema alone", async () => {
     const started = await start({
       rawToolSchemas: { echo: { outputSchema: { type: "object" } } },

@@ -40,7 +40,6 @@ export type SchemaLintRule =
   | "boolean-schema"
   | "type-union"
   | "untyped-schema"
-  | "non-object-root"
   | "remote-ref";
 
 /** One problem found at one location in one schema. */
@@ -275,8 +274,16 @@ function walk(
       path,
       `Bare \`${String(node)}\` used where a schema object is expected.`,
       node
-        ? 'Spell the "anything" schema out — `{"type": "object", "additionalProperties": true}` for a free-form object, or the concrete type if you know it.'
-        : "Remove the property (or the keyword) rather than schema-ing it away with `false`.",
+        ? // `true` accepts any JSON value, and no portable object form says
+          // exactly that — `{}` is the same shape this lint flags as untyped.
+          // So the advice is to narrow, and it says so rather than implying an
+          // equivalent rewrite.
+          'Declare what the value actually is — e.g. `{"type": "object", "additionalProperties": true}` for a free-form object. That narrows the schema deliberately; `true` accepts any JSON value at all.'
+        : // `false` in a property position means the property is FORBIDDEN.
+          // Deleting the entry is not the same thing: with `additionalProperties`
+          // absent (default `true`) the property becomes allowed with any value,
+          // so the suggestion has to preserve the always-false constraint.
+          'Use the object form of the always-false schema — `{"not": {}}`. (Deleting the entry is a different contract: under the default `additionalProperties` the property would then be allowed with any value, not forbidden.)',
     );
     return;
   }
@@ -286,7 +293,7 @@ function walk(
   // is the right place to reject it, so this lint stays quiet and stops here.
   if (!isRecord(node)) return;
 
-  lintNode(node, path, ctx);
+  lintNode(node, path, keyword, ctx);
 
   for (const key of SUBSCHEMA_MAP_KEYWORDS) {
     const map = node[key];
@@ -319,7 +326,12 @@ function walk(
 }
 
 /** Rules that apply to a single schema object, ignoring its children. */
-function lintNode(node: SchemaRecord, path: string, ctx: WalkContext): void {
+function lintNode(
+  node: SchemaRecord,
+  path: string,
+  keyword: string | undefined,
+  ctx: WalkContext,
+): void {
   const type = node.type;
 
   if (Array.isArray(type)) {
@@ -361,14 +373,19 @@ function lintNode(node: SchemaRecord, path: string, ctx: WalkContext): void {
   const constrains = Object.keys(node).some((key) =>
     CONSTRAINING_KEYWORDS.has(key),
   );
-  if (!constrains) {
+  // Under `not`, an always-accepting subschema is the idiomatic spelling of
+  // always-*reject* — `{"not": {}}` is the object form of `false`, and the one
+  // this module's own `boolean-schema` suggestion recommends. Reporting it as
+  // "accepts any value" would be the exact opposite of what it does, so the
+  // rule stops at that position rather than contradicting itself.
+  if (!constrains && keyword !== "not") {
     add(
       ctx,
       "untyped-schema",
       "warning",
       path,
       "Schema carries no validation keyword at all, so it accepts any value — the object-literal spelling of a bare `true`.",
-      'Give it an explicit `type`. For a genuinely free-form value use `{"type": "object", "additionalProperties": true}`.',
+      'Declare what the value actually is — e.g. `{"type": "object", "additionalProperties": true}` for a free-form object. That narrows the schema deliberately, which is the point: as written it constrains nothing.',
     );
   }
 }
@@ -376,37 +393,25 @@ function lintNode(node: SchemaRecord, path: string, ctx: WalkContext): void {
 /**
  * Lint one of a tool's schemas.
  *
- * `inputSchema` gets one extra rule at the root: MCP requires it to describe
- * an object, and the SDK enforces that — its `Tool` schema types `inputSchema`
- * with `type: literal("object")`, so a non-object root is refused by the
- * parser rather than merely degraded.
+ * There is deliberately **no root-level "inputSchema must be an object" rule**,
+ * even though MCP does require that. The SDK's `ToolSchema` types `inputSchema`
+ * with `type: literal("object")`, so a tool whose input root is anything else
+ * fails `ListToolsResultSchema.safeParse`; `salvageListItems` then drops it
+ * before `ManagedToolsState` hands the list to anyone. Verified against a live
+ * server advertising `inputSchema: {type: "array"}` — `listAllTools()` returns
+ * an empty array, so no client can ever pass such a tool to this module.
  *
- * That rule is **scoped to `inputSchema` deliberately**. The same SDK types
- * `outputSchema` as a plain loose object with no `type` constraint at all, so
- * a tool whose output is `{"type": "string"}` is conforming; flagging it would
- * report an error MCP does not require and would fail `--strict` on a valid
- * server.
+ * A rule that cannot fire is worse than no rule: it makes the documentation
+ * claim a check the tool does not perform. The condition is already reported
+ * through the salvage path's malformed-items surface, which is where a dropped
+ * tool legitimately belongs.
  */
 function lintSchema(
   schema: unknown,
   kind: SchemaKind,
   findings: SchemaFinding[],
 ): void {
-  const ctx: WalkContext = { schema: kind, findings };
-  if (kind === "inputSchema" && isRecord(schema)) {
-    const type = schema.type;
-    if (typeof type === "string" && type !== "object") {
-      add(
-        ctx,
-        "non-object-root",
-        "error",
-        "",
-        `Root \`type\` is "${type}". MCP requires a tool's inputSchema to describe an object.`,
-        'Wrap the value in an object schema — `{"type": "object", "properties": {…}}`.',
-      );
-    }
-  }
-  walk(schema, "", undefined, 0, ctx);
+  walk(schema, "", undefined, 0, { schema: kind, findings });
 }
 
 /**

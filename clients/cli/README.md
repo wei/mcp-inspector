@@ -174,11 +174,18 @@ Error: tool "info"
 ```
 
 Severity decides the exit code, not the report: **errors** are constructs a
-shipping MCP client refuses outright (a bare `true` in a `properties` map, a
-non-object schema root), **warnings** are ones handled unevenly (an array-form
-`type`, a remote `$ref`, a schema carrying no validation keyword at all). Only
-errors fail the run — a `--strict` that failed on warnings would be unusable as
-a CI gate against servers that are in fact fine.
+shipping MCP client refuses outright (a bare `true` or `false` where a schema
+object belongs), **warnings** are ones handled unevenly (an array-form `type`,
+a remote `$ref`, a schema carrying no constraining keyword at all). Only errors
+fail the run — a `--strict` that failed on warnings would be unusable as a CI
+gate against servers that are in fact fine.
+
+There is deliberately **no "inputSchema must be an object" check**, even though
+MCP requires one. The SDK types `inputSchema` with `type: literal("object")`,
+so a tool whose input root is anything else fails `ListToolsResultSchema` and
+is dropped from the list before the lint could see it — it is reported through
+the malformed-items path instead. A rule that cannot fire would only make this
+documentation claim a check the CLI does not perform.
 
 The report goes to stderr, so the result on stdout stays parseable. Under
 `--format json` the findings are folded into the same envelope instead

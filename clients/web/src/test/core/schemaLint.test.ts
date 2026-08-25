@@ -131,14 +131,48 @@ describe("lintToolSchemas — boolean-schema", () => {
     expect(findings[0]!.suggestion).toContain("additionalProperties");
   });
 
-  it("flags a bare false, with a different suggestion", () => {
+  it("suggests the always-false object form for a bare false", () => {
+    // `properties: {a: false}` forbids the property. Deleting the entry would
+    // *permit* it with any value under the default `additionalProperties`, so
+    // the suggestion has to preserve the constraint rather than drop it.
     const findings = lintToolSchemas(
       tool({
         inputSchema: { type: "object", properties: { data: false } },
       }),
     );
     expect(rules(findings)).toEqual(["boolean-schema"]);
-    expect(findings[0]!.suggestion).toContain("Remove the property");
+    expect(findings[0]!.suggestion).toContain('{"not": {}}');
+    expect(findings[0]!.suggestion).toContain("different contract");
+    expect(findings[0]!.suggestion).not.toMatch(/^Remove the property/);
+  });
+
+  it('does not flag the `{"not": {}}` form it recommends', () => {
+    // The suggestion above would be self-defeating if this module reported its
+    // own recommended replacement.
+    expect(
+      lintToolSchemas(
+        tool({
+          inputSchema: { type: "object", properties: { data: { not: {} } } },
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("still flags an unconstrained schema elsewhere under a not branch", () => {
+    // The exemption is scoped to the `not` position itself, not inherited by
+    // everything beneath it.
+    const findings = lintToolSchemas(
+      tool({
+        inputSchema: {
+          type: "object",
+          properties: { a: { not: { properties: { b: {} } } } },
+        },
+      }),
+    );
+    expect(rules(findings)).toEqual(["untyped-schema"]);
+    expect(paths(findings)).toEqual([
+      "inputSchema.properties.a.not.properties.b",
+    ]);
   });
 
   it.each([
@@ -274,9 +308,7 @@ describe("lintToolSchemas — type-union", () => {
     expect(findings[0]!.suggestion).toContain("anyOf");
   });
 
-  it("does not raise non-object-root for an array-typed root", () => {
-    // The root rule reads a *string* `type`; an array root is the union rule's
-    // business, and reporting both would name one defect twice.
+  it("raises only the union rule for an array-typed root", () => {
     const findings = lintToolSchemas(
       tool({ inputSchema: { type: ["object", "null"] } }),
     );
@@ -354,38 +386,27 @@ describe("lintToolSchemas — untyped-schema", () => {
   });
 });
 
-describe("lintToolSchemas — non-object-root", () => {
-  it("flags a non-object inputSchema root", () => {
-    const findings = lintToolSchemas(
-      tool({
-        inputSchema: { type: "array", items: { type: "string" } },
-      }),
-    );
-    expect(rules(findings)).toEqual(["non-object-root"]);
-    expect(findings[0]!.severity).toBe("error");
-    expect(findings[0]!.issue).toContain("inputSchema");
-  });
-
-  it("does NOT flag a non-object outputSchema root", () => {
-    // The SDK's `Tool` schema types `inputSchema` with `type: literal("object")`
-    // but `outputSchema` as a plain loose object with no `type` constraint, so
-    // a string-typed output is conforming. Flagging it would report an error
-    // MCP does not require and would fail `--strict` on a valid server.
-    expect(lintToolSchemas(tool({ outputSchema: { type: "string" } }))).toEqual(
-      [],
-    );
-  });
-
-  it("does not flag a nested non-object schema", () => {
-    const findings = lintToolSchemas(
-      tool({
+describe("lintToolSchemas — no root-type rule", () => {
+  // There is deliberately no "inputSchema must be an object" rule: the SDK
+  // types `inputSchema` with `type: literal("object")`, so such a tool fails
+  // `ListToolsResultSchema` and `salvageListItems` drops it before any client
+  // sees it. `raw-tool-schemas.test.ts` pins that live behaviour; these cases
+  // pin that the module stays quiet rather than reporting a check nothing can
+  // reach.
+  it.each([
+    ["a non-object inputSchema root", { inputSchema: { type: "array" } }],
+    ["a non-object outputSchema root", { outputSchema: { type: "string" } }],
+    [
+      "a nested non-object schema",
+      {
         inputSchema: {
           type: "object",
           properties: { a: { type: "array", items: { type: "string" } } },
         },
-      }),
-    );
-    expect(findings).toEqual([]);
+      },
+    ],
+  ])("reports nothing for %s", (_label, overrides) => {
+    expect(lintToolSchemas(tool(overrides))).toEqual([]);
   });
 });
 
