@@ -175,6 +175,9 @@ export class OAuthManager {
       // `authorizationParams` this is pure config off mcp.json, so it lives on
       // the provider rather than in OAuth storage.
       requestRefreshToken: this.oauthConfig.requestRefreshToken,
+      // #2068: lets the provider tell an `offline_access` the user asked for
+      // from one inherited from a previous grant's persisted scope.
+      configuredScope: this.oauthConfig.scope,
     });
 
     provider.setEventTarget(this.params.getEventTarget());

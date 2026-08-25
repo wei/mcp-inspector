@@ -1459,6 +1459,83 @@ describe("InspectorClient OAuth E2E", () => {
       // addition, not what the user asked for.
       expect(scope.split(/\s+/)).toContain("mcp");
     });
+
+    // #2068 — the case that makes the opt-out worth anything to the user who
+    // reported it: a server that already authorized successfully. That grant
+    // persists the AS-granted scope, `offline_access` included, and the
+    // provider reloads it on the next connect. Handing it back unfiltered puts
+    // the token in scope again and `startAuthorization` re-adds
+    // `prompt=consent` off the scope alone — box unchecked, AADSTS90094 intact.
+    it("drops an offline_access inherited from an earlier grant's stored scope", async () => {
+      const transport = transports[1]!;
+      const staticClientId = "test-inherited-offline-client";
+      const staticClientSecret = "test-inherited-offline-secret";
+      const serverConfig = {
+        ...getDefaultServerConfig(),
+        serverType: transport.serverType,
+        ...createOAuthTestServerConfig({
+          requireAuth: true,
+          supportRefreshTokens: true,
+          scopesSupported: ["mcp", "offline_access"],
+          staticClients: [
+            {
+              clientId: staticClientId,
+              clientSecret: staticClientSecret,
+              redirectUris: [testRedirectUrl],
+            },
+          ],
+        }),
+      };
+      server = new TestServerHttp(serverConfig);
+      const port = await server.start();
+      const serverUrl = `http://localhost:${port}`;
+      await waitForOAuthWellKnown(serverUrl);
+
+      const oauthConfig = createTestOAuthConfig({
+        mode: "static",
+        clientId: staticClientId,
+        clientSecret: staticClientSecret,
+        redirectUrl: testRedirectUrl,
+        scope: "mcp",
+      });
+      // Exactly what a completed default-on authorization leaves behind (see
+      // `resolvePersistedScopeAfterGrant`): the scope the AS granted.
+      const mcpUrl = `${serverUrl}${transport.endpoint}`;
+      await oauthConfig.storage.saveScope(mcpUrl, "mcp offline_access");
+
+      client = new InspectorClient(
+        { type: transport.clientType, url: mcpUrl } as MCPServerConfig,
+        {
+          environment: {
+            transport: createTransportNode,
+            oauth: {
+              storage: oauthConfig.storage,
+              navigation: oauthConfig.navigation,
+              redirectUrlProvider: oauthConfig.redirectUrlProvider,
+            },
+          },
+          oauth: {
+            clientId: oauthConfig.clientId,
+            clientSecret: oauthConfig.clientSecret,
+            scope: oauthConfig.scope,
+            requestRefreshToken: false,
+          },
+        },
+      );
+
+      const authUrl = await client.authenticate();
+      if (!authUrl) throw new Error("Expected authorization URL");
+      const scope = authUrl.searchParams.get("scope") ?? "";
+      expect(scope.split(/\s+/)).not.toContain("offline_access");
+      expect(authUrl.searchParams.get("prompt")).toBeNull();
+      expect(scope.split(/\s+/)).toContain("mcp");
+
+      // Filtered on the way out, not in storage — re-checking the box has to
+      // restore the old behavior rather than find the scope destroyed.
+      expect(await oauthConfig.storage.getScope(mcpUrl)).toBe(
+        "mcp offline_access",
+      );
+    });
   });
 
   describe("SEP-2352 AS migration (Streamable HTTP)", () => {

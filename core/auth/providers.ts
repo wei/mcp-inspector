@@ -12,6 +12,7 @@ import type {
 import type { OAuthStorage, SaveClientInformationOptions } from "./storage.js";
 import { generateOAuthState } from "./utils.js";
 import { applyAuthorizationParams } from "./authorizationParams.js";
+import { scopeForDeclinedRefreshGrant } from "./scopes.js";
 
 /**
  * Redirect URL provider. Returns the redirect URL for OAuth flows.
@@ -125,6 +126,16 @@ export type OAuthProviderConfig = {
    * its own a guarantee that `prompt=consent` is absent.
    */
   requestRefreshToken?: boolean;
+  /**
+   * The scope configured for this server (mcp.json / Server Settings), as
+   * distinct from the scope carried in OAuth storage after a previous grant.
+   *
+   * Used only to decide whether an `offline_access` in the effective scope was
+   * *asked for* or merely inherited — see {@link scopeForDeclinedRefreshGrant}.
+   * An explicitly configured one is honored; an inherited one is dropped from
+   * the request when {@link requestRefreshToken} is false. (#2068)
+   */
+  configuredScope?: string;
 };
 
 /**
@@ -148,6 +159,8 @@ export class BaseOAuthClientProvider implements OAuthClientProvider {
   protected authorizationParams?: Record<string, string>;
   /** Declare the `refresh_token` grant in {@link clientMetadata} (#2068). */
   protected requestRefreshToken: boolean;
+  /** Server-configured scope, for the #2068 `offline_access` distinction. */
+  protected configuredScope?: string;
 
   constructor(serverUrl: string, oauthConfig: OAuthProviderConfig) {
     this.serverUrl = serverUrl;
@@ -157,6 +170,7 @@ export class BaseOAuthClientProvider implements OAuthClientProvider {
     this.clientMetadataUrl = oauthConfig.clientMetadataUrl;
     this.authorizationParams = oauthConfig.authorizationParams;
     this.requestRefreshToken = oauthConfig.requestRefreshToken ?? true;
+    this.configuredScope = oauthConfig.configuredScope;
   }
 
   /**
@@ -194,6 +208,16 @@ export class BaseOAuthClientProvider implements OAuthClientProvider {
   }
 
   get scope(): string | undefined {
+    // #2068: filter at the point of *request*, not in storage. This getter is
+    // the one seam both readers go through — `clientMetadata.scope` below, and
+    // the `scope:` argument `OAuthManager.authenticate` hands to the SDK — so
+    // filtering here covers both without a second derivation that could drift.
+    if (!this.requestRefreshToken) {
+      return scopeForDeclinedRefreshGrant(
+        this.cachedScope,
+        this.configuredScope,
+      );
+    }
     return this.cachedScope;
   }
 

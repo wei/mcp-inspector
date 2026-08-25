@@ -539,6 +539,15 @@ export function ServerSettingsForm({
     .includes("offline_access");
   const refreshTokenOptedOut = settings.oauthRequestRefreshToken === false;
 
+  // #2068 — suppressed under EMA for a different reason than the endpoint
+  // overrides: that leg never builds a BaseOAuthClientProvider at all. It
+  // authorizes against the enterprise IdP with its own fixed scope, so this
+  // checkbox cannot influence the request. Say so rather than leaving a control
+  // that looks effective, matching how the overrides annotate themselves.
+  const refreshTokenEmaNote = settings.enterpriseManaged
+    ? " Not applied while Enterprise-managed authorization is on: that flow authorizes against the enterprise IdP with its own scope, which this setting does not reach."
+    : "";
+
   const rejectedParamKeys = authorizationParams
     .map((p) => p.key.trim())
     .filter((key) => isReservedAuthorizationParam(key));
@@ -892,7 +901,7 @@ export function ServerSettingsForm({
               />
               <Checkbox
                 label="Request refresh token"
-                description="When checked, the Inspector registers with the refresh_token grant so it can renew access tokens without a new sign-in. Unchecking it stops the SDK adding offline_access to the requested scope, and so stops the prompt=consent it forces — on Microsoft Entra ID that prompt routes a non-admin user into the admin-consent workflow (AADSTS90094) even after a tenant admin has consented. It removes only that automatic scope: an offline_access you configure in Scopes still forces the prompt. Applies on the next connect, and does not revoke a refresh token already issued or reach a registration the authorization server already holds."
+                description={`When checked, the Inspector registers with the refresh_token grant so it can renew access tokens without a new sign-in. Unchecking it stops the SDK adding offline_access to the requested scope, and so stops the prompt=consent it forces — on Microsoft Entra ID that prompt routes a non-admin user into the admin-consent workflow (AADSTS90094) even after a tenant admin has consented. It removes only that automatic scope: an offline_access you configure in Scopes still forces the prompt. Applies on the next connect, and does not revoke a refresh token already issued or reach a registration the authorization server already holds.${refreshTokenEmaNote}`}
                 checked={settings.oauthRequestRefreshToken ?? true}
                 onChange={(e) =>
                   onOAuthChange({

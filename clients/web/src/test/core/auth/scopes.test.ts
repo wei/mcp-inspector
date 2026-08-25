@@ -4,6 +4,7 @@ import {
   isStrictScopeSuperset,
   resolveEffectiveGrantedScope,
   resolvePersistedScopeAfterGrant,
+  scopeForDeclinedRefreshGrant,
 } from "@inspector/core/auth/scopes.js";
 
 describe("scopes", () => {
@@ -63,5 +64,56 @@ describe("scopes", () => {
         "mcp tools:read",
       );
     });
+  });
+});
+
+describe("scopeForDeclinedRefreshGrant (#2068)", () => {
+  it("drops an inherited offline_access from the requested scope", () => {
+    expect(scopeForDeclinedRefreshGrant("mcp offline_access", "mcp")).toBe(
+      "mcp",
+    );
+  });
+
+  // The persisted scope is what a previous default-on grant left behind, and
+  // the configured scope may be unset entirely (DCR + resource-advertised
+  // scopes). An inherited token is still inherited.
+  it("drops it when no scope is configured at all", () => {
+    expect(scopeForDeclinedRefreshGrant("mcp offline_access", undefined)).toBe(
+      "mcp",
+    );
+  });
+
+  it("keeps an offline_access the user explicitly configured", () => {
+    expect(
+      scopeForDeclinedRefreshGrant("mcp offline_access", "mcp offline_access"),
+    ).toBe("mcp offline_access");
+  });
+
+  it("leaves a scope without offline_access untouched", () => {
+    expect(scopeForDeclinedRefreshGrant("mcp tools:read", "mcp")).toBe(
+      "mcp tools:read",
+    );
+  });
+
+  // Requesting `scope=` empty is not the same as omitting it; collapse to
+  // undefined so the SDK falls back to its own resolution.
+  it("collapses to undefined when offline_access was the only scope", () => {
+    expect(scopeForDeclinedRefreshGrant("offline_access", "")).toBeUndefined();
+  });
+
+  it("passes an absent scope through", () => {
+    expect(scopeForDeclinedRefreshGrant(undefined, "mcp")).toBeUndefined();
+  });
+
+  it("matches whole tokens, not substrings", () => {
+    expect(
+      scopeForDeclinedRefreshGrant("mcp offline_access_extra", "mcp"),
+    ).toBe("mcp offline_access_extra");
+  });
+
+  it("tolerates irregular whitespace", () => {
+    expect(
+      scopeForDeclinedRefreshGrant("  mcp   offline_access  ", "mcp"),
+    ).toBe("mcp");
   });
 });

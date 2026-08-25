@@ -818,6 +818,33 @@ describe("ServerSettingsForm", () => {
     ).not.toBeInTheDocument();
   });
 
+  // #2068 — EMA never builds the Inspector's OAuth provider at all; it
+  // authorizes against the enterprise IdP with a fixed `openid offline_access`.
+  // The checkbox therefore cannot affect that request and must say so.
+  it("says the refresh-token setting is not applied under EMA", () => {
+    const { rerender } = renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{ ...emptySettings, enterpriseManaged: true }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.getByText(/which this setting does not reach/),
+    ).toBeInTheDocument();
+
+    rerender(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{ ...emptySettings, enterpriseManaged: false }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.queryByText(/which this setting does not reach/),
+    ).not.toBeInTheDocument();
+  });
+
   // #2018 — custom authorization-request parameters.
   it("shows the empty hint for authorization parameters when none are set", () => {
     renderWithMantine(
@@ -1110,7 +1137,7 @@ describe("ServerSettingsForm", () => {
     );
   });
 
-  it("says the endpoint overrides are unused under enterprise-managed auth", () => {
+  it("says the EMA-suppressed controls are unused under enterprise-managed auth", () => {
     const { rerender } = renderWithMantine(
       <ServerSettingsForm
         {...baseHandlers}
@@ -1118,11 +1145,15 @@ describe("ServerSettingsForm", () => {
         expandedSections={["oauth"]}
       />,
     );
+    // Three controls carry this notice: the two endpoint overrides (#1906) and
+    // the refresh-token checkbox (#2068). The count is asserted rather than
+    // merely "present" so a control that stops annotating itself — or a new one
+    // that never starts — is caught here.
     expect(
       screen.getAllByText(
         /Not applied while Enterprise-managed authorization is on/,
       ),
-    ).toHaveLength(2);
+    ).toHaveLength(3);
 
     rerender(
       <ServerSettingsForm
