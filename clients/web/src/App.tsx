@@ -2909,6 +2909,19 @@ function App() {
         // active-server lock is never released. Before the EMA guard, since a
         // stuck session is worth clearing whichever way the error classifies.
         await client.disconnect().catch(() => {});
+        // `activeServerId` is deliberately NOT cleared here, even though the
+        // disconnect above often cannot announce itself: it emits only on a
+        // status *change*, and the commonest failure — a rejected token
+        // exchange — throws inside `completeOAuthFlow` before the reconnect
+        // runs, so this freshly built client is still at its initial
+        // `"disconnected"` and the listener that would clear it never fires.
+        //
+        // That looks like a leak and is not. The next step after a callback
+        // failure is the re-auth banner below, and its "Authorize again" hands
+        // `clearServerOAuthState` the live client only when the banner's server
+        // *is* the active one. Releasing it here would pass `null` instead, and
+        // the stale tokens would never be cleared from the client that holds
+        // them — the one thing that recovery exists to do.
         if (isEmaClientNotConfiguredError(err)) {
           notifications.show({
             title: `Cannot connect to "${server.name}"`,

@@ -468,6 +468,7 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
     readResourceState?: { status?: string };
     currentLogLevel?: string;
     activeTab?: string;
+    activeServer?: string;
     erroredServerId?: string;
     initializeResult?: { serverInfo: { name: string; version: string } };
     onActiveTabChange: (tab: string) => void;
@@ -549,6 +550,7 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
       <span data-testid="errored-server">
         {props.erroredServerId ?? "none"}
       </span>
+      <span data-testid="active-server">{props.activeServer ?? "none"}</span>
       <button onClick={() => props.onActiveTabChange("Servers")}>
         switch-servers-tab
       </button>
@@ -2604,8 +2606,15 @@ describe("App OAuth callback issuer-binding failures (#1808)", () => {
     await waitFor(() =>
       expect(screen.getByTestId("errored-server")).toHaveTextContent("A"),
     );
-    // `resumeAfterOAuth` carries the reconnect, which can reject while holding
-    // the status at "connecting", so the attempt is torn down explicitly.
+    // The active server is deliberately retained. "Authorize again" on the
+    // re-auth banner only hands `clearServerOAuthState` the live client when
+    // the banner's server is the active one, so releasing it here would leave
+    // the stale tokens on the client that holds them. Asserted so a later
+    // "cleanup" of the apparent leak fails here rather than silently breaking
+    // the recovery.
+    expect(screen.getByTestId("active-server")).toHaveTextContent("A");
+    // The teardown still runs, for the case where the reconnect is what
+    // rejected and the status really is left at "connecting".
     const client = clientInstances[0] as EventTarget & {
       disconnect: ReturnType<typeof vi.fn>;
     };
