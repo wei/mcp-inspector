@@ -12,12 +12,18 @@ import {
   mergeSecretsIntoStored,
   normalizeServerType,
   normalizeStoredMetadata,
+  applyStdioSettingsToConfig,
+  stdioConfigFieldsFromSettings,
   oauthAuthorizationParamsFromSettings,
   oauthEndpointOverridesFromSettings,
   serverEntriesToMcpConfig,
   serializeMcpConfig,
   storedFieldsToInspectorSettings,
 } from "@inspector/core/mcp/serverList.js";
+import type {
+  InspectorServerSettings,
+  MCPServerConfig,
+} from "@inspector/core/mcp/types.js";
 import {
   SECRET_FIELD_OAUTH_CLIENT_SECRET,
   envSecretField,
@@ -1831,5 +1837,124 @@ describe("cleanAuthorizationParams", () => {
     expect(settings?.oauthAuthorizationParams).toEqual([
       { key: "kc_idp_hint", value: "corp" },
     ]);
+  });
+});
+
+describe("stdio env/cwd settings → config mapping (#2096)", () => {
+  // `env` and `cwd` are edited as settings but read by the transport off the
+  // config, so both sides of the wire have to derive one from the other. This
+  // is the single mapping they share — the PUT write-through persists it, the
+  // web client applies it when constructing an InspectorClient.
+  const settings = (
+    over: Partial<InspectorServerSettings> = {},
+  ): InspectorServerSettings => ({
+    headers: [],
+    env: [],
+    metadata: {},
+    connectionTimeout: 0,
+    requestTimeout: 0,
+    taskTtl: 60000,
+    maxFetchRequests: 1000,
+    roots: [],
+    ...over,
+  });
+
+  describe("stdioConfigFieldsFromSettings", () => {
+    it("collapses the pair rows into a record and trims the cwd", () => {
+      expect(
+        stdioConfigFieldsFromSettings(
+          settings({
+            env: [
+              { key: "FOO", value: "after" },
+              { key: "BAR", value: "" },
+            ],
+            cwd: "  /tmp/after  ",
+          }),
+        ),
+      ).toEqual({ env: { FOO: "after", BAR: "" }, cwd: "/tmp/after" });
+    });
+
+    it("reports an empty list and a blank cwd as unset, i.e. cleared", () => {
+      // The modal deletes a value by emptying it, so "no rows" cannot mean
+      // "leave it alone" — it has to remove the field.
+      expect(
+        stdioConfigFieldsFromSettings(settings({ env: [], cwd: "   " })),
+      ).toEqual({ env: undefined, cwd: undefined });
+      // A row the user started and left blank is dropped, so it does not
+      // materialize an env consisting of one nameless variable.
+      expect(
+        stdioConfigFieldsFromSettings(
+          settings({ env: [{ key: "  ", value: "x" }] }),
+        ).env,
+      ).toBeUndefined();
+    });
+  });
+
+  describe("applyStdioSettingsToConfig", () => {
+    const stdio: MCPServerConfig = {
+      type: "stdio",
+      command: "node",
+      args: ["server.js"],
+      env: { FOO: "before" },
+      cwd: "/tmp/before",
+    };
+
+    it("overwrites env/cwd and leaves the rest of the config alone", () => {
+      expect(
+        applyStdioSettingsToConfig(
+          stdio,
+          settings({
+            env: [{ key: "FOO", value: "after" }],
+            cwd: "/tmp/after",
+          }),
+        ),
+      ).toEqual({
+        type: "stdio",
+        command: "node",
+        args: ["server.js"],
+        env: { FOO: "after" },
+        cwd: "/tmp/after",
+      });
+    });
+
+    it("removes the fields the settings cleared", () => {
+      expect(applyStdioSettingsToConfig(stdio, settings())).toEqual({
+        type: "stdio",
+        command: "node",
+        args: ["server.js"],
+      });
+    });
+
+    it("does not mutate the config it was given", () => {
+      const before = { ...stdio };
+      applyStdioSettingsToConfig(stdio, settings());
+      expect(stdio).toEqual(before);
+    });
+
+    it("treats a typeless entry as stdio, matching the on-disk default", () => {
+      // An `mcp.json` entry written without a `type` key is stdio (the Claude
+      // Desktop convention), and the modal edits its env like any other.
+      const applied = applyStdioSettingsToConfig(
+        { command: "node" } as MCPServerConfig,
+        settings({ env: [{ key: "FOO", value: "after" }] }),
+      );
+      expect(applied).toEqual({ command: "node", env: { FOO: "after" } });
+    });
+
+    it("returns a non-stdio config untouched", () => {
+      // An HTTP server carries neither field, matching the modal's stdio-only
+      // UI — applying an empty mirror to it must not invent one.
+      const http: MCPServerConfig = {
+        type: "streamable-http",
+        url: "https://mcp.example.com/mcp",
+      };
+      expect(applyStdioSettingsToConfig(http, settings())).toBe(http);
+    });
+
+    it("returns the config untouched when there are no settings", () => {
+      // A server with no settings node has nothing to apply; treating that as
+      // an empty mirror would clear an env the file does hold.
+      expect(applyStdioSettingsToConfig(stdio, undefined)).toBe(stdio);
+    });
   });
 });
