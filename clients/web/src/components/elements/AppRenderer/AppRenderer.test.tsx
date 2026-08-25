@@ -1,5 +1,5 @@
 import { createRef, StrictMode } from "react";
-import { act } from "@testing-library/react";
+import { act, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { AppBridge } from "@modelcontextprotocol/ext-apps/app-bridge";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/client";
@@ -546,15 +546,30 @@ describe("AppRenderer", () => {
         // MutationObserver callbacks are delivered on a microtask.
         await Promise.resolve();
       });
-      expect(bridge.sendHostContextChange).toHaveBeenCalledWith(
-        expect.objectContaining({
-          theme: "dark",
-          styles: expect.objectContaining({
-            variables: expect.objectContaining({
-              "--color-background-primary": "#101113",
+      // `waitFor`, not a bare assertion after the single microtask above: how
+      // many ticks happy-dom takes to deliver the MutationObserver callback is
+      // load-dependent, so under a full parallel run the observer can still be
+      // pending here. Observed failing exactly once that way, with 0 calls.
+      //
+      // The default 1000ms then turned out not to be enough either — it failed
+      // twice in a row in `npm run ci` (at ~1021ms, still 0 calls) while
+      // passing every time this file runs alone, which is the signature of a
+      // budget that is too tight rather than of a broken observer. Raised
+      // rather than retried: a `waitFor` that is generous costs nothing on the
+      // passing path, since it returns as soon as the assertion holds.
+      await waitFor(
+        () =>
+          expect(bridge.sendHostContextChange).toHaveBeenCalledWith(
+            expect.objectContaining({
+              theme: "dark",
+              styles: expect.objectContaining({
+                variables: expect.objectContaining({
+                  "--color-background-primary": "#101113",
+                }),
+              }),
             }),
-          }),
-        }),
+          ),
+        { timeout: 5000 },
       );
     } finally {
       getComputedStyleSpy.mockRestore();

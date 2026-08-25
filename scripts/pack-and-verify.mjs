@@ -29,7 +29,19 @@
  *   4. runs the installed `mcp-inspector` bin: `--help`, `--cli`/`--tui` help
  *      dispatch, a real `--cli` `tools/list` over stdio, and a prod `--web` boot
  *      that must serve `/` (HTTP 200) with the injected auth-token global from
- *      the shipped `dist` — all from the INSTALLED location, not the repo.
+ *      the shipped `dist` — all from the INSTALLED location, not the repo;
+ *   5. drives the **MCP Apps** path in headless Chromium against that same
+ *      installed `--web` server — connect → open app → `data-app-status="ready"`
+ *      (#2003). Asserting the sandbox proxy page merely *exists* (step 2/3) is
+ *      not the same as loading a widget through it: a rename with a stale
+ *      reader, or a wrong position relative to `clients/web/build`, ships a file
+ *      that is present and unreachable. The flow is shared with `smoke:web:app`
+ *      via `lib/mcp-app-flow.mjs` so the deep-link shape cannot drift between
+ *      the repo-tree check and this one.
+ *
+ * The **client** under test comes from the install; the **test server** stays a
+ * repo fixture (`test-servers/build/server-composable.js`) — it is not in the
+ * tarball and should not be.
  *
  * Exits non-zero on the first failure. Requires network access (step 3 pulls the
  * package's runtime dependencies from the registry) — it is a local / release
@@ -44,6 +56,15 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { hasExited, removeSafe, stopChild } from "./lib/child-cleanup.mjs";
+import {
+  APP_TOOL,
+  attachPageDiagnostics,
+  buildAppDeepLink,
+  composableServerPath,
+  driveAppFlow,
+  loadChromium,
+  startMcpAppServer,
+} from "./lib/mcp-app-flow.mjs";
 import { winShellArgs } from "./lib/win-shell-args.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
@@ -53,6 +74,7 @@ const testServer = join(
   "build",
   "test-server-stdio.js",
 );
+const composableServer = composableServerPath(repoRoot);
 
 // Mirrors INSPECTOR_API_TOKEN_GLOBAL in core/mcp/remote/constants.ts; kept as a
 // literal because this plain .mjs script can't import the TS source.
@@ -70,6 +92,10 @@ let workDir = null;
 // the port and could even serve a stale false-200 to a later run (verifyWeb's
 // own `finally { stop() }` is skipped when fail() calls process.exit()).
 let webChild = null;
+// The composable MCP App test server spawned for the step-5 App render, if any.
+// Same reasoning as `webChild`: fail() calls process.exit(), which skips the
+// `finally` that would otherwise stop it, and an orphan holds its port.
+let appServerChild = null;
 
 const LABEL = "pack:verify";
 
@@ -82,8 +108,10 @@ function fail(message) {
   // exiting 1, so an ENOTEMPTY could only bury the real diagnostic under an
   // rmSync stack (and skip the "tarball retained" hint below), never turn a
   // green run red.
-  if (webChild && !hasExited(webChild)) {
-    webChild.kill("SIGTERM");
+  for (const child of [webChild, appServerChild]) {
+    if (child && !hasExited(child)) {
+      child.kill("SIGTERM");
+    }
   }
   if (workDir) {
     removeSafe(workDir, { label: LABEL });
@@ -117,14 +145,22 @@ function runInherit(command, args, cwd = repoRoot) {
   return r.status;
 }
 
-/** Build the bundled stdio test server if it isn't present yet. */
+/**
+ * Build the bundled test servers if they aren't present yet — both the stdio
+ * entry (step 4b) and the composable one (step 5). One `tsc -p test-servers`
+ * emits both, so this builds once and checks each entry.
+ */
 function ensureTestServer() {
-  if (existsSync(testServer)) return;
+  if (existsSync(testServer) && existsSync(composableServer)) return;
   step("building test-servers (missing build output)...");
   const status = runInherit("npx", ["tsc", "-p", "test-servers", "--noCheck"]);
-  if (status !== 0 || !existsSync(testServer)) {
+  if (
+    status !== 0 ||
+    !existsSync(testServer) ||
+    !existsSync(composableServer)
+  ) {
     fail(
-      "could not build the stdio test server (test-servers/build/test-server-stdio.js)",
+      "could not build the test servers (test-servers/build/{test-server-stdio,server-composable}.js)",
     );
   }
 }
@@ -376,7 +412,8 @@ try {
 
   console.log(
     "\npack:verify OK — published tarball installs clean and the real bin drives " +
-      "web (prod / served dist), cli (stdio tools/list), and tui (help) end to end.",
+      "web (prod / served dist + an MCP App rendered through the shipped sandbox " +
+      "proxy), cli (stdio tools/list), and tui (help) end to end.",
   );
 } catch (err) {
   // Unexpected throw (not via fail()) — route through fail() for consistent
@@ -404,6 +441,15 @@ async function verifyWeb(bin, cwd) {
       CLIENT_PORT: port,
       HOST: host,
       MCP_INSPECTOR_API_TOKEN: token,
+      // Isolate the catalog, for the reason #1977 gave the web smokes: without
+      // it the backend falls back to the developer's real
+      // ~/.mcp-inspector/mcp.json. That was merely untidy while this step only
+      // did `GET /`; the App deep link below *persists a server row*, which
+      // would make this both destructive and non-deterministic (a second run
+      // finds the row already there and races hydration). Assigned after the
+      // spread so an inherited MCP_CATALOG_PATH is overridden, not obeyed. The
+      // file lives in the throwaway consumer dir, removed with it.
+      MCP_CATALOG_PATH: join(cwd, "web-catalog.json"),
       MCP_AUTO_OPEN_ENABLED: "false",
     },
     stdio: ["ignore", "inherit", "inherit"],
@@ -464,7 +510,123 @@ async function verifyWeb(bin, cwd) {
     if (!body.includes(token)) {
       fail("`--web` served HTML is missing the injected auth-token value");
     }
+
+    // Step 5, riding the same boot: drive the MCP Apps path in a real browser
+    // against this installed server. Throws rather than calling fail() so the
+    // `finally` below still stops the `--web` child — the outer catch routes
+    // the throw back through fail() for the usual cleanup and exit.
+    //
+    // `whenExits` lets a mid-run server death be reported as the real cause
+    // instead of two stacked 45s selector timeouts. Promise.race attaches a
+    // handler to it either way, so a rejection arriving later (during stop())
+    // is never an unhandled one.
+    const whenExits = new Promise((_, reject) => {
+      child.on("exit", (code) =>
+        reject(
+          new Error(
+            `\`--web\` exited (code ${code}) during the App render — see output above`,
+          ),
+        ),
+      );
+    });
+    await verifyAppRender(`http://${host}:${port}`, token, whenExits);
   } finally {
     await stop();
   }
+}
+
+/**
+ * Drive **connect → open app → widget ready** against the installed `--web`
+ * server (#2003).
+ *
+ * This is what makes the sandbox proxy's *reachability* a checked property
+ * rather than an inferred one. Steps 2 and 3 assert the file is in the tarball
+ * and on disk at the right path; neither loads a widget through it, so a
+ * renamed file with a stale reader, or a future `"files"` / `.npmignore` edit
+ * that moves it relative to `clients/web/build`, ships present-but-unreachable
+ * and passes both — exactly the shape of #1859.
+ *
+ * The App test server is a repo fixture spawned here; only the *client* comes
+ * from the install. Everything downstream of the deep link is shared with
+ * `smoke:web:app` through `lib/mcp-app-flow.mjs`, so the two cannot drift.
+ */
+async function verifyAppRender(baseUrl, token, whenWebServerExits) {
+  step(
+    "verifying an MCP App renders end to end against the installed `--web` server...",
+  );
+  ensureTestServer();
+
+  let browser = null;
+  let mcpUrl = null;
+  try {
+    // `startMcpAppServer` publishes the child through `onSpawn` before it waits
+    // for readiness, so teardown reaches it on every throw path — the readiness
+    // timeout included (#2000).
+    mcpUrl = await startMcpAppServer({
+      repoRoot,
+      onSpawn: (child) => {
+        appServerChild = child;
+      },
+      label: LABEL,
+    });
+    browser = await loadChromium(repoRoot);
+    const page = await browser.newPage();
+    const diagnostics = attachPageDiagnostics(page);
+
+    try {
+      await Promise.race([
+        whenWebServerExits,
+        driveAppFlow({
+          page,
+          url: buildAppDeepLink({
+            baseUrl,
+            mcpUrl,
+            token,
+            appArgs: { title: LABEL },
+          }),
+        }),
+      ]);
+    } catch (err) {
+      const notes = [
+        ...diagnostics.pageErrors,
+        ...diagnostics.fatalConsole().map((m) => `console: ${m}`),
+      ];
+      throw new Error(
+        `${err instanceof Error ? err.message : String(err)}${
+          notes.length ? ` — page diagnostics: ${notes.join("; ")}` : ""
+        }`,
+      );
+    }
+
+    // Hard failures: any uncaught sync page error, plus the console errors that
+    // are the async half of the same class. Benign console noise stays a note.
+    const fatal = diagnostics.fatal();
+    if (fatal.length > 0) {
+      throw new Error(`app logged uncaught error(s): ${fatal.join("; ")}`);
+    }
+    const benign = diagnostics.benignConsole();
+    if (benign.length > 0) {
+      console.log(
+        `pack:verify note — ${benign.length} non-fatal console error(s): ${benign.join("; ")}`,
+      );
+    }
+  } finally {
+    if (browser) {
+      try {
+        await browser.close();
+      } catch {
+        // best-effort
+      }
+    }
+    if (appServerChild) {
+      const child = appServerChild;
+      appServerChild = null;
+      await stopChild(child, { label: LABEL, what: "MCP App test server" });
+    }
+  }
+
+  console.log(
+    `pack:verify — installed \`--web\` opened "${APP_TOOL}" from ${mcpUrl}; ` +
+      `widget reached data-app-status="ready" through the shipped sandbox proxy`,
+  );
 }

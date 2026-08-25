@@ -26,7 +26,7 @@ import {
 import {
   buildOAuthConnectionState,
   hasPersistedOAuthServerState,
-  isAccessTokenUsable,
+  isAccessTokenProvablyUnexpired,
   isServerOAuthConfigured,
   protocolFromOAuthConfig,
 } from "../auth/connection-state.js";
@@ -522,9 +522,12 @@ export class OAuthManager {
    * satisfied without an authorization-server round-trip.
    *
    * Returns `true` for `insufficient_scope` when stored + token scope cover the
-   * SEP-2350 union. For `token_expired`, returns `true` when a usable access
-   * token is already in storage. `invalid_token` and `unauthorized` always
-   * return `false` — the resource server explicitly rejected the credential.
+   * SEP-2350 union. For `token_expired`, returns `true` only when storage holds
+   * a *provably* unexpired token — a JWT whose `exp` is still in the future. An
+   * opaque token carries no local expiry evidence, so the resource server's
+   * verdict stands and re-authorization proceeds. `invalid_token` and
+   * `unauthorized` always return `false` — the resource server explicitly
+   * rejected the credential.
    */
   async checkAuthChallengeSatisfied(
     challenge: AuthChallenge,
@@ -542,7 +545,8 @@ export class OAuthManager {
 
     if (challenge.reason !== "insufficient_scope") {
       return (
-        challenge.reason === "token_expired" && isAccessTokenUsable(tokens)
+        challenge.reason === "token_expired" &&
+        isAccessTokenProvablyUnexpired(tokens)
       );
     }
 

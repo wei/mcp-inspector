@@ -17,6 +17,14 @@ export default defineConfig({
   platform: "node",
   noExternal: [/^@inspector\/core/],
   external: [
+    // `undici` MUST stay external. It is CommonJS, so inlining it rewrites
+    // `import("undici")` to a relative chunk whose `require("assert")` hits
+    // esbuild's ESM `__require` shim and throws "Dynamic require of \"assert\"
+    // is not supported" — and because the specifier was rewritten at build time,
+    // no user-side install can ever satisfy it (#2067). It is declared in the
+    // ROOT manifest only, so tsup cannot infer this from a nearest-manifest
+    // lookup; the entry has to be explicit.
+    "undici",
     "commander",
     "open",
     "pino",
@@ -36,6 +44,12 @@ export default defineConfig({
     "proper-lockfile",
     "@modelcontextprotocol/client",
     "@modelcontextprotocol/core",
+    // Root-declared and reached through `core/mcp/apps.ts`, so it must be
+    // external here like every other root runtime dependency — which client
+    // actually reaches it is a function of what `core/` imports, not of this
+    // client's own code, so all three lists carry it (AGENTS.md). The CLI was
+    // inlining it; the #2067 guard surfaced that.
+    "@modelcontextprotocol/ext-apps",
   ],
   esbuildOptions(options) {
     options.alias = {

@@ -27,6 +27,15 @@ const mockedMcpAuth = vi.mocked(mcpAuth);
 
 const SERVER_URL = "https://example.com/mcp";
 
+/** Minimal unsigned JWT carrying only `exp` (epoch seconds). */
+function jwtWithExp(expSec: number): string {
+  const payload = btoa(JSON.stringify({ exp: expSec }))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+  return `header.${payload}.sig`;
+}
+
 function createMockParams(
   overrides?: Partial<OAuthManagerParams>,
 ): OAuthManagerParams {
@@ -988,10 +997,10 @@ describe("OAuthManager", () => {
       ).toBe(false);
     });
 
-    it("returns true for token_expired when a usable access token exists", async () => {
+    it("returns true for token_expired when a provably unexpired JWT exists", async () => {
       const params = createMockParams();
       storageOf(params).getTokens.mockResolvedValue({
-        access_token: "tok",
+        access_token: jwtWithExp(Math.floor(Date.now() / 1000) + 3600),
         token_type: "Bearer",
       });
       const manager = new OAuthManager(params);
@@ -999,6 +1008,36 @@ describe("OAuthManager", () => {
       expect(
         await manager.checkAuthChallengeSatisfied({ reason: "token_expired" }),
       ).toBe(true);
+    });
+
+    it("returns false for token_expired when the stored JWT has expired", async () => {
+      const params = createMockParams();
+      storageOf(params).getTokens.mockResolvedValue({
+        access_token: jwtWithExp(Math.floor(Date.now() / 1000) - 60),
+        token_type: "Bearer",
+      });
+      const manager = new OAuthManager(params);
+
+      expect(
+        await manager.checkAuthChallengeSatisfied({ reason: "token_expired" }),
+      ).toBe(false);
+    });
+
+    it("returns false for token_expired when the stored token is opaque", async () => {
+      // Regression guard for #2051: an opaque token has no local expiry
+      // evidence, so it must not outvote the resource server's verdict and
+      // short-circuit re-authorization into replaying a dead credential.
+      const params = createMockParams();
+      storageOf(params).getTokens.mockResolvedValue({
+        access_token: "opaque-tok",
+        token_type: "Bearer",
+        expires_in: 900,
+      });
+      const manager = new OAuthManager(params);
+
+      expect(
+        await manager.checkAuthChallengeSatisfied({ reason: "token_expired" }),
+      ).toBe(false);
     });
 
     it("returns false for invalid_token even when a locally valid token exists", async () => {

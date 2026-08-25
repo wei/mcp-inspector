@@ -24,8 +24,10 @@ import type { LogEvent } from "pino";
 import { Hono } from "hono";
 import type { Context, Env, Next } from "hono";
 import { streamSSE } from "hono/streaming";
+import { bodyLimit } from "hono/body-limit";
 import { watch as chokidarWatch, type FSWatcher } from "chokidar";
 import { createTransportNode } from "../../node/transport.js";
+import { createProxyFetch } from "../../node/proxyFetch.js";
 import type {
   RemoteConnectRequest,
   RemoteSendRequest,
@@ -41,6 +43,7 @@ import {
 } from "../../types.js";
 import type {
   InspectorServerSettings,
+  RequestMetadata,
   MCPConfig,
   MCPServerConfig,
   StdioServerConfig,
@@ -254,6 +257,23 @@ export interface RemoteServerOptions {
   /** Optional sandbox URL for MCP Apps tab. When set, GET /api/config includes sandboxUrl. */
   sandboxUrl?: string;
 
+  /**
+   * Publish a fully-wrapped MCP App document to the backend's dedicated
+   * app-origin listener and return the URL to load it from (#2056). When set,
+   * `POST /api/app-document` is served; when absent — or when it returns
+   * `null`, meaning the listener never bound — the route answers 503 and the
+   * browser falls back to the default opaque-origin `srcdoc` render.
+   *
+   * Supplied by the web backends only. It is an option rather than a route
+   * built here because the listener is a `clients/web/server` concern; this
+   * module owns nothing but the authenticated seam the browser reaches it
+   * through.
+   */
+  publishAppDocument?: (doc: {
+    html: string;
+    csp?: string;
+  }) => { url: string } | null;
+
   /** Initial config for GET /api/config. Caller must pass this (e.g. from webServerConfigToInitialPayload(config)). */
   initialConfig: InitialConfigPayload;
 
@@ -276,6 +296,50 @@ export interface RemoteServerOptions {
    * tests and any embedder that doesn't care get.
    */
   secretStorageResolver?: () => Promise<SecretStorageInfo | undefined>;
+}
+
+/**
+ * Upper bound on a single MCP App document accepted by `POST /api/app-document`
+ * (#2056). Counted in UTF-16 code units, which is what `String.length` gives —
+ * a loose but cheap proxy for bytes, and it only has to keep a runaway or
+ * hostile payload from being pinned in the backend's memory. Generous: a real
+ * app inlines its own scripts and styles into this one document.
+ */
+const MAX_APP_DOCUMENT_CHARS = 8 * 1024 * 1024;
+
+/**
+ * Upper bound on the request BODY, in bytes, enforced by `bodyLimit` *before*
+ * anything is parsed. {@link MAX_APP_DOCUMENT_CHARS} alone is not enough: it is
+ * checked after `c.req.json()` has already buffered and parsed the whole
+ * request, so an unbounded body — or one whose bulk sits in `csp` or in keys
+ * the route never reads — is fully materialized in memory before being
+ * rejected. Generous relative to the document bound because JSON escaping
+ * inflates the payload (`<` stays one byte, but a `"` or a newline becomes
+ * two, and non-BMP text more), so this must not reject a document the char
+ * check would accept.
+ */
+const MAX_APP_DOCUMENT_BODY_BYTES = 24 * 1024 * 1024;
+
+/**
+ * Upper bound on the per-app CSP policy string. Unlike the document, this is
+ * retained for the life of the published entry, and a real policy is a few
+ * hundred characters — an app pushing more is not describing sources.
+ */
+const MAX_APP_CSP_CHARS = 8 * 1024;
+
+/**
+ * Whether a string is safe to emit as an HTTP header VALUE.
+ *
+ * The published `csp` is handed to `res.writeHead()` verbatim by the app-origin
+ * controller. Node validates header values there and throws
+ * `ERR_INVALID_CHAR` **synchronously inside the request handler** — outside
+ * this route's error handling, on a request this route is not even part of —
+ * so a CR/LF or NUL accepted here surfaces later as a thrown listener rather
+ * than a 400. Restrict to tab plus printable ASCII, which is stricter than RFC
+ * 9110 field-value grammar and is all a CSP policy needs.
+ */
+function isHeaderSafeValue(value: string): boolean {
+  return !/[^\t\x20-\x7e]/.test(value);
 }
 
 export interface CreateRemoteAppResult {
@@ -705,6 +769,73 @@ export function createRemoteApp(
     return c.json(payload);
   });
 
+  /**
+   * Hand the backend a wrapped MCP App document and get back the URL its
+   * dedicated origin serves it from (#2056).
+   *
+   * The browser is what holds the document — it read the `ui://` resource over
+   * the MCP connection and wrapped it — so the only way it can reach a real
+   * HTTP origin is to hand the bytes back. This route is the authenticated
+   * seam for that; the returned URL is unguessable and is served by a separate
+   * listener on its own port, which is what makes the app's origin real
+   * instead of opaque.
+   */
+  app.post(
+    "/api/app-document",
+    // Before the parse, not after: see MAX_APP_DOCUMENT_BODY_BYTES.
+    bodyLimit({
+      maxSize: MAX_APP_DOCUMENT_BODY_BYTES,
+      onError: (c) => c.json({ error: "Document too large" }, 413),
+    }),
+    async (c) => {
+      const publish = options.publishAppDocument;
+      if (!publish) {
+        return c.json({ error: "App-origin hosting is not available" }, 503);
+      }
+      let parsed: unknown;
+      try {
+        parsed = await c.req.json();
+      } catch {
+        return c.json({ error: "Invalid JSON body" }, 400);
+      }
+      // `null` and `[1,2]` are both valid JSON, so `c.req.json()` resolving is
+      // not proof there is an object to destructure — and destructuring `null`
+      // here would throw OUTSIDE the try above, turning a malformed body into a
+      // 500 instead of the 400 every other bad shape gets.
+      if (
+        parsed === null ||
+        typeof parsed !== "object" ||
+        Array.isArray(parsed)
+      ) {
+        return c.json({ error: "Invalid JSON body" }, 400);
+      }
+      const { html, csp } = parsed as { html?: unknown; csp?: unknown };
+      if (typeof html !== "string" || html === "") {
+        return c.json({ error: "Missing html" }, 400);
+      }
+      if (csp !== undefined && typeof csp !== "string") {
+        return c.json({ error: "csp must be a string" }, 400);
+      }
+      if (csp !== undefined && !isHeaderSafeValue(csp)) {
+        // Rejected here rather than sanitized: a policy carrying a control
+        // character is not a policy with a stray byte in it, it is a caller
+        // doing something this route has no honest interpretation of.
+        return c.json({ error: "csp is not a valid header value" }, 400);
+      }
+      if (html.length > MAX_APP_DOCUMENT_CHARS) {
+        return c.json({ error: "Document too large" }, 413);
+      }
+      if (csp !== undefined && csp.length > MAX_APP_CSP_CHARS) {
+        return c.json({ error: "csp too large" }, 413);
+      }
+      const published = publish({ html, csp });
+      if (!published) {
+        return c.json({ error: "App-origin hosting is not available" }, 503);
+      }
+      return c.json(published);
+    },
+  );
+
   app.post("/api/mcp/connect", async (c) => {
     let body: RemoteConnectRequest;
     try {
@@ -1054,7 +1185,14 @@ export function createRemoteApp(
     }
 
     try {
-      const res = await fetch(url, {
+      // Proxy-aware, not the bare global. This route is the browser's ONLY way
+      // out to the network: the web client's `environment.fetch` is
+      // `createRemoteFetch()`, which forwards OAuth discovery and token
+      // requests here. Left on the global `fetch`, a corporate-proxy user could
+      // connect to a server but never authorize against it — and Node's native
+      // `NODE_USE_ENV_PROXY` does not cover them either, being unsupported at
+      // our 22.19 engine floor (#2067).
+      const res = await (createProxyFetch() ?? fetch)(url, {
         method,
         headers: new Headers(headers),
         body: reqBody,
@@ -1212,6 +1350,20 @@ export function createRemoteApp(
   // credentials are intentionally lost on first read (hard cutover per
   // #1358 decision 4). Users re-enter via the form or hand-edit into the
   // flat shape.
+  // The *container* `_meta` requires — a plain JSON object.
+  //
+  // Value-level validity is deliberately not checked here. Values are
+  // arbitrary JSON (#1910), and the one class that survives `JSON.parse` yet
+  // cannot be sent — a non-finite number, from a literal like `1e400` in a
+  // hand-edited catalog — is filtered **per key** by
+  // `normalizeStoredMetadata`, which every read routes through. Rejecting the
+  // whole field here instead would cost a user every other key they had
+  // configured, for one bad value.
+  //
+  // Note the wire cannot carry the bad case at all: a client's own
+  // `JSON.stringify` turns `Infinity` into `null` before the request is sent.
+  const isJsonObject = (v: unknown): v is RequestMetadata =>
+    v !== null && typeof v === "object" && !Array.isArray(v);
   const isStringRecord = (v: unknown): v is Record<string, string> => {
     if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
     for (const val of Object.values(v as Record<string, unknown>)) {
@@ -1324,10 +1476,18 @@ export function createRemoteApp(
         );
         delete valObj.headers;
       }
-      if ("metadata" in valObj && !isKvArray(valObj.metadata)) {
+      // A JSON object post-#1910; the pre-#1910 `{ key, value }[]` pair array
+      // is still accepted so an existing file keeps working (it is normalized
+      // by `normalizeStoredMetadata` on the way into the settings shape, and
+      // rewritten as an object on the next save).
+      if (
+        "metadata" in valObj &&
+        !isJsonObject(valObj.metadata) &&
+        !isKvArray(valObj.metadata)
+      ) {
         logWarn(
           { route: "/api/servers", id, droppedKey: "metadata" },
-          "Dropping malformed `metadata` field — expected `Array<{ key: string, value: string }>`.",
+          "Dropping malformed `metadata` field — expected a JSON object.",
         );
         delete valObj.metadata;
       }
@@ -1556,10 +1716,14 @@ export function createRemoteApp(
         error: "settings.headers must be an array of { key, value }",
       };
     }
-    if (!isKvArray(obj.metadata)) {
+    // `_meta` takes any JSON, so metadata crosses the wire as a plain JSON
+    // object rather than the `{ key, value }` rows headers/env still use
+    // (#1910). Only the container is checked — the values are arbitrary JSON
+    // by design, and anything that survived `c.req.json()` already is.
+    if (!isJsonObject(obj.metadata)) {
       return {
         ok: false,
-        error: "settings.metadata must be an array of { key, value }",
+        error: "settings.metadata must be a JSON object",
       };
     }
     // env is optional on the wire (older clients / non-stdio servers won't send
@@ -1735,7 +1899,7 @@ export function createRemoteApp(
       // Absent → empty list, matching the read side. The write-through drops
       // empty-key rows and clears `config.env` when the list is empty.
       env: isKvArray(obj.env) ? obj.env : [],
-      metadata: obj.metadata as { key: string; value: string }[],
+      metadata: obj.metadata as RequestMetadata,
       connectionTimeout: obj.connectionTimeout as number,
       requestTimeout: obj.requestTimeout as number,
       // Absent → product default, matching the read side

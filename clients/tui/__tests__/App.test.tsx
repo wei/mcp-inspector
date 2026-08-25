@@ -102,7 +102,18 @@ const h = vi.hoisted(() => {
   // handler for the event (the common single-server case).
   type EventEntry = { client: unknown; fn: (event: unknown) => void };
   const clientEvents = new Map<string, Set<EventEntry>>();
-  const clientInstances: Array<{ cfg?: { type?: string; url?: string } }> = [];
+  const clientInstances: Array<{
+    cfg?: { type?: string; url?: string };
+    // The options the mount effect built for this server. Captured so a test
+    // can assert what was actually handed to the client — `defaultMetadata`
+    // and the `environment.fetch` proxy wiring (#2067), both of which are
+    // invisible to a render-only assertion.
+    opts?: { defaultMetadata?: unknown; environment?: { fetch?: unknown } };
+  }> = [];
+  // What the mocked `createProxyFetch` returns. `undefined` is the real
+  // behavior with no proxy env var set; a test points this at a sentinel to
+  // exercise the proxy-configured branch (#2067).
+  const proxyFetchState: { current: unknown } = { current: undefined };
   const fireClientEvent = (event: string, detail?: unknown) => {
     clientEvents.get(event)?.forEach((e) => e.fn({ detail }));
   };
@@ -127,8 +138,15 @@ const h = vi.hoisted(() => {
   }
   class FakeClient {
     cfg: { type?: string; url?: string } | undefined;
-    constructor(config?: { type?: string; url?: string }) {
+    opts:
+      | { defaultMetadata?: unknown; environment?: { fetch?: unknown } }
+      | undefined;
+    constructor(
+      config?: { type?: string; url?: string },
+      opts?: { defaultMetadata?: unknown; environment?: { fetch?: unknown } },
+    ) {
       this.cfg = config;
+      this.opts = opts;
       clientInstances.push(this);
     }
     // Derive the transport type from the server config the client was built
@@ -183,6 +201,7 @@ const h = vi.hoisted(() => {
   }
   return {
     ctrl,
+    proxyFetchState,
     connect,
     disconnect,
     openUrl,
@@ -232,6 +251,12 @@ vi.mock("@inspector/core/mcp/state/index.js", () => ({
 }));
 vi.mock("@inspector/core/mcp/node/index.js", () => ({
   createTransportNode: vi.fn(),
+  // Defaults to undefined — "no proxy configured", which is what the real one
+  // returns with no proxy env var set, so `environment.fetch` stays unset and
+  // the client falls back to the built-in fetch, exactly as before #2067. A
+  // test can point `h.proxyFetchState.current` at a sentinel to exercise the
+  // other branch.
+  createProxyFetch: vi.fn(() => h.proxyFetchState.current),
 }));
 vi.mock("@inspector/core/react/useInspectorClient.js", () => ({
   useInspectorClient: h.useInspectorClient,
@@ -340,7 +365,7 @@ function oneEmaHttp(): Record<string, TuiServer> {
       config: { type: "streamable-http", url: "http://localhost:8080/mcp" },
       settings: {
         requestTimeout: 0,
-        metadata: [],
+        metadata: {},
         headers: [],
         env: [],
         roots: [],
@@ -393,10 +418,10 @@ function httpWithSettings(): Record<string, TuiServer> {
       config: { type: "streamable-http", url: "http://x" },
       settings: {
         requestTimeout: 5000,
-        metadata: [
-          { key: "team", value: "alpha" },
-          { key: "  ", value: "ignored" },
-        ],
+        // Object-shaped with a nested value (#1910) — the shape the TUI now
+        // forwards verbatim. As a pair array this would have reached the wire
+        // as numeric `_meta` keys.
+        metadata: { team: "alpha", trace: { id: "abc", hops: [1, 2] } },
         oauthClientId: "cid",
         oauthClientSecret: "secret",
         oauthScopes: "read write",
@@ -633,6 +658,7 @@ beforeEach(() => {
   h.callbackStop.mockClear();
   h.clientEvents.clear();
   h.clientInstances.length = 0;
+  h.proxyFetchState.current = undefined;
   h.runner.override = null;
   h.clientSpies.authenticate.mockReset();
   h.clientSpies.authenticate.mockResolvedValue(
@@ -1114,6 +1140,13 @@ describe("App (input handling, focus, effects)", () => {
   it("builds a client with saved settings (metadata, oauth, timeout)", async () => {
     const r = await mount(httpWithSettings());
     await expectFrame(r, "MCP Servers");
+    // Not just "it mounted": the saved metadata must reach the client as the
+    // same object, nesting intact (#1910).
+    const web = h.clientInstances.find((c) => c.cfg?.url === "http://x");
+    expect(web?.opts?.defaultMetadata).toEqual({
+      team: "alpha",
+      trace: { id: "abc", hops: [1, 2] },
+    });
   });
 
   it("passes top-level oauth client credentials into an http client", async () => {
@@ -1606,6 +1639,27 @@ describe("App (OAuth result branches)", () => {
       challenge: { reason: "unauthorized" },
     });
     await expectFrame(r, "Authorization updated. Retry your action");
+  });
+
+  it("installs the proxy fetch as environment.fetch when a proxy is configured", async () => {
+    // The bottom-of-stack wiring for #2067. It is one line in App.tsx and it is
+    // what makes InspectorClient's own wrappers compose OVER the proxy instead
+    // of discarding it — delete it and TUI proxy support silently disappears
+    // while every other test stays green.
+    const sentinel: typeof fetch = async () => new Response("");
+    h.proxyFetchState.current = sentinel;
+    await mount(oneHttp());
+    expect(h.clientInstances.length).toBeGreaterThan(0);
+    expect(h.clientInstances[0]!.opts?.environment?.fetch).toBe(sentinel);
+  });
+
+  it("leaves environment.fetch unset when no proxy is configured", async () => {
+    // The default path must stay on the built-in fetch — a wrapper installed
+    // unconditionally would put every TUI user behind an undici fetch.
+    h.proxyFetchState.current = undefined;
+    await mount(oneHttp());
+    expect(h.clientInstances.length).toBeGreaterThan(0);
+    expect(h.clientInstances[0]!.opts?.environment?.fetch).toBeUndefined();
   });
 
   it("ignores auth lifecycle events from a non-selected server", async () => {

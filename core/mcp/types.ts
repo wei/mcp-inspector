@@ -24,7 +24,11 @@ import type { OAuthClientProvider } from "@modelcontextprotocol/client";
 import type { Transport } from "@modelcontextprotocol/client";
 import type { InspectorLogger } from "../logging/logger.js";
 import type { AppElicitationRenderer } from "./appElicitation.js";
-import type { JsonValue } from "../json/jsonUtils.js";
+import type {
+  JsonValue,
+  StrictJsonObject,
+  StrictJsonValue,
+} from "../json/jsonUtils.js";
 import type {
   ClientConfig,
   EnterpriseManagedAuthIdpConfig,
@@ -100,11 +104,20 @@ export type StoredMCPServer = MCPServerConfig & {
    */
   headers?: Record<string, string>;
   /**
-   * Default `_meta` keys merged into every outgoing MCP request. Inspector-
-   * specific (no analog in the broader mcp.json ecosystem), so the pair-array
-   * shape is preserved on disk and in memory.
+   * Default `_meta` payload merged into every outgoing MCP request. Inspector-
+   * specific (no analog in the broader mcp.json ecosystem).
+   *
+   * A JSON object, so a value may be any JSON — object, array, number, boolean,
+   * `null` — not just a string (#1910). Nothing in the MCP spec restricts
+   * `_meta` to string values, and the SDK models it as a passthrough object;
+   * the string-pair restriction was the Inspector's own.
+   *
+   * The pre-#1910 on-disk shape was a `{ key, value }[]` pair array. It is
+   * still **read** (see `normalizeStoredMetadata` in `serverList.ts`) so an
+   * existing `mcp.json` keeps working, but it is never written back — a
+   * round-trip through the Inspector rewrites the field as an object.
    */
-  metadata?: { key: string; value: string }[];
+  metadata?: StrictJsonObject;
   /**
    * Protocol era to negotiate with this server (`"legacy" | "auto" | "modern"`),
    * orthogonal to the transport `type`. Inspector-specific (no analog in the
@@ -363,6 +376,24 @@ export interface ServerState {
 }
 
 /**
+ * A `_meta` payload: a JSON object whose values may be any JSON, not just
+ * strings (#1910).
+ *
+ * {@link StrictJsonValue}, not `JsonValue`: the latter admits `undefined`,
+ * which `JSON.stringify` drops from an object and turns into `null` inside an
+ * array — so a value the type accepted would not be the value that reaches the
+ * server, contradicting the one promise this payload makes.
+ *
+ * The MCP spec places no restriction on `_meta` value types and the SDK models
+ * the field as a passthrough object, so the Inspector must be able to send —
+ * and to record — nested objects, arrays, numbers, booleans and `null`. Used
+ * for both the per-server default payload (`InspectorServerSettings.metadata`,
+ * `InspectorClientOptions.defaultMetadata`) and the per-call metadata every
+ * request verb accepts.
+ */
+export type RequestMetadata = Record<string, StrictJsonValue>;
+
+/**
  * Represents a complete resource read invocation, including request parameters,
  * response, and metadata.
  */
@@ -370,7 +401,7 @@ export interface ResourceReadInvocation {
   result: ReadResourceResult;
   timestamp: Date;
   uri: string;
-  metadata?: Record<string, string>;
+  metadata?: RequestMetadata;
 }
 
 /**
@@ -383,7 +414,7 @@ export interface ResourceTemplateReadInvocation {
   result: ReadResourceResult;
   timestamp: Date;
   params: Record<string, string>;
-  metadata?: Record<string, string>;
+  metadata?: RequestMetadata;
 }
 
 /**
@@ -395,7 +426,7 @@ export interface PromptGetInvocation {
   timestamp: Date;
   name: string;
   params?: Record<string, string>;
-  metadata?: Record<string, string>;
+  metadata?: RequestMetadata;
 }
 
 /**
@@ -409,7 +440,7 @@ export interface ToolCallInvocation {
   timestamp: Date;
   success: boolean;
   error?: string;
-  metadata?: Record<string, string>;
+  metadata?: RequestMetadata;
   /**
    * Set only on the `skipOutputValidation` path: present when the (delivered)
    * result's structuredContent does NOT match the tool's declared outputSchema.
@@ -690,7 +721,12 @@ export function eraToVersionNegotiation(
  */
 export interface InspectorServerSettings {
   headers: { key: string; value: string }[];
-  metadata: { key: string; value: string }[];
+  /**
+   * Default `_meta` payload for this server, edited as a JSON object rather
+   * than key/value rows so a value can be any JSON (#1910). Always present;
+   * `{}` means "send no default metadata".
+   */
+  metadata: RequestMetadata;
   /**
    * Environment variables for stdio servers, edited as controlled key/value
    * rows (mirrors `headers`). Only meaningful for stdio transports; non-stdio
@@ -929,7 +965,12 @@ export interface InspectorClientEnvironment {
   /**
    * Optional fetch function for HTTP requests (OAuth discovery/token exchange and
    * MCP transport). When provided, used for both auth and transport to bypass CORS.
-   * - Node: undefined (uses global fetch)
+   * - Node: `createProxyFetch()` (core/mcp/node/proxyFetch.ts) — a proxy-aware
+   *   fetch when `HTTPS_PROXY`/`HTTP_PROXY` is set, and `undefined` otherwise,
+   *   which leaves the built-in global fetch in place. This is the BOTTOM of the
+   *   fetch stack: `InspectorClient` wraps whatever it finds here, so proxying
+   *   composes with request tracking and the OAuth endpoint overrides instead of
+   *   being discarded by them (#2067).
    * - Browser: createRemoteFetch
    */
   fetch?: typeof fetch;
@@ -1085,7 +1126,7 @@ export interface InspectorClientOptions {
    * site metadata wins on key collision. Set this from `InspectorServerSettings.metadata`
    * so persisted server-wide metadata reaches the wire on the first request.
    */
-  defaultMetadata?: Record<string, string>;
+  defaultMetadata?: RequestMetadata;
 
   /**
    * Optional per-server runtime settings forwarded to the transport factory

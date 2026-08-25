@@ -17,6 +17,7 @@ import { clearStoredAuthForRelogin } from "./clear-stored-auth-for-relogin.js";
 import { InspectorClient } from "@inspector/core/mcp/index.js";
 import { cleanRoots } from "@inspector/core/mcp/serverList.js";
 import {
+  createProxyFetch,
   createTransportNode,
   loadServerEntries,
   selectServerEntry,
@@ -24,6 +25,8 @@ import {
   parseHeaderPair,
 } from "@inspector/core/mcp/node/index.js";
 import type { JsonValue } from "@inspector/core/mcp/index.js";
+import type { StrictJsonValue } from "@inspector/core/json/jsonUtils.js";
+import { isSerializableJson } from "@inspector/core/json/jsonUtils.js";
 import {
   canonicalUrlHost,
   isAllInterfacesHost,
@@ -33,7 +36,6 @@ import { consumeMethodOutcome } from "./handlers/consume-outcome.js";
 import { runMethod } from "./handlers/run-method.js";
 import {
   isOneShotMethod,
-  metaValueToString,
   ONE_SHOT_METHODS,
   type MethodArgs,
 } from "./handlers/method-types.js";
@@ -122,6 +124,11 @@ async function callMethod(
 
   const environment: InspectorClientEnvironment = {
     transport: createTransportNode,
+    // Proxy support sits at the bottom of the fetch stack so InspectorClient's
+    // wrappers compose over it — and so OAuth discovery/token requests, which
+    // also run through `environment.fetch`, are proxied too (#2067). Undefined
+    // when no proxy env var is set, which leaves the built-in fetch in place.
+    fetch: createProxyFetch(),
   };
   const redirectUrlProvider = new MutableRedirectUrlProvider();
   // Disarmed until the CLI-owned interactive OAuth flow runs — SDK `auth()`
@@ -162,6 +169,17 @@ async function callMethod(
     // the change at all: the SDK refuses `roots/list_changed` from a client
     // that never declared it, which `setRoots` logged as a send failure (#1797).
     roots: cleanRoots(serverSettings?.roots ?? []),
+    // Per-server default `_meta` from mcp.json, exactly as web (`App.tsx`) and
+    // the TUI pass it — the setting belongs to the server, not to the client
+    // that happens to read it, and `InspectorClient` only reads the option
+    // rather than falling back to `serverSettings.metadata` (#2093). Already a
+    // JSON object (#1910), so there is no pair-array flattening left to do;
+    // `{}` means "no defaults". `--metadata` stays per-invocation and wins on a
+    // key collision, since call-time keys override defaults in `mergeMeta`.
+    ...(serverSettings?.metadata &&
+      Object.keys(serverSettings.metadata).length > 0 && {
+        defaultMetadata: serverSettings.metadata,
+      }),
     serverSettings,
     // Per-server protocol era (SEP §7.8) from mcp.json → SDK versionNegotiation.
     // Absent era defaults to legacy in the InspectorClient constructor (#1626).
@@ -445,6 +463,11 @@ function buildHandoff(
     : canonicalUrlHost(host);
   const clientPort = process.env.CLIENT_PORT || "6274";
   const sandboxPort = process.env.MCP_SANDBOX_PORT || "6275";
+  // The dedicated app origin (#2056). Forwarded alongside the other two: an App
+  // whose UI resource declares `_meta.ui.domain` is served from this port and
+  // the browser reaches it DIRECTLY, so a handoff that forwards only 6274/6275
+  // renders that app from an unreachable origin.
+  const appOriginPort = process.env.MCP_APP_ORIGIN_PORT || "6278";
   // Treat an empty MCP_INSPECTOR_API_TOKEN the same as unset — an empty token
   // can't satisfy the deep-link autoConnect gate.
   const apiToken = process.env.MCP_INSPECTOR_API_TOKEN || undefined;
@@ -462,7 +485,7 @@ function buildHandoff(
   return {
     serverUrl: normalizedUrl,
     deepLink: `http://${linkHost}:${clientPort}/?${params.toString()}`,
-    portForwardCmd: `coder port-forward <workspace> --tcp ${clientPort}:${clientPort} --tcp ${sandboxPort}:${sandboxPort}`,
+    portForwardCmd: `coder port-forward <workspace> --tcp ${clientPort}:${clientPort} --tcp ${sandboxPort}:${sandboxPort} --tcp ${appOriginPort}:${appOriginPort}`,
     oauthStatePath: statePath,
     apiToken: apiToken ?? null,
     note:
@@ -474,8 +497,8 @@ function buildHandoff(
 
 function parseKeyValuePair(
   value: string,
-  previous: Record<string, JsonValue> = {},
-): Record<string, JsonValue> {
+  previous: Record<string, StrictJsonValue> = {},
+): Record<string, StrictJsonValue> {
   const parts = value.split("=");
   const key = parts[0];
   const val = parts.slice(1).join("=");
@@ -486,11 +509,29 @@ function parseKeyValuePair(
     );
   }
 
-  let parsedValue: JsonValue;
+  // `StrictJsonValue`: `JSON.parse` cannot produce `undefined`, and these values
+  // become `_meta`, which must reach the wire exactly as written (#1910).
+  let parsedValue: StrictJsonValue;
   try {
-    parsedValue = JSON.parse(val) as JsonValue;
+    parsedValue = JSON.parse(val) as StrictJsonValue;
   } catch {
+    // Not JSON at all — a bare word or an unquoted string. Sent as a string,
+    // which is what the user plainly meant.
     parsedValue = val;
+  }
+
+  // Valid JSON syntax is not the same as sendable JSON: `1e400` parses to
+  // `Infinity`, which `JSON.stringify` writes as `null`. Rejecting is better
+  // than accepting the flag and silently transmitting a different value —
+  // and better than falling back to the literal string, which would also not
+  // be what was asked for.
+  if (!isSerializableJson(parsedValue)) {
+    // Names the key, never the value: the pair can carry a credential
+    // (`credentials={"accessToken":"…","n":1e400}`) and this message lands in
+    // stderr and CI logs.
+    throw new Error(
+      `Invalid value for "${key}": numbers must be finite (a literal like 1e400 overflows to Infinity and cannot be sent).`,
+    );
   }
 
   return { ...previous, [key as string]: parsedValue };
@@ -736,8 +777,8 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
     promptName?: string;
     promptArgs?: Record<string, JsonValue>;
     logLevel?: LoggingLevel;
-    metadata?: Record<string, JsonValue>;
-    toolMetadata?: Record<string, JsonValue>;
+    metadata?: Record<string, StrictJsonValue>;
+    toolMetadata?: Record<string, StrictJsonValue>;
     cwd?: string;
     transport?: "sse" | "http" | "stdio";
     serverUrl?: string;
@@ -999,22 +1040,12 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
     promptName: options.promptName,
     promptArgs: options.promptArgs,
     logLevel: options.logLevel,
-    metadata: options.metadata
-      ? Object.fromEntries(
-          Object.entries(options.metadata).map(([key, value]) => [
-            key,
-            metaValueToString(value),
-          ]),
-        )
-      : undefined,
-    toolMeta: options.toolMetadata
-      ? Object.fromEntries(
-          Object.entries(options.toolMetadata).map(([key, value]) => [
-            key,
-            metaValueToString(value),
-          ]),
-        )
-      : undefined,
+    // `--metadata`/`--tool-metadata` values are parsed as JSON, and `_meta`
+    // takes any JSON — so they go through unflattened (#1910). They used to be
+    // squeezed through `metaValueToString`, which sent `{"a":1}` as the
+    // *string* `'{"a":1}'`.
+    metadata: options.metadata,
+    toolMeta: options.toolMetadata,
     appInfo: options.appInfo === true,
     format: options.format,
   };
