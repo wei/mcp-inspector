@@ -692,6 +692,7 @@ import {
   useServers,
 } from "@inspector/core/react/useServers.js";
 import type {
+  InspectorClientOptions,
   InspectorServerSettings,
   MessageEntry,
   ServerEntry,
@@ -742,6 +743,120 @@ const { __rejectNextChallengeCheck: rejectNextChallengeCheck } =
 const fetchLogInstances = (
   FetchLogModule as unknown as { __fetchLogInstances: EventTarget[] }
 ).__fetchLogInstances;
+
+// #2068 — the web connection seam for the refresh-token opt-out. The provider
+// and manager tests start from an already-built OAuth config and the runner test
+// covers only the CLI/TUI leg, so without this case deleting the
+// `requestRefreshToken` spread from App's `oauthFromServer` would leave the
+// checkbox persisted but inert with every other new test still green.
+describe("App wires the refresh-token opt-out into the client (#2068)", () => {
+  // Fully-typed fixtures rather than a cast: `settings` is the whole
+  // `InspectorServerSettings`, so a field added to that interface later is a
+  // compile error here instead of a silently-absent value at runtime.
+  const HTTP_SERVER: ServerEntry = {
+    id: "A",
+    name: "PlotRocket",
+    config: { type: "streamable-http", url: "https://api.example.com/mcp" },
+    connection: { status: "disconnected" },
+  };
+
+  const BASE_SETTINGS: InspectorServerSettings = {
+    headers: [],
+    env: [],
+    metadata: {},
+    connectionTimeout: 0,
+    requestTimeout: 0,
+    taskTtl: 60000,
+    maxFetchRequests: 1000,
+    roots: [],
+  };
+
+  function mockServersWith(overrides?: Partial<InspectorServerSettings>) {
+    vi.mocked(useServers).mockReturnValue({
+      servers: [
+        {
+          ...HTTP_SERVER,
+          ...(overrides
+            ? { settings: { ...BASE_SETTINGS, ...overrides } }
+            : {}),
+        },
+      ],
+      loading: false,
+      error: undefined,
+      refresh: vi.fn().mockResolvedValue(undefined),
+      addServer: addServerSpy,
+      updateServer: updateServerSpy,
+      updateServerSettings: updateServerSettingsSpy,
+      removeServer: vi.fn(),
+      reorderServers: vi.fn(),
+      importSource: vi.fn().mockResolvedValue({ servers: {} }),
+    });
+  }
+
+  /**
+   * The `oauth` option the mocked InspectorClient constructor was given. Read
+   * through the constructor's own parameter type, so a rename of the option
+   * fails to compile here rather than silently reading `undefined`.
+   */
+  function constructedOAuth(): InspectorClientOptions["oauth"] {
+    return vi.mocked(McpIndex.InspectorClient).mock.calls[0]?.[1]?.oauth;
+  }
+
+  let previousUseServers: typeof useServers | undefined;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clientInstances.length = 0;
+    previousUseServers = vi.mocked(useServers).getMockImplementation();
+    vi.mocked(useInspectorClient).mockReturnValue(DEFAULT_USE_INSPECTOR_CLIENT);
+  });
+
+  afterEach(() => {
+    if (previousUseServers) {
+      vi.mocked(useServers).mockImplementation(previousUseServers);
+    }
+  });
+
+  it("passes requestRefreshToken: false when the server opted out", async () => {
+    const user = userEvent.setup();
+    mockServersWith({ oauthRequestRefreshToken: false });
+    renderWithMantine(<App />);
+
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    expect(constructedOAuth()?.requestRefreshToken).toBe(false);
+  });
+
+  // The default must not send the key at all — the provider's own default is
+  // what declares the grant, and a stray `true` here would mask its removal.
+  it("omits requestRefreshToken when the setting is on", async () => {
+    const user = userEvent.setup();
+    mockServersWith({ oauthScopes: "openid" });
+    renderWithMantine(<App />);
+
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    const oauth = constructedOAuth();
+    expect(oauth).toBeDefined();
+    expect(oauth).not.toHaveProperty("requestRefreshToken");
+  });
+
+  // The opt-out is the only OAuth field set, so it must be enough on its own to
+  // materialize the `oauth` option — otherwise it is dropped for any server
+  // without credentials or scopes, which is the common case here.
+  it("builds the oauth option from the opt-out alone", async () => {
+    const user = userEvent.setup();
+    mockServersWith({ oauthRequestRefreshToken: false });
+    renderWithMantine(<App />);
+
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    expect(constructedOAuth()).toEqual({ requestRefreshToken: false });
+  });
+});
 
 describe("App failed-connection card border (#1621)", () => {
   beforeEach(() => {

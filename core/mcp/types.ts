@@ -182,6 +182,18 @@ export type StoredMCPServer = MCPServerConfig & {
     /** SEP-2350 step-up policy for `403 insufficient_scope` (default `reauthorize`). */
     onInsufficientScope?: OnInsufficientScopePolicy;
     /**
+     * Whether the Inspector declares the `refresh_token` grant when it
+     * registers. Defaults to `true`; only `false` is written to disk, so an
+     * entry that never touched the setting keeps a minimal diff. Turning it off
+     * stops the SDK's *automatic* `offline_access` augmentation, and so the
+     * `prompt=consent` that scope forces — but only that one: an
+     * `offline_access` from `scopes` here, or from the resource's advertised
+     * scopes when `scopes` is unset, still reaches the authorization request.
+     * See {@link InspectorServerSettings.oauthRequestRefreshToken}.
+     * Inspector-specific. (#2068)
+     */
+    requestRefreshToken?: boolean;
+    /**
      * Custom query parameters appended to the OAuth **authorization request**
      * (never the token request) — e.g. Keycloak's `kc_idp_hint`, OIDC's
      * `login_hint` / `prompt` / `acr_values`, Auth0's `audience`. Reserved,
@@ -589,6 +601,11 @@ export interface OAuthSettings {
   tokenUrl?: string;
   enterpriseManaged?: boolean;
   onInsufficientScope?: OnInsufficientScopePolicy;
+  /**
+   * Whether to declare the `refresh_token` grant (#2068). Optional for the same
+   * reason as `authorizationParams`; `undefined` means the default, on.
+   */
+  requestRefreshToken?: boolean;
 }
 
 /**
@@ -774,6 +791,26 @@ export interface InspectorServerSettings {
    * server's HTTP transport. Defaults to `reauthorize` when unset.
    */
   oauthOnInsufficientScope?: OnInsufficientScopePolicy;
+  /**
+   * Whether the Inspector declares the `refresh_token` grant in its OAuth
+   * client metadata for this server. `undefined` (the default) means on;
+   * persisted as `oauth.requestRefreshToken` only when explicitly off. Turning
+   * it off drops the SDK's *automatic* `offline_access` scope and so the
+   * `prompt=consent` it forces — the Entra admin-consent failure in #2068.
+   *
+   * Only the automatic one: `startAuthorization` adds `prompt=consent` for any
+   * `offline_access` in the effective scope without consulting `grant_types`,
+   * so a scope the user configured (or one the resource advertises when the
+   * scope field is blank) still forces the prompt.
+   *
+   * Read at connect time like the rest of the OAuth block, so a live client
+   * keeps the metadata it was built with. It changes what the Inspector
+   * declares, not state the authorization server already holds: an existing
+   * registration still lists the grant, and a refresh token issued earlier
+   * stays usable (the SDK's refresh path never consults `grant_types`) until
+   * the stored OAuth state is cleared.
+   */
+  oauthRequestRefreshToken?: boolean;
   /**
    * When true, connect via the configured enterprise IdP (EMA) instead of
    * interactive OAuth to the MCP authorization server. Per-server OAuth
@@ -1170,6 +1207,11 @@ export interface InspectorClientOptions {
      */
     authorizationUrl?: string;
     tokenUrl?: string;
+    /**
+     * Declare the `refresh_token` grant in the registered client metadata
+     * (#2068). Defaults to `true` when omitted.
+     */
+    requestRefreshToken?: boolean;
   };
 
   /**

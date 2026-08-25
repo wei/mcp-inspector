@@ -631,6 +631,14 @@ describe("server.ts supplemental coverage", () => {
       expect((await res.json()).error).toMatch(/enterpriseManaged/);
     });
 
+    it("rejects a non-boolean oauthRequestRefreshToken (#2068)", async () => {
+      const res = await postSettings({
+        ...base,
+        oauthRequestRefreshToken: "no",
+      });
+      expect((await res.json()).error).toMatch(/oauthRequestRefreshToken/);
+    });
+
     it("rejects malformed roots", async () => {
       const res = await postSettings({ ...base, roots: [{ uri: 1 }] });
       expect((await res.json()).error).toMatch(/roots/);
@@ -667,6 +675,39 @@ describe("server.ts supplemental coverage", () => {
       expect(res.status).toBe(200);
     });
 
+    // #2068 — a 200 only proves the payload validated. Without reading the
+    // saved entry back, deleting the `oauthRequestRefreshToken` line from
+    // `normalizeSettings` leaves every other test green while saves through
+    // this route silently revert to the default.
+    it("persists the refresh-token opt-out through a save", async () => {
+      expect(
+        (await postSettings({ ...base, oauthRequestRefreshToken: false }))
+          .status,
+      ).toBe(200);
+
+      const res = await fetch(`${h.baseUrl}/api/servers`);
+      const body = (await res.json()) as {
+        mcpServers: Record<
+          string,
+          { oauth?: { requestRefreshToken?: boolean } }
+        >;
+      };
+      expect(body.mcpServers.srv?.oauth?.requestRefreshToken).toBe(false);
+    });
+
+    it("writes no refresh-token field when the setting is on", async () => {
+      expect(
+        (await postSettings({ ...base, oauthRequestRefreshToken: true }))
+          .status,
+      ).toBe(200);
+
+      const res = await fetch(`${h.baseUrl}/api/servers`);
+      const body = (await res.json()) as {
+        mcpServers: Record<string, { oauth?: Record<string, unknown> }>;
+      };
+      expect(body.mcpServers.srv?.oauth?.requestRefreshToken).toBeUndefined();
+    });
+
     it("accepts a fully-populated valid settings payload", async () => {
       const res = await postSettings({
         ...base,
@@ -682,6 +723,7 @@ describe("server.ts supplemental coverage", () => {
         oauthClientId: "cid",
         oauthScopes: "a b",
         enterpriseManaged: true,
+        oauthRequestRefreshToken: false,
         roots: [{ uri: "file:///x", name: "x" }],
       });
       expect(res.status).toBe(200);
@@ -819,6 +861,57 @@ describe("server.ts supplemental coverage", () => {
           mcpServers: Record<string, Record<string, unknown>>;
         };
         expect(body.mcpServers.srv).not.toHaveProperty("oauth");
+      } finally {
+        await stop(h);
+      }
+    });
+
+    // #2068 — same all-or-nothing rule for the refresh-token opt-out: a
+    // non-boolean drops the whole `oauth` node rather than reaching the
+    // provider, where only an explicit `false` means anything.
+    it("drops oauth whose requestRefreshToken is not a boolean", async () => {
+      const h = await start({
+        seedConfig: JSON.stringify({
+          mcpServers: {
+            srv: {
+              type: "streamable-http",
+              url: "https://x.test/mcp",
+              oauth: { requestRefreshToken: "no" },
+            },
+          },
+        }),
+      });
+      try {
+        const res = await fetch(`${h.baseUrl}/api/servers`);
+        const body = (await res.json()) as {
+          mcpServers: Record<string, Record<string, unknown>>;
+        };
+        expect(body.mcpServers.srv).not.toHaveProperty("oauth");
+      } finally {
+        await stop(h);
+      }
+    });
+
+    it("keeps a well-formed requestRefreshToken opt-out on read (#2068)", async () => {
+      const h = await start({
+        seedConfig: JSON.stringify({
+          mcpServers: {
+            srv: {
+              type: "streamable-http",
+              url: "https://x.test/mcp",
+              oauth: { requestRefreshToken: false },
+            },
+          },
+        }),
+      });
+      try {
+        const res = await fetch(`${h.baseUrl}/api/servers`);
+        const body = (await res.json()) as {
+          mcpServers: Record<string, Record<string, unknown>>;
+        };
+        expect(body.mcpServers.srv?.oauth).toEqual({
+          requestRefreshToken: false,
+        });
       } finally {
         await stop(h);
       }
