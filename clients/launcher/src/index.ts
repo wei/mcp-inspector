@@ -79,10 +79,12 @@ async function run(): Promise<void> {
       // this `undefined`; fall through to the generic sink with the real message
       // rather than throwing "handleError is not a function" over it.
       if (typeof handleError !== "function") throw err;
-      // write-then-exit like the direct bin; the envelope is a few hundred bytes,
-      // well inside the pipe buffer, so the truncation risk noted above (which is
-      // about a large stdout payload) doesn't apply to this stderr line.
-      handleError(err); // writes the envelope + process.exit(code); never returns
+      // Write-then-exit like the direct bin — and AWAIT it. The envelope being
+      // a few hundred bytes is not the safeguard it looks like: on a pipe the
+      // write is asynchronous, so `process.exit()` discards it whether or not
+      // it would have fitted in the buffer. `handleError` settles on the write
+      // callback before exiting; skipping the await puts the truncation back.
+      await handleError(err); // writes the envelope + process.exit(code)
     }
   } else {
     const { runTui } = await import(clientEntry("tui"));

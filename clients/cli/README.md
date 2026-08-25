@@ -120,6 +120,7 @@ Options that specify the MCP server (catalog/config file, ad-hoc command/URL, en
 | `--tool-metadata <key=value>` | Tool-specific `_meta` entries for `tools/call`. Same JSON-parsed value handling as `--metadata`. |
 | `--connect-timeout <ms>`      | Connection timeout in ms. Defaults to `15000` for ad-hoc `--server-url`/target runs (so a black-holed host fails fast) and to the file-level timeout for `--catalog`/`--config` runs. `0` disables the timeout.                                                                                                                                                                                                      |
 | `--app-info`                  | Probe a tool's MCP App UI metadata without invoking it. With `--method tools/call --tool-name <name>`: prints one JSON line (`hasApp`, `resourceUri`, `csp`, `permissions`, `domain`, …) and exits `0` if the tool has an app or `2` (`no_app`) if not. With `--method tools/list`: emits NDJSON — one app-info line per tool over a single connection.                                                              |
+| `--strict`                    | With `--method tools/list`: report tool-schema portability problems in full (path, issue, suggested fix) on stderr, and exit `6` if any is error-severity. Without it, a one-line count is printed instead. See [Schema portability](#schema-portability---strict). |
 | `--format <text\|json>`       | Output format. `text` (default) pretty-prints the result. `json` emits a single JSON object on stdout (`{ "result": … }`, plus `{ "appInfo": … }` as a sibling key for App tools) with no banners, so the whole output pipes cleanly into `jq`.                                                                                                                                                                      |
 | `--relogin`                   | Delete stored OAuth for this server URL from the shared store before connect; interactive login still only runs if the server requires auth. Requires an HTTP/SSE URL (rejected for stdio). Conflicts with `--stored-auth-only` / `--use-stored-auth` / `--wait-for-auth` / catalog short-circuits.                                                                                                                  |
 | `--stored-auth-only`          | **CI / non-interactive safe:** never start interactive OAuth / step-up (and never auto-open a browser); use the shared store if present, otherwise fail immediately with `auth_required`. Prefer this over a bare pipe/CI run that would otherwise attempt interactive login.                                                                                                                                        |
@@ -151,6 +152,84 @@ mcp-inspector --cli <server> --method tools/call --tool-name my_app_tool --forma
 > `tools/list --app-info` always emits NDJSON (one raw app-info object per line) **regardless of `--format`** — the per-tool list shape is fixed. `--format json` only reshapes the single-result paths (`tools/call`, `tools/list` without `--app-info`, etc.) into the `{result[, appInfo]}` envelope.
 
 A `tools/call` that returns `isError:true` still prints its payload but exits `5` (`tool_is_error`) so `&&` chains don't proceed on a failed call.
+
+#### Schema portability (`--strict`)
+
+A tool schema can be perfectly legal JSON Schema and still be refused by the
+client the server is meant to run against. `--strict` (with `--method
+tools/list`) names those constructs — path, what is wrong, and a concrete fix —
+on **stderr**, and exits `6` if any is error-severity:
+
+```bash
+mcp-inspector --cli <server> --method tools/list --strict
+```
+
+The complete **report** against the `unportable-schemas-http.json` showcase —
+one block per finding, then the summary. On a non-zero exit the shared error
+handler adds one more stderr line after this, the
+[`ErrorEnvelope`](#exit-codes--error-envelopes) (`{"error":{"code":"schema_unportable",…}}`):
+
+```text
+Error: tool "get_temp"
+  Path: outputSchema.properties.data
+  Issue: Bare `true` used where a schema object is expected.
+  Suggestion: Declare what the value actually is — e.g. `{"type": "object", "additionalProperties": true}` for a free-form object. That is a deliberate change of contract, not an equivalent rewrite: `true` accepts any JSON value at all.
+
+Warning: tool "echo"
+  Path: inputSchema.properties.show_ids
+  Issue: `type` is an array (["null","boolean"]). The array form is legal JSON Schema, but several MCP clients read `type` as a single string and either reject the tool or drop the constraint.
+  Suggestion: Split it into `anyOf` branches, each with a single `type` — `{"anyOf": [{"type": "null"}, {"type": "boolean"}]}`. (Making the property optional instead is a different contract: absent is not the same as `null`.)
+
+Warning: tool "echo"
+  Path: inputSchema.properties.opts
+  Issue: Schema carries no validation keyword at all, so it accepts any value — the object-literal spelling of a bare `true`.
+  Suggestion: Declare what the value actually is — e.g. `{"type": "object", "additionalProperties": true}` for a free-form object. That is a deliberate change of contract, which is the point: as written it constrains nothing.
+
+Warning: tool "add"
+  Path: inputSchema.properties.a
+  Issue: `$ref` points outside this document (`https://example.com/schemas/number.json`). Clients do not fetch remote schemas, so the constraint is dropped or the tool is rejected.
+  Suggestion: Inline the referenced schema, or move it into `$defs` and reference it as `#/$defs/<name>`.
+
+1 error, 3 warnings across 3 tools.
+```
+
+Note the shape of that suggestion. Where a replacement genuinely narrows the
+schema it says so, rather than implying an equivalent rewrite — and where an
+equivalent exists it gives that instead: an array-form `type` becomes `anyOf`
+branches (not "drop it from `required`", since absent is not the same as
+`null`), and a bare `false` becomes `{"not": {}}` (not "delete the entry",
+which would *permit* the property under the default `additionalProperties`).
+
+Severity decides the exit code, not the report: **errors** are constructs a
+shipping MCP client refuses outright (a bare `true` or `false` where a schema
+object belongs), **warnings** are ones handled unevenly (an array-form `type`,
+a remote `$ref`, a schema carrying no constraining keyword at all). Only errors
+fail the run — a `--strict` that failed on warnings would be unusable as a CI
+gate against servers that are in fact fine.
+
+There is deliberately **no "inputSchema must be an object" check**, even though
+MCP requires one. The SDK types `inputSchema` with `type: literal("object")`,
+so a tool whose input root is anything else fails `ListToolsResultSchema` and
+is dropped from the list before the lint could see it — it is reported through
+the malformed-items path instead. A rule that cannot fire would only make this
+documentation claim a check the CLI does not perform.
+
+The report goes to stderr, so the result on stdout stays parseable. Under
+`--format json` the findings are folded into the same envelope instead
+(`{"result":…,"schemaFindings":[…]}`), so a caller reads one document rather
+than correlating two.
+
+**Without `--strict` nothing changes except one line.** A `tools/list` whose
+schemas have findings prints a single stderr summary — `Schema portability: 1
+error, 3 warnings across 3 tools. Re-run with --strict for details.` — and
+still exits `0`. A clean list prints nothing at all.
+
+This is deliberately not a JSON Schema validator. A census of 617 public
+servers found **zero** that fail the SDK's own parser, so a conformance check
+would report nothing on essentially every real server; what bites is the
+narrower subset each consumer accepts, which is what these rules encode. The
+same verdict drives the TUI's tool detail pane and the web Tools tab — all
+three read `core/json/schemaLint`.
 
 ### CLI-specific (OAuth for HTTP servers)
 
@@ -250,6 +329,7 @@ prose from stderr:
 | `3`  | Server requires authentication (401/403, `WWW-Authenticate`, OAuth).          |
 | `4`  | Server unreachable (DNS, connection refused, timeout, `fetch failed`).        |
 | `5`  | Tool error (`tools/call` returned `isError:true`, or the tool was not found). |
+| `6`  | `--strict` found an error-severity tool-schema portability problem (`schema_unportable` — the schema is valid JSON Schema, just not portable). |
 
 On any non-zero exit the CLI also writes a single JSON line to **stderr** — the
 `ErrorEnvelope`:

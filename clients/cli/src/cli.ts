@@ -685,6 +685,10 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
       "Probe the tool's MCP App UI metadata (resourceUri, csp, permissions, domain) and emit it as one JSON line; exit 2 when the tool has no app. Use with --method tools/call --tool-name <name> (the tool itself is not invoked) or --method tools/list (one NDJSON line per tool).",
     )
     .option(
+      "--strict",
+      "Report tool-schema portability problems in full (path, issue, suggested fix) on stderr, and exit 6 if any is error-severity. Use with --method tools/list. Without it, a one-line count is printed instead.",
+    )
+    .option(
       "--connect-timeout <ms>",
       `Connection timeout in ms (default ${DEFAULT_CONNECT_TIMEOUT_MS} for ad-hoc --server-url / target invocations; 0 = no timeout).`,
       (v: string) => {
@@ -784,6 +788,7 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
     serverUrl?: string;
     header?: Record<string, string>;
     appInfo?: boolean;
+    strict?: boolean;
     connectTimeout?: number;
     format?: OutputFormat;
     toolArgsJson?: string;
@@ -820,6 +825,27 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
     ) {
       throw new Error(
         "--relogin cannot be combined with --method servers/list or servers/show (no OAuth connect)",
+      );
+    }
+  }
+
+  // `--strict` is checked HERE, ahead of every short-circuit return below
+  // (`--list-stored-auth`, `--print-handoff`, `servers/list`, `servers/show`),
+  // rather than beside the other method-shaped validations further down. Those
+  // returns never reach the lint, so a later check would let
+  // `--strict --method servers/list` succeed while silently ignoring a flag
+  // documented as tools/list-only — the same "accepted but inert" failure the
+  // `--app-info` pairing rejection exists to prevent.
+  if (options.strict) {
+    if (options.method !== "tools/list") {
+      throw new Error("--strict requires --method tools/list.");
+    }
+    // `tools/list --app-info` returns NDJSON straight from `runMethod` and
+    // never reaches `emitResult`, where the lint runs. Accepting the pair
+    // would hand a CI caller a gate that can never fail.
+    if (options.appInfo) {
+      throw new Error(
+        "--strict cannot be combined with --app-info; run tools/list twice, once for each.",
       );
     }
   }
@@ -1004,6 +1030,10 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
     );
   }
 
+  // NOTE: `--strict`'s validations are deliberately NOT here — they run before
+  // the short-circuit returns further up, so a `servers/*` invocation cannot
+  // accept the flag and ignore it.
+
   // --tool-args-json passes arguments verbatim with no key=value coercion (so
   // `"012"` stays a string and nested objects work without shell escaping).
   let toolArg = options.toolArg;
@@ -1047,6 +1077,7 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
     metadata: options.metadata,
     toolMeta: options.toolMetadata,
     appInfo: options.appInfo === true,
+    strict: options.strict === true,
     format: options.format,
   };
 

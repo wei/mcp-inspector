@@ -24,6 +24,11 @@ export type MethodArgs = {
   toolMeta?: RequestMetadata;
   metadata?: RequestMetadata;
   appInfo?: boolean;
+  /**
+   * `--strict`: report tool-schema portability findings in full and exit
+   * non-zero when any is error-severity (#1005). `tools/list` only.
+   */
+  strict?: boolean;
   format?: OutputFormat;
   /** Task id for tasks/get, tasks/cancel, tasks/result. */
   taskId?: string;

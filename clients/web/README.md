@@ -56,6 +56,27 @@ Components live under `src/components/` in four layers, smallest to largest:
 
 Every screen and element has a `*.stories.tsx` (see [Storybook](#storybook)). Styling follows the Mantine-first rules in [`AGENTS.md`](../../AGENTS.md) — theme variants and component props over CSS, `--inspector-*` tokens over raw colors.
 
+## Tool-schema portability (`#1005`)
+
+The Tools tab flags tools whose advertised `inputSchema` / `outputSchema`
+carries a construct that is legal JSON Schema and is refused or mishandled by
+real MCP clients — the reported case being Go's `jsonschema` package emitting a
+bare `true` for an `interface{}` field, which Claude Code rejects with an
+opaque `"Invalid input"`.
+
+Two surfaces, one verdict: the sidebar row (`ToolListItem`) carries a
+hover-labelled icon — red when something is refused outright, yellow when it is
+merely handled unevenly — and selecting the tool renders a **Schema
+portability** section (`SchemaFindingsList`) above the argument form, one block
+per finding with its path, the problem, and a concrete fix.
+
+Both read [`core/json/schemaLint.ts`](../../core/json/schemaLint.ts), which is
+also what backs the TUI's detail pane and the CLI's `--strict` report — so the
+three clients cannot disagree about whether a schema is portable. That module's
+header explains why it is a portability lint rather than a JSON Schema
+validator. `test-servers/configs/unportable-schemas-http.json` is a server that
+exercises every rule.
+
 ## Non-component code: `src/lib` vs `src/utils`
 
 Two grab-bag directories, split by one rule: **`utils` = functions that compute; `lib` = things that instantiate, adapt, or touch the environment.** If it does I/O or wraps a subsystem, it's `lib`; if it's a pure transform, it's `utils`.
