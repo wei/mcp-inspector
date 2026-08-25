@@ -12,6 +12,7 @@ import type {
 import type { OAuthStorage, SaveClientInformationOptions } from "./storage.js";
 import { generateOAuthState } from "./utils.js";
 import { applyAuthorizationParams } from "./authorizationParams.js";
+import { scopeForDeclinedRefreshGrant } from "./scopes.js";
 
 /**
  * Redirect URL provider. Returns the redirect URL for OAuth flows.
@@ -105,6 +106,36 @@ export type OAuthProviderConfig = {
    * unaffected.
    */
   authorizationParams?: Record<string, string>;
+  /**
+   * Whether to declare the `refresh_token` grant in the registered client
+   * metadata (#2068). Defaults to `true`; set `false` to register (and
+   * authorize) as an authorization-code-only client.
+   *
+   * This is not merely cosmetic. The SDK's `determineScope()` appends
+   * `offline_access` to the effective scope whenever the authorization server
+   * advertises it **and** the client metadata declares `refresh_token`, and
+   * `startAuthorization()` then appends `prompt=consent` whenever
+   * `offline_access` is in scope. Against Microsoft Entra ID, that forced
+   * consent prompt routes a non-admin user into the admin-consent workflow and
+   * fails with `AADSTS90094` even after a tenant admin has consented.
+   *
+   * It removes that *automatic* augmentation only. `startAuthorization()` reads
+   * the scope, never `grant_types`, so an `offline_access` the caller passed in
+   * `scope` — or one the resource advertises when `scope` is unset, which
+   * `determineScope` falls back to — still produces the prompt. This is not on
+   * its own a guarantee that `prompt=consent` is absent.
+   */
+  requestRefreshToken?: boolean;
+  /**
+   * The scope configured for this server (mcp.json / Server Settings), as
+   * distinct from the scope carried in OAuth storage after a previous grant.
+   *
+   * Used only to decide whether an `offline_access` in the effective scope was
+   * *asked for* or merely inherited — see {@link scopeForDeclinedRefreshGrant}.
+   * An explicitly configured one is honored; an inherited one is dropped from
+   * the request when {@link requestRefreshToken} is false. (#2068)
+   */
+  configuredScope?: string;
 };
 
 /**
@@ -126,6 +157,10 @@ export class BaseOAuthClientProvider implements OAuthClientProvider {
   public clientMetadataUrl?: string;
   /** Custom authorization-request parameters (#2018). Authorize URL only. */
   protected authorizationParams?: Record<string, string>;
+  /** Declare the `refresh_token` grant in {@link clientMetadata} (#2068). */
+  protected requestRefreshToken: boolean;
+  /** Server-configured scope, for the #2068 `offline_access` distinction. */
+  protected configuredScope?: string;
 
   constructor(serverUrl: string, oauthConfig: OAuthProviderConfig) {
     this.serverUrl = serverUrl;
@@ -134,6 +169,8 @@ export class BaseOAuthClientProvider implements OAuthClientProvider {
     this.navigation = oauthConfig.navigation;
     this.clientMetadataUrl = oauthConfig.clientMetadataUrl;
     this.authorizationParams = oauthConfig.authorizationParams;
+    this.requestRefreshToken = oauthConfig.requestRefreshToken ?? true;
+    this.configuredScope = oauthConfig.configuredScope;
   }
 
   /**
@@ -171,6 +208,21 @@ export class BaseOAuthClientProvider implements OAuthClientProvider {
   }
 
   get scope(): string | undefined {
+    // #2068: filter at the point of *request*, not in storage. Covers the two
+    // readers that go through this getter — `clientMetadata.scope` below, and
+    // the `scope:` argument `OAuthManager.authenticate` hands to the SDK.
+    //
+    // It is NOT the only request path: mid-session `insufficient_scope` step-up
+    // builds its union from raw storage and passes it to `mcpAuth` directly,
+    // never reading this getter. `OAuthManager.handleAuthChallenge` applies the
+    // same filter there. Both call `scopeForDeclinedRefreshGrant`, so the rule
+    // lives in one place even though it has to be applied twice.
+    if (!this.requestRefreshToken) {
+      return scopeForDeclinedRefreshGrant(
+        this.cachedScope,
+        this.configuredScope,
+      );
+    }
     return this.cachedScope;
   }
 
@@ -186,7 +238,14 @@ export class BaseOAuthClientProvider implements OAuthClientProvider {
     const metadata: OAuthClientMetadata = {
       redirect_uris: this.redirect_uris,
       token_endpoint_auth_method: "none",
-      grant_types: ["authorization_code", "refresh_token"],
+      // #2068: `refresh_token` is declared by default, and dropped when the
+      // server's "Request refresh token" setting is off — which stops the SDK
+      // *adding* `offline_access` (and so the `prompt=consent` it forces). It
+      // does not remove an `offline_access` that reaches the scope another way.
+      // See `OAuthProviderConfig.requestRefreshToken`.
+      grant_types: this.requestRefreshToken
+        ? ["authorization_code", "refresh_token"]
+        : ["authorization_code"],
       response_types: ["code"],
       client_name: "MCP Inspector",
       client_uri: "https://github.com/modelcontextprotocol/inspector",

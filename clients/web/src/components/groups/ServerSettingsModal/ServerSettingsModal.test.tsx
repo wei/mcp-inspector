@@ -119,6 +119,43 @@ describe("ServerSettingsModal", () => {
     );
   });
 
+  // #2068 — only the opt-out is persisted; re-checking the box clears the field
+  // rather than writing `true`, so a default-on server keeps a minimal entry.
+  it("maps the refresh-token opt-out into settings, and back to unset", async () => {
+    const user = userEvent.setup();
+    const onSettingsChange = vi.fn();
+    const { rerender } = renderWithMantine(
+      <ServerSettingsModal
+        opened
+        settings={initialSettings}
+        serverType="streamable-http"
+        isStdio={false}
+        onClose={vi.fn()}
+        onSettingsChange={onSettingsChange}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: /OAuth Settings/i }));
+    await user.click(screen.getByLabelText("Request refresh token"));
+    expect(onSettingsChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ oauthRequestRefreshToken: false }),
+    );
+
+    rerender(
+      <ServerSettingsModal
+        opened
+        settings={{ ...initialSettings, oauthRequestRefreshToken: false }}
+        serverType="streamable-http"
+        isStdio={false}
+        onClose={vi.fn()}
+        onSettingsChange={onSettingsChange}
+      />,
+    );
+    await user.click(screen.getByLabelText("Request refresh token"));
+    expect(onSettingsChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ oauthRequestRefreshToken: undefined }),
+    );
+  });
+
   it("maps the selected protocol era into settings (#1626)", async () => {
     const user = userEvent.setup();
     const onSettingsChange = vi.fn();

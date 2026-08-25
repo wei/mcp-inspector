@@ -48,6 +48,7 @@ import {
   isStrictScopeSuperset,
   resolveEffectiveGrantedScope,
   resolvePersistedScopeAfterGrant,
+  scopeForDeclinedRefreshGrant,
 } from "../auth/scopes.js";
 import { stepUpInsufficientScopeMessage } from "../auth/oauthUx.js";
 import type {
@@ -105,6 +106,8 @@ export class OAuthManager {
     authorizationParams?: Record<string, string>;
     authorizationUrl?: string;
     tokenUrl?: string;
+    /** Declare the `refresh_token` grant in client metadata (#2068). */
+    requestRefreshToken?: boolean;
   }): void {
     this.oauthConfig = {
       ...this.oauthConfig,
@@ -176,6 +179,13 @@ export class OAuthManager {
       // read from mcp.json, and nothing in the flow needs to persist or union
       // them.
       authorizationParams: this.oauthConfig.authorizationParams,
+      // #2068: per-server opt-out of the `refresh_token` grant. Like
+      // `authorizationParams` this is pure config off mcp.json, so it lives on
+      // the provider rather than in OAuth storage.
+      requestRefreshToken: this.oauthConfig.requestRefreshToken,
+      // #2068: lets the provider tell an `offline_access` the user asked for
+      // from one inherited from a previous grant's persisted scope.
+      configuredScope: this.oauthConfig.scope,
     });
 
     provider.setEventTarget(this.params.getEventTarget());
@@ -305,9 +315,12 @@ export class OAuthManager {
       resourceMetadataUrl,
     });
 
+    // Read once: the getter filters (#2068), so this is what was actually
+    // requested and what the callback leg has to persist.
+    const requestedScope = provider.scope;
     const result = await mcpAuth(provider, {
       serverUrl,
-      scope: provider.scope,
+      scope: requestedScope,
       fetchFn: this.params.effectiveAuthFetch,
       resourceMetadataUrl,
     });
@@ -316,6 +329,21 @@ export class OAuthManager {
       throw new Error(
         "Unexpected: auth() returned AUTHORIZED without authorization code",
       );
+    }
+
+    // #2068 — record the filtered request so `completeOAuthFlow` can persist
+    // it. `resolvePersistedScopeAfterGrant` falls back to the requested scope
+    // when the token response omits `scope` (RFC 6749 §5.1: omitted means the
+    // grant matched the request), and without this that fallback is `undefined`
+    // on the ordinary leg — only step-up ever set it. The old
+    // `offline_access` would then stay in storage, so the scope never
+    // self-heals and later satisfaction checks still read it as granted.
+    //
+    // Only when the filter is in effect. With the grant declared there is
+    // nothing to heal, and persisting a request the AS did not confirm would be
+    // a behavior change beyond this setting.
+    if (this.oauthConfig.requestRefreshToken === false && requestedScope) {
+      this.pendingAuthorizationScope = requestedScope;
     }
 
     const capturedUrl = provider.getCapturedAuthUrl();
@@ -774,13 +802,37 @@ export class OAuthManager {
       resourceMetadataUrl,
     });
 
-    const scopeForAuth =
+    // #2068 — the step-up union is built from *raw* storage
+    // (`enrichChallengeWithScopes`) and handed to the SDK directly, so it never
+    // passes through the provider's filtering `scope` getter. Without this an
+    // `offline_access` inherited from an earlier grant reappears here and the
+    // SDK re-adds `prompt=consent` even with the setting off — the same failure
+    // the option exists to prevent, on the one path that bypasses it. A scope
+    // the challenge itself requires is preserved, since stripping that would
+    // just re-earn the same challenge.
+    const requestedScopeForAuth =
       enriched.reason === "insufficient_scope"
         ? enriched.authorizationScopes?.join(" ")
         : this.oauthConfig.scope?.trim() ||
           (enriched.requiredScopes?.length
             ? enriched.requiredScopes.join(" ")
             : undefined);
+    const scopeForAuth =
+      this.oauthConfig.requestRefreshToken === false
+        ? scopeForDeclinedRefreshGrant(
+            requestedScopeForAuth,
+            this.oauthConfig.scope,
+            // The RAW challenge scopes, not `enriched.requiredScopes`:
+            // `enrichChallengeWithScopes` narrows that to the *missing* subset,
+            // so a challenge requiring `offline_access tools:write` against a
+            // stored scope that already has `offline_access` arrives here as
+            // just `["tools:write"]`. Passing the narrowed list would read the
+            // server's explicit requirement as inherited and strip it — then
+            // re-authorization earns the same challenge forever, which is the
+            // loop this argument exists to prevent.
+            challenge.requiredScopes,
+          )
+        : requestedScopeForAuth;
 
     provider.setSuppressAuthorizationNavigation(true);
     let result: Awaited<ReturnType<typeof mcpAuth>>;

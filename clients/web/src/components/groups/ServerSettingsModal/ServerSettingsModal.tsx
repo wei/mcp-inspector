@@ -187,6 +187,10 @@ export function ServerSettingsModal({
       // the SDK's `reauthorize` behavior without writing a spurious field.
       oauthOnInsufficientScope:
         oauth.onInsufficientScope === "throw" ? "throw" : undefined,
+      // #2068: persist only the non-default (off). `undefined` means on, so a
+      // server that never touched the switch writes no field at all.
+      oauthRequestRefreshToken:
+        oauth.requestRefreshToken === false ? false : undefined,
     });
   }
 
