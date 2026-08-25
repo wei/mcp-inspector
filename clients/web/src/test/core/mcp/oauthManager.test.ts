@@ -1213,6 +1213,24 @@ describe("OAuthManager", () => {
         );
         expect(sent?.split(/\s+/)).toContain("offline_access");
       });
+
+      // The mixed case, and the one that made the guard above insufficient:
+      // `enrichChallengeWithScopes` narrows `requiredScopes` to the *missing*
+      // subset, so a challenge requiring both — against a stored scope that
+      // already carries `offline_access` — arrives as just `["tools:write"]`.
+      // Reading the narrowed list treats the server's explicit requirement as
+      // inherited and strips it, and re-authorization then earns the same
+      // challenge forever.
+      it("preserves a required offline_access when the challenge also names a missing scope", async () => {
+        const sent = await scopeSentForChallenge(
+          "mcp offline_access",
+          "mcp",
+          ["offline_access", "tools:write"],
+          false,
+        );
+        expect(sent?.split(/\s+/)).toContain("offline_access");
+        expect(sent?.split(/\s+/)).toContain("tools:write");
+      });
     });
 
     it("short-circuits handleAuthChallenge when scope already satisfied", async () => {

@@ -804,7 +804,15 @@ export class OAuthManager {
         ? scopeForDeclinedRefreshGrant(
             requestedScopeForAuth,
             this.oauthConfig.scope,
-            enriched.requiredScopes,
+            // The RAW challenge scopes, not `enriched.requiredScopes`:
+            // `enrichChallengeWithScopes` narrows that to the *missing* subset,
+            // so a challenge requiring `offline_access tools:write` against a
+            // stored scope that already has `offline_access` arrives here as
+            // just `["tools:write"]`. Passing the narrowed list would read the
+            // server's explicit requirement as inherited and strip it — then
+            // re-authorization earns the same challenge forever, which is the
+            // loop this argument exists to prevent.
+            challenge.requiredScopes,
           )
         : requestedScopeForAuth;
 

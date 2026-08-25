@@ -913,7 +913,7 @@ export function ServerSettingsForm({
               />
               <Checkbox
                 label="Request refresh token"
-                description={`Registers the refresh_token grant, so access tokens renew without a new sign-in. Uncheck it for authorization servers that reject the offline_access scope and forced consent prompt the grant brings with it. Applies on the next connect.${refreshTokenEmaNote}`}
+                description={`Declares the refresh_token grant, so the authorization server may issue a refresh token and renew access tokens without a new sign-in. Uncheck it for authorization servers that reject the offline_access scope and forced consent prompt the grant brings with it. Applies on the next connect.${refreshTokenEmaNote}`}
                 checked={settings.oauthRequestRefreshToken ?? true}
                 onChange={handleRequestRefreshTokenChange}
               />
