@@ -919,10 +919,11 @@ export function ServerSettingsForm({
               />
               {refreshTokenOptedOut && scopesIncludeOfflineAccess ? (
                 <Alert color="yellow" title="offline_access is still requested">
-                  Scopes above lists offline_access, and prompt=consent is added
-                  whenever that scope is requested — regardless of this setting.
-                  Remove it from Scopes as well, or the consent prompt this
-                  checkbox is meant to avoid still goes out.
+                  The Scopes field above lists offline_access, and
+                  prompt=consent is added whenever that scope is requested —
+                  regardless of this setting. Remove it from Scopes as well, or
+                  the consent prompt this checkbox is meant to avoid still goes
+                  out.
                 </Alert>
               ) : null}
               <Stack gap="xs">
