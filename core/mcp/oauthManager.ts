@@ -324,13 +324,20 @@ export class OAuthManager {
       throw new Error("Failed to capture authorization URL");
     }
 
-    // RFC 6749 5.1: an omitted `scope` in the token response means the grant
+    // RFC 6749 §5.1: an omitted `scope` in the token response means the grant
     // is identical to what was requested. Carry the request across the
-    // redirect so completeOAuthFlow has that fallback to persist (#2117) --
+    // redirect so completeOAuthFlow has that fallback to persist (#2117) —
     // the step-up paths already do this, and without it an ordinary grant
     // whose AS echoes no scope leaves the previous stored scope standing as
     // if it were still what the current token carries.
-    this.pendingAuthorizationScope = requestedScope;
+    //
+    // Read it off the authorize URL rather than from `provider.scope`: the
+    // SDK augments the request with `offline_access` when the AS advertises
+    // it and the client asks for a refresh token, so the provider's scope can
+    // be a strict subset of what was actually asked for — and persisting the
+    // subset would understate the grant in exactly the way this fixes.
+    this.pendingAuthorizationScope =
+      capturedUrl.searchParams.get("scope")?.trim() || requestedScope;
 
     const stateParam = capturedUrl.searchParams.get("state");
     if (stateParam && this.params.onBeforeOAuthRedirect) {
@@ -366,8 +373,8 @@ export class OAuthManager {
           authorizationCode,
           iss,
         );
-        // `scopeForMint` -- not `pendingAuthorizationScope` -- is what the
-        // mint actually asked for, so it is the RFC 6749 5.1 fallback here
+        // `scopeForMint` — not `pendingAuthorizationScope` — is what the
+        // mint actually asked for, so it is the RFC 6749 §5.1 fallback here
         // (the two differ on the ordinary leg, where only the config carries
         // a scope).
         const scopeToPersist = resolvePersistedScopeAfterGrant(

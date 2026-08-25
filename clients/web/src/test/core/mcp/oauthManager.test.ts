@@ -737,13 +737,18 @@ describe("OAuthManager", () => {
   });
 
   describe("persisting the requested scope after an ordinary grant (#2117)", () => {
-    const CAPTURED_URL = new URL(
-      "https://auth.example.com/authorize?state=abc",
-    );
+    function capturedUrlWithScope(scope?: string): URL {
+      const url = new URL("https://auth.example.com/authorize?state=abc");
+      if (scope !== undefined) {
+        url.searchParams.set("scope", scope);
+      }
+      return url;
+    }
 
     async function authorizeThenComplete(
       storedScope: string | undefined,
       tokenScope: string | undefined,
+      authorizeUrlScope?: string,
     ) {
       mockedMcpAuth.mockResolvedValue("REDIRECT");
       const params = createMockParams();
@@ -758,7 +763,7 @@ describe("OAuthManager", () => {
             .BaseOAuthClientProvider.prototype,
           "getCapturedAuthUrl",
         )
-        .mockReturnValue(CAPTURED_URL);
+        .mockReturnValue(capturedUrlWithScope(authorizeUrlScope));
 
       await manager.authenticate();
 
@@ -797,6 +802,23 @@ describe("OAuthManager", () => {
       const params = await authorizeThenComplete(undefined, undefined);
 
       expect(storageOf(params).saveScope).not.toHaveBeenCalled();
+    });
+
+    it("persists the scope the authorize URL actually carried, not the provider's", async () => {
+      // The SDK augments the request with `offline_access` when the AS
+      // advertises it and the client wants a refresh token, so the authorize
+      // URL is a superset of `provider.scope`. Persisting the provider's copy
+      // would understate the grant the AS implied by staying silent.
+      const params = await authorizeThenComplete(
+        "mcp",
+        undefined,
+        "mcp offline_access",
+      );
+
+      expect(storageOf(params).saveScope).toHaveBeenCalledWith(
+        SERVER_URL,
+        "mcp offline_access",
+      );
     });
   });
 
