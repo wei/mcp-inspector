@@ -120,6 +120,7 @@ Options that specify the MCP server (catalog/config file, ad-hoc command/URL, en
 | `--tool-metadata <key=value>` | Tool-specific `_meta` entries for `tools/call`. Same JSON-parsed value handling as `--metadata`. |
 | `--connect-timeout <ms>`      | Connection timeout in ms. Defaults to `15000` for ad-hoc `--server-url`/target runs (so a black-holed host fails fast) and to the file-level timeout for `--catalog`/`--config` runs. `0` disables the timeout.                                                                                                                                                                                                      |
 | `--app-info`                  | Probe a tool's MCP App UI metadata without invoking it. With `--method tools/call --tool-name <name>`: prints one JSON line (`hasApp`, `resourceUri`, `csp`, `permissions`, `domain`, …) and exits `0` if the tool has an app or `2` (`no_app`) if not. With `--method tools/list`: emits NDJSON — one app-info line per tool over a single connection.                                                              |
+| `--strict`                    | With `--method tools/list`: report tool-schema portability problems in full (path, issue, suggested fix) on stderr, and exit `6` if any is error-severity. Without it, a one-line count is printed instead. See [Schema portability](#schema-portability---strict). |
 | `--format <text\|json>`       | Output format. `text` (default) pretty-prints the result. `json` emits a single JSON object on stdout (`{ "result": … }`, plus `{ "appInfo": … }` as a sibling key for App tools) with no banners, so the whole output pipes cleanly into `jq`.                                                                                                                                                                      |
 | `--relogin`                   | Delete stored OAuth for this server URL from the shared store before connect; interactive login still only runs if the server requires auth. Requires an HTTP/SSE URL (rejected for stdio). Conflicts with `--stored-auth-only` / `--use-stored-auth` / `--wait-for-auth` / catalog short-circuits.                                                                                                                  |
 | `--stored-auth-only`          | **CI / non-interactive safe:** never start interactive OAuth / step-up (and never auto-open a browser); use the shared store if present, otherwise fail immediately with `auth_required`. Prefer this over a bare pipe/CI run that would otherwise attempt interactive login.                                                                                                                                        |
@@ -151,6 +152,50 @@ mcp-inspector --cli <server> --method tools/call --tool-name my_app_tool --forma
 > `tools/list --app-info` always emits NDJSON (one raw app-info object per line) **regardless of `--format`** — the per-tool list shape is fixed. `--format json` only reshapes the single-result paths (`tools/call`, `tools/list` without `--app-info`, etc.) into the `{result[, appInfo]}` envelope.
 
 A `tools/call` that returns `isError:true` still prints its payload but exits `5` (`tool_is_error`) so `&&` chains don't proceed on a failed call.
+
+#### Schema portability (`--strict`)
+
+A tool schema can be perfectly legal JSON Schema and still be refused by the
+client the server is meant to run against. `--strict` (with `--method
+tools/list`) names those constructs — path, what is wrong, and a concrete fix —
+on **stderr**, and exits `6` if any is error-severity:
+
+```bash
+mcp-inspector --cli <server> --method tools/list --strict
+```
+
+```text
+Error: tool "info"
+  Path: outputSchema.properties.data
+  Issue: Bare `true` used where a schema object is expected.
+  Suggestion: Spell the "anything" schema out — `{"type": "object", "additionalProperties": true}` …
+
+1 error, 3 warnings across 2 tools.
+```
+
+Severity decides the exit code, not the report: **errors** are constructs a
+shipping MCP client refuses outright (a bare `true` in a `properties` map, a
+non-object schema root), **warnings** are ones handled unevenly (an array-form
+`type`, a remote `$ref`, a schema carrying no validation keyword at all). Only
+errors fail the run — a `--strict` that failed on warnings would be unusable as
+a CI gate against servers that are in fact fine.
+
+The report goes to stderr, so the result on stdout stays parseable. Under
+`--format json` the findings are folded into the same envelope instead
+(`{"result":…,"schemaFindings":[…]}`), so a caller reads one document rather
+than correlating two.
+
+**Without `--strict` nothing changes except one line.** A `tools/list` whose
+schemas have findings prints a single stderr summary — `Schema portability: 1
+error, 3 warnings across 2 tools. Re-run with --strict for details.` — and
+still exits `0`. A clean list prints nothing at all.
+
+This is deliberately not a JSON Schema validator. A census of 617 public
+servers found **zero** that fail the SDK's own parser, so a conformance check
+would report nothing on essentially every real server; what bites is the
+narrower subset each consumer accepts, which is what these rules encode. The
+same verdict drives the TUI's tool detail pane and the web Tools tab — all
+three read `core/json/schemaLint`.
 
 ### CLI-specific (OAuth for HTTP servers)
 
@@ -250,6 +295,7 @@ prose from stderr:
 | `3`  | Server requires authentication (401/403, `WWW-Authenticate`, OAuth).          |
 | `4`  | Server unreachable (DNS, connection refused, timeout, `fetch failed`).        |
 | `5`  | Tool error (`tools/call` returned `isError:true`, or the tool was not found). |
+| `6`  | `--strict` found an error-severity tool-schema portability problem.            |
 
 On any non-zero exit the CLI also writes a single JSON line to **stderr** — the
 `ErrorEnvelope`:

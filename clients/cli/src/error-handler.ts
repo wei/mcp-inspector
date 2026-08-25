@@ -8,6 +8,7 @@
  *  - 3: server requires authentication (401 / WWW-Authenticate / OAuth)
  *  - 4: server unreachable (DNS, connect refused, timeout, fetch failure)
  *  - 5: tool error (`tools/call` returned `isError:true`, or tool not found)
+ *  - 6: `--strict` found an error-severity tool-schema portability finding
  */
 export const EXIT_CODES = {
   OK: 0,
@@ -16,6 +17,7 @@ export const EXIT_CODES = {
   AUTH_REQUIRED: 3,
   UNREACHABLE: 4,
   TOOL_ERROR: 5,
+  SCHEMA_INVALID: 6,
 } as const;
 
 /** Machine-readable error envelope written as one JSON line on stderr. */

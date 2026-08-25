@@ -685,6 +685,10 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
       "Probe the tool's MCP App UI metadata (resourceUri, csp, permissions, domain) and emit it as one JSON line; exit 2 when the tool has no app. Use with --method tools/call --tool-name <name> (the tool itself is not invoked) or --method tools/list (one NDJSON line per tool).",
     )
     .option(
+      "--strict",
+      "Report tool-schema portability problems in full (path, issue, suggested fix) on stderr, and exit 6 if any is error-severity. Use with --method tools/list. Without it, a one-line count is printed instead.",
+    )
+    .option(
       "--connect-timeout <ms>",
       `Connection timeout in ms (default ${DEFAULT_CONNECT_TIMEOUT_MS} for ad-hoc --server-url / target invocations; 0 = no timeout).`,
       (v: string) => {
@@ -784,6 +788,7 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
     serverUrl?: string;
     header?: Record<string, string>;
     appInfo?: boolean;
+    strict?: boolean;
     connectTimeout?: number;
     format?: OutputFormat;
     toolArgsJson?: string;
@@ -1004,6 +1009,10 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
     );
   }
 
+  if (options.strict && options.method !== "tools/list") {
+    throw new Error("--strict requires --method tools/list.");
+  }
+
   // --tool-args-json passes arguments verbatim with no key=value coercion (so
   // `"012"` stays a string and nested objects work without shell escaping).
   let toolArg = options.toolArg;
@@ -1047,6 +1056,7 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
     metadata: options.metadata,
     toolMeta: options.toolMetadata,
     appInfo: options.appInfo === true,
+    strict: options.strict === true,
     format: options.format,
   };
 

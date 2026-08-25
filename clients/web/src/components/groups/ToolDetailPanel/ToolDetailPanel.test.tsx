@@ -510,6 +510,30 @@ describe("ToolDetailPanel", () => {
     });
   });
 
+  describe("schema portability findings (#1005)", () => {
+    it("lists a finding with its path when a schema is unportable", () => {
+      renderWithMantine(
+        <ToolDetailPanel
+          {...baseProps}
+          tool={{
+            name: "info",
+            inputSchema: { type: "object", properties: {} },
+            outputSchema: { type: "object", properties: { data: true } },
+          }}
+        />,
+      );
+      expect(screen.getByText("Schema portability (1)")).toBeInTheDocument();
+      expect(
+        screen.getByText("outputSchema.properties.data"),
+      ).toBeInTheDocument();
+    });
+
+    it("omits the section for a portable tool", () => {
+      renderWithMantine(<ToolDetailPanel {...baseProps} tool={simpleTool} />);
+      expect(screen.queryByTestId("schema-findings")).not.toBeInTheDocument();
+    });
+  });
+
   // #2020: Execute used to be gated on `isExecuting` alone — this panel never
   // called `hasMissingRequiredFields`, unlike the App and elicitation panels —
   // so arguments that could not be sent were executed anyway and simply arrived

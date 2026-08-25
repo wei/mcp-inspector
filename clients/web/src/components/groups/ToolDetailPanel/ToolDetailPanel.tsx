@@ -11,7 +11,7 @@ import {
   Switch,
   Text,
 } from "@mantine/core";
-import { useId, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { RiArrowDownSLine, RiArrowRightSLine } from "react-icons/ri";
 import type {
   ProgressNotification,
@@ -24,7 +24,9 @@ import {
   toFormSchema,
 } from "../../../utils/jsonUtils";
 import { getMirroredHeaderParams } from "@inspector/core/json/xMcpHeader.js";
+import { lintToolSchemas } from "@inspector/core/json/schemaLint.js";
 import { AnnotationBadge } from "../../elements/AnnotationBadge/AnnotationBadge";
+import { SchemaFindingsList } from "../../elements/SchemaFindingsList/SchemaFindingsList";
 import { ProgressDisplay } from "../../elements/ProgressDisplay/ProgressDisplay";
 import { SchemaForm } from "../SchemaForm/SchemaForm";
 
@@ -219,6 +221,9 @@ export function ToolDetailPanel({
   // SEP-2243: args this tool declares as `x-mcp-header` — their values mirror
   // into `Mcp-Param-{Name}` headers on a `tools/call` (#1632).
   const mirroredParams = getMirroredHeaderParams(tool);
+  // Memoized on the tool: this panel re-renders on every keystroke in the
+  // argument form, and the walk depends on nothing that changes in between.
+  const schemaFindings = useMemo(() => lintToolSchemas(tool), [tool]);
 
   // Descriptions are shown by default (most are short); the chevron lets the
   // user hide a long one to keep the form and Execute footer in view. Reset to
@@ -337,6 +342,8 @@ export function ToolDetailPanel({
               </HeaderParamsNote>
             </HeaderParamsSection>
           )}
+
+          <SchemaFindingsList findings={schemaFindings} />
 
           <SchemaForm
             schema={formSchema}

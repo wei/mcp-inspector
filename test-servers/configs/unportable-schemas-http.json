@@ -1,0 +1,39 @@
+{
+  "serverInfo": {
+    "name": "unportable-schemas-showcase",
+    "version": "1.0.0"
+  },
+  "tools": [{ "preset": "echo" }, { "preset": "add" }, { "preset": "get_temp" }],
+  "rawToolSchemas": {
+    "echo": {
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "message": { "type": "string" },
+          "show_ids": { "type": ["null", "boolean"] },
+          "opts": {}
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "data": true,
+          "topic": { "type": "string" }
+        }
+      }
+    },
+    "add": {
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "a": { "$ref": "https://example.com/schemas/number.json" },
+          "b": { "type": "number" }
+        }
+      }
+    }
+  },
+  "transport": {
+    "type": "streamable-http",
+    "port": 6603
+  }
+}

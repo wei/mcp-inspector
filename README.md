@@ -34,8 +34,9 @@ inspector/
 │   │                 #   plus per-server secret storage — the keychain/file/memory SecretStore
 │   │                 #   implementations, the selection policy, and the descriptor the banner and UI report
 │   ├── client/       # Install-level client config (`client.json`): browser-safe parse/validate + Node load/save, remote backend, secrets
-│   ├── json/         # JSON + parameter/argument conversion utilities, and the nullable-union
-│   │                 #   schema collapse shared by the web and TUI form builders
+│   ├── json/         # JSON + parameter/argument conversion utilities, the nullable-union
+│   │                 #   schema collapse shared by the web and TUI form builders, and the
+│   │                 #   tool-schema portability lint all three clients report from
 │   ├── logging/      # Silent pino logger singleton
 │   ├── mcp/          # InspectorClient runtime, state stores, transports, config import,
 │   │                 #   and the RFC 6570 URI-template helpers the web form and TUI expand through
@@ -152,6 +153,7 @@ Each config below is a ready-made server for exercising one feature by hand. Loa
 | `structured-output-http.json`             | Tools tab: a result's `structuredContent` section  | [#1908](https://github.com/modelcontextprotocol/inspector/issues/1908) |
 | `duplicate-tool-names-http.json`          | A `tools/list` that repeats a tool name            | [#1957](https://github.com/modelcontextprotocol/inspector/issues/1957) |
 | `nullable-fields-http.json`               | Tools tab: nullable (`anyOf` + `null`) arguments   | [#1928](https://github.com/modelcontextprotocol/inspector/issues/1928) |
+| `unportable-schemas-http.json` **(legacy era)** | Tool schemas a real client rejects, flagged in all three clients | [#1005](https://github.com/modelcontextprotocol/inspector/issues/1005) |
 | `rfc6570-templates-http.json`             | Resources tab: RFC 6570 resource-template expansion | [#1919](https://github.com/modelcontextprotocol/inspector/issues/1919) |
 | `advertised-extensions-http.json`         | Tool registration gated on advertised extensions    | [#1739](https://github.com/modelcontextprotocol/inspector/issues/1739) |
 | `oauth-custom-resource-metadata-http.json` **(legacy era)** | OAuth discovery driven by the challenge's `resource_metadata` | [#2071](https://github.com/modelcontextprotocol/inspector/issues/2071) |
@@ -285,6 +287,47 @@ The duplicated copies are appended rather than placed beside their twin on purpo
 Open the Tools tab and select `record_shipment`: `direction` must render as a **Select** (`envio` / `recebimento`) with a clear button that sets it back to `null`, `reference` as a text input, `quantity` as a number input, and `express` as a checkbox. On the broken build every one of them fell through to the raw-JSON textarea, which re-escaped its own contents on each keystroke until the value was unusable ([#1928](https://github.com/modelcontextprotocol/inspector/issues/1928)). The tool echoes the arguments it received, so the result panel shows exactly what was sent.
 
 The **TUI** had the same gap and is worth checking against the same server (`--tui`, then test `record_shipment`): `direction` is a select, `quantity` an integer field, `express` a boolean. Both clients now share one collapse step — `normalizeNullableUnion` in [`core/json/nullableUnion.ts`](./core/json/nullableUnion.ts) — precisely so they cannot drift on which schemas they can render.
+
+#### Unportable tool schemas
+
+`unportable-schemas-http.json` serves three tools, two of whose advertised
+schemas carry constructs that are legal JSON Schema and are refused or
+mishandled by real MCP clients: `echo` declares `outputSchema.properties.data`
+as a bare `true` (what Go's `jsonschema` package emits for `interface{}` —
+the case reported in [#1005](https://github.com/modelcontextprotocol/inspector/issues/1005)),
+an array-form `"type": ["null","boolean"]`, and an `opts` property that
+constrains nothing; `add` points a property at a remote `$ref`. `get_temp` is
+left clean, so a flagged tool sits next to an unflagged one. Plain
+streamable-HTTP — connect with the **default (legacy)** protocol era.
+
+The Inspector is where a server author looks first, so a construct that will
+fail downstream is named here rather than passed through silently. All three
+clients report the same verdict from
+[`core/json/schemaLint.ts`](./core/json/schemaLint.ts), each with the room it
+has:
+
+```bash
+mcp-inspector --cli http://127.0.0.1:6603/mcp --method tools/list --strict   # exits 6
+```
+
+- **CLI** — `--strict` prints the full report (path, issue, suggested fix) on
+  stderr and exits `6` on an error-severity finding; without it, one summary
+  line. See [Schema portability](./clients/cli/README.md#schema-portability---strict).
+- **TUI** — the tools list marks `echo` with a red `!` and `add` with a yellow
+  `?`; the detail pane lists each finding under **Schema Portability**.
+- **Web** — the Tools sidebar row carries the same flag as a hover-labelled
+  icon, and selecting the tool shows a **Schema portability** section above the
+  argument form.
+
+This is deliberately **not** a JSON Schema validator. A census of 617 public
+servers (14,804 tool schemas) reported on that issue found **0** that fail the
+SDK's own `ListToolsResultSchema.safeParse`, so a conformance check would
+report nothing on essentially every real server. What bites is the narrower
+subset each consumer accepts, and each rule here is a construct known to be
+refused or degraded by a shipping client. The schemas are supplied through the
+test server's `rawToolSchemas` override, because the Zod-built presets cannot
+express any of them — which is the same reason a real server hits this only
+when its schemas come from another generator.
 
 #### RFC 6570 resource templates
 

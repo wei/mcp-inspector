@@ -1,0 +1,463 @@
+import { describe, it, expect } from "vitest";
+import type { Tool } from "@modelcontextprotocol/client";
+import {
+  countFindings,
+  describeSchemaPath,
+  formatSchemaLintReport,
+  lintToolSchemas,
+  lintTools,
+  summarizeFindings,
+  type SchemaFinding,
+  type SchemaLintRule,
+} from "@inspector/core/json/schemaLint.js";
+
+/**
+ * Minimal well-formed tool; each test overrides the schema under test.
+ *
+ * Overrides are `Record<string, unknown>` rather than `Partial<Tool>` on
+ * purpose: the SDK types a tool schema as an *object* schema with a literal
+ * `type: "object"`, and the whole point of this suite is to feed the lint the
+ * malformed shapes a real server can send — an array-form `type`, a `properties`
+ * that is not a map, a root that is a bare boolean. `Partial<Tool>` rejects
+ * every one of them, so the fixture accepts the loose shape and narrows once,
+ * here, instead of scattering a cast over each case.
+ */
+function tool(overrides: Record<string, unknown> = {}): Tool {
+  return {
+    name: "t",
+    inputSchema: { type: "object", properties: {} },
+    ...overrides,
+  } as Tool;
+}
+
+/** The rules raised, in order — the shape most assertions here care about. */
+function rules(findings: readonly SchemaFinding[]): SchemaLintRule[] {
+  return findings.map((f) => f.rule);
+}
+
+function paths(findings: readonly SchemaFinding[]): string[] {
+  return findings.map((f) => describeSchemaPath(f.schema, f.path));
+}
+
+describe("lintToolSchemas — clean schemas", () => {
+  it.each([
+    ["an empty object schema", { type: "object", properties: {} }],
+    [
+      "a typed property",
+      { type: "object", properties: { a: { type: "string" } } },
+    ],
+    [
+      "an enum property with no type",
+      { type: "object", properties: { a: { enum: ["x", "y"] } } },
+    ],
+    [
+      "a const property with no type",
+      { type: "object", properties: { a: { const: 3 } } },
+    ],
+    [
+      "a local $ref",
+      {
+        type: "object",
+        properties: { a: { $ref: "#/$defs/x" } },
+        $defs: { x: { type: "string" } },
+      },
+    ],
+    [
+      "additionalProperties: true",
+      { type: "object", properties: {}, additionalProperties: true },
+    ],
+    [
+      "additionalProperties: false",
+      { type: "object", properties: {}, additionalProperties: false },
+    ],
+    [
+      "unevaluatedProperties / additionalItems / unevaluatedItems booleans",
+      {
+        type: "object",
+        unevaluatedProperties: false,
+        additionalItems: true,
+        unevaluatedItems: false,
+      },
+    ],
+    [
+      "a shape-implying schema with no type",
+      {
+        type: "object",
+        properties: { a: { properties: { b: { type: "string" } } } },
+      },
+    ],
+    [
+      "an anyOf branch set",
+      {
+        type: "object",
+        properties: {
+          a: { anyOf: [{ type: "string" }, { type: "null" }] },
+        },
+      },
+    ],
+    [
+      "a typed array with typed items",
+      {
+        type: "object",
+        properties: { a: { type: "array", items: { type: "number" } } },
+      },
+    ],
+  ])("reports nothing for %s", (_label, inputSchema) => {
+    expect(lintToolSchemas(tool({ inputSchema }))).toEqual([]);
+  });
+
+  it("reports nothing when a tool declares neither schema", () => {
+    const bare = { name: "t" } as unknown as Tool;
+    expect(lintToolSchemas(bare)).toEqual([]);
+  });
+});
+
+describe("lintToolSchemas — boolean-schema", () => {
+  it("flags the Go interface{} case from the issue", () => {
+    const findings = lintToolSchemas(
+      tool({
+        outputSchema: {
+          type: "object",
+          properties: { data: true, topic: { type: "string" } },
+        },
+      }),
+    );
+    expect(rules(findings)).toEqual(["boolean-schema"]);
+    expect(paths(findings)).toEqual(["outputSchema.properties.data"]);
+    expect(findings[0]!.severity).toBe("error");
+    expect(findings[0]!.suggestion).toContain("additionalProperties");
+  });
+
+  it("flags a bare false, with a different suggestion", () => {
+    const findings = lintToolSchemas(
+      tool({
+        inputSchema: { type: "object", properties: { data: false } },
+      }),
+    );
+    expect(rules(findings)).toEqual(["boolean-schema"]);
+    expect(findings[0]!.suggestion).toContain("Remove the property");
+  });
+
+  it.each([
+    [
+      "items",
+      { type: "object", properties: { a: { items: true } } },
+      "inputSchema.properties.a.items",
+    ],
+    [
+      "an anyOf branch",
+      { type: "object", properties: { a: { anyOf: [true] } } },
+      "inputSchema.properties.a.anyOf[0]",
+    ],
+    [
+      "a prefixItems entry",
+      { type: "object", properties: { a: { prefixItems: [true] } } },
+      "inputSchema.properties.a.prefixItems[0]",
+    ],
+    [
+      "a $defs entry",
+      { type: "object", $defs: { x: true }, properties: {} },
+      "inputSchema.$defs.x",
+    ],
+    [
+      "a patternProperties entry",
+      { type: "object", patternProperties: { "^a": true }, properties: {} },
+      'inputSchema.patternProperties["^a"]',
+    ],
+    [
+      "a tuple-form items entry",
+      { type: "object", properties: { a: { items: [true] } } },
+      "inputSchema.properties.a.items[0]",
+    ],
+    [
+      "propertyNames",
+      { type: "object", propertyNames: true, properties: {} },
+      "inputSchema.propertyNames",
+    ],
+    ["the schema root", true, "inputSchema"],
+  ])("flags a bare boolean under %s", (_label, inputSchema, path) => {
+    const findings = lintToolSchemas(tool({ inputSchema }));
+    expect(rules(findings)).toEqual(["boolean-schema"]);
+    expect(paths(findings)).toEqual([path]);
+  });
+
+  it("quotes a non-identifier property name in the path", () => {
+    const findings = lintToolSchemas(
+      tool({
+        inputSchema: { type: "object", properties: { "odd key": true } },
+      }),
+    );
+    expect(paths(findings)).toEqual(['inputSchema.properties["odd key"]']);
+  });
+});
+
+describe("lintToolSchemas — type-union", () => {
+  it("flags the nullable array form and suggests the single type", () => {
+    const findings = lintToolSchemas(
+      tool({
+        inputSchema: {
+          type: "object",
+          properties: { show_ids: { type: ["null", "boolean"] } },
+        },
+      }),
+    );
+    expect(rules(findings)).toEqual(["type-union"]);
+    expect(findings[0]!.severity).toBe("warning");
+    expect(findings[0]!.suggestion).toContain('"type": "boolean"');
+  });
+
+  it("suggests anyOf when more than one non-null member survives", () => {
+    const findings = lintToolSchemas(
+      tool({
+        inputSchema: {
+          type: "object",
+          properties: { a: { type: ["string", "number"] } },
+        },
+      }),
+    );
+    expect(findings[0]!.suggestion).toContain("anyOf");
+  });
+
+  it("ignores non-string members when picking the suggestion", () => {
+    const findings = lintToolSchemas(
+      tool({
+        inputSchema: {
+          type: "object",
+          properties: { a: { type: ["string", 3] } },
+        },
+      }),
+    );
+    expect(findings[0]!.suggestion).toContain('"type": "string"');
+  });
+
+  it("does not raise non-object-root for an array-typed root", () => {
+    // The root rule reads a *string* `type`; an array root is the union rule's
+    // business, and reporting both would name one defect twice.
+    const findings = lintToolSchemas(
+      tool({ inputSchema: { type: ["object", "null"] } }),
+    );
+    expect(rules(findings)).toEqual(["type-union"]);
+  });
+});
+
+describe("lintToolSchemas — untyped-schema", () => {
+  it.each([
+    ["an empty schema", {}],
+    ["an annotation-only schema", { description: "anything at all" }],
+    [
+      "a title/default-only schema",
+      { title: "T", default: 1, examples: [1], deprecated: false },
+    ],
+  ])("flags %s", (_label, sub) => {
+    const findings = lintToolSchemas(
+      tool({
+        inputSchema: { type: "object", properties: { a: sub } },
+      }),
+    );
+    expect(rules(findings)).toEqual(["untyped-schema"]);
+    expect(paths(findings)).toEqual(["inputSchema.properties.a"]);
+  });
+
+  it("flags an entirely empty root schema", () => {
+    const findings = lintToolSchemas(tool({ inputSchema: {} }));
+    expect(rules(findings)).toEqual(["untyped-schema"]);
+    expect(paths(findings)).toEqual(["inputSchema"]);
+  });
+});
+
+describe("lintToolSchemas — non-object-root", () => {
+  it("flags a non-object inputSchema root", () => {
+    const findings = lintToolSchemas(
+      tool({
+        inputSchema: { type: "array", items: { type: "string" } },
+      }),
+    );
+    expect(rules(findings)).toEqual(["non-object-root"]);
+    expect(findings[0]!.severity).toBe("error");
+    expect(findings[0]!.issue).toContain("inputSchema");
+  });
+
+  it("names outputSchema when that is the offending root", () => {
+    const findings = lintToolSchemas(
+      tool({ outputSchema: { type: "string" } }),
+    );
+    expect(rules(findings)).toEqual(["non-object-root"]);
+    expect(findings[0]!.issue).toContain("outputSchema");
+  });
+
+  it("does not flag a nested non-object schema", () => {
+    const findings = lintToolSchemas(
+      tool({
+        inputSchema: {
+          type: "object",
+          properties: { a: { type: "array", items: { type: "string" } } },
+        },
+      }),
+    );
+    expect(findings).toEqual([]);
+  });
+});
+
+describe("lintToolSchemas — remote-ref", () => {
+  it.each([
+    ["an https ref", "https://example.com/schema.json"],
+    ["a sibling-file ref", "common.json#/$defs/x"],
+  ])("flags %s", (_label, ref) => {
+    const findings = lintToolSchemas(
+      tool({
+        inputSchema: { type: "object", properties: { a: { $ref: ref } } },
+      }),
+    );
+    expect(rules(findings)).toEqual(["remote-ref"]);
+    expect(findings[0]!.issue).toContain(ref);
+  });
+
+  it("ignores an empty $ref rather than calling it remote", () => {
+    const findings = lintToolSchemas(
+      tool({
+        inputSchema: { type: "object", properties: { a: { $ref: "" } } },
+      }),
+    );
+    expect(findings).toEqual([]);
+  });
+});
+
+describe("lintToolSchemas — walk robustness", () => {
+  it("skips a value that is not a schema at all", () => {
+    const findings = lintToolSchemas(
+      tool({
+        inputSchema: { type: "object", properties: { a: "nonsense" } },
+      }),
+    );
+    expect(findings).toEqual([]);
+  });
+
+  it("skips keyword values of the wrong shape", () => {
+    const findings = lintToolSchemas(
+      tool({
+        inputSchema: {
+          type: "object",
+          properties: "not-a-map",
+          anyOf: "not-an-array",
+        },
+      }),
+    );
+    expect(findings).toEqual([]);
+  });
+
+  it("stops at the depth cap instead of recursing forever", () => {
+    // 200 nested `items`, deeper than MAX_DEPTH (64), each level clean; the
+    // bare `true` at the bottom sits past the cap and is therefore not
+    // reported. The assertion is that the walk terminates and stays quiet.
+    let nested: unknown = true;
+    for (let i = 0; i < 200; i++) nested = { type: "array", items: nested };
+    const findings = lintToolSchemas(
+      tool({
+        inputSchema: { type: "object", properties: { a: nested } },
+      }),
+    );
+    expect(findings).toEqual([]);
+  });
+
+  it("walks both schemas, inputSchema first", () => {
+    const findings = lintToolSchemas(
+      tool({
+        inputSchema: { type: "object", properties: { a: true } },
+        outputSchema: { type: "object", properties: { b: true } },
+      }),
+    );
+    expect(paths(findings)).toEqual([
+      "inputSchema.properties.a",
+      "outputSchema.properties.b",
+    ]);
+  });
+});
+
+describe("lintTools", () => {
+  it("drops clean tools and keeps the rest in list order", () => {
+    const results = lintTools([
+      tool({ name: "clean" }),
+      tool({
+        name: "dirty",
+        inputSchema: { type: "object", properties: { a: true } },
+      }),
+      tool({ name: "also-clean" }),
+    ]);
+    expect(results.map((r) => r.toolName)).toEqual(["dirty"]);
+    expect(results[0]!.findings).toHaveLength(1);
+  });
+
+  it("returns an empty list when everything is clean", () => {
+    expect(lintTools([tool(), tool({ name: "b" })])).toEqual([]);
+  });
+});
+
+describe("reporting helpers", () => {
+  const results = lintTools([
+    tool({
+      name: "info",
+      inputSchema: {
+        type: "object",
+        properties: { show_ids: { type: ["null", "boolean"] } },
+      },
+      outputSchema: { type: "object", properties: { data: true } },
+    }),
+  ]);
+
+  it("counts by severity", () => {
+    expect(countFindings(results)).toEqual({ errors: 1, warnings: 1 });
+  });
+
+  it("counts nothing for an empty result", () => {
+    expect(countFindings([])).toEqual({ errors: 0, warnings: 0 });
+  });
+
+  it("summarizes with singular nouns at one", () => {
+    expect(summarizeFindings(results)).toBe("1 error, 1 warning across 1 tool");
+  });
+
+  it("pluralizes above one", () => {
+    const two = lintTools([
+      tool({
+        name: "a",
+        inputSchema: { type: "object", properties: { x: true, y: true } },
+      }),
+      tool({
+        name: "b",
+        inputSchema: { type: "object", properties: { x: true } },
+      }),
+    ]);
+    expect(summarizeFindings(two)).toBe("3 errors, 0 warnings across 2 tools");
+  });
+
+  it("renders a report with a path, issue and suggestion per finding", () => {
+    const report = formatSchemaLintReport(results);
+    expect(report).toContain('Error: tool "info"');
+    expect(report).toContain('Warning: tool "info"');
+    expect(report).toContain("Path: outputSchema.properties.data");
+    expect(report).toContain("Path: inputSchema.properties.show_ids");
+    expect(report).toContain("Issue: ");
+    expect(report).toContain("Suggestion: ");
+    expect(report.trimEnd().endsWith("1 error, 1 warning across 1 tool.")).toBe(
+      true,
+    );
+  });
+
+  it("renders a zero summary for an empty result", () => {
+    expect(formatSchemaLintReport([])).toBe(
+      "0 errors, 0 warnings across 0 tools.",
+    );
+  });
+});
+
+describe("describeSchemaPath", () => {
+  it("names the schema alone at the root", () => {
+    expect(describeSchemaPath("inputSchema", "")).toBe("inputSchema");
+  });
+
+  it("joins a nested path onto the schema name", () => {
+    expect(describeSchemaPath("outputSchema", "properties.a")).toBe(
+      "outputSchema.properties.a",
+    );
+  });
+});

@@ -157,7 +157,20 @@ v2/main/
 │   │                                   #   Shared by BOTH form builders — web SchemaForm
 │   │                                   #   and TUI schemaToForm — since each dispatches on
 │   │                                   #   a single `type` string and would otherwise miss
-│   │                                   #   a nullable field entirely — #1928/#2015)
+│   │                                   #   a nullable field entirely — #1928/#2015;
+│   │                                   #   schemaLint.ts: tool-schema PORTABILITY lint —
+│   │                                   #   constructs that are legal JSON Schema and are
+│   │                                   #   refused or mishandled by real MCP clients (a bare
+│   │                                   #   `true` in `properties`, an array-form `type`, a
+│   │                                   #   remote `$ref`, a schema carrying no validation
+│   │                                   #   keyword, a non-object root). Deliberately NOT a
+│   │                                   #   validator: a census of 617 public servers found 0
+│   │                                   #   that fail the SDK's own parse, so a conformance
+│   │                                   #   check reports nothing on real servers. ONE verdict
+│   │                                   #   for all three clients — the CLI's `--strict` report
+│   │                                   #   (exit 6), the TUI's tool detail pane, the web Tools
+│   │                                   #   tab — so they cannot disagree about what is
+│   │                                   #   portable; the report TEXT is shared too — #1005)
 │   ├── logging/                        # Silent pino logger singleton
 │   ├── mcp/                            # InspectorClient runtime + state stores
 │   │                                   #   (uriTemplate.ts: RFC 6570 parse/classify/expand.

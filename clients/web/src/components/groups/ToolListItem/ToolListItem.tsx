@@ -1,5 +1,16 @@
-import { Group, Image, Stack, Text, UnstyledButton } from "@mantine/core";
+import {
+  Group,
+  Image,
+  Stack,
+  Text,
+  ThemeIcon,
+  Tooltip,
+  UnstyledButton,
+} from "@mantine/core";
+import { useMemo } from "react";
+import { RiErrorWarningLine } from "react-icons/ri";
 import type { Tool } from "@modelcontextprotocol/client";
+import { lintToolSchemas } from "@inspector/core/json/schemaLint.js";
 import { resolveDisplayLabel } from "../../../utils/toolUtils";
 
 export interface ToolListItemProps {
@@ -43,9 +54,20 @@ const ListItemButton = UnstyledButton.withProps({
   variant: "listItem",
 });
 
+// Schema-portability flag (#1005). Sits in the row rather than only in the
+// detail panel so a problem tool is visible without clicking each one — the
+// findings are rare enough that a marked row means something.
+const SchemaFlagIcon = ThemeIcon.withProps({
+  size: "xs",
+  variant: "transparent",
+  role: "img",
+});
+
 export function ToolListItem({ tool, selected, onClick }: ToolListItemProps) {
   const { name, title, icons } = tool;
   const iconSrc = icons?.[0]?.src;
+  const findings = useMemo(() => lintToolSchemas(tool), [tool]);
+  const hasError = findings.some((f) => f.severity === "error");
 
   return (
     <ListItemButton
@@ -58,6 +80,23 @@ export function ToolListItem({ tool, selected, onClick }: ToolListItemProps) {
           <ItemLabel>{resolveDisplayLabel(name, title)}</ItemLabel>
           {title && <ItemSubLabel>{name}</ItemSubLabel>}
         </ItemBody>
+        {findings.length > 0 && (
+          <Tooltip
+            label={`${findings.length} schema portability finding${findings.length === 1 ? "" : "s"} — select the tool for detail`}
+            withArrow
+          >
+            <SchemaFlagIcon
+              color={hasError ? "red" : "yellow"}
+              aria-label={
+                hasError
+                  ? "Schema portability errors"
+                  : "Schema portability warnings"
+              }
+            >
+              <RiErrorWarningLine />
+            </SchemaFlagIcon>
+          </Tooltip>
+        )}
       </Row>
     </ListItemButton>
   );

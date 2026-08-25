@@ -496,6 +496,24 @@ export interface ServerConfig {
    */
   duplicateToolNames?: string[];
   /**
+   * Replace a registered tool's `inputSchema` / `outputSchema` in `tools/list`
+   * with a **raw** JSON Schema document (#1005).
+   *
+   * The presets build their schemas from Zod, which by construction cannot
+   * emit the constructs the schema-portability lint exists to find — a bare
+   * `true` in a `properties` map, an array-form `type`, a remote `$ref`. Those
+   * come from other generators (Go's `jsonschema` package emits `true` for
+   * `interface{}`), so reproducing them needs a hand-written document. Only the
+   * *advertised* schema is replaced; the tool's handler and its real Zod
+   * validation are untouched, so calling it still behaves as its preset does.
+   *
+   * A name that isn't registered is ignored.
+   */
+  rawToolSchemas?: Record<
+    string,
+    { inputSchema?: unknown; outputSchema?: unknown }
+  >;
+  /**
    * Gate a tool's visibility in `tools/list` on a client-declared extension
    * (SEP-2133 `capabilities.extensions`). Maps extension id → tool name (the
    * tool must be among the registered presets). The named tool is registered
@@ -1186,11 +1204,34 @@ export function createMcpServer(config: ServerConfig): McpServer {
             })),
         ];
 
-  // Tools pagination, and/or the duplicate-name override — both need the same
-  // hand-built list, so the handler is installed when either is configured.
+  // Swap in hand-written JSON Schema documents for the named tools (#1005).
+  // Applied before duplication so a duplicated row carries the same schema its
+  // twin does, which is what a real concatenated tool list looks like.
+  const rawToolSchemas = config.rawToolSchemas ?? {};
+  const withRawSchemas = (tools: Tool[]): Tool[] =>
+    Object.keys(rawToolSchemas).length === 0
+      ? tools
+      : tools.map((tool) => {
+          const override = rawToolSchemas[tool.name];
+          if (!override) return tool;
+          const patched: Record<string, unknown> = { ...tool };
+          if (override.inputSchema !== undefined) {
+            patched.inputSchema = override.inputSchema;
+          }
+          if (override.outputSchema !== undefined) {
+            patched.outputSchema = override.outputSchema;
+          }
+          return patched as Tool;
+        });
+
+  // Tools pagination, the duplicate-name override, and the raw-schema override
+  // all need the same hand-built list, so the handler is installed when any of
+  // them is configured.
   if (
     capabilities.tools &&
-    (maxPageSize.tools !== undefined || duplicateToolNames.size > 0)
+    (maxPageSize.tools !== undefined ||
+      duplicateToolNames.size > 0 ||
+      Object.keys(rawToolSchemas).length > 0)
   ) {
     mcpServer.server.setRequestHandler("tools/list", async (request) => {
       const cursor = request.params?.cursor;
@@ -1224,7 +1265,7 @@ export function createMcpServer(config: ServerConfig): McpServer {
       }
       // Duplicate before paginating, so a duplicated pair can straddle a page
       // boundary exactly as a real server's would.
-      const allTools = withDuplicates(registeredTools);
+      const allTools = withDuplicates(withRawSchemas(registeredTools));
 
       const startIndex = cursor ? parseInt(cursor, 10) : 0;
       const endIndex = startIndex + pageSize;
