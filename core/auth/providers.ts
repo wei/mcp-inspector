@@ -116,8 +116,13 @@ export type OAuthProviderConfig = {
    * `startAuthorization()` then appends `prompt=consent` whenever
    * `offline_access` is in scope. Against Microsoft Entra ID, that forced
    * consent prompt routes a non-admin user into the admin-consent workflow and
-   * fails with `AADSTS90094` even after a tenant admin has consented. Dropping
-   * the grant here breaks that chain at its source.
+   * fails with `AADSTS90094` even after a tenant admin has consented.
+   *
+   * It removes that *automatic* augmentation only. `startAuthorization()` reads
+   * the scope, never `grant_types`, so an `offline_access` the caller passed in
+   * `scope` — or one the resource advertises when `scope` is unset, which
+   * `determineScope` falls back to — still produces the prompt. This is not on
+   * its own a guarantee that `prompt=consent` is absent.
    */
   requestRefreshToken?: boolean;
 };
@@ -205,9 +210,10 @@ export class BaseOAuthClientProvider implements OAuthClientProvider {
       redirect_uris: this.redirect_uris,
       token_endpoint_auth_method: "none",
       // #2068: `refresh_token` is declared by default, and dropped when the
-      // server's "Request refresh token" setting is off — which also stops the
-      // SDK adding `offline_access` (and therefore `prompt=consent`) to the
-      // authorization request. See `OAuthProviderConfig.requestRefreshToken`.
+      // server's "Request refresh token" setting is off — which stops the SDK
+      // *adding* `offline_access` (and so the `prompt=consent` it forces). It
+      // does not remove an `offline_access` that reaches the scope another way.
+      // See `OAuthProviderConfig.requestRefreshToken`.
       grant_types: this.requestRefreshToken
         ? ["authorization_code", "refresh_token"]
         : ["authorization_code"],

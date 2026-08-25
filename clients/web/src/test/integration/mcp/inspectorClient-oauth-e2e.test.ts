@@ -1383,6 +1383,81 @@ describe("InspectorClient OAuth E2E", () => {
       if (!authUrl) throw new Error("Expected authorization URL");
       const scope = authUrl.searchParams.get("scope") ?? "";
       expect(scope.split(/\s+/)).toContain("offline_access");
+      // The consequence of that scope, and the actual failure in #2068: the SDK
+      // forces an interactive consent prompt. Asserted here so the opt-out case
+      // below is a real before/after pair rather than a scope check alone.
+      expect(authUrl.searchParams.get("prompt")).toBe("consent");
+    });
+
+    // #2068 — the same server, the same AS advertising `offline_access`, with
+    // the grant declined. This is the end-to-end proof the unit tests cannot
+    // give: they assert our `grant_types` array, while the behavior that
+    // actually unblocks an Entra tenant is what the SDK puts in the authorize
+    // URL. If the SDK ever stopped keying its augmentation off `grant_types`,
+    // every other test here would still pass and AADSTS90094 would remain.
+    it("omits offline_access and prompt=consent when the refresh-token grant is declined", async () => {
+      const transport = transports[1]!;
+      const staticClientId = "test-no-offline-access-client";
+      const staticClientSecret = "test-no-offline-access-secret";
+      const serverConfig = {
+        ...getDefaultServerConfig(),
+        serverType: transport.serverType,
+        ...createOAuthTestServerConfig({
+          requireAuth: true,
+          supportRefreshTokens: true,
+          scopesSupported: ["mcp", "offline_access"],
+          staticClients: [
+            {
+              clientId: staticClientId,
+              clientSecret: staticClientSecret,
+              redirectUris: [testRedirectUrl],
+            },
+          ],
+        }),
+      };
+      server = new TestServerHttp(serverConfig);
+      const port = await server.start();
+      const serverUrl = `http://localhost:${port}`;
+      await waitForOAuthWellKnown(serverUrl);
+
+      const oauthConfig = createTestOAuthConfig({
+        mode: "static",
+        clientId: staticClientId,
+        clientSecret: staticClientSecret,
+        redirectUrl: testRedirectUrl,
+        scope: "mcp",
+      });
+      client = new InspectorClient(
+        {
+          type: transport.clientType,
+          url: `${serverUrl}${transport.endpoint}`,
+        } as MCPServerConfig,
+        {
+          environment: {
+            transport: createTransportNode,
+            oauth: {
+              storage: oauthConfig.storage,
+              navigation: oauthConfig.navigation,
+              redirectUrlProvider: oauthConfig.redirectUrlProvider,
+            },
+          },
+          oauth: {
+            clientId: oauthConfig.clientId,
+            clientSecret: oauthConfig.clientSecret,
+            scope: oauthConfig.scope,
+            requestRefreshToken: false,
+          },
+        },
+      );
+
+      const authUrl = await client.authenticate();
+      if (!authUrl) throw new Error("Expected authorization URL");
+      const scope = authUrl.searchParams.get("scope") ?? "";
+      expect(scope.split(/\s+/)).not.toContain("offline_access");
+      expect(authUrl.searchParams.get("prompt")).toBeNull();
+      // The configured scope still goes out — the opt-out drops the SDK's
+      // addition, not what the user asked for.
+      expect(scope.split(/\s+/)).toContain("mcp");
     });
   });
 

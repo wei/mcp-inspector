@@ -496,9 +496,11 @@ describe("OAuthNavigation", () => {
       });
 
       // The point of the opt-out: the SDK's determineScope() only appends
-      // `offline_access` when the client metadata declares `refresh_token`, and
-      // startAuthorization() only forces `prompt=consent` when `offline_access`
-      // is in scope. Dropping the grant is what breaks that chain.
+      // `offline_access` when the client metadata declares `refresh_token`.
+      // This asserts our half — the grant list. That the authorize URL then
+      // carries neither `offline_access` nor `prompt=consent` is proved against
+      // a real AS in the e2e suite (inspectorClient-oauth-e2e.test.ts), since
+      // the SDK, not this array, is what ultimately writes that URL.
       it("drops the refresh_token grant when disabled", () => {
         expect(
           makeProviderWithRefresh(false).clientMetadata.grant_types,

@@ -184,9 +184,12 @@ export type StoredMCPServer = MCPServerConfig & {
      * Whether the Inspector declares the `refresh_token` grant when it
      * registers. Defaults to `true`; only `false` is written to disk, so an
      * entry that never touched the setting keeps a minimal diff. Turning it off
-     * also stops the SDK adding `offline_access` to the requested scope and
-     * `prompt=consent` to the authorization request. Inspector-specific.
-     * (#2068)
+     * stops the SDK's *automatic* `offline_access` augmentation, and so the
+     * `prompt=consent` that scope forces — but only that one: an
+     * `offline_access` from `scopes` here, or from the resource's advertised
+     * scopes when `scopes` is unset, still reaches the authorization request.
+     * See {@link InspectorServerSettings.oauthRequestRefreshToken}.
+     * Inspector-specific. (#2068)
      */
     requestRefreshToken?: boolean;
     /**

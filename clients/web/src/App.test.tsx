@@ -654,6 +654,7 @@ import {
   useServers,
 } from "@inspector/core/react/useServers.js";
 import type {
+  InspectorClientOptions,
   InspectorServerSettings,
   MessageEntry,
   ServerEntry,
@@ -702,20 +703,36 @@ const fetchLogInstances = (
 // `requestRefreshToken` spread from App's `oauthFromServer` would leave the
 // checkbox persisted but inert with every other new test still green.
 describe("App wires the refresh-token opt-out into the client (#2068)", () => {
-  const HTTP_SERVER = {
+  // Fully-typed fixtures rather than a cast: `settings` is the whole
+  // `InspectorServerSettings`, so a field added to that interface later is a
+  // compile error here instead of a silently-absent value at runtime.
+  const HTTP_SERVER: ServerEntry = {
     id: "A",
     name: "PlotRocket",
     config: { type: "streamable-http", url: "https://api.example.com/mcp" },
     connection: { status: "disconnected" },
   };
 
-  function mockServersWith(settings?: Partial<InspectorServerSettings>) {
+  const BASE_SETTINGS: InspectorServerSettings = {
+    headers: [],
+    env: [],
+    metadata: {},
+    connectionTimeout: 0,
+    requestTimeout: 0,
+    taskTtl: 60000,
+    maxFetchRequests: 1000,
+    roots: [],
+  };
+
+  function mockServersWith(overrides?: Partial<InspectorServerSettings>) {
     vi.mocked(useServers).mockReturnValue({
       servers: [
         {
           ...HTTP_SERVER,
-          ...(settings ? { settings } : {}),
-        } as unknown as ServerEntry,
+          ...(overrides
+            ? { settings: { ...BASE_SETTINGS, ...overrides } }
+            : {}),
+        },
       ],
       loading: false,
       error: undefined,
@@ -729,13 +746,13 @@ describe("App wires the refresh-token opt-out into the client (#2068)", () => {
     });
   }
 
-  /** The `oauth` option the mocked InspectorClient constructor was given. */
-  function constructedOAuth(): { requestRefreshToken?: boolean } | undefined {
-    const call = vi.mocked(McpIndex.InspectorClient).mock.calls[0];
-    const options = call?.[1] as
-      | { oauth?: { requestRefreshToken?: boolean } }
-      | undefined;
-    return options?.oauth;
+  /**
+   * The `oauth` option the mocked InspectorClient constructor was given. Read
+   * through the constructor's own parameter type, so a rename of the option
+   * fails to compile here rather than silently reading `undefined`.
+   */
+  function constructedOAuth(): InspectorClientOptions["oauth"] {
+    return vi.mocked(McpIndex.InspectorClient).mock.calls[0]?.[1]?.oauth;
   }
 
   let previousUseServers: typeof useServers | undefined;
