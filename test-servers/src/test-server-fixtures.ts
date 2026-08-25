@@ -2914,7 +2914,10 @@ export function createOAuthTestServerConfig(options: {
       mode: "combined",
       requireAuth: options.requireAuth ?? false,
       scopesSupported: options.scopesSupported ?? ["mcp"],
-      ...(options.resourceMetadataPath
+      // `!== undefined`, not truthiness: an explicitly supplied `""` is
+      // invalid, and dropping it here would silently fall back to the
+      // well-known route instead of reporting the bad fixture (Copilot).
+      ...(options.resourceMetadataPath !== undefined
         ? { resourceMetadataPath: options.resourceMetadataPath }
         : {}),
       staticClients: options.staticClients,

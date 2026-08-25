@@ -10,8 +10,10 @@
  * plumbing is load-bearing rather than merely present.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { discoverOAuthProtectedResourceMetadata } from "@modelcontextprotocol/client";
 import {
   TestServerHttp,
@@ -26,8 +28,19 @@ import {
   challengeResourceMetadataUrl,
   parseAuthChallengeFromResponse,
 } from "@inspector/core/auth/challenge.js";
+import { InspectorClient } from "@inspector/core/mcp/inspectorClient.js";
+import { createTransportNode } from "@inspector/core/mcp/node/transport.js";
+import {
+  ConsoleNavigation,
+  type RedirectUrlProvider,
+} from "@inspector/core/auth/providers.js";
+import { NodeOAuthStorage } from "@inspector/core/auth/node/storage-node.js";
+import type { MCPServerConfig } from "@inspector/core/mcp/types.js";
 
 const METADATA_PATH = "/custom/protected-resource";
+const STATIC_CLIENT_ID = "test-2071-resource-metadata";
+const STATIC_CLIENT_SECRET = "test-2071-secret";
+const REDIRECT_URL = "http://localhost:3000/oauth/callback";
 
 describe("OAuth challenge resource_metadata (RFC 9728)", () => {
   let mcpServer: TestServerHttp | null = null;
@@ -40,6 +53,16 @@ describe("OAuth challenge resource_metadata (RFC 9728)", () => {
       ...createOAuthTestServerConfig({
         requireAuth: true,
         resourceMetadataPath: METADATA_PATH,
+        // Static rather than DCR: this suite is about *where the metadata
+        // document is found*, so registration should not be a second thing
+        // that can fail.
+        staticClients: [
+          {
+            clientId: STATIC_CLIENT_ID,
+            clientSecret: STATIC_CLIENT_SECRET,
+            redirectUris: [REDIRECT_URL],
+          },
+        ],
       }),
     });
     const port = await mcpServer.start();
@@ -88,6 +111,68 @@ describe("OAuth challenge resource_metadata (RFC 9728)", () => {
       discoverOAuthProtectedResourceMetadata(serverUrl),
     ).rejects.toThrow();
   });
+
+  it("drives first-time legacy authorization off the advertised URL (#2071)", async () => {
+    // The gap the challenge-driven plumbing alone does not close: with no
+    // stored token in the default legacy era, `InspectorClient` builds the
+    // transport with no `authProvider` and no challenge interception, so the
+    // 401 reaches the client as the SDK's headerless `UnauthorizedError` and
+    // the CLI/TUI runner calls `authenticate()` with nothing in hand. The
+    // observed-challenge path is what carries the URL across that gap.
+    const requested: string[] = [];
+    const spyFetch = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        requested.push(String(input instanceof Request ? input.url : input));
+        return fetch(input as RequestInfo, init);
+      },
+    ) as unknown as typeof fetch;
+
+    const redirectUrlProvider: RedirectUrlProvider = {
+      getRedirectUrl: () => REDIRECT_URL,
+    };
+
+    const client = new InspectorClient(
+      {
+        type: "streamable-http",
+        url: `${serverUrl}/mcp`,
+      } as MCPServerConfig,
+      {
+        environment: {
+          transport: createTransportNode,
+          fetch: spyFetch,
+          oauth: {
+            storage: new NodeOAuthStorage(
+              join(tmpdir(), `mcp-oauth-${process.pid}-2071.json`),
+            ),
+            navigation: new ConsoleNavigation(),
+            redirectUrlProvider,
+          },
+        },
+        oauth: {
+          clientId: STATIC_CLIENT_ID,
+          clientSecret: STATIC_CLIENT_SECRET,
+          scope: "mcp",
+        },
+      },
+    );
+
+    await expect(client.connect()).rejects.toThrow();
+
+    // Reaching an authorization URL at all means discovery resolved — which it
+    // can only have done through the advertised path, since the well-known one
+    // 404s on this server.
+    const authUrl = await client.authenticate();
+    expect(authUrl?.href).toContain("/oauth/authorize");
+
+    expect(requested).toContain(`${serverUrl}${METADATA_PATH}`);
+    expect(
+      requested.filter((url) =>
+        url.includes("/.well-known/oauth-protected-resource"),
+      ),
+    ).toEqual([]);
+
+    await client.disconnect();
+  }, 30_000);
 
   it("keeps the showcase config valid and carrying the custom path", () => {
     const configPath = fileURLToPath(

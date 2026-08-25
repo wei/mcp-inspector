@@ -1777,6 +1777,61 @@ describe("OAuthManager", () => {
       );
     });
 
+    it("uses the last observed challenge on the plain authenticate() path", async () => {
+      // The legacy first-authorization path: no challenge is passed in, so the
+      // one the transport observed is the only source (#2071).
+      mockedMcpAuth.mockResolvedValue("REDIRECT");
+      const params = createMockParams();
+      const manager = new OAuthManager(params);
+      const captureSpy = vi
+        .spyOn(
+          (await import("@inspector/core/auth/providers.js"))
+            .BaseOAuthClientProvider.prototype,
+          "getCapturedAuthUrl",
+        )
+        .mockReturnValue(new URL("https://auth.example.com/authorize?state=x"));
+
+      manager.noteObservedAuthChallenge({
+        reason: "unauthorized",
+        resourceMetadataUrl: METADATA_URL,
+      });
+      await manager.authenticate();
+
+      expect(mockedMcpAuth).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          resourceMetadataUrl: new URL(METADATA_URL),
+        }),
+      );
+      captureSpy.mockRestore();
+    });
+
+    it("clears the observed URL when a later challenge advertises none", async () => {
+      mockedMcpAuth.mockResolvedValue("REDIRECT");
+      const params = createMockParams();
+      const manager = new OAuthManager(params);
+      const captureSpy = vi
+        .spyOn(
+          (await import("@inspector/core/auth/providers.js"))
+            .BaseOAuthClientProvider.prototype,
+          "getCapturedAuthUrl",
+        )
+        .mockReturnValue(new URL("https://auth.example.com/authorize?state=x"));
+
+      manager.noteObservedAuthChallenge({
+        reason: "unauthorized",
+        resourceMetadataUrl: METADATA_URL,
+      });
+      manager.noteObservedAuthChallenge({ reason: "unauthorized" });
+      await manager.authenticate();
+
+      expect(mockedMcpAuth).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ resourceMetadataUrl: undefined }),
+      );
+      captureSpy.mockRestore();
+    });
+
     it("forwards it on the forced step-up reauthorization leg too", async () => {
       mockedMcpAuth.mockResolvedValue("AUTHORIZED");
       const params = createMockParams();

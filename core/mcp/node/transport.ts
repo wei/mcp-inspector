@@ -12,7 +12,10 @@ import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { SSEClientTransport } from "@modelcontextprotocol/client";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { createFetchTracker } from "../fetchTracking.js";
-import { createAuthChallengeInterceptFetch } from "./authChallengeFetch.js";
+import {
+  createAuthChallengeInterceptFetch,
+  createAuthChallengeObserverFetch,
+} from "./authChallengeFetch.js";
 import type { Dispatcher } from "undici";
 
 /** Node's `RequestInit` plus the undici-specific `dispatcher` option. */
@@ -110,14 +113,21 @@ export function createTransportNode(
     authProvider,
     settings,
     interceptAuthChallenges = false,
+    onAuthChallengeObserved,
   } = options;
 
   // Proxy-wrap first so the auth-challenge interceptor observes responses from
   // the (optionally proxied) network call.
   const baseFetch = withProxyDispatcher(optionsFetchFn ?? globalThis.fetch);
-  const fetchWithOptionalAuthIntercept = interceptAuthChallenges
-    ? createAuthChallengeInterceptFetch(baseFetch)
+  // The observer sits *under* the interceptor so it still reports the
+  // challenge on the path where interception throws — and, more to the point,
+  // on the legacy first-auth path where interception is off entirely.
+  const observedFetch = onAuthChallengeObserved
+    ? createAuthChallengeObserverFetch(baseFetch, onAuthChallengeObserved)
     : baseFetch;
+  const fetchWithOptionalAuthIntercept = interceptAuthChallenges
+    ? createAuthChallengeInterceptFetch(observedFetch)
+    : observedFetch;
 
   if (serverType === "stdio") {
     const stdioConfig = config as StdioServerConfig;
