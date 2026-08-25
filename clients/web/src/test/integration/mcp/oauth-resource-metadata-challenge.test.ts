@@ -116,6 +116,11 @@ describe("OAuth challenge resource_metadata (RFC 9728)", () => {
     ["https://other-host/doc", false],
     ["custom/protected-resource", false],
     ["/has a space", false],
+    // `href` preserves both, so these pass an origin+href comparison — but
+    // Express matches on the path alone and a fragment never reaches the
+    // server, so the advertised URL could not resolve to the route.
+    ["/doc?version=1", false],
+    ["/doc#section", false],
     ["", false],
   ])("origin-relative path check: %j -> %s", (value, expected) => {
     expect(isOriginRelativePath(value)).toBe(expected);

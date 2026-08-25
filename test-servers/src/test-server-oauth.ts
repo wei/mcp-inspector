@@ -40,6 +40,12 @@ const PATH_VALIDATION_BASE = "http://config.invalid";
  * it does not serve (Copilot). Comparing the resolved href against the literal
  * also rejects anything the parser would rewrite (spaces, unescaped
  * characters), which an Express route would not match either.
+ *
+ * A query or fragment is rejected for the same reason from the other
+ * direction: `href` preserves both, so `/doc?v=1` and `/doc#s` would pass the
+ * comparison above, yet Express matches on the path alone (and treats `?` as a
+ * pattern character) and a fragment is never sent on the wire at all — so the
+ * advertised URL could not reach the registered route (Copilot).
  */
 export function isOriginRelativePath(value: unknown): value is string {
   if (typeof value !== "string" || !value.startsWith("/")) {
@@ -49,6 +55,8 @@ export function isOriginRelativePath(value: unknown): value is string {
     const resolved = new URL(value, PATH_VALIDATION_BASE);
     return (
       resolved.origin === PATH_VALIDATION_BASE &&
+      resolved.search === "" &&
+      resolved.hash === "" &&
       resolved.href === `${PATH_VALIDATION_BASE}${value}`
     );
   } catch {
