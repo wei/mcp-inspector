@@ -64,7 +64,6 @@ import {
   APP_TOOL,
   attachPageDiagnostics,
   buildAppDeepLink,
-  composableServerPath,
   driveAppFlow,
   loadChromium,
   startMcpAppServer,
@@ -73,7 +72,6 @@ import { winShellArgs } from "./lib/win-shell-args.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const testServer = testServerEntryPath(repoRoot, "stdio");
-const composableServer = composableServerPath(repoRoot);
 
 // Mirrors INSPECTOR_API_TOKEN_GLOBAL in core/mcp/remote/constants.ts; kept as a
 // literal because this plain .mjs script can't import the TS source.
