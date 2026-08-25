@@ -19,15 +19,19 @@ describe("handleError", () => {
     vi.restoreAllMocks();
   });
 
-  it("emits a JSON error envelope on stderr and exits with the classified code", () => {
-    const writeSpy = vi
-      .spyOn(process.stderr, "write")
-      .mockImplementation((() => true) as never);
+  it("emits a JSON error envelope on stderr and exits with the classified code", async () => {
+    const writeSpy = vi.spyOn(process.stderr, "write").mockImplementation(((
+      _chunk: unknown,
+      cb?: () => void,
+    ) => {
+      cb?.();
+      return true;
+    }) as never);
     const exitSpy = vi
       .spyOn(process, "exit")
       .mockImplementation((() => undefined) as never);
 
-    handleError(new Error("boom"));
+    await handleError(new Error("boom"));
 
     expect(exitSpy).toHaveBeenCalledWith(EXIT_CODES.USAGE);
     const written = writeSpy.mock.calls[0]![0] as string;
@@ -38,17 +42,48 @@ describe("handleError", () => {
     expect(parsed.error.message).toBe("boom");
   });
 
-  it("uses a CliExitCodeError's exitCode and envelope code", () => {
-    vi.spyOn(process.stderr, "write").mockImplementation((() => true) as never);
+  it("uses a CliExitCodeError's exitCode and envelope code", async () => {
+    vi.spyOn(process.stderr, "write").mockImplementation(((
+      _chunk: unknown,
+      cb?: () => void,
+    ) => {
+      cb?.();
+      return true;
+    }) as never);
     const exitSpy = vi
       .spyOn(process, "exit")
       .mockImplementation((() => undefined) as never);
 
-    handleError(
+    await handleError(
       new CliExitCodeError(EXIT_CODES.NO_APP, "no app", { code: "no_app" }),
     );
 
     expect(exitSpy).toHaveBeenCalledWith(EXIT_CODES.NO_APP);
+  });
+
+  it("exits only after stderr has taken the envelope", async () => {
+    // The whole point of the await: a pipe defers the write, and
+    // `process.exit()` discards anything still queued. A spy that called back
+    // synchronously would pass with or without it, so this one defers.
+    let flushed = false;
+    vi.spyOn(process.stderr, "write").mockImplementation(((
+      _chunk: unknown,
+      cb?: () => void,
+    ) => {
+      setTimeout(() => {
+        flushed = true;
+        cb?.();
+      }, 0);
+      return false;
+    }) as never);
+    const exitSpy = vi
+      .spyOn(process, "exit")
+      .mockImplementation((() => undefined) as never);
+
+    await handleError(new Error("boom"));
+
+    expect(flushed).toBe(true);
+    expect(exitSpy).toHaveBeenCalledWith(EXIT_CODES.USAGE);
   });
 });
 

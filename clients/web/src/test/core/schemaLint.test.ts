@@ -213,6 +213,20 @@ describe("lintToolSchemas — boolean-schema", () => {
       "inputSchema.propertyNames",
     ],
     [
+      "contentSchema",
+      {
+        type: "object",
+        properties: {
+          a: {
+            type: "string",
+            contentMediaType: "application/json",
+            contentSchema: true,
+          },
+        },
+      },
+      "inputSchema.properties.a.contentSchema",
+    ],
+    [
       "a dependentSchemas entry",
       { type: "object", dependentSchemas: { a: true }, properties: {} },
       "inputSchema.dependentSchemas.a",
@@ -402,6 +416,9 @@ describe("lintToolSchemas — untyped-schema", () => {
     ["contains", { contains: { type: "string" } }],
     ["propertyNames", { propertyNames: { pattern: "^a" } }],
     ["dependentRequired", { dependentRequired: { a: ["b"] } }],
+    ["contentMediaType", { contentMediaType: "application/json" }],
+    ["contentEncoding", { contentEncoding: "base64" }],
+    ["contentSchema", { contentSchema: { type: "object" } }],
   ])("does not flag a schema constrained only by %s", (_label, sub) => {
     const findings = lintToolSchemas(
       tool({ inputSchema: { type: "object", properties: { a: sub } } }),

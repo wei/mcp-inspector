@@ -1,3 +1,5 @@
+import { awaitableError } from "./utils/awaitable-log.js";
+
 /**
  * Exit-code map. Non-zero codes let an automated caller (CI, an agent) branch
  * on the failure class without regex-scraping stderr:
@@ -218,8 +220,19 @@ export function formatErrorOutput(
   };
 }
 
-export function handleError(error: unknown): never {
+/**
+ * The binary's last-resort error sink: write the envelope, then exit.
+ *
+ * **Async, and the await is load-bearing.** On a pipe or a file — as opposed
+ * to a TTY — `process.stderr.write` is asynchronous, and `process.exit()`
+ * discards whatever is still queued. Size is not the safeguard it looks like:
+ * the envelope being small enough for the pipe buffer says nothing about
+ * whether the write has been *performed* by the time the process goes away.
+ * So this settles on the write callback first, exactly as the `--strict`
+ * schema report does.
+ */
+export async function handleError(error: unknown): Promise<never> {
   const { exitCode, stderr } = formatErrorOutput(error);
-  process.stderr.write(stderr);
+  await awaitableError(stderr);
   process.exit(exitCode);
 }

@@ -164,8 +164,10 @@ on **stderr**, and exits `6` if any is error-severity:
 mcp-inspector --cli <server> --method tools/list --strict
 ```
 
-Complete output against the `unportable-schemas-http.json` showcase — one
-block per finding, then the summary:
+The complete **report** against the `unportable-schemas-http.json` showcase —
+one block per finding, then the summary. On a non-zero exit the shared error
+handler adds one more stderr line after this, the
+[`ErrorEnvelope`](#exit-codes--error-envelopes) (`{"error":{"code":"schema_unportable",…}}`):
 
 ```text
 Error: tool "get_temp"

@@ -92,6 +92,10 @@ const SUBSCHEMA_KEYWORDS = [
   "unevaluatedProperties",
   "additionalItems",
   "unevaluatedItems",
+  // 2019-09/2020-12: the schema the *decoded* string content must satisfy.
+  // A real schema position, so a bare `true` or a remote `$ref` under it is a
+  // real finding.
+  "contentSchema",
 ] as const;
 
 /** Keywords whose value is an array of subschemas. */
@@ -135,10 +139,11 @@ const SUBSCHEMA_MAP_KEYWORDS = [
  * `$schema`, `$anchor`, `$vocabulary`: they hold or name subschemas for
  * *other* schemas to reference, and constrain the current instance not at all.
  *
- * `format` is included even though 2020-12's default vocabulary treats it as
- * an annotation rather than an assertion. A schema declaring one is plainly an
- * attempt to constrain, and reporting it as accepting anything would be noise
- * rather than a finding an author can act on.
+ * One category is admitted despite being annotation-only in 2020-12's default
+ * vocabulary: `format`, and the three content keywords (`contentMediaType`,
+ * `contentEncoding`, `contentSchema`). A schema declaring any of them is
+ * plainly an attempt to constrain, and reporting it as accepting anything
+ * would be noise rather than a finding an author can act on.
  *
  * Defining the rule this way, rather than as "has no `type`", is also
  * deliberate: `{"properties": {…}}` with no `type` does constrain its input,
@@ -160,6 +165,9 @@ const CONSTRAINING_KEYWORDS: ReadonlySet<string> = new Set([
   "minLength",
   "pattern",
   "format",
+  "contentMediaType",
+  "contentEncoding",
+  "contentSchema",
   "maxItems",
   "minItems",
   "uniqueItems",
