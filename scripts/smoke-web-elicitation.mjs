@@ -27,29 +27,28 @@
  * length in smoke-web-browser.mjs.
  *
  * Expects `clients/web/dist` and `clients/launcher/build` to be built first.
- * `test-servers/build` is built on demand if missing, as in smoke:web:app.
+ * `test-servers/build` is rebuilt on every run, as in smoke:web:app — see
+ * `scripts/lib/ensure-test-servers.mjs` for why presence isn't freshness.
  */
 
-import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { setTimeout as delay } from "node:timers/promises";
 import { join, resolve } from "node:path";
 import { startProdWebServer } from "./lib/prod-web-server.mjs";
 import { stopChild } from "./lib/child-cleanup.mjs";
-import { resolveNodeBin } from "./lib/resolve-node-bin.mjs";
+import {
+  ensureTestServers,
+  testServerEntryPath,
+} from "./lib/ensure-test-servers.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const requireFromWeb = createRequire(
   resolve(repoRoot, "clients/web/package.json"),
 );
 
-const composableServer = join(
-  repoRoot,
-  "test-servers",
-  "build",
-  "server-composable.js",
-);
+const composableServer = testServerEntryPath(repoRoot, "composable");
 const configPath = (name) =>
   join(repoRoot, "test-servers", "configs", `${name}.json`);
 
@@ -95,30 +94,6 @@ async function fail(message) {
   console.error(`smoke:web:elicit FAILED — ${message}`);
   await shutdown();
   process.exit(1);
-}
-
-/** Build the composable test server bundle if it isn't present yet. */
-function ensureTestServer() {
-  if (existsSync(composableServer)) return;
-  console.log(
-    "smoke:web:elicit — building test-servers (missing build output)...",
-  );
-  const r = spawnSync(
-    process.execPath,
-    [
-      resolveNodeBin("typescript", "tsc", repoRoot),
-      "-p",
-      "test-servers",
-      "--noCheck",
-    ],
-    { cwd: repoRoot, stdio: "inherit" },
-  );
-  if (r.status !== 0 || !existsSync(composableServer)) {
-    throw new Error(
-      "could not build the test servers (test-servers/build/server-composable.js). " +
-        "Run `npm run test-servers:build` from clients/web.",
-    );
-  }
 }
 
 /**
@@ -229,7 +204,12 @@ async function runTool(page) {
 }
 
 try {
-  ensureTestServer();
+  // Rebuilt on every run — presence is not freshness (#2111).
+  ensureTestServers({
+    repoRoot,
+    label: "smoke:web:elicit",
+    requires: ["composable"],
+  });
   const appUrl = await startMcpServer("app-elicitation-http");
   const nativeUrl = await startMcpServer("app-elicitation-native-http");
   await web.waitForReady();

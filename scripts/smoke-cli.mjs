@@ -35,8 +35,9 @@
  * Exits non-zero (failing CI / `npm run validate`) on any mismatch.
  *
  * Expects `clients/launcher/build` and `clients/cli/build` to be built first
- * (the validate / CI ordering guarantees this). The bundled stdio test server
- * (`test-servers/build`) is built on demand here if missing.
+ * (the validate / CI ordering guarantees this). The bundled test servers
+ * (`test-servers/build`) are rebuilt on every run — see
+ * `scripts/lib/ensure-test-servers.mjs` for why presence isn't freshness.
  */
 
 import { spawn, spawnSync } from "node:child_process";
@@ -44,54 +45,13 @@ import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { resolveNodeBin } from "./lib/resolve-node-bin.mjs";
+import { ensureTestServers } from "./lib/ensure-test-servers.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const launcher = join(repoRoot, "clients", "launcher", "build", "index.js");
-const testServer = join(
-  repoRoot,
-  "test-servers",
-  "build",
-  "test-server-stdio.js",
-);
-const httpTestServerModule = join(
-  repoRoot,
-  "test-servers",
-  "build",
-  "test-server-http.js",
-);
-
 function fail(message) {
   console.error(`smoke:cli FAILED — ${message}`);
   process.exit(1);
-}
-
-/** Build the bundled test servers (stdio + http) if they aren't present yet. */
-function ensureTestServer() {
-  if (existsSync(testServer) && existsSync(httpTestServerModule)) return;
-  console.log("smoke:cli — building test-servers (missing build output)...");
-  // The root-installed tsc, run via this Node — `npx` is a `.cmd` shim on
-  // Windows that a shell-free spawnSync can't start (ENOENT — #1939).
-  const r = spawnSync(
-    process.execPath,
-    [
-      resolveNodeBin("typescript", "tsc", repoRoot),
-      "-p",
-      "test-servers",
-      "--noCheck",
-    ],
-    { cwd: repoRoot, stdio: "inherit" },
-  );
-  if (
-    r.status !== 0 ||
-    !existsSync(testServer) ||
-    !existsSync(httpTestServerModule)
-  ) {
-    fail(
-      "could not build the test servers (test-servers/build/test-server-stdio.js, " +
-        "test-server-http.js). Run `npm run test-servers:build` from clients/cli.",
-    );
-  }
 }
 
 // Neutralize env that would make an unrelated step fail: parseRunnerOAuthCallbackUrl
@@ -136,7 +96,17 @@ function runCliAsync(args, extraEnv = {}) {
 if (!existsSync(launcher)) {
   fail(`launcher build not found at ${launcher} — run \`npm run build\` first`);
 }
-ensureTestServer();
+// Rebuilt on every run — presence is not freshness (#2111).
+let testServer, httpTestServerModule, fixturesModule;
+try {
+  [testServer, httpTestServerModule, fixturesModule] = ensureTestServers({
+    repoRoot,
+    label: "smoke:cli",
+    requires: ["stdio", "http", "fixtures"],
+  });
+} catch (e) {
+  fail(e.message);
+}
 
 const work = mkdtempSync(join(tmpdir(), "smoke-cli-"));
 try {
@@ -341,9 +311,7 @@ try {
     pathToFileURL(httpTestServerModule).href
   );
   const { createEchoTool, createTestServerInfo } = await import(
-    pathToFileURL(
-      join(repoRoot, "test-servers", "build", "test-server-fixtures.js"),
-    ).href
+    pathToFileURL(fixturesModule).href
   );
   const httpServer = createTestServerHttp({
     serverInfo: createTestServerInfo(),
