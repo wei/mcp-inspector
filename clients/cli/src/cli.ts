@@ -829,6 +829,27 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
     }
   }
 
+  // `--strict` is checked HERE, ahead of every short-circuit return below
+  // (`--list-stored-auth`, `--print-handoff`, `servers/list`, `servers/show`),
+  // rather than beside the other method-shaped validations further down. Those
+  // returns never reach the lint, so a later check would let
+  // `--strict --method servers/list` succeed while silently ignoring a flag
+  // documented as tools/list-only — the same "accepted but inert" failure the
+  // `--app-info` pairing rejection exists to prevent.
+  if (options.strict) {
+    if (options.method !== "tools/list") {
+      throw new Error("--strict requires --method tools/list.");
+    }
+    // `tools/list --app-info` returns NDJSON straight from `runMethod` and
+    // never reaches `emitResult`, where the lint runs. Accepting the pair
+    // would hand a CI caller a gate that can never fail.
+    if (options.appInfo) {
+      throw new Error(
+        "--strict cannot be combined with --app-info; run tools/list twice, once for each.",
+      );
+    }
+  }
+
   // State-path precedence (getStateFilePath): MCP_INSPECTOR_OAUTH_STATE_PATH →
   // <MCP_STORAGE_DIR>/oauth.json → ~/.mcp-inspector/storage/oauth.json — the
   // same file the web backend writes, so tokens are shared across surfaces.
@@ -1009,20 +1030,9 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
     );
   }
 
-  if (options.strict && options.method !== "tools/list") {
-    throw new Error("--strict requires --method tools/list.");
-  }
-
-  // `tools/list --app-info` takes a different path out of `runMethod` — it
-  // returns NDJSON that the caller writes directly, never reaching
-  // `emitResult` where the lint runs. Rejecting the pair is the honest
-  // outcome: silently accepting it would give a CI caller a `--strict` gate
-  // that can never fail.
-  if (options.strict && options.appInfo) {
-    throw new Error(
-      "--strict cannot be combined with --app-info; run tools/list twice, once for each.",
-    );
-  }
+  // NOTE: `--strict`'s validations are deliberately NOT here — they run before
+  // the short-circuit returns further up, so a `servers/*` invocation cannot
+  // accept the flag and ignore it.
 
   // --tool-args-json passes arguments verbatim with no key=value coercion (so
   // `"012"` stays a string and nested objects work without shell escaping).

@@ -283,6 +283,39 @@ export function describeSchemaPath(schema: SchemaKind, path: string): string {
 interface WalkContext {
   schema: SchemaKind;
   findings: SchemaFinding[];
+  /**
+   * Whether this schema document declares an `$id` anywhere — see
+   * {@link declaresAnyId}. Suppresses the `remote-ref` rule.
+   */
+  hasEmbeddedIds: boolean;
+}
+
+/**
+ * Does the document declare an `$id` anywhere in it?
+ *
+ * `$id` establishes a base URI, which changes what "points outside this
+ * document" means: with a root `$id: "https://example.com/root"`, the `$ref`
+ * `"https://example.com/root#/$defs/x"` resolves to *this* document and needs
+ * no fetch at all. Classifying refs correctly in that case means full RFC 3986
+ * base-URI resolution against possibly-nested embedded resources, which this
+ * module does not do — so when any `$id` is present it declines to classify
+ * rather than risk a wrong finding with wrong remediation on a valid schema.
+ *
+ * A missed finding is the acceptable direction here, the same trade the walk
+ * makes on a malformed `type` array. `$id` is vanishingly rare in a tool
+ * schema, so this costs almost nothing in practice. If it ever matters, the
+ * refinement is to resolve each `$ref` against the enclosing base and compare
+ * with the declared ids — not to drop the guard.
+ */
+function declaresAnyId(node: unknown, depth = 0): boolean {
+  if (depth > MAX_DEPTH || !isRecord(node)) return false;
+  if (typeof node.$id === "string" && node.$id !== "") return true;
+  return Object.values(node).some((value) => {
+    if (Array.isArray(value)) {
+      return value.some((entry) => declaresAnyId(entry, depth + 1));
+    }
+    return declaresAnyId(value, depth + 1);
+  });
 }
 
 function add(
@@ -409,7 +442,12 @@ function lintNode(
   }
 
   const ref = node.$ref;
-  if (typeof ref === "string" && ref !== "" && !ref.startsWith("#")) {
+  if (
+    typeof ref === "string" &&
+    ref !== "" &&
+    !ref.startsWith("#") &&
+    !ctx.hasEmbeddedIds
+  ) {
     add(
       ctx,
       "remote-ref",
@@ -459,7 +497,11 @@ function lintSchema(
   kind: SchemaKind,
   findings: SchemaFinding[],
 ): void {
-  walk(schema, "", undefined, 0, { schema: kind, findings });
+  walk(schema, "", undefined, 0, {
+    schema: kind,
+    findings,
+    hasEmbeddedIds: declaresAnyId(schema),
+  });
 }
 
 /**
@@ -517,6 +559,26 @@ export function summarizeFindings(
 ): string {
   const { errors, warnings } = countFindings(results);
   return `${plural(errors, "error")}, ${plural(warnings, "warning")} across ${plural(results.length, "tool")}`;
+}
+
+/**
+ * Severity breakdown for ONE tool's findings — "1 error, 3 warnings".
+ *
+ * Deliberately not "N errors" keyed off the highest severity present: a tool
+ * with one error and three warnings is four findings, not four errors, and
+ * labelling the total with the worst severity misreports every mixed result.
+ * Categories that are empty are omitted, so a warning-only tool reads "3
+ * warnings" rather than "0 errors, 3 warnings".
+ */
+export function summarizeToolFindings(
+  findings: readonly SchemaFinding[],
+): string {
+  const errors = findings.filter((f) => f.severity === "error").length;
+  const warnings = findings.length - errors;
+  const parts: string[] = [];
+  if (errors > 0) parts.push(plural(errors, "error"));
+  if (warnings > 0) parts.push(plural(warnings, "warning"));
+  return parts.join(", ");
 }
 
 /**

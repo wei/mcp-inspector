@@ -255,6 +255,20 @@ describe("--strict argument validation", () => {
     ).rejects.toThrow("--strict requires --method tools/list.");
   });
 
+  it.each([
+    ["servers/list", ["--method", "servers/list"]],
+    ["--list-stored-auth", ["--method", "servers/list", "--list-stored-auth"]],
+  ])(
+    "is rejected on the %s short-circuit path, which never reaches the lint",
+    async (_label, extra) => {
+      // These return from `parseArgs` before any connect, so a validation
+      // placed further down would let `--strict` be accepted and ignored.
+      await expect(
+        runCli(["node", "cli", "--cli", "--strict", ...extra]),
+      ).rejects.toThrow("--strict requires --method tools/list.");
+    },
+  );
+
   it("is rejected alongside --app-info rather than silently ignored", async () => {
     // `tools/list --app-info` returns NDJSON straight from `runMethod` and
     // never reaches `emitResult`, so accepting the pair would hand a CI caller

@@ -86,7 +86,28 @@ describe("ToolListItem", () => {
       />,
     );
     expect(
-      screen.getByLabelText("Schema portability errors"),
+      screen.getByLabelText("Schema portability: 1 error"),
+    ).toBeInTheDocument();
+  });
+
+  it("breaks a mixed tool down rather than labelling the total", () => {
+    // One error plus one warning must not announce as "2 errors".
+    renderWithMantine(
+      <ToolListItem
+        tool={{
+          ...tool,
+          inputSchema: {
+            type: "object",
+            properties: { a: { type: ["null", "boolean"] } },
+          },
+          outputSchema: { type: "object", properties: { data: true } },
+        }}
+        selected={false}
+        onClick={() => {}}
+      />,
+    );
+    expect(
+      screen.getByLabelText("Schema portability: 1 error, 1 warning"),
     ).toBeInTheDocument();
   });
 
@@ -105,7 +126,7 @@ describe("ToolListItem", () => {
       />,
     );
     expect(
-      screen.getByLabelText("Schema portability warnings"),
+      screen.getByLabelText("Schema portability: 1 warning"),
     ).toBeInTheDocument();
   });
 });

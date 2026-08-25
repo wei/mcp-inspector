@@ -10,7 +10,10 @@ import {
 import { useMemo } from "react";
 import { RiAlertLine, RiErrorWarningLine } from "react-icons/ri";
 import type { Tool } from "@modelcontextprotocol/client";
-import { lintToolSchemas } from "@inspector/core/json/schemaLint.js";
+import {
+  lintToolSchemas,
+  summarizeToolFindings,
+} from "@inspector/core/json/schemaLint.js";
 import { resolveDisplayLabel } from "../../../utils/toolUtils";
 
 export interface ToolListItemProps {
@@ -73,6 +76,9 @@ export function ToolListItem({ tool, selected, onClick }: ToolListItemProps) {
   const iconSrc = icons?.[0]?.src;
   const findings = useMemo(() => lintToolSchemas(tool), [tool]);
   const hasError = findings.some((f) => f.severity === "error");
+  // "1 error, 3 warnings" — the breakdown, not the total labelled with the
+  // worst severity, which would announce a mixed tool as "4 errors".
+  const summary = summarizeToolFindings(findings);
 
   return (
     <ListItemButton
@@ -87,7 +93,7 @@ export function ToolListItem({ tool, selected, onClick }: ToolListItemProps) {
         </ItemBody>
         {findings.length > 0 && (
           <Tooltip
-            label={`${findings.length} schema portability ${hasError ? "error" : "warning"}${findings.length === 1 ? "" : "s"} — select the tool for detail`}
+            label={`Schema portability: ${summary} — select the tool for detail`}
             withArrow
           >
             <SchemaFlagIcon
@@ -96,11 +102,7 @@ export function ToolListItem({ tool, selected, onClick }: ToolListItemProps) {
                   ? "var(--inspector-danger-text)"
                   : "var(--inspector-warning-text)"
               }
-              aria-label={
-                hasError
-                  ? "Schema portability errors"
-                  : "Schema portability warnings"
-              }
+              aria-label={`Schema portability: ${summary}`}
             >
               {/* Distinct SHAPES, not just distinct colours: an octagon for an
                   error and a triangle for a warning, so the severity survives

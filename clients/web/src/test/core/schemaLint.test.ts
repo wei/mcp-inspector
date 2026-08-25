@@ -7,6 +7,7 @@ import {
   lintToolSchemas,
   lintTools,
   summarizeFindings,
+  summarizeToolFindings,
   type SchemaFinding,
   type SchemaLintRule,
 } from "@inspector/core/json/schemaLint.js";
@@ -453,6 +454,56 @@ describe("lintToolSchemas — remote-ref", () => {
     expect(findings[0]!.issue).toContain(ref);
   });
 
+  it("stays quiet when the document declares an $id", () => {
+    // With a root `$id`, `https://example.com/root#/$defs/x` resolves to THIS
+    // document and needs no fetch — so the finding, and its "inline the
+    // referenced schema" remediation, would both be wrong. Classifying refs
+    // correctly here needs full base-URI resolution, which this module does
+    // not do, so it declines rather than guessing.
+    expect(
+      lintToolSchemas(
+        tool({
+          inputSchema: {
+            $id: "https://example.com/root",
+            type: "object",
+            properties: { a: { $ref: "https://example.com/root#/$defs/x" } },
+            $defs: { x: { type: "string" } },
+          },
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("finds an $id declared on a nested subschema too", () => {
+    // The base URI can be established by an embedded resource, not just the
+    // root, so the scan has to reach the whole document.
+    expect(
+      lintToolSchemas(
+        tool({
+          inputSchema: {
+            type: "object",
+            properties: {
+              a: { $id: "https://example.com/embedded", type: "object" },
+              b: { $ref: "https://example.com/embedded#/x" },
+            },
+          },
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("still fires when no $id is declared anywhere", () => {
+    const findings = lintToolSchemas(
+      tool({
+        inputSchema: {
+          type: "object",
+          properties: { a: { $ref: "https://example.com/root#/$defs/x" } },
+        },
+      }),
+    );
+    expect(rules(findings)).toEqual(["remote-ref"]);
+  });
+
   it("ignores an empty $ref rather than calling it remote", () => {
     const findings = lintToolSchemas(
       tool({
@@ -603,6 +654,54 @@ describe("reporting helpers", () => {
     expect(formatSchemaLintReport([])).toBe(
       "0 errors, 0 warnings across 0 tools.",
     );
+  });
+});
+
+describe("summarizeToolFindings", () => {
+  const mixed = lintToolSchemas(
+    tool({
+      inputSchema: {
+        type: "object",
+        properties: {
+          a: { type: ["null", "boolean"] },
+          b: {},
+          c: { $ref: "https://example.com/s.json" },
+        },
+      },
+      outputSchema: { type: "object", properties: { data: true } },
+    }),
+  );
+
+  it("breaks a mixed tool down instead of labelling the total", () => {
+    // The defect this replaced: one error plus three warnings announced as
+    // "4 schema portability errors".
+    expect(mixed).toHaveLength(4);
+    expect(summarizeToolFindings(mixed)).toBe("1 error, 3 warnings");
+  });
+
+  it("omits a category with no findings", () => {
+    const warnOnly = lintToolSchemas(
+      tool({
+        inputSchema: {
+          type: "object",
+          properties: { a: { type: ["null", "boolean"] } },
+        },
+      }),
+    );
+    expect(summarizeToolFindings(warnOnly)).toBe("1 warning");
+  });
+
+  it("reads as errors only when that is all there is", () => {
+    const errOnly = lintToolSchemas(
+      tool({
+        inputSchema: { type: "object", properties: { a: true, b: true } },
+      }),
+    );
+    expect(summarizeToolFindings(errOnly)).toBe("2 errors");
+  });
+
+  it("is empty for a clean tool", () => {
+    expect(summarizeToolFindings([])).toBe("");
   });
 });
 
