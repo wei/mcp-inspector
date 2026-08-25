@@ -256,6 +256,26 @@ describe("rawToolSchemas override (#1005)", () => {
       { tool: "add", rules: ["remote-ref"] },
     ]);
     expect(countFindings(results)).toEqual({ errors: 1, warnings: 3 });
+
+    // Every flagged tool in the fixture must stay runnable — the README and
+    // the PR say so, and a showcase that errors on its own obvious button is
+    // worse than no showcase. Each is called with the arguments its ADVERTISED
+    // schema renders, including the properties the override added, since that
+    // is what a user clicking through the form would send.
+    const byName = (n: string) => tools.find((t) => t.name === n)!;
+    await expect(
+      connected.callTool(byName("get_temp"), { city: "Oslo", units: "C" }),
+    ).resolves.toBeDefined();
+    await expect(
+      connected.callTool(byName("echo"), {
+        message: "hi",
+        show_ids: null,
+        opts: {},
+      }),
+    ).resolves.toBeDefined();
+    await expect(
+      connected.callTool(byName("add"), { a: 1, b: 2 }),
+    ).resolves.toBeDefined();
   });
 
   it("keeps a structured-content tool callable under an outputSchema override", async () => {

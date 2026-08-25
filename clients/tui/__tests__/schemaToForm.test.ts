@@ -381,5 +381,31 @@ describe("schemaToForm", () => {
         type: "string",
       });
     });
+
+    // #1005: the unportable-schemas showcase advertises a remote `$ref` so the
+    // lint has a `remote-ref` finding to report. A `$ref`-only property falls
+    // through to a string field here, which the tool's real (numeric) handler
+    // then rejects — so the fixture keeps a local `type` alongside the ref and
+    // the tool stays runnable. This pins the half of that contract the TUI
+    // owns; the wire half is in `raw-tool-schemas.test.ts`.
+    it("types a property that carries both a remote $ref and a local type", () => {
+      const form = schemaToForm(
+        {
+          properties: {
+            a: {
+              type: "number",
+              $ref: "https://example.com/schemas/number.json",
+            },
+          },
+        },
+        "refWithLocalType",
+      );
+      // `float` is this form builder's numeric field kind — the point is that
+      // it is NOT the string fallback a `$ref`-only property would get.
+      expect(form.sections[0]!.fields[0]).toMatchObject({
+        name: "a",
+        type: "float",
+      });
+    });
   });
 });

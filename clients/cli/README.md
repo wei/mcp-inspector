@@ -201,7 +201,7 @@ than correlating two.
 
 **Without `--strict` nothing changes except one line.** A `tools/list` whose
 schemas have findings prints a single stderr summary — `Schema portability: 1
-error, 3 warnings across 2 tools. Re-run with --strict for details.` — and
+error, 3 warnings across 3 tools. Re-run with --strict for details.` — and
 still exits `0`. A clean list prints nothing at all.
 
 This is deliberately not a JSON Schema validator. A census of 617 public

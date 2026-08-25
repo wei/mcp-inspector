@@ -284,28 +284,32 @@ describe("lintToolSchemas — type-union", () => {
     );
   });
 
-  it("drops non-string members from the suggested branches", () => {
-    const findings = lintToolSchemas(
-      tool({
-        inputSchema: {
-          type: "object",
-          properties: { a: { type: ["string", 3] } },
-        },
-      }),
-    );
-    expect(findings[0]!.suggestion).toContain(
-      '{"anyOf": [{"type": "string"}]}',
-    );
+  it.each([
+    ["an empty array, which matches nothing", []],
+    ["a non-string member", ["string", 3]],
+    ["only non-string members", [3]],
+    ["an unrecognized type name", ["string", "bananas"]],
+    ["a duplicated member", ["string", "string"]],
+  ])("stays quiet on a malformed type array — %s", (_label, type) => {
+    // The rule's message asserts the construct is *legal* JSON Schema, and the
+    // `anyOf` it suggests would be invalid for these. Malformed schemas are
+    // the SDK parser's business, the same way a non-schema node is.
+    expect(
+      lintToolSchemas(
+        tool({ inputSchema: { type: "object", properties: { a: { type } } } }),
+      ),
+    ).toEqual([]);
   });
 
-  it("falls back to a placeholder when no member is a string", () => {
+  it.each([
+    ["integer", ["integer", "null"]],
+    ["array", ["array", "null"]],
+    ["object", ["object", "string"]],
+  ])("still fires for a well-formed union containing %s", (_label, type) => {
     const findings = lintToolSchemas(
-      tool({
-        inputSchema: { type: "object", properties: { a: { type: [3] } } },
-      }),
+      tool({ inputSchema: { type: "object", properties: { a: { type } } } }),
     );
     expect(rules(findings)).toEqual(["type-union"]);
-    expect(findings[0]!.suggestion).toContain("anyOf");
   });
 
   it("raises only the union rule for an array-typed root", () => {
@@ -362,6 +366,31 @@ describe("lintToolSchemas — untyped-schema", () => {
     );
     expect(rules(findings)).toEqual(["untyped-schema"]);
     expect(paths(findings)).toEqual(["inputSchema.properties.a"]);
+  });
+
+  it.each([
+    ["a lone if", { if: { const: 1 } }],
+    ["a lone then", { then: { type: "string" } }],
+    ["a lone else", { else: { type: "string" } }],
+  ])("flags %s, which asserts nothing on its own", (_label, sub) => {
+    // `if` has no assertion effect without `then`/`else`, and either of those
+    // is ignored without an `if` — so these accept every value, and counting
+    // the keyword's mere presence would let them pass as constrained.
+    const findings = lintToolSchemas(
+      tool({ inputSchema: { type: "object", properties: { a: sub } } }),
+    );
+    expect(rules(findings)).toEqual(["untyped-schema"]);
+  });
+
+  it.each([
+    ["if + then", { if: { const: 1 }, then: { type: "string" } }],
+    ["if + else", { if: { const: 1 }, else: { type: "string" } }],
+  ])("does not flag %s, which is a real conditional", (_label, sub) => {
+    expect(
+      lintToolSchemas(
+        tool({ inputSchema: { type: "object", properties: { a: sub } } }),
+      ),
+    ).toEqual([]);
   });
 
   it.each([

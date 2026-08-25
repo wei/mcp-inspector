@@ -26,16 +26,21 @@
           "message": { "type": "string" },
           "show_ids": { "type": ["null", "boolean"] },
           "opts": {}
-        }
+        },
+        "required": ["message"]
       }
     },
     "add": {
       "inputSchema": {
         "type": "object",
         "properties": {
-          "a": { "$ref": "https://example.com/schemas/number.json" },
+          "a": {
+            "type": "number",
+            "$ref": "https://example.com/schemas/number.json"
+          },
           "b": { "type": "number" }
-        }
+        },
+        "required": ["a", "b"]
       }
     }
   },

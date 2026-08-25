@@ -64,6 +64,18 @@ describe("classifyError", () => {
     expect(envelope.url).toBe("https://x.example/mcp");
   });
 
+  it("derives schema_unportable from the exit code when no envelope is given", () => {
+    // `CliExitCodeError` lets a caller omit the envelope, in which case the
+    // machine code comes from `codeForExit`. A new exit code that is missing
+    // there degrades to the generic `error`, which is exactly the kind of
+    // silent mislabelling the code map exists to prevent (#1005).
+    const { exitCode, envelope } = classifyError(
+      new CliExitCodeError(EXIT_CODES.SCHEMA_UNPORTABLE, "1 finding"),
+    );
+    expect(exitCode).toBe(EXIT_CODES.SCHEMA_UNPORTABLE);
+    expect(envelope.code).toBe("schema_unportable");
+  });
+
   it("classifies a WWW-Authenticate message as AUTH_REQUIRED without a status", () => {
     const { exitCode } = classifyError(
       new Error("Dynamic client registration failed: WWW-Authenticate Bearer"),

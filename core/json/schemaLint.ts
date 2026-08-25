@@ -174,9 +174,10 @@ const CONSTRAINING_KEYWORDS: ReadonlySet<string> = new Set([
   "anyOf",
   "oneOf",
   "not",
-  "if",
-  "then",
-  "else",
+  // `if` / `then` / `else` are deliberately absent — they only constrain as a
+  // PAIR. `if` alone has no assertion effect, and `then` / `else` are ignored
+  // without it, so `{"if": {"const": 1}}` accepts every value. The pairing is
+  // checked separately in `constrainsInstance`.
   "items",
   "prefixItems",
   "contains",
@@ -194,6 +195,57 @@ const CONSTRAINING_KEYWORDS: ReadonlySet<string> = new Set([
   "$dynamicRef",
   "$recursiveRef",
 ]);
+
+/**
+ * The seven type names JSON Schema recognizes. A `type` naming anything else
+ * is malformed rather than unportable, which this module deliberately does not
+ * report — see {@link isPortableTypeUnion}.
+ */
+const JSON_SCHEMA_TYPES: ReadonlySet<string> = new Set([
+  "null",
+  "boolean",
+  "object",
+  "array",
+  "number",
+  "string",
+  "integer",
+]);
+
+/**
+ * Does this schema constrain the instance at all?
+ *
+ * Presence of a {@link CONSTRAINING_KEYWORDS} member, plus the one keyword
+ * group that cannot be judged by presence alone: `if` asserts nothing without
+ * a `then` or an `else`, and either of those is ignored without an `if`. So
+ * `{"if": {"const": 1}}` and `{"then": {"type": "string"}}` both accept every
+ * value, and counting the keyword's mere presence would let them pass as
+ * constrained.
+ */
+function constrainsInstance(node: SchemaRecord): boolean {
+  if (Object.keys(node).some((key) => CONSTRAINING_KEYWORDS.has(key))) {
+    return true;
+  }
+  return "if" in node && ("then" in node || "else" in node);
+}
+
+/**
+ * Is an array-valued `type` the *legal* union this rule is about?
+ *
+ * The rule reports a construct that is valid JSON Schema and unportable, and
+ * its message says exactly that — so it must not fire on an array that is
+ * simply malformed (`[]`, which matches nothing; `[3]`; `["bananas"]`;
+ * `["string", "string"]`). Saying "this is legal JSON Schema, but…" of those
+ * would be false, and the `anyOf` replacement it suggests would be invalid
+ * too. Malformed schemas are the SDK parser's business, the same way a
+ * non-object, non-boolean node is; this module stays quiet on them.
+ */
+function isPortableTypeUnion(type: readonly unknown[]): type is string[] {
+  if (type.length === 0) return false;
+  if (!type.every((t) => typeof t === "string" && JSON_SCHEMA_TYPES.has(t))) {
+    return false;
+  }
+  return new Set(type).size === type.length;
+}
 
 /**
  * Depth cap for the walk. A `$ref`-free JSON document cannot be cyclic, but
@@ -334,8 +386,7 @@ function lintNode(
 ): void {
   const type = node.type;
 
-  if (Array.isArray(type)) {
-    const members = type.filter((t): t is string => typeof t === "string");
+  if (Array.isArray(type) && isPortableTypeUnion(type)) {
     // The suggestion is always `anyOf`, never "drop it from `required`".
     // Accepting an explicit JSON `null` and permitting the property to be
     // absent are independent: on a required `["null","boolean"]` field,
@@ -343,14 +394,13 @@ function lintNode(
     // omission — a different contract, not the same one spelled portably.
     // `anyOf` branches each carrying a single `type` are equivalent, and this
     // lint treats them as portable.
-    const branches = members.length > 0 ? members : type.map(() => "…");
     add(
       ctx,
       "type-union",
       "warning",
       path,
       `\`type\` is an array (${JSON.stringify(type)}). The array form is legal JSON Schema, but several MCP clients read \`type\` as a single string and either reject the tool or drop the constraint.`,
-      `Split it into \`anyOf\` branches, each with a single \`type\` — \`{"anyOf": [${branches
+      `Split it into \`anyOf\` branches, each with a single \`type\` — \`{"anyOf": [${type
         .map((t) => `{"type": "${t}"}`)
         .join(
           ", ",
@@ -370,9 +420,7 @@ function lintNode(
     );
   }
 
-  const constrains = Object.keys(node).some((key) =>
-    CONSTRAINING_KEYWORDS.has(key),
-  );
+  const constrains = constrainsInstance(node);
   // Under `not`, an always-accepting subschema is the idiomatic spelling of
   // always-*reject* — `{"not": {}}` is the object form of `false`, and the one
   // this module's own `boolean-schema` suggestion recommends. Reporting it as

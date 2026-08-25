@@ -191,6 +191,8 @@ function codeForExit(exitCode: number): string {
       return "unreachable";
     case EXIT_CODES.TOOL_ERROR:
       return "tool_error";
+    case EXIT_CODES.SCHEMA_UNPORTABLE:
+      return "schema_unportable";
     default:
       return "error";
   }

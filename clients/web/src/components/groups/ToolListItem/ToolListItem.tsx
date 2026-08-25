@@ -8,7 +8,7 @@ import {
   UnstyledButton,
 } from "@mantine/core";
 import { useMemo } from "react";
-import { RiErrorWarningLine } from "react-icons/ri";
+import { RiAlertLine, RiErrorWarningLine } from "react-icons/ri";
 import type { Tool } from "@modelcontextprotocol/client";
 import { lintToolSchemas } from "@inspector/core/json/schemaLint.js";
 import { resolveDisplayLabel } from "../../../utils/toolUtils";
@@ -87,7 +87,7 @@ export function ToolListItem({ tool, selected, onClick }: ToolListItemProps) {
         </ItemBody>
         {findings.length > 0 && (
           <Tooltip
-            label={`${findings.length} schema portability finding${findings.length === 1 ? "" : "s"} — select the tool for detail`}
+            label={`${findings.length} schema portability ${hasError ? "error" : "warning"}${findings.length === 1 ? "" : "s"} — select the tool for detail`}
             withArrow
           >
             <SchemaFlagIcon
@@ -102,7 +102,11 @@ export function ToolListItem({ tool, selected, onClick }: ToolListItemProps) {
                   : "Schema portability warnings"
               }
             >
-              <RiErrorWarningLine />
+              {/* Distinct SHAPES, not just distinct colours: an octagon for an
+                  error and a triangle for a warning, so the severity survives
+                  for a colour-blind reader. The tooltip and the accessible
+                  label name it in words as well. */}
+              {hasError ? <RiErrorWarningLine /> : <RiAlertLine />}
             </SchemaFlagIcon>
           </Tooltip>
         )}
