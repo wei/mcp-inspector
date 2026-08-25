@@ -61,7 +61,19 @@ v2/main/
 ├── core/                               # Shared core code (no package.json — consumed via the `@inspector/core` vite alias)
 │   ├── auth/                           # OAuth: providers, discovery, OAuthStorage + persist backends;
 │   │                                   #   mid-session recovery (challenge.ts WWW-Authenticate
-│   │                                   #   parsing, scopes.ts SEP-2350 scope union, oauthUx.ts
+│   │                                   #   parsing — including the RFC 9728
+│   │                                   #   `resource_metadata` URL, carried on
+│   │                                   #   AuthChallenge as a STRING because the
+│   │                                   #   web client's challenge crosses the
+│   │                                   #   remote-backend boundary as JSON, and
+│   │                                   #   converted to a URL at the OAuth
+│   │                                   #   boundary by challengeResourceMetadataUrl
+│   │                                   #   (malformed values ignored, matching the
+│   │                                   #   SDK's own parser) so discovery targets
+│   │                                   #   the advertised document rather than a
+│   │                                   #   location derived from the MCP server
+│   │                                   #   URL — #2071;
+│   │                                   #   scopes.ts SEP-2350 scope union, oauthUx.ts
 │   │                                   #   shared copy, mcpAuth.ts force-reauthorization,
 │   │                                   #   issuerBinding.ts SEP-2352 callback-leg failure
 │   │                                   #   classification — separates a recoverable

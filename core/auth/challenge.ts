@@ -26,6 +26,17 @@ export interface AuthChallenge {
   /** Resource authorization server audience when known. */
   audience?: string;
 
+  /**
+   * RFC 9728 `resource_metadata` advertised by the `WWW-Authenticate` challenge.
+   *
+   * Kept as a string so the challenge stays serializable — it crosses the web
+   * client's remote-backend boundary as JSON. Converted to a `URL` (and
+   * discarded if malformed) at the OAuth boundary, where it is handed to the
+   * SDK as `resourceMetadataUrl` so protected-resource discovery targets the
+   * advertised document instead of a location derived from the MCP server URL.
+   */
+  resourceMetadataUrl?: string;
+
   /** Optional human-readable detail from server or SDK (for UI, not parsing). */
   message?: string;
 
@@ -193,6 +204,30 @@ export function parseWwwAuthenticateBearer(
   };
 }
 
+/**
+ * Convert a challenge's advertised RFC 9728 `resource_metadata` value into the
+ * `URL` the SDK's `auth()` takes as `resourceMetadataUrl`.
+ *
+ * A malformed value is ignored rather than surfaced, matching the SDK's own
+ * `WWW-Authenticate` parser (`extractWWWAuthenticateParams`), which drops a
+ * value `new URL()` rejects. Discovery then falls back to the default
+ * RFC 9728 locations derived from the MCP server URL — the pre-existing
+ * behavior — instead of failing the whole authorization on a bad header.
+ */
+export function challengeResourceMetadataUrl(
+  challenge: Pick<AuthChallenge, "resourceMetadataUrl">,
+): URL | undefined {
+  const value = challenge.resourceMetadataUrl?.trim();
+  if (!value) {
+    return undefined;
+  }
+  try {
+    return new URL(value);
+  } catch {
+    return undefined;
+  }
+}
+
 /** Split an OAuth scope string into individual scopes (space-separated). */
 export function parseScopeString(scope: string | undefined): string[] {
   if (!scope?.trim()) {
@@ -275,6 +310,9 @@ export function parseAuthChallengeFromResponse(
   return {
     reason: reasonFromHttpResponse(status, bearer),
     ...(requiredScopes.length > 0 ? { requiredScopes } : {}),
+    ...(bearer.resourceMetadata
+      ? { resourceMetadataUrl: bearer.resourceMetadata }
+      : {}),
     ...(bearer.errorDescription ? { message: bearer.errorDescription } : {}),
     ...(context ? { context } : {}),
     raw: {
@@ -337,6 +375,9 @@ export function parseAuthChallengeFromError(
   return {
     reason: reasonFromHttpResponse(status, bearer),
     ...(requiredScopes.length > 0 ? { requiredScopes } : {}),
+    ...(bearer.resourceMetadata
+      ? { resourceMetadataUrl: bearer.resourceMetadata }
+      : {}),
     ...(context ? { context } : {}),
     raw: {
       httpStatus: status,
