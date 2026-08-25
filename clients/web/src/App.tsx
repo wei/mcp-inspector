@@ -422,20 +422,41 @@ const ToastLinkButton = Anchor.withProps({
   size: "sm",
 });
 
-// Sticky re-auth banner bar. A `Paper` so every static style is a prop: `shadow`
-// emits `var(--mantine-shadow-sm)` (identical to the old CSS), and the stacking
+// The re-auth popup. A `Paper` so every static style is a prop; the stacking
 // order goes through `styles.root` since Mantine has no `z` prop.
+//
+// Floats top-right rather than spanning the top as a sticky full-bleed bar.
+// The bar cost the whole view a band of vertical space for what is a
+// notification about one server, and it sat directly above the monitoring
+// sidebar that an OAuth failure now opens (#2108) — the two things a user needs
+// at once here are this affordance and those requests, so it must not push them
+// around. `fixed`, not `sticky`, so scrolling the server list leaves it put.
+//
+// Centered, and deliberately WITHOUT an overlay. Every corner is spoken for —
+// the toast stack owns bottom-right (see `main.tsx`), the right edge is the
+// monitoring sidebar whose toolbar this would cover, and top-left is the
+// Servers header — so anchoring it anywhere hides something. Centering is the
+// one placement that reads as addressed to the whole window rather than
+// attached to the wrong panel.
+//
+// The missing overlay is the point, not an omission: this is a notification,
+// not a decision that must be made now. An OAuth failure opens the monitoring
+// sidebar (#2108), and blocking the page would force a choice between reading
+// those requests and keeping the affordance — dismissing is not free, since
+// "Authorize again" also clears the stale OAuth state, which a plain reconnect
+// does not do. So it floats above the page and leaves it usable.
+//
+// `transform` goes through `styles.root` for the same reason `zIndex` does:
+// Mantine exposes neither as a style prop.
 const ReAuthBannerBar = Paper.withProps({
-  px: "md",
-  pt: "xs",
-  pos: "sticky",
-  top: 60,
+  pos: "fixed",
+  top: "50%",
+  left: "50%",
+  w: 420,
   bg: "var(--mantine-color-body)",
-  shadow: "sm",
-  styles: { root: { zIndex: 200 } },
-  // Paper's default `radius: "md"` would round this full-bleed sticky bar's
-  // corners; the bar it replaced (a Box) had none.
-  radius: 0,
+  shadow: "xl",
+  radius: "md",
+  styles: { root: { transform: "translate(-50%, -50%)", zIndex: 200 } },
 });
 
 // Body of the "response body dropped" warning toast: a one-line summary of what
@@ -2841,6 +2862,13 @@ function App() {
     if (!params.successful) {
       const pendingId = resumeSnapshot?.serverId;
       if (pendingId) {
+        // Red border only (#1621), not a sidebar. This arm returns before a
+        // client is rebuilt, so the persisted `auth` entries are never
+        // restored and the content-gated column stays shut — correctly: the
+        // provider's own `error` param is the whole diagnostic, and the
+        // re-auth banner below is already showing it. The flag is still right,
+        // because the attempt did fail.
+        setFailedServerId(pendingId);
         queueMicrotask(() => {
           showReAuthBanner(pendingId, generateOAuthErrorDescription(params));
         });
@@ -2876,6 +2904,10 @@ function App() {
         await webOAuthStorage.load();
       } catch (err) {
         connectStartRef.current = undefined;
+        // Red border only, for the same reason as the provider-error arm above
+        // — and here the network log would not help anyway: this is a failure
+        // to read local OAuth storage, not a request that went out.
+        setFailedServerId(server.id);
         queueMicrotask(() => {
           showReAuthBanner(server.id, err instanceof Error ? err : String(err));
         });
@@ -2891,6 +2923,26 @@ function App() {
         });
       } catch (err) {
         connectStartRef.current = undefined;
+        // `resumeAfterOAuth` carries the reconnect, and that reconnect can
+        // reject with an auth-recovery error — which holds the status at
+        // `"connecting"` instead of moving it to `"error"`. Nothing downstream
+        // of here ends the attempt, so without this the toggle is stuck and the
+        // active-server lock is never released. Before the EMA guard, since a
+        // stuck session is worth clearing whichever way the error classifies.
+        await client.disconnect().catch(() => {});
+        // `activeServerId` is deliberately NOT cleared here, even though the
+        // disconnect above often cannot announce itself: it emits only on a
+        // status *change*, and the commonest failure — a rejected token
+        // exchange — throws inside `completeOAuthFlow` before the reconnect
+        // runs, so this freshly built client is still at its initial
+        // `"disconnected"` and the listener that would clear it never fires.
+        //
+        // That looks like a leak and is not. The next step after a callback
+        // failure is the re-auth banner below, and its "Authorize again" hands
+        // `clearServerOAuthState` the live client only when the banner's server
+        // *is* the active one. Releasing it here would pass `null` instead, and
+        // the stale tokens would never be cleared from the client that holds
+        // them — the one thing that recovery exists to do.
         if (isEmaClientNotConfiguredError(err)) {
           notifications.show({
             title: `Cannot connect to "${server.name}"`,
@@ -2900,6 +2952,19 @@ function App() {
           });
           return;
         }
+        // The token exchange (or the re-handshake behind it) failed. Flag the
+        // server (#1621) so the monitoring sidebar opens onto the OAuth
+        // requests that explain it (#2108) — the rebuilt client restored the
+        // pre-redirect `auth` fetch entries from the session, so discovery,
+        // DCR and the token exchange are all there.
+        //
+        // Below the EMA guard, not above it: an unconfigured enterprise client
+        // is a *configuration* error rather than a failed attempt, and both
+        // connect-path arms already return on it without flagging. Flagging it
+        // only here would make the three disagree about what the red border
+        // means. Above every other arm, so the classification fan-out that
+        // follows carries it whichever way it goes.
+        setFailedServerId(server.id);
         // SEP-2352 issuer binding (#1808). Two very different failures share
         // one SDK error class, so classify before falling through to the
         // generic re-auth banner (whose detail line would otherwise be the raw
@@ -3048,9 +3113,42 @@ function App() {
         // against the right client. The redirect unloads this page, so there's
         // nothing to do after the await on the success path.
         if (err instanceof AuthRecoveryRequiredError) {
-          if (await client.checkAuthChallengeSatisfied(err.authChallenge)) {
-            connectStartRef.current = Date.now();
-            await client.connect();
+          try {
+            if (await client.checkAuthChallengeSatisfied(err.authChallenge)) {
+              connectStartRef.current = Date.now();
+              await client.connect();
+              return;
+            }
+          } catch (recoveryErr) {
+            // Both awaits above are unguarded connect work sitting inside a
+            // `catch`, so a rejection escapes `onToggleConnection` altogether:
+            // no toast, no red border, no sidebar — the #2108 failure mode in
+            // its most invisible form. Surface it as the failed connect attempt
+            // it is. A throw from `checkAuthChallengeSatisfied` lands here too
+            // rather than falling through to `prepareOAuthRedirect`: it is not
+            // the same as the challenge being *unsatisfied*, and navigating the
+            // whole page away on the strength of an error would bury it.
+            connectStartRef.current = undefined;
+            // Tear the session down before reporting, as the sibling OAuth
+            // catch below does. The outer `connect()` rejected with an
+            // auth-recovery error, which deliberately holds the status at
+            // `"connecting"` rather than moving it to `"error"` — so if the
+            // challenge check is what rejected, nothing else ever ends the
+            // attempt and the toggle spins while the active-server lock is
+            // held. The fetch log survives a disconnect, so the Network
+            // diagnostics this issue is about are unaffected.
+            await client.disconnect().catch(() => {});
+            setFailedServerId(id);
+            const message =
+              recoveryErr instanceof Error
+                ? recoveryErr.message
+                : String(recoveryErr);
+            setConnectErrorMessage(message);
+            notifications.show({
+              title: `Failed to connect to "${target.name}"`,
+              message,
+              color: "red",
+            });
             return;
           }
           prepareOAuthRedirect({
@@ -3091,6 +3189,13 @@ function App() {
               });
               return;
             }
+            // The connect attempt failed, same as any other handshake error —
+            // flag the card (#1621) and, with it, open the monitoring sidebar
+            // onto the OAuth requests that explain the failure (#2108). This
+            // leg never reaches the `"error"` connection status (the
+            // `disconnect()` above settles it at `"disconnected"`), so this
+            // flag is the only signal the view has that a connect attempt died.
+            setFailedServerId(id);
             const message =
               authErr instanceof Error ? authErr.message : String(authErr);
             setConnectErrorMessage(message);
