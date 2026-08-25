@@ -611,6 +611,12 @@ export function storedFieldsToInspectorSettings(
   if (stored.oauth?.enterpriseManaged === true) {
     settings.enterpriseManaged = true;
   }
+  // Inverted from the flags above: the default is *on*, so only an explicit
+  // `false` is carried through. Anything else on disk (absent, or a
+  // hand-edited non-boolean) reads back as unset, i.e. the default. (#2068)
+  if (stored.oauth?.requestRefreshToken === false) {
+    settings.oauthRequestRefreshToken = false;
+  }
   // Mirror the stdio working directory for the form. Like the OAuth fields, an
   // empty string coerces to absent so the form's "(inherit)" placeholder shows.
   if (stored.cwd) settings.cwd = stored.cwd;
@@ -737,6 +743,12 @@ export function inspectorSettingsToStoredFields(
   }
   if (settings.enterpriseManaged === true) {
     oauthFields.enterpriseManaged = true;
+  }
+  // Only the non-default (off) is written; an absent field reads back as the
+  // default (on), so writing `true` would inject the key into files that never
+  // set it and break byte-stable round-trips. (#2068)
+  if (settings.oauthRequestRefreshToken === false) {
+    oauthFields.requestRefreshToken = false;
   }
   if (Object.keys(oauthFields).length > 0) {
     out.oauth = oauthFields;

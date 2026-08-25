@@ -2624,7 +2624,8 @@ function App() {
           savedSettings.oauthScopes ||
           serverAuthorizationParams ||
           serverEndpointOverrides ||
-          savedSettings.enterpriseManaged)
+          savedSettings.enterpriseManaged ||
+          savedSettings.oauthRequestRefreshToken === false)
           ? {
               ...(savedSettings.oauthClientId && {
                 clientId: savedSettings.oauthClientId,
@@ -2641,6 +2642,11 @@ function App() {
               ...serverEndpointOverrides,
               ...(savedSettings.enterpriseManaged && {
                 enterpriseManaged: true,
+              }),
+              // #2068: only the explicit opt-out is forwarded; omitting the key
+              // leaves the provider's default (declare `refresh_token`) in place.
+              ...(savedSettings.oauthRequestRefreshToken === false && {
+                requestRefreshToken: false,
               }),
             }
           : undefined;

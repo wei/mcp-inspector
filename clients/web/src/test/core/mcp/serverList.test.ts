@@ -1199,6 +1199,68 @@ describe("enterpriseManaged oauth settings", () => {
   });
 });
 
+describe("oauth.requestRefreshToken (#2068)", () => {
+  const baseSettings = {
+    headers: [],
+    env: [],
+    metadata: {},
+    connectionTimeout: 0,
+    requestTimeout: 0,
+    taskTtl: 60000,
+    maxFetchRequests: 1000,
+    roots: [],
+  };
+
+  it("lifts an explicit false to settings.oauthRequestRefreshToken", () => {
+    const settings = storedFieldsToInspectorSettings({
+      oauth: { clientId: "cid", requestRefreshToken: false },
+    });
+    expect(settings?.oauthRequestRefreshToken).toBe(false);
+  });
+
+  it("leaves the setting unset when the field is absent (default: on)", () => {
+    const settings = storedFieldsToInspectorSettings({
+      oauth: { clientId: "cid" },
+    });
+    expect(settings?.oauthRequestRefreshToken).toBeUndefined();
+  });
+
+  it("leaves the setting unset for an explicit true, which means the default", () => {
+    const settings = storedFieldsToInspectorSettings({
+      oauth: { clientId: "cid", requestRefreshToken: true },
+    });
+    expect(settings?.oauthRequestRefreshToken).toBeUndefined();
+  });
+
+  it("persists the opt-out under oauth on disk", () => {
+    const stored = inspectorSettingsToStoredFields({
+      ...baseSettings,
+      oauthRequestRefreshToken: false,
+    });
+    expect(stored.oauth?.requestRefreshToken).toBe(false);
+  });
+
+  it("writes nothing when the setting is on", () => {
+    expect(
+      inspectorSettingsToStoredFields({
+        ...baseSettings,
+        oauthRequestRefreshToken: true,
+      }).oauth,
+    ).toBeUndefined();
+    expect(inspectorSettingsToStoredFields(baseSettings).oauth).toBeUndefined();
+  });
+
+  it("round-trips the opt-out", () => {
+    const stored = inspectorSettingsToStoredFields({
+      ...baseSettings,
+      oauthRequestRefreshToken: false,
+    });
+    expect(
+      storedFieldsToInspectorSettings(stored)?.oauthRequestRefreshToken,
+    ).toBe(false);
+  });
+});
+
 describe("oauthOnInsufficientScope (SEP-2350)", () => {
   const baseSettings = {
     headers: [],
