@@ -52,14 +52,28 @@ export const OFFLINE_ACCESS_SCOPE = "offline_access";
  * Widening the request with unrelated configured tokens is outside what this
  * setting governs and could push an otherwise-satisfied connection into a
  * step-up authorization.
+ *
+ * `requiredScopes` carries scopes a `403 insufficient_scope` challenge demands
+ * (SEP-2350). They are honored exactly like a configured one: the server is
+ * asking for them, and stripping a scope the challenge requires would loop —
+ * re-authorize, get the same challenge back, strip it again. The step-up path
+ * needs this because it does not read the scope through the provider at all:
+ * it unions the *raw* stored scope with the challenge and hands that to the
+ * SDK directly, so an inherited `offline_access` would otherwise reappear
+ * there with the setting off.
  */
 export function scopeForDeclinedRefreshGrant(
   effectiveScope: string | undefined,
   configuredScope: string | undefined,
+  requiredScopes?: readonly string[],
 ): string | undefined {
   if (!effectiveScope) return effectiveScope;
   const configured = configuredScope?.trim().split(/\s+/) ?? [];
-  if (configured.includes(OFFLINE_ACCESS_SCOPE)) {
+  const required = requiredScopes ?? [];
+  if (
+    configured.includes(OFFLINE_ACCESS_SCOPE) ||
+    required.includes(OFFLINE_ACCESS_SCOPE)
+  ) {
     const tokens = effectiveScope
       .trim()
       .split(/\s+/)
@@ -83,7 +97,7 @@ export function scopeForDeclinedRefreshGrant(
   // silent overwrite of the persisted value, so re-enabling the grant could no
   // longer restore it. Hand back the configured scope instead: it is the right
   // thing to request, and it leaves storage alone.
-  // Cannot itself contain `offline_access`: that case returned unchanged above.
+  // Cannot itself contain `offline_access`: that case returned above.
   const fallback = configuredScope?.trim();
   if (fallback) return fallback;
 

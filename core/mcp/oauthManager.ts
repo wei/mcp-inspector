@@ -48,6 +48,7 @@ import {
   isStrictScopeSuperset,
   resolveEffectiveGrantedScope,
   resolvePersistedScopeAfterGrant,
+  scopeForDeclinedRefreshGrant,
 } from "../auth/scopes.js";
 import { stepUpInsufficientScopeMessage } from "../auth/oauthUx.js";
 import type {
@@ -783,13 +784,29 @@ export class OAuthManager {
       resourceMetadataUrl,
     });
 
-    const scopeForAuth =
+    // #2068 — the step-up union is built from *raw* storage
+    // (`enrichChallengeWithScopes`) and handed to the SDK directly, so it never
+    // passes through the provider's filtering `scope` getter. Without this an
+    // `offline_access` inherited from an earlier grant reappears here and the
+    // SDK re-adds `prompt=consent` even with the setting off — the same failure
+    // the option exists to prevent, on the one path that bypasses it. A scope
+    // the challenge itself requires is preserved, since stripping that would
+    // just re-earn the same challenge.
+    const requestedScopeForAuth =
       enriched.reason === "insufficient_scope"
         ? enriched.authorizationScopes?.join(" ")
         : this.oauthConfig.scope?.trim() ||
           (enriched.requiredScopes?.length
             ? enriched.requiredScopes.join(" ")
             : undefined);
+    const scopeForAuth =
+      this.oauthConfig.requestRefreshToken === false
+        ? scopeForDeclinedRefreshGrant(
+            requestedScopeForAuth,
+            this.oauthConfig.scope,
+            enriched.requiredScopes,
+          )
+        : requestedScopeForAuth;
 
     provider.setSuppressAuthorizationNavigation(true);
     let result: Awaited<ReturnType<typeof mcpAuth>>;

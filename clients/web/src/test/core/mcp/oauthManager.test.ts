@@ -1140,6 +1140,81 @@ describe("OAuthManager", () => {
       ).toBe(false);
     });
 
+    // #2068 round 8 — the step-up path never reads the provider's filtering
+    // `scope` getter: `enrichChallengeWithScopes` unions the *raw* stored scope
+    // with the challenge and `handleAuthChallenge` hands that straight to
+    // `mcpAuth`. So an inherited `offline_access` reappeared here with the
+    // setting off, and the SDK re-added `prompt=consent` — the exact failure
+    // the option exists to prevent, on the one path that bypassed it.
+    describe("step-up scope with the refresh grant declined (#2068)", () => {
+      /** The `scope` this challenge run handed to the SDK. */
+      async function scopeSentForChallenge(
+        storedScope: string,
+        configuredScope: string | undefined,
+        requiredScopes: string[],
+        requestRefreshToken: boolean | undefined,
+      ): Promise<string | undefined> {
+        const params = createMockParams();
+        storageOf(params).getScope.mockResolvedValue(storedScope);
+        storageOf(params).getTokens.mockResolvedValue({
+          access_token: "tok",
+          token_type: "Bearer",
+          scope: storedScope,
+        });
+        storageOf(params).getClientInformation.mockResolvedValue({
+          client_id: "cid",
+        });
+        const manager = new OAuthManager(params);
+        manager.setOAuthConfig({
+          ...(configuredScope !== undefined && { scope: configuredScope }),
+          ...(requestRefreshToken !== undefined && { requestRefreshToken }),
+        });
+        mockedMcpAuth.mockResolvedValue("REDIRECT");
+
+        await manager.handleAuthChallenge({
+          reason: "insufficient_scope",
+          requiredScopes,
+        });
+
+        const call = mockedMcpAuth.mock.calls.at(-1);
+        return (call?.[1] as { scope?: string } | undefined)?.scope;
+      }
+
+      it("drops an inherited offline_access from the step-up union", async () => {
+        const sent = await scopeSentForChallenge(
+          "mcp offline_access",
+          "mcp",
+          ["tools:write"],
+          false,
+        );
+        expect(sent?.split(/\s+/)).not.toContain("offline_access");
+        // The step-up still asks for what the challenge demanded.
+        expect(sent?.split(/\s+/)).toContain("tools:write");
+      });
+
+      it("keeps offline_access in the step-up union while the grant is on", async () => {
+        const sent = await scopeSentForChallenge(
+          "mcp offline_access",
+          "mcp",
+          ["tools:write"],
+          undefined,
+        );
+        expect(sent?.split(/\s+/)).toContain("offline_access");
+      });
+
+      // Stripping a scope the challenge itself requires would loop:
+      // re-authorize, earn the same challenge, strip it again.
+      it("preserves an offline_access the challenge requires", async () => {
+        const sent = await scopeSentForChallenge(
+          "mcp",
+          "mcp",
+          ["offline_access"],
+          false,
+        );
+        expect(sent?.split(/\s+/)).toContain("offline_access");
+      });
+    });
+
     it("short-circuits handleAuthChallenge when scope already satisfied", async () => {
       const params = createMockParams();
       storageOf(params).getTokens.mockResolvedValue({

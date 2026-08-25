@@ -208,10 +208,15 @@ export class BaseOAuthClientProvider implements OAuthClientProvider {
   }
 
   get scope(): string | undefined {
-    // #2068: filter at the point of *request*, not in storage. This getter is
-    // the one seam both readers go through — `clientMetadata.scope` below, and
-    // the `scope:` argument `OAuthManager.authenticate` hands to the SDK — so
-    // filtering here covers both without a second derivation that could drift.
+    // #2068: filter at the point of *request*, not in storage. Covers the two
+    // readers that go through this getter — `clientMetadata.scope` below, and
+    // the `scope:` argument `OAuthManager.authenticate` hands to the SDK.
+    //
+    // It is NOT the only request path: mid-session `insufficient_scope` step-up
+    // builds its union from raw storage and passes it to `mcpAuth` directly,
+    // never reading this getter. `OAuthManager.handleAuthChallenge` applies the
+    // same filter there. Both call `scopeForDeclinedRefreshGrant`, so the rule
+    // lives in one place even though it has to be applied twice.
     if (!this.requestRefreshToken) {
       return scopeForDeclinedRefreshGrant(
         this.cachedScope,
