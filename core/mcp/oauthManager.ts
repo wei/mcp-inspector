@@ -315,9 +315,12 @@ export class OAuthManager {
       resourceMetadataUrl,
     });
 
+    // Read once: the getter filters (#2068), so this is what was actually
+    // requested and what the callback leg has to persist.
+    const requestedScope = provider.scope;
     const result = await mcpAuth(provider, {
       serverUrl,
-      scope: provider.scope,
+      scope: requestedScope,
       fetchFn: this.params.effectiveAuthFetch,
       resourceMetadataUrl,
     });
@@ -326,6 +329,21 @@ export class OAuthManager {
       throw new Error(
         "Unexpected: auth() returned AUTHORIZED without authorization code",
       );
+    }
+
+    // #2068 — record the filtered request so `completeOAuthFlow` can persist
+    // it. `resolvePersistedScopeAfterGrant` falls back to the requested scope
+    // when the token response omits `scope` (RFC 6749 §5.1: omitted means the
+    // grant matched the request), and without this that fallback is `undefined`
+    // on the ordinary leg — only step-up ever set it. The old
+    // `offline_access` would then stay in storage, so the scope never
+    // self-heals and later satisfaction checks still read it as granted.
+    //
+    // Only when the filter is in effect. With the grant declared there is
+    // nothing to heal, and persisting a request the AS did not confirm would be
+    // a behavior change beyond this setting.
+    if (this.oauthConfig.requestRefreshToken === false && requestedScope) {
+      this.pendingAuthorizationScope = requestedScope;
     }
 
     const capturedUrl = provider.getCapturedAuthUrl();

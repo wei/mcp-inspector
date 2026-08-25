@@ -1140,6 +1140,72 @@ describe("OAuthManager", () => {
       ).toBe(false);
     });
 
+    // #2068 round 11 — the callback leg of an *ordinary* authorization.
+    // `resolvePersistedScopeAfterGrant` falls back to the requested scope when
+    // the token response omits `scope` (RFC 6749 §5.1), but only step-up ever
+    // populated that fallback. So a filtered request whose AS omitted `scope`
+    // persisted nothing, the stale `offline_access` survived in storage, and
+    // the "self-healing" this feature documents never happened.
+    describe("persisting the filtered scope after an ordinary grant (#2068)", () => {
+      async function completeWith(
+        tokenScope: string | undefined,
+        requestRefreshToken: boolean | undefined,
+      ): Promise<ReturnType<typeof storageOf>> {
+        const params = createMockParams();
+        const storage = storageOf(params);
+        storage.getScope.mockResolvedValue("mcp offline_access");
+        storage.getClientInformation.mockResolvedValue({ client_id: "cid" });
+        const manager = new OAuthManager(params);
+        manager.setOAuthConfig({
+          scope: "mcp",
+          ...(requestRefreshToken !== undefined && { requestRefreshToken }),
+        });
+        mockedMcpAuth.mockResolvedValue("REDIRECT");
+
+        const captureSpy = vi
+          .spyOn(
+            (await import("@inspector/core/auth/providers.js"))
+              .BaseOAuthClientProvider.prototype,
+            "getCapturedAuthUrl",
+          )
+          .mockReturnValue(new URL("https://as.example.com/authorize?state=s"));
+        await manager.authenticate();
+        captureSpy.mockRestore();
+
+        // The callback leg calls `mcpAuth` again and requires AUTHORIZED.
+        mockedMcpAuth.mockResolvedValue("AUTHORIZED");
+        storage.getTokens.mockResolvedValue({
+          access_token: "access",
+          token_type: "Bearer",
+          ...(tokenScope !== undefined && { scope: tokenScope }),
+        });
+        await manager.completeOAuthFlow("code");
+        return storage;
+      }
+
+      it("persists the filtered request when the token response omits scope", async () => {
+        const storage = await completeWith(undefined, false);
+        expect(storage.saveScope).toHaveBeenLastCalledWith(SERVER_URL, "mcp");
+      });
+
+      // An explicit grant is authoritative and wins over what we requested.
+      it("persists the granted scope when the token response carries one", async () => {
+        const storage = await completeWith("mcp tools:read", false);
+        expect(storage.saveScope).toHaveBeenLastCalledWith(
+          SERVER_URL,
+          "mcp tools:read",
+        );
+      });
+
+      // With the grant declared there is nothing to heal, so the ordinary leg
+      // keeps its previous behavior rather than persisting an unconfirmed
+      // request.
+      it("does not persist a request the AS never confirmed while the grant is on", async () => {
+        const storage = await completeWith(undefined, undefined);
+        expect(storage.saveScope).not.toHaveBeenCalled();
+      });
+    });
+
     // #2068 round 8 — the step-up path never reads the provider's filtering
     // `scope` getter: `enrichChallengeWithScopes` unions the *raw* stored scope
     // with the challenge and `handleAuthChallenge` hands that straight to
