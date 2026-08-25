@@ -2841,6 +2841,12 @@ function App() {
     if (!params.successful) {
       const pendingId = resumeSnapshot?.serverId;
       if (pendingId) {
+        // Red border only (#1621), not a sidebar. This arm returns before a
+        // client is rebuilt, so the persisted `auth` entries are never
+        // restored and the content-gated column stays shut — correctly: the
+        // provider's own `error` param is the whole diagnostic, and the
+        // re-auth banner below is already showing it. The flag is still right,
+        // because the attempt did fail.
         setFailedServerId(pendingId);
         queueMicrotask(() => {
           showReAuthBanner(pendingId, generateOAuthErrorDescription(params));
@@ -2877,6 +2883,9 @@ function App() {
         await webOAuthStorage.load();
       } catch (err) {
         connectStartRef.current = undefined;
+        // Red border only, for the same reason as the provider-error arm above
+        // — and here the network log would not help anyway: this is a failure
+        // to read local OAuth storage, not a request that went out.
         setFailedServerId(server.id);
         queueMicrotask(() => {
           showReAuthBanner(server.id, err instanceof Error ? err : String(err));
@@ -3057,9 +3066,33 @@ function App() {
         // against the right client. The redirect unloads this page, so there's
         // nothing to do after the await on the success path.
         if (err instanceof AuthRecoveryRequiredError) {
-          if (await client.checkAuthChallengeSatisfied(err.authChallenge)) {
-            connectStartRef.current = Date.now();
-            await client.connect();
+          try {
+            if (await client.checkAuthChallengeSatisfied(err.authChallenge)) {
+              connectStartRef.current = Date.now();
+              await client.connect();
+              return;
+            }
+          } catch (recoveryErr) {
+            // Both awaits above are unguarded connect work sitting inside a
+            // `catch`, so a rejection escapes `onToggleConnection` altogether:
+            // no toast, no red border, no sidebar — the #2108 failure mode in
+            // its most invisible form. Surface it as the failed connect attempt
+            // it is. A throw from `checkAuthChallengeSatisfied` lands here too
+            // rather than falling through to `prepareOAuthRedirect`: it is not
+            // the same as the challenge being *unsatisfied*, and navigating the
+            // whole page away on the strength of an error would bury it.
+            connectStartRef.current = undefined;
+            setFailedServerId(id);
+            const message =
+              recoveryErr instanceof Error
+                ? recoveryErr.message
+                : String(recoveryErr);
+            setConnectErrorMessage(message);
+            notifications.show({
+              title: `Failed to connect to "${target.name}"`,
+              message,
+              color: "red",
+            });
             return;
           }
           prepareOAuthRedirect({

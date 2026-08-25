@@ -13,6 +13,7 @@ import {
   act,
 } from "./test/renderWithMantine";
 import userEvent from "@testing-library/user-event";
+import { AuthRecoveryRequiredError } from "@inspector/core/auth/challenge.js";
 
 // Spy on the toast layer so the progress-notification tests can assert the
 // show/update calls without mounting Mantine's <Notifications/> portal.
@@ -48,9 +49,13 @@ const { messageLogClear } = vi.hoisted(() => ({ messageLogClear: vi.fn() }));
 vi.mock("@inspector/core/mcp/index.js", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("@inspector/core/mcp/index.js")>();
-  // When set, the next `connect()` rejects with this value (one-shot), so a test
-  // can exercise the handshake-failure path. Cleared after it fires.
-  let nextConnectRejection: unknown = null;
+  // Each armed value makes one `connect()` reject, in FIFO order, so a test can
+  // exercise the handshake-failure path — or a two-connect sequence such as the
+  // auth-recovery retry, where the first call rejects with the recovery error
+  // and the retry behind it fails too. A queue rather than a single slot: with
+  // one slot the second arming would overwrite the first, and the retry would
+  // silently succeed.
+  const connectRejections: unknown[] = [];
   // Same one-shot arming for the `/oauth/callback` token exchange, so a test can
   // exercise the callback-leg failure paths (#1808).
   let nextResumeRejection: unknown = null;
@@ -60,10 +65,8 @@ vi.mock("@inspector/core/mcp/index.js", async (importOriginal) => {
   let nextAuthenticateRejection: unknown = null;
   class FakeInspectorClient extends EventTarget {
     connect = vi.fn(() => {
-      if (nextConnectRejection !== null) {
-        const err = nextConnectRejection;
-        nextConnectRejection = null;
-        return Promise.reject(err);
+      if (connectRejections.length > 0) {
+        return Promise.reject(connectRejections.shift());
       }
       return Promise.resolve(undefined);
     });
@@ -134,8 +137,9 @@ vi.mock("@inspector/core/mcp/index.js", async (importOriginal) => {
     // Test-only handle so the test can grab the live instance and fire events.
     __clientInstances: instances,
     // Test-only: arm the next connect() to reject (handshake-failure path).
+    // Call it more than once to arm consecutive calls.
     __rejectNextConnect: (err: unknown) => {
-      nextConnectRejection = err;
+      connectRejections.push(err);
     },
     // Test-only: arm the next resumeAfterOAuth() to reject (callback-leg failure).
     __rejectNextResumeAfterOAuth: (err: unknown) => {
@@ -698,19 +702,21 @@ const clientInstances = (
   McpIndex as unknown as { __clientInstances: EventTarget[] }
 ).__clientInstances;
 
-const rejectNextConnect = (
-  McpIndex as unknown as { __rejectNextConnect: (err: unknown) => void }
-).__rejectNextConnect;
+// The mock factory adds three test-only arming hooks to the module namespace.
+// Intersecting with `typeof McpIndex` keeps the real module's shape checked and
+// narrows this to a single cast — `as unknown as` would discard the former and
+// is what AGENTS.md rules out.
+type ArmingHooks = typeof McpIndex & {
+  __rejectNextConnect: (err: unknown) => void;
+  __rejectNextResumeAfterOAuth: (err: unknown) => void;
+  __rejectNextAuthenticate: (err: unknown) => void;
+};
 
-const rejectNextResumeAfterOAuth = (
-  McpIndex as unknown as {
-    __rejectNextResumeAfterOAuth: (err: unknown) => void;
-  }
-).__rejectNextResumeAfterOAuth;
-
-const rejectNextAuthenticate = (
-  McpIndex as unknown as { __rejectNextAuthenticate: (err: unknown) => void }
-).__rejectNextAuthenticate;
+const { __rejectNextConnect: rejectNextConnect } = McpIndex as ArmingHooks;
+const { __rejectNextResumeAfterOAuth: rejectNextResumeAfterOAuth } =
+  McpIndex as ArmingHooks;
+const { __rejectNextAuthenticate: rejectNextAuthenticate } =
+  McpIndex as ArmingHooks;
 
 const fetchLogInstances = (
   FetchLogModule as unknown as { __fetchLogInstances: EventTarget[] }
@@ -759,6 +765,36 @@ describe("App failed-connection card border (#1621)", () => {
     expect(notificationsMock.show).toHaveBeenCalledWith(
       expect.objectContaining({
         title: expect.stringContaining("OAuth authorization failed"),
+      }),
+    );
+  });
+
+  // The auth-recovery arm re-connects from inside the outer `catch`, so before
+  // #2108 a rejection there escaped `onToggleConnection` entirely as an
+  // unhandled rejection: no toast, no red border, no sidebar.
+  it("flags the server when the satisfied-challenge retry fails (#2108)", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+
+    // First connect asks for recovery; the fake reports the challenge already
+    // satisfied, so App retries the connect — and that retry fails.
+    rejectNextConnect(
+      new AuthRecoveryRequiredError(
+        new URL("https://as.example.com/authorize"),
+        {
+          reason: "unauthorized",
+        },
+      ),
+    );
+    rejectNextConnect(new Error("handshake failed after re-authorization"));
+    await user.click(screen.getByText("connect"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("errored-server")).toHaveTextContent("A"),
+    );
+    expect(notificationsMock.show).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: expect.stringContaining("Failed to connect"),
       }),
     );
   });
@@ -2516,6 +2552,12 @@ describe("App OAuth callback issuer-binding failures (#1808)", () => {
   // The other callback arm: the provider redirected back with an error instead
   // of a code, so no token exchange is even attempted. Still a connect attempt
   // that failed, so the server carries the same flag (#2108).
+  //
+  // The flag is deliberately all this asserts. That arm returns before a client
+  // is rebuilt, so no Network entries are restored and the content-gated column
+  // stays shut — which is right here: the provider's `error` param is the whole
+  // diagnostic and the re-auth banner is already showing it. Asserting a
+  // sidebar would be asserting behavior this arm should not have.
   it("flags the server when the provider returns an error to the callback (#2108)", async () => {
     writeOAuthResumeSnapshot({
       version: 1,
