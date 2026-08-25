@@ -736,6 +736,70 @@ describe("OAuthManager", () => {
     });
   });
 
+  describe("persisting the requested scope after an ordinary grant (#2117)", () => {
+    const CAPTURED_URL = new URL(
+      "https://auth.example.com/authorize?state=abc",
+    );
+
+    async function authorizeThenComplete(
+      storedScope: string | undefined,
+      tokenScope: string | undefined,
+    ) {
+      mockedMcpAuth.mockResolvedValue("REDIRECT");
+      const params = createMockParams();
+      storageOf(params).getScope.mockResolvedValue(storedScope);
+      storageOf(params).getClientInformation.mockResolvedValue({
+        client_id: "cid",
+      });
+      const manager = new OAuthManager(params);
+      const captureSpy = vi
+        .spyOn(
+          (await import("@inspector/core/auth/providers.js"))
+            .BaseOAuthClientProvider.prototype,
+          "getCapturedAuthUrl",
+        )
+        .mockReturnValue(CAPTURED_URL);
+
+      await manager.authenticate();
+
+      mockedMcpAuth.mockResolvedValue("AUTHORIZED");
+      storageOf(params).getTokens.mockResolvedValue({
+        access_token: "access",
+        token_type: "Bearer",
+        ...(tokenScope === undefined ? {} : { scope: tokenScope }),
+      });
+      storageOf(params).saveScope.mockClear();
+
+      await manager.completeOAuthFlow("code");
+      captureSpy.mockRestore();
+      return params;
+    }
+
+    it("persists the requested scope when the token response omits scope", async () => {
+      const params = await authorizeThenComplete("mcp weather:read", undefined);
+
+      expect(storageOf(params).saveScope).toHaveBeenCalledWith(
+        SERVER_URL,
+        "mcp weather:read",
+      );
+    });
+
+    it("still prefers the granted scope when the AS echoes one", async () => {
+      const params = await authorizeThenComplete("mcp weather:read", "mcp");
+
+      expect(storageOf(params).saveScope).toHaveBeenCalledWith(
+        SERVER_URL,
+        "mcp",
+      );
+    });
+
+    it("persists nothing when neither the request nor the response names a scope", async () => {
+      const params = await authorizeThenComplete(undefined, undefined);
+
+      expect(storageOf(params).saveScope).not.toHaveBeenCalled();
+    });
+  });
+
   describe("completeOAuthFlow (EMA)", () => {
     it("mints resource tokens via the EMA path and dispatches complete", async () => {
       const tokens = { access_token: "EMA", token_type: "Bearer" };
@@ -760,6 +824,35 @@ describe("OAuthManager", () => {
       expect(mintSpy).toHaveBeenCalled();
       expect(params.dispatchOAuthComplete).toHaveBeenCalledWith({ tokens });
       expect(manager.getOAuthFlowStep()).toBe("complete");
+      mintSpy.mockRestore();
+    });
+
+    it("persists the minted scope request when the mint response omits scope (#2117)", async () => {
+      const params = createMockParams({
+        enterpriseManagedAuth: {
+          idp: {
+            issuer: "https://idp.example.com",
+            clientId: "app-client",
+            clientSecret: "secret",
+          },
+        },
+      });
+      params.initialConfig.scope = "mcp weather:read";
+      storageOf(params).getScope.mockResolvedValue(undefined);
+      const manager = new OAuthManager(params);
+      manager.setOAuthConfig({ enterpriseManaged: true });
+
+      const mintSpy = vi
+        .spyOn(emaFlow, "completeEmaIdpAuthorizationAndMint")
+        .mockResolvedValue({ access_token: "EMA", token_type: "Bearer" });
+      storageOf(params).saveScope.mockClear();
+
+      await manager.completeOAuthFlow("ema-code");
+
+      expect(storageOf(params).saveScope).toHaveBeenCalledWith(
+        SERVER_URL,
+        "mcp weather:read",
+      );
       mintSpy.mockRestore();
     });
   });

@@ -305,9 +305,10 @@ export class OAuthManager {
       resourceMetadataUrl,
     });
 
+    const requestedScope = provider.scope;
     const result = await mcpAuth(provider, {
       serverUrl,
-      scope: provider.scope,
+      scope: requestedScope,
       fetchFn: this.params.effectiveAuthFetch,
       resourceMetadataUrl,
     });
@@ -322,6 +323,14 @@ export class OAuthManager {
     if (!capturedUrl) {
       throw new Error("Failed to capture authorization URL");
     }
+
+    // RFC 6749 5.1: an omitted `scope` in the token response means the grant
+    // is identical to what was requested. Carry the request across the
+    // redirect so completeOAuthFlow has that fallback to persist (#2117) --
+    // the step-up paths already do this, and without it an ordinary grant
+    // whose AS echoes no scope leaves the previous stored scope standing as
+    // if it were still what the current token carries.
+    this.pendingAuthorizationScope = requestedScope;
 
     const stateParam = capturedUrl.searchParams.get("state");
     if (stateParam && this.params.onBeforeOAuthRedirect) {
@@ -357,10 +366,13 @@ export class OAuthManager {
           authorizationCode,
           iss,
         );
-        const requestedScope = this.pendingAuthorizationScope;
+        // `scopeForMint` -- not `pendingAuthorizationScope` -- is what the
+        // mint actually asked for, so it is the RFC 6749 5.1 fallback here
+        // (the two differ on the ordinary leg, where only the config carries
+        // a scope).
         const scopeToPersist = resolvePersistedScopeAfterGrant(
           tokens.scope,
-          requestedScope,
+          scopeForMint,
         );
         if (scopeToPersist) {
           await this.requireStorage().saveScope(
