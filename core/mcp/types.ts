@@ -38,6 +38,7 @@ import type {
   RedirectUrlProvider,
 } from "../auth/providers.js";
 import type { OAuthStorage } from "../auth/storage.js";
+import type { AuthChallenge } from "../auth/challenge.js";
 
 // Stdio transport config
 export interface StdioServerConfig {
@@ -903,6 +904,15 @@ export interface CreateTransportOptions {
    * become {@link AuthChallengeError} before the SDK calls `auth()` on a frozen provider.
    */
   interceptAuthChallenges?: boolean;
+
+  /**
+   * Called for every HTTP 401/403 the transport sees, without altering control
+   * flow. Unlike {@link interceptAuthChallenges} this never throws, so it also
+   * covers the legacy first-time-authorization path where interception is
+   * deliberately off and the SDK's headerless `UnauthorizedError` would
+   * otherwise lose the challenge's `resource_metadata` (#2071).
+   */
+  onAuthChallengeObserved?: (challenge: AuthChallenge) => void;
 }
 
 export interface CreateTransportResult {
