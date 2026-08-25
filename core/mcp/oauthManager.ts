@@ -39,6 +39,7 @@ import type {
   HandleAuthChallengeOptions,
 } from "../auth/challenge.js";
 import {
+  challengeResourceMetadataUrl,
   parseScopeString,
   unionAuthorizationScopes,
 } from "../auth/challenge.js";
@@ -81,6 +82,12 @@ export class OAuthManager {
   private oauthFlowState: OAuthFlowState | null = null;
   /** SEP-2350 union scope pending until interactive step-up completes. */
   private pendingAuthorizationScope: string | undefined;
+
+  /**
+   * The RFC 9728 metadata URL from the last 401/403 the transport observed.
+   * See {@link noteObservedAuthChallenge}.
+   */
+  private observedResourceMetadataUrl: URL | undefined;
   private authChallengeMutex: Promise<void> = Promise.resolve();
 
   constructor(params: OAuthManagerParams) {
@@ -271,6 +278,20 @@ export class OAuthManager {
     return authorizationUrl;
   }
 
+  /**
+   * Record a challenge the transport saw but did not raise as one.
+   *
+   * The legacy first-authorization path connects with no `authProvider` and no
+   * challenge interception, so the client calls {@link authenticate} off a
+   * headerless SDK `UnauthorizedError` — this is what carries the advertised
+   * RFC 9728 metadata URL across that gap (#2071). Latest-wins: every
+   * challenge comes from the same server, so the most recent one is what that
+   * server currently says, including when it says nothing.
+   */
+  noteObservedAuthChallenge(challenge: AuthChallenge): void {
+    this.observedResourceMetadataUrl = challengeResourceMetadataUrl(challenge);
+  }
+
   async authenticate(): Promise<URL | undefined> {
     if (this.isEnterpriseManaged()) {
       return this.authenticateEnterpriseManaged();
@@ -281,16 +302,23 @@ export class OAuthManager {
 
     provider.clearCapturedAuthUrl();
 
+    // No challenge is passed to this entry point — it is reached from a plain
+    // unauthorized error — so the last one the transport observed is the only
+    // source for the advertised metadata URL.
+    const resourceMetadataUrl = this.observedResourceMetadataUrl;
+
     await ensureCimdClientRegistration({
       serverUrl,
       provider,
       fetchFn: this.params.effectiveAuthFetch,
+      resourceMetadataUrl,
     });
 
     const result = await mcpAuth(provider, {
       serverUrl,
       scope: provider.scope,
       fetchFn: this.params.effectiveAuthFetch,
+      resourceMetadataUrl,
     });
 
     if (result === "AUTHORIZED") {
@@ -742,10 +770,17 @@ export class OAuthManager {
 
     provider.clearCapturedAuthUrl();
 
+    // RFC 9728: honor the metadata document the challenge advertised rather
+    // than probing the default locations derived from the MCP server URL
+    // (#2071). The SDK persists it in its discovery state, so the callback leg
+    // recovers it without our passing it again.
+    const resourceMetadataUrl = challengeResourceMetadataUrl(enriched);
+
     await ensureCimdClientRegistration({
       serverUrl,
       provider,
       fetchFn: this.params.effectiveAuthFetch,
+      resourceMetadataUrl,
     });
 
     const scopeForAuth =
@@ -763,6 +798,7 @@ export class OAuthManager {
         serverUrl,
         scope: scopeForAuth,
         fetchFn: this.params.effectiveAuthFetch,
+        resourceMetadataUrl,
         ...(enriched.reason === "insufficient_scope" && {
           forceReauthorization: isStrictScopeSuperset(
             scopeForAuth,
@@ -892,6 +928,7 @@ export class OAuthManager {
         serverUrl,
         scope: scopeForAuth,
         fetchFn: this.params.effectiveAuthFetch,
+        resourceMetadataUrl: challengeResourceMetadataUrl(enriched),
         forceReauthorization: true,
       });
     } finally {

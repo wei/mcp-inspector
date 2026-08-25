@@ -1816,6 +1816,153 @@ describe("OAuthManager", () => {
     });
   });
 
+  describe("resource_metadata forwarding (RFC 9728) — #2071", () => {
+    const METADATA_URL = "http://127.0.0.1:3001/custom/protected-resource";
+
+    it("forwards the advertised metadata URL to auth() as a URL", async () => {
+      mockedMcpAuth.mockResolvedValue("AUTHORIZED");
+      const manager = new OAuthManager(createMockParams());
+
+      await manager.handleAuthChallenge({
+        reason: "token_expired",
+        resourceMetadataUrl: METADATA_URL,
+      });
+
+      expect(mockedMcpAuth).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          resourceMetadataUrl: new URL(METADATA_URL),
+        }),
+      );
+    });
+
+    it("leaves the metadata URL undefined when the challenge advertises none", async () => {
+      mockedMcpAuth.mockResolvedValue("AUTHORIZED");
+      const manager = new OAuthManager(createMockParams());
+
+      await manager.handleAuthChallenge({ reason: "token_expired" });
+
+      expect(mockedMcpAuth).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ resourceMetadataUrl: undefined }),
+      );
+    });
+
+    it("ignores a malformed metadata URL rather than failing authorization", async () => {
+      mockedMcpAuth.mockResolvedValue("AUTHORIZED");
+      const manager = new OAuthManager(createMockParams());
+
+      const outcome = await manager.handleAuthChallenge({
+        reason: "token_expired",
+        resourceMetadataUrl: "not-a-url",
+      });
+
+      expect(outcome).toEqual({ kind: "satisfied" });
+      expect(mockedMcpAuth).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ resourceMetadataUrl: undefined }),
+      );
+    });
+
+    it("uses the last observed challenge on the plain authenticate() path", async () => {
+      // The legacy first-authorization path: no challenge is passed in, so the
+      // one the transport observed is the only source (#2071).
+      mockedMcpAuth.mockResolvedValue("REDIRECT");
+      const params = createMockParams();
+      const manager = new OAuthManager(params);
+      const captureSpy = vi
+        .spyOn(
+          (await import("@inspector/core/auth/providers.js"))
+            .BaseOAuthClientProvider.prototype,
+          "getCapturedAuthUrl",
+        )
+        .mockReturnValue(new URL("https://auth.example.com/authorize?state=x"));
+
+      manager.noteObservedAuthChallenge({
+        reason: "unauthorized",
+        resourceMetadataUrl: METADATA_URL,
+      });
+      await manager.authenticate();
+
+      expect(mockedMcpAuth).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          resourceMetadataUrl: new URL(METADATA_URL),
+        }),
+      );
+      captureSpy.mockRestore();
+    });
+
+    it("clears the observed URL when a later challenge advertises none", async () => {
+      mockedMcpAuth.mockResolvedValue("REDIRECT");
+      const params = createMockParams();
+      const manager = new OAuthManager(params);
+      const captureSpy = vi
+        .spyOn(
+          (await import("@inspector/core/auth/providers.js"))
+            .BaseOAuthClientProvider.prototype,
+          "getCapturedAuthUrl",
+        )
+        .mockReturnValue(new URL("https://auth.example.com/authorize?state=x"));
+
+      manager.noteObservedAuthChallenge({
+        reason: "unauthorized",
+        resourceMetadataUrl: METADATA_URL,
+      });
+      manager.noteObservedAuthChallenge({ reason: "unauthorized" });
+      await manager.authenticate();
+
+      expect(mockedMcpAuth).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ resourceMetadataUrl: undefined }),
+      );
+      captureSpy.mockRestore();
+    });
+
+    it("forwards it on the forced step-up reauthorization leg too", async () => {
+      mockedMcpAuth.mockResolvedValue("AUTHORIZED");
+      const params = createMockParams();
+      const noScopeTokens = {
+        access_token: "a",
+        token_type: "Bearer",
+        scope: "",
+      };
+      const midScopeTokens = {
+        access_token: "b",
+        token_type: "Bearer",
+        scope: "newscope",
+      };
+      const grantedTokens = {
+        access_token: "d",
+        token_type: "Bearer",
+        scope: "granted:scope",
+      };
+      storageOf(params)
+        .getTokens.mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce(noScopeTokens)
+        .mockResolvedValueOnce(noScopeTokens)
+        .mockResolvedValueOnce(midScopeTokens)
+        .mockResolvedValueOnce(grantedTokens);
+      const manager = new OAuthManager(params);
+
+      await manager.handleAuthChallenge({
+        reason: "insufficient_scope",
+        resourceMetadataUrl: METADATA_URL,
+      });
+
+      expect(mockedMcpAuth).toHaveBeenCalledTimes(2);
+      expect(mockedMcpAuth).toHaveBeenNthCalledWith(
+        2,
+        expect.anything(),
+        expect.objectContaining({
+          forceReauthorization: true,
+          resourceMetadataUrl: new URL(METADATA_URL),
+        }),
+      );
+    });
+  });
+
   describe("handleAuthChallenge (additional branch coverage)", () => {
     it("resolves via the second satisfaction check inside the mutex", async () => {
       const params = createMockParams();

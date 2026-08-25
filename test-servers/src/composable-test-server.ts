@@ -574,6 +574,19 @@ export interface ServerConfig {
     resource?: string;
 
     /**
+     * Serve the RFC 9728 protected-resource metadata document from this
+     * non-default path *instead of* `/.well-known/oauth-protected-resource`,
+     * and advertise it via `WWW-Authenticate: Bearer resource_metadata="…"`
+     * on every 401.
+     *
+     * The default well-known routes are deliberately left unserved, so a
+     * client that ignores the advertised URL cannot discover the document at
+     * all — which is what makes this a regression test for #2071 rather than
+     * a path that merely happens to work.
+     */
+    resourceMetadataPath?: string;
+
+    /**
      * OAuth authorization server issuer URL (combined mode AS metadata).
      * If not provided, defaults to the test server's base URL.
      */

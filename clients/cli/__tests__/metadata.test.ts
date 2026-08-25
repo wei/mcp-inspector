@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { runCli } from "./helpers/cli-runner.js";
+import type { StrictJsonObject } from "@inspector/core/json/jsonUtils.js";
 import {
   expectCliSuccess,
   expectCliFailure,
@@ -11,7 +12,11 @@ import {
   createAddTool,
   createTestServerInfo,
 } from "@modelcontextprotocol/inspector-test-server";
-import { NO_SERVER_SENTINEL } from "./helpers/fixtures.js";
+import {
+  NO_SERVER_SENTINEL,
+  createTestConfig,
+  deleteConfigFile,
+} from "./helpers/fixtures.js";
 
 describe("Metadata Tests", () => {
   describe("General Metadata", () => {
@@ -1024,6 +1029,145 @@ describe("Metadata Tests", () => {
         expect(toolsListRequest).toBeDefined();
         expect(toolsListRequest?.metadata).toEqual({ client: "test-client" });
       } finally {
+        await server.stop();
+      }
+    });
+  });
+  describe("Per-server metadata from mcp.json (#2093)", () => {
+    /**
+     * Write a one-server catalog pointing at `url`, carrying `metadata` as the
+     * on-disk per-server key. Returns the catalog path; the caller deletes it.
+     */
+    function writeCatalogWithMetadata(
+      url: string,
+      metadata: StrictJsonObject,
+    ): string {
+      return createTestConfig({
+        mcpServers: {
+          "meta-server": {
+            type: "streamable-http",
+            url,
+            metadata,
+          },
+        },
+      });
+    }
+
+    it("applies a server's persisted metadata to every request", async () => {
+      // The setting belongs to the server, not to the client that reads it —
+      // web and the TUI already honored it, and the CLI silently did not,
+      // because `InspectorClient` reads `defaultMetadata` rather than falling
+      // back to `serverSettings.metadata`.
+      const server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createEchoTool()],
+      });
+      let catalogPath: string | undefined;
+
+      try {
+        await server.start();
+        catalogPath = writeCatalogWithMetadata(server.url, { tenant: "acme" });
+
+        const result = await runCli([
+          "--catalog",
+          catalogPath,
+          "--server",
+          "meta-server",
+          "--cli",
+          "--method",
+          "tools/list",
+        ]);
+
+        expectCliSuccess(result);
+        expect(expectValidJson(result)).toHaveProperty("tools");
+
+        const toolsListRequest = server
+          .getRecordedRequests()
+          .find((r) => r.method === "tools/list");
+        expect(toolsListRequest).toBeDefined();
+        expect(toolsListRequest?.metadata).toEqual({ tenant: "acme" });
+      } finally {
+        if (catalogPath) deleteConfigFile(catalogPath);
+        await server.stop();
+      }
+    });
+
+    it("merges --metadata over the persisted defaults", async () => {
+      // `--metadata` is per-invocation and stays that way: non-colliding keys
+      // merge with the catalog's, and a colliding one wins (call-time keys
+      // override defaults in `InspectorClient.mergeMeta`).
+      const server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createEchoTool()],
+      });
+      let catalogPath: string | undefined;
+
+      try {
+        await server.start();
+        catalogPath = writeCatalogWithMetadata(server.url, {
+          tenant: "acme",
+          region: "eu",
+        });
+
+        const result = await runCli([
+          "--catalog",
+          catalogPath,
+          "--server",
+          "meta-server",
+          "--cli",
+          "--method",
+          "tools/list",
+          "--metadata",
+          "tenant=override",
+        ]);
+
+        expectCliSuccess(result);
+
+        const toolsListRequest = server
+          .getRecordedRequests()
+          .find((r) => r.method === "tools/list");
+        expect(toolsListRequest?.metadata).toEqual({
+          tenant: "override",
+          region: "eu",
+        });
+      } finally {
+        if (catalogPath) deleteConfigFile(catalogPath);
+        await server.stop();
+      }
+    });
+
+    it("sends no _meta when the persisted metadata is empty", async () => {
+      // `{}` means "no defaults" — an empty map must not put a bare `_meta` on
+      // the wire, matching what the option-less CLI has always sent.
+      const server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createEchoTool()],
+      });
+      let catalogPath: string | undefined;
+
+      try {
+        await server.start();
+        catalogPath = writeCatalogWithMetadata(server.url, {});
+
+        const result = await runCli([
+          "--catalog",
+          catalogPath,
+          "--server",
+          "meta-server",
+          "--cli",
+          "--method",
+          "tools/list",
+        ]);
+
+        expectCliSuccess(result);
+
+        const toolsListRequest = server
+          .getRecordedRequests()
+          .find((r) => r.method === "tools/list");
+        expect(toolsListRequest).toBeDefined();
+        expect(toolsListRequest?.metadata).toBeUndefined();
+      } finally {
+        if (catalogPath) deleteConfigFile(catalogPath);
         await server.stop();
       }
     });

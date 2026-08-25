@@ -2025,6 +2025,16 @@ export class InspectorClient extends InspectorClientEventTarget {
         ...(this.serverSettings && { settings: this.serverSettings }),
       };
       if (this.isHttpOAuthConfig() && oauthManager) {
+        // Record every 401/403 the transport sees, whatever else happens to
+        // it. The legacy first-authorization path deliberately runs with no
+        // authProvider and no challenge interception (see below), so the SDK
+        // raises a headerless `UnauthorizedError` and the client calls
+        // `authenticate()` with nothing in hand — this is the only place the
+        // challenge's RFC 9728 `resource_metadata` still exists (#2071).
+        const manager = oauthManager;
+        transportOptions.onAuthChallengeObserved = (challenge) => {
+          manager.noteObservedAuthChallenge(challenge);
+        };
         if (oauthManager.isEnterpriseManaged()) {
           await oauthManager.trySilentEnterpriseManagedAuth();
           const provider = await oauthManager.createOAuthProviderForTransport();
