@@ -1,3 +1,5 @@
+import { awaitableError } from "./utils/awaitable-log.js";
+
 /**
  * Exit-code map. Non-zero codes let an automated caller (CI, an agent) branch
  * on the failure class without regex-scraping stderr:
@@ -8,6 +10,12 @@
  *  - 3: server requires authentication (401 / WWW-Authenticate / OAuth)
  *  - 4: server unreachable (DNS, connect refused, timeout, fetch failure)
  *  - 5: tool error (`tools/call` returned `isError:true`, or tool not found)
+ *  - 6: `--strict` found an error-severity tool-schema portability finding
+ *
+ * Note 6 is `SCHEMA_UNPORTABLE`, not "invalid": the whole premise of the lint
+ * is that these schemas ARE valid JSON Schema and are merely refused by some
+ * clients. Calling the outcome "invalid" would misreport it to the automated
+ * callers this map exists for.
  */
 export const EXIT_CODES = {
   OK: 0,
@@ -16,6 +24,7 @@ export const EXIT_CODES = {
   AUTH_REQUIRED: 3,
   UNREACHABLE: 4,
   TOOL_ERROR: 5,
+  SCHEMA_UNPORTABLE: 6,
 } as const;
 
 /** Machine-readable error envelope written as one JSON line on stderr. */
@@ -184,6 +193,8 @@ function codeForExit(exitCode: number): string {
       return "unreachable";
     case EXIT_CODES.TOOL_ERROR:
       return "tool_error";
+    case EXIT_CODES.SCHEMA_UNPORTABLE:
+      return "schema_unportable";
     default:
       return "error";
   }
@@ -209,8 +220,19 @@ export function formatErrorOutput(
   };
 }
 
-export function handleError(error: unknown): never {
+/**
+ * The binary's last-resort error sink: write the envelope, then exit.
+ *
+ * **Async, and the await is load-bearing.** On a pipe or a file — as opposed
+ * to a TTY — `process.stderr.write` is asynchronous, and `process.exit()`
+ * discards whatever is still queued. Size is not the safeguard it looks like:
+ * the envelope being small enough for the pipe buffer says nothing about
+ * whether the write has been *performed* by the time the process goes away.
+ * So this settles on the write callback first, exactly as the `--strict`
+ * schema report does.
+ */
+export async function handleError(error: unknown): Promise<never> {
   const { exitCode, stderr } = formatErrorOutput(error);
-  process.stderr.write(stderr);
+  await awaitableError(stderr);
   process.exit(exitCode);
 }
