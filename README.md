@@ -290,15 +290,22 @@ The **TUI** had the same gap and is worth checking against the same server (`--t
 
 #### Unportable tool schemas
 
-`unportable-schemas-http.json` serves three tools, two of whose advertised
+`unportable-schemas-http.json` serves four tools, three of whose advertised
 schemas carry constructs that are legal JSON Schema and are refused or
-mishandled by real MCP clients: `echo` declares `outputSchema.properties.data`
-as a bare `true` (what Go's `jsonschema` package emits for `interface{}` —
-the case reported in [#1005](https://github.com/modelcontextprotocol/inspector/issues/1005)),
-an array-form `"type": ["null","boolean"]`, and an `opts` property that
-constrains nothing; `add` points a property at a remote `$ref`. `get_temp` is
-left clean, so a flagged tool sits next to an unflagged one. Plain
-streamable-HTTP — connect with the **default (legacy)** protocol era.
+mishandled by real MCP clients:
+
+| Tool | What it carries |
+| --- | --- |
+| `get_temp` | `outputSchema.properties.data` as a bare `true` — what Go's `jsonschema` package emits for `interface{}`, the case reported in [#1005](https://github.com/modelcontextprotocol/inspector/issues/1005) |
+| `echo` | an array-form `"type": ["null","boolean"]`, and an `opts` property that constrains nothing |
+| `add` | a property pointing at a remote `$ref` |
+| `get_weather` | nothing — left clean, so a flagged tool sits beside an unflagged one |
+
+Plain streamable-HTTP — connect with the **default (legacy)** protocol era.
+Every tool here is still **runnable**: the override replaces only the
+*advertised* schema, and the flagship bare-`true` rides `get_temp` (which
+returns structured content) rather than `echo` — see the caveat under
+[Try it](#unportable-tool-schemas) below.
 
 The Inspector is where a server author looks first, so a construct that will
 fail downstream is named here rather than passed through silently. All three
@@ -313,8 +320,9 @@ mcp-inspector --cli http://127.0.0.1:6603/mcp --method tools/list --strict   # e
 - **CLI** — `--strict` prints the full report (path, issue, suggested fix) on
   stderr and exits `6` on an error-severity finding; without it, one summary
   line. See [Schema portability](./clients/cli/README.md#schema-portability---strict).
-- **TUI** — the tools list marks `echo` with a red `!` and `add` with a yellow
-  `?`; the detail pane lists each finding under **Schema Portability**.
+- **TUI** — the tools list marks `get_temp` with a red `!` and `echo`/`add`
+  with a yellow `?`; the detail pane lists each finding under **Schema
+  Portability**.
 - **Web** — the Tools sidebar row carries the same flag as a hover-labelled
   icon, and selecting the tool shows a **Schema portability** section above the
   argument form.
@@ -328,6 +336,13 @@ refused or degraded by a shipping client. The schemas are supplied through the
 test server's `rawToolSchemas` override, because the Zod-built presets cannot
 express any of them — which is the same reason a real server hits this only
 when its schemas come from another generator.
+
+⚠️ **If you add an `outputSchema` override of your own, put it on a tool that
+returns structured content.** A conforming client validates a tool result
+against the advertised output schema, so an override on a preset that returns
+none makes every call to it fail with "declares an output schema but returned
+no structured content" — a confusing thing to hit from a fixture. That is why
+the bare `true` rides `get_temp` here and not `echo`.
 
 #### RFC 6570 resource templates
 

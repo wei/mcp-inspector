@@ -1013,6 +1013,17 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
     throw new Error("--strict requires --method tools/list.");
   }
 
+  // `tools/list --app-info` takes a different path out of `runMethod` — it
+  // returns NDJSON that the caller writes directly, never reaching
+  // `emitResult` where the lint runs. Rejecting the pair is the honest
+  // outcome: silently accepting it would give a CI caller a `--strict` gate
+  // that can never fail.
+  if (options.strict && options.appInfo) {
+    throw new Error(
+      "--strict cannot be combined with --app-info; run tools/list twice, once for each.",
+    );
+  }
+
   // --tool-args-json passes arguments verbatim with no key=value coercion (so
   // `"012"` stays a string and nested objects work without shell escaping).
   let toolArg = options.toolArg;

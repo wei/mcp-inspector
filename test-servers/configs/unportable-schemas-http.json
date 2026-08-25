@@ -3,8 +3,22 @@
     "name": "unportable-schemas-showcase",
     "version": "1.0.0"
   },
-  "tools": [{ "preset": "echo" }, { "preset": "add" }, { "preset": "get_temp" }],
+  "tools": [
+    { "preset": "get_temp" },
+    { "preset": "echo" },
+    { "preset": "add" },
+    { "preset": "get_weather" }
+  ],
   "rawToolSchemas": {
+    "get_temp": {
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "data": true,
+          "city": { "type": "string" }
+        }
+      }
+    },
     "echo": {
       "inputSchema": {
         "type": "object",
@@ -12,13 +26,6 @@
           "message": { "type": "string" },
           "show_ids": { "type": ["null", "boolean"] },
           "opts": {}
-        }
-      },
-      "outputSchema": {
-        "type": "object",
-        "properties": {
-          "data": true,
-          "topic": { "type": "string" }
         }
       }
     },

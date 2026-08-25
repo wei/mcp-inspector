@@ -207,6 +207,9 @@ describe("emitResult — schema lint wiring (#1005)", () => {
   });
 
   it("does not lint an --app-info run", async () => {
+    // `runCli` rejects `--strict --app-info` outright (see below), so this is
+    // the defensive half: any other Node runner reusing `emitResult` gets the
+    // app-info early return rather than a report interleaved with its NDJSON.
     await emitResult(
       DIRTY_LIST,
       { hasApp: true, toolName: "info" },
@@ -247,5 +250,24 @@ describe("--strict argument validation", () => {
         "http://127.0.0.1:1/mcp",
       ]),
     ).rejects.toThrow("--strict requires --method tools/list.");
+  });
+
+  it("is rejected alongside --app-info rather than silently ignored", async () => {
+    // `tools/list --app-info` returns NDJSON straight from `runMethod` and
+    // never reaches `emitResult`, so accepting the pair would hand a CI caller
+    // a `--strict` gate that can never fail.
+    await expect(
+      runCli([
+        "node",
+        "cli",
+        "--cli",
+        "--method",
+        "tools/list",
+        "--strict",
+        "--app-info",
+        "--server-url",
+        "http://127.0.0.1:1/mcp",
+      ]),
+    ).rejects.toThrow("--strict cannot be combined with --app-info");
   });
 });

@@ -57,6 +57,11 @@ const ListItemButton = UnstyledButton.withProps({
 // Schema-portability flag (#1005). Sits in the row rather than only in the
 // detail panel so a problem tool is visible without clicking each one — the
 // findings are rare enough that a marked row means something.
+//
+// Coloured from the same `--inspector-*` severity tokens the detail panel's
+// findings list uses, rather than from Mantine's `color="yellow"`: those are
+// the pairings this app already tunes against its own surfaces in both colour
+// schemes, and the default yellow is what failed the a11y check there.
 const SchemaFlagIcon = ThemeIcon.withProps({
   size: "xs",
   variant: "transparent",
@@ -86,7 +91,11 @@ export function ToolListItem({ tool, selected, onClick }: ToolListItemProps) {
             withArrow
           >
             <SchemaFlagIcon
-              color={hasError ? "red" : "yellow"}
+              c={
+                hasError
+                  ? "var(--inspector-danger-text)"
+                  : "var(--inspector-warning-text)"
+              }
               aria-label={
                 hasError
                   ? "Schema portability errors"

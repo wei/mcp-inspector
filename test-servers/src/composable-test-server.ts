@@ -507,6 +507,15 @@ export interface ServerConfig {
    * *advertised* schema is replaced; the tool's handler and its real Zod
    * validation are untouched, so calling it still behaves as its preset does.
    *
+   * ⚠️ **Overriding `outputSchema` changes what a client will accept.** A
+   * conforming client validates a tool result against the advertised output
+   * schema, so putting one on a preset whose handler returns no
+   * `structuredContent` makes every call to it fail — the Inspector rejects it
+   * with "declares an output schema but returned no structured content". Put an
+   * `outputSchema` override only on a tool that actually returns structured
+   * content (`get_temp`, `list_items`), and keep the override permissive enough
+   * that the real payload still validates.
+   *
    * A name that isn't registered is ignored.
    */
   rawToolSchemas?: Record<

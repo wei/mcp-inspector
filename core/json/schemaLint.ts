@@ -103,37 +103,97 @@ const SUBSCHEMA_ARRAY_KEYWORDS = [
   "prefixItems",
 ] as const;
 
-/** Keywords whose value is a name → subschema map. */
+/**
+ * Keywords whose value is a name → subschema map.
+ *
+ * `dependencies` is the pre-2019 form and may hold either a subschema or an
+ * array of property names; the array case is not a schema position, and the
+ * walk skips it because a non-object, non-boolean node is not a schema.
+ */
 const SUBSCHEMA_MAP_KEYWORDS = [
   "properties",
   "patternProperties",
+  "dependentSchemas",
+  "dependencies",
   "$defs",
   "definitions",
 ] as const;
 
 /**
- * Keywords that carry no validation meaning — metadata a schema may hold
- * alongside its constraints. A schema built *only* from these accepts every
- * value, which is what the `untyped-schema` rule reports.
+ * Keywords that actually constrain the instance being validated — the
+ * assertion and applicator vocabularies, plus reference keywords.
  *
- * Defining the rule this way, rather than as "has no `type`", is deliberate:
- * `{"properties": {…}}` with no `type` does constrain its input, so calling it
- * unconstrained would be false. That shape is left alone; the rule fires on
- * `{}` and on annotation-only schemas — the object-literal spelling of the
- * same "any" that a bare `true` expresses.
+ * This is an **allowlist**, and that direction is load-bearing. JSON Schema
+ * ignores keywords it does not recognize, so a schema is unconstrained unless
+ * something it carries is known to constrain: a denylist of known-annotation
+ * keywords would let `{"vendorHint": true}` — which accepts every value —
+ * pass as constrained simply because the keyword is unfamiliar.
+ *
+ * Two categories are deliberately absent. **Annotations** (`title`,
+ * `description`, `default`, `examples`, `deprecated`, `readOnly`,
+ * `writeOnly`, `$comment`) assert nothing. So do the **definition-only
+ * containers** `$defs` / `definitions` and the identifier keywords `$id`,
+ * `$schema`, `$anchor`, `$vocabulary`: they hold or name subschemas for
+ * *other* schemas to reference, and constrain the current instance not at all.
+ *
+ * `format` is included even though 2020-12's default vocabulary treats it as
+ * an annotation rather than an assertion. A schema declaring one is plainly an
+ * attempt to constrain, and reporting it as accepting anything would be noise
+ * rather than a finding an author can act on.
+ *
+ * Defining the rule this way, rather than as "has no `type`", is also
+ * deliberate: `{"properties": {…}}` with no `type` does constrain its input,
+ * so calling it unconstrained would be false. The rule fires on `{}`, on
+ * annotation-only schemas, and on `$defs`-only schemas — the object-literal
+ * spellings of the same "any" that a bare `true` expresses.
  */
-const ANNOTATION_ONLY_KEYWORDS: ReadonlySet<string> = new Set([
-  "title",
-  "description",
-  "default",
-  "examples",
-  "deprecated",
-  "readOnly",
-  "writeOnly",
-  "$comment",
-  "$id",
-  "$schema",
-  "$anchor",
+const CONSTRAINING_KEYWORDS: ReadonlySet<string> = new Set([
+  // Assertions
+  "type",
+  "enum",
+  "const",
+  "multipleOf",
+  "maximum",
+  "exclusiveMaximum",
+  "minimum",
+  "exclusiveMinimum",
+  "maxLength",
+  "minLength",
+  "pattern",
+  "format",
+  "maxItems",
+  "minItems",
+  "uniqueItems",
+  "maxContains",
+  "minContains",
+  "maxProperties",
+  "minProperties",
+  "required",
+  "dependentRequired",
+  // Applicators
+  "allOf",
+  "anyOf",
+  "oneOf",
+  "not",
+  "if",
+  "then",
+  "else",
+  "items",
+  "prefixItems",
+  "contains",
+  "additionalItems",
+  "unevaluatedItems",
+  "properties",
+  "patternProperties",
+  "additionalProperties",
+  "unevaluatedProperties",
+  "propertyNames",
+  "dependentSchemas",
+  "dependencies",
+  // References
+  "$ref",
+  "$dynamicRef",
+  "$recursiveRef",
 ]);
 
 /**
@@ -263,18 +323,26 @@ function lintNode(node: SchemaRecord, path: string, ctx: WalkContext): void {
   const type = node.type;
 
   if (Array.isArray(type)) {
-    const nonNull = type.filter(
-      (t): t is string => typeof t === "string" && t !== "null",
-    );
+    const members = type.filter((t): t is string => typeof t === "string");
+    // The suggestion is always `anyOf`, never "drop it from `required`".
+    // Accepting an explicit JSON `null` and permitting the property to be
+    // absent are independent: on a required `["null","boolean"]` field,
+    // un-requiring it would both stop accepting `null` and start accepting
+    // omission — a different contract, not the same one spelled portably.
+    // `anyOf` branches each carrying a single `type` are equivalent, and this
+    // lint treats them as portable.
+    const branches = members.length > 0 ? members : type.map(() => "…");
     add(
       ctx,
       "type-union",
       "warning",
       path,
       `\`type\` is an array (${JSON.stringify(type)}). The array form is legal JSON Schema, but several MCP clients read \`type\` as a single string and either reject the tool or drop the constraint.`,
-      nonNull.length === 1
-        ? `Use \`"type": "${nonNull[0]}"\` and leave the property out of \`required\` to express "may be absent".`
-        : "Split the alternatives into `anyOf` branches, each with a single `type`.",
+      `Split it into \`anyOf\` branches, each with a single \`type\` — \`{"anyOf": [${branches
+        .map((t) => `{"type": "${t}"}`)
+        .join(
+          ", ",
+        )}]}\`. (Making the property optional instead is a different contract: absent is not the same as \`null\`.)`,
     );
   }
 
@@ -290,8 +358,8 @@ function lintNode(node: SchemaRecord, path: string, ctx: WalkContext): void {
     );
   }
 
-  const constrains = Object.keys(node).some(
-    (key) => !ANNOTATION_ONLY_KEYWORDS.has(key),
+  const constrains = Object.keys(node).some((key) =>
+    CONSTRAINING_KEYWORDS.has(key),
   );
   if (!constrains) {
     add(
@@ -306,9 +374,18 @@ function lintNode(node: SchemaRecord, path: string, ctx: WalkContext): void {
 }
 
 /**
- * Lint one of a tool's schemas. The root gets one extra rule: MCP requires a
- * tool schema to describe an object, and a root of any other type is refused
- * by the SDK-side parsers rather than merely degraded.
+ * Lint one of a tool's schemas.
+ *
+ * `inputSchema` gets one extra rule at the root: MCP requires it to describe
+ * an object, and the SDK enforces that — its `Tool` schema types `inputSchema`
+ * with `type: literal("object")`, so a non-object root is refused by the
+ * parser rather than merely degraded.
+ *
+ * That rule is **scoped to `inputSchema` deliberately**. The same SDK types
+ * `outputSchema` as a plain loose object with no `type` constraint at all, so
+ * a tool whose output is `{"type": "string"}` is conforming; flagging it would
+ * report an error MCP does not require and would fail `--strict` on a valid
+ * server.
  */
 function lintSchema(
   schema: unknown,
@@ -316,7 +393,7 @@ function lintSchema(
   findings: SchemaFinding[],
 ): void {
   const ctx: WalkContext = { schema: kind, findings };
-  if (isRecord(schema)) {
+  if (kind === "inputSchema" && isRecord(schema)) {
     const type = schema.type;
     if (typeof type === "string" && type !== "object") {
       add(
@@ -324,7 +401,7 @@ function lintSchema(
         "non-object-root",
         "error",
         "",
-        `Root \`type\` is "${type}". MCP requires a tool's ${kind} to describe an object.`,
+        `Root \`type\` is "${type}". MCP requires a tool's inputSchema to describe an object.`,
         'Wrap the value in an object schema — `{"type": "object", "properties": {…}}`.',
       );
     }

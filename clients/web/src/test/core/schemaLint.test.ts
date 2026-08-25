@@ -107,8 +107,11 @@ describe("lintToolSchemas — clean schemas", () => {
   });
 
   it("reports nothing when a tool declares neither schema", () => {
-    const bare = { name: "t" } as unknown as Tool;
-    expect(lintToolSchemas(bare)).toEqual([]);
+    expect(
+      lintToolSchemas(
+        tool({ inputSchema: undefined, outputSchema: undefined }),
+      ),
+    ).toEqual([]);
   });
 });
 
@@ -174,6 +177,16 @@ describe("lintToolSchemas — boolean-schema", () => {
       { type: "object", propertyNames: true, properties: {} },
       "inputSchema.propertyNames",
     ],
+    [
+      "a dependentSchemas entry",
+      { type: "object", dependentSchemas: { a: true }, properties: {} },
+      "inputSchema.dependentSchemas.a",
+    ],
+    [
+      "a draft-07 schema-valued dependencies entry",
+      { type: "object", dependencies: { a: true }, properties: {} },
+      "inputSchema.dependencies.a",
+    ],
     ["the schema root", true, "inputSchema"],
   ])("flags a bare boolean under %s", (_label, inputSchema, path) => {
     const findings = lintToolSchemas(tool({ inputSchema }));
@@ -192,7 +205,7 @@ describe("lintToolSchemas — boolean-schema", () => {
 });
 
 describe("lintToolSchemas — type-union", () => {
-  it("flags the nullable array form and suggests the single type", () => {
+  it("flags the nullable array form and suggests anyOf branches", () => {
     const findings = lintToolSchemas(
       tool({
         inputSchema: {
@@ -203,10 +216,27 @@ describe("lintToolSchemas — type-union", () => {
     );
     expect(rules(findings)).toEqual(["type-union"]);
     expect(findings[0]!.severity).toBe("warning");
-    expect(findings[0]!.suggestion).toContain('"type": "boolean"');
+    expect(findings[0]!.suggestion).toContain(
+      '{"anyOf": [{"type": "null"}, {"type": "boolean"}]}',
+    );
   });
 
-  it("suggests anyOf when more than one non-null member survives", () => {
+  it("never suggests un-requiring the property as the equivalent fix", () => {
+    // Absent and `null` are different contracts, so "drop it from `required`"
+    // is not a portable spelling of the same schema — it is a change to it.
+    const findings = lintToolSchemas(
+      tool({
+        inputSchema: {
+          type: "object",
+          properties: { a: { type: ["null", "string"] } },
+        },
+      }),
+    );
+    expect(findings[0]!.suggestion).toContain("absent is not the same as");
+    expect(findings[0]!.suggestion).not.toMatch(/leave the property out/);
+  });
+
+  it("keeps every member in the suggestion when none is null", () => {
     const findings = lintToolSchemas(
       tool({
         inputSchema: {
@@ -215,10 +245,12 @@ describe("lintToolSchemas — type-union", () => {
         },
       }),
     );
-    expect(findings[0]!.suggestion).toContain("anyOf");
+    expect(findings[0]!.suggestion).toContain(
+      '{"anyOf": [{"type": "string"}, {"type": "number"}]}',
+    );
   });
 
-  it("ignores non-string members when picking the suggestion", () => {
+  it("drops non-string members from the suggested branches", () => {
     const findings = lintToolSchemas(
       tool({
         inputSchema: {
@@ -227,7 +259,19 @@ describe("lintToolSchemas — type-union", () => {
         },
       }),
     );
-    expect(findings[0]!.suggestion).toContain('"type": "string"');
+    expect(findings[0]!.suggestion).toContain(
+      '{"anyOf": [{"type": "string"}]}',
+    );
+  });
+
+  it("falls back to a placeholder when no member is a string", () => {
+    const findings = lintToolSchemas(
+      tool({
+        inputSchema: { type: "object", properties: { a: { type: [3] } } },
+      }),
+    );
+    expect(rules(findings)).toEqual(["type-union"]);
+    expect(findings[0]!.suggestion).toContain("anyOf");
   });
 
   it("does not raise non-object-root for an array-typed root", () => {
@@ -258,6 +302,51 @@ describe("lintToolSchemas — untyped-schema", () => {
     expect(paths(findings)).toEqual(["inputSchema.properties.a"]);
   });
 
+  it("flags a schema whose only keyword is unrecognized", () => {
+    // JSON Schema ignores keywords it does not know, so `{"vendorHint": true}`
+    // accepts every value. A denylist of known annotations would let it pass
+    // simply because the keyword is unfamiliar — hence the allowlist.
+    const findings = lintToolSchemas(
+      tool({
+        inputSchema: {
+          type: "object",
+          properties: { a: { vendorHint: true, "x-internal": 1 } },
+        },
+      }),
+    );
+    expect(rules(findings)).toEqual(["untyped-schema"]);
+  });
+
+  it("flags a definition-only schema", () => {
+    // `$defs` holds subschemas for *other* schemas to reference; it constrains
+    // the current instance not at all.
+    const findings = lintToolSchemas(
+      tool({
+        inputSchema: {
+          type: "object",
+          properties: { a: { $defs: { x: { type: "string" } } } },
+        },
+      }),
+    );
+    expect(rules(findings)).toEqual(["untyped-schema"]);
+    expect(paths(findings)).toEqual(["inputSchema.properties.a"]);
+  });
+
+  it.each([
+    ["pattern", { pattern: "^a" }],
+    ["format", { format: "email" }],
+    ["required", { required: ["a"] }],
+    ["minimum", { minimum: 0 }],
+    ["contains", { contains: { type: "string" } }],
+    ["propertyNames", { propertyNames: { pattern: "^a" } }],
+    ["dependentRequired", { dependentRequired: { a: ["b"] } }],
+  ])("does not flag a schema constrained only by %s", (_label, sub) => {
+    const findings = lintToolSchemas(
+      tool({ inputSchema: { type: "object", properties: { a: sub } } }),
+    );
+    expect(findings).toEqual([]);
+  });
+
   it("flags an entirely empty root schema", () => {
     const findings = lintToolSchemas(tool({ inputSchema: {} }));
     expect(rules(findings)).toEqual(["untyped-schema"]);
@@ -277,12 +366,14 @@ describe("lintToolSchemas — non-object-root", () => {
     expect(findings[0]!.issue).toContain("inputSchema");
   });
 
-  it("names outputSchema when that is the offending root", () => {
-    const findings = lintToolSchemas(
-      tool({ outputSchema: { type: "string" } }),
+  it("does NOT flag a non-object outputSchema root", () => {
+    // The SDK's `Tool` schema types `inputSchema` with `type: literal("object")`
+    // but `outputSchema` as a plain loose object with no `type` constraint, so
+    // a string-typed output is conforming. Flagging it would report an error
+    // MCP does not require and would fail `--strict` on a valid server.
+    expect(lintToolSchemas(tool({ outputSchema: { type: "string" } }))).toEqual(
+      [],
     );
-    expect(rules(findings)).toEqual(["non-object-root"]);
-    expect(findings[0]!.issue).toContain("outputSchema");
   });
 
   it("does not flag a nested non-object schema", () => {
@@ -327,6 +418,21 @@ describe("lintToolSchemas — walk robustness", () => {
     const findings = lintToolSchemas(
       tool({
         inputSchema: { type: "object", properties: { a: "nonsense" } },
+      }),
+    );
+    expect(findings).toEqual([]);
+  });
+
+  it("skips the draft-07 property-name-array form of dependencies", () => {
+    // `dependencies: {a: ["b"]}` is a required-property list, not a schema
+    // position, so the walk must not descend into it.
+    const findings = lintToolSchemas(
+      tool({
+        inputSchema: {
+          type: "object",
+          properties: { a: { type: "string" }, b: { type: "string" } },
+          dependencies: { a: ["b"] },
+        },
       }),
     );
     expect(findings).toEqual([]);
