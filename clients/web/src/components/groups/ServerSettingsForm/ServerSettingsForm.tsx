@@ -15,6 +15,7 @@ import {
 } from "@mantine/core";
 import { ClearButton } from "../../elements/ClearButton/ClearButton";
 import { JsonObjectInput } from "../../elements/JsonObjectInput/JsonObjectInput";
+import type { ChangeEvent } from "react";
 import type { ProtocolEra } from "@modelcontextprotocol/client";
 import type {
   InspectorServerSettings,
@@ -518,6 +519,8 @@ export function ServerSettingsForm({
       tokenUrl: settings.oauthTokenUrl ?? "",
       enterpriseManaged: settings.enterpriseManaged ?? false,
       onInsufficientScope: settings.oauthOnInsufficientScope,
+      // Unset means the default, on — only an explicit opt-out is stored.
+      requestRefreshToken: settings.oauthRequestRefreshToken ?? true,
     };
   }
 
@@ -528,6 +531,26 @@ export function ServerSettingsForm({
     ? " Not applied while Enterprise-managed authorization is on: that flow authorizes against the enterprise IdP, a different authorization server."
     : "";
 
+  // #2068 — the opt-out only removes the SDK's *automatic* `offline_access`.
+  // `prompt=consent` keys off the scope, not the grant, so an `offline_access`
+  // the user typed here still forces the prompt the checkbox claims to avoid.
+  // Flag that combination rather than letting it read as a fixed configuration.
+  const scopesIncludeOfflineAccess = (settings.oauthScopes ?? "")
+    .split(/\s+/)
+    .includes("offline_access");
+  const refreshTokenOptedOut = settings.oauthRequestRefreshToken === false;
+
+  // #2068 — annotated under EMA. Not because the provider is bypassed (EMA
+  // wraps a BaseOAuthClientProvider and forwards its `clientMetadata`), but
+  // because the IdP authorization leg — the one the user signs in through —
+  // uses a fixed `openid offline_access` scope this setting cannot change. The
+  // control therefore cannot affect EMA's consent behavior, which is the whole
+  // reason to touch it. Say so rather than leave it looking effective, matching
+  // how the endpoint overrides annotate themselves.
+  const refreshTokenEmaNote = settings.enterpriseManaged
+    ? " Not applied while Enterprise-managed authorization is on: that flow signs in against the enterprise IdP using its own fixed scope, which this setting cannot change."
+    : "";
+
   const rejectedParamKeys = authorizationParams
     .map((p) => p.key.trim())
     .filter((key) => isReservedAuthorizationParam(key));
@@ -536,6 +559,15 @@ export function ServerSettingsForm({
     params: { key: string; value: string }[],
   ): void {
     onOAuthChange({ ...currentOAuth(), authorizationParams: params });
+  }
+
+  function handleRequestRefreshTokenChange(
+    event: ChangeEvent<HTMLInputElement>,
+  ): void {
+    onOAuthChange({
+      ...currentOAuth(),
+      requestRefreshToken: event.currentTarget.checked,
+    });
   }
 
   function handleAddAuthorizationParam(): void {
@@ -879,6 +911,21 @@ export function ServerSettingsForm({
                   ) : null
                 }
               />
+              <Checkbox
+                label="Request refresh token"
+                description={`Declares the refresh_token grant, so the authorization server may issue a refresh token and renew access tokens without a new sign-in. Uncheck it for authorization servers that reject the offline_access scope and forced consent prompt the grant brings with it. Applies on the next connect.${refreshTokenEmaNote}`}
+                checked={settings.oauthRequestRefreshToken ?? true}
+                onChange={handleRequestRefreshTokenChange}
+              />
+              {refreshTokenOptedOut && scopesIncludeOfflineAccess ? (
+                <Alert color="yellow" title="offline_access is still requested">
+                  The Scopes field above lists offline_access, and
+                  prompt=consent is added whenever that scope is requested —
+                  regardless of this setting. Remove it from Scopes as well, or
+                  the consent prompt this checkbox is meant to avoid still goes
+                  out.
+                </Alert>
+              ) : null}
               <Stack gap="xs">
                 <FieldLabel>Additional authorization parameters</FieldLabel>
                 <FieldDescription>
