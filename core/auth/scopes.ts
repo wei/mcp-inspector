@@ -40,8 +40,18 @@ export const OFFLINE_ACCESS_SCOPE = "offline_access";
  * self-heals, while re-checking the box restores the old behavior from the
  * user's own configuration rather than from a value we destroyed.
  *
- * A scope the user explicitly configured is left alone — they asked for it, and
- * the web form warns that it keeps the consent prompt alive.
+ * An `offline_access` the user explicitly configured is honored — they asked
+ * for it, and the web form warns that it keeps the consent prompt alive. That
+ * means *ensuring* it is requested, not merely declining to strip it: the
+ * persisted scope can predate the configuration change (`createOAuthProvider`
+ * preserves a stored scope rather than reseeding from current settings), and
+ * silently omitting a scope the user typed would make both this promise and the
+ * form's warning false.
+ *
+ * Only `offline_access` is added, never the rest of the configured scope.
+ * Widening the request with unrelated configured tokens is outside what this
+ * setting governs and could push an otherwise-satisfied connection into a
+ * step-up authorization.
  */
 export function scopeForDeclinedRefreshGrant(
   effectiveScope: string | undefined,
@@ -49,7 +59,16 @@ export function scopeForDeclinedRefreshGrant(
 ): string | undefined {
   if (!effectiveScope) return effectiveScope;
   const configured = configuredScope?.trim().split(/\s+/) ?? [];
-  if (configured.includes(OFFLINE_ACCESS_SCOPE)) return effectiveScope;
+  if (configured.includes(OFFLINE_ACCESS_SCOPE)) {
+    const tokens = effectiveScope
+      .trim()
+      .split(/\s+/)
+      .filter((token) => token !== "");
+    if (!tokens.includes(OFFLINE_ACCESS_SCOPE)) {
+      tokens.push(OFFLINE_ACCESS_SCOPE);
+    }
+    return tokens.join(" ");
+  }
 
   const kept = effectiveScope
     .trim()

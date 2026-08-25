@@ -89,6 +89,30 @@ describe("scopeForDeclinedRefreshGrant (#2068)", () => {
     ).toBe("mcp offline_access");
   });
 
+  // Storage can predate the settings change — `createOAuthProvider` preserves a
+  // stored scope rather than reseeding from current settings. Merely declining
+  // to strip would silently omit a scope the user just typed, and the form's
+  // "still requested" warning would be lying.
+  it("adds a newly configured offline_access that stale storage lacks", () => {
+    expect(scopeForDeclinedRefreshGrant("mcp", "mcp offline_access")).toBe(
+      "mcp offline_access",
+    );
+  });
+
+  // Only the token itself is added; unrelated configured scopes are not unioned
+  // in, since widening the request could force a step-up authorization.
+  it("does not union unrelated configured scopes into the request", () => {
+    expect(
+      scopeForDeclinedRefreshGrant("mcp", "tools:read offline_access"),
+    ).toBe("mcp offline_access");
+  });
+
+  it("does not duplicate an offline_access already present", () => {
+    expect(
+      scopeForDeclinedRefreshGrant("  mcp  offline_access ", "offline_access"),
+    ).toBe("mcp offline_access");
+  });
+
   it("leaves a scope without offline_access untouched", () => {
     expect(scopeForDeclinedRefreshGrant("mcp tools:read", "mcp")).toBe(
       "mcp tools:read",
