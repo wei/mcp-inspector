@@ -15,6 +15,7 @@ import {
 } from "@mantine/core";
 import { ClearButton } from "../../elements/ClearButton/ClearButton";
 import { JsonObjectInput } from "../../elements/JsonObjectInput/JsonObjectInput";
+import type { ChangeEvent } from "react";
 import type { ProtocolEra } from "@modelcontextprotocol/client";
 import type {
   InspectorServerSettings,
@@ -560,6 +561,15 @@ export function ServerSettingsForm({
     onOAuthChange({ ...currentOAuth(), authorizationParams: params });
   }
 
+  function handleRequestRefreshTokenChange(
+    event: ChangeEvent<HTMLInputElement>,
+  ): void {
+    onOAuthChange({
+      ...currentOAuth(),
+      requestRefreshToken: event.currentTarget.checked,
+    });
+  }
+
   function handleAddAuthorizationParam(): void {
     changeAuthorizationParams([...authorizationParams, { key: "", value: "" }]);
   }
@@ -905,12 +915,7 @@ export function ServerSettingsForm({
                 label="Request refresh token"
                 description={`When checked, the Inspector registers with the refresh_token grant so it can renew access tokens without a new sign-in. Unchecking it stops the SDK adding offline_access to the requested scope, and so stops the prompt=consent it forces — on Microsoft Entra ID that prompt routes a non-admin user into the admin-consent workflow (AADSTS90094) even after a tenant admin has consented. It removes only that automatic scope: an offline_access you configure in Scopes still forces the prompt. Applies on the next connect, and does not revoke a refresh token already issued or reach a registration the authorization server already holds.${refreshTokenEmaNote}`}
                 checked={settings.oauthRequestRefreshToken ?? true}
-                onChange={(e) =>
-                  onOAuthChange({
-                    ...currentOAuth(),
-                    requestRefreshToken: e.currentTarget.checked,
-                  })
-                }
+                onChange={handleRequestRefreshTokenChange}
               />
               {refreshTokenOptedOut && scopesIncludeOfflineAccess ? (
                 <Alert color="yellow" title="offline_access is still requested">
