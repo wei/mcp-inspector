@@ -27,6 +27,54 @@ export function getOAuthMode(
   return config.mode ?? "combined";
 }
 
+const PATH_VALIDATION_BASE = "http://config.invalid";
+
+/**
+ * True for a path that resolves under its own origin — the only shape safe to
+ * use as both an Express route and a `resource_metadata` value.
+ *
+ * A leading-slash check is not enough: `//other-host/doc` and `/\other-host/doc`
+ * both re-point the origin when resolved against the request base (the URL
+ * parser folds a backslash into a slash for special schemes), while Express
+ * still registers the route locally — so the server would advertise a document
+ * it does not serve (Copilot). Comparing the resolved href against the literal
+ * also rejects anything the parser would rewrite (spaces, unescaped
+ * characters), which an Express route would not match either.
+ */
+export function isOriginRelativePath(value: unknown): value is string {
+  if (typeof value !== "string" || !value.startsWith("/")) {
+    return false;
+  }
+  try {
+    const resolved = new URL(value, PATH_VALIDATION_BASE);
+    return (
+      resolved.origin === PATH_VALIDATION_BASE &&
+      resolved.href === `${PATH_VALIDATION_BASE}${value}`
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The configured metadata path, validated. Throws at server-setup time rather
+ * than serving a route that contradicts the challenge — the JSON-config path
+ * is validated earlier by `load-config`, so this covers a `ServerConfig`
+ * built programmatically.
+ */
+function resourceMetadataPath(config: OAuthConfig): string | undefined {
+  const path = config.resourceMetadataPath;
+  if (path === undefined) {
+    return undefined;
+  }
+  if (!isOriginRelativePath(path)) {
+    throw new Error(
+      `oauth.resourceMetadataPath must be an origin-relative path (got ${JSON.stringify(path)})`,
+    );
+  }
+  return path;
+}
+
 /**
  * The `WWW-Authenticate` challenge sent with every 401.
  *
@@ -36,7 +84,7 @@ export function getOAuthMode(
  * `Bearer` challenge keeps the existing fixtures byte-identical.
  */
 function bearerChallenge(config: OAuthConfig, req: Request): string {
-  const path = config.resourceMetadataPath;
+  const path = resourceMetadataPath(config);
   if (!path) {
     return "Bearer";
   }
@@ -206,7 +254,7 @@ function setupMetadataEndpoints(
   // a client that ignores the advertised `resource_metadata` URL gets a 404
   // — see the field's doc comment.
   app.get(
-    config.resourceMetadataPath ?? "/.well-known/oauth-protected-resource",
+    resourceMetadataPath(config) ?? "/.well-known/oauth-protected-resource",
     (req: Request, res: Response) => {
       const requestBaseUrl = `${req.protocol}://${req.get("host")}`;
       const resourceUrl = config.resource ?? new URL("/", requestBaseUrl).href;

@@ -17,6 +17,7 @@ import {
   TestServerHttp,
   getDefaultServerConfig,
   createOAuthTestServerConfig,
+  isOriginRelativePath,
   loadConfig,
   resolveConfig,
   waitForOAuthWellKnown,
@@ -102,5 +103,21 @@ describe("OAuth challenge resource_metadata (RFC 9728)", () => {
       enabled: true,
       resourceMetadataPath: METADATA_PATH,
     });
+  });
+
+  it.each([
+    ["/custom/protected-resource", true],
+    ["/a", true],
+    // Both re-point the origin when resolved against the request base while
+    // Express still registers the route locally, so the server would advertise
+    // a document it does not serve (Copilot).
+    ["//other-host/doc", false],
+    ["/\\other-host/doc", false],
+    ["https://other-host/doc", false],
+    ["custom/protected-resource", false],
+    ["/has a space", false],
+    ["", false],
+  ])("origin-relative path check: %j -> %s", (value, expected) => {
+    expect(isOriginRelativePath(value)).toBe(expected);
   });
 });

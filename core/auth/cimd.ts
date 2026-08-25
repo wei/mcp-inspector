@@ -38,6 +38,12 @@ export async function ensureCimdClientRegistration(params: {
     resourceMetadata = await discoverOAuthProtectedResourceMetadata(
       params.serverUrl,
       { resourceMetadataUrl: params.resourceMetadataUrl },
+      // The same fetch the AS-metadata leg below uses. On web that is
+      // `createRemoteFetch`, which proxies through the backend to sidestep
+      // CORS — on the global `fetch` this leg would fail in the browser, be
+      // swallowed by the catch, and leave CIMD probing the wrong
+      // authorization server (Copilot).
+      params.fetchFn,
     );
   } catch {
     resourceMetadata = undefined;
