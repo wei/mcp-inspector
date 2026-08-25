@@ -4,6 +4,10 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "outDir": "./build",
+    // The script consumers rebuild this project on every run (#2111), so the
+    // up-to-date case has to be cheap. `.tsbuildinfo` lands under `build/`,
+    // which is gitignored.
+    "incremental": true,
     "rootDir": "./src",
     "declaration": false,
     "sourceMap": true,
