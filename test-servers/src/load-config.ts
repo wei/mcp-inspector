@@ -80,6 +80,15 @@ export interface ConfigFile {
    */
   duplicateToolNames?: string[];
   /**
+   * Replace a registered tool's advertised `inputSchema`/`outputSchema` with a
+   * raw JSON Schema document — the constructs a Zod-built preset cannot emit.
+   * See {@link ServerConfig.rawToolSchemas} (#1005).
+   */
+  rawToolSchemas?: Record<
+    string,
+    { inputSchema?: unknown; outputSchema?: unknown }
+  >;
+  /**
    * Gate a tool's `tools/list` visibility on a client-declared extension. Maps
    * extension id → tool name; the tool appears only when the connected client
    * advertised that extension (#1739 / #1633). Legacy stateful leg only. See

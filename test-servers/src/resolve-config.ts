@@ -93,6 +93,7 @@ export function resolveConfig(config: ConfigFile): ServerConfig {
     appElicitation: config.appElicitation,
     maxPageSize: config.maxPageSize,
     duplicateToolNames: config.duplicateToolNames,
+    rawToolSchemas: config.rawToolSchemas,
     extensionGatedTools: config.extensionGatedTools,
     serverType: isHttp
       ? (transport.type as "sse" | "streamable-http")
