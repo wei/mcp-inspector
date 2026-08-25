@@ -3168,6 +3168,94 @@ describe("App paginated list pagination toggle (#1721)", () => {
     expect(fetchLogOptions?.maxFetchRequests).toBe(42);
   });
 
+  it("carries a landed stdio env/cwd onto the config it connects with (#2096)", async () => {
+    // The sibling case above covers the client *options*, which are derived
+    // from the settings. `env` and `cwd` are the two fields the modal edits as
+    // settings while the transport reads them off the **config** — and the
+    // config came straight off the same frozen `servers` entry. So a save that
+    // landed while list reads were failing kept spawning the child process with
+    // the pre-save environment, while the modal (re-seeded from the tracker
+    // since #2089) showed the new one. Credentials live here, so the symptom is
+    // the inspected server failing to authorize rather than a lost edit.
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+
+    const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+    if (!draftOptions) throw new Error("useSettingsDraft was never called");
+    await act(async () => {
+      await draftOptions.onPersist("A", {
+        ...settingsWithRoots([]),
+        env: [{ key: "FOO", value: "after" }],
+        cwd: "/tmp/after",
+      });
+    });
+
+    // `servers` still reports `{ type: "stdio", command: "node" }` with no
+    // settings node at all — what a failed reload leaves behind.
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+    expect(vi.mocked(McpIndex.InspectorClient).mock.calls.at(-1)?.[0]).toEqual({
+      type: "stdio",
+      command: "node",
+      env: { FOO: "after" },
+      cwd: "/tmp/after",
+    });
+  });
+
+  it("clears a stdio env/cwd the last write removed (#2096)", async () => {
+    // Clearing has to travel too, and it is the direction a naive merge gets
+    // wrong: an empty env list and a blank cwd mean "remove the field", which
+    // is how the modal deletes a value. Spreading the settings over the config
+    // would leave the stale one in place instead.
+    const user = userEvent.setup();
+    const previousUseServers = vi.mocked(useServers).getMockImplementation();
+    try {
+      vi.mocked(useServers).mockReturnValue({
+        servers: [
+          {
+            ...SERVER_A,
+            config: {
+              type: "stdio",
+              command: "node",
+              env: { FOO: "before" },
+              cwd: "/tmp/before",
+            },
+          } as ServerEntry,
+        ],
+        loading: false,
+        error: undefined,
+        refresh: vi.fn().mockResolvedValue(undefined),
+        addServer: vi.fn(),
+        updateServer: vi.fn(),
+        updateServerSettings: updateServerSettingsSpy,
+        removeServer: vi.fn(),
+        reorderServers: vi.fn(),
+        importSource: vi.fn().mockResolvedValue({ servers: {} }),
+      });
+      renderWithMantine(<App />);
+
+      const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+      if (!draftOptions) throw new Error("useSettingsDraft was never called");
+      await act(async () => {
+        await draftOptions.onPersist("A", {
+          ...settingsWithRoots([]),
+          env: [],
+          cwd: "",
+        });
+      });
+
+      await user.click(screen.getByText("connect"));
+      await waitFor(() => expect(clientInstances).toHaveLength(1));
+      expect(
+        vi.mocked(McpIndex.InspectorClient).mock.calls.at(-1)?.[0],
+      ).toEqual({ type: "stdio", command: "node" });
+    } finally {
+      if (previousUseServers) {
+        vi.mocked(useServers).mockImplementation(previousUseServers);
+      }
+    }
+  });
+
   it("lets a successful list read supersede a concrete rollback override (#2089)", async () => {
     // A rollback sets the override to a value rather than clearing it, so the
     // effect that drops it cannot key on the persisted boolean alone: if a

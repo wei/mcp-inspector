@@ -198,6 +198,62 @@ export function envPairsToRecord(
 }
 
 /**
+ * The stdio `env` / `cwd` **config** fields implied by a settings mirror.
+ * `undefined` means "the field is not set" — i.e. remove it — which is how a
+ * user clears a value through the Server Settings modal (empty env list, blank
+ * cwd).
+ *
+ * `env` and `cwd` are the two fields the modal edits as *settings* while the
+ * transport reads them off *config* (see `storedFieldsToInspectorSettings`), so
+ * every consumer that has settings and needs a config has to perform this same
+ * mapping. It lives here, once, because the two consumers are on opposite sides
+ * of the wire — the `/api/servers` PUT write-through persists it, and the web
+ * client applies it when constructing an `InspectorClient` (#2096) — and a
+ * disagreement between them is invisible until a spawned child process gets an
+ * environment the file does not describe.
+ */
+export function stdioConfigFieldsFromSettings(
+  settings: InspectorServerSettings,
+): { env: Record<string, string> | undefined; cwd: string | undefined } {
+  const env = envPairsToRecord(settings.env);
+  const cwd = settings.cwd?.trim();
+  return {
+    env: Object.keys(env).length > 0 ? env : undefined,
+    cwd: cwd ? cwd : undefined,
+  };
+}
+
+/**
+ * A copy of `config` with the stdio `env` / `cwd` taken from `settings`.
+ *
+ * Used where a caller holds a settings value it trusts more than the config it
+ * was read alongside — the web client's connect path, which resolves settings
+ * through the last-persisted-write tracker while `config` still comes off a
+ * `servers` entry that stops advancing once a list read fails (#2089). Without
+ * this the two disagree and the child process is spawned with the *pre-save*
+ * environment even though the save reached disk (#2096).
+ *
+ * Non-stdio configs are returned untouched — they carry neither field, matching
+ * the modal's stdio-only UI. Absent settings likewise: a server with no settings
+ * node has nothing to apply, and treating that as an empty mirror would clear a
+ * config `env` the file does hold.
+ */
+export function applyStdioSettingsToConfig(
+  config: MCPServerConfig,
+  settings: InspectorServerSettings | undefined,
+): MCPServerConfig {
+  if (!settings) return config;
+  if (!(config.type === "stdio" || config.type === undefined)) return config;
+  const { env, cwd } = stdioConfigFieldsFromSettings(settings);
+  const next: StdioServerConfig = { ...(config as StdioServerConfig) };
+  if (env) next.env = env;
+  else delete next.env;
+  if (cwd) next.cwd = cwd;
+  else delete next.cwd;
+  return next;
+}
+
+/**
  * Read a server's `metadata` off disk into the in-memory `RequestMetadata`
  * object, accepting both the current object shape and the pre-#1910
  * `{ key, value }[]` pair array.

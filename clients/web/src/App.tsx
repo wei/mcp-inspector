@@ -70,6 +70,7 @@ import { ManagedResourceTemplatesState } from "@inspector/core/mcp/state/managed
 import { ManagedRequestorTasksState } from "@inspector/core/mcp/state/managedRequestorTasksState.js";
 import { ResourceSubscriptionsState } from "@inspector/core/mcp/state/resourceSubscriptionsState.js";
 import {
+  applyStdioSettingsToConfig,
   cleanRoots,
   oauthAuthorizationParamsFromSettings,
   oauthEndpointOverridesFromSettings,
@@ -2650,7 +2651,19 @@ function App() {
               ...(activeCimdUrl && { clientMetadataUrl: activeCimdUrl }),
             }
           : undefined;
-      const client = new InspectorClient(server.config, {
+      // The stdio `env` / `cwd` are edited as *settings* but stored on — and
+      // read by the transport from — *config*, so the tracker's account of the
+      // former has to be carried onto the latter. `server.config` comes off the
+      // same frozen `servers` entry `server.settings` does, so without this a
+      // save that landed while list reads were failing spawns the child process
+      // with the pre-save environment while the modal, re-seeded from the
+      // tracker, shows the new one (#2096). Same mapping the PUT route applies
+      // when persisting it, from the same helper.
+      const effectiveConfig = applyStdioSettingsToConfig(
+        server.config,
+        savedSettings,
+      );
+      const client = new InspectorClient(effectiveConfig, {
         environment,
         // The Tasks tab needs the receiver-task pipeline; the
         // requestor-task list comes from the client's task store.

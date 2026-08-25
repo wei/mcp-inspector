@@ -51,7 +51,6 @@ import type {
 } from "../../types.js";
 import {
   DEFAULT_SEED_CONFIG,
-  envPairsToRecord,
   expectedSecretFields,
   extractSecretsFromStored,
   INSPECTOR_FIELD_KEYS,
@@ -59,6 +58,7 @@ import {
   isProtocolEra,
   mergeSecretsIntoStored,
   normalizeServerType,
+  stdioConfigFieldsFromSettings,
   storedFieldsToInspectorSettings,
   stripInspectorFields,
 } from "../../serverList.js";
@@ -1653,16 +1653,18 @@ export function createRemoteApp(
   ): void => {
     if (!(entry.type === "stdio" || entry.type === undefined)) return;
     const stdio = entry as StdioServerConfig & StoredMCPServer;
+    // Shared with the web client's connect-time application of the same
+    // mapping (#2096), so the environment a save persists and the one the
+    // child process is spawned with cannot be derived differently.
+    const { env, cwd } = stdioConfigFieldsFromSettings(settings);
     if (provided.env) {
-      const env = envPairsToRecord(settings.env);
-      if (Object.keys(env).length > 0) {
+      if (env) {
         stdio.env = env;
       } else {
         delete stdio.env;
       }
     }
     if (provided.cwd) {
-      const cwd = settings.cwd?.trim();
       if (cwd) {
         stdio.cwd = cwd;
       } else {
