@@ -12,7 +12,10 @@ import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { SSEClientTransport } from "@modelcontextprotocol/client";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { createFetchTracker } from "../fetchTracking.js";
-import { createAuthChallengeInterceptFetch } from "./authChallengeFetch.js";
+import {
+  createAuthChallengeInterceptFetch,
+  createAuthChallengeObserverFetch,
+} from "./authChallengeFetch.js";
 import { createProxyFetch } from "./proxyFetch.js";
 
 /**
@@ -49,6 +52,7 @@ export function createTransportNode(
     authProvider,
     settings,
     interceptAuthChallenges = false,
+    onAuthChallengeObserved,
   } = options;
 
   // `optionsFetchFn` is the caller's whole fetch stack and already sits on top of
@@ -57,9 +61,18 @@ export function createTransportNode(
   // that. The fallback is for the one caller that supplies nothing: the web
   // backend (`core/mcp/remote/node/server.ts`), which calls this directly.
   const baseFetch = optionsFetchFn ?? createProxyFetch() ?? globalThis.fetch;
+  // Purely passive, so — unlike proxying and interception — it is safe to
+  // apply to any fetch, including a caller's explicit one.
+  const withChallengeObserver = (inner: typeof fetch): typeof fetch =>
+    onAuthChallengeObserved
+      ? createAuthChallengeObserverFetch(inner, onAuthChallengeObserved)
+      : inner;
+  // The observer sits *under* the interceptor so it still reports the
+  // challenge on the path where interception throws — and, more to the point,
+  // on the legacy first-auth path where interception is off entirely.
   const fetchWithOptionalAuthIntercept = interceptAuthChallenges
-    ? createAuthChallengeInterceptFetch(baseFetch)
-    : baseFetch;
+    ? createAuthChallengeInterceptFetch(withChallengeObserver(baseFetch))
+    : withChallengeObserver(baseFetch);
 
   if (serverType === "stdio") {
     const stdioConfig = config as StdioServerConfig;
@@ -92,9 +105,15 @@ export function createTransportNode(
     // A caller-supplied eventSourceInit.fetch wins as-is (explicit fetch is not
     // re-wrapped for proxying); the default path uses fetchWithOptionalAuthIntercept
     // (the proxy-aware baseFetch plus the optional auth-challenge intercept).
-    const sseFetch =
-      (sseConfig.eventSourceInit?.fetch as typeof fetch) ||
-      fetchWithOptionalAuthIntercept;
+    // The challenge observer is applied either way: it is passive, and without
+    // it a first-time legacy SSE authorization through an explicit fetch would
+    // lose the challenge's `resource_metadata` the same way (Copilot).
+    const configuredSseFetch = sseConfig.eventSourceInit?.fetch as
+      | typeof fetch
+      | undefined;
+    const sseFetch = configuredSseFetch
+      ? withChallengeObserver(configuredSseFetch)
+      : fetchWithOptionalAuthIntercept;
     const trackedFetch = onFetchRequest
       ? createFetchTracker(sseFetch, {
           trackRequest: onFetchRequest,

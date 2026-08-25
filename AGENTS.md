@@ -61,7 +61,19 @@ v2/main/
 ├── core/                               # Shared core code (no package.json — consumed via the `@inspector/core` vite alias)
 │   ├── auth/                           # OAuth: providers, discovery, OAuthStorage + persist backends;
 │   │                                   #   mid-session recovery (challenge.ts WWW-Authenticate
-│   │                                   #   parsing, scopes.ts SEP-2350 scope union, oauthUx.ts
+│   │                                   #   parsing — including the RFC 9728
+│   │                                   #   `resource_metadata` URL, carried on
+│   │                                   #   AuthChallenge as a STRING because the
+│   │                                   #   web client's challenge crosses the
+│   │                                   #   remote-backend boundary as JSON, and
+│   │                                   #   converted to a URL at the OAuth
+│   │                                   #   boundary by challengeResourceMetadataUrl
+│   │                                   #   (malformed values ignored, matching the
+│   │                                   #   SDK's own parser) so discovery targets
+│   │                                   #   the advertised document rather than a
+│   │                                   #   location derived from the MCP server
+│   │                                   #   URL — #2071;
+│   │                                   #   scopes.ts SEP-2350 scope union, oauthUx.ts
 │   │                                   #   shared copy, mcpAuth.ts force-reauthorization,
 │   │                                   #   issuerBinding.ts SEP-2352 callback-leg failure
 │   │                                   #   classification — separates a recoverable
@@ -293,6 +305,8 @@ The same **placement** rule covers anything reached only through **root-owned co
 **A dependency that renders React components must be bundled into the client that uses it, and is then not a root dependency.** An externalized package resolves its own `react` from wherever npm placed **it** in the consumer's tree, and npm places a package beside a React satisfying *that package's* peer range — looser than ours in every case here, which is all it takes to split React. `ink-form` and `ink-scroll-view` declare `">=18"`, satisfied by a consumer's React 18 while our React 19 nests underneath: the bundle renders through one React, those packages call hooks on another, and the TUI crashes on the first hook (#1952). Both are inlined by `clients/tui/tsup.config.ts` (`noExternal`) and declared only in `clients/tui/package.json`, where the build resolves them — declaring an inlined package at the root would just make consumers install a second, unused copy.
 
 **`ink` is the single exemption, and it is justified by cost, not by safety.** Bundling it works but adds ~1.4MB (`react-reconciler` + `yoga-layout`, plus a `createRequire` banner, since inlined CJS calls `require` at runtime and esbuild's ESM interop rejects that without a real `require` in scope). **Never justify an exemption by a peer range** — `ink` briefly carried "its `">=19"` peer keeps npm honest", which is false: a consumer pinning React 19.0 satisfies `">=19"` while a narrower range of ours nests underneath. What actually makes the exemption safe is a *different* lever: the **root `react` range stays open to the whole major (`^19.0.0`)**, so npm can dedupe our React with whatever React 19 a consumer pins and an external `ink` lands on the same copy the bundle uses. Narrowing it (e.g. back to `^19.2.4`) silently reopens the crash for the renderer itself, which breaks TUI *startup*, not just its forms. `clients/tui/__tests__/tsupConfig.test.ts` enforces all of it: React-rendering deps inlined, each exempt package both external and root-declared, and the root range pinned to `ink`'s peer floor.
+
+**An `overrides` entry is how a transitive dependency gets pinned past its parent's declared range — reach for it before `npm audit fix`.** `clients/{web,cli,tui}/package.json` each override `esbuild` to `^0.28.2` (#2062). `tsup@8.5.1` declares `esbuild: ^0.27.0`, and GHSA-g7r4-m6w7-qqqr covers `0.27.3 - 0.28.0` with `0.27.7` the last 0.27.x — so there is no *upward* escape inside `tsup`'s range, and `npm audit fix` "resolves" it by silently **downgrading** to `0.27.2` across three installs (~700 lines of lockfile churn for a low-severity dev-only advisory; tried and reverted in #2058). The override forces the single deduped copy above the range instead, which also collapses the nested `tsup/node_modules/esbuild` and `tsx/node_modules/esbuild` copies into it. Two things this costs: it puts `tsup` on an esbuild **major it does not declare**, so `npm run build` for web/cli/tui — not `npm audit` — is the real gate on such a pin; and it is invisible to the audit once clean, so **when `tsup` widens its range to `^0.28`, drop the override rather than carrying it forever**. The same file's `ink-select-input` entry is a different case entirely (it pins a bundled dep's transitive resolution, which npm ignores for a consumer install — see above), so don't read one as precedent for the other.
 
 The v1 SDK (`@modelcontextprotocol/sdk`) is **not** a dependency of this repo and must not become one — v2 uses the packages above. It appears in the lock files only as a `"peer": true` entry pulled in by `ext-apps`.
 
