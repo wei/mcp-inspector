@@ -751,6 +751,73 @@ describe("ServerSettingsForm", () => {
     );
   });
 
+  it("warns when opting out while offline_access is still in Scopes", () => {
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{
+          ...emptySettings,
+          oauthRequestRefreshToken: false,
+          oauthScopes: "openid offline_access",
+        }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.getByText("offline_access is still requested"),
+    ).toBeInTheDocument();
+  });
+
+  it("does not warn when opted out and Scopes omits offline_access", () => {
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{
+          ...emptySettings,
+          oauthRequestRefreshToken: false,
+          oauthScopes: "openid",
+        }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.queryByText("offline_access is still requested"),
+    ).not.toBeInTheDocument();
+  });
+
+  // The scope alone is not a problem — with the grant declared, requesting
+  // offline_access is exactly what the default configuration does.
+  it("does not warn when offline_access is in Scopes but the grant is on", () => {
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{ ...emptySettings, oauthScopes: "openid offline_access" }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.queryByText("offline_access is still requested"),
+    ).not.toBeInTheDocument();
+  });
+
+  // A substring must not trip it — `offline_access_extra` is a different scope.
+  it("matches offline_access as a whole scope token, not a substring", () => {
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{
+          ...emptySettings,
+          oauthRequestRefreshToken: false,
+          oauthScopes: "openid offline_access_extra",
+        }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.queryByText("offline_access is still requested"),
+    ).not.toBeInTheDocument();
+  });
+
   // #2018 — custom authorization-request parameters.
   it("shows the empty hint for authorization parameters when none are set", () => {
     renderWithMantine(

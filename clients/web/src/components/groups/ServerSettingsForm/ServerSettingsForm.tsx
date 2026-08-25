@@ -530,6 +530,15 @@ export function ServerSettingsForm({
     ? " Not applied while Enterprise-managed authorization is on: that flow authorizes against the enterprise IdP, a different authorization server."
     : "";
 
+  // #2068 — the opt-out only removes the SDK's *automatic* `offline_access`.
+  // `prompt=consent` keys off the scope, not the grant, so an `offline_access`
+  // the user typed here still forces the prompt the checkbox claims to avoid.
+  // Flag that combination rather than letting it read as a fixed configuration.
+  const scopesIncludeOfflineAccess = (settings.oauthScopes ?? "")
+    .split(/\s+/)
+    .includes("offline_access");
+  const refreshTokenOptedOut = settings.oauthRequestRefreshToken === false;
+
   const rejectedParamKeys = authorizationParams
     .map((p) => p.key.trim())
     .filter((key) => isReservedAuthorizationParam(key));
@@ -883,7 +892,7 @@ export function ServerSettingsForm({
               />
               <Checkbox
                 label="Request refresh token"
-                description="When checked, the Inspector registers with the refresh_token grant so it can renew access tokens without a new sign-in. Uncheck it for authorization servers where that grant forces an unwanted consent prompt — the SDK adds offline_access to the requested scope whenever the grant is declared, and then prompt=consent to the authorization request. On Microsoft Entra ID that routes a non-admin user into the admin-consent workflow (AADSTS90094) even after a tenant admin has consented. Applies on the next connect. Unchecking it does not revoke a refresh token already issued, nor the grant already registered at the authorization server — use Clear stored OAuth state below for that."
+                description="When checked, the Inspector registers with the refresh_token grant so it can renew access tokens without a new sign-in. Unchecking it stops the SDK adding offline_access to the requested scope, and so stops the prompt=consent it forces — on Microsoft Entra ID that prompt routes a non-admin user into the admin-consent workflow (AADSTS90094) even after a tenant admin has consented. It removes only that automatic scope: an offline_access you configure in Scopes still forces the prompt. Applies on the next connect, and does not revoke a refresh token already issued or reach a registration the authorization server already holds."
                 checked={settings.oauthRequestRefreshToken ?? true}
                 onChange={(e) =>
                   onOAuthChange({
@@ -892,6 +901,14 @@ export function ServerSettingsForm({
                   })
                 }
               />
+              {refreshTokenOptedOut && scopesIncludeOfflineAccess ? (
+                <Alert color="yellow" title="offline_access is still requested">
+                  Scopes above lists offline_access, and prompt=consent is added
+                  whenever that scope is requested — regardless of this setting.
+                  Remove it from Scopes as well, or the consent prompt this
+                  checkbox is meant to avoid still goes out.
+                </Alert>
+              ) : null}
               <Stack gap="xs">
                 <FieldLabel>Additional authorization parameters</FieldLabel>
                 <FieldDescription>

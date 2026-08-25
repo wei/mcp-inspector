@@ -791,8 +791,13 @@ export interface InspectorServerSettings {
    * Whether the Inspector declares the `refresh_token` grant in its OAuth
    * client metadata for this server. `undefined` (the default) means on;
    * persisted as `oauth.requestRefreshToken` only when explicitly off. Turning
-   * it off also drops the SDK's automatic `offline_access` scope and the
+   * it off drops the SDK's *automatic* `offline_access` scope and so the
    * `prompt=consent` it forces — the Entra admin-consent failure in #2068.
+   *
+   * Only the automatic one: `startAuthorization` adds `prompt=consent` for any
+   * `offline_access` in the effective scope without consulting `grant_types`,
+   * so a scope the user configured (or one the resource advertises when the
+   * scope field is blank) still forces the prompt.
    *
    * Read at connect time like the rest of the OAuth block, so a live client
    * keeps the metadata it was built with. It changes what the Inspector

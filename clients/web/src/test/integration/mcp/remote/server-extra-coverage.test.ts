@@ -675,6 +675,39 @@ describe("server.ts supplemental coverage", () => {
       expect(res.status).toBe(200);
     });
 
+    // #2068 — a 200 only proves the payload validated. Without reading the
+    // saved entry back, deleting the `oauthRequestRefreshToken` line from
+    // `normalizeSettings` leaves every other test green while saves through
+    // this route silently revert to the default.
+    it("persists the refresh-token opt-out through a save", async () => {
+      expect(
+        (await postSettings({ ...base, oauthRequestRefreshToken: false }))
+          .status,
+      ).toBe(200);
+
+      const res = await fetch(`${h.baseUrl}/api/servers`);
+      const body = (await res.json()) as {
+        mcpServers: Record<
+          string,
+          { oauth?: { requestRefreshToken?: boolean } }
+        >;
+      };
+      expect(body.mcpServers.srv?.oauth?.requestRefreshToken).toBe(false);
+    });
+
+    it("writes no refresh-token field when the setting is on", async () => {
+      expect(
+        (await postSettings({ ...base, oauthRequestRefreshToken: true }))
+          .status,
+      ).toBe(200);
+
+      const res = await fetch(`${h.baseUrl}/api/servers`);
+      const body = (await res.json()) as {
+        mcpServers: Record<string, { oauth?: Record<string, unknown> }>;
+      };
+      expect(body.mcpServers.srv?.oauth?.requestRefreshToken).toBeUndefined();
+    });
+
     it("accepts a fully-populated valid settings payload", async () => {
       const res = await postSettings({
         ...base,
