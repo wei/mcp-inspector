@@ -1687,6 +1687,32 @@ describe("OAuthManager", () => {
       expect(navigated.searchParams.get("state")).toBe("xyz");
     });
 
+    // #2068 — the manager→provider bridge for the refresh-token opt-out. Same
+    // gap as the authorizationParams case above: the provider test constructs
+    // `BaseOAuthClientProvider` directly and the runner test stops at the
+    // options object, so deleting `requestRefreshToken:` from
+    // `createOAuthProvider` would leave the feature dead with every other test
+    // still green.
+    it("forwards the refresh-token opt-out to the provider it builds", async () => {
+      const manager = new OAuthManager(createMockParams());
+      manager.setOAuthConfig({ requestRefreshToken: false });
+
+      const provider = await manager.createOAuthProviderForTransport();
+      expect(provider.clientMetadata.grant_types).toEqual([
+        "authorization_code",
+      ]);
+    });
+
+    it("declares the refresh_token grant when the opt-out is not configured", async () => {
+      const manager = new OAuthManager(createMockParams());
+
+      const provider = await manager.createOAuthProviderForTransport();
+      expect(provider.clientMetadata.grant_types).toEqual([
+        "authorization_code",
+        "refresh_token",
+      ]);
+    });
+
     it("drops a reserved key configured on the manager", async () => {
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
       const params = createMockParams();

@@ -793,6 +793,13 @@ export interface InspectorServerSettings {
    * persisted as `oauth.requestRefreshToken` only when explicitly off. Turning
    * it off also drops the SDK's automatic `offline_access` scope and the
    * `prompt=consent` it forces — the Entra admin-consent failure in #2068.
+   *
+   * Read at connect time like the rest of the OAuth block, so a live client
+   * keeps the metadata it was built with. It changes what the Inspector
+   * declares, not state the authorization server already holds: an existing
+   * registration still lists the grant, and a refresh token issued earlier
+   * stays usable (the SDK's refresh path never consults `grant_types`) until
+   * the stored OAuth state is cleared.
    */
   oauthRequestRefreshToken?: boolean;
   /**
