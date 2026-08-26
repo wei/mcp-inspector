@@ -19,6 +19,7 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type KeyboardEvent,
 } from "react";
 import { ClearButton } from "../../elements/ClearButton/ClearButton";
 import { EnlargeButton } from "../../elements/EnlargeButton/EnlargeButton";
@@ -78,16 +79,23 @@ const MultilineStringInput = Textarea.withProps({
  * A string field that has just been enlarged (#2042).
  *
  * Exists only to take focus on mount. This component mounts as a direct
- * consequence of the user activating the enlarge button — which unmounts in the
- * same commit, taking the focused element with it. Without this, a keyboard user
- * who activates it is left with focus on the document body, and the next Tab
- * restarts from the top of the page rather than continuing through the form.
+ * consequence of the user enlarging the field — and whichever control they used
+ * unmounts in the same commit, taking the focused element with it. Without this,
+ * the user is left with focus on the document body, and the next Tab restarts
+ * from the top of the page rather than continuing through the form.
  *
- * The caret is placed at the end of whatever was already typed, since focusing a
- * pre-filled text control does not agree across browsers on where it lands, and
- * the one answer that is never right is "before the text the user just wrote".
+ * `caretAt` says where the caret goes. The keyboard route passes one, because
+ * Enter inserts a newline at the user's selection and the caret belongs just
+ * after it (#2138). Pointer activation passes none: a click carries no
+ * meaningful position, so the caret falls to the end of whatever was already
+ * typed — focusing a pre-filled text control does not agree across browsers on
+ * where it lands, and the one answer that is never right is "before the text
+ * the user just wrote".
  */
-function EnlargedStringField(props: TextareaProps) {
+function EnlargedStringField({
+  caretAt,
+  ...props
+}: TextareaProps & { caretAt?: number }) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   // Layout, not passive: a passive effect runs after paint, so the browser would
@@ -98,8 +106,9 @@ function EnlargedStringField(props: TextareaProps) {
     /* v8 ignore next -- an effect runs after mount, so the ref is always set */
     if (!node) return;
     node.focus();
-    node.setSelectionRange(node.value.length, node.value.length);
-  }, []);
+    const caret = caretAt ?? node.value.length;
+    node.setSelectionRange(caret, caret);
+  }, [caretAt]);
 
   return <MultilineStringInput {...props} ref={inputRef} />;
 }
@@ -122,6 +131,26 @@ const ONE_ACTION_WIDTH = rem(CLEAR_WIDTH + SECTION_INSET);
 const TWO_ACTION_WIDTH = rem(
   ENLARGE_WIDTH + ACTION_GAP + CLEAR_WIDTH + SECTION_INSET,
 );
+
+// `keyCode` reported for a keydown the IME consumed — the pre-`isComposing`
+// sentinel every browser still sets during composition. Only needed for the
+// browsers whose composition events land too late for `isComposing` to help
+// (#2138 review); a real Enter reports 13, so this cannot swallow one.
+const IME_KEY_CODE = 229;
+
+/**
+ * Length in Unicode code points, which is how JSON Schema counts `maxLength`
+ * (its characters are RFC 8259 characters, i.e. code points). `String.length`
+ * counts UTF-16 code units instead, so it double-counts anything astral: a
+ * field holding a single emoji reads as 2 and a `maxLength: 2` field would be
+ * treated as full when it has room for another character.
+ *
+ * Note the `maxLength` handed to the DOM input still enforces the HTML
+ * attribute's own UTF-16 counting; that predates this and is not changed here.
+ */
+function countCodePoints(value: string): number {
+  return Array.from(value).length;
+}
 
 function serializeJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
@@ -634,8 +663,21 @@ export function SchemaForm({
   // *name*, so it must not carry across to another entity's same-named field —
   // the same reasoning `resetKey` documents for the number field's draft. Reset
   // during render rather than in an effect so no frame paints the wrong shape.
+  // Where the caret goes when a field's text area mounts, for the fields
+  // enlarged by Enter (#2138). Absent for a field enlarged by the button, which
+  // carries no position — see EnlargedStringField.
+  // A Map rather than a plain object: the keys are field names straight out of
+  // a server's schema, and on a bare record a field legitimately named
+  // `constructor` or `toString` reads back an inherited function instead of
+  // `undefined` — which would then be handed to setSelectionRange in place of
+  // the documented end-of-value fallback.
+  const [enlargeCarets, setEnlargeCarets] = useState<
+    ReadonlyMap<string, number>
+  >(() => new Map());
+
   useValueChange(resetKey, () => {
     setEnlargedFields(new Set());
+    setEnlargeCarets(new Map());
     // Which branch is selected belongs to the entity it was chosen for, for the
     // same reason enlargement does — reset to whichever branch the new values
     // identify, so the visible selection cannot disagree with what would be
@@ -841,11 +883,98 @@ export function SchemaForm({
           <EnlargedStringField
             key={fieldName}
             {...sharedProps}
+            caretAt={enlargeCarets.get(fieldName)}
             rightSectionWidth={ONE_ACTION_WIDTH}
             rightSection={clearButton}
           />
         );
       }
+
+      const enlarge = () =>
+        setEnlargedFields((previous) => new Set([...previous, fieldName]));
+
+      // Enter both enlarges the field and enters the newline that was asked
+      // for. Enlarging alone would consume the keystroke and leave the caret
+      // where it was, so the next thing typed runs on from the last word — the
+      // user pressed the key that means "new line" and got a reshaped box.
+      //
+      // The newline goes in at the field's own selection, exactly as it would
+      // in a text area: split at the caret, and replace a selected range rather
+      // than keeping it. Appending at the end instead would silently rewrite
+      // the value whenever the caret was not already there — pressing Enter in
+      // the middle of `abc|def` would produce `abcdef` with a trailing blank
+      // line, which is not what any editor does and not what was asked for.
+      //
+      // A field with no room left for the newline is enlarged without one,
+      // since the alternative is breaching a maxLength the schema states.
+      const enlargeWithNewline = (input: HTMLInputElement) => {
+        // The control's own value, not the form's. Two reasons, and the second
+        // is the one that bites: it is the exact string the selection offsets
+        // below index into, and it is always a string. `values` is a
+        // `Record<string, unknown>` fed by whatever a server's schema declares,
+        // so a non-string default on a string field (`default: 123`) arrives
+        // here as a number — it renders as text, and would then throw on
+        // `.slice`, turning a keystroke into a crashed panel.
+        const current = input.value;
+        // A control that cannot report a selection (`selectionStart` is null
+        // for some input types) is treated as a caret at the end.
+        const start = input.selectionStart ?? current.length;
+        const end = input.selectionEnd ?? start;
+        const next = `${current.slice(0, start)}\n${current.slice(end)}`;
+        const fits =
+          fieldSchema.maxLength === undefined ||
+          countCodePoints(next) <= fieldSchema.maxLength;
+        if (fits) handleFieldChange(fieldName, next);
+        // The caret is recorded either way. The keyboard route always has a
+        // real position, so dropping it when the newline does not fit would
+        // send the caret to the end of a field the user was editing the middle
+        // of — a second surprise on top of the newline they did not get.
+        setEnlargeCarets((previous) =>
+          new Map(previous).set(fieldName, fits ? start + 1 : start),
+        );
+        enlarge();
+      };
+
+      // The keyboard's way into multiline mode, now that the enlarge button is
+      // out of the tab order (#2138). Enter is inert in this field — nothing
+      // renders SchemaForm inside a `<form>`, so there is no implicit
+      // submission to displace — and it is the very key a user presses trying
+      // to enter the newline a single-line input swallows, which is what #2042
+      // exists to fix. So the gesture that fails is the one that enlarges,
+      // rather than a shortcut nobody would guess.
+      //
+      // Every condition below is load-bearing; none is incidental:
+      //
+      // - Shift+Enter is the other newline gesture, so it enlarges too.
+      // - `isComposing` is the IME guard. Enter is also how a Japanese, Chinese
+      //   or Korean input method commits the candidate being composed, and that
+      //   keystroke means "accept this word", not "new line". Acting on it
+      //   would enlarge the field and insert a stray newline every time such a
+      //   user finished a word, making the field unusable for them.
+      // - `keyCode === 229` is the same guard again, for WebKit. It is reported
+      //   to fire `compositionend` *before* the committing keydown, which
+      //   leaves `isComposing` already false by the time this runs; 229 is the
+      //   pre-`isComposing` sentinel for "this key went to the IME" and is
+      //   still set there. Kept despite `keyCode` being deprecated because
+      //   nothing non-deprecated distinguishes that event, and it cannot misfire
+      //   on a real Enter, which reports 13.
+      // - The Ctrl/Cmd/Alt chords are deliberately left alone: those read as
+      //   "submit" in a form, and a consumer binding one (run the tool) must
+      //   not be overridden into enlarging a field instead.
+      const handleEnlargeKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+        if (
+          event.key !== "Enter" ||
+          event.nativeEvent.isComposing ||
+          event.keyCode === IME_KEY_CODE ||
+          event.ctrlKey ||
+          event.metaKey ||
+          event.altKey
+        ) {
+          return;
+        }
+        event.preventDefault();
+        enlargeWithNewline(event.currentTarget);
+      };
 
       return (
         <TextInput
@@ -853,16 +982,17 @@ export function SchemaForm({
           {...sharedProps}
           rightSectionPointerEvents="auto"
           rightSectionWidth={clearButton ? TWO_ACTION_WIDTH : ONE_ACTION_WIDTH}
+          onKeyDown={handleEnlargeKeyDown}
+          // Announces that the field carries a shortcut at all. A keyboard user
+          // no longer meets the button by tabbing, so without this the binding
+          // is undiscoverable rather than merely unlabelled.
+          aria-keyshortcuts="Enter"
           rightSection={
             <FieldActions>
               <EnlargeButton
                 ariaLabel={`Enlarge ${label}`}
                 disabled={disabled}
-                onClick={() =>
-                  setEnlargedFields(
-                    (previous) => new Set([...previous, fieldName]),
-                  )
-                }
+                onClick={enlarge}
               />
               {clearButton}
             </FieldActions>
