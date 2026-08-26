@@ -296,7 +296,7 @@ The **TUI** had the same gap and is worth checking against the same server (`--t
 
 The 2026-07-28 revision makes this shape explicitly legal: `type: "object"` is required at the root, and beyond that "any JSON Schema 2020-12 keyword may appear alongside `type`, including composition keywords (`oneOf`, `anyOf`, `allOf`, `not`)".
 
-Open the Tools tab and select `echo`. Above the fields is a **Variant** picker listing the union's alternatives — labelled from each branch's `title`, else its discriminator `const`, else its position — and choosing one swaps in that branch's fields with the discriminator already filled in.
+Open the Tools tab and select `echo`. Above the fields is a **Variant** picker listing the union's alternatives — labelled from each branch's `title`, else its discriminator `const`, else its position — and choosing one swaps in that branch's fields with the discriminator already filled in. A field the schema pins with `const` renders read-only, and is filled in automatically only where the schema also **requires** it: `const` constrains a value that is present rather than demanding one, so an optional pinned field stays omittable.
 
 The two tools show the two halves of the old behavior. On the broken build `echo` rendered its root `message` and **nothing from either branch**, so it could only ever be called with half its arguments; `get_weather`, whose fields live entirely on its `oneOf`, rendered **nothing but the Execute Tool button** — no picker, no fields, not even the raw-JSON editor a union-typed _property_ falls back to ([#2123](https://github.com/modelcontextprotocol/inspector/issues/2123)).
 

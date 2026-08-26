@@ -555,6 +555,7 @@ describe("schemaToForm", () => {
         {
           type: "object",
           properties: { v: { type: "string", const: "a", default: "b" } },
+          required: ["v"],
         },
         "const_tool",
       );
@@ -563,6 +564,26 @@ describe("schemaToForm", () => {
         initialValue: "a",
         options: [{ label: "a", value: "a" }],
       });
+    });
+
+    it("leaves an optional const unfilled", () => {
+      // `const` constrains a present value; it does not require the property
+      // or act as a default, so an optional one must stay omittable.
+      const form = schemaToForm(
+        {
+          type: "object",
+          properties: { dryRun: { type: "boolean", const: true } },
+        },
+        "optional_const",
+      );
+      const field = form.sections[0]!.fields[0] as {
+        initialValue?: unknown;
+        options?: unknown[];
+      };
+      expect(field.initialValue).toBeUndefined();
+      // The single option is still offered to a user who wants it.
+      expect(field.options).toEqual([{ label: "true", value: "true" }]);
+      expect(decodeFormValues({ type: "object" }, {})).toEqual({});
     });
 
     it("renders a branch's specialization of a root property in its section", () => {

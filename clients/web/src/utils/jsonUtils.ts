@@ -145,7 +145,17 @@ export function collectSchemaDefaults(
   // to a form showing the branch the values actually identify.
   const { base, branches } = resolveRootUnion(schema);
   const selected = selectBranchIndex(branches, knownValues) ?? 0;
-  const properties = (branches[selected]?.schema ?? base).properties ?? {};
+  const effective = branches[selected]?.schema ?? base;
+  const properties = effective.properties ?? {};
+  // `const` constrains a property only when it is PRESENT — it neither requires
+  // the property nor acts as a default. So it is supplied automatically for a
+  // REQUIRED field, whose only submittable value was never in doubt and which
+  // the form renders read-only, and left alone otherwise: seeding an optional
+  // `dryRun: { const: true }` would turn a valid `{}` call into one that asks
+  // the server to do something.
+  const requiredNames = Array.isArray(effective.required)
+    ? effective.required
+    : [];
   const result: Record<string, unknown> = {};
   // `properties` is a JSON record, so `__proto__` is a legal field name that a
   // plain assignment would drop into the legacy prototype setter rather than
@@ -164,10 +174,10 @@ export function collectSchemaDefaults(
     // without this the form would *display* a hoisted default that never
     // reached the seeded values — the field would submit empty (#1928).
     const fieldSchema = normalizeNullableUnion(rawSchema);
-    if (fieldSchema.const !== undefined) {
-      // `const` is a one-value enumeration, so the only submittable value is
-      // already known — seeding it spares the user hand-typing a discriminator
-      // the schema has fixed (#2123).
+    if (fieldSchema.const !== undefined && requiredNames.includes(fieldName)) {
+      // `const` is a one-value enumeration, so a required field's only
+      // submittable value is already known — seeding it spares the user
+      // hand-typing a discriminator the schema has fixed (#2123).
       //
       // It outranks `default`, which JSON Schema defines as an annotation
       // rather than a constraint: a schema may advertise a default its own
@@ -267,13 +277,21 @@ export function applySchemaConstants(
 ): Record<string, unknown> {
   const { base, branches } = resolveRootUnion(schema);
   const selected = selectBranchIndex(branches, values) ?? 0;
-  const properties = (branches[selected]?.schema ?? base).properties ?? {};
+  const effective = branches[selected]?.schema ?? base;
+  const properties = effective.properties ?? {};
+  const required = Array.isArray(effective.required) ? effective.required : [];
 
   const corrections: [string, unknown][] = [];
   for (const [name, rawSchema] of Object.entries(properties)) {
     const fieldSchema = normalizeNullableUnion(rawSchema);
     if (fieldSchema.const !== undefined) {
-      corrections.push([name, fieldSchema.const]);
+      // Corrected where the property is PRESENT — whatever supplied it, the
+      // schema fixes the value — and inserted only where the schema also
+      // requires it. An optional `const` the caller left out stays out:
+      // `const` constrains a present value, it does not demand one.
+      if (Object.hasOwn(values, name) || required.includes(name)) {
+        corrections.push([name, fieldSchema.const]);
+      }
       continue;
     }
     // Recurse: a nested object renders its own read-only fields, and the

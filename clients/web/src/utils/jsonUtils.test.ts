@@ -375,13 +375,30 @@ describe("root composition (#2123)", () => {
     expect(collectSchemaDefaults(UNION)).not.toHaveProperty("phone");
   });
 
-  it("seeds a const property on an ordinary schema too", () => {
+  it("seeds a required const property on an ordinary schema too", () => {
     expect(
       collectSchemaDefaults({
         type: "object",
         properties: { version: { type: "string", const: "1" } },
+        required: ["version"],
       }),
     ).toEqual({ version: "1" });
+  });
+
+  it("leaves an optional const out", () => {
+    // `const` constrains a present value; it does not require the property or
+    // act as a default, so seeding it would turn a valid `{}` call into one
+    // that asks the server to do something.
+    const optional: InspectorFormSchema = {
+      type: "object",
+      properties: { dryRun: { type: "boolean", const: true } },
+    };
+    expect(collectSchemaDefaults(optional)).toEqual({});
+    expect(applySchemaConstants(optional, {})).toEqual({});
+    // …but a value that IS present must be the one the schema fixes.
+    expect(applySchemaConstants(optional, { dryRun: false })).toEqual({
+      dryRun: true,
+    });
   });
 
   it("prefers a const over a conflicting default", () => {
@@ -394,6 +411,7 @@ describe("root composition (#2123)", () => {
         properties: {
           v: { type: "string", const: "a", default: "b" },
         },
+        required: ["v"],
       }),
     ).toEqual({ v: "a" });
   });
@@ -454,6 +472,7 @@ describe("root composition (#2123)", () => {
       properties: Object.fromEntries([
         ["__proto__", { type: "string", const: "kept" }],
       ]),
+      required: ["__proto__"],
     });
     expect(Object.hasOwn(seeded, "__proto__")).toBe(true);
   });
@@ -474,6 +493,7 @@ describe("root composition (#2123)", () => {
                   kind: { type: "string", const: "email" },
                   address: { type: "string" },
                 },
+                required: ["kind"],
               },
               {
                 type: "object",
@@ -481,6 +501,7 @@ describe("root composition (#2123)", () => {
                   kind: { type: "string", const: "sms" },
                   phone: { type: "string" },
                 },
+                required: ["kind"],
               },
             ],
           },

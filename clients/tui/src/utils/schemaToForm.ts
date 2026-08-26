@@ -156,6 +156,13 @@ function labelled(property: unknown, name: string): unknown {
   return { title: name, ...property };
 }
 
+/** A schema's `required`, as the list of strings it should be. */
+function requiredOf(schema: { required?: unknown }): string[] {
+  return Array.isArray(schema.required)
+    ? schema.required.filter((name): name is string => typeof name === "string")
+    : [];
+}
+
 /** The `const` a property schema pins its value to, if any. */
 function constOf(schema: unknown): unknown {
   if (typeof schema !== "object" || schema === null) return undefined;
@@ -227,6 +234,9 @@ export function schemaToForm(
   // says: only one alternative applies to a call, so requiring them would build
   // a form that can never be submitted.
   branches.forEach((branch, index) => {
+    const byRealName = Object.fromEntries(
+      branchFields(base, branches, index).map((name) => [name, true]),
+    );
     const properties = Object.fromEntries(
       branchFields(base, branches, index).map((name) => [
         branchFieldName(prefix, index, name),
@@ -239,7 +249,17 @@ export function schemaToForm(
     );
     sections.push({
       title: branch.label,
-      fields: buildFields({ properties }),
+      fields: buildFields(
+        {
+          properties,
+          // Under their prefixed names, so the constant seeding below can tell
+          // which of this branch's fields the schema actually requires.
+          required: requiredOf(branch.schema)
+            .filter((name) => Object.hasOwn(byRealName, name))
+            .map((name) => branchFieldName(prefix, index, name)),
+        },
+        { optional: true },
+      ),
     });
   });
 
@@ -270,7 +290,7 @@ export function decodeFormValues<T>(
 ): Record<string, T> {
   const { base, branches } = resolveRootUnion(schema ?? {});
   if (branches.length === 0) {
-    return applyConstants(base.properties ?? {}, values);
+    return applyConstants(base.properties ?? {}, values, requiredOf(base));
   }
 
   const { variant, prefix } = generatedNames(base, branches);
@@ -298,7 +318,11 @@ export function decodeFormValues<T>(
       .filter(([, value]) => value !== undefined),
   ]);
   /* v8 ignore next -- an offerable branch always carries properties */
-  return applyConstants(branch.schema.properties ?? {}, decoded);
+  return applyConstants(
+    branch.schema.properties ?? {},
+    decoded,
+    requiredOf(branch.schema),
+  );
 }
 
 /**
@@ -320,13 +344,24 @@ function selectedBranchIndex(
     : 0;
 }
 
-/** Overwrite every `const`-pinned field with the value its schema fixes. */
+/**
+ * Overwrite every `const`-pinned field with the value its schema fixes —
+ * where the field is PRESENT, or where the schema also requires it.
+ *
+ * `const` constrains a present value; it neither requires the property nor
+ * acts as a default. Restoring an optional one the user left blank would send
+ * it on every call.
+ */
 function applyConstants<T>(
   properties: Record<string, unknown>,
   values: Record<string, T>,
+  required: string[],
 ): Record<string, T> {
   const pinned = Object.entries(properties).filter(
-    ([, schema]) => constOf(schema) !== undefined,
+    ([name, schema]) =>
+      constOf(schema) !== undefined &&
+      (required.includes(name) ||
+        (Object.hasOwn(values, name) && values[name] !== undefined)),
   );
   if (pinned.length === 0) return values;
   return Object.fromEntries([
@@ -335,8 +370,19 @@ function applyConstants<T>(
   ]);
 }
 
-/** Build the ink-form fields for one already-flattened object schema. */
-function buildFields(schema: JsonSchemaObject): FormField[] {
+/**
+ * Build the ink-form fields for one already-flattened object schema.
+ *
+ * `optional` renders every field non-required whatever the schema says, for a
+ * branch section: only one alternative applies to a call, so demanding all of
+ * them would build a form that can never be submitted. The schema's own
+ * `required` is still read — it decides which constants are pre-filled, and
+ * `missingRequiredFields` enforces the real requirement at submit.
+ */
+function buildFields(
+  schema: JsonSchemaObject,
+  { optional = false }: { optional?: boolean } = {},
+): FormField[] {
   const fields: FormField[] = [];
   const properties = schema.properties || {};
   // `Array.isArray`, not `|| []`: a nonconforming server can send
@@ -360,7 +406,7 @@ function buildFields(schema: JsonSchemaObject): FormField[] {
     const baseField = {
       name: key,
       label: property.title || key,
-      required: required.includes(key),
+      required: optional ? false : required.includes(key),
     };
 
     let field: FormField;
@@ -374,13 +420,18 @@ function buildFields(schema: JsonSchemaObject): FormField[] {
       fields.push({
         type: "select",
         ...baseField,
+        // Only a REQUIRED constant is pre-filled. `const` constrains a present
+        // value; it neither requires the property nor acts as a default, so an
+        // optional `dryRun: { const: true }` must stay omittable rather than
+        // being sent on every call. The single option is still there for a user
+        // who wants it.
+        ...(required.includes(key) ? { initialValue: String(pinned) } : {}),
         // Never required: the one option may legitimately be the empty string,
         // which ink-form's required gate can never accept — submission would
         // not even reach `decodeFormValues`, which reapplies the constant. The
         // value is fixed by the schema, and `missingRequiredFields` still
         // validates the decoded call.
         required: false,
-        initialValue: String(pinned),
         options: [{ label: String(pinned), value: String(pinned) }],
       } as FormField);
       continue;

@@ -175,9 +175,23 @@ function propertiesOf(schema: RootUnionSchema): Record<string, unknown> {
  *   `{ type: "string", properties: {…} }` member can never match — rendering it
  *   as a fillable form would offer a call that cannot be valid.
  */
-function isOfferable(branch: RootUnionSchema): boolean {
-  if (!hasReadableProperties(branch) || !admitsObject(branch)) return false;
-  const properties = Object.values(propertiesOf(branch));
+function isOfferable(
+  branch: RootUnionSchema,
+  merged: RootUnionSchema,
+): boolean {
+  // The MEMBER decides whether the shape is readable at all…
+  if (branch.properties !== undefined && !hasReadableProperties(branch)) {
+    return false;
+  }
+  if (!admitsObject(branch)) return false;
+
+  // …and the MERGE decides whether there is anything to render. A member may
+  // legitimately declare no properties of its own and only add `required` over
+  // names the root already declares — `anyOf: [{ required: ["email"] }, …]` is
+  // a perfectly ordinary way to say "one of these two" — and judging it on its
+  // own properties would decline it, leaving the gate checking the base alone
+  // and accepting `{}`, which the schema rejects.
+  const properties = Object.values(propertiesOf(merged));
   return (
     properties.length > 0 &&
     // Every value has to be something a renderer can read AND something a
@@ -679,7 +693,7 @@ export function resolveRootUnion<T extends RootUnionSchema>(
     branches.some(
       (branch) =>
         branch === null ||
-        !isOfferable(branch) ||
+        !isOfferable(branch, mergeBranch(base, branch)) ||
         // The same faithfulness test the `allOf` fold applies: a member
         // carrying a constraint the merge does not copy — a nested `allOf`, a
         // `not`, a `$ref` — would have it erased along with the union keyword,

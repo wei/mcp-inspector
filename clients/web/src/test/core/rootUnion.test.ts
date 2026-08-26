@@ -617,6 +617,24 @@ describe("resolveRootUnion", () => {
     });
   });
 
+  it("offers a branch that only adds required names over the root's fields", () => {
+    // `anyOf: [{ required: ["email"] }, { required: ["phone"] }]` is an
+    // ordinary way to say "one of these two". Judging the member on its own
+    // properties declined it, leaving the gate checking the base alone and
+    // accepting `{}` — which the schema rejects.
+    const { branches } = resolveRootUnion({
+      type: "object",
+      properties: { email: { type: "string" }, phone: { type: "string" } },
+      anyOf: [
+        { type: "object", required: ["email"] },
+        { type: "object", required: ["phone"] },
+      ],
+    });
+    expect(branches).toHaveLength(2);
+    expect(branches[0].schema.required).toEqual(["email"]);
+    expect(branches[1].schema.required).toEqual(["phone"]);
+  });
+
   describe("oneOf exclusivity", () => {
     it("offers a discriminated oneOf", () => {
       expect(

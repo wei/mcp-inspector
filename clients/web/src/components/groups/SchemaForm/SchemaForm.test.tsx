@@ -2344,6 +2344,7 @@ describe("SchemaForm multiline strings (#2042)", () => {
               a: { type: "string", title: "A" },
               version: { type: "string", const: "2" },
             },
+            required: ["version"],
           }}
           values={{}}
           onChange={onChange}
@@ -2402,6 +2403,7 @@ describe("SchemaForm multiline strings (#2042)", () => {
           kind: { type: "string", const: value },
           note: { type: "string", title: "Note" },
         },
+        required: ["kind"],
       });
       const { rerender } = renderWithMantine(
         <SchemaForm
