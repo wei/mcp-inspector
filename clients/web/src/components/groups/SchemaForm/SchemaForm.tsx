@@ -125,6 +125,20 @@ const TWO_ACTION_WIDTH = rem(
 // (#2138 review); a real Enter reports 13, so this cannot swallow one.
 const IME_KEY_CODE = 229;
 
+/**
+ * Length in Unicode code points, which is how JSON Schema counts `maxLength`
+ * (its characters are RFC 8259 characters, i.e. code points). `String.length`
+ * counts UTF-16 code units instead, so it double-counts anything astral: a
+ * field holding a single emoji reads as 2 and a `maxLength: 2` field would be
+ * treated as full when it has room for another character.
+ *
+ * Note the `maxLength` handed to the DOM input still enforces the HTML
+ * attribute's own UTF-16 counting; that predates this and is not changed here.
+ */
+function countCodePoints(value: string): number {
+  return Array.from(value).length;
+}
+
 function serializeJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
@@ -608,13 +622,18 @@ export function SchemaForm({
   // Where the caret goes when a field's text area mounts, for the fields
   // enlarged by Enter (#2138). Absent for a field enlarged by the button, which
   // carries no position — see EnlargedStringField.
+  // A Map rather than a plain object: the keys are field names straight out of
+  // a server's schema, and on a bare record a field legitimately named
+  // `constructor` or `toString` reads back an inherited function instead of
+  // `undefined` — which would then be handed to setSelectionRange in place of
+  // the documented end-of-value fallback.
   const [enlargeCarets, setEnlargeCarets] = useState<
-    Readonly<Record<string, number>>
-  >({});
+    ReadonlyMap<string, number>
+  >(() => new Map());
 
   useValueChange(resetKey, () => {
     setEnlargedFields(new Set());
-    setEnlargeCarets({});
+    setEnlargeCarets(new Map());
   });
 
   // Stable so a field's reporting effect subscribes once, not per render. The
@@ -737,7 +756,7 @@ export function SchemaForm({
           <EnlargedStringField
             key={fieldName}
             {...sharedProps}
-            caretAt={enlargeCarets[fieldName]}
+            caretAt={enlargeCarets.get(fieldName)}
             rightSectionWidth={ONE_ACTION_WIDTH}
             rightSection={clearButton}
           />
@@ -777,16 +796,15 @@ export function SchemaForm({
         const next = `${current.slice(0, start)}\n${current.slice(end)}`;
         const fits =
           fieldSchema.maxLength === undefined ||
-          next.length <= fieldSchema.maxLength;
+          countCodePoints(next) <= fieldSchema.maxLength;
         if (fits) handleFieldChange(fieldName, next);
         // The caret is recorded either way. The keyboard route always has a
         // real position, so dropping it when the newline does not fit would
         // send the caret to the end of a field the user was editing the middle
         // of — a second surprise on top of the newline they did not get.
-        setEnlargeCarets((previous) => ({
-          ...previous,
-          [fieldName]: fits ? start + 1 : start,
-        }));
+        setEnlargeCarets((previous) =>
+          new Map(previous).set(fieldName, fits ? start + 1 : start),
+        );
         enlarge();
       };
 

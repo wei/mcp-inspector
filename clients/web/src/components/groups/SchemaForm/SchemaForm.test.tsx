@@ -2286,6 +2286,58 @@ describe("SchemaForm enlarge keyboard access (#2138)", () => {
     expect(noteField().selectionStart).toBe(1);
   });
 
+  // JSON Schema counts maxLength in Unicode code points; String.length counts
+  // UTF-16 code units, so an emoji reads as 2 and a field with room left is
+  // treated as full (#2139 review).
+  it("counts maxLength in code points, not UTF-16 units", () => {
+    renderWithMantine(<SeededHarness maxLength={2} initial="😀" />);
+
+    noteField().setSelectionRange(2, 2);
+    fireEvent.keyDown(noteField(), { key: "Enter" });
+
+    // One emoji plus one newline is two characters, so it fits.
+    expect(noteField().value).toBe("😀\n");
+  });
+
+  // A field name that collides with something on Object.prototype must still
+  // take the documented end-of-value fallback when enlarged by pointer, rather
+  // than reading an inherited value off a bare record (#2139 review).
+  it("handles a field named after an Object.prototype member", async () => {
+    const user = userEvent.setup();
+
+    // Both halves are annotated rather than inlined. Under a `constructor` key
+    // the contextual type does not reach the nested literal, so `type: "string"`
+    // widens to `string` and fails to typecheck — the type-level echo of the
+    // very prototype collision this test is about.
+    const ctorField: InspectorFormSchema = { type: "string", title: "Ctor" };
+    const prototypeSchema: InspectorFormSchema = {
+      type: "object",
+      properties: { constructor: ctorField },
+    };
+
+    function PrototypeHarness() {
+      const [values, setValues] = useState<Record<string, unknown>>({
+        constructor: "abc",
+      });
+      return (
+        <SchemaForm
+          schema={prototypeSchema}
+          values={values}
+          onChange={setValues}
+        />
+      );
+    }
+
+    renderWithMantine(<PrototypeHarness />);
+    await user.click(screen.getByRole("button", { name: "Enlarge Ctor" }));
+
+    const field = screen.getByRole("textbox", {
+      name: /Ctor/,
+    }) as HTMLTextAreaElement;
+    expect(field.tagName).toBe("TEXTAREA");
+    expect(field.selectionStart).toBe("abc".length);
+  });
+
   // The control: the same seeded field with no maxLength does take the newline,
   // so the test above is showing the constraint at work rather than a field
   // that never accepts one.
