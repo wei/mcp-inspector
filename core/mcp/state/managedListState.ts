@@ -19,6 +19,7 @@ import type {
 } from "@modelcontextprotocol/client";
 import { isClientDecodeRejection } from "../listSalvage.js";
 import { isTerminalStatus } from "../types.js";
+import type { RequestMetadata } from "../types.js";
 import { TypedEventTarget } from "../typedEventTarget.js";
 
 /**
@@ -67,7 +68,7 @@ export interface ManagedListConfig<T, M extends ManagedListEventMap> {
   fetchAll: (
     client: InspectorClientProtocol,
     cacheMode: CacheMode | undefined,
-    metadata: Record<string, string> | undefined,
+    metadata: RequestMetadata | undefined,
   ) => Promise<T[]>;
   /**
    * Whether this list drives a list-changed indicator. When true, a
@@ -97,7 +98,7 @@ export abstract class ManagedListState<
   protected items: T[] = [];
   protected client: InspectorClientProtocol | null = null;
   private unsubscribe: (() => void) | null = null;
-  private _metadata: Record<string, string> | undefined = undefined;
+  private _metadata: RequestMetadata | undefined = undefined;
   private listChanged = false;
   // The last fetch's failure, kept as observable state so a load that fails
   // (a transport error, or a result the SDK codec rejects as invalid) is
@@ -282,7 +283,7 @@ export abstract class ManagedListState<
     this.emit("errorChange", value);
   }
 
-  setMetadata(metadata?: Record<string, string>): void {
+  setMetadata(metadata?: RequestMetadata): void {
     this._metadata = metadata;
   }
 
@@ -299,7 +300,7 @@ export abstract class ManagedListState<
    * the `list_changed` auto-refresh) catch it explicitly (#1953).
    */
   async refresh(
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
     cacheMode?: CacheMode,
   ): Promise<T[]> {
     let next: T[] | null;
@@ -336,7 +337,7 @@ export abstract class ManagedListState<
    * the console; empty list is the right semantics).
    */
   private async fetchItems(
-    metadata: Record<string, string> | undefined,
+    metadata: RequestMetadata | undefined,
     cacheMode: CacheMode | undefined,
   ): Promise<T[] | null> {
     const client = this.client;

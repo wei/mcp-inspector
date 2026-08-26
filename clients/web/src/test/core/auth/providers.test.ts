@@ -464,6 +464,125 @@ describe("OAuthNavigation", () => {
       expect(provider.clientMetadata.application_type).toBe("native");
     });
 
+    describe("requestRefreshToken (#2068)", () => {
+      function makeProviderWithRefresh(
+        requestRefreshToken: boolean | undefined,
+      ): BaseOAuthClientProvider {
+        return new BaseOAuthClientProvider(SERVER, {
+          storage: makeStorage(),
+          redirectUrlProvider: new MutableRedirectUrlProvider(),
+          navigation: new CallbackNavigation(vi.fn()),
+          requestRefreshToken,
+        });
+      }
+
+      it("declares the refresh_token grant by default", () => {
+        expect(makeProvider(makeStorage()).clientMetadata.grant_types).toEqual([
+          "authorization_code",
+          "refresh_token",
+        ]);
+      });
+
+      it("declares the refresh_token grant when explicitly enabled", () => {
+        expect(
+          makeProviderWithRefresh(true).clientMetadata.grant_types,
+        ).toEqual(["authorization_code", "refresh_token"]);
+      });
+
+      it("treats an omitted setting as enabled", () => {
+        expect(
+          makeProviderWithRefresh(undefined).clientMetadata.grant_types,
+        ).toEqual(["authorization_code", "refresh_token"]);
+      });
+
+      // The point of the opt-out: the SDK's determineScope() only appends
+      // `offline_access` when the client metadata declares `refresh_token`.
+      // This asserts our half — the grant list. That the authorize URL then
+      // carries neither `offline_access` nor `prompt=consent` is proved against
+      // a real AS in the e2e suite (inspectorClient-oauth-e2e.test.ts), since
+      // the SDK, not this array, is what ultimately writes that URL.
+      it("drops the refresh_token grant when disabled", () => {
+        expect(
+          makeProviderWithRefresh(false).clientMetadata.grant_types,
+        ).toEqual(["authorization_code"]);
+      });
+
+      // The regression that makes the opt-out actually work for a server that
+      // already authorized once. A successful default-on grant persists the
+      // AS-granted scope — `offline_access` included — and the provider reloads
+      // it here. Handing that straight back to the SDK puts the token in scope
+      // again, and `startAuthorization` appends `prompt=consent` off the scope
+      // alone, so the box would be unchecked and AADSTS90094 would persist.
+      describe("scope inherited from an earlier default-on grant", () => {
+        function makeProviderWithScopes(
+          storedScope: string,
+          configuredScope: string | undefined,
+          requestRefreshToken: boolean,
+        ): { provider: BaseOAuthClientProvider; storage: OAuthStorage } {
+          const storage = makeStorage();
+          vi.mocked(storage.getScope).mockResolvedValue(storedScope);
+          const provider = new BaseOAuthClientProvider(SERVER, {
+            storage,
+            redirectUrlProvider: new MutableRedirectUrlProvider(),
+            navigation: new CallbackNavigation(vi.fn()),
+            requestRefreshToken,
+            configuredScope,
+          });
+          return { provider, storage };
+        }
+
+        it("drops the inherited offline_access from the requested scope", async () => {
+          const { provider } = makeProviderWithScopes(
+            "mcp offline_access",
+            "mcp",
+            false,
+          );
+          await provider.prepareForAuth();
+
+          expect(provider.scope).toBe("mcp");
+          expect(provider.clientMetadata.scope).toBe("mcp");
+        });
+
+        it("honors an offline_access the user configured", async () => {
+          const { provider } = makeProviderWithScopes(
+            "mcp offline_access",
+            "mcp offline_access",
+            false,
+          );
+          await provider.prepareForAuth();
+
+          expect(provider.scope).toBe("mcp offline_access");
+        });
+
+        it("leaves the scope alone while the grant is declared", async () => {
+          const { provider } = makeProviderWithScopes(
+            "mcp offline_access",
+            "mcp",
+            true,
+          );
+          await provider.prepareForAuth();
+
+          expect(provider.scope).toBe("mcp offline_access");
+        });
+
+        // Filtered at the point of request, never in storage: re-checking the
+        // box must restore the previous behavior rather than find the value
+        // destroyed, and the persisted scope is also what scope-satisfaction
+        // checks read.
+        it("does not rewrite the persisted scope", async () => {
+          const { provider, storage } = makeProviderWithScopes(
+            "mcp offline_access",
+            "mcp",
+            false,
+          );
+          await provider.prepareForAuth();
+          void provider.scope;
+
+          expect(storage.saveScope).not.toHaveBeenCalled();
+        });
+      });
+    });
+
     describe("SEP-2352 issuer threading", () => {
       it("forwards ctx.issuer to storage on clientInformation/tokens reads", async () => {
         const storage = makeStorage();

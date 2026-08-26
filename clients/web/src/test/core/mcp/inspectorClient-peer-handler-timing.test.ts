@@ -854,7 +854,7 @@ describe("InspectorClient peer-handler timing (#1797)", () => {
         serverSettings: {
           headers: [],
           env: [],
-          metadata: [],
+          metadata: {},
           connectionTimeout: 0,
           requestTimeout: 0,
           taskTtl: 0,

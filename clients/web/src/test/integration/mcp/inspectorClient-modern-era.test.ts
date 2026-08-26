@@ -506,7 +506,7 @@ describe("modern-era negotiation (2026-07-28)", () => {
         versionNegotiation: eraToVersionNegotiation("modern"),
         serverSettings: {
           headers: [],
-          metadata: [],
+          metadata: {},
           env: [],
           connectionTimeout: 0,
           requestTimeout: 0,
@@ -535,7 +535,7 @@ describe("modern-era negotiation (2026-07-28)", () => {
         versionNegotiation: eraToVersionNegotiation("modern"),
         serverSettings: {
           headers: [],
-          metadata: [],
+          metadata: {},
           env: [],
           connectionTimeout: 0,
           requestTimeout: 0,
@@ -586,7 +586,7 @@ describe("modern-era negotiation (2026-07-28)", () => {
         versionNegotiation: eraToVersionNegotiation("modern"),
         serverSettings: {
           headers: [],
-          metadata: [],
+          metadata: {},
           env: [],
           connectionTimeout: 0,
           requestTimeout: 0,

@@ -16,53 +16,25 @@
  *
  * Expects `clients/launcher/build` and `clients/tui/build` to be built first
  * (the validate / CI ordering guarantees this). The bundled stdio test server
- * (`test-servers/build`) is built on demand here if missing.
+ * (`test-servers/build`) is rebuilt on every run — see
+ * `scripts/lib/ensure-test-servers.mjs` for why presence isn't freshness.
  */
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { mkdtempSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { removeSafe } from "./lib/child-cleanup.mjs";
-import { resolveNodeBin } from "./lib/resolve-node-bin.mjs";
+import { ensureTestServers } from "./lib/ensure-test-servers.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const launcher = join(repoRoot, "clients", "launcher", "build", "index.js");
-const testServer = join(
-  repoRoot,
-  "test-servers",
-  "build",
-  "test-server-stdio.js",
-);
 const RENDER_MARKER = "MCP Servers";
 const TIMEOUT_MS = Number(process.env.SMOKE_TUI_TIMEOUT_MS ?? 15000);
 
 function fail(message) {
   console.error(`smoke:tui FAILED — ${message}`);
   process.exit(1);
-}
-
-function ensureTestServer() {
-  if (existsSync(testServer)) return;
-  console.log("smoke:tui — building test-servers (missing build output)...");
-  // The root-installed tsc, run via this Node — `npx` is a `.cmd` shim on
-  // Windows that a shell-free spawnSync can't start (ENOENT — #1939).
-  const r = spawnSync(
-    process.execPath,
-    [
-      resolveNodeBin("typescript", "tsc", repoRoot),
-      "-p",
-      "test-servers",
-      "--noCheck",
-    ],
-    { cwd: repoRoot, stdio: "inherit" },
-  );
-  if (r.status !== 0 || !existsSync(testServer)) {
-    fail(
-      "could not build the stdio test server (test-servers/build/test-server-stdio.js). " +
-        "Run `npm run test-servers:build` from clients/cli.",
-    );
-  }
 }
 
 // The Ink TUI requires a real TTY for raw-mode keyboard input. Headless CI has
@@ -81,7 +53,17 @@ if (process.env.CI) {
 if (!existsSync(launcher)) {
   fail(`launcher build not found at ${launcher} — run \`npm run build\` first`);
 }
-ensureTestServer();
+// Rebuilt on every run — presence is not freshness (#2111).
+let testServer;
+try {
+  [testServer] = ensureTestServers({
+    repoRoot,
+    label: "smoke:tui",
+    requires: ["stdio"],
+  });
+} catch (e) {
+  fail(e.message);
+}
 
 const work = mkdtempSync(join(tmpdir(), "smoke-tui-"));
 const catalogPath = join(work, "catalog.json");

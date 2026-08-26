@@ -13,6 +13,8 @@ import {
   act,
 } from "./test/renderWithMantine";
 import userEvent from "@testing-library/user-event";
+import { AuthRecoveryRequiredError } from "@inspector/core/auth/challenge.js";
+import { RemoteOAuthStorage } from "@inspector/core/auth/remote/storage-remote.js";
 
 // Spy on the toast layer so the progress-notification tests can assert the
 // show/update calls without mounting Mantine's <Notifications/> portal.
@@ -48,18 +50,28 @@ const { messageLogClear } = vi.hoisted(() => ({ messageLogClear: vi.fn() }));
 vi.mock("@inspector/core/mcp/index.js", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("@inspector/core/mcp/index.js")>();
-  // When set, the next `connect()` rejects with this value (one-shot), so a test
-  // can exercise the handshake-failure path. Cleared after it fires.
-  let nextConnectRejection: unknown = null;
+  // Each armed value makes one `connect()` reject, in FIFO order, so a test can
+  // exercise the handshake-failure path — or a two-connect sequence such as the
+  // auth-recovery retry, where the first call rejects with the recovery error
+  // and the retry behind it fails too. A queue rather than a single slot: with
+  // one slot the second arming would overwrite the first, and the retry would
+  // silently succeed.
+  const connectRejections: unknown[] = [];
   // Same one-shot arming for the `/oauth/callback` token exchange, so a test can
   // exercise the callback-leg failure paths (#1808).
   let nextResumeRejection: unknown = null;
+  // And for `authenticate()`, the pre-redirect OAuth leg (discovery + DCR), so a
+  // test can exercise a failure there — the case that never reaches the "error"
+  // connection status (#2108).
+  let nextAuthenticateRejection: unknown = null;
+  // And for the auth-recovery challenge check, whose *rejection* is a distinct
+  // control-flow decision from its resolving `false` (#2108): a throw is
+  // surfaced as a failed attempt rather than falling through to the redirect.
+  let nextChallengeCheckRejection: unknown = null;
   class FakeInspectorClient extends EventTarget {
     connect = vi.fn(() => {
-      if (nextConnectRejection !== null) {
-        const err = nextConnectRejection;
-        nextConnectRejection = null;
-        return Promise.reject(err);
+      if (connectRejections.length > 0) {
+        return Promise.reject(connectRejections.shift());
       }
       return Promise.resolve(undefined);
     });
@@ -108,7 +120,22 @@ vi.mock("@inspector/core/mcp/index.js", async (importOriginal) => {
       }
       return Promise.resolve(undefined);
     });
-    checkAuthChallengeSatisfied = vi.fn().mockResolvedValue(true);
+    authenticate = vi.fn(() => {
+      if (nextAuthenticateRejection !== null) {
+        const err = nextAuthenticateRejection;
+        nextAuthenticateRejection = null;
+        return Promise.reject(err);
+      }
+      return Promise.resolve(undefined);
+    });
+    checkAuthChallengeSatisfied = vi.fn(() => {
+      if (nextChallengeCheckRejection !== null) {
+        const err = nextChallengeCheckRejection;
+        nextChallengeCheckRejection = null;
+        return Promise.reject(err);
+      }
+      return Promise.resolve(true);
+    });
     clearOAuthTokens = vi.fn().mockResolvedValue(undefined);
   }
   const instances: FakeInspectorClient[] = [];
@@ -122,12 +149,21 @@ vi.mock("@inspector/core/mcp/index.js", async (importOriginal) => {
     // Test-only handle so the test can grab the live instance and fire events.
     __clientInstances: instances,
     // Test-only: arm the next connect() to reject (handshake-failure path).
+    // Call it more than once to arm consecutive calls.
     __rejectNextConnect: (err: unknown) => {
-      nextConnectRejection = err;
+      connectRejections.push(err);
     },
     // Test-only: arm the next resumeAfterOAuth() to reject (callback-leg failure).
     __rejectNextResumeAfterOAuth: (err: unknown) => {
       nextResumeRejection = err;
+    },
+    // Test-only: arm the next authenticate() to reject (pre-redirect OAuth leg).
+    __rejectNextAuthenticate: (err: unknown) => {
+      nextAuthenticateRejection = err;
+    },
+    // Test-only: arm the next checkAuthChallengeSatisfied() to reject.
+    __rejectNextChallengeCheck: (err: unknown) => {
+      nextChallengeCheckRejection = err;
     },
   };
 });
@@ -220,16 +256,29 @@ const SERVER_A = {
 const { updateServerSettingsSpy } = vi.hoisted(() => ({
   updateServerSettingsSpy: vi.fn(() => Promise.resolve()),
 }));
+
+// Same idea for the edit-modal rename path (#1914): the test needs to make the
+// PUT's *reload* fail, which only a spy it controls can do.
+const { updateServerSpy, addServerSpy } = vi.hoisted(() => ({
+  updateServerSpy: vi.fn(() => Promise.resolve()),
+  addServerSpy: vi.fn(() => Promise.resolve()),
+}));
 // Stable spy for the tools list-changed acknowledgement, so a test can assert
 // the paginated Refresh clears the indicator (#1721).
 const { clearToolsListChangedSpy } = vi.hoisted(() => ({
   clearToolsListChangedSpy: vi.fn(),
 }));
-vi.mock("@inspector/core/react/useServers.js", () => ({
+vi.mock("@inspector/core/react/useServers.js", async (importOriginal) => ({
+  // `ServerListReloadError` is a real class the pagination toggle branches on
+  // with `instanceof`, so it must be the genuine one — a stub would make the
+  // check vacuously false and the #1914 branch untestable (#1914 review r1).
+  ...(await importOriginal<
+    typeof import("@inspector/core/react/useServers.js")
+  >()),
   useServers: vi.fn(() => ({
     servers: [SERVER_A],
-    addServer: vi.fn(),
-    updateServer: vi.fn(),
+    addServer: addServerSpy,
+    updateServer: updateServerSpy,
     updateServerSettings: updateServerSettingsSpy,
     removeServer: vi.fn(),
   })),
@@ -355,6 +404,47 @@ vi.mock("@inspector/core/react/useSettingsDraft.js", () => ({
   })),
 }));
 
+// --- App bridge factory spy (#2055) -----------------------------------------
+// Passes through to the real factory but records the deps App hands it, so a
+// test can drive `getListedResourceMeta` — the wiring that carries a
+// `resources/list` entry's `_meta.ui` into the sandbox CSP. Without this the
+// bridge-factory unit tests would still pass while App stopped supplying it.
+const appBridgeFactoryDeps: AppBridgeFactoryDeps[] = [];
+vi.mock(
+  "./components/elements/AppRenderer/createAppBridgeFactory",
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import("./components/elements/AppRenderer/createAppBridgeFactory")
+      >();
+    return {
+      ...actual,
+      createAppBridgeFactory: (deps: AppBridgeFactoryDeps) => {
+        appBridgeFactoryDeps.push(deps);
+        return actual.createAppBridgeFactory(deps);
+      },
+    };
+  },
+);
+
+// --- publishAppDocument spy (#2056) -----------------------------------------
+// The dedicated-origin publisher App hands both bridge factories. Mocked at the
+// module so a test can assert the wiring is live — the factory's own tests
+// inject the dep and cannot see App failing to supply it.
+const publishAppDocumentMock =
+  vi.fn<
+    (
+      doc: { html: string; csp?: string },
+      opts: { baseUrl: string; authToken?: string },
+    ) => Promise<string | null>
+  >();
+vi.mock("./lib/publishAppDocument", () => ({
+  publishAppDocument: (
+    doc: { html: string; csp?: string },
+    opts: { baseUrl: string; authToken?: string },
+  ) => publishAppDocumentMock(doc, opts),
+}));
+
 // --- InspectorView double ---------------------------------------------------
 // Surfaces each piece of session-scoped state under test and exposes buttons
 // that invoke the App's connect / call-tool / get-prompt / read-resource /
@@ -378,6 +468,7 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
     readResourceState?: { status?: string };
     currentLogLevel?: string;
     activeTab?: string;
+    activeServer?: string;
     erroredServerId?: string;
     initializeResult?: { serverInfo: { name: string; version: string } };
     onActiveTabChange: (tab: string) => void;
@@ -412,6 +503,9 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
     onClearCompletedTasks: () => void;
     onRefreshTasks: () => void;
     onServerSettings: (id: string) => void;
+    onServerEdit: (id: string) => void;
+    onServerAdd: () => void;
+    highlightedServerIds?: string[];
     onClearProtocol: () => void;
     onReplayProtocol: (id: string) => void;
     onTogglePinProtocol: (id: string) => void;
@@ -456,10 +550,13 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
       <span data-testid="errored-server">
         {props.erroredServerId ?? "none"}
       </span>
+      <span data-testid="active-server">{props.activeServer ?? "none"}</span>
       <button onClick={() => props.onActiveTabChange("Servers")}>
         switch-servers-tab
       </button>
       <button onClick={() => props.onToggleConnection("A")}>connect</button>
+      {/* A second target, so a test can drive an A -> B -> A switch (#2095). */}
+      <button onClick={() => props.onToggleConnection("B")}>connect-b</button>
       <button onClick={() => props.onConnectionInfo()}>
         open-connection-info
       </button>
@@ -537,6 +634,14 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
       </button>
       <button onClick={() => props.onSetLogLevel("debug")}>set-level</button>
       <button onClick={() => props.onServerSettings("A")}>open-settings</button>
+      {/* The real server grid (and its Add / Edit controls) lives inside this
+          mocked view, so the config modal is only reachable through these
+          callbacks — and the highlight batch only observable through this prop. */}
+      <button onClick={() => props.onServerEdit("A")}>edit-server</button>
+      <button onClick={() => props.onServerAdd()}>add-server</button>
+      <span data-testid="highlighted-servers">
+        {(props.highlightedServerIds ?? []).join(",") || "none"}
+      </span>
       <span data-testid="pinned-history">
         {Array.from(props.pinnedProtocolIds ?? []).join(",")}
       </span>
@@ -584,12 +689,20 @@ import { usePagedTools } from "@inspector/core/react/usePagedTools.js";
 import { useMessageLog } from "@inspector/core/react/useMessageLog.js";
 import { useInspectorClient } from "@inspector/core/react/useInspectorClient.js";
 import { useSettingsDraft } from "@inspector/core/react/useSettingsDraft.js";
-import { useServers } from "@inspector/core/react/useServers.js";
+import {
+  ServerListReloadError,
+  useServers,
+} from "@inspector/core/react/useServers.js";
 import type {
+  InspectorClientOptions,
   InspectorServerSettings,
   MessageEntry,
   ServerEntry,
 } from "@inspector/core/mcp/types.js";
+import type { AppBridgeFactoryDeps } from "./components/elements/AppRenderer/createAppBridgeFactory";
+import { useManagedResources } from "@inspector/core/react/useManagedResources.js";
+import type { UseManagedResourcesResult } from "@inspector/core/react/useManagedResources.js";
+import type { Resource } from "@modelcontextprotocol/client";
 
 // Default useInspectorClient return — capabilities empty (no task tool calls).
 // Individual tests override via vi.mocked(...).mockReturnValue(...).
@@ -610,19 +723,142 @@ const clientInstances = (
   McpIndex as unknown as { __clientInstances: EventTarget[] }
 ).__clientInstances;
 
-const rejectNextConnect = (
-  McpIndex as unknown as { __rejectNextConnect: (err: unknown) => void }
-).__rejectNextConnect;
+// The mock factory adds four test-only arming hooks to the module namespace.
+// Intersecting with `typeof McpIndex` keeps the real module's shape checked and
+// narrows this to a single cast — `as unknown as` would discard the former and
+// is what AGENTS.md rules out.
+type ArmingHooks = typeof McpIndex & {
+  __rejectNextConnect: (err: unknown) => void;
+  __rejectNextResumeAfterOAuth: (err: unknown) => void;
+  __rejectNextAuthenticate: (err: unknown) => void;
+  __rejectNextChallengeCheck: (err: unknown) => void;
+};
 
-const rejectNextResumeAfterOAuth = (
-  McpIndex as unknown as {
-    __rejectNextResumeAfterOAuth: (err: unknown) => void;
-  }
-).__rejectNextResumeAfterOAuth;
+const { __rejectNextConnect: rejectNextConnect } = McpIndex as ArmingHooks;
+const { __rejectNextResumeAfterOAuth: rejectNextResumeAfterOAuth } =
+  McpIndex as ArmingHooks;
+const { __rejectNextAuthenticate: rejectNextAuthenticate } =
+  McpIndex as ArmingHooks;
+const { __rejectNextChallengeCheck: rejectNextChallengeCheck } =
+  McpIndex as ArmingHooks;
 
 const fetchLogInstances = (
   FetchLogModule as unknown as { __fetchLogInstances: EventTarget[] }
 ).__fetchLogInstances;
+
+// #2068 — the web connection seam for the refresh-token opt-out. The provider
+// and manager tests start from an already-built OAuth config and the runner test
+// covers only the CLI/TUI leg, so without this case deleting the
+// `requestRefreshToken` spread from App's `oauthFromServer` would leave the
+// checkbox persisted but inert with every other new test still green.
+describe("App wires the refresh-token opt-out into the client (#2068)", () => {
+  // Fully-typed fixtures rather than a cast: `settings` is the whole
+  // `InspectorServerSettings`, so a field added to that interface later is a
+  // compile error here instead of a silently-absent value at runtime.
+  const HTTP_SERVER: ServerEntry = {
+    id: "A",
+    name: "PlotRocket",
+    config: { type: "streamable-http", url: "https://api.example.com/mcp" },
+    connection: { status: "disconnected" },
+  };
+
+  const BASE_SETTINGS: InspectorServerSettings = {
+    headers: [],
+    env: [],
+    metadata: {},
+    connectionTimeout: 0,
+    requestTimeout: 0,
+    taskTtl: 60000,
+    maxFetchRequests: 1000,
+    roots: [],
+  };
+
+  function mockServersWith(overrides?: Partial<InspectorServerSettings>) {
+    vi.mocked(useServers).mockReturnValue({
+      servers: [
+        {
+          ...HTTP_SERVER,
+          ...(overrides
+            ? { settings: { ...BASE_SETTINGS, ...overrides } }
+            : {}),
+        },
+      ],
+      loading: false,
+      error: undefined,
+      refresh: vi.fn().mockResolvedValue(undefined),
+      addServer: addServerSpy,
+      updateServer: updateServerSpy,
+      updateServerSettings: updateServerSettingsSpy,
+      removeServer: vi.fn(),
+      reorderServers: vi.fn(),
+      importSource: vi.fn().mockResolvedValue({ servers: {} }),
+    });
+  }
+
+  /**
+   * The `oauth` option the mocked InspectorClient constructor was given. Read
+   * through the constructor's own parameter type, so a rename of the option
+   * fails to compile here rather than silently reading `undefined`.
+   */
+  function constructedOAuth(): InspectorClientOptions["oauth"] {
+    return vi.mocked(McpIndex.InspectorClient).mock.calls[0]?.[1]?.oauth;
+  }
+
+  let previousUseServers: typeof useServers | undefined;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clientInstances.length = 0;
+    previousUseServers = vi.mocked(useServers).getMockImplementation();
+    vi.mocked(useInspectorClient).mockReturnValue(DEFAULT_USE_INSPECTOR_CLIENT);
+  });
+
+  afterEach(() => {
+    if (previousUseServers) {
+      vi.mocked(useServers).mockImplementation(previousUseServers);
+    }
+  });
+
+  it("passes requestRefreshToken: false when the server opted out", async () => {
+    const user = userEvent.setup();
+    mockServersWith({ oauthRequestRefreshToken: false });
+    renderWithMantine(<App />);
+
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    expect(constructedOAuth()?.requestRefreshToken).toBe(false);
+  });
+
+  // The default must not send the key at all — the provider's own default is
+  // what declares the grant, and a stray `true` here would mask its removal.
+  it("omits requestRefreshToken when the setting is on", async () => {
+    const user = userEvent.setup();
+    mockServersWith({ oauthScopes: "openid" });
+    renderWithMantine(<App />);
+
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    const oauth = constructedOAuth();
+    expect(oauth).toBeDefined();
+    expect(oauth).not.toHaveProperty("requestRefreshToken");
+  });
+
+  // The opt-out is the only OAuth field set, so it must be enough on its own to
+  // materialize the `oauth` option — otherwise it is dropped for any server
+  // without credentials or scopes, which is the common case here.
+  it("builds the oauth option from the opt-out alone", async () => {
+    const user = userEvent.setup();
+    mockServersWith({ oauthRequestRefreshToken: false });
+    renderWithMantine(<App />);
+
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    expect(constructedOAuth()).toEqual({ requestRefreshToken: false });
+  });
+});
 
 describe("App failed-connection card border (#1621)", () => {
   beforeEach(() => {
@@ -642,6 +878,101 @@ describe("App failed-connection card border (#1621)", () => {
     await waitFor(() =>
       expect(screen.getByTestId("errored-server")).toHaveTextContent("A"),
     );
+  });
+
+  // An OAuth leg that fails never reaches the `"error"` connection status — the
+  // handler tears the client down, leaving the session `"disconnected"` — so the
+  // flag is the only signal downstream that a connect attempt died. Without it
+  // the monitoring sidebar stays shut on exactly the failure the Network tab
+  // exists to explain (#2108).
+  it("flags the server when the OAuth authorization leg fails (#2108)", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+    expect(screen.getByTestId("errored-server")).toHaveTextContent("none");
+
+    // 401 from the server -> App starts the authorization-code flow, whose
+    // discovery/DCR round-trip then fails (e.g. an invalid
+    // `/.well-known/oauth-authorization-server`).
+    rejectNextConnect(Object.assign(new Error("HTTP 401"), { status: 401 }));
+    rejectNextAuthenticate(new Error("discovery failed"));
+    await user.click(screen.getByText("connect"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("errored-server")).toHaveTextContent("A"),
+    );
+    expect(notificationsMock.show).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: expect.stringContaining("OAuth authorization failed"),
+      }),
+    );
+  });
+
+  // The auth-recovery arm re-connects from inside the outer `catch`, so before
+  // #2108 a rejection there escaped `onToggleConnection` entirely as an
+  // unhandled rejection: no toast, no red border, no sidebar.
+  it("flags the server when the satisfied-challenge retry fails (#2108)", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+
+    // First connect asks for recovery; the fake reports the challenge already
+    // satisfied, so App retries the connect — and that retry fails.
+    rejectNextConnect(
+      new AuthRecoveryRequiredError(
+        new URL("https://as.example.com/authorize"),
+        {
+          reason: "unauthorized",
+        },
+      ),
+    );
+    rejectNextConnect(new Error("handshake failed after re-authorization"));
+    await user.click(screen.getByText("connect"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("errored-server")).toHaveTextContent("A"),
+    );
+    expect(notificationsMock.show).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: expect.stringContaining("Failed to connect"),
+      }),
+    );
+  });
+
+  // The other half of the guarded arm. A *rejecting* challenge check is not the
+  // same as one that resolves `false`: the latter means "re-authorize", the
+  // former means the check itself broke, so it is surfaced rather than used as
+  // grounds to navigate the whole page to the auth server.
+  it("surfaces a rejecting challenge check instead of redirecting (#2108)", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+
+    rejectNextConnect(
+      new AuthRecoveryRequiredError(
+        new URL("https://as.example.com/authorize"),
+        { reason: "unauthorized" },
+      ),
+    );
+    rejectNextChallengeCheck(new Error("challenge check failed"));
+    await user.click(screen.getByText("connect"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("errored-server")).toHaveTextContent("A"),
+    );
+    expect(notificationsMock.show).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: expect.stringContaining("Failed to connect"),
+        message: "challenge check failed",
+      }),
+    );
+    // No redirect was prepared: `prepareOAuthRedirect` persists a resume
+    // snapshot before navigating, and nothing wrote one.
+    expect(readOAuthResumeSnapshot()).toBeUndefined();
+    // And the attempt was ended. The outer connect rejected with an
+    // auth-recovery error, which holds the status at "connecting", so without
+    // an explicit teardown here the toggle would spin forever.
+    const client = clientInstances[0] as EventTarget & {
+      disconnect: ReturnType<typeof vi.fn>;
+    };
+    expect(client.disconnect).toHaveBeenCalled();
   });
 
   it("clears the flag when a new connection attempt starts", async () => {
@@ -1628,6 +1959,9 @@ describe("App task wiring", () => {
 type RootsFakeClient = EventTarget & {
   setRoots: ReturnType<typeof vi.fn>;
   getRoots: ReturnType<typeof vi.fn>;
+  // Close also pushes the settings it decided to apply, which is what the
+  // failed-save case asserts on (#2089).
+  setServerSettings: ReturnType<typeof vi.fn>;
 };
 
 const settingsWithRoots = (
@@ -1635,7 +1969,7 @@ const settingsWithRoots = (
 ): InspectorServerSettings => ({
   headers: [],
   env: [],
-  metadata: [],
+  metadata: {},
   connectionTimeout: 0,
   requestTimeout: 0,
   taskTtl: 60000,
@@ -1717,6 +2051,99 @@ describe("App roots live-apply on settings-dialog close", () => {
       expect(screen.queryByText("Server Settings")).not.toBeInTheDocument(),
     );
     expect(client.setRoots).not.toHaveBeenCalled();
+  });
+
+  it("applies the last persisted settings on close after a save failed (#2089)", async () => {
+    // `useSettingsDraft` keeps the draft when a save rejects, so closing the
+    // modal would push a value that never reached disk into the live client —
+    // undoing the rollback that reported the failure. Close has to apply what
+    // landed instead.
+    const user = userEvent.setup();
+    updateServerSettingsSpy.mockClear();
+    const failedDraft: InspectorServerSettings = {
+      ...settingsWithRoots([{ uri: "file:///rejected" }]),
+      paginatedLists: true,
+    };
+    const client = await openSettingsForConnectedServer(failedDraft);
+    client.getRoots.mockReturnValue([]);
+
+    const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+    if (!draftOptions) throw new Error("useSettingsDraft was never called");
+    // One save lands, so the tracker has an account of disk…
+    const persistedSettings: InspectorServerSettings = {
+      ...settingsWithRoots([]),
+      paginatedLists: false,
+    };
+    await act(async () => {
+      await draftOptions.onPersist("A", persistedSettings);
+    });
+    // …then the next one rejects, leaving the draft holding an unsaved edit.
+    updateServerSettingsSpy.mockRejectedValueOnce(new Error("disk full"));
+    await act(async () => {
+      await draftOptions.onPersist("A", failedDraft).catch(() => undefined);
+    });
+    client.setServerSettings.mockClear();
+
+    await closeModal(user);
+
+    await waitFor(() => expect(client.setServerSettings).toHaveBeenCalled());
+    expect(client.setServerSettings).toHaveBeenLastCalledWith(
+      persistedSettings,
+    );
+    // …and the rejected roots edit is not advertised either.
+    expect(client.setRoots).not.toHaveBeenCalled();
+  });
+
+  it("restores the roots and log size too when a flushed save rejects (#2089)", async () => {
+    // Close flushes a pending save and live-applies the draft immediately —
+    // roots and the Network log size, not just the settings object. If that
+    // save then rejects, reconciling only `setServerSettings` would leave the
+    // server advertising roots that were never persisted.
+    const user = userEvent.setup();
+    updateServerSettingsSpy.mockClear();
+    const rejectedDraft: InspectorServerSettings = {
+      ...settingsWithRoots([{ uri: "file:///rejected" }]),
+      maxFetchRequests: 10,
+    };
+    const client = await openSettingsForConnectedServer(rejectedDraft);
+    client.getRoots.mockReturnValue([]);
+
+    const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+    if (!draftOptions) throw new Error("useSettingsDraft was never called");
+    const persistedSettings = settingsWithRoots([]);
+    await act(async () => {
+      await draftOptions.onPersist("A", persistedSettings);
+    });
+
+    // Close applies the draft live — the state the flush leaves behind.
+    const fetchLog = fetchLogInstances.at(-1) as EventTarget & {
+      setMaxFetchRequests: ReturnType<typeof vi.fn>;
+    };
+    await closeModal(user);
+    await waitFor(() =>
+      expect(client.setRoots).toHaveBeenCalledWith([
+        { uri: "file:///rejected" },
+      ]),
+    );
+    expect(fetchLog.setMaxFetchRequests).toHaveBeenLastCalledWith(10);
+    client.getRoots.mockReturnValue([{ uri: "file:///rejected" }]);
+    client.setRoots.mockClear();
+
+    // …and only now does the flushed save reject.
+    updateServerSettingsSpy.mockRejectedValueOnce(new Error("disk full"));
+    await act(async () => {
+      await draftOptions.onPersist("A", rejectedDraft).catch(() => undefined);
+    });
+
+    // The whole live surface goes back to what landed — settings, roots, and
+    // the log size, each of which close had moved to the rejected draft.
+    await waitFor(() => expect(client.setRoots).toHaveBeenCalledWith([]));
+    expect(client.setServerSettings).toHaveBeenLastCalledWith(
+      persistedSettings,
+    );
+    expect(fetchLog.setMaxFetchRequests).toHaveBeenLastCalledWith(
+      persistedSettings.maxFetchRequests,
+    );
   });
 });
 
@@ -2286,6 +2713,92 @@ describe("App OAuth callback issuer-binding failures (#1808)", () => {
     expect(screen.queryByText("Re-authentication required")).toBeNull();
   });
 
+  // The callback leg is a connect attempt too, so a failure there must flag the
+  // server — that is what opens the monitoring sidebar onto the OAuth requests
+  // (discovery, DCR and the token exchange, restored from the pre-redirect
+  // session) rather than leaving the user with only a banner (#2108).
+  it("flags the server when the callback leg fails (#2108)", async () => {
+    renderCallbackWithFailure(new Error("token exchange rejected"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("errored-server")).toHaveTextContent("A"),
+    );
+    // The active server is deliberately retained. "Authorize again" on the
+    // re-auth banner only hands `clearServerOAuthState` the live client when
+    // the banner's server is the active one, so releasing it here would leave
+    // the stale tokens on the client that holds them. Asserted so a later
+    // "cleanup" of the apparent leak fails here rather than silently breaking
+    // the recovery.
+    expect(screen.getByTestId("active-server")).toHaveTextContent("A");
+    // The teardown still runs, for the case where the reconnect is what
+    // rejected and the status really is left at "connecting".
+    const client = clientInstances[0] as EventTarget & {
+      disconnect: ReturnType<typeof vi.fn>;
+    };
+    await waitFor(() => expect(client.disconnect).toHaveBeenCalled());
+  });
+
+  // The callback leg can also die before the token exchange, if the persisted
+  // OAuth state cannot be read back at all. Spied on the prototype rather than
+  // mocked at the module, so every other test keeps the real storage.
+  it("flags the server when the OAuth storage fails to load (#2108)", async () => {
+    const loadSpy = vi
+      .spyOn(RemoteOAuthStorage.prototype, "load")
+      .mockRejectedValueOnce(new Error("storage unavailable"));
+    try {
+      writeOAuthResumeSnapshot({
+        version: 1,
+        serverId: "A",
+        activeTab: "Tools",
+        authKind: "reauth",
+        tabUi: {},
+      });
+      window.history.replaceState({}, "", `${OAUTH_CALLBACK_PATH}?code=test`);
+      renderWithMantine(<App />);
+
+      await waitFor(() =>
+        expect(screen.getByTestId("errored-server")).toHaveTextContent("A"),
+      );
+      // Red border only, by design: this arm returns before a client is built,
+      // so nothing restores the Network log — and a failed local read of
+      // `oauth.json` would not be in it anyway.
+      expect(
+        await screen.findByText(/storage unavailable/),
+      ).toBeInTheDocument();
+    } finally {
+      loadSpy.mockRestore();
+    }
+  });
+
+  // The other callback arm: the provider redirected back with an error instead
+  // of a code, so no token exchange is even attempted. Still a connect attempt
+  // that failed, so the server carries the same flag (#2108).
+  //
+  // The flag is deliberately all this asserts. That arm returns before a client
+  // is rebuilt, so no Network entries are restored and the content-gated column
+  // stays shut — which is right here: the provider's `error` param is the whole
+  // diagnostic and the re-auth banner is already showing it. Asserting a
+  // sidebar would be asserting behavior this arm should not have.
+  it("flags the server when the provider returns an error to the callback (#2108)", async () => {
+    writeOAuthResumeSnapshot({
+      version: 1,
+      serverId: "A",
+      activeTab: "Tools",
+      authKind: "reauth",
+      tabUi: {},
+    });
+    window.history.replaceState(
+      {},
+      "",
+      `${OAUTH_CALLBACK_PATH}?error=access_denied`,
+    );
+    renderWithMantine(<App />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("errored-server")).toHaveTextContent("A"),
+    );
+  });
+
   it("clears the stale OAuth state and reconnects when the affordance is used", async () => {
     const user = userEvent.setup();
     renderCallbackWithFailure(
@@ -2422,6 +2935,836 @@ describe("App paginated list pagination toggle (#1721)", () => {
       paginatedLists?: boolean;
     };
     expect(lastPush?.paginatedLists).toBeFalsy();
+  });
+
+  it("rolls back to the last write that landed, not to a stale list entry (#2089)", async () => {
+    // Two toggles. The first PUT lands but the list reload behind it fails, so
+    // the `servers` entry keeps describing disk as it was *before* it — which
+    // this suite models exactly, because `useServers` is mocked to return the
+    // same entry forever. The second PUT fails outright and rolls back.
+    //
+    // Reverting to the `servers` entry there lands on `false`, the value from
+    // before the first toggle, contradicting what is on disk. The baseline has
+    // to come from the write that landed instead.
+    //
+    // One failed toggle cannot distinguish the two baselines — they only differ
+    // once a write has landed that the list never caught up with — so the test
+    // needs the full sequence.
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    await user.click(screen.getByText("paginated-on"));
+    await waitFor(() =>
+      expect(updateServerSettingsSpy).toHaveBeenCalledWith(
+        "A",
+        expect.objectContaining({ paginatedLists: true }),
+      ),
+    );
+
+    updateServerSettingsSpy.mockRejectedValueOnce(new Error("disk full"));
+    await user.click(screen.getByText("paginated-off"));
+
+    // Back to the value the first toggle put on disk, not to the pre-toggle one.
+    await waitFor(() =>
+      expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true"),
+    );
+    const client = clientInstances[0] as EventTarget & {
+      setServerSettings: ReturnType<typeof vi.fn>;
+    };
+    const lastPush = client.setServerSettings.mock.calls.at(-1)?.[0] as {
+      paginatedLists?: boolean;
+    };
+    expect(lastPush?.paginatedLists).toBe(true);
+  });
+
+  it("rolls back to a write that landed while this one was in flight (#2089)", async () => {
+    // Overlapping toggles. The baseline cannot be captured when a write is
+    // issued: toggle 1 is still in flight when toggle 2 reads it, so toggle 2
+    // would close over `false` — and by the time toggle 2 fails, toggle 1 has
+    // landed `true` on disk. Rolling back to the captured value contradicts
+    // disk exactly as the stale-list case does; the baseline has to be resolved
+    // at failure time. The two writes are driven by deferred promises so the
+    // order — issue 1, issue 2, land 1, fail 2 — is exact rather than timed.
+    const user = userEvent.setup();
+    let landFirst: (() => void) | undefined;
+    let failSecond: ((err: Error) => void) | undefined;
+    const first = new Promise<void>((resolve) => {
+      landFirst = resolve;
+    });
+    const second = new Promise<void>((_resolve, reject) => {
+      failSecond = (err) => {
+        reject(err);
+      };
+    });
+    updateServerSettingsSpy
+      .mockImplementationOnce(() => first)
+      .mockImplementationOnce(() => second);
+
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    await user.click(screen.getByText("paginated-on"));
+    await user.click(screen.getByText("paginated-off"));
+    await waitFor(() =>
+      expect(updateServerSettingsSpy).toHaveBeenCalledTimes(2),
+    );
+
+    await act(async () => {
+      landFirst?.();
+      await first;
+    });
+    await act(async () => {
+      failSecond?.(new Error("disk full"));
+      await second.catch(() => undefined);
+    });
+
+    // `true` is what the landed write put on disk — not the `false` the second
+    // toggle read before it got there.
+    await waitFor(() =>
+      expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true"),
+    );
+    const client = clientInstances[0] as EventTarget & {
+      setServerSettings: ReturnType<typeof vi.fn>;
+    };
+    const lastPush = client.setServerSettings.mock.calls.at(-1)?.[0] as {
+      paginatedLists?: boolean;
+    };
+    expect(lastPush?.paginatedLists).toBe(true);
+  });
+
+  it("re-applies a write that lands after an overlapping one failed (#2089)", async () => {
+    // The mirror of the test above, in the other settlement order: toggle 1
+    // (`true`) is still in flight when toggle 2 (`false`) fails, so the rollback
+    // resolves to the stale entry's `false` — correct at that instant, since
+    // nothing had landed. Toggle 1 then lands `true`. If its list reload failed
+    // too, no render will ever correct the UI, so the write that settles has to
+    // re-apply itself.
+    const user = userEvent.setup();
+    let landFirst: (() => void) | undefined;
+    let failSecond: ((err: Error) => void) | undefined;
+    const first = new Promise<void>((resolve) => {
+      landFirst = resolve;
+    });
+    const second = new Promise<void>((_resolve, reject) => {
+      failSecond = (err) => {
+        reject(err);
+      };
+    });
+    updateServerSettingsSpy
+      .mockImplementationOnce(() => first)
+      .mockImplementationOnce(() => second);
+
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    await user.click(screen.getByText("paginated-on"));
+    await user.click(screen.getByText("paginated-off"));
+    await waitFor(() =>
+      expect(updateServerSettingsSpy).toHaveBeenCalledTimes(2),
+    );
+
+    // Fail the second write first, then land the first.
+    await act(async () => {
+      failSecond?.(new Error("disk full"));
+      await second.catch(() => undefined);
+    });
+    expect(screen.getByTestId("tools-paginated")).toHaveTextContent("false");
+    await act(async () => {
+      landFirst?.();
+      await first;
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true"),
+    );
+    const client = clientInstances[0] as EventTarget & {
+      setServerSettings: ReturnType<typeof vi.fn>;
+    };
+    const lastPush = client.setServerSettings.mock.calls.at(-1)?.[0] as {
+      paginatedLists?: boolean;
+    };
+    expect(lastPush?.paginatedLists).toBe(true);
+  });
+
+  it("re-applies a settled modal save after a toggle failed first (#2089)", async () => {
+    // The mixed-writer version of the order above: the modal's flush is in
+    // flight with `paginatedLists: true` when the sidebar toggle fails and
+    // rolls back to the stale entry's `false`. The modal save then lands, so it
+    // is the settled state — and it has to re-apply itself for the same reason
+    // the toggle does, or disk holds `true` while the UI and the live client
+    // sit on `false`.
+    const user = userEvent.setup();
+    let landModal: (() => void) | undefined;
+    const modalWrite = new Promise<void>((resolve) => {
+      landModal = resolve;
+    });
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+    if (!draftOptions) throw new Error("useSettingsDraft was never called");
+    updateServerSettingsSpy.mockImplementationOnce(() => modalWrite);
+    const persisted = draftOptions.onPersist("A", {
+      ...settingsWithRoots([]),
+      paginatedLists: true,
+    });
+
+    updateServerSettingsSpy.mockRejectedValueOnce(new Error("disk full"));
+    await user.click(screen.getByText("paginated-off"));
+    await waitFor(() =>
+      expect(screen.getByTestId("tools-paginated")).toHaveTextContent("false"),
+    );
+
+    await act(async () => {
+      landModal?.();
+      await persisted;
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true"),
+    );
+    const client = clientInstances[0] as EventTarget & {
+      setServerSettings: ReturnType<typeof vi.fn>;
+    };
+    const lastPush = client.setServerSettings.mock.calls.at(-1)?.[0] as {
+      paginatedLists?: boolean;
+    };
+    expect(lastPush?.paginatedLists).toBe(true);
+  });
+
+  it("applies a settled write to the current client, not the one it started on (#2089)", async () => {
+    // A write can outlive a disconnect/reconnect to the *same* server: the id
+    // guard still passes, but the client captured when the write was issued has
+    // been destroyed and replaced by one built from the stale list entry. The
+    // settled value has to reach the live instance.
+    const user = userEvent.setup();
+    let landWrite: (() => void) | undefined;
+    const write = new Promise<void>((resolve) => {
+      landWrite = resolve;
+    });
+    updateServerSettingsSpy.mockImplementationOnce(() => write);
+
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    await user.click(screen.getByText("paginated-on"));
+    // Reconnect to the same server while that write is in flight. The transport
+    // drops, then the user reconnects — and `onToggleConnection` always
+    // rebuilds the client so the latest saved settings are picked up.
+    act(() => {
+      clientInstances[0].dispatchEvent(new Event("disconnect"));
+    });
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(2));
+    const replacement = clientInstances[1] as EventTarget & {
+      setServerSettings: ReturnType<typeof vi.fn>;
+    };
+    replacement.setServerSettings.mockClear();
+
+    await act(async () => {
+      landWrite?.();
+      await write;
+    });
+
+    await waitFor(() =>
+      expect(replacement.setServerSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ paginatedLists: true }),
+      ),
+    );
+  });
+
+  it("reconciles after a modal save fails onto a write that landed first (#2089)", async () => {
+    // Reverse of the mixed-writer case above: the toggle lands while the modal
+    // save is still pending, so it is told it is not settled and applies
+    // nothing. The modal save then fails, which makes the toggle's value the
+    // account of disk — and nothing else is left to apply it.
+    const user = userEvent.setup();
+    let failModal: ((err: Error) => void) | undefined;
+    const modalWrite = new Promise<void>((_resolve, reject) => {
+      failModal = (err) => {
+        reject(err);
+      };
+    });
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+    if (!draftOptions) throw new Error("useSettingsDraft was never called");
+    updateServerSettingsSpy.mockImplementationOnce(() => modalWrite);
+    const persisted = draftOptions
+      .onPersist("A", { ...settingsWithRoots([]), paginatedLists: false })
+      .catch(() => undefined);
+
+    // The toggle lands `true` while the modal save is still in flight.
+    await user.click(screen.getByText("paginated-on"));
+    await waitFor(() =>
+      expect(updateServerSettingsSpy).toHaveBeenCalledTimes(2),
+    );
+    const client = clientInstances[0] as EventTarget & {
+      setServerSettings: ReturnType<typeof vi.fn>;
+    };
+    client.setServerSettings.mockClear();
+
+    await act(async () => {
+      failModal?.(new Error("disk full"));
+      await persisted;
+    });
+
+    // The failure is what reconciles: a push carrying the landed value arrives
+    // only after it, since the landed write itself was not settled at the time.
+    await waitFor(() =>
+      expect(client.setServerSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ paginatedLists: true }),
+      ),
+    );
+  });
+
+  it("seeds the settings modal from the last write, not the stale entry (#2089)", async () => {
+    // The modal draft is the input to the *next* write, so seeding it from a
+    // `servers` entry that a failed list reload froze would send the superseded
+    // value back to disk the moment the user saves any unrelated field.
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    await user.click(screen.getByText("paginated-on"));
+    await waitFor(() =>
+      expect(updateServerSettingsSpy).toHaveBeenCalledWith(
+        "A",
+        expect.objectContaining({ paginatedLists: true }),
+      ),
+    );
+
+    // `servers` is mocked to a fixed entry here, so it still reports the
+    // pre-toggle value — exactly what a failed reload leaves behind.
+    const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+    if (!draftOptions) throw new Error("useSettingsDraft was never called");
+    expect(draftOptions.resolveInitial("A")).toEqual(
+      expect.objectContaining({ paginatedLists: true }),
+    );
+  });
+
+  it("builds the next client from the last write, not the stale entry (#2089)", async () => {
+    // Connecting is where the whole connection is configured, and it read the
+    // `servers` entry directly — so a save that landed while list reads were
+    // failing (including one made from the modal for a server that was not
+    // connected at the time) was undone by the next connect, which rebuilt the
+    // client from the frozen entry.
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+
+    const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+    if (!draftOptions) throw new Error("useSettingsDraft was never called");
+    const saved: InspectorServerSettings = {
+      ...settingsWithRoots([{ uri: "file:///saved" }]),
+      maxFetchRequests: 42,
+    };
+    await act(async () => {
+      await draftOptions.onPersist("A", saved);
+    });
+
+    // `servers` still reports the entry with no settings at all — what a failed
+    // reload leaves. The client must be built from the write that landed.
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+    const clientOptions = vi
+      .mocked(McpIndex.InspectorClient)
+      .mock.calls.at(-1)?.[1] as { roots?: { uri: string }[] } | undefined;
+    expect(clientOptions?.roots).toEqual([{ uri: "file:///saved" }]);
+    const fetchLogOptions = vi
+      .mocked(FetchLogModule.FetchRequestLogState)
+      .mock.calls.at(-1)?.[1] as { maxFetchRequests?: number } | undefined;
+    expect(fetchLogOptions?.maxFetchRequests).toBe(42);
+  });
+
+  it("carries a landed stdio env/cwd onto the config it connects with (#2096)", async () => {
+    // The sibling case above covers the client *options*, which are derived
+    // from the settings. `env` and `cwd` are the two fields the modal edits as
+    // settings while the transport reads them off the **config** — and the
+    // config came straight off the same frozen `servers` entry. So a save that
+    // landed while list reads were failing kept spawning the child process with
+    // the pre-save environment, while the modal (re-seeded from the tracker
+    // since #2089) showed the new one. Credentials live here, so the symptom is
+    // the inspected server failing to authorize rather than a lost edit.
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+
+    const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+    if (!draftOptions) throw new Error("useSettingsDraft was never called");
+    await act(async () => {
+      await draftOptions.onPersist("A", {
+        ...settingsWithRoots([]),
+        env: [{ key: "FOO", value: "after" }],
+        cwd: "/tmp/after",
+      });
+    });
+
+    // `servers` still reports `{ type: "stdio", command: "node" }` with no
+    // settings node at all — what a failed reload leaves behind.
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+    expect(vi.mocked(McpIndex.InspectorClient).mock.calls.at(-1)?.[0]).toEqual({
+      type: "stdio",
+      command: "node",
+      env: { FOO: "after" },
+      cwd: "/tmp/after",
+    });
+  });
+
+  it("clears a stdio env/cwd the last write removed (#2096)", async () => {
+    // Clearing has to travel too, and it is the direction a naive merge gets
+    // wrong: an empty env list and a blank cwd mean "remove the field", which
+    // is how the modal deletes a value. Spreading the settings over the config
+    // would leave the stale one in place instead.
+    const user = userEvent.setup();
+    const previousUseServers = vi.mocked(useServers).getMockImplementation();
+    try {
+      vi.mocked(useServers).mockReturnValue({
+        servers: [
+          {
+            ...SERVER_A,
+            config: {
+              type: "stdio",
+              command: "node",
+              env: { FOO: "before" },
+              cwd: "/tmp/before",
+            },
+          } as ServerEntry,
+        ],
+        loading: false,
+        error: undefined,
+        refresh: vi.fn().mockResolvedValue(undefined),
+        addServer: vi.fn(),
+        updateServer: vi.fn(),
+        updateServerSettings: updateServerSettingsSpy,
+        removeServer: vi.fn(),
+        reorderServers: vi.fn(),
+        importSource: vi.fn().mockResolvedValue({ servers: {} }),
+      });
+      renderWithMantine(<App />);
+
+      const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+      if (!draftOptions) throw new Error("useSettingsDraft was never called");
+      await act(async () => {
+        await draftOptions.onPersist("A", {
+          ...settingsWithRoots([]),
+          env: [],
+          cwd: "",
+        });
+      });
+
+      await user.click(screen.getByText("connect"));
+      await waitFor(() => expect(clientInstances).toHaveLength(1));
+      expect(
+        vi.mocked(McpIndex.InspectorClient).mock.calls.at(-1)?.[0],
+      ).toEqual({ type: "stdio", command: "node" });
+    } finally {
+      if (previousUseServers) {
+        vi.mocked(useServers).mockImplementation(previousUseServers);
+      }
+    }
+  });
+
+  it("lets a successful list read supersede a concrete rollback override (#2089)", async () => {
+    // A rollback sets the override to a value rather than clearing it, so the
+    // effect that drops it cannot key on the persisted boolean alone: if a
+    // later read reports the value the override replaced — an edit made outside
+    // the Inspector overtaking the write — neither that boolean nor the server
+    // id changes, and the UI would stay stuck on the override forever. A read
+    // rebuilds the list, so the entry object is the signal that supersedes it.
+    const user = userEvent.setup();
+    const previousUseServers = vi.mocked(useServers).getMockImplementation();
+    try {
+      const { rerender } = renderWithMantine(<App />);
+      await user.click(screen.getByText("connect"));
+      await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+      // A write lands `true` while list reads are stale, then a toggle fails —
+      // leaving the override on `true` with the entry still reporting `false`.
+      const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+      if (!draftOptions) throw new Error("useSettingsDraft was never called");
+      await act(async () => {
+        await draftOptions.onPersist("A", {
+          ...settingsWithRoots([]),
+          paginatedLists: true,
+        });
+      });
+      updateServerSettingsSpy.mockRejectedValueOnce(new Error("disk full"));
+      await user.click(screen.getByText("paginated-off"));
+      await waitFor(() =>
+        expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true"),
+      );
+
+      // Now a list read succeeds and still says `false` — same boolean, same
+      // server id, new entry object. It is authoritative and must win.
+      vi.mocked(useServers).mockReturnValue({
+        servers: [{ ...SERVER_A } as ServerEntry],
+        loading: false,
+        error: undefined,
+        refresh: vi.fn().mockResolvedValue(undefined),
+        addServer: vi.fn(),
+        updateServer: vi.fn(),
+        updateServerSettings: updateServerSettingsSpy,
+        removeServer: vi.fn(),
+        reorderServers: vi.fn(),
+        importSource: vi.fn().mockResolvedValue({ servers: {} }),
+      });
+      rerender(<App />);
+      await waitFor(() =>
+        expect(screen.getByTestId("tools-paginated")).toHaveTextContent(
+          "false",
+        ),
+      );
+    } finally {
+      if (previousUseServers) {
+        vi.mocked(useServers).mockImplementation(previousUseServers);
+      }
+    }
+  });
+
+  it("rolls back to a settings-modal save that landed, not just a toggle (#2089)", async () => {
+    // The two settings writers feed one record, and this is the half the
+    // toggle-driven tests cannot reach: `useSettingsDraft` is mocked for this
+    // file, so its `onPersist` never runs on its own and a regression that
+    // dropped `begin`/`landed` from the modal path would go unnoticed. The
+    // callback the App handed the hook is invoked directly instead.
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+    if (!draftOptions) throw new Error("useSettingsDraft was never called");
+    const saved: InspectorServerSettings = {
+      ...settingsWithRoots([]),
+      paginatedLists: true,
+    };
+    // The save lands; the list read behind it is what stays stale, so `servers`
+    // (mocked to a fixed entry here) never reports it.
+    await act(async () => {
+      await draftOptions.onPersist("A", saved);
+    });
+    expect(updateServerSettingsSpy).toHaveBeenCalledWith("A", saved);
+
+    updateServerSettingsSpy.mockRejectedValueOnce(new Error("disk full"));
+    await user.click(screen.getByText("paginated-off"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true"),
+    );
+    const client = clientInstances[0] as EventTarget & {
+      setServerSettings: ReturnType<typeof vi.fn>;
+    };
+    const lastPush = client.setServerSettings.mock.calls.at(-1)?.[0] as {
+      paginatedLists?: boolean;
+    };
+    expect(lastPush?.paginatedLists).toBe(true);
+  });
+
+  it("treats a modal save whose list reload failed as landed (#1914 + #2089)", async () => {
+    // A `ServerListReloadError` rejects *after* the PUT landed, so the save is
+    // on disk. It has to be recorded as the last landed write and applied like
+    // any other settled one — the failure path would roll the UI, the live
+    // client and the modal's seed back to a value disk no longer holds.
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    const draftOptions = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0];
+    if (!draftOptions) throw new Error("useSettingsDraft was never called");
+    updateServerSettingsSpy.mockRejectedValueOnce(
+      new ServerListReloadError(
+        "The server was saved, but the server list could not be reloaded: disk full",
+      ),
+    );
+    const saved: InspectorServerSettings = {
+      ...settingsWithRoots([]),
+      paginatedLists: true,
+    };
+    await act(async () => {
+      await draftOptions.onPersist("A", saved).catch(() => undefined);
+    });
+
+    // `servers` is mocked to a fixed entry here — exactly what a failed reload
+    // leaves — so both of these read the record rather than the entry.
+    expect(draftOptions.resolveInitial("A")).toEqual(
+      expect.objectContaining({ paginatedLists: true }),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true"),
+    );
+  });
+
+  it("keeps the optimistic toggle when only the list reload failed (#1914)", async () => {
+    // The mirror of the test above. `refreshAfterWrite` rejects with a
+    // `ServerListReloadError` when the PUT landed and only reading the list
+    // back failed — the setting IS on disk, so the #1721 rollback would put
+    // the UI and the live client on the value the user just changed away
+    // from, and contradict what a reload would show.
+    const user = userEvent.setup();
+    updateServerSettingsSpy.mockRejectedValueOnce(
+      new ServerListReloadError(
+        "The server was saved, but the server list could not be reloaded: disk full",
+      ),
+    );
+    renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    await user.click(screen.getByText("paginated-on"));
+    await waitFor(() =>
+      expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true"),
+    );
+    // Give the rejection a turn to land, then confirm nothing reverted it.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true");
+    // Single intersection assertion rather than the `as unknown as` this file
+    // uses elsewhere: the fake client really is an EventTarget, and widening
+    // it keeps that relationship instead of erasing it (#1914 r2).
+    const client = clientInstances[0] as EventTarget & {
+      setServerSettings: ReturnType<typeof vi.fn>;
+    };
+    const lastPush = client.setServerSettings.mock.calls.at(-1)?.[0] as {
+      paginatedLists?: boolean;
+    };
+    expect(lastPush?.paginatedLists).toBe(true);
+  });
+
+  it("keeps the toggle on the last write after switching servers and back (#2095)", async () => {
+    // The override is what holds the display up while list reads are failing --
+    // the `servers` entry it would otherwise be read from is frozen at the last
+    // successful read, which this suite models exactly by mocking `useServers`
+    // to a fixed list.
+    //
+    // Held app-wide and cleared on every change of the *active* entry, it did
+    // not survive a plain server switch: A to B and back dropped it and the
+    // toggle fell back to that stale entry, reading `off` while disk, the
+    // tracker, and the client just built from it all said `on`. The lists were
+    // then rendered in all-pages mode showing an aggregate the client never
+    // fetched, with no Load-next-page control to fill them.
+    //
+    // Nothing here fails a list read explicitly: the fixed mock *is* that
+    // state, which is why one write is enough to reproduce it.
+    const user = userEvent.setup();
+    const previousUseServers = vi.mocked(useServers).getMockImplementation();
+    try {
+      vi.mocked(useServers).mockReturnValue({
+        servers: [
+          SERVER_A,
+          { ...SERVER_A, id: "B", name: "Other" },
+        ] as ServerEntry[],
+        loading: false,
+        error: undefined,
+        refresh: vi.fn().mockResolvedValue(undefined),
+        addServer: addServerSpy,
+        updateServer: updateServerSpy,
+        updateServerSettings: updateServerSettingsSpy,
+        removeServer: vi.fn(),
+        reorderServers: vi.fn(),
+        importSource: vi.fn().mockResolvedValue({ servers: {} }),
+      });
+      renderWithMantine(<App />);
+      await user.click(screen.getByText("connect"));
+      await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+      await user.click(screen.getByText("paginated-on"));
+      await waitFor(() =>
+        expect(updateServerSettingsSpy).toHaveBeenCalledWith(
+          "A",
+          expect.objectContaining({ paginatedLists: true }),
+        ),
+      );
+      await waitFor(() =>
+        expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true"),
+      );
+
+      // Away to B, whose own entry has never been written and so reads false.
+      await user.click(screen.getByText("connect-b"));
+      await waitFor(() =>
+        expect(screen.getByTestId("active-server")).toHaveTextContent("B"),
+      );
+      expect(screen.getByTestId("tools-paginated")).toHaveTextContent("false");
+
+      // ...and back to A, which is still paginated on disk.
+      await user.click(screen.getByText("connect"));
+      await waitFor(() =>
+        expect(screen.getByTestId("active-server")).toHaveTextContent("A"),
+      );
+      expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true");
+    } finally {
+      if (previousUseServers) {
+        vi.mocked(useServers).mockImplementation(previousUseServers);
+      }
+    }
+  });
+});
+
+// A post-write reload failure rejects *after* the write landed, so every piece
+// of state `onConfigSubmit` used to apply on the resolve path has to be applied
+// on the reject path too — the rename target and the highlight batch both
+// describe a row that really is on disk (#1914 review r2 / r3).
+describe("App config submit with a failed list reload (#1914)", () => {
+  // Earlier describes install their own `useServers` return value, which
+  // outlives them — so this block installs its own and puts the previous
+  // implementation back, rather than trusting whatever leaked in.
+  let restoreUseServers: (() => void) | undefined;
+
+  const serversResult = (ids: string[]): ReturnType<typeof useServers> => ({
+    servers: ids.map((id) => ({ ...SERVER_A, id }) as ServerEntry),
+    loading: false,
+    error: undefined,
+    refresh: vi.fn().mockResolvedValue(undefined),
+    addServer: addServerSpy,
+    updateServer: updateServerSpy,
+    updateServerSettings: updateServerSettingsSpy,
+    removeServer: vi.fn().mockResolvedValue(undefined),
+    reorderServers: vi.fn().mockResolvedValue(undefined),
+    importSource: vi.fn().mockResolvedValue({ servers: {} }),
+  });
+
+  beforeEach(() => {
+    clientInstances.length = 0;
+    const previous = vi.mocked(useServers).getMockImplementation();
+    restoreUseServers = previous
+      ? () => vi.mocked(useServers).mockImplementation(previous)
+      : undefined;
+    updateServerSpy.mockClear();
+    addServerSpy.mockClear();
+    updateServerSettingsSpy.mockClear();
+    vi.mocked(useServers).mockReturnValue(serversResult(["A"]));
+  });
+
+  afterEach(() => {
+    restoreUseServers?.();
+  });
+
+  it("follows the rename so the active id isn't orphaned (#1914)", async () => {
+    // `activeServerId` isn't rendered anywhere, so it's read back through the
+    // one handler that passes it straight to a spy: the pagination toggle
+    // calls `updateServerSettings(activeServerId, …)`.
+    const user = userEvent.setup();
+    updateServerSpy.mockRejectedValueOnce(
+      new ServerListReloadError(
+        "The server was saved, but the server list could not be reloaded: disk full",
+      ),
+    );
+    const { rerender } = renderWithMantine(<App />);
+    await user.click(screen.getByText("connect"));
+    await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+    await user.click(screen.getByText("edit-server"));
+    const idField = await screen.findByLabelText(/Server ID/);
+    await user.clear(idField);
+    await user.type(idField, "A-renamed");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(updateServerSpy).toHaveBeenCalledWith(
+        "A",
+        "A-renamed",
+        expect.anything(),
+      ),
+    );
+    // The rejection still reaches the modal, which stays open showing it.
+    expect(
+      await screen.findByText(/could not be reloaded: disk full/),
+    ).toBeInTheDocument();
+
+    // Now let the row land, as the SSE refresh the write itself triggers
+    // would. The modal's target ("A") is gone, so it closes rather than
+    // blanking its own form — `initialId`/`initialConfig` would go undefined
+    // and ServerConfigModal's reset would wipe the open form and the error
+    // it is showing (#1914 r3).
+    vi.mocked(useServers).mockReturnValue(serversResult(["A-renamed"]));
+    rerender(<App />);
+    await waitFor(() =>
+      expect(screen.queryByLabelText(/Server ID/)).not.toBeInTheDocument(),
+    );
+
+    // With the modal gone, read the active id back off the toggle.
+    await user.click(screen.getByText("paginated-on"));
+    await waitFor(() =>
+      expect(updateServerSettingsSpy).toHaveBeenCalledWith(
+        "A-renamed",
+        expect.objectContaining({ paginatedLists: true }),
+      ),
+    );
+  });
+
+  it("labels a settings save whose reload failed as saved, not failed (#1914)", () => {
+    // The settings draft debounces and flushes on close, so this toast is the
+    // user's only signal — a flush that rejects usually does so after the
+    // modal is gone. `useSettingsDraft` is mocked here, so the App's `onError`
+    // is invoked directly with the options it was handed.
+    renderWithMantine(<App />);
+    const onError = vi.mocked(useSettingsDraft).mock.calls.at(-1)?.[0].onError;
+    expect(onError).toBeDefined();
+
+    act(() => {
+      onError!(
+        "A",
+        new ServerListReloadError(
+          "The server was saved, but the server list could not be reloaded: disk full",
+        ),
+      );
+    });
+    expect(notificationsMock.show).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Saved settings for "A", but the server list did not reload',
+        message: expect.stringContaining("disk full"),
+      }),
+    );
+
+    // A genuinely failed write still reads as a failure.
+    act(() => {
+      onError!("A", new Error("disk full"));
+    });
+    expect(notificationsMock.show).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Failed to save settings for "A"' }),
+    );
+  });
+
+  it("keeps a successful add in the highlight batch when the reload failed (#1914)", async () => {
+    // `addServerHighlighted` marked the new id only after `addServer`
+    // resolved. The row is on disk either way, so on a reload failure it has
+    // to be marked from the catch — the next successful refresh is what
+    // renders it, and it would otherwise arrive unhighlighted.
+    const user = userEvent.setup();
+    addServerSpy.mockRejectedValueOnce(
+      new ServerListReloadError(
+        "The server was added, but the server list could not be reloaded: disk full",
+      ),
+    );
+    renderWithMantine(<App />);
+    expect(screen.getByTestId("highlighted-servers")).toHaveTextContent("none");
+
+    await user.click(screen.getByText("add-server"));
+    await user.type(await screen.findByLabelText(/Server ID/), "brand-new");
+    await user.type(screen.getByLabelText(/^Command/), "node");
+    await user.click(screen.getByRole("button", { name: "Add" }));
+
+    await waitFor(() =>
+      expect(addServerSpy).toHaveBeenCalledWith("brand-new", expect.anything()),
+    );
+    expect(
+      await screen.findByText(/could not be reloaded: disk full/),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByTestId("highlighted-servers")).toHaveTextContent(
+        "brand-new",
+      ),
+    );
   });
 });
 
@@ -2574,6 +3917,105 @@ describe("App background command rejections (#2049)", () => {
       expect(rejections.seen).toEqual([]);
     } finally {
       rejections.stop();
+    }
+  });
+});
+
+/** A complete `useManagedResources` return, so the mock stays type-checked against the hook's contract. */
+function managedResourcesResult(
+  resources: Resource[],
+): UseManagedResourcesResult {
+  return {
+    error: null,
+    resources,
+    listChanged: false,
+    refresh: vi.fn().mockResolvedValue(resources),
+    clearListChanged: vi.fn(),
+  };
+}
+
+describe("App MCP App listed-resource metadata wiring (#2055)", () => {
+  beforeEach(() => {
+    appBridgeFactoryDeps.length = 0;
+  });
+
+  afterEach(() => {
+    // The hook mock is module-level and shared, so put the empty-list default
+    // back rather than leaving a populated list for whatever runs next.
+    vi.mocked(useManagedResources).mockReturnValue(managedResourcesResult([]));
+  });
+
+  it("hands the bridge factory a getListedResourceMeta reading the resources/list entries", async () => {
+    // ext-apps treats a listing entry's `_meta.ui` as the static default for a
+    // UI resource, so the App has to surface the listing to the bridge — the
+    // factory's own tests inject the dep and cannot see this wiring break.
+    const listedMeta = {
+      ui: { csp: { connectDomains: ["https://api.example.com"] } },
+    };
+    vi.mocked(useManagedResources).mockReturnValue(
+      managedResourcesResult([
+        { uri: "ui://weather/app.html", name: "app", _meta: listedMeta },
+      ]),
+    );
+
+    renderWithMantine(<App />);
+
+    // App builds two factories, differing only in `advertiseElicitation`. Wait
+    // for BOTH by that flag rather than for a count: waiting on "at least one"
+    // would still pass with the wiring stripped from either call site, since
+    // the other's deps sit in the same array.
+    const appsFactory = () =>
+      appBridgeFactoryDeps.find((d) => !d.advertiseElicitation);
+    const elicitationFactory = () =>
+      appBridgeFactoryDeps.find((d) => d.advertiseElicitation === true);
+    await waitFor(() => {
+      expect(appsFactory()).toBeDefined();
+      expect(elicitationFactory()).toBeDefined();
+    });
+
+    for (const deps of [appsFactory(), elicitationFactory()]) {
+      expect(deps?.getListedResourceMeta?.("ui://weather/app.html")).toEqual(
+        listedMeta,
+      );
+      expect(
+        deps?.getListedResourceMeta?.("ui://other/app.html"),
+      ).toBeUndefined();
+    }
+  });
+
+  it("hands BOTH bridge factories a working publishAppDocument (#2056)", async () => {
+    // Both call sites pass the same `publishDocument`, and the end-to-end smoke
+    // only covers the Apps-screen one — so without this the elicitation
+    // factory's `publishAppDocument` could be dropped and every test stays
+    // green while a domain-declaring elicitation app silently loses its real
+    // origin. Assert it is not merely present but actually reaches the lib.
+    publishAppDocumentMock.mockResolvedValue(
+      "http://127.0.0.1:6278/app-document/deadbeef",
+    );
+
+    renderWithMantine(<App />);
+
+    const appsFactory = () =>
+      appBridgeFactoryDeps.find((d) => !d.advertiseElicitation);
+    const elicitationFactory = () =>
+      appBridgeFactoryDeps.find((d) => d.advertiseElicitation === true);
+    await waitFor(() => {
+      expect(appsFactory()).toBeDefined();
+      expect(elicitationFactory()).toBeDefined();
+    });
+
+    for (const deps of [appsFactory(), elicitationFactory()]) {
+      publishAppDocumentMock.mockClear();
+      await expect(
+        deps?.publishAppDocument?.({
+          html: "<p>app</p>",
+          csp: "default-src 'none'",
+        }),
+      ).resolves.toBe("http://127.0.0.1:6278/app-document/deadbeef");
+      expect(publishAppDocumentMock).toHaveBeenCalledWith(
+        { html: "<p>app</p>", csp: "default-src 'none'" },
+        expect.objectContaining({ baseUrl: expect.any(String) }),
+      );
     }
   });
 });

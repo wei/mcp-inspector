@@ -15,6 +15,7 @@ import {
 import type { Root } from "@modelcontextprotocol/client";
 import type {
   InspectorServerSettings,
+  RequestMetadata,
   MCPConfig,
   MCPServerConfig,
   ServerEntry,
@@ -28,6 +29,8 @@ import {
   envSecretField,
 } from "../auth/secret-fields.js";
 import { toRecord } from "../json/jsonUtils.js";
+import type { JsonValue } from "../json/jsonUtils.js";
+import { isSerializableJson } from "../json/jsonUtils.js";
 
 // The full set of valid `type` discriminator values, used to reject anything
 // else read off disk so unknown strings can't propagate to narrowing sites.
@@ -195,6 +198,186 @@ export function envPairsToRecord(
 }
 
 /**
+ * The stdio `env` / `cwd` **config** fields implied by a settings mirror.
+ * `undefined` means "the field is not set" — i.e. remove it — which is how a
+ * user clears a value through the Server Settings modal (empty env list, blank
+ * cwd).
+ *
+ * `env` and `cwd` are the two fields the modal edits as *settings* while the
+ * transport reads them off *config* (see `storedFieldsToInspectorSettings`), so
+ * every consumer that has settings and needs a config has to perform this same
+ * mapping. It lives here, once, because the two consumers are on opposite sides
+ * of the wire — the `/api/servers` PUT write-through persists it, and the web
+ * client applies it when constructing an `InspectorClient` (#2096) — and a
+ * disagreement between them is invisible until a spawned child process gets an
+ * environment the file does not describe.
+ */
+export function stdioConfigFieldsFromSettings(
+  settings: InspectorServerSettings,
+): { env: Record<string, string> | undefined; cwd: string | undefined } {
+  const env = envPairsToRecord(settings.env);
+  const cwd = settings.cwd?.trim();
+  return {
+    env: Object.keys(env).length > 0 ? env : undefined,
+    cwd: cwd ? cwd : undefined,
+  };
+}
+
+/**
+ * A copy of `config` with the stdio `env` / `cwd` taken from `settings`.
+ *
+ * Used where a caller holds a settings value it trusts more than the config it
+ * was read alongside — the web client's connect path, which resolves settings
+ * through the last-persisted-write tracker while `config` still comes off a
+ * `servers` entry that stops advancing once a list read fails (#2089). Without
+ * this the two disagree and the child process is spawned with the *pre-save*
+ * environment even though the save reached disk (#2096).
+ *
+ * Non-stdio configs are returned untouched — they carry neither field, matching
+ * the modal's stdio-only UI. Absent settings likewise: a server with no settings
+ * node has nothing to apply, and treating that as an empty mirror would clear a
+ * config `env` the file does hold.
+ */
+export function applyStdioSettingsToConfig(
+  config: MCPServerConfig,
+  settings: InspectorServerSettings | undefined,
+): MCPServerConfig {
+  if (!settings) return config;
+  if (!(config.type === "stdio" || config.type === undefined)) return config;
+  const { env, cwd } = stdioConfigFieldsFromSettings(settings);
+  const next: StdioServerConfig = { ...(config as StdioServerConfig) };
+  if (env) next.env = env;
+  else delete next.env;
+  if (cwd) next.cwd = cwd;
+  else delete next.cwd;
+  return next;
+}
+
+/**
+ * Read a server's `metadata` off disk into the in-memory `RequestMetadata`
+ * object, accepting both the current object shape and the pre-#1910
+ * `{ key, value }[]` pair array.
+ *
+ * The pair array is the shape every `mcp.json` written before #1910 carries, so
+ * dropping it would silently stop sending a user's configured `_meta` on the
+ * first read of an existing file. It is read here and never written back:
+ * `inspectorSettingsToStoredFields` emits only the object form, so the file is
+ * migrated the next time the entry is saved.
+ *
+ * Anything else — a string, a number, an array of non-pairs — is not metadata
+ * the Inspector can send, so it is dropped with a warning rather than half-
+ * interpreted, following `cleanRoots` / `cleanAuthorizationParams` above. A
+ * pair whose key is blank is skipped for the same reason the write side omits
+ * it: `_meta` has no meaningful empty key.
+ */
+export function normalizeStoredMetadata(
+  metadata: StoredMCPServer["metadata"] | unknown,
+): RequestMetadata {
+  if (metadata === undefined || metadata === null) return {};
+
+  if (Array.isArray(metadata)) {
+    const out: RequestMetadata = {};
+    for (const entry of metadata) {
+      if (
+        typeof entry !== "object" ||
+        entry === null ||
+        typeof (entry as { key?: unknown }).key !== "string"
+      ) {
+        // Structural message only — never the entry. A malformed legacy row
+        // still holds whatever the user put in it, which for `_meta` can be a
+        // credential, and this goes to the console of every client that reads
+        // the catalog.
+        console.warn(
+          "Ignoring malformed legacy metadata entry (expected `{ key, value }`).",
+        );
+        continue;
+      }
+      const { key, value } = entry as { key: string; value?: JsonValue };
+      if (key.trim() === "") continue;
+      // `??`, not `||`: `null` is a legal `_meta` value and must survive the
+      // migration as `null`. Only a genuinely absent `value` becomes `""`.
+      const resolved = value === undefined ? "" : value;
+      if (!keepSerializable(key, resolved)) continue;
+      defineMetadataKey(out, key, resolved);
+    }
+    return out;
+  }
+
+  if (typeof metadata === "object") {
+    // A hand-edited catalog reaches this untouched by any editor, so it is a
+    // real source of values that parse but cannot be sent — `1e400` becomes
+    // `Infinity`, which the next serialization writes as `null`. Same
+    // invariant the web editor and the CLI enforce, applied per key so one bad
+    // value does not cost the rest.
+    const out: RequestMetadata = {};
+    for (const [key, value] of Object.entries(metadata as RequestMetadata)) {
+      if (keepSerializable(key, value)) defineMetadataKey(out, key, value);
+    }
+    return out;
+  }
+
+  console.warn(
+    `Ignoring malformed \`metadata\` (expected a JSON object, got ${describeJsonType(metadata)}).`,
+  );
+  return {};
+}
+
+/**
+ * Store a metadata key as an **own** property.
+ *
+ * `out[key] = value` invokes the prototype setter for the key `"__proto__"`,
+ * so the entry vanishes on reload and — for an object value — the returned
+ * metadata is given a caller-controlled prototype. `_meta` keys come from a
+ * file a user (or something that wrote that file) controls, so `"__proto__"`
+ * is a key that can genuinely arrive.
+ *
+ * Both branches of `normalizeStoredMetadata` go through this rather than each
+ * spelling it out. The object branch was originally a spread — safe, because
+ * spread defines rather than sets — and rewriting it into a per-key loop for
+ * value filtering silently reintroduced the hazard the legacy branch had
+ * already fixed. One mechanism is what stops that recurring.
+ */
+function defineMetadataKey(
+  out: RequestMetadata,
+  key: string,
+  value: JsonValue,
+): void {
+  Object.defineProperty(out, key, {
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
+}
+
+/**
+ * Whether a metadata value can be sent as written, warning by key when it
+ * cannot.
+ *
+ * Names the key and the offending type, never the value: `_meta` carries
+ * whatever the user configured, credentials included, and these warnings reach
+ * ordinary console output.
+ */
+function keepSerializable(key: string, value: unknown): boolean {
+  if (isSerializableJson(value)) return true;
+  console.warn(
+    `Ignoring metadata key "${key}" — its value is not JSON that can be sent ` +
+      `(got ${describeJsonType(value)}; note \`1e400\` parses to Infinity).`,
+  );
+  return false;
+}
+
+/** A one-word type name for a diagnostic that must not disclose the value. */
+function describeJsonType(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  if (typeof value === "number" && !Number.isFinite(value)) {
+    return Number.isNaN(value) ? "NaN" : "a non-finite number";
+  }
+  return typeof value;
+}
+
+/**
  * Validate a server's `oauth.authorizationParams` as it comes off disk, or
  * `undefined` when there is nothing usable. (#2018)
  *
@@ -349,7 +532,7 @@ export function storedFieldsToInspectorSettings(
   const settings: InspectorServerSettings = {
     headers: headersPairs,
     env: envRecordToPairs(stored.env),
-    metadata: stored.metadata ?? [],
+    metadata: normalizeStoredMetadata(stored.metadata),
     connectionTimeout: stored.connectionTimeout ?? 0,
     requestTimeout: stored.requestTimeout ?? 0,
     // Unlike the timeouts (0 = "SDK default"), task TTL has a concrete product
@@ -428,6 +611,12 @@ export function storedFieldsToInspectorSettings(
   if (stored.oauth?.enterpriseManaged === true) {
     settings.enterpriseManaged = true;
   }
+  // Inverted from the flags above: the default is *on*, so only an explicit
+  // `false` is carried through. Anything else on disk (absent, or a
+  // hand-edited non-boolean) reads back as unset, i.e. the default. (#2068)
+  if (stored.oauth?.requestRefreshToken === false) {
+    settings.oauthRequestRefreshToken = false;
+  }
   // Mirror the stdio working directory for the form. Like the OAuth fields, an
   // empty string coerces to absent so the form's "(inherit)" placeholder shows.
   if (stored.cwd) settings.cwd = stored.cwd;
@@ -458,9 +647,11 @@ export function inspectorSettingsToStoredFields(
     out.headers = headersRecord;
   }
 
-  const metadataFiltered = settings.metadata.filter((m) => m.key.trim() !== "");
-  if (metadataFiltered.length > 0) {
-    out.metadata = metadataFiltered;
+  // Blank-key entries can't exist in the object form (an object has no blank
+  // key the user can leave mid-edit, the way a `{key,value}` row could), so
+  // there is nothing to filter — only the empty-object case to omit.
+  if (Object.keys(settings.metadata).length > 0) {
+    out.metadata = settings.metadata;
   }
 
   if (settings.connectionTimeout > 0) {
@@ -552,6 +743,12 @@ export function inspectorSettingsToStoredFields(
   }
   if (settings.enterpriseManaged === true) {
     oauthFields.enterpriseManaged = true;
+  }
+  // Only the non-default (off) is written; an absent field reads back as the
+  // default (on), so writing `true` would inject the key into files that never
+  // set it and break byte-stable round-trips. (#2068)
+  if (settings.oauthRequestRefreshToken === false) {
+    oauthFields.requestRefreshToken = false;
   }
   if (Object.keys(oauthFields).length > 0) {
     out.oauth = oauthFields;

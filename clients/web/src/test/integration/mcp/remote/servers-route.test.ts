@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import pino from "pino";
 import {
   mkdtempSync,
   readFileSync,
@@ -21,6 +22,7 @@ import { DEFAULT_SEED_CONFIG } from "@inspector/core/mcp/serverList.js";
 import {
   InMemorySecretStore,
   KeychainUnavailableError,
+  SessionSecretStore,
   SECRET_FIELD_OAUTH_CLIENT_SECRET,
   envSecretField,
   type SecretStore,
@@ -423,10 +425,11 @@ describe("/api/servers routes", () => {
           // Wire envelope unchanged from #1353: pair-array headers, flat
           // oauth* fields. Backend splats these into the flat disk shape:
           // object headers, nested oauth, plus the inspector-only fields
-          // at the top level.
+          // at the top level. Metadata is the exception — it crosses as a
+          // JSON object, since a `_meta` value may be any JSON (#1910).
           settings: {
             headers: [{ key: "Authorization", value: "Bearer xyz" }],
-            metadata: [{ key: "tenant", value: "acme" }],
+            metadata: { tenant: "acme", limits: { rps: 10 } },
             connectionTimeout: 30000,
             requestTimeout: 60000,
             oauthClientId: "client-abc",
@@ -440,7 +443,7 @@ describe("/api/servers routes", () => {
       // Disk shape: flat, no `settings` wrapper, object headers, nested oauth.
       expect(stored).not.toHaveProperty("settings");
       expect(stored.headers).toEqual({ Authorization: "Bearer xyz" });
-      expect(stored.metadata).toEqual([{ key: "tenant", value: "acme" }]);
+      expect(stored.metadata).toEqual({ tenant: "acme", limits: { rps: 10 } });
       expect(stored.connectionTimeout).toBe(30000);
       expect(stored.requestTimeout).toBe(60000);
       expect(stored.oauth).toEqual({
@@ -460,7 +463,7 @@ describe("/api/servers routes", () => {
           config: { type: "streamable-http", url: "https://x.test/mcp" },
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             oauthAuthorizationParams: [
@@ -486,7 +489,7 @@ describe("/api/servers routes", () => {
           config: { type: "streamable-http", url: "https://x.test/mcp" },
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             oauthAuthorizationParams: { kc_idp_hint: "corp" },
@@ -507,7 +510,7 @@ describe("/api/servers routes", () => {
           config: { type: "streamable-http", url: "https://x.test/mcp" },
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             oauthAuthorizationUrl: "https://staging.test/authorize",
@@ -532,7 +535,7 @@ describe("/api/servers routes", () => {
           config: { type: "streamable-http", url: "https://x.test/mcp" },
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             oauthAuthorizationUrl: "",
@@ -555,7 +558,7 @@ describe("/api/servers routes", () => {
           config: { type: "streamable-http", url: "https://x.test/mcp" },
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             oauthTokenUrl: 42,
@@ -581,7 +584,7 @@ describe("/api/servers routes", () => {
           config: { type: "streamable-http", url: "https://x.test/mcp" },
           settings: {
             headers: [{ key: "X-Tenant", value: "acme" }],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 45000,
           },
@@ -615,7 +618,7 @@ describe("/api/servers routes", () => {
         body: JSON.stringify({
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             autoRefreshOnListChanged: true,
@@ -647,7 +650,7 @@ describe("/api/servers routes", () => {
         body: JSON.stringify({
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             autoRefreshOnListChanged: false,
@@ -669,7 +672,7 @@ describe("/api/servers routes", () => {
           config: { type: "stdio", command: "node" },
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             autoRefreshOnListChanged: "yes",
@@ -694,7 +697,7 @@ describe("/api/servers routes", () => {
         body: JSON.stringify({
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             maxFetchRequests: 5000,
@@ -722,7 +725,7 @@ describe("/api/servers routes", () => {
         body: JSON.stringify({
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             maxFetchRequests: 0,
@@ -754,7 +757,7 @@ describe("/api/servers routes", () => {
         body: JSON.stringify({
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             maxFetchRequests: 1000,
@@ -776,7 +779,7 @@ describe("/api/servers routes", () => {
           config: { type: "stdio", command: "node" },
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             maxFetchRequests: -5,
@@ -882,7 +885,7 @@ describe("/api/servers routes", () => {
           // headers should be an array of {key, value}; "oops" is a string.
           settings: {
             headers: "oops",
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
           },
@@ -913,7 +916,7 @@ describe("/api/servers routes", () => {
           // write lock and apply only the settings patch.
           settings: {
             headers: [{ key: "X-Tenant", value: "acme" }],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
           },
@@ -955,7 +958,7 @@ describe("/api/servers routes", () => {
           config: { type: "streamable-http", url: "https://x.test/mcp" },
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             oauthClientId: "",
@@ -981,7 +984,7 @@ describe("/api/servers routes", () => {
           config: { type: "stdio", command: "node" },
           settings: {
             headers: [{ key: "X-A", value: "1" }],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             // Unknown stowaway — must not survive the validator.
@@ -1099,7 +1102,7 @@ describe("/api/servers routes", () => {
               url: "https://x.test/mcp",
               settings: {
                 headers: [{ key: "X-Tenant", value: "acme" }],
-                metadata: [],
+                metadata: {},
                 connectionTimeout: 30000,
                 requestTimeout: 0,
                 oauthClientId: "client-abc",
@@ -1205,7 +1208,7 @@ describe("/api/servers routes", () => {
           config: { type: "stdio", command: "node" },
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             roots: [
@@ -1253,7 +1256,7 @@ describe("/api/servers routes", () => {
           config: { type: "stdio", command: "node" },
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             roots: [{ uri: "  " }],
@@ -1283,7 +1286,7 @@ describe("/api/servers routes", () => {
           config: { type: "stdio", command: "node" },
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             // uri must be a string.
@@ -1334,7 +1337,7 @@ describe("/api/servers routes", () => {
               { key: "Authorization", value: "Bearer the-token" },
               { key: "X-Tenant", value: "acme" },
             ],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
           },
@@ -1366,7 +1369,7 @@ describe("/api/servers routes", () => {
         body: JSON.stringify({
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             env: [{ key: "API_KEY", value: "abc-123" }],
@@ -1414,7 +1417,7 @@ describe("/api/servers routes", () => {
         body: JSON.stringify({
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 5000,
             requestTimeout: 0,
           },
@@ -1482,7 +1485,7 @@ describe("/api/servers routes", () => {
         body: JSON.stringify({
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             env: [],
@@ -1514,7 +1517,7 @@ describe("/api/servers routes", () => {
         body: JSON.stringify({
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             env: [
@@ -1585,7 +1588,7 @@ describe("/api/servers routes", () => {
         body: JSON.stringify({
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             env: "nope",
@@ -1612,7 +1615,7 @@ describe("/api/servers routes", () => {
         body: JSON.stringify({
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             env: [],
@@ -1640,7 +1643,7 @@ describe("/api/servers routes", () => {
         body: JSON.stringify({
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             env: [],
@@ -1673,7 +1676,7 @@ describe("/api/servers routes", () => {
         body: JSON.stringify({
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             env: [{ key: "API_KEY", value: "abc" }],
@@ -1773,7 +1776,7 @@ describe("/api/servers routes", () => {
           config: { type: "streamable-http", url: "https://x.test/mcp" },
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             oauthClientId: "cid",
@@ -1933,7 +1936,7 @@ describe("/api/servers routes", () => {
         body: JSON.stringify({
           settings: {
             headers: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 0,
             requestTimeout: 0,
             oauthClientId: "cid",
@@ -2325,7 +2328,7 @@ describe("/api/servers routes", () => {
             config: { type: "streamable-http", url: "https://x.test/mcp" },
             settings: {
               headers: [],
-              metadata: [],
+              metadata: {},
               connectionTimeout: 0,
               requestTimeout: 0,
               oauthClientId: "cid",
@@ -2359,7 +2362,7 @@ describe("/api/servers routes", () => {
             config: { type: "streamable-http", url: "https://x.test/mcp" },
             settings: {
               headers: [],
-              metadata: [],
+              metadata: {},
               connectionTimeout: 0,
               requestTimeout: 0,
               oauthClientId: "cid",
@@ -2620,5 +2623,372 @@ describe("/api/servers read-only sessions (#1481/#1483)", () => {
     } finally {
       await close(h);
     }
+  });
+});
+
+describe("a config-only PUT must not delete stored secrets (#2083)", () => {
+  // `useServers.updateServer` sends `{ id, config }` with no `settings` —
+  // the Add/Edit modal's save. The route re-derives settings from the *disk*
+  // entry, which by #1356's design no longer holds the secrets, so they were
+  // absent from the submitted set; `expectedSecretFields` always lists the
+  // OAuth slot, and the reconcile deleted a value the user never touched.
+  let tempDir: string;
+  let configPath: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "inspector-config-put-"));
+    configPath = join(tempDir, "mcp.json");
+    writeFileSync(configPath, JSON.stringify({ mcpServers: {} }));
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const seed = async (
+    app: ReturnType<typeof createRemoteApp>["app"],
+    extra: Record<string, unknown> = {},
+  ) =>
+    app.request(
+      new Request("http://test/api/servers", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          id: "srv",
+          config: { type: "streamable-http", url: "https://a.test/mcp" },
+          settings: {
+            headers: [],
+            env: [],
+            metadata: {},
+            connectionTimeout: 30000,
+            requestTimeout: 60000,
+            taskTtl: 60000,
+            maxFetchRequests: 1000,
+            roots: [],
+            oauthClientId: "cid",
+            oauthClientSecret: "keep-me",
+            ...extra,
+          },
+        }),
+      }),
+    );
+
+  it("keeps the secret in a durable store when only the config changes", async () => {
+    // Not a session-store quirk — this loses the value from the keychain too,
+    // which is what makes it a bug in shipped behaviour rather than in the
+    // fallback added by #1950.
+    const store = new InMemorySecretStore();
+    const { app } = createRemoteApp({
+      dangerouslyOmitAuth: true,
+      mcpConfigPath: configPath,
+      initialConfig: { defaultEnvironment: {} },
+      secretStore: store,
+    });
+    await seed(app);
+    expect(await store.get("srv", SECRET_FIELD_OAUTH_CLIENT_SECRET)).toBe(
+      "keep-me",
+    );
+
+    const res = await app.request(
+      new Request("http://test/api/servers/srv", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          id: "srv",
+          config: { type: "streamable-http", url: "https://b.test/mcp" },
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(await store.get("srv", SECRET_FIELD_OAUTH_CLIENT_SECRET)).toBe(
+      "keep-me",
+    );
+    expect(readFileSync(configPath, "utf-8")).toContain("b.test");
+  });
+
+  it("still clears a secret the user actually cleared", async () => {
+    // The reconcile has to keep working when the caller *did* say something:
+    // an explicit settings apply with the field emptied must delete it.
+    const store = new InMemorySecretStore();
+    const { app } = createRemoteApp({
+      dangerouslyOmitAuth: true,
+      mcpConfigPath: configPath,
+      initialConfig: { defaultEnvironment: {} },
+      secretStore: store,
+    });
+    await seed(app);
+
+    const res = await app.request(
+      new Request("http://test/api/servers/srv", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          id: "srv",
+          settings: {
+            headers: [],
+            env: [],
+            metadata: {},
+            connectionTimeout: 30000,
+            requestTimeout: 60000,
+            taskTtl: 60000,
+            maxFetchRequests: 1000,
+            roots: [],
+            oauthClientId: "cid",
+            oauthClientSecret: "",
+          },
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(await store.get("srv", SECRET_FIELD_OAUTH_CLIENT_SECRET)).toBe(null);
+  });
+});
+
+describe("plaintext migration against a session-scoped store (#1950)", () => {
+  // The container fallback selects an in-memory store in production. The
+  // migration must not take that as licence to delete the durable copy: it
+  // runs on an ordinary GET, so merely opening the app would move the user's
+  // secrets into RAM and lose them at exit.
+  let tempDir: string;
+  let configPath: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "inspector-session-store-"));
+    configPath = join(tempDir, "mcp.json");
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        mcpServers: {
+          srv: {
+            type: "streamable-http",
+            url: "https://x.test/mcp",
+            oauth: { clientId: "cid", clientSecret: "must-survive" },
+          },
+        },
+      }),
+    );
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("leaves the disk plaintext alone and still serves the secret", async () => {
+    const { app } = createRemoteApp({
+      dangerouslyOmitAuth: true,
+      mcpConfigPath: configPath,
+      initialConfig: { defaultEnvironment: {} },
+      secretStore: new SessionSecretStore(),
+    });
+    const before = readFileSync(configPath, "utf-8");
+
+    const res = await app.request(new Request("http://test/api/servers"));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as MCPConfig;
+    // The session behaves normally — the value is loaded and served.
+    expect(
+      (body.mcpServers.srv as { oauth?: { clientSecret?: string } }).oauth
+        ?.clientSecret,
+    ).toBe("must-survive");
+    // But the durable copy is untouched.
+    expect(readFileSync(configPath, "utf-8")).toBe(before);
+  });
+
+  it("warns only when something is actually preserved, and only once", async () => {
+    // The warning used to fire on every `/api/servers` read whenever the
+    // store was session-scoped — including for the default empty catalog,
+    // where "plaintext values are left on disk" is simply false, repeated on
+    // every list refresh. A log line that is usually untrue is one people
+    // learn to skip, which costs it the occasion it matters.
+    // A real pino logger writing to a capturing destination, rather than a
+    // four-method object forced through the API type with a double cast: the
+    // cast is prohibited here, and it also erased the fact that the stand-in
+    // was not a `pino.Logger` — so a change to how the server logs (child
+    // loggers, bindings, a different level) would have gone unnoticed.
+    const lines: string[] = [];
+    const logger = pino(
+      { level: "warn" },
+      {
+        write(chunk: string) {
+          lines.push(chunk);
+        },
+      },
+    );
+    const sessionMessage = /kept in memory for this session/;
+    const saidSessionWarning = () =>
+      lines.filter((l) => sessionMessage.test(l));
+
+    // A catalog with no plaintext secrets: nothing is being preserved.
+    const emptyPath = join(tempDir, "empty.json");
+    writeFileSync(emptyPath, JSON.stringify({ mcpServers: {} }));
+    const empty = createRemoteApp({
+      dangerouslyOmitAuth: true,
+      mcpConfigPath: emptyPath,
+      initialConfig: { defaultEnvironment: {} },
+      secretStore: new SessionSecretStore(),
+      logger,
+    });
+    await empty.app.request(new Request("http://test/api/servers"));
+    await empty.app.request(new Request("http://test/api/servers"));
+    expect(saidSessionWarning()).toHaveLength(0);
+
+    // And with a plaintext secret: said once, not once per read.
+    lines.length = 0;
+    const withSecret = createRemoteApp({
+      dangerouslyOmitAuth: true,
+      mcpConfigPath: configPath,
+      initialConfig: { defaultEnvironment: {} },
+      secretStore: new SessionSecretStore(),
+      logger,
+    });
+    await withSecret.app.request(new Request("http://test/api/servers"));
+    await withSecret.app.request(new Request("http://test/api/servers"));
+    expect(saidSessionWarning()).toHaveLength(1);
+  });
+
+  it("keeps the plaintext on disk through a later unrelated settings edit", async () => {
+    // The gap round 19 found. The GET migration withheld the strip for a
+    // session store, but the *write* paths did not — and the GET returns the
+    // rehydrated secret to the settings form, which resends the whole object
+    // on any edit. So changing a timeout wrote the stripped shape, moving the
+    // only durable copy into RAM to be lost at exit. The user changed a
+    // timeout and lost a client secret, with everything reporting success.
+    const { app } = createRemoteApp({
+      dangerouslyOmitAuth: true,
+      mcpConfigPath: configPath,
+      initialConfig: { defaultEnvironment: {} },
+      secretStore: new SessionSecretStore(),
+    });
+
+    // Read it the way the UI does — this is what fills the form.
+    const listed = (await (
+      await app.request(new Request("http://test/api/servers"))
+    ).json()) as MCPConfig;
+    expect(
+      (listed.mcpServers.srv as { oauth?: { clientSecret?: string } }).oauth
+        ?.clientSecret,
+    ).toBe("must-survive");
+
+    // Now save an unrelated change, resending the settings verbatim.
+    const res = await app.request(
+      new Request("http://test/api/servers/srv", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          id: "srv",
+          config: { type: "streamable-http", url: "https://x.test/mcp" },
+          settings: {
+            headers: [],
+            env: [],
+            metadata: {},
+            connectionTimeout: 45000,
+            requestTimeout: 60000,
+            taskTtl: 60000,
+            maxFetchRequests: 1000,
+            roots: [],
+            oauthClientId: "cid",
+            oauthClientSecret: "must-survive",
+          },
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    // The durable copy is still on disk. Exiting now loses nothing.
+    const onDisk = JSON.parse(readFileSync(configPath, "utf-8")) as {
+      mcpServers: Record<string, { oauth?: { clientSecret?: string } }>;
+    };
+    expect(onDisk.mcpServers.srv?.oauth?.clientSecret).toBe("must-survive");
+    // And the unrelated edit did land.
+    expect(readFileSync(configPath, "utf-8")).toContain("45000");
+  });
+
+  it("does not write a NEWLY entered secret to disk on a session store", async () => {
+    // The overshoot in the previous round's fix. Preserving legacy plaintext
+    // is right; using the whole submitted entry as a proxy for "legacy" is
+    // not — it turned `MCP_INSPECTOR_SECRET_STORE=memory` into "write every
+    // new secret to mcp.json in the clear" while the footer said secrets are
+    // written nowhere.
+    const freshPath = join(tempDir, "fresh.json");
+    writeFileSync(freshPath, JSON.stringify({ mcpServers: {} }));
+    const { app } = createRemoteApp({
+      dangerouslyOmitAuth: true,
+      mcpConfigPath: freshPath,
+      initialConfig: { defaultEnvironment: {} },
+      secretStore: new SessionSecretStore(),
+    });
+
+    const res = await app.request(
+      new Request("http://test/api/servers", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          id: "newsrv",
+          config: { type: "streamable-http", url: "https://y.test/mcp" },
+          settings: {
+            headers: [],
+            env: [],
+            metadata: {},
+            connectionTimeout: 30000,
+            requestTimeout: 60000,
+            taskTtl: 60000,
+            maxFetchRequests: 1000,
+            roots: [],
+            oauthClientId: "cid",
+            oauthClientSecret: "never-typed-before",
+          },
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(readFileSync(freshPath, "utf-8")).not.toContain(
+      "never-typed-before",
+    );
+  });
+
+  it("aborts the migration when the keychain read fails, preserving mcp.json", async () => {
+    // The keychain-wins lookup used the tolerant `get`, so an unreadable
+    // keychain read as "nothing there" — and the write that followed would
+    // put the older plaintext over a newer keychain value before the disk
+    // copy was stripped.
+    let wrote = false;
+    const flaky: SecretStore = {
+      get: async () => null,
+      getStrict: async () => {
+        throw new KeychainUnavailableError(new Error("temporarily down"));
+      },
+      set: async () => {
+        wrote = true;
+      },
+      delete: async () => {},
+      deleteAllForServer: async () => {},
+    };
+    const { app } = createRemoteApp({
+      dangerouslyOmitAuth: true,
+      mcpConfigPath: configPath,
+      initialConfig: { defaultEnvironment: {} },
+      secretStore: flaky,
+    });
+    const before = readFileSync(configPath, "utf-8");
+
+    const res = await app.request(new Request("http://test/api/servers"));
+    expect(res.status).toBe(200);
+    expect(wrote).toBe(false);
+    expect(readFileSync(configPath, "utf-8")).toBe(before);
+  });
+
+  it("still strips it against a durable store, so the guard is the difference", async () => {
+    // The control: same config, same request, a store that outlives the
+    // process — and the migration does what it always did.
+    const { app } = createRemoteApp({
+      dangerouslyOmitAuth: true,
+      mcpConfigPath: configPath,
+      initialConfig: { defaultEnvironment: {} },
+      secretStore: new InMemorySecretStore(),
+    });
+
+    const res = await app.request(new Request("http://test/api/servers"));
+    expect(res.status).toBe(200);
+    expect(readFileSync(configPath, "utf-8")).not.toContain("must-survive");
   });
 });

@@ -3,10 +3,8 @@
  * for Node runners (TUI, CLI).
  */
 
-import {
-  KeyringSecretStore,
-  type SecretStore,
-} from "../auth/node/secret-store.js";
+import type { SecretStore } from "../auth/node/secret-store.js";
+import { defaultSecretStore } from "../auth/node/secret-store-selection.js";
 import type {
   InspectorClientOptions,
   InspectorServerSettings,
@@ -25,8 +23,9 @@ import {
 export interface LoadRunnerClientConfigOptions {
   /** Explicit path from `--client-config` (or MCP_CLIENT_CONFIG_PATH when unset). */
   clientConfigPath?: string;
-  /** Secret store for the IdP clientSecret; defaults to the OS keychain. Tests
-   * inject an in-memory store for determinism. */
+  /** Secret store for the IdP clientSecret; defaults to the store selected for
+   * this host (OS keychain, or its file/memory fallback). Tests inject an
+   * in-memory store for determinism. */
   secretStore?: SecretStore;
 }
 
@@ -38,7 +37,7 @@ export async function loadRunnerClientConfig(
     options?.clientConfigPath?.trim() ||
     process.env.MCP_CLIENT_CONFIG_PATH?.trim() ||
     undefined;
-  const secretStore = options?.secretStore ?? new KeyringSecretStore();
+  const secretStore = options?.secretStore ?? defaultSecretStore();
   return loadClientConfig({ filePath: customPath, secretStore });
 }
 
@@ -88,7 +87,8 @@ export function buildRunnerClientAuthOptions(
       savedSettings.oauthScopes ||
       serverAuthorizationParams ||
       serverEndpointOverrides ||
-      savedSettings.enterpriseManaged)
+      savedSettings.enterpriseManaged ||
+      savedSettings.oauthRequestRefreshToken === false)
       ? {
           ...(savedSettings.oauthClientId && {
             clientId: savedSettings.oauthClientId,
@@ -105,6 +105,11 @@ export function buildRunnerClientAuthOptions(
           ...serverEndpointOverrides,
           ...(savedSettings.enterpriseManaged && {
             enterpriseManaged: true,
+          }),
+          // #2068: only the explicit opt-out is forwarded; omitting the key
+          // leaves the provider's default (declare `refresh_token`) in place.
+          ...(savedSettings.oauthRequestRefreshToken === false && {
+            requestRefreshToken: false,
           }),
         }
       : undefined;

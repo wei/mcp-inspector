@@ -471,3 +471,42 @@ describe("ServerConfigModal", () => {
     expect(props.onClose).toHaveBeenCalledOnce();
   });
 });
+
+describe("secret-storage footer (#1950 review r20)", () => {
+  it("discloses where stdio env values will be kept", () => {
+    // This dialog takes stdio `env` values, which are extracted into the
+    // secret store exactly as Server Settings' are — so it is a secret-entry
+    // surface. It had no disclosure at all, which made it the one place a
+    // user could type a secret without being told where it goes.
+    renderWithMantine(
+      <ServerConfigModal
+        opened
+        mode="add"
+        existingIds={[]}
+        onClose={vi.fn()}
+        onSubmit={vi.fn()}
+        secretStorage={{
+          kind: "memory",
+          reason: "fallback",
+          durable: false,
+        }}
+      />,
+    );
+    expect(screen.getByTestId("secret-storage-footer")).toHaveTextContent(
+      "Secrets: Memory (this session only)",
+    );
+  });
+
+  it("renders no footer when the backend didn't report a store", () => {
+    renderWithMantine(
+      <ServerConfigModal
+        opened
+        mode="add"
+        existingIds={[]}
+        onClose={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+    expect(screen.queryByTestId("secret-storage-footer")).toBeNull();
+  });
+});

@@ -11,7 +11,7 @@ import {
   Switch,
   Text,
 } from "@mantine/core";
-import { useId, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { RiArrowDownSLine, RiArrowRightSLine } from "react-icons/ri";
 import type {
   ProgressNotification,
@@ -24,7 +24,9 @@ import {
   toFormSchema,
 } from "../../../utils/jsonUtils";
 import { getMirroredHeaderParams } from "@inspector/core/json/xMcpHeader.js";
+import { lintToolSchemas } from "@inspector/core/json/schemaLint.js";
 import { AnnotationBadge } from "../../elements/AnnotationBadge/AnnotationBadge";
+import { SchemaFindingsList } from "../../elements/SchemaFindingsList/SchemaFindingsList";
 import { ProgressDisplay } from "../../elements/ProgressDisplay/ProgressDisplay";
 import { SchemaForm } from "../SchemaForm/SchemaForm";
 
@@ -55,6 +57,15 @@ export interface ToolDetailPanelProps {
   /** Receives the effective run-as-task decision for this execution. */
   onExecute: (runAsTask: boolean) => void;
   onCancel: () => void;
+  /**
+   * Identity of the selected *row*, which is not the tool name: a server may
+   * repeat a name, and `ToolsScreen` disambiguates those rows with a key of its
+   * own (#1957). Passed straight to `SchemaFormProps.resetKey`, so switching
+   * between two same-named tools drops the first one's in-progress field text
+   * and enlarged fields. Falls back to the name, which is the right answer for
+   * any caller whose list cannot repeat one.
+   */
+  resetKey?: string;
 }
 
 // Outer column: title/annotations pin at top, the Execute footer pins at the
@@ -201,6 +212,7 @@ export function ToolDetailPanel({
   onFormChange,
   onExecute,
   onCancel,
+  resetKey,
 }: ToolDetailPanelProps) {
   const { name, title, description, icons, annotations, inputSchema } = tool;
   // Narrow the SDK protocol schema to the form renderer's schema type.
@@ -209,6 +221,9 @@ export function ToolDetailPanel({
   // SEP-2243: args this tool declares as `x-mcp-header` — their values mirror
   // into `Mcp-Param-{Name}` headers on a `tools/call` (#1632).
   const mirroredParams = getMirroredHeaderParams(tool);
+  // Memoized on the tool: this panel re-renders on every keystroke in the
+  // argument form, and the walk depends on nothing that changes in between.
+  const schemaFindings = useMemo(() => lintToolSchemas(tool), [tool]);
 
   // Descriptions are shown by default (most are short); the chevron lets the
   // user hide a long one to keep the form and Execute footer in view. Reset to
@@ -328,15 +343,17 @@ export function ToolDetailPanel({
             </HeaderParamsSection>
           )}
 
+          <SchemaFindingsList findings={schemaFindings} />
+
           <SchemaForm
             schema={formSchema}
             values={formValues}
             onChange={onFormChange}
             disabled={isExecuting}
-            // This panel is reused across tool selections rather than remounted,
-            // so the form needs the tool name to drop another tool's
-            // in-progress field text. See SchemaFormProps.resetKey.
-            resetKey={name}
+            // This panel is reused across tool selections rather than
+            // remounted, so the form needs a per-selection key to drop another
+            // tool's in-progress field text. See SchemaFormProps.resetKey.
+            resetKey={resetKey ?? name}
             onValidityChange={setHasInvalidDraft}
           />
 

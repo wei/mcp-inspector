@@ -25,7 +25,7 @@
     "test:integration": "npm run test-servers:build && vitest run --project=integration",
     "test:integration:watch": "npm run test-servers:build && vitest --project=integration",
     "test-servers:build": "tsc -p ../../test-servers --noCheck",
-    "lint": "eslint .",
+    "lint": "eslint . --max-warnings 0",
     "format": "prettier --write src server .storybook \"*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}\"",
     "format:check": "prettier --check src server .storybook \"*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}\"",
     "preview": "vite preview",
@@ -42,6 +42,7 @@
     "@mantine/hooks": "^8.3.17",
     "@mantine/notifications": "^8.3.17",
     "@napi-rs/keyring": "^1.3.0",
+    "ace-builds": "^1.44.0",
     "ajv": "^8.17.1",
     "atomically": "^2.1.1",
     "chokidar": "^4.0.3",
@@ -51,6 +52,7 @@
     "papaparse": "^5.5.4",
     "pino": "^9.14.0",
     "react": "^19.2.4",
+    "react-ace": "^15.0.0",
     "react-dom": "^19.2.4",
     "react-icons": "^5.6.0",
     "react-markdown": "^10.1.0",
@@ -93,5 +95,8 @@
     "vite": "^8.1.5",
     "vitest": "^4.1.10",
     "yaml": "^2.9.0"
+  },
+  "overrides": {
+    "esbuild": "^0.28.2"
   }
 }

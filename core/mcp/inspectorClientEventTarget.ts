@@ -25,6 +25,7 @@ import type {
   ResourceTemplateReadInvocation,
   ResourceSubscriptionStreamState,
   ExcludedTool,
+  RequestMetadata,
 } from "./types.js";
 import type { MalformedListItem } from "./listSalvage.js";
 import type {
@@ -112,7 +113,7 @@ export interface InspectorClientEventMap {
     timestamp: Date;
     success: boolean;
     error?: string;
-    metadata?: Record<string, string>;
+    metadata?: RequestMetadata;
     /** Non-fatal outputSchema mismatch detected on the skipOutputValidation path. */
     outputValidationError?: string;
   };

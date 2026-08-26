@@ -30,7 +30,7 @@ describe("headersToServerSettings", () => {
     expect(settings?.headers).toEqual([
       { key: "Authorization", value: "Bearer t" },
     ]);
-    expect(settings?.metadata).toEqual([]);
+    expect(settings?.metadata).toEqual({});
     expect(settings?.roots).toEqual([]);
   });
 });
@@ -276,5 +276,35 @@ describe("selectServerEntry", () => {
     expect(() => selectServerEntry({ a, b })).toThrow(
       /Multiple servers found.*--server.*Available servers: a, b/,
     );
+  });
+});
+
+describe("rehydrateMcpConfigFromKeychain bulk seam", () => {
+  it("tolerates a store whose bulk read omits a server", async () => {
+    // `getMany` is an optional seam, so an implementation — a test double, a
+    // future store — may answer only for the servers it knows. The merge must
+    // treat a missing entry as "no secrets" rather than reading `undefined`
+    // into the config, which is what the `?? {}` guard is for.
+    const { rehydrateMcpConfigFromKeychain } =
+      await import("@inspector/core/mcp/node/server-secrets.js");
+    const partial = {
+      async get() {
+        return null;
+      },
+      async set() {},
+      async delete() {},
+      async deleteAllForServer() {},
+      async getMany() {
+        // Deliberately answers for nobody.
+        return {};
+      },
+    };
+    const config = {
+      mcpServers: {
+        alpha: { type: "streamable-http" as const, url: "https://a.example" },
+      },
+    };
+    const out = await rehydrateMcpConfigFromKeychain(config, partial);
+    expect(out.mcpServers.alpha).toEqual(config.mcpServers.alpha);
   });
 });

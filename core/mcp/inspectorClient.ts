@@ -1,4 +1,10 @@
 import { Client } from "@modelcontextprotocol/client";
+// The protocol's own schemas for the reserved `_meta` members, so the client
+// validates against the SDK rather than a restatement of it that can drift.
+import {
+  ProgressTokenSchema,
+  RequestMetaSchema,
+} from "@modelcontextprotocol/core";
 import type {
   MCPServerConfig,
   StderrLogEntry,
@@ -17,6 +23,7 @@ import type {
   PendingRequestOrigin,
   ResourceSubscriptionStreamState,
   ExcludedTool,
+  RequestMetadata,
 } from "./types.js";
 import {
   scanXMcpHeaderDeclarations,
@@ -133,6 +140,13 @@ import {
 } from "./modernTaskSchemas.js";
 import { buildClientExtensions } from "./extensions.js";
 import {
+  getElicitationUiResourceUri,
+  isFormElicitation,
+  supportsAppElicitation,
+  validateAppElicitResult,
+  type AppElicitationRenderer,
+} from "./appElicitation.js";
+import {
   EmptyResultSchema,
   CallToolResultSchema,
   GetPromptResultSchema,
@@ -232,6 +246,14 @@ interface ReceiverTaskRecord {
   resolvePayload: (payload: ClientResult) => void;
   rejectPayload: (reason?: unknown) => void;
   cleanupTimeoutId?: ReturnType<typeof setTimeout>;
+  /**
+   * Aborted when the task reaches a terminal state some way other than the
+   * user answering — a `tasks/cancel`, or session teardown. Whatever is
+   * collecting the answer (the native pending-request entry, or an app-rendered
+   * elicitation and its bridge) is torn down from this, so a cancelled task
+   * cannot leave a modal on screen waiting for an answer nothing will read.
+   */
+  abort: AbortController;
 }
 
 /**
@@ -341,8 +363,8 @@ function notificationMethodFromSchema(schema: unknown): string | undefined {
 interface ToolCallRequest {
   tool: Tool;
   args: Record<string, JsonValue>;
-  generalMetadata?: Record<string, string>;
-  toolSpecificMetadata?: Record<string, string>;
+  generalMetadata?: RequestMetadata;
+  toolSpecificMetadata?: RequestMetadata;
   taskOptions?: { ttl?: number };
   options?: { skipOutputValidation?: boolean };
 }
@@ -353,6 +375,69 @@ interface ToolCallRequest {
 // server can't spin a tight zero-delay loop; a successful acknowledgement resets
 // the count, and past the cap we give up (mark the stream ended) rather than
 // retry a persistently-failing re-list forever.
+/**
+ * A one-word name for a JSON value's type, for diagnostics that must not
+ * disclose the value itself.
+ */
+function describeJsonType(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+/**
+ * Whether a `_meta.progressToken` value is one the protocol allows.
+ *
+ * Delegates to the SDK's own `ProgressTokenSchema` rather than restating it.
+ * A hand-rolled check drifts: this was `Number.isInteger` until review pointed
+ * out that zod 4's `.int()` rejects anything past `Number.MAX_SAFE_INTEGER`,
+ * so an unsafe integer passed here and was rejected by the server instead.
+ */
+function isProgressToken(value: unknown): value is ProgressToken {
+  return ProgressTokenSchema.safeParse(value).success;
+}
+
+/**
+ * Drop the reserved `_meta` members whose value the protocol will not accept.
+ *
+ * Most of `_meta` is arbitrary JSON (#1910), but a few keys are **reserved**
+ * and carry their own schema — `progressToken` (a string or a safe integer;
+ * zod's `.int()` rejects anything past `Number.MAX_SAFE_INTEGER`) and
+ * `io.modelcontextprotocol/related-task` (`{ taskId: string }`) in the pinned
+ * SDK. Before the widening every value was a string, so only `progressToken`
+ * could even be wrong; now any of them can, and one bad reserved member makes a
+ * conforming server reject the **whole request** rather than ignore the key.
+ *
+ * Validated with the SDK's `RequestMetaSchema` instead of a hand-maintained
+ * list, which is the point: the schema is loose, so unknown keys pass through
+ * untouched, and a member the SDK constrains in a later release is covered here
+ * without anyone remembering to add it. Zod reports the offending top-level key
+ * as `issue.path[0]`, so only that member is removed — siblings survive, and
+ * the request stays well-formed because every reserved member is optional.
+ */
+function dropInvalidReservedMeta(
+  meta: RequestMetadata,
+  logger: InspectorLogger,
+): RequestMetadata {
+  const result = RequestMetaSchema.safeParse(meta);
+  if (result.success) return meta;
+
+  const cleaned = { ...meta };
+  for (const issue of result.error.issues) {
+    const key = issue.path[0];
+    if (typeof key !== "string" || !(key in cleaned)) continue;
+    // The key and the reason, never the value: `_meta` can carry credentials,
+    // and this logger is persisted by real clients (the TUI writes it to
+    // `~/.mcp-inspector/auth.log`).
+    logger.warn(
+      { key, received: describeJsonType(cleaned[key]) },
+      "Dropping reserved `_meta` member — it does not match the protocol schema.",
+    );
+    delete cleaned[key];
+  }
+  return cleaned;
+}
+
 const MODERN_RECONNECT_BASE_MS = 500;
 const MODERN_RECONNECT_MAX_MS = 15_000;
 const MODERN_RECONNECT_MAX_ATTEMPTS = 8;
@@ -405,7 +490,7 @@ export class InspectorClient extends InspectorClientEventTarget {
   private progress: boolean;
   private resetTimeoutOnProgress: boolean;
   private requestTimeout: number | undefined;
-  private defaultMetadata: Record<string, string> | undefined;
+  private defaultMetadata: RequestMetadata | undefined;
   private serverSettings: InspectorServerSettings | undefined;
   private versionNegotiation: VersionNegotiationOptions;
   private status: ConnectionStatus = "disconnected";
@@ -562,6 +647,38 @@ export class InspectorClient extends InspectorClientEventTarget {
   // Per-extension advertise overrides (#1738); undefined key falls back to the
   // registry default in ADVERTISABLE_EXTENSIONS.
   private readonly advertisedExtensions?: Record<string, boolean>;
+  /**
+   * Host-supplied renderer for app-rendered form elicitations (#1854), or
+   * undefined on a client that cannot host MCP Apps. Its presence is what
+   * advertises the nested MCP Apps `elicitation` capability, so this is the one
+   * fact both the advertisement and the routing gate read.
+   */
+  private readonly appElicitationRenderer?: AppElicitationRenderer;
+
+  /**
+   * Monotonic counter behind the request-scoped id handed to the renderer. The
+   * association MUST be per request (a map keyed by this id owns the resource
+   * URI, renderer instance and promise on the host side) so two concurrent
+   * elicitations cannot resolve through each other's bridges.
+   */
+  private appElicitationSeq = 0;
+  /**
+   * Per-instance prefix for {@link appElicitationSeq}.
+   *
+   * A counter alone is not enough: a host may hold ONE renderer across
+   * replacement clients (the web client rebuilds its `InspectorClient` on a
+   * settings change), and every fresh instance would otherwise mint
+   * `app-elicitation-1` for its first request. Settling that id would then
+   * resolve — or discard — whichever connection's request the host happened to
+   * be keying.
+   */
+  private readonly appElicitationPrefix = `app-elicitation-${globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)}`;
+  /**
+   * Abort controllers for app-rendered elicitations still awaiting an answer.
+   * Aborted alongside the native pending queue on disconnect, so a rendered app
+   * cannot outlive the connection that asked for it.
+   */
+  private activeAppElicitations = new Set<AbortController>();
   private receiverTaskTtlMs: number | (() => number);
   private receiverTaskRecords: Map<string, ReceiverTaskRecord> = new Map();
   // OAuth support (config owned by oauthManager; client delegates and uses !!oauthManager for "is OAuth configured")
@@ -616,6 +733,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     this.elicit = options.elicit ?? true;
     this.receiverTasks = options.receiverTasks ?? false;
     this.advertisedExtensions = options.advertisedExtensions;
+    this.appElicitationRenderer = options.appElicitation;
     this.receiverTaskTtlMs = options.receiverTaskTtlMs ?? 60_000;
     this.progress = options.progress ?? true;
     this.resetTimeoutOnProgress = options.resetTimeoutOnProgress ?? true;
@@ -785,6 +903,14 @@ export class InspectorClient extends InspectorClientEventTarget {
     const advertisedExtensions = buildClientExtensions({
       enterpriseManaged: options.oauth?.enterpriseManaged ?? false,
       advertised: this.advertisedExtensions,
+      // Read off the built `capabilities.elicitation.form` rather than
+      // re-deriving from `options.elicit`: the nested MCP Apps `elicitation`
+      // setting must never be advertised without the core form capability it
+      // extends, and two derivations of the same fact can drift. Disabling form
+      // elicitation therefore drops both, as the contract requires. (#1854)
+      appElicitation:
+        this.appElicitationRenderer !== undefined &&
+        capabilities.elicitation?.form !== undefined,
     });
     if (Object.keys(advertisedExtensions).length > 0) {
       capabilities.extensions = {
@@ -979,8 +1105,8 @@ export class InspectorClient extends InspectorClientEventTarget {
    * injecting an empty `_meta` field.
    */
   private mergeMeta(
-    callMetadata?: Record<string, string>,
-  ): Record<string, string> | undefined {
+    callMetadata?: RequestMetadata,
+  ): RequestMetadata | undefined {
     const defaults = this.defaultMetadata;
     // Modern-era per-request log level (#1629): stamp the opt-in `_meta` key on
     // every request so the server emits `notifications/message` on this
@@ -996,7 +1122,29 @@ export class InspectorClient extends InspectorClientEventTarget {
       ...(logMeta ?? {}),
       ...(callMetadata ?? {}),
     };
-    return Object.keys(merged).length > 0 ? merged : undefined;
+    // Reserved members carry their own schemas even though the rest of `_meta`
+    // is arbitrary JSON, and one bad reserved value makes a conforming server
+    // reject the whole request. See `dropInvalidReservedMeta`.
+    const sanitized = dropInvalidReservedMeta(merged, this.logger);
+    return Object.keys(sanitized).length > 0 ? sanitized : undefined;
+  }
+
+  /**
+   * The `progressToken` a caller stamped on its request metadata, when it is
+   * one the SDK will accept.
+   *
+   * This governs only **callback correlation** — whether the client wires up an
+   * `onprogress` for the request. Keeping an invalid value off the **wire** is
+   * a separate concern handled in {@link mergeMeta}, which deletes the member
+   * from the outgoing `_meta` so a conforming server is never sent something
+   * `ProgressTokenSchema` rejects. The two use the same {@link isProgressToken}
+   * predicate, so they cannot disagree about what counts as valid.
+   */
+  private progressTokenOf(
+    metadata: RequestMetadata | undefined,
+  ): ProgressToken | undefined {
+    const token = metadata?.progressToken;
+    return isProgressToken(token) ? token : undefined;
   }
 
   private getRequestOptions(
@@ -1054,8 +1202,8 @@ export class InspectorClient extends InspectorClientEventTarget {
    * so the merge/omit branch is defined once.
    */
   private aggregateListParams(
-    metadata?: Record<string, string>,
-  ): { _meta: Record<string, string> } | undefined {
+    metadata?: RequestMetadata,
+  ): { _meta: RequestMetadata } | undefined {
     const effectiveMeta = this.mergeMeta(metadata);
     return effectiveMeta ? { _meta: effectiveMeta } : undefined;
   }
@@ -1174,6 +1322,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       payloadPromise,
       resolvePayload,
       rejectPayload,
+      abort: new AbortController(),
     };
     record.cleanupTimeoutId = setTimeout(() => {
       record.cleanupTimeoutId = undefined;
@@ -1250,6 +1399,9 @@ export class InspectorClient extends InspectorClientEventTarget {
     };
     record.task = updatedTask;
     record.rejectPayload(new Error("Task cancelled"));
+    // Stop collecting an answer nobody will read: drops the native pending
+    // entry and tears down an app-rendered elicitation's renderer.
+    record.abort.abort();
     if (record.cleanupTimeoutId != null) {
       clearTimeout(record.cleanupTimeoutId);
       record.cleanupTimeoutId = undefined;
@@ -1379,7 +1531,13 @@ export class InspectorClient extends InspectorClientEventTarget {
     // an elicit option that enables no mode advertises nothing, and registering
     // regardless throws before the handshake.
     if (this.elicitationCapabilityAdvertised && this.client) {
-      const elicitHandler = (request: ElicitRequest): Promise<ElicitResult> => {
+      const elicitHandler = (
+        request: ElicitRequest,
+        // Structural, and only the one field this needs: the SDK's
+        // `ClientContext` carries much more, and naming it here would tie the
+        // handler to a type the bypass helper below does not thread through.
+        ctx?: { mcpReq?: { signal?: AbortSignal } },
+      ): Promise<ElicitResult> => {
         const paramsTask = (request.params as { task?: { ttl?: number } })
           ?.task;
         if (this.tasksCapabilityAdvertised && paramsTask != null) {
@@ -1388,35 +1546,74 @@ export class InspectorClient extends InspectorClientEventTarget {
             initialStatus: "input_required",
             statusMessage: "Awaiting user input",
           });
+          // Settling the receiver task, shared by both answer routes below so
+          // an app-rendered answer completes the task exactly as a native one
+          // does.
+          const completeTask = (result: ElicitResult) => {
+            // A cancelled (or otherwise terminal) task must not be re-settled:
+            // an answer that arrives after `tasks/cancel` would otherwise
+            // overwrite `cancelled` with `completed`.
+            if (InspectorClient.isTerminalTaskStatus(record.task.status))
+              return;
+            record.resolvePayload(result);
+            const updated: Task = {
+              ...record.task,
+              status: "completed",
+              lastUpdatedAt: new Date().toISOString(),
+            };
+            record.task = updated;
+            this.upsertReceiverTask(updated);
+          };
+          const failTask = (error: Error) => {
+            if (InspectorClient.isTerminalTaskStatus(record.task.status))
+              return;
+            record.rejectPayload(error);
+            const updated: Task = {
+              ...record.task,
+              status: "failed",
+              lastUpdatedAt: new Date().toISOString(),
+              statusMessage: error.message,
+            };
+            record.task = updated;
+            this.upsertReceiverTask(updated);
+          };
           void (async () => {
+            // A task-augmented request is still an `elicitation/create`, so the
+            // app-rendering contract applies to it too (#1854). It cannot go
+            // through `enqueuePendingElicitation` — the response frame has
+            // already been sent as a `CreateTaskResult` and the answer settles
+            // the TASK rather than the request — so the same attempt is made
+            // here, falling back to the native queue exactly as that funnel
+            // does. An abort (disconnect) fails the task rather than reopening
+            // it natively.
+            let appResult: ElicitResult | null;
+            try {
+              appResult = await this.tryAppElicitation(
+                request,
+                record.abort.signal,
+              );
+            } catch (error) {
+              failTask(
+                error instanceof Error ? error : new Error(String(error)),
+              );
+              return;
+            }
+            if (appResult) {
+              completeTask(appResult);
+              return;
+            }
             const elicitationRequest = new ElicitationCreateMessage(
               request,
-              (result) => {
-                record.resolvePayload(result);
-                const now = new Date().toISOString();
-                const updated: Task = {
-                  ...record.task,
-                  status: "completed",
-                  lastUpdatedAt: now,
-                };
-                record.task = updated;
-                this.upsertReceiverTask(updated);
-              },
+              completeTask,
               (id) => this.removePendingElicitation(id),
-              (error) => {
-                record.rejectPayload(error);
-                const now = new Date().toISOString();
-                const updated: Task = {
-                  ...record.task,
-                  status: "failed",
-                  lastUpdatedAt: now,
-                  statusMessage: error.message,
-                };
-                record.task = updated;
-                this.upsertReceiverTask(updated);
-              },
+              failTask,
             );
             this.addPendingElicitation(elicitationRequest);
+            // A `tasks/cancel` (or teardown) drops the queued entry, so the
+            // modal does not outlive the task it belongs to.
+            this.wirePendingAbort(record.abort.signal, () =>
+              this.removePendingElicitation(elicitationRequest.id),
+            );
           })();
           // Task-augmented (2025-11-25) response — see the sampling handler
           // above. Reply with a `CreateTaskResult` (`{ task }`), routed around
@@ -1429,7 +1626,19 @@ export class InspectorClient extends InspectorClientEventTarget {
           const taskResult: CreateTaskResult = { task: record.task };
           return Promise.resolve(taskResult as unknown as ElicitResult);
         }
-        return this.enqueuePendingElicitation(request, "server-request");
+        // `ctx.mcpReq.signal` aborts when the server cancels this request
+        // (`notifications/cancelled`). Threading it through means both answer
+        // surfaces — the native queue entry and an app-rendered elicitation's
+        // renderer — are torn down with the request, instead of a modal
+        // outliving work the server abandoned. The task-augmented branch above
+        // deliberately does NOT use it: that request is answered immediately
+        // with a `CreateTaskResult`, so its lifetime is the task's, which
+        // carries its own abort (see `ReceiverTaskRecord.abort`).
+        return this.enqueuePendingElicitation(
+          request,
+          "server-request",
+          ctx?.mcpReq?.signal,
+        );
       };
       this.client.setRequestHandler("elicitation/create", elicitHandler);
       // Registration, like the `setRequestHandler` above it — and the whole
@@ -1548,6 +1757,9 @@ export class InspectorClient extends InspectorClientEventTarget {
       if (record.cleanupTimeoutId != null) {
         clearTimeout(record.cleanupTimeoutId);
       }
+      // Same reason as `cancelReceiverTask`: the session that owns whatever is
+      // collecting the answer is ending.
+      record.abort.abort();
     }
     this.receiverTaskRecords.clear();
   }
@@ -1688,6 +1900,13 @@ export class InspectorClient extends InspectorClientEventTarget {
       elicitation.cancel();
     }
     this.pendingElicitations = [];
+    // App-rendered elicitations (#1854) are not in the queue above — they live
+    // in the host's renderer — so abort them here on the same teardown paths.
+    // `tryAppElicitation` removes each controller in its own `finally`.
+    for (const controller of this.activeAppElicitations) {
+      controller.abort();
+    }
+    this.activeAppElicitations.clear();
   }
 
   /**
@@ -1711,7 +1930,12 @@ export class InspectorClient extends InspectorClientEventTarget {
   private clearAndAnnouncePendingPeerRequests(): void {
     if (
       this.pendingSamples.length === 0 &&
-      this.pendingElicitations.length === 0
+      this.pendingElicitations.length === 0 &&
+      // App-rendered elicitations (#1854) are not in either array — they live in
+      // the host's renderer — so an emptiness check that ignores them lets a
+      // mid-session close (the `onclose` route, which reaches teardown only
+      // through here) leave a modal open for a connection that is gone.
+      this.activeAppElicitations.size === 0
     ) {
       return;
     }
@@ -1801,6 +2025,16 @@ export class InspectorClient extends InspectorClientEventTarget {
         ...(this.serverSettings && { settings: this.serverSettings }),
       };
       if (this.isHttpOAuthConfig() && oauthManager) {
+        // Record every 401/403 the transport sees, whatever else happens to
+        // it. The legacy first-authorization path deliberately runs with no
+        // authProvider and no challenge interception (see below), so the SDK
+        // raises a headerless `UnauthorizedError` and the client calls
+        // `authenticate()` with nothing in hand — this is the only place the
+        // challenge's RFC 9728 `resource_metadata` still exists (#2071).
+        const manager = oauthManager;
+        transportOptions.onAuthChallengeObserved = (challenge) => {
+          manager.noteObservedAuthChallenge(challenge);
+        };
         if (oauthManager.isEnterpriseManaged()) {
           await oauthManager.trySilentEnterpriseManagedAuth();
           const provider = await oauthManager.createOAuthProviderForTransport();
@@ -2820,11 +3054,17 @@ export class InspectorClient extends InspectorClientEventTarget {
    * corresponding `ElicitResult` (echoed to the server on retry); only a
    * genuine failure or a `signal` abort rejects.
    */
-  private enqueuePendingElicitation(
+  private async enqueuePendingElicitation(
     request: ElicitRequest,
     origin: PendingRequestOrigin,
     signal?: AbortSignal,
   ): Promise<ElicitResult> {
+    // App-rendered form elicitation (#1854) is offered first and falls back to
+    // the native queue below on every failure. Both entry points — the inbound
+    // `elicitation/create` handler and the MRTR driver's embedded requests —
+    // funnel through here, so neither can miss the routing.
+    const appResult = await this.tryAppElicitation(request, signal);
+    if (appResult) return appResult;
     // See {@link enqueuePendingSample} — Promise settle is idempotent.
     return new Promise<ElicitResult>((resolvePromise, rejectPromise) => {
       const elicitation = new ElicitationCreateMessage(
@@ -2840,6 +3080,92 @@ export class InspectorClient extends InspectorClientEventTarget {
         rejectPromise(createPendingAbortError());
       });
     });
+  }
+
+  /**
+   * Attempt to resolve an `elicitation/create` request by rendering the MCP App
+   * the server attached to it (#1854), returning the app's standard
+   * `ElicitResult`.
+   *
+   * Returns `null` for "not app-rendered — use the native UI", which covers
+   * every negotiation gate and every failure mode the contract lists: either
+   * peer did not negotiate the capability, the metadata is absent or unusable,
+   * the mode is not `form`, the renderer failed (resource read, sandbox/bridge
+   * init, missing app capability, timeout), or the app returned something that
+   * is not a valid result for this request. An explicit `decline` or `cancel`
+   * is a *completed* elicitation and is returned, not fallen back on.
+   *
+   * The one case that does not fall back is an abort of the originating
+   * request: the caller is cancelling the whole elicitation, so re-opening it
+   * in the native queue would resurrect work the user just abandoned.
+   */
+  private async tryAppElicitation(
+    request: ElicitRequest,
+    signal?: AbortSignal,
+  ): Promise<ElicitResult | null> {
+    const renderer = this.appElicitationRenderer;
+    if (!renderer) return null;
+    // Gate 1-3 (client) + 4 (server), from the negotiated capabilities of this
+    // connection — `this.capabilities` is populated at initialize.
+    if (!supportsAppElicitation(this.clientCapabilities, this.capabilities)) {
+      return null;
+    }
+    // Only form mode is app-renderable; `url` keeps its existing path.
+    if (!isFormElicitation(request.params)) return null;
+    let resourceUri: string | undefined;
+    try {
+      resourceUri = getElicitationUiResourceUri(request.params);
+    } catch (error) {
+      this.logger.warn(
+        { error },
+        "Elicitation carried unusable _meta.ui.resourceUri; using the native elicitation UI",
+      );
+      return null;
+    }
+    if (!resourceUri) return null;
+
+    // Request-scoped abort: forwards the caller's signal (MRTR cancellation)
+    // and is aborted by `settleAndDropPendingPeerRequests` on disconnect, so a
+    // rendered app cannot outlive the connection that asked for it.
+    // Already cancelled before we got here (the caller aborted while an earlier
+    // MRTR round was in flight): don't mount an app nobody is waiting on.
+    if (signal?.aborted) throw createPendingAbortError();
+    const controller = new AbortController();
+    const forwardAbort = () => controller.abort(signal?.reason);
+    signal?.addEventListener("abort", forwardAbort, { once: true });
+    this.activeAppElicitations.add(controller);
+    try {
+      const result = await renderer({
+        requestId: `${this.appElicitationPrefix}-${++this.appElicitationSeq}`,
+        resourceUri,
+        params: request.params,
+        signal: controller.signal,
+      });
+      this.outputValidator ??= new AjvJsonSchemaValidator();
+      const invalid = validateAppElicitResult(
+        this.outputValidator,
+        request.params,
+        result,
+      );
+      if (invalid) {
+        this.logger.warn(
+          { resourceUri, reason: invalid },
+          "App-rendered elicitation returned an invalid result; using the native elicitation UI",
+        );
+        return null;
+      }
+      return result;
+    } catch (error) {
+      if (controller.signal.aborted) throw createPendingAbortError();
+      this.logger.warn(
+        { error, resourceUri },
+        "App-rendered elicitation failed; using the native elicitation UI",
+      );
+      return null;
+    } finally {
+      this.activeAppElicitations.delete(controller);
+      signal?.removeEventListener("abort", forwardAbort);
+    }
   }
 
   /**
@@ -3181,7 +3507,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   async listTools(
     cursor?: string,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<{ tools: Tool[]; nextCursor?: string }> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -3199,7 +3525,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       this.client!.request(
         { method: "tools/list", params },
         ListToolsResultSchema,
-        this.getRequestOptions(metadata?.progressToken),
+        this.getRequestOptions(this.progressTokenOf(metadata)),
       ),
     );
     const tools = [...(response.tools || [])];
@@ -3220,7 +3546,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   async listAllTools(options?: {
     cacheMode?: CacheMode;
-    metadata?: Record<string, string>;
+    metadata?: RequestMetadata;
   }): Promise<{ tools: Tool[] }> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -3372,7 +3698,7 @@ export class InspectorClient extends InspectorClientEventTarget {
      *  from it so every field except the entries is still validated. */
     resultSchema: z.ZodObject;
     aggregate: () => Promise<T[]>;
-    metadata?: Record<string, string>;
+    metadata?: RequestMetadata;
     /**
      * Filter applied to SALVAGED entries only, to reproduce a filter the SDK's
      * strict aggregate applies for us. Without it the fallback would return a
@@ -3450,7 +3776,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     itemsKey: string;
     itemSchema: z.ZodType<T>;
     resultSchema: z.ZodObject;
-    metadata?: Record<string, string>;
+    metadata?: RequestMetadata;
     err: unknown;
   }): Promise<T[]> {
     const pageSchema = lenientListPageSchema(resultSchema, itemsKey);
@@ -3501,7 +3827,7 @@ export class InspectorClient extends InspectorClientEventTarget {
               : this.client!.request(
                   { method, params },
                   pageSchema,
-                  this.getRequestOptions(metadata?.progressToken),
+                  this.getRequestOptions(this.progressTokenOf(metadata)),
                 ),
           { method },
         );
@@ -3587,7 +3913,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    * stops the walk (non-converging-server guard, mirroring the SDK).
    */
   async refreshExcludedTools(
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<ExcludedTool[]> {
     const excluded: ExcludedTool[] = [];
     // Gated to connections that actually exclude; otherwise this is a pure
@@ -3657,7 +3983,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   private async listToolsForScan(
     cursor: string | undefined,
-    metadata: Record<string, string> | undefined,
+    metadata: RequestMetadata | undefined,
   ): Promise<{
     tools: Tool[];
     nextCursor?: string;
@@ -3700,7 +4026,7 @@ export class InspectorClient extends InspectorClientEventTarget {
               : this.client!.request(
                   { method: "tools/list", params },
                   pageSchema,
-                  this.getRequestOptions(metadata?.progressToken),
+                  this.getRequestOptions(this.progressTokenOf(metadata)),
                 ),
           { method: "tools/list" },
         );
@@ -3792,8 +4118,8 @@ export class InspectorClient extends InspectorClientEventTarget {
   async callTool(
     tool: Tool,
     args: Record<string, JsonValue>,
-    generalMetadata?: Record<string, string>,
-    toolSpecificMetadata?: Record<string, string>,
+    generalMetadata?: RequestMetadata,
+    toolSpecificMetadata?: RequestMetadata,
     taskOptions?: { ttl?: number },
     options?: { skipOutputValidation?: boolean },
   ): Promise<ToolCallInvocation> {
@@ -4021,7 +4347,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     const convertedArgs = this.convertStringToolArgs(tool, args);
 
     // Merge general metadata with tool-specific metadata; tool-specific wins.
-    const callMetadata: Record<string, string> | undefined =
+    const callMetadata: RequestMetadata | undefined =
       generalMetadata || toolSpecificMetadata
         ? { ...(generalMetadata || {}), ...(toolSpecificMetadata || {}) }
         : undefined;
@@ -4034,7 +4360,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     const callParams: {
       name: string;
       arguments: Record<string, JsonValue>;
-      _meta?: Record<string, string>;
+      _meta?: RequestMetadata;
       task?: { ttl: number };
     } = {
       name: tool.name,
@@ -4046,7 +4372,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     }
 
     const requestOptions = this.getRequestOptions(
-      metadata?.progressToken,
+      this.progressTokenOf(metadata),
       signal,
     );
     this.applyMirroredParamHeaders(tool, convertedArgs, requestOptions);
@@ -4136,11 +4462,11 @@ export class InspectorClient extends InspectorClientEventTarget {
   private dispatchFailedToolCall(
     tool: Tool,
     args: Record<string, JsonValue>,
-    generalMetadata: Record<string, string> | undefined,
-    toolSpecificMetadata: Record<string, string> | undefined,
+    generalMetadata: RequestMetadata | undefined,
+    toolSpecificMetadata: RequestMetadata | undefined,
     errorMessage: string,
   ): void {
-    const callMetadata: Record<string, string> | undefined =
+    const callMetadata: RequestMetadata | undefined =
       generalMetadata || toolSpecificMetadata
         ? { ...(generalMetadata || {}), ...(toolSpecificMetadata || {}) }
         : undefined;
@@ -4624,8 +4950,8 @@ export class InspectorClient extends InspectorClientEventTarget {
   async callToolStream(
     tool: Tool,
     args: Record<string, JsonValue>,
-    generalMetadata?: Record<string, string>,
-    toolSpecificMetadata?: Record<string, string>,
+    generalMetadata?: RequestMetadata,
+    toolSpecificMetadata?: RequestMetadata,
     taskOptions?: { ttl?: number },
   ): Promise<ToolCallInvocation> {
     if (!this.client) {
@@ -4635,7 +4961,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       const convertedArgs = this.convertStringToolArgs(tool, args);
 
       // Merge general metadata with tool-specific metadata; tool-specific wins.
-      const callMetadata: Record<string, string> | undefined =
+      const callMetadata: RequestMetadata | undefined =
         generalMetadata || toolSpecificMetadata
           ? { ...(generalMetadata || {}), ...(toolSpecificMetadata || {}) }
           : undefined;
@@ -4671,7 +4997,9 @@ export class InspectorClient extends InspectorClientEventTarget {
       // attach one here either — doing so would request a progress token (and
       // emit requestorTaskProgress) for task calls only, bypassing the toggle
       // that governs every other call path.
-      const requestOptions = this.getRequestOptions(metadata?.progressToken);
+      const requestOptions = this.getRequestOptions(
+        this.progressTokenOf(metadata),
+      );
       // The task-augmented `tools/call` needs the same SEP-2243 mirroring as the
       // plain one — a strict modern server rejects it with -32020 otherwise.
       this.applyMirroredParamHeaders(tool, convertedArgs, requestOptions);
@@ -4832,7 +5160,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       return invocation;
     } catch (error) {
       // Merge general metadata with tool-specific metadata for error case
-      const callMetadata: Record<string, string> | undefined =
+      const callMetadata: RequestMetadata | undefined =
         generalMetadata || toolSpecificMetadata
           ? { ...(generalMetadata || {}), ...(toolSpecificMetadata || {}) }
           : undefined;
@@ -4862,7 +5190,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   async listResources(
     cursor?: string,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<{ resources: Resource[]; nextCursor?: string }> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -4876,7 +5204,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       this.client!.request(
         { method: "resources/list", params },
         ListResourcesResultSchema,
-        this.getRequestOptions(metadata?.progressToken),
+        this.getRequestOptions(this.progressTokenOf(metadata)),
       ),
     );
     return {
@@ -4893,7 +5221,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   async listAllResources(options?: {
     cacheMode?: CacheMode;
-    metadata?: Record<string, string>;
+    metadata?: RequestMetadata;
   }): Promise<{ resources: Resource[] }> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -4924,7 +5252,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   async readResource(
     uri: string,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<ResourceReadInvocation> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -4943,7 +5271,7 @@ export class InspectorClient extends InspectorClientEventTarget {
           "resources/read",
           params,
           ReadResourceResultSchema,
-          this.getRequestOptions(metadata?.progressToken),
+          this.getRequestOptions(this.progressTokenOf(metadata)),
         ),
       { method: "resources/read" },
     );
@@ -4974,7 +5302,7 @@ export class InspectorClient extends InspectorClientEventTarget {
   async readResourceFromTemplate(
     uriTemplate: string,
     params: Record<string, string>,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<ResourceTemplateReadInvocation> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -5036,7 +5364,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   async listResourceTemplates(
     cursor?: string,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<{ resourceTemplates: ResourceTemplate[]; nextCursor?: string }> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -5051,7 +5379,7 @@ export class InspectorClient extends InspectorClientEventTarget {
         this.client!.request(
           { method: "resources/templates/list", params },
           ListResourceTemplatesResultSchema,
-          this.getRequestOptions(metadata?.progressToken),
+          this.getRequestOptions(this.progressTokenOf(metadata)),
         ),
       { method: "resources/templates/list" },
     );
@@ -5069,7 +5397,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   async listAllResourceTemplates(options?: {
     cacheMode?: CacheMode;
-    metadata?: Record<string, string>;
+    metadata?: RequestMetadata;
   }): Promise<{ resourceTemplates: ResourceTemplate[] }> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -5100,7 +5428,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   async listPrompts(
     cursor?: string,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<{ prompts: Prompt[]; nextCursor?: string }> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -5114,7 +5442,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       this.client!.request(
         { method: "prompts/list", params },
         ListPromptsResultSchema,
-        this.getRequestOptions(metadata?.progressToken),
+        this.getRequestOptions(this.progressTokenOf(metadata)),
       ),
     );
     return {
@@ -5131,7 +5459,7 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   async listAllPrompts(options?: {
     cacheMode?: CacheMode;
-    metadata?: Record<string, string>;
+    metadata?: RequestMetadata;
   }): Promise<{ prompts: Prompt[] }> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -5164,7 +5492,7 @@ export class InspectorClient extends InspectorClientEventTarget {
   async getPrompt(
     name: string,
     args?: Record<string, JsonValue>,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<PromptGetInvocation> {
     if (!this.client) {
       throw new Error("Client is not connected");
@@ -5188,7 +5516,7 @@ export class InspectorClient extends InspectorClientEventTarget {
           "prompts/get",
           params,
           GetPromptResultSchema,
-          this.getRequestOptions(metadata?.progressToken),
+          this.getRequestOptions(this.progressTokenOf(metadata)),
         ),
       { method: "prompts/get", toolName: name },
     );
@@ -5227,7 +5555,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     argumentName: string,
     argumentValue: string,
     context?: Record<string, string>,
-    metadata?: Record<string, string>,
+    metadata?: RequestMetadata,
   ): Promise<{ values: string[]; total?: number; hasMore?: boolean }> {
     if (!this.client) {
       return { values: [] };
@@ -5249,7 +5577,7 @@ export class InspectorClient extends InspectorClientEventTarget {
         () =>
           this.client!.complete(
             params,
-            this.getRequestOptions(metadata?.progressToken),
+            this.getRequestOptions(this.progressTokenOf(metadata)),
           ),
         {
           method: "completion/complete",
@@ -6012,6 +6340,8 @@ export class InspectorClient extends InspectorClientEventTarget {
     /** Endpoint overrides applied to the discovered AS metadata (#1906). */
     authorizationUrl?: string;
     tokenUrl?: string;
+    /** Declare the `refresh_token` grant in client metadata (#2068). */
+    requestRefreshToken?: boolean;
   }): void {
     if (!this.oauthManager) {
       throw new Error(

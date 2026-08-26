@@ -153,6 +153,28 @@ const buildAccount = (serverId: string, field: string): string =>
   `${serverId}:${field}`;
 
 /**
+ * Base type for "the active secret store cannot do this right now".
+ *
+ * Every store implementation hard-fails on `set` and only on `set` (see
+ * the {@link SecretStore} contract), and the API routes translate that
+ * one condition into a 503. Before #1950 there was only one store, so the
+ * routes could match on `KeychainUnavailableError` directly; now that a
+ * file-backed store can fail for entirely different reasons (an
+ * unreadable file, a changed passphrase) they match on this base instead,
+ * and a future store gets the same treatment by extending it rather than
+ * by every route learning its name.
+ *
+ * The message is the user-facing text — these are surfaced verbatim in
+ * the 503 body — so subclasses write advice, not diagnostics.
+ */
+export class SecretStoreUnavailableError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "SecretStoreUnavailableError";
+  }
+}
+
+/**
  * Thrown when the OS keychain is unavailable. Surfaced as a 503 by the
  * API handlers so the UI can show an actionable error rather than a
  * generic 500 — and "actionable" is the point: the causes need
@@ -168,7 +190,7 @@ const buildAccount = (serverId: string, field: string): string =>
  * - **It loads but exposes the wrong API** — a version or packaging
  *   mismatch (`KeyringModuleShapeError`). Also not a daemon problem.
  */
-export class KeychainUnavailableError extends Error {
+export class KeychainUnavailableError extends SecretStoreUnavailableError {
   constructor(cause: unknown) {
     const message = cause instanceof Error ? cause.message : String(cause);
     super(
@@ -198,14 +220,167 @@ const hintFor = (cause: unknown, message: string): string => {
 };
 
 /**
- * Storage interface for the per-server secrets we lift off
- * `~/.mcp-inspector/mcp.json`. Implemented by `KeyringSecretStore` (the
- * production impl) and `InMemorySecretStore` (used in tests so the suite
- * doesn't require libsecret in CI).
+ * Probe whether the OS keychain is actually usable, rather than merely
+ * importable.
+ *
+ * This is the input to the automatic-fallback policy in
+ * `secret-store-selection.ts`, and it deliberately does more than
+ * {@link loadKeyring}: on the container that motivated #1848 the package
+ * imports and shape-checks perfectly well, and the failure only appears
+ * when `AsyncEntry::new` tries to reach a Secret Service that isn't
+ * there. So the probe constructs an entry and performs a real read.
+ *
+ * A **read** and not a write, on purpose. A write would be the stronger
+ * signal — a keychain can in principle be readable and not writable — but
+ * it means depositing a value in the user's login keyring at every
+ * startup, for a store they may never use, that we would then have to
+ * clean up (and would leave behind if the process died between the two
+ * calls). Writing into someone's keychain uninvited to answer a question
+ * about our own configuration is not a trade worth making; a write that
+ * fails after a passing probe still surfaces as the documented 503.
+ *
+ * Never throws — the whole point is to answer a question, and a probe
+ * that could fail its caller would just move the crash it exists to
+ * prevent.
  */
+export async function probeKeyringAvailable(): Promise<
+  { available: true } | { available: false; detail: string }
+> {
+  const keyring = await loadKeyring();
+  if (!keyring.ok) {
+    const err = keyring.err;
+    return {
+      available: false,
+      detail: err instanceof Error ? err.message : String(err),
+    };
+  }
+  try {
+    const entry = new keyring.mod.AsyncEntry(SERVICE_NAME, PROBE_ACCOUNT);
+    await entry.getPassword();
+    return { available: true };
+  } catch (err) {
+    return {
+      available: false,
+      detail: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/**
+ * Account used by {@link probeKeyringAvailable}. Namespaced under a server
+ * id that cannot collide with a real one (`:` is the account separator, so
+ * a real id never contains one) and never written — it only ever appears
+ * as the argument to a lookup that is expected to miss.
+ */
+const PROBE_ACCOUNT = "__inspector:probe";
+
+/**
+ * Storage interface for the per-server secrets we lift off
+ * `~/.mcp-inspector/mcp.json`.
+ *
+ * Three implementations, selected per run by
+ * `secret-store-selection.ts` (#1950) and described to the user by the
+ * `SecretStorageInfo` it returns:
+ *
+ * - `KeyringSecretStore` — the OS keychain, and the default wherever one
+ *   is reachable.
+ * - `FileSecretStore` — `~/.mcp-inspector/secrets.json`, `0600`,
+ *   encrypted when `MCP_INSPECTOR_SECRET_KEY` is set. The fallback on a
+ *   host with no keychain, and on a container with a mounted volume.
+ * - `InMemorySecretStore` — the session-scoped store. Used by the test
+ *   suite (so CI needs no libsecret), and as the container fallback when
+ *   nothing durable is mounted, where it is the honest choice rather than
+ *   the degraded one: a file in the writable layer promises persistence
+ *   the next `docker run` will not honor.
+ *
+ * All three share one availability contract, which is what lets callers
+ * stay ignorant of which they got: `get` is tolerant (`null` on any
+ * failure), `delete` no-ops, and `set` is the only operation that
+ * hard-fails — throwing a {@link SecretStoreUnavailableError} the API
+ * routes turn into a 503 — because it is the only one where a value would
+ * be lost.
+ */
+/** One server's worth of a bulk read: which fields, for which server id. */
+export interface SecretBulkRequest {
+  serverId: string;
+  fields: string[];
+}
+
 export interface SecretStore {
+  /**
+   * Do values written here outlive the process?
+   *
+   * Optional, and **absent means durable** — every store that predates
+   * #1950 is, and a custom one is far more likely to be backed by
+   * something than by RAM.
+   *
+   * It exists because the *migrations* need it. Both of them (mcp.json in
+   * `server.ts`, client.json in `client/node-persistence.ts`) lift a
+   * plaintext secret off disk, write it to this store, and then strip it
+   * from the file — a safe trade only while "written to the store" is at
+   * least as durable as "left on disk". `InMemorySecretStore` used to be
+   * a test double only, so that held by construction; making it a
+   * production fallback broke it, and a plain `GET /api/servers` on an
+   * unmounted container would have moved a user's existing secrets into
+   * RAM and lost them at exit.
+   */
+  isDurable?(): Promise<boolean>;
   get(serverId: string, field: string): Promise<string | null>;
+  /**
+   * Like {@link get}, but **throws** when the store cannot be read instead
+   * of answering `null`.
+   *
+   * `get` is deliberately tolerant — an unreachable keychain and an absent
+   * entry are the same answer to a caller that just wants to render a form.
+   * That tolerance is wrong for exactly one caller: a migration that treats
+   * `null` as proof of absence and then *writes*. A transient read failure
+   * would look like "nothing there", and the write would overwrite a newer
+   * keychain value with an older file copy — silently inverting the
+   * keychain-wins rule the migration exists to honor.
+   *
+   * Optional, so existing implementations (and test doubles) keep
+   * compiling; {@link secretStoreGetStrict} falls back to `get` when it is
+   * absent, which is correct for stores whose reads cannot fail.
+   */
+  getStrict?(serverId: string, field: string): Promise<string | null>;
+  /**
+   * Read many fields, across **many servers**, in a single pass.
+   *
+   * Optional, and purely a performance seam: {@link secretStoreGetMany}
+   * falls back to a parallel `get` per field, which is what the keychain
+   * wants anyway (independent native round-trips).
+   *
+   * It exists for `FileSecretStore`, where the shape is inverted — every
+   * `get` reads and decrypts the *whole* file, so each call costs a scrypt
+   * derivation, serialized behind the store's own queue.
+   *
+   * **Cross-server, and that is the whole point.** A per-server version of
+   * this shipped first and did not fix the case it was written for: both
+   * rehydration callers iterate servers, so a catalog of 20 servers holding
+   * one secret each still paid 20 serialized derivations — the same stall,
+   * reached one server at a time instead of one field at a time. The unit
+   * that matters is "everything this rehydration needs", so that is the
+   * unit the seam takes.
+   */
+  getMany?(
+    requests: SecretBulkRequest[],
+  ): Promise<Record<string, Record<string, string>>>;
   set(serverId: string, field: string, value: string): Promise<void>;
+  /**
+   * Write several of one server's fields in a single pass.
+   *
+   * The write-side twin of {@link getMany}, and the same shape of problem:
+   * `FileSecretStore.set` costs a whole-file read, decrypt, encrypt, write
+   * and verifying read *per call*, all serialized. A settings save resends
+   * the server's full `env` map even when the user edited something
+   * unrelated, so an entry with N secret fields paid roughly `3N` scrypt
+   * derivations on every debounced save — a stall that grows with the
+   * environment rather than with the edit.
+   *
+   * Optional: {@link secretStoreSetMany} falls back to parallel `set` calls,
+   * which is what the keychain wants (independent native round-trips).
+   */
+  setMany?(serverId: string, values: Record<string, string>): Promise<void>;
   /** No-op if no entry exists. */
   delete(serverId: string, field: string): Promise<void>;
   /** Remove every secret stored for this server id (called on DELETE /api/servers/:id). */
@@ -255,6 +430,33 @@ export interface SecretStore {
  *    one the first version of this contract actually handled.
  */
 export class KeyringSecretStore implements SecretStore {
+  /**
+   * The intolerant read. Same lookup as {@link get}, minus the catch — a
+   * keychain that cannot answer must not be reported as an empty one to a
+   * caller that is about to write based on the answer.
+   */
+  async getStrict(serverId: string, field: string): Promise<string | null> {
+    try {
+      const keyring = await loadKeyring();
+      if (!keyring.ok) throw new KeychainUnavailableError(keyring.err);
+      const entry = new keyring.mod.AsyncEntry(
+        SERVICE_NAME,
+        buildAccount(serverId, field),
+      );
+      return (await entry.getPassword()) ?? null;
+    } catch (err) {
+      // "Strict" means the caller learns the read failed — not that it
+      // learns in a form it cannot handle. Both plaintext migrations keep
+      // their source file only when they catch `SecretStoreUnavailableError`;
+      // a raw binding error escaping here sails past that and turns
+      // `GET /api/servers` (or client-config loading) into a 500 instead of
+      // an abandoned migration. Same wrapping `set` already does, for the
+      // same reason.
+      if (err instanceof KeychainUnavailableError) throw err;
+      throw new KeychainUnavailableError(err);
+    }
+  }
+
   async get(serverId: string, field: string): Promise<string | null> {
     try {
       const keyring = await loadKeyring();
@@ -342,6 +544,96 @@ export class KeyringSecretStore implements SecretStore {
  * server factory. Mirrors the keyring contract exactly so swapping it
  * in/out doesn't change behavior beyond persistence.
  */
+/**
+ * Is `store` durable? Absent `isDurable` means yes — see the interface.
+ *
+ * A free function rather than a required method so the existing test
+ * doubles (and any third-party implementation) keep compiling, while the
+ * one store that is *not* durable has to say so explicitly. Defaulting the
+ * other way would make every double silently non-durable and quietly
+ * disable the migrations they exist to exercise.
+ */
+/**
+ * Read `store` intolerantly: throw rather than answer `null` when the store
+ * itself cannot be read.
+ *
+ * Falls back to `get` only for stores that genuinely cannot fail that way —
+ * in practice `InMemorySecretStore`, whose reads are a `Map` lookup. It is
+ * **not** a safe fallback for the file store: `FileSecretStore.get`
+ * deliberately converts filesystem, format and key failures to `null`, which
+ * is exactly the masquerade this helper exists to prevent, and is why that
+ * store implements `getStrict` itself. The fallback stays because the seam is
+ * optional and third-party/test doubles must keep compiling — not because
+ * `get` is equivalent for anything that can fail.
+ */
+export async function secretStoreGetStrict(
+  store: SecretStore,
+  serverId: string,
+  field: string,
+): Promise<string | null> {
+  return store.getStrict
+    ? store.getStrict(serverId, field)
+    : store.get(serverId, field);
+}
+
+/**
+ * Read many servers' fields, using the store's bulk path when it has one.
+ *
+ * Returns a map keyed by server id, holding only the fields that are
+ * present — matching the callers, which merge each server's result into its
+ * stored config. The fallback issues every `get` in parallel, which is right
+ * for a keychain (independent native round-trips) and harmless for the
+ * in-memory store.
+ */
+export async function secretStoreGetMany(
+  store: SecretStore,
+  requests: SecretBulkRequest[],
+): Promise<Record<string, Record<string, string>>> {
+  if (store.getMany) return store.getMany(requests);
+  const out: Record<string, Record<string, string>> = {};
+  await Promise.all(
+    requests.map(async ({ serverId, fields }) => {
+      const entries = await Promise.all(
+        fields.map(
+          async (field) => [field, await store.get(serverId, field)] as const,
+        ),
+      );
+      const found: Record<string, string> = {};
+      for (const [field, value] of entries) {
+        if (value !== null) found[field] = value;
+      }
+      out[serverId] = found;
+    }),
+  );
+  return out;
+}
+
+/**
+ * Write several of one server's fields, using the store's bulk path when it
+ * has one. Falls back to parallel `set`s.
+ *
+ * The fallback keeps `set`'s contract: `Promise.all` surfaces the first
+ * rejection, which is what the routes translate into a 503.
+ */
+export async function secretStoreSetMany(
+  store: SecretStore,
+  serverId: string,
+  values: Record<string, string>,
+): Promise<void> {
+  if (store.setMany) return store.setMany(serverId, values);
+  await Promise.all(
+    Object.entries(values).map(([field, value]) =>
+      store.set(serverId, field, value),
+    ),
+  );
+}
+
+export async function secretStoreIsDurable(
+  store: SecretStore,
+): Promise<boolean> {
+  return store.isDurable ? store.isDurable() : true;
+}
+
 export class InMemorySecretStore implements SecretStore {
   private readonly map = new Map<string, string>();
 
@@ -362,5 +654,28 @@ export class InMemorySecretStore implements SecretStore {
     for (const key of [...this.map.keys()]) {
       if (key.startsWith(prefix)) this.map.delete(key);
     }
+  }
+}
+
+/**
+ * The in-memory store as a **production** choice — the fallback for a
+ * container with no keychain and nothing durable mounted (#1950).
+ *
+ * Behaviorally identical to {@link InMemorySecretStore}; it exists to
+ * answer `isDurable()` with `false`, and that one bit is load-bearing.
+ * Both migrations (mcp.json, client.json) lift a plaintext secret off
+ * disk, write it to the store, and then delete it from the file — safe
+ * only while the store outlives the process. Against a session-scoped
+ * store that trade destroys the secret, and it runs on an ordinary read,
+ * so merely opening the app would do it.
+ *
+ * Kept as a separate class rather than a flag on the base so the test
+ * suite's many `new InMemorySecretStore()` doubles keep standing in for a
+ * *working keychain*, which is what they are there to be. Only the code
+ * that deliberately chooses RAM in production says so.
+ */
+export class SessionSecretStore extends InMemorySecretStore {
+  async isDurable(): Promise<boolean> {
+    return false;
   }
 }

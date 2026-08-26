@@ -10,7 +10,10 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { useServers } from "@inspector/core/react/useServers";
+import {
+  ServerListReloadError,
+  useServers,
+} from "@inspector/core/react/useServers";
 import { createRemoteApp } from "@inspector/core/mcp/remote/node/server";
 import { DEFAULT_SEED_CONFIG } from "@inspector/core/mcp/serverList";
 import { InMemorySecretStore } from "@inspector/core/auth/node/secret-store";
@@ -412,7 +415,7 @@ describe("useServers", () => {
       await result.current.updateServerSettings("alpha", {
         headers: [{ key: "X-Tenant", value: "acme" }],
         env: [],
-        metadata: [{ key: "trace", value: "abc" }],
+        metadata: { trace: "abc" },
         connectionTimeout: 5000,
         requestTimeout: 30000,
         taskTtl: 30000,
@@ -425,7 +428,7 @@ describe("useServers", () => {
       expect(result.current.servers[0]?.settings).toEqual({
         headers: [{ key: "X-Tenant", value: "acme" }],
         env: [],
-        metadata: [{ key: "trace", value: "abc" }],
+        metadata: { trace: "abc" },
         connectionTimeout: 5000,
         requestTimeout: 30000,
         taskTtl: 30000,
@@ -444,7 +447,7 @@ describe("useServers", () => {
     expect(stored.url).toBe("https://x.test/mcp");
     expect(stored).not.toHaveProperty("settings");
     expect(stored.headers).toEqual({ "X-Tenant": "acme" });
-    expect(stored.metadata).toEqual([{ key: "trace", value: "abc" }]);
+    expect(stored.metadata).toEqual({ trace: "abc" });
     expect(stored.connectionTimeout).toBe(5000);
     expect(stored.requestTimeout).toBe(30000);
     expect(stored.taskTtl).toBe(30000);
@@ -461,7 +464,7 @@ describe("useServers", () => {
         await result.current.updateServerSettings("nonexistent", {
           headers: [],
           env: [],
-          metadata: [],
+          metadata: {},
           connectionTimeout: 0,
           requestTimeout: 0,
           taskTtl: 0,
@@ -511,7 +514,7 @@ describe("useServers", () => {
     expect(result.current.servers[0]?.settings).toEqual({
       headers: [{ key: "X-Keep", value: "yes" }],
       env: [],
-      metadata: [],
+      metadata: {},
       connectionTimeout: 0,
       requestTimeout: 0,
       // Absent taskTtl on disk reads back as the product default for the form.
@@ -875,7 +878,9 @@ describe("useServers", () => {
         fetchFn: async (input, init) => {
           const url = input instanceof Request ? input.url : String(input);
           if (url.endsWith("/api/servers/events")) {
-            return { ok: true, body: null } as unknown as Response;
+            // A real Response constructed from `null` has a null `.body`,
+            // so the guard is exercised through the actual Response API.
+            return new Response(null, { status: 200 });
           }
           return h.fetchFn(url, init);
         },
@@ -894,12 +899,14 @@ describe("useServers", () => {
         fetchFn: async (input, init) => {
           const url = input instanceof Request ? input.url : String(input);
           if (url.endsWith("/api/servers/events")) {
-            const body = {
-              getReader: () => ({
-                read: () => Promise.reject(new Error("stream broke")),
-              }),
-            };
-            return { ok: true, body } as unknown as Response;
+            // A real stream whose first pull throws — `reader.read()` then
+            // rejects exactly as a broken network body would, with no cast.
+            const body = new ReadableStream<Uint8Array>({
+              pull() {
+                throw new Error("stream broke");
+              },
+            });
+            return new Response(body, { status: 200 });
           }
           return h.fetchFn(url, init);
         },
@@ -928,22 +935,18 @@ describe("useServers", () => {
         fetchFn: async (input, init) => {
           const url = input instanceof Request ? input.url : String(input);
           if (url.endsWith("/api/servers/events")) {
-            const body = {
-              getReader: () => ({
-                read: async () => {
-                  reads += 1;
-                  if (reads === 1) {
-                    // Two frames in one chunk → one background refresh.
-                    return {
-                      done: false,
-                      value: encoder.encode("event: change\n\n\n\n"),
-                    };
-                  }
-                  return { done: true, value: undefined };
-                },
-              }),
-            };
-            return { ok: true, body } as unknown as Response;
+            const body = new ReadableStream<Uint8Array>({
+              pull(controller) {
+                reads += 1;
+                if (reads === 1) {
+                  // Two frames in one chunk → one background refresh.
+                  controller.enqueue(encoder.encode("event: change\n\n\n\n"));
+                  return;
+                }
+                controller.close();
+              },
+            });
+            return new Response(body, { status: 200 });
           }
           return h.fetchFn(url, init);
         },
@@ -1138,22 +1141,24 @@ describe("useServers", () => {
     const fetchFn: typeof fetch = async (input, init) => {
       const url = input instanceof Request ? input.url : String(input);
       if (url.endsWith("/api/servers/events")) {
-        const body = {
-          getReader: () => ({
-            read: async () => {
-              reads += 1;
-              // Priming comment only — no `event:` / `data:` line.
-              if (reads === 1) {
-                return { done: false, value: encoder.encode(":\n\n") };
-              }
-              // Hold the stream open so the loop can't end and let a
-              // teardown-time settle hide a queued refresh.
-              await secondRead;
-              return { done: true, value: undefined };
-            },
-          }),
-        };
-        return { ok: true, body } as unknown as Response;
+        // `pull` runs once per read, so the counting and the blocking
+        // second read work the same way they would on a hand-rolled reader
+        // double — while staying type-checked against the Response API.
+        const body = new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            reads += 1;
+            // Priming comment only — no `event:` / `data:` line.
+            if (reads === 1) {
+              controller.enqueue(encoder.encode(":\n\n"));
+              return;
+            }
+            // Hold the stream open so the loop can't end and let a
+            // teardown-time settle hide a queued refresh.
+            await secondRead;
+            controller.close();
+          },
+        });
+        return new Response(body, { status: 200 });
       }
       if (url.endsWith("/api/servers")) listGets += 1;
       return h.fetchFn(url, init);
@@ -1197,6 +1202,186 @@ describe("useServers", () => {
     } finally {
       globalThis.fetch = original;
     }
+  });
+
+  /**
+   * #1914 — a write that lands but whose list reload fails must reject.
+   *
+   * `ServerConfigModal` renders `submitError` only for something `onSubmit`
+   * threw, so while the post-write refresh swallowed its failure into the
+   * `error` state the Add Server modal closed as though nothing had gone
+   * wrong. That is the "silent failure" in the report: the POST succeeded,
+   * the GET 500'd, and the user saw neither the new row nor an error.
+   *
+   * `failGetAfterWrite` lets the seed load and the write itself through, then
+   * fails every subsequent list read — the shape a container with no
+   * reachable keychain produced before #1848.
+   */
+  function failGetAfterWrite(message: string): {
+    fetchFn: typeof fetch;
+    startFailing: () => void;
+  } {
+    let failing = false;
+    const fetchFn: typeof fetch = async (input, init) => {
+      const req =
+        input instanceof Request
+          ? input
+          : new Request(input as string | URL, init);
+      if (failing && req.method === "GET" && req.url.endsWith("/api/servers")) {
+        return new Response(JSON.stringify({ error: message }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return h.fetchFn(req);
+    };
+    return {
+      fetchFn,
+      startFailing: () => {
+        failing = true;
+      },
+    };
+  }
+
+  it("addServer rejects when the post-write list reload fails (#1914)", async () => {
+    const { fetchFn, startFailing } = failGetAfterWrite("keyring unavailable");
+    const { result } = renderHook(() =>
+      useServers({ baseUrl: "http://test.local", fetchFn }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    startFailing();
+    await act(async () => {
+      await expect(
+        result.current.addServer("alpha", { type: "stdio", command: "node" }),
+      ).rejects.toThrow(
+        /The server was added, but the server list could not be reloaded: keyring unavailable/,
+      );
+    });
+
+    // The write itself landed, and the message says so — a bare failure would
+    // send the user into a retry that trips the duplicate-id check.
+    expect(readConfig(h.configPath).mcpServers.alpha).toEqual({
+      type: "stdio",
+      command: "node",
+    });
+    // Still recorded in `error` for any list-level UI reading it.
+    await waitFor(() =>
+      expect(result.current.error).toBe("keyring unavailable"),
+    );
+    expect(result.current.loading).toBe(false);
+  });
+
+  it("updateServer rejects when the post-write list reload fails (#1914)", async () => {
+    const { fetchFn, startFailing } = failGetAfterWrite("disk full");
+    const { result } = renderHook(() =>
+      useServers({ baseUrl: "http://test.local", fetchFn }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const existing = result.current.servers[0]!.id;
+
+    startFailing();
+    await act(async () => {
+      await expect(
+        result.current.updateServer(existing, existing, {
+          type: "stdio",
+          command: "node",
+        }),
+      ).rejects.toThrow(
+        /The server was saved, but the server list could not be reloaded: disk full/,
+      );
+    });
+  });
+
+  it("updateServerSettings rejects when the post-write list reload fails (#1914)", async () => {
+    const { fetchFn, startFailing } = failGetAfterWrite("disk full");
+    const { result } = renderHook(() =>
+      useServers({ baseUrl: "http://test.local", fetchFn }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const existing = result.current.servers[0]!.id;
+
+    startFailing();
+    await act(async () => {
+      await expect(
+        result.current.updateServerSettings(existing, {
+          headers: [],
+          env: [],
+          metadata: {},
+          roots: [],
+          connectionTimeout: 5000,
+          requestTimeout: 30000,
+          taskTtl: 30000,
+          maxFetchRequests: 1000,
+          paginatedLists: true,
+        }),
+      ).rejects.toThrow(
+        /The server was saved, but the server list could not be reloaded: disk full/,
+      );
+    });
+  });
+
+  it("tags a post-write reload failure as ServerListReloadError, not a failed write (#1914)", async () => {
+    // The pagination toggle updates optimistically and reverts the live
+    // client on a rejection. That is right for a failed PUT and wrong for a
+    // failed reload — the setting IS on disk — so the two must be tellable
+    // apart by type, not by message matching.
+    const { fetchFn, startFailing } = failGetAfterWrite("disk full");
+    const { result } = renderHook(() =>
+      useServers({ baseUrl: "http://test.local", fetchFn }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    startFailing();
+    await act(async () => {
+      await expect(
+        result.current.addServer("alpha", { type: "stdio", command: "node" }),
+      ).rejects.toBeInstanceOf(ServerListReloadError);
+    });
+
+    // A rejected *write* stays a plain Error, so a caller branching on the
+    // type still rolls back for the case the rollback was written for.
+    await act(async () => {
+      const err = await result.current
+        .addServer("alpha", { type: "stdio", command: "node" })
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err).not.toBeInstanceOf(ServerListReloadError);
+    });
+  });
+
+  it("removeServer rejects when the post-write list reload fails (#1914)", async () => {
+    const { fetchFn, startFailing } = failGetAfterWrite("disk full");
+    const { result } = renderHook(() =>
+      useServers({ baseUrl: "http://test.local", fetchFn }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const existing = result.current.servers[0]!.id;
+
+    startFailing();
+    await act(async () => {
+      await expect(result.current.removeServer(existing)).rejects.toThrow(
+        /The server was removed, but the server list could not be reloaded: disk full/,
+      );
+    });
+    expect(readConfig(h.configPath).mcpServers[existing]).toBeUndefined();
+  });
+
+  it("a plain refresh() still resolves on a failed list read, recording the error (#1914)", async () => {
+    // The rethrow is scoped to post-write reloads. `refresh()` is awaited by
+    // the mount effect and the SSE loop, neither of which has anywhere to put
+    // a rejection, so it must keep swallowing into `error`.
+    const { fetchFn, startFailing } = failGetAfterWrite("keyring unavailable");
+    const { result } = renderHook(() =>
+      useServers({ baseUrl: "http://test.local", fetchFn }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    startFailing();
+    await act(async () => {
+      await expect(result.current.refresh()).resolves.toBeUndefined();
+    });
+    expect(result.current.error).toBe("keyring unavailable");
   });
 
   it("uses DEFAULT_SEED_CONFIG keys on the first load (seed-write contract)", async () => {

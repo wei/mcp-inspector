@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   AuthChallengeError,
+  challengeResourceMetadataUrl,
   AuthRecoveryRequiredError,
   findNestedAuthError,
   isAuthChallengeError,
@@ -282,6 +283,58 @@ describe("parseAuthChallengeFromError", () => {
   it("returns undefined for an empty WWW-Authenticate header", () => {
     expect(
       parseAuthChallengeFromError({ status: 401, wwwAuthenticate: "" }),
+    ).toBeUndefined();
+  });
+});
+
+describe("resource_metadata (RFC 9728) preservation — #2071", () => {
+  const METADATA_URL = "http://127.0.0.1:3001/custom/protected-resource";
+  const HEADER = `Bearer resource_metadata="${METADATA_URL}"`;
+
+  it("keeps the advertised URL when parsing a response challenge", () => {
+    const response = new Response(null, {
+      status: 401,
+      headers: { "WWW-Authenticate": HEADER },
+    });
+
+    expect(parseAuthChallengeFromResponse(response)).toEqual({
+      reason: "token_expired",
+      resourceMetadataUrl: METADATA_URL,
+      raw: { httpStatus: 401, wwwAuthenticate: HEADER },
+    });
+  });
+
+  it("keeps the advertised URL when parsing an error challenge", () => {
+    expect(
+      parseAuthChallengeFromError({ status: 401, wwwAuthenticate: HEADER }),
+    ).toMatchObject({ resourceMetadataUrl: METADATA_URL });
+  });
+
+  it("omits the field entirely when the challenge does not advertise one", () => {
+    const response = new Response(null, {
+      status: 401,
+      headers: { "WWW-Authenticate": "Bearer" },
+    });
+
+    expect(parseAuthChallengeFromResponse(response)).not.toHaveProperty(
+      "resourceMetadataUrl",
+    );
+  });
+
+  it("converts the stored string to a URL at the OAuth boundary", () => {
+    expect(
+      challengeResourceMetadataUrl({ resourceMetadataUrl: METADATA_URL })?.href,
+    ).toBe(METADATA_URL);
+  });
+
+  it.each([
+    ["absent", undefined],
+    ["empty", ""],
+    ["whitespace", "   "],
+    ["not a URL", "not-a-url"],
+  ])("ignores a %s resource_metadata value", (_label, value) => {
+    expect(
+      challengeResourceMetadataUrl({ resourceMetadataUrl: value }),
     ).toBeUndefined();
   });
 });

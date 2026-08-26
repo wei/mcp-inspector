@@ -388,6 +388,13 @@ export interface InspectorViewProps {
    * the Servers screen draws a red border until another server is connected or
    * a new connection is attempted. Independent of `activeServer`, which the
    * parent clears on the failure's `disconnect` event.
+   *
+   * It is also the sole signal that opens the monitoring sidebar onto the
+   * failure's diagnostics (#2108). That used to be gated on the `"error"`
+   * connection status, which an OAuth failure never reaches — the parent drives
+   * that leg and tears the client down itself, settling the session at
+   * `"disconnected"`. So the parent must set this for *every* connect-attempt
+   * failure, auth legs included, and clear it as each new attempt starts.
    */
   erroredServerId?: string;
   /**
@@ -817,18 +824,33 @@ export function InspectorView({
   // connecting/disconnected → error, never connected → error. This keeps the
   // auto-open aligned with the red-border (`erroredServerId`), which the parent
   // also sets only for connect-attempt failures.
+  //
+  // A connect attempt that fails *during OAuth* (#2108) never reaches the
+  // `"error"` status at all: the auth leg is driven from the parent, which
+  // tears the client down on failure, so the session settles at
+  // `"disconnected"`. So the failure arm also fires on the parent raising
+  // `erroredServerId` — the canonical "this server's last connect attempt
+  // failed" flag, which the parent clears at the start of every new attempt.
+  // Tracked through a ref for the same reason as the status: a mount that
+  // starts already flagged must not re-open a column the user closed.
   const prevStatusRef = useRef(connectionStatus);
+  const prevErroredServerIdRef = useRef(erroredServerId);
   useEffect(() => {
     const prev = prevStatusRef.current;
     prevStatusRef.current = connectionStatus;
+    const prevErrored = prevErroredServerIdRef.current;
+    prevErroredServerIdRef.current = erroredServerId;
     const becameConnected =
       connectionStatus === "connected" && prev !== "connected";
     const becameError =
-      connectionStatus === "error" && prev !== "error" && prev !== "connected";
+      (connectionStatus === "error" &&
+        prev !== "error" &&
+        prev !== "connected") ||
+      (erroredServerId !== undefined && prevErrored !== erroredServerId);
     if (becameConnected || becameError) {
       setMonitorPinned(true);
     }
-  }, [connectionStatus, setMonitorPinned]);
+  }, [connectionStatus, erroredServerId, setMonitorPinned]);
 
   const appTools = useMemo<Tool[]>(() => {
     return tools.filter((tool) => {
@@ -924,7 +946,14 @@ export function InspectorView({
   // (set by the parent only for connect-attempt failures, not mid-session
   // crashes) so a crash of a previously-connected server doesn't reorganize the
   // column into the failure tab set — matching the auto-open effect above.
-  const failed = connectionStatus === "error" && erroredServerId !== undefined;
+  //
+  // Keyed on `erroredServerId` alone rather than on the `"error"` status
+  // (#2108): an OAuth leg that fails is torn down by the parent, so the session
+  // rests at `"disconnected"` and a status gate would never see the failure —
+  // which is exactly the case a server developer needs the Network tab for.
+  // `!connected` is the only status condition left, and it holds vacuously
+  // whenever the flag is set (the parent clears it as each new attempt starts).
+  const failed = !connected && erroredServerId !== undefined;
   const monitorAvailable = useMemo<string[]>(() => {
     if (connected) return availableTabs.filter((t) => MONITOR_TABS.includes(t));
     if (failed) {

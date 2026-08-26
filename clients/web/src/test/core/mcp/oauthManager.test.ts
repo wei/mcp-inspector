@@ -27,6 +27,15 @@ const mockedMcpAuth = vi.mocked(mcpAuth);
 
 const SERVER_URL = "https://example.com/mcp";
 
+/** Minimal unsigned JWT carrying only `exp` (epoch seconds). */
+function jwtWithExp(expSec: number): string {
+  const payload = btoa(JSON.stringify({ exp: expSec }))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+  return `header.${payload}.sig`;
+}
+
 function createMockParams(
   overrides?: Partial<OAuthManagerParams>,
 ): OAuthManagerParams {
@@ -727,9 +736,137 @@ describe("OAuthManager", () => {
     });
   });
 
+  describe("persisting the requested scope after an ordinary grant (#2117)", () => {
+    function capturedUrlWithScope(scope?: string): URL {
+      const url = new URL("https://auth.example.com/authorize?state=abc");
+      if (scope !== undefined) {
+        url.searchParams.set("scope", scope);
+      }
+      return url;
+    }
+
+    async function authorizeThenComplete(
+      storedScope: string | undefined,
+      tokenScope: string | undefined,
+      authorizeUrlScope?: string,
+    ) {
+      mockedMcpAuth.mockResolvedValue("REDIRECT");
+      const params = createMockParams();
+      storageOf(params).getScope.mockResolvedValue(storedScope);
+      storageOf(params).getClientInformation.mockResolvedValue({
+        client_id: "cid",
+      });
+      const manager = new OAuthManager(params);
+      const captureSpy = vi
+        .spyOn(
+          (await import("@inspector/core/auth/providers.js"))
+            .BaseOAuthClientProvider.prototype,
+          "getCapturedAuthUrl",
+        )
+        .mockReturnValue(capturedUrlWithScope(authorizeUrlScope));
+
+      await manager.authenticate();
+
+      mockedMcpAuth.mockResolvedValue("AUTHORIZED");
+      storageOf(params).getTokens.mockResolvedValue({
+        access_token: "access",
+        token_type: "Bearer",
+        ...(tokenScope === undefined ? {} : { scope: tokenScope }),
+      });
+      storageOf(params).saveScope.mockClear();
+
+      await manager.completeOAuthFlow("code");
+      captureSpy.mockRestore();
+      return params;
+    }
+
+    it("persists the requested scope when the token response omits scope", async () => {
+      const params = await authorizeThenComplete("mcp weather:read", undefined);
+
+      expect(storageOf(params).saveScope).toHaveBeenCalledWith(
+        SERVER_URL,
+        "mcp weather:read",
+      );
+    });
+
+    it("still prefers the granted scope when the AS echoes one", async () => {
+      const params = await authorizeThenComplete("mcp weather:read", "mcp");
+
+      expect(storageOf(params).saveScope).toHaveBeenCalledWith(
+        SERVER_URL,
+        "mcp",
+      );
+    });
+
+    it("records the request for a plain challenge redirect too, not just step-up", async () => {
+      // A `token_expired` / `unauthorized` challenge can return an interactive
+      // redirect whose callback lands in this same completeOAuthFlow. It used
+      // to record nothing, so a silent token response left the old stored
+      // scope standing — the same defect on a sibling entry point.
+      mockedMcpAuth.mockResolvedValue("REDIRECT");
+      const params = createMockParams();
+      storageOf(params).getScope.mockResolvedValue("stale:scope");
+      storageOf(params).getClientInformation.mockResolvedValue({
+        client_id: "cid",
+      });
+      const manager = new OAuthManager(params);
+      manager.setOAuthConfig({ scope: "catalog:scope" });
+      const captureSpy = vi
+        .spyOn(
+          (await import("@inspector/core/auth/providers.js"))
+            .BaseOAuthClientProvider.prototype,
+          "getCapturedAuthUrl",
+        )
+        .mockReturnValue(capturedUrlWithScope("catalog:scope offline_access"));
+
+      const outcome = await manager.handleAuthChallenge({
+        reason: "token_expired",
+      });
+      expect(outcome.kind).toBe("interactive");
+
+      mockedMcpAuth.mockResolvedValue("AUTHORIZED");
+      storageOf(params).getTokens.mockResolvedValue({
+        access_token: "access",
+        token_type: "Bearer",
+      });
+      storageOf(params).saveScope.mockClear();
+
+      await manager.completeOAuthFlow("code");
+
+      expect(storageOf(params).saveScope).toHaveBeenCalledWith(
+        SERVER_URL,
+        "catalog:scope offline_access",
+      );
+      captureSpy.mockRestore();
+    });
+
+    it("persists nothing when neither the request nor the response names a scope", async () => {
+      const params = await authorizeThenComplete(undefined, undefined);
+
+      expect(storageOf(params).saveScope).not.toHaveBeenCalled();
+    });
+
+    it("persists the scope the authorize URL actually carried, not the provider's", async () => {
+      // The SDK augments the request with `offline_access` when the AS
+      // advertises it and the client wants a refresh token, so the authorize
+      // URL is a superset of `provider.scope`. Persisting the provider's copy
+      // would understate the grant the AS implied by staying silent.
+      const params = await authorizeThenComplete(
+        "mcp",
+        undefined,
+        "mcp offline_access",
+      );
+
+      expect(storageOf(params).saveScope).toHaveBeenCalledWith(
+        SERVER_URL,
+        "mcp offline_access",
+      );
+    });
+  });
+
   describe("completeOAuthFlow (EMA)", () => {
     it("mints resource tokens via the EMA path and dispatches complete", async () => {
-      const tokens = { access_token: "EMA", token_type: "Bearer" };
+      const tokens = { access_token: "EMA", token_type: "Bearer" as const };
       const params = createMockParams({
         enterpriseManagedAuth: {
           idp: {
@@ -744,7 +881,7 @@ describe("OAuthManager", () => {
 
       const mintSpy = vi
         .spyOn(emaFlow, "completeEmaIdpAuthorizationAndMint")
-        .mockResolvedValue(tokens);
+        .mockResolvedValue({ tokens });
 
       await manager.completeOAuthFlow("ema-code");
 
@@ -988,10 +1125,10 @@ describe("OAuthManager", () => {
       ).toBe(false);
     });
 
-    it("returns true for token_expired when a usable access token exists", async () => {
+    it("returns true for token_expired when a provably unexpired JWT exists", async () => {
       const params = createMockParams();
       storageOf(params).getTokens.mockResolvedValue({
-        access_token: "tok",
+        access_token: jwtWithExp(Math.floor(Date.now() / 1000) + 3600),
         token_type: "Bearer",
       });
       const manager = new OAuthManager(params);
@@ -999,6 +1136,36 @@ describe("OAuthManager", () => {
       expect(
         await manager.checkAuthChallengeSatisfied({ reason: "token_expired" }),
       ).toBe(true);
+    });
+
+    it("returns false for token_expired when the stored JWT has expired", async () => {
+      const params = createMockParams();
+      storageOf(params).getTokens.mockResolvedValue({
+        access_token: jwtWithExp(Math.floor(Date.now() / 1000) - 60),
+        token_type: "Bearer",
+      });
+      const manager = new OAuthManager(params);
+
+      expect(
+        await manager.checkAuthChallengeSatisfied({ reason: "token_expired" }),
+      ).toBe(false);
+    });
+
+    it("returns false for token_expired when the stored token is opaque", async () => {
+      // Regression guard for #2051: an opaque token has no local expiry
+      // evidence, so it must not outvote the resource server's verdict and
+      // short-circuit re-authorization into replaying a dead credential.
+      const params = createMockParams();
+      storageOf(params).getTokens.mockResolvedValue({
+        access_token: "opaque-tok",
+        token_type: "Bearer",
+        expires_in: 900,
+      });
+      const manager = new OAuthManager(params);
+
+      expect(
+        await manager.checkAuthChallengeSatisfied({ reason: "token_expired" }),
+      ).toBe(false);
     });
 
     it("returns false for invalid_token even when a locally valid token exists", async () => {
@@ -1099,6 +1266,179 @@ describe("OAuthManager", () => {
           reason: "insufficient_scope",
         }),
       ).toBe(false);
+    });
+
+    // #2068 round 11 — the callback leg of an *ordinary* authorization.
+    // `resolvePersistedScopeAfterGrant` falls back to the requested scope when
+    // the token response omits `scope` (RFC 6749 §5.1), but only step-up ever
+    // populated that fallback. So a filtered request whose AS omitted `scope`
+    // persisted nothing, the stale `offline_access` survived in storage, and
+    // the "self-healing" this feature documents never happened.
+    //
+    // #2068 fixed that only while the opt-out was on, which was the case where
+    // a stale scope caused a user-visible failure. #2117 dropped the gate, so
+    // the recording is now unconditional and reads the authorize URL rather
+    // than the provider — see `recordAuthorizationRequestScope`. The filter
+    // still applies with the opt-out on, because the SDK's `offline_access`
+    // augmentation is gated on the `refresh_token` grant type the provider
+    // drops there.
+    describe("persisting the filtered scope after an ordinary grant (#2068)", () => {
+      async function completeWith(
+        tokenScope: string | undefined,
+        requestRefreshToken: boolean | undefined,
+      ): Promise<ReturnType<typeof storageOf>> {
+        const params = createMockParams();
+        const storage = storageOf(params);
+        storage.getScope.mockResolvedValue("mcp offline_access");
+        storage.getClientInformation.mockResolvedValue({ client_id: "cid" });
+        const manager = new OAuthManager(params);
+        manager.setOAuthConfig({
+          scope: "mcp",
+          ...(requestRefreshToken !== undefined && { requestRefreshToken }),
+        });
+        mockedMcpAuth.mockResolvedValue("REDIRECT");
+
+        const captureSpy = vi
+          .spyOn(
+            (await import("@inspector/core/auth/providers.js"))
+              .BaseOAuthClientProvider.prototype,
+            "getCapturedAuthUrl",
+          )
+          .mockReturnValue(new URL("https://as.example.com/authorize?state=s"));
+        await manager.authenticate();
+        captureSpy.mockRestore();
+
+        // The callback leg calls `mcpAuth` again and requires AUTHORIZED.
+        mockedMcpAuth.mockResolvedValue("AUTHORIZED");
+        storage.getTokens.mockResolvedValue({
+          access_token: "access",
+          token_type: "Bearer",
+          ...(tokenScope !== undefined && { scope: tokenScope }),
+        });
+        await manager.completeOAuthFlow("code");
+        return storage;
+      }
+
+      it("persists the filtered request when the token response omits scope", async () => {
+        const storage = await completeWith(undefined, false);
+        expect(storage.saveScope).toHaveBeenLastCalledWith(SERVER_URL, "mcp");
+      });
+
+      // An explicit grant is authoritative and wins over what we requested.
+      it("persists the granted scope when the token response carries one", async () => {
+        const storage = await completeWith("mcp tools:read", false);
+        expect(storage.saveScope).toHaveBeenLastCalledWith(
+          SERVER_URL,
+          "mcp tools:read",
+        );
+      });
+
+      // #2117 inverted this. #2068 gated the recording on the opt-out being
+      // on, so with the grant declared the ordinary leg persisted nothing;
+      // that gate is gone, and one wire case now has one behavior rather than
+      // two selected by a checkbox. Persisting here records no new claim: the
+      // request is what storage already held, so this rewrites the same value
+      // rather than asserting a scope the AS never mentioned.
+      it("persists the request even with the grant on, matching what storage held", async () => {
+        const storage = await completeWith(undefined, undefined);
+        expect(storage.saveScope).toHaveBeenLastCalledWith(
+          SERVER_URL,
+          "mcp offline_access",
+        );
+      });
+    });
+
+    // #2068 round 8 — the step-up path never reads the provider's filtering
+    // `scope` getter: `enrichChallengeWithScopes` unions the *raw* stored scope
+    // with the challenge and `handleAuthChallenge` hands that straight to
+    // `mcpAuth`. So an inherited `offline_access` reappeared here with the
+    // setting off, and the SDK re-added `prompt=consent` — the exact failure
+    // the option exists to prevent, on the one path that bypassed it.
+    describe("step-up scope with the refresh grant declined (#2068)", () => {
+      /** The `scope` this challenge run handed to the SDK. */
+      async function scopeSentForChallenge(
+        storedScope: string,
+        configuredScope: string | undefined,
+        requiredScopes: string[],
+        requestRefreshToken: boolean | undefined,
+      ): Promise<string | undefined> {
+        const params = createMockParams();
+        storageOf(params).getScope.mockResolvedValue(storedScope);
+        storageOf(params).getTokens.mockResolvedValue({
+          access_token: "tok",
+          token_type: "Bearer",
+          scope: storedScope,
+        });
+        storageOf(params).getClientInformation.mockResolvedValue({
+          client_id: "cid",
+        });
+        const manager = new OAuthManager(params);
+        manager.setOAuthConfig({
+          ...(configuredScope !== undefined && { scope: configuredScope }),
+          ...(requestRefreshToken !== undefined && { requestRefreshToken }),
+        });
+        mockedMcpAuth.mockResolvedValue("REDIRECT");
+
+        await manager.handleAuthChallenge({
+          reason: "insufficient_scope",
+          requiredScopes,
+        });
+
+        const call = mockedMcpAuth.mock.calls.at(-1);
+        return (call?.[1] as { scope?: string } | undefined)?.scope;
+      }
+
+      it("drops an inherited offline_access from the step-up union", async () => {
+        const sent = await scopeSentForChallenge(
+          "mcp offline_access",
+          "mcp",
+          ["tools:write"],
+          false,
+        );
+        expect(sent?.split(/\s+/)).not.toContain("offline_access");
+        // The step-up still asks for what the challenge demanded.
+        expect(sent?.split(/\s+/)).toContain("tools:write");
+      });
+
+      it("keeps offline_access in the step-up union while the grant is on", async () => {
+        const sent = await scopeSentForChallenge(
+          "mcp offline_access",
+          "mcp",
+          ["tools:write"],
+          undefined,
+        );
+        expect(sent?.split(/\s+/)).toContain("offline_access");
+      });
+
+      // Stripping a scope the challenge itself requires would loop:
+      // re-authorize, earn the same challenge, strip it again.
+      it("preserves an offline_access the challenge requires", async () => {
+        const sent = await scopeSentForChallenge(
+          "mcp",
+          "mcp",
+          ["offline_access"],
+          false,
+        );
+        expect(sent?.split(/\s+/)).toContain("offline_access");
+      });
+
+      // The mixed case, and the one that made the guard above insufficient:
+      // `enrichChallengeWithScopes` narrows `requiredScopes` to the *missing*
+      // subset, so a challenge requiring both — against a stored scope that
+      // already carries `offline_access` — arrives as just `["tools:write"]`.
+      // Reading the narrowed list treats the server's explicit requirement as
+      // inherited and strips it, and re-authorization then earns the same
+      // challenge forever.
+      it("preserves a required offline_access when the challenge also names a missing scope", async () => {
+        const sent = await scopeSentForChallenge(
+          "mcp offline_access",
+          "mcp",
+          ["offline_access", "tools:write"],
+          false,
+        );
+        expect(sent?.split(/\s+/)).toContain("offline_access");
+        expect(sent?.split(/\s+/)).toContain("tools:write");
+      });
     });
 
     it("short-circuits handleAuthChallenge when scope already satisfied", async () => {
@@ -1550,7 +1890,10 @@ describe("OAuthManager", () => {
         .mockResolvedValue(authUrl);
       const mintSpy = vi
         .spyOn(emaFlow, "completeEmaIdpAuthorizationAndMint")
-        .mockResolvedValue({ access_token: "tok", token_type: "Bearer" });
+        .mockResolvedValue({
+          tokens: { access_token: "tok", token_type: "Bearer" },
+          requestedScope: "mcp tools:read weather:read",
+        });
       const params = createMockParams({
         enterpriseManagedAuth: {
           idp: {
@@ -1585,10 +1928,9 @@ describe("OAuthManager", () => {
         "auth-code",
         "https://idp.example.com",
       );
-      expect(storageOf(params).saveScope).toHaveBeenCalledWith(
-        SERVER_URL,
-        "mcp tools:read weather:read",
-      );
+      // Persisting the granted scope is the EMA flow's job (saveMintedTokens),
+      // and it is mocked here -- the union reaching its config, asserted just
+      // above, is what this test owns. emaFlow.test.ts covers the persistence.
 
       silentSpy.mockRestore();
       startSpy.mockRestore();
@@ -1646,6 +1988,54 @@ describe("OAuthManager", () => {
       expect(navigated.searchParams.get("prompt")).toBe("login");
       // The flow's own parameters are untouched.
       expect(navigated.searchParams.get("state")).toBe("xyz");
+    });
+
+    // #2068 — the manager→provider bridge for the refresh-token opt-out. Same
+    // gap as the authorizationParams case above: the provider test constructs
+    // `BaseOAuthClientProvider` directly and the runner test stops at the
+    // options object, so deleting `requestRefreshToken:` from
+    // `createOAuthProvider` would leave the feature dead with every other test
+    // still green.
+    it("forwards the refresh-token opt-out to the provider it builds", async () => {
+      const manager = new OAuthManager(createMockParams());
+      manager.setOAuthConfig({ requestRefreshToken: false });
+
+      const provider = await manager.createOAuthProviderForTransport();
+      expect(provider.clientMetadata.grant_types).toEqual([
+        "authorization_code",
+      ]);
+    });
+
+    // #2068 round 5 — the provider-level test for "storage is never rewritten"
+    // could not see this: `createOAuthProvider` reads `provider.scope` (the
+    // filtered getter) and seeds storage when it comes back undefined. A
+    // persisted scope of `offline_access` alone therefore used to be silently
+    // overwritten by the configured scope, which is the one thing the filter
+    // promises not to do. Exercised through the manager, where the seeding
+    // branch actually lives.
+    it("does not overwrite a persisted scope that filters down to nothing", async () => {
+      const params = createMockParams();
+      const storage = params.initialConfig.storage;
+      if (!storage) throw new Error("expected mock storage");
+      vi.mocked(storage.getScope).mockResolvedValue("offline_access");
+
+      const manager = new OAuthManager(params);
+      manager.setOAuthConfig({ requestRefreshToken: false, scope: "mcp" });
+      const provider = await manager.createOAuthProviderForTransport();
+
+      expect(storage.saveScope).not.toHaveBeenCalled();
+      // Still requests the configured scope, without the declined token.
+      expect(provider.clientMetadata.scope).toBe("mcp");
+    });
+
+    it("declares the refresh_token grant when the opt-out is not configured", async () => {
+      const manager = new OAuthManager(createMockParams());
+
+      const provider = await manager.createOAuthProviderForTransport();
+      expect(provider.clientMetadata.grant_types).toEqual([
+        "authorization_code",
+        "refresh_token",
+      ]);
     });
 
     it("drops a reserved key configured on the manager", async () => {
@@ -1726,6 +2116,153 @@ describe("OAuthManager", () => {
           reason: "insufficient_scope",
         }),
       ).toBe(false);
+    });
+  });
+
+  describe("resource_metadata forwarding (RFC 9728) — #2071", () => {
+    const METADATA_URL = "http://127.0.0.1:3001/custom/protected-resource";
+
+    it("forwards the advertised metadata URL to auth() as a URL", async () => {
+      mockedMcpAuth.mockResolvedValue("AUTHORIZED");
+      const manager = new OAuthManager(createMockParams());
+
+      await manager.handleAuthChallenge({
+        reason: "token_expired",
+        resourceMetadataUrl: METADATA_URL,
+      });
+
+      expect(mockedMcpAuth).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          resourceMetadataUrl: new URL(METADATA_URL),
+        }),
+      );
+    });
+
+    it("leaves the metadata URL undefined when the challenge advertises none", async () => {
+      mockedMcpAuth.mockResolvedValue("AUTHORIZED");
+      const manager = new OAuthManager(createMockParams());
+
+      await manager.handleAuthChallenge({ reason: "token_expired" });
+
+      expect(mockedMcpAuth).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ resourceMetadataUrl: undefined }),
+      );
+    });
+
+    it("ignores a malformed metadata URL rather than failing authorization", async () => {
+      mockedMcpAuth.mockResolvedValue("AUTHORIZED");
+      const manager = new OAuthManager(createMockParams());
+
+      const outcome = await manager.handleAuthChallenge({
+        reason: "token_expired",
+        resourceMetadataUrl: "not-a-url",
+      });
+
+      expect(outcome).toEqual({ kind: "satisfied" });
+      expect(mockedMcpAuth).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ resourceMetadataUrl: undefined }),
+      );
+    });
+
+    it("uses the last observed challenge on the plain authenticate() path", async () => {
+      // The legacy first-authorization path: no challenge is passed in, so the
+      // one the transport observed is the only source (#2071).
+      mockedMcpAuth.mockResolvedValue("REDIRECT");
+      const params = createMockParams();
+      const manager = new OAuthManager(params);
+      const captureSpy = vi
+        .spyOn(
+          (await import("@inspector/core/auth/providers.js"))
+            .BaseOAuthClientProvider.prototype,
+          "getCapturedAuthUrl",
+        )
+        .mockReturnValue(new URL("https://auth.example.com/authorize?state=x"));
+
+      manager.noteObservedAuthChallenge({
+        reason: "unauthorized",
+        resourceMetadataUrl: METADATA_URL,
+      });
+      await manager.authenticate();
+
+      expect(mockedMcpAuth).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          resourceMetadataUrl: new URL(METADATA_URL),
+        }),
+      );
+      captureSpy.mockRestore();
+    });
+
+    it("clears the observed URL when a later challenge advertises none", async () => {
+      mockedMcpAuth.mockResolvedValue("REDIRECT");
+      const params = createMockParams();
+      const manager = new OAuthManager(params);
+      const captureSpy = vi
+        .spyOn(
+          (await import("@inspector/core/auth/providers.js"))
+            .BaseOAuthClientProvider.prototype,
+          "getCapturedAuthUrl",
+        )
+        .mockReturnValue(new URL("https://auth.example.com/authorize?state=x"));
+
+      manager.noteObservedAuthChallenge({
+        reason: "unauthorized",
+        resourceMetadataUrl: METADATA_URL,
+      });
+      manager.noteObservedAuthChallenge({ reason: "unauthorized" });
+      await manager.authenticate();
+
+      expect(mockedMcpAuth).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ resourceMetadataUrl: undefined }),
+      );
+      captureSpy.mockRestore();
+    });
+
+    it("forwards it on the forced step-up reauthorization leg too", async () => {
+      mockedMcpAuth.mockResolvedValue("AUTHORIZED");
+      const params = createMockParams();
+      const noScopeTokens = {
+        access_token: "a",
+        token_type: "Bearer",
+        scope: "",
+      };
+      const midScopeTokens = {
+        access_token: "b",
+        token_type: "Bearer",
+        scope: "newscope",
+      };
+      const grantedTokens = {
+        access_token: "d",
+        token_type: "Bearer",
+        scope: "granted:scope",
+      };
+      storageOf(params)
+        .getTokens.mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce(noScopeTokens)
+        .mockResolvedValueOnce(noScopeTokens)
+        .mockResolvedValueOnce(midScopeTokens)
+        .mockResolvedValueOnce(grantedTokens);
+      const manager = new OAuthManager(params);
+
+      await manager.handleAuthChallenge({
+        reason: "insufficient_scope",
+        resourceMetadataUrl: METADATA_URL,
+      });
+
+      expect(mockedMcpAuth).toHaveBeenCalledTimes(2);
+      expect(mockedMcpAuth).toHaveBeenNthCalledWith(
+        2,
+        expect.anything(),
+        expect.objectContaining({
+          forceReauthorization: true,
+          resourceMetadataUrl: new URL(METADATA_URL),
+        }),
+      );
     });
   });
 

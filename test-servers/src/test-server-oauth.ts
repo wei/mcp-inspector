@@ -27,6 +27,79 @@ export function getOAuthMode(
   return config.mode ?? "combined";
 }
 
+const PATH_VALIDATION_BASE = "http://config.invalid";
+
+/**
+ * True for a path that resolves under its own origin — the only shape safe to
+ * use as both an Express route and a `resource_metadata` value.
+ *
+ * A leading-slash check is not enough: `//other-host/doc` and `/\other-host/doc`
+ * both re-point the origin when resolved against the request base (the URL
+ * parser folds a backslash into a slash for special schemes), while Express
+ * still registers the route locally — so the server would advertise a document
+ * it does not serve (Copilot). Comparing the resolved href against the literal
+ * also rejects anything the parser would rewrite (spaces, unescaped
+ * characters), which an Express route would not match either.
+ *
+ * A query or fragment is rejected for the same reason from the other
+ * direction: `href` preserves both, so `/doc?v=1` and `/doc#s` would pass the
+ * comparison above, yet Express matches on the path alone (and treats `?` as a
+ * pattern character) and a fragment is never sent on the wire at all — so the
+ * advertised URL could not reach the registered route (Copilot).
+ */
+export function isOriginRelativePath(value: unknown): value is string {
+  if (typeof value !== "string" || !value.startsWith("/")) {
+    return false;
+  }
+  try {
+    const resolved = new URL(value, PATH_VALIDATION_BASE);
+    return (
+      resolved.origin === PATH_VALIDATION_BASE &&
+      resolved.search === "" &&
+      resolved.hash === "" &&
+      resolved.href === `${PATH_VALIDATION_BASE}${value}`
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The configured metadata path, validated. Throws at server-setup time rather
+ * than serving a route that contradicts the challenge — the JSON-config path
+ * is validated earlier by `load-config`, so this covers a `ServerConfig`
+ * built programmatically.
+ */
+function resourceMetadataPath(config: OAuthConfig): string | undefined {
+  const path = config.resourceMetadataPath;
+  if (path === undefined) {
+    return undefined;
+  }
+  if (!isOriginRelativePath(path)) {
+    throw new Error(
+      `oauth.resourceMetadataPath must be an origin-relative path (got ${JSON.stringify(path)})`,
+    );
+  }
+  return path;
+}
+
+/**
+ * The `WWW-Authenticate` challenge sent with every 401.
+ *
+ * RFC 9728 §5.1: a resource server advertises where its protected-resource
+ * metadata lives via the `resource_metadata` parameter. Only emitted when the
+ * config moves that document off the well-known path — otherwise the bare
+ * `Bearer` challenge keeps the existing fixtures byte-identical.
+ */
+function bearerChallenge(config: OAuthConfig, req: Request): string {
+  const path = resourceMetadataPath(config);
+  if (!path) {
+    return "Bearer";
+  }
+  const requestBaseUrl = `${req.protocol}://${req.get("host")}`;
+  return `Bearer resource_metadata="${new URL(path, requestBaseUrl).href}"`;
+}
+
 /**
  * Set up OAuth routes on an Express application
  * This adds all OAuth endpoints (authorization, token, metadata, etc.)
@@ -76,7 +149,7 @@ export function createBearerTokenMiddleware(
       // For streamable-http, the SDK checks response status and throws StreamableHTTPError with code 401
       res.status(401);
       res.setHeader("Content-Type", "application/json");
-      res.setHeader("WWW-Authenticate", "Bearer");
+      res.setHeader("WWW-Authenticate", bearerChallenge(config, req));
       // Return a JSON-RPC error response format that the SDK will recognize
       res.json({
         jsonrpc: "2.0",
@@ -113,7 +186,7 @@ export function createBearerTokenMiddleware(
       // Return 401 - the SDK's transport should detect this and throw an error
       res.status(401);
       res.setHeader("Content-Type", "application/json");
-      res.setHeader("WWW-Authenticate", "Bearer");
+      res.setHeader("WWW-Authenticate", bearerChallenge(config, req));
       // Return a JSON-RPC error response format that the SDK will recognize
       res.json({
         jsonrpc: "2.0",
@@ -184,9 +257,12 @@ function setupMetadataEndpoints(
     );
   }
 
-  // OAuth Protected Resource Metadata
+  // OAuth Protected Resource Metadata. `resourceMetadataPath` moves the
+  // document off the well-known path entirely (rather than serving both), so
+  // a client that ignores the advertised `resource_metadata` URL gets a 404
+  // — see the field's doc comment.
   app.get(
-    "/.well-known/oauth-protected-resource",
+    resourceMetadataPath(config) ?? "/.well-known/oauth-protected-resource",
     (req: Request, res: Response) => {
       const requestBaseUrl = `${req.protocol}://${req.get("host")}`;
       const resourceUrl = config.resource ?? new URL("/", requestBaseUrl).href;

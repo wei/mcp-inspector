@@ -17,6 +17,7 @@ import { clearStoredAuthForRelogin } from "./clear-stored-auth-for-relogin.js";
 import { InspectorClient } from "@inspector/core/mcp/index.js";
 import { cleanRoots } from "@inspector/core/mcp/serverList.js";
 import {
+  createProxyFetch,
   createTransportNode,
   loadServerEntries,
   selectServerEntry,
@@ -24,6 +25,8 @@ import {
   parseHeaderPair,
 } from "@inspector/core/mcp/node/index.js";
 import type { JsonValue } from "@inspector/core/mcp/index.js";
+import type { StrictJsonValue } from "@inspector/core/json/jsonUtils.js";
+import { isSerializableJson } from "@inspector/core/json/jsonUtils.js";
 import {
   canonicalUrlHost,
   isAllInterfacesHost,
@@ -33,7 +36,6 @@ import { consumeMethodOutcome } from "./handlers/consume-outcome.js";
 import { runMethod } from "./handlers/run-method.js";
 import {
   isOneShotMethod,
-  metaValueToString,
   ONE_SHOT_METHODS,
   type MethodArgs,
 } from "./handlers/method-types.js";
@@ -45,7 +47,11 @@ import {
   serializeOAuthPersistBlob,
   type OAuthPersistSnapshot,
 } from "@inspector/core/auth/oauth-persist.js";
-import { getAuthorizationServerUrl } from "@inspector/core/auth/discovery.js";
+import {
+  discoverAuthorizationServerMetadataFromCandidates,
+  getAuthorizationServerUrl,
+  getAuthorizationServerUrlCandidates,
+} from "@inspector/core/auth/discovery.js";
 import { writeStoreFile } from "@inspector/core/storage/store-io.js";
 import {
   refreshAuthorization,
@@ -122,6 +128,11 @@ async function callMethod(
 
   const environment: InspectorClientEnvironment = {
     transport: createTransportNode,
+    // Proxy support sits at the bottom of the fetch stack so InspectorClient's
+    // wrappers compose over it — and so OAuth discovery/token requests, which
+    // also run through `environment.fetch`, are proxied too (#2067). Undefined
+    // when no proxy env var is set, which leaves the built-in fetch in place.
+    fetch: createProxyFetch(),
   };
   const redirectUrlProvider = new MutableRedirectUrlProvider();
   // Disarmed until the CLI-owned interactive OAuth flow runs — SDK `auth()`
@@ -162,6 +173,17 @@ async function callMethod(
     // the change at all: the SDK refuses `roots/list_changed` from a client
     // that never declared it, which `setRoots` logged as a send failure (#1797).
     roots: cleanRoots(serverSettings?.roots ?? []),
+    // Per-server default `_meta` from mcp.json, exactly as web (`App.tsx`) and
+    // the TUI pass it — the setting belongs to the server, not to the client
+    // that happens to read it, and `InspectorClient` only reads the option
+    // rather than falling back to `serverSettings.metadata` (#2093). Already a
+    // JSON object (#1910), so there is no pair-array flattening left to do;
+    // `{}` means "no defaults". `--metadata` stays per-invocation and wins on a
+    // key collision, since call-time keys override defaults in `mergeMeta`.
+    ...(serverSettings?.metadata &&
+      Object.keys(serverSettings.metadata).length > 0 && {
+        defaultMetadata: serverSettings.metadata,
+      }),
     serverSettings,
     // Per-server protocol era (SEP §7.8) from mcp.json → SDK versionNegotiation.
     // Absent era defaults to legacy in the InspectorClient constructor (#1626).
@@ -329,11 +351,27 @@ export async function refreshStoredAuthToken(
     );
   }
 
-  const authServerUrl = found.state.serverMetadata?.issuer
-    ? new URL(found.state.serverMetadata.issuer)
-    : getAuthorizationServerUrl(serverUrl);
-  const metadata =
-    found.state.serverMetadata ?? (await discover(authServerUrl)) ?? undefined;
+  // With stored metadata the issuer settles it. Without, the MCP server URL
+  // stands in as the authorization server — and a path-hosted server has two
+  // plausible answers, so walk them rather than committing to the path-scoped
+  // one: a server that merely lives under a path while publishing its metadata
+  // at the domain root must keep working (#2110). The candidate that *answered*
+  // becomes `authServerUrl`, since it is also the base the token request below
+  // is made against.
+  let authServerUrl: URL;
+  let metadata = found.state.serverMetadata ?? undefined;
+  if (found.state.serverMetadata?.issuer) {
+    authServerUrl = new URL(found.state.serverMetadata.issuer);
+  } else {
+    const discovered = await discoverAuthorizationServerMetadataFromCandidates(
+      getAuthorizationServerUrlCandidates(serverUrl),
+      discover,
+    );
+    authServerUrl =
+      discovered?.authorizationServerUrl ??
+      getAuthorizationServerUrl(serverUrl);
+    metadata = discovered?.metadata;
+  }
 
   let tokens: OAuthTokens;
   try {
@@ -445,6 +483,11 @@ function buildHandoff(
     : canonicalUrlHost(host);
   const clientPort = process.env.CLIENT_PORT || "6274";
   const sandboxPort = process.env.MCP_SANDBOX_PORT || "6275";
+  // The dedicated app origin (#2056). Forwarded alongside the other two: an App
+  // whose UI resource declares `_meta.ui.domain` is served from this port and
+  // the browser reaches it DIRECTLY, so a handoff that forwards only 6274/6275
+  // renders that app from an unreachable origin.
+  const appOriginPort = process.env.MCP_APP_ORIGIN_PORT || "6278";
   // Treat an empty MCP_INSPECTOR_API_TOKEN the same as unset — an empty token
   // can't satisfy the deep-link autoConnect gate.
   const apiToken = process.env.MCP_INSPECTOR_API_TOKEN || undefined;
@@ -462,7 +505,7 @@ function buildHandoff(
   return {
     serverUrl: normalizedUrl,
     deepLink: `http://${linkHost}:${clientPort}/?${params.toString()}`,
-    portForwardCmd: `coder port-forward <workspace> --tcp ${clientPort}:${clientPort} --tcp ${sandboxPort}:${sandboxPort}`,
+    portForwardCmd: `coder port-forward <workspace> --tcp ${clientPort}:${clientPort} --tcp ${sandboxPort}:${sandboxPort} --tcp ${appOriginPort}:${appOriginPort}`,
     oauthStatePath: statePath,
     apiToken: apiToken ?? null,
     note:
@@ -474,8 +517,8 @@ function buildHandoff(
 
 function parseKeyValuePair(
   value: string,
-  previous: Record<string, JsonValue> = {},
-): Record<string, JsonValue> {
+  previous: Record<string, StrictJsonValue> = {},
+): Record<string, StrictJsonValue> {
   const parts = value.split("=");
   const key = parts[0];
   const val = parts.slice(1).join("=");
@@ -486,11 +529,29 @@ function parseKeyValuePair(
     );
   }
 
-  let parsedValue: JsonValue;
+  // `StrictJsonValue`: `JSON.parse` cannot produce `undefined`, and these values
+  // become `_meta`, which must reach the wire exactly as written (#1910).
+  let parsedValue: StrictJsonValue;
   try {
-    parsedValue = JSON.parse(val) as JsonValue;
+    parsedValue = JSON.parse(val) as StrictJsonValue;
   } catch {
+    // Not JSON at all — a bare word or an unquoted string. Sent as a string,
+    // which is what the user plainly meant.
     parsedValue = val;
+  }
+
+  // Valid JSON syntax is not the same as sendable JSON: `1e400` parses to
+  // `Infinity`, which `JSON.stringify` writes as `null`. Rejecting is better
+  // than accepting the flag and silently transmitting a different value —
+  // and better than falling back to the literal string, which would also not
+  // be what was asked for.
+  if (!isSerializableJson(parsedValue)) {
+    // Names the key, never the value: the pair can carry a credential
+    // (`credentials={"accessToken":"…","n":1e400}`) and this message lands in
+    // stderr and CI logs.
+    throw new Error(
+      `Invalid value for "${key}": numbers must be finite (a literal like 1e400 overflows to Infinity and cannot be sent).`,
+    );
   }
 
   return { ...previous, [key as string]: parsedValue };
@@ -644,6 +705,10 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
       "Probe the tool's MCP App UI metadata (resourceUri, csp, permissions, domain) and emit it as one JSON line; exit 2 when the tool has no app. Use with --method tools/call --tool-name <name> (the tool itself is not invoked) or --method tools/list (one NDJSON line per tool).",
     )
     .option(
+      "--strict",
+      "Report tool-schema portability problems in full (path, issue, suggested fix) on stderr, and exit 6 if any is error-severity. Use with --method tools/list. Without it, a one-line count is printed instead.",
+    )
+    .option(
       "--connect-timeout <ms>",
       `Connection timeout in ms (default ${DEFAULT_CONNECT_TIMEOUT_MS} for ad-hoc --server-url / target invocations; 0 = no timeout).`,
       (v: string) => {
@@ -736,13 +801,14 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
     promptName?: string;
     promptArgs?: Record<string, JsonValue>;
     logLevel?: LoggingLevel;
-    metadata?: Record<string, JsonValue>;
-    toolMetadata?: Record<string, JsonValue>;
+    metadata?: Record<string, StrictJsonValue>;
+    toolMetadata?: Record<string, StrictJsonValue>;
     cwd?: string;
     transport?: "sse" | "http" | "stdio";
     serverUrl?: string;
     header?: Record<string, string>;
     appInfo?: boolean;
+    strict?: boolean;
     connectTimeout?: number;
     format?: OutputFormat;
     toolArgsJson?: string;
@@ -779,6 +845,27 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
     ) {
       throw new Error(
         "--relogin cannot be combined with --method servers/list or servers/show (no OAuth connect)",
+      );
+    }
+  }
+
+  // `--strict` is checked HERE, ahead of every short-circuit return below
+  // (`--list-stored-auth`, `--print-handoff`, `servers/list`, `servers/show`),
+  // rather than beside the other method-shaped validations further down. Those
+  // returns never reach the lint, so a later check would let
+  // `--strict --method servers/list` succeed while silently ignoring a flag
+  // documented as tools/list-only — the same "accepted but inert" failure the
+  // `--app-info` pairing rejection exists to prevent.
+  if (options.strict) {
+    if (options.method !== "tools/list") {
+      throw new Error("--strict requires --method tools/list.");
+    }
+    // `tools/list --app-info` returns NDJSON straight from `runMethod` and
+    // never reaches `emitResult`, where the lint runs. Accepting the pair
+    // would hand a CI caller a gate that can never fail.
+    if (options.appInfo) {
+      throw new Error(
+        "--strict cannot be combined with --app-info; run tools/list twice, once for each.",
       );
     }
   }
@@ -963,6 +1050,10 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
     );
   }
 
+  // NOTE: `--strict`'s validations are deliberately NOT here — they run before
+  // the short-circuit returns further up, so a `servers/*` invocation cannot
+  // accept the flag and ignore it.
+
   // --tool-args-json passes arguments verbatim with no key=value coercion (so
   // `"012"` stays a string and nested objects work without shell escaping).
   let toolArg = options.toolArg;
@@ -999,23 +1090,14 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
     promptName: options.promptName,
     promptArgs: options.promptArgs,
     logLevel: options.logLevel,
-    metadata: options.metadata
-      ? Object.fromEntries(
-          Object.entries(options.metadata).map(([key, value]) => [
-            key,
-            metaValueToString(value),
-          ]),
-        )
-      : undefined,
-    toolMeta: options.toolMetadata
-      ? Object.fromEntries(
-          Object.entries(options.toolMetadata).map(([key, value]) => [
-            key,
-            metaValueToString(value),
-          ]),
-        )
-      : undefined,
+    // `--metadata`/`--tool-metadata` values are parsed as JSON, and `_meta`
+    // takes any JSON — so they go through unflattened (#1910). They used to be
+    // squeezed through `metaValueToString`, which sent `{"a":1}` as the
+    // *string* `'{"a":1}'`.
+    metadata: options.metadata,
+    toolMeta: options.toolMetadata,
     appInfo: options.appInfo === true,
+    strict: options.strict === true,
     format: options.format,
   };
 

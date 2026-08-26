@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { within } from "@testing-library/react";
 import type { InspectorServerSettings } from "@inspector/core/mcp/types.js";
 import { renderWithMantine, screen } from "../../../test/renderWithMantine";
+import { getAceText, setAceText } from "../../../test/aceEditor";
 import {
   ServerSettingsForm,
   type ServerSettingsSection,
@@ -22,7 +23,7 @@ function clearButtonFor(input: HTMLElement): HTMLElement {
 const emptySettings: InspectorServerSettings = {
   headers: [],
   env: [],
-  metadata: [],
+  metadata: {},
   connectionTimeout: 30000,
   requestTimeout: 60000,
   taskTtl: 60000,
@@ -33,7 +34,7 @@ const emptySettings: InspectorServerSettings = {
 const populatedSettings: InspectorServerSettings = {
   headers: [{ key: "Authorization", value: "Bearer abc" }],
   env: [],
-  metadata: [{ key: "userId", value: "u-1" }],
+  metadata: { userId: "u-1", tenant: { id: 7, tags: ["a"] } },
   connectionTimeout: 30000,
   requestTimeout: 60000,
   taskTtl: 60000,
@@ -63,8 +64,6 @@ const baseHandlers = {
   onRemoveEnv: vi.fn(),
   onEnvChange: vi.fn(),
   onCwdChange: vi.fn(),
-  onAddMetadata: vi.fn(),
-  onRemoveMetadata: vi.fn(),
   onMetadataChange: vi.fn(),
   onTimeoutChange: vi.fn(),
   onAutoRefreshChange: vi.fn(),
@@ -239,7 +238,7 @@ describe("ServerSettingsForm", () => {
     expect(screen.getByText("Log Level per Request")).toBeInTheDocument();
   });
 
-  it("shows empty hints for headers and metadata when no entries exist", () => {
+  it("shows the empty hint for headers, and an empty JSON object for metadata", () => {
     renderWithMantine(
       <ServerSettingsForm
         {...baseHandlers}
@@ -250,9 +249,9 @@ describe("ServerSettingsForm", () => {
     expect(
       screen.getByText("No custom headers configured"),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText("No request metadata configured"),
-    ).toBeInTheDocument();
+    // Metadata has no rows to be absent — the editor is always present, and
+    // "none configured" is spelled `{}` in it.
+    expect(getAceText()).toBe("{}");
   });
 
   it("invokes onAddHeader when + Add Header is clicked", async () => {
@@ -268,21 +267,6 @@ describe("ServerSettingsForm", () => {
     );
     await user.click(screen.getByRole("button", { name: "+ Add Header" }));
     expect(onAddHeader).toHaveBeenCalledTimes(1);
-  });
-
-  it("invokes onAddMetadata when + Add Metadata is clicked", async () => {
-    const user = userEvent.setup();
-    const onAddMetadata = vi.fn();
-    renderWithMantine(
-      <ServerSettingsForm
-        {...baseHandlers}
-        onAddMetadata={onAddMetadata}
-        settings={emptySettings}
-        expandedSections={["metadata"]}
-      />,
-    );
-    await user.click(screen.getByRole("button", { name: "+ Add Metadata" }));
-    expect(onAddMetadata).toHaveBeenCalledTimes(1);
   });
 
   it("invokes onHeaderChange when typing in header value input", async () => {
@@ -340,29 +324,34 @@ describe("ServerSettingsForm", () => {
     expect(onRemoveHeader).toHaveBeenCalledWith(0);
   });
 
-  it("invokes onMetadataChange and onRemoveMetadata for metadata rows", async () => {
-    const user = userEvent.setup();
-    const onMetadataChange = vi.fn();
-    const onRemoveMetadata = vi.fn();
+  it("renders the configured metadata as formatted JSON, nested values included", () => {
     renderWithMantine(
       <ServerSettingsForm
         {...baseHandlers}
-        onMetadataChange={onMetadataChange}
-        onRemoveMetadata={onRemoveMetadata}
         settings={populatedSettings}
         expandedSections={["metadata"]}
       />,
     );
-    const valueInput = screen.getByDisplayValue("u-1");
-    await user.type(valueInput, "Z");
-    expect(onMetadataChange).toHaveBeenCalled();
+    // The point of #1910: a nested object survives into the editor instead of
+    // being flattened into a `{ key, value }` string row.
+    expect(JSON.parse(getAceText())).toEqual({
+      userId: "u-1",
+      tenant: { id: 7, tags: ["a"] },
+    });
+  });
 
-    await user.click(
-      screen.getByRole("button", {
-        name: "Remove metadata entry, userId, row 1",
-      }),
+  it("reports the whole edited object through onMetadataChange", async () => {
+    const onMetadataChange = vi.fn();
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        onMetadataChange={onMetadataChange}
+        settings={emptySettings}
+        expandedSections={["metadata"]}
+      />,
     );
-    expect(onRemoveMetadata).toHaveBeenCalledWith(0);
+    await setAceText('{"n":[1,2]}');
+    expect(onMetadataChange).toHaveBeenLastCalledWith({ n: [1, 2] });
   });
 
   it("invokes onTimeoutChange when typing in connection timeout", async () => {
@@ -717,7 +706,145 @@ describe("ServerSettingsForm", () => {
       authorizationUrl: "",
       tokenUrl: "",
       enterpriseManaged: false,
+      requestRefreshToken: true,
     });
+  });
+
+  // #2068 — the refresh-token opt-out. On by default; unchecking it is what
+  // stops the SDK adding `offline_access` and then `prompt=consent`.
+  it("renders Request refresh token checked by default", () => {
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={emptySettings}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(screen.getByLabelText("Request refresh token")).toBeChecked();
+  });
+
+  it("renders Request refresh token unchecked when the server opted out", () => {
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{ ...emptySettings, oauthRequestRefreshToken: false }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(screen.getByLabelText("Request refresh token")).not.toBeChecked();
+  });
+
+  it("toggles Request refresh token through onOAuthChange", async () => {
+    const user = userEvent.setup();
+    const onOAuthChange = vi.fn();
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        onOAuthChange={onOAuthChange}
+        settings={emptySettings}
+        expandedSections={["oauth"]}
+      />,
+    );
+    await user.click(screen.getByLabelText("Request refresh token"));
+    expect(onOAuthChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ requestRefreshToken: false }),
+    );
+  });
+
+  it("warns when opting out while offline_access is still in Scopes", () => {
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{
+          ...emptySettings,
+          oauthRequestRefreshToken: false,
+          oauthScopes: "openid offline_access",
+        }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.getByText("offline_access is still requested"),
+    ).toBeInTheDocument();
+  });
+
+  it("does not warn when opted out and Scopes omits offline_access", () => {
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{
+          ...emptySettings,
+          oauthRequestRefreshToken: false,
+          oauthScopes: "openid",
+        }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.queryByText("offline_access is still requested"),
+    ).not.toBeInTheDocument();
+  });
+
+  // The scope alone is not a problem — with the grant declared, requesting
+  // offline_access is exactly what the default configuration does.
+  it("does not warn when offline_access is in Scopes but the grant is on", () => {
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{ ...emptySettings, oauthScopes: "openid offline_access" }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.queryByText("offline_access is still requested"),
+    ).not.toBeInTheDocument();
+  });
+
+  // A substring must not trip it — `offline_access_extra` is a different scope.
+  it("matches offline_access as a whole scope token, not a substring", () => {
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{
+          ...emptySettings,
+          oauthRequestRefreshToken: false,
+          oauthScopes: "openid offline_access_extra",
+        }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.queryByText("offline_access is still requested"),
+    ).not.toBeInTheDocument();
+  });
+
+  // #2068 — EMA wraps this provider and forwards its `clientMetadata`, so the
+  // setting is not ignored outright; what it cannot change is the IdP
+  // authorization leg's fixed `openid offline_access` scope. That leg is the
+  // one the user signs in through, so the checkbox cannot affect EMA's consent
+  // behavior and must say so.
+  it("says the refresh-token setting is not applied under EMA", () => {
+    const { rerender } = renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{ ...emptySettings, enterpriseManaged: true }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.getByText(/which this setting cannot change/),
+    ).toBeInTheDocument();
+
+    rerender(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{ ...emptySettings, enterpriseManaged: false }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(
+      screen.queryByText(/which this setting cannot change/),
+    ).not.toBeInTheDocument();
   });
 
   // #2018 — custom authorization-request parameters.
@@ -1012,7 +1139,7 @@ describe("ServerSettingsForm", () => {
     );
   });
 
-  it("says the endpoint overrides are unused under enterprise-managed auth", () => {
+  it("says the EMA-suppressed controls are unused under enterprise-managed auth", () => {
     const { rerender } = renderWithMantine(
       <ServerSettingsForm
         {...baseHandlers}
@@ -1020,11 +1147,15 @@ describe("ServerSettingsForm", () => {
         expandedSections={["oauth"]}
       />,
     );
+    // Three controls carry this notice: the two endpoint overrides (#1906) and
+    // the refresh-token checkbox (#2068). The count is asserted rather than
+    // merely "present" so a control that stops annotating itself — or a new one
+    // that never starts — is caught here.
     expect(
       screen.getAllByText(
         /Not applied while Enterprise-managed authorization is on/,
       ),
-    ).toHaveLength(2);
+    ).toHaveLength(3);
 
     rerender(
       <ServerSettingsForm
@@ -1123,6 +1254,7 @@ describe("ServerSettingsForm", () => {
       authorizationUrl: "",
       tokenUrl: "",
       enterpriseManaged: true,
+      requestRefreshToken: true,
     });
   });
 
@@ -1230,6 +1362,7 @@ describe("ServerSettingsForm", () => {
       authorizationUrl: "",
       tokenUrl: "",
       enterpriseManaged: false,
+      requestRefreshToken: true,
     });
   });
 
@@ -1468,23 +1601,6 @@ describe("ServerSettingsForm", () => {
       screen.getByRole("button", { name: "Clear stored OAuth state" }),
     );
     expect(onClearStoredOAuth).toHaveBeenCalledTimes(1);
-  });
-
-  it("clears a metadata value via its Clear button (onMetadataChange with empty value)", async () => {
-    const user = userEvent.setup();
-    const onMetadataChange = vi.fn();
-    renderWithMantine(
-      <ServerSettingsForm
-        {...baseHandlers}
-        onMetadataChange={onMetadataChange}
-        settings={populatedSettings}
-        expandedSections={["metadata"]}
-      />,
-    );
-    // populatedSettings has one metadata { key: "userId", value: "u-1" }
-    const valueInput = screen.getByDisplayValue("u-1");
-    await user.click(clearButtonFor(valueInput));
-    expect(onMetadataChange).toHaveBeenCalledWith(0, "userId", "");
   });
 
   it("omits the Clear buttons for an empty header key/value row", () => {
