@@ -8,9 +8,15 @@
  * a fallback to Chromium there would report a green run under a job labelled
  * "webkit", claiming coverage that never ran.
  *
- * `loadBrowser`'s own launch path is deliberately not covered here — it takes a
- * real browser binary, which is what the smokes are for. Only its argument
- * validation, which fails before any of that, is.
+ * `loadBrowser`'s failure branches are covered here too, through its injectable
+ * `loadPlaywright`. The smokes cannot reach them by construction —
+ * `install-smoke-browser` fetches the binary before the smoke runs, so a passing
+ * smoke says nothing about what a failing one would print. And that message is
+ * the deliverable: #2086's acceptance criterion is that a missing browser fails
+ * naming *that engine* and its own `playwright install` command, which is
+ * exactly the kind of string that rots into naming the wrong one.
+ *
+ * Only the successful launch is left to the smokes, since it needs a real binary.
  */
 
 import assert from "node:assert/strict";
@@ -66,13 +72,84 @@ describe("resolveBrowserName", () => {
 });
 
 describe("loadBrowser", () => {
+  /** A Playwright stand-in whose every engine rejects on launch. */
+  const launchAlwaysFails = (message) => () => ({
+    chromium: { launch: () => Promise.reject(new Error(message)) },
+    firefox: { launch: () => Promise.reject(new Error(message)) },
+    webkit: { launch: () => Promise.reject(new Error(message)) },
+  });
+
   it("rejects an unsupported engine before touching Playwright", async () => {
+    let loaded = false;
     await assert.rejects(
-      // A repo root that does not exist: reaching the `createRequire` would
-      // throw a different (resolution) error, so this also pins the ORDER —
-      // validation first, so the message names the real mistake.
-      () => loadBrowser("/nonexistent-repo-root", "safari"),
+      () =>
+        loadBrowser("/nonexistent-repo-root", "safari", {
+          loadPlaywright: () => {
+            loaded = true;
+            return {};
+          },
+        }),
       /unsupported browser "safari"/,
+    );
+    // Pins the ORDER, not just the message: validating first is what makes the
+    // error name the real mistake instead of a downstream resolution failure.
+    assert.equal(loaded, false);
+  });
+
+  it("names the engine that failed, and its own install command", async () => {
+    // The whole point of #2086's acceptance criterion: a reader whose WebKit
+    // binary is missing must not be sent to install chromium.
+    for (const name of SUPPORTED_BROWSERS) {
+      await assert.rejects(
+        () =>
+          loadBrowser("/repo", name, {
+            loadPlaywright: launchAlwaysFails("Executable doesn't exist"),
+          }),
+        (err) => {
+          assert.match(err.message, new RegExp(`^${name} failed to launch`));
+          assert.match(
+            err.message,
+            new RegExp(
+              `npx playwright install --with-deps ${name}\\\`(?![\\s\\S]*--with-deps (?!${name}))`,
+            ),
+          );
+          // The underlying cause survives, so the reader can tell a missing
+          // binary from a sandbox/permissions problem.
+          assert.match(err.message, /Executable doesn't exist/);
+          // And no OTHER engine is named anywhere in the message.
+          for (const other of SUPPORTED_BROWSERS.filter((b) => b !== name)) {
+            assert.ok(
+              !err.message.includes(other),
+              `message for ${name} must not mention ${other}: ${err.message}`,
+            );
+          }
+          return true;
+        },
+      );
+    }
+  });
+
+  it("sends an unresolvable Playwright to `npm install`, not `playwright install`", async () => {
+    // Two different failures with two different remedies. Suggesting
+    // `playwright install` here would be actively wrong — it fetches browser
+    // binaries and cannot install the missing npm package.
+    await assert.rejects(
+      () =>
+        loadBrowser("/repo", "firefox", {
+          loadPlaywright: () => {
+            throw new Error("Cannot find module 'playwright'");
+          },
+        }),
+      (err) => {
+        assert.match(err.message, /could not resolve the Playwright package/);
+        assert.match(err.message, /npm install/);
+        assert.ok(
+          !/playwright install/.test(err.message),
+          `must not suggest \`playwright install\` for a missing package: ${err.message}`,
+        );
+        assert.match(err.message, /Cannot find module 'playwright'/);
+        return true;
+      },
     );
   });
 });

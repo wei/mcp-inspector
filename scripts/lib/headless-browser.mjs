@@ -113,29 +113,54 @@ export function resolveBrowserName(env = process.env) {
 }
 
 /**
+ * Resolve the Playwright package from the web client's install.
+ *
+ * Separate from `loadBrowser` so it can be substituted in tests — see the
+ * `loadPlaywright` option there for why that seam has to exist.
+ */
+export function requirePlaywright(repoRoot) {
+  const requireFromWeb = createRequire(
+    join(repoRoot, "clients", "web", "package.json"),
+  );
+  return requireFromWeb("playwright");
+}
+
+/**
  * Launch a headless browser of `browserName`, resolved from the web client's
  * install.
  *
- * The launch-failure message names the engine that failed and the
- * `playwright install` invocation that fixes it — naming "chromium" while
- * WebKit was the thing missing sends the reader off to install a browser they
- * already have.
+ * Both failure branches produce a message that names the actual remedy, and they
+ * are different remedies — which is the whole reason they are separate branches:
+ *
+ *   - **not resolvable** means the Playwright *npm package* is missing, fixed by
+ *     `npm install` at the repo root. `playwright install` (which fetches
+ *     browser binaries) would not help and is the wrong thing to suggest.
+ *   - **launch rejected** means the package is there but that engine's *binary*
+ *     is not, fixed by `playwright install --with-deps <that engine>`. Naming
+ *     "chromium" while WebKit was the missing one sends the reader off to
+ *     install a browser they already have — the reason the engine is
+ *     interpolated rather than hard-coded (#2086's acceptance criterion).
+ *
+ * `loadPlaywright` is injectable purely so those branches can be unit-tested.
+ * They are unreachable from the smokes by construction: `install-smoke-browser`
+ * runs first and fetches the binary, so a passing smoke proves nothing about the
+ * message a failing one would print — and that message IS the deliverable here,
+ * since its whole job is to be read by someone whose setup is broken.
  */
-export async function loadBrowser(repoRoot, browserName = DEFAULT_BROWSER) {
+export async function loadBrowser(
+  repoRoot,
+  browserName = DEFAULT_BROWSER,
+  { loadPlaywright = requirePlaywright } = {},
+) {
   if (!SUPPORTED_BROWSERS.includes(browserName)) {
     throw new Error(
       `unsupported browser "${browserName}" — expected one of ${SUPPORTED_BROWSERS.join(", ")}`,
     );
   }
-  const requireFromWeb = createRequire(
-    join(repoRoot, "clients", "web", "package.json"),
-  );
   let playwright;
   try {
-    playwright = requireFromWeb("playwright");
+    playwright = loadPlaywright(repoRoot);
   } catch (err) {
-    // Not resolvable means devDependencies are missing — fixed by `npm install`
-    // at the repo root, NOT by `playwright install` (which fetches binaries).
     throw new Error(
       `could not resolve the Playwright package from clients/web — run \`npm install\` at the repo root (${err instanceof Error ? err.message : String(err)})`,
     );
