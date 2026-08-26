@@ -1,9 +1,6 @@
-import {
-  discoverAuthorizationServerMetadata,
-  discoverOAuthProtectedResourceMetadata,
-} from "@modelcontextprotocol/client";
+import { discoverOAuthProtectedResourceMetadata } from "@modelcontextprotocol/client";
 import type { OAuthClientInformation } from "@modelcontextprotocol/client";
-import { getAuthorizationServerUrl } from "./discovery.js";
+import { discoverAuthorizationServerMetadataForServer } from "./discovery.js";
 import type { BaseOAuthClientProvider } from "./providers.js";
 
 /**
@@ -49,14 +46,14 @@ export async function ensureCimdClientRegistration(params: {
     resourceMetadata = undefined;
   }
 
-  const authServerUrl = getAuthorizationServerUrl(
+  // Walks the path-scoped authorization-server URL before the bare origin, so a
+  // server hosted under a path is probed where it actually publishes its
+  // metadata rather than only at the domain root (#2110).
+  const metadata = await discoverAuthorizationServerMetadataForServer(
     params.serverUrl,
     resourceMetadata,
+    params.fetchFn,
   );
-
-  const metadata = await discoverAuthorizationServerMetadata(authServerUrl, {
-    ...(params.fetchFn && { fetchFn: params.fetchFn }),
-  });
   if (!metadata?.client_id_metadata_document_supported) return;
 
   const clientInformation: OAuthClientInformation = {

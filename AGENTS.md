@@ -73,6 +73,34 @@ v2/main/
 │   │                                   #   the advertised document rather than a
 │   │                                   #   location derived from the MCP server
 │   │                                   #   URL — #2071;
+│   │                                   #   discovery.ts the authorization-server
+│   │                                   #   URL POLICY — when protected-resource
+│   │                                   #   metadata names no authorization
+│   │                                   #   server, the MCP server URL stands in,
+│   │                                   #   and its PATH is load-bearing: the
+│   │                                   #   SDK's buildDiscoveryUrls derives the
+│   │                                   #   path-scoped well-known locations from
+│   │                                   #   that pathname, so reducing it to the
+│   │                                   #   origin can only ever probe the domain
+│   │                                   #   root. getAuthorizationServerUrlCandidates
+│   │                                   #   therefore yields the path-scoped URL
+│   │                                   #   FIRST and the bare origin second, and
+│   │                                   #   discoverAuthorizationServerMetadataForServer
+│   │                                   #   walks them — the second candidate is
+│   │                                   #   what keeps a server that merely lives
+│   │                                   #   under a path while publishing metadata
+│   │                                   #   at the root working, so do not drop it
+│   │                                   #   in favour of a straight swap. EVERY
+│   │                                   #   consumer of the fallback must walk:
+│   │                                   #   discoverScopes, the CIMD probe, and
+│   │                                   #   the CLI's refreshStoredAuthToken,
+│   │                                   #   which is why the walk is also exposed
+│   │                                   #   as ...FromCandidates(candidates,
+│   │                                   #   discover) — the CLI injects its own
+│   │                                   #   discovery function as a test seam and
+│   │                                   #   needs to know WHICH candidate
+│   │                                   #   answered, since that is the base its
+│   │                                   #   token request is made against — #2110;
 │   │                                   #   scopes.ts SEP-2350 scope union, oauthUx.ts
 │   │                                   #   shared copy, mcpAuth.ts force-reauthorization,
 │   │                                   #   issuerBinding.ts SEP-2352 callback-leg failure
