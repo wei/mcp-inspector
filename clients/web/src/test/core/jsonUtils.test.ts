@@ -291,11 +291,12 @@ describe("JSON Utils", () => {
           ],
         },
       };
-      // A `properties: { broken: null }` entry must not throw, and a branch is
-      // still identifiable by the discriminator that *is* well-formed.
+      // A `properties: { broken: null }` entry must not throw. The union is
+      // declined — a `null` is not a schema, and handing it on would crash a
+      // renderer — so nothing is coerced and the strings pass through.
       expect(
         convertToolParameters(malformed, { kind: "a", value: "3" }),
-      ).toEqual({ kind: "a", value: 3 });
+      ).toEqual({ kind: "a", value: "3" });
     });
 
     it("falls back to the branch-agreement path when no constant is supplied (#2123)", () => {
@@ -342,11 +343,11 @@ describe("JSON Utils", () => {
           ],
         },
       };
-      // The `null` is not a vote about the type, and must not end up standing
-      // in for one — the surviving declaration is what coerces.
+      // The `null` makes the whole union unofferable, so nothing is coerced —
+      // and, the point of the test, nothing throws either.
       expect(
         convertToolParameters(malformedDeclaration, { count: "3" }),
-      ).toEqual({ count: 3 });
+      ).toEqual({ count: "3" });
     });
 
     it("coerces a value whose schema lives on a root allOf branch (#2123)", () => {

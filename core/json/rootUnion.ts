@@ -176,10 +176,23 @@ function propertiesOf(schema: RootUnionSchema): Record<string, unknown> {
  *   as a fillable form would offer a call that cannot be valid.
  */
 function isOfferable(branch: RootUnionSchema): boolean {
+  if (!hasReadableProperties(branch) || !admitsObject(branch)) return false;
+  const properties = Object.values(propertiesOf(branch));
   return (
-    hasReadableProperties(branch) &&
-    Object.keys(propertiesOf(branch)).length > 0 &&
-    admitsObject(branch)
+    properties.length > 0 &&
+    // Every value has to be something a renderer can read. JSON Schema's
+    // boolean form is legal and harmless — `true`/`false` answer every keyword
+    // lookup with `undefined` — but a `null` or an array is not a schema at
+    // all, and the web form dereferences one on the way to choosing a widget.
+    // A branch carrying one is declined rather than handed on to crash a tool
+    // panel that would otherwise have rendered.
+    properties.every(
+      (property) =>
+        typeof property === "boolean" ||
+        (typeof property === "object" &&
+          property !== null &&
+          !Array.isArray(property)),
+    )
   );
 }
 
@@ -748,17 +761,22 @@ export function selectBranchIndex<T extends RootUnionSchema>(
     if (pinned.length > 0) agreeing.push(index);
   });
 
-  // One branch's discriminator matched and no other's did — the plain case.
-  if (agreeing.length === 1) return agreeing[0];
-
-  // Several branches remain — they share the constant that was supplied, or
-  // none was. The values still belong to a shape, so keep looking among the
-  // candidates by the names that were supplied.
-  return narrowBySuppliedNames(
+  // What the supplied NAMES say comes first: a matching constant does not
+  // identify a branch on its own while another candidate leaves that property
+  // unpinned — `{ kind: "email", phone: "555" }` agrees with an email branch
+  // whose `address` is missing while satisfying a phone branch outright, and
+  // the picker must show the one that could actually be called.
+  const narrowed = narrowBySuppliedNames(
     branches,
     candidates,
     Object.keys(values).filter(supplied),
   );
+  if (narrowed !== null) return narrowed;
+
+  // Nothing in the names settled it, so a lone agreeing constant is the last
+  // evidence left — a branch pinning `kind` to what was supplied says more
+  // than one that merely permits any value there.
+  return agreeing.length === 1 ? agreeing[0] : null;
 }
 
 /**

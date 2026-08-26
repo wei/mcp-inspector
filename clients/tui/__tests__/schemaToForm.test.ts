@@ -743,9 +743,10 @@ describe("schemaToForm", () => {
       expect(decodeFormValues({ type: "object" }, values)).toBe(values);
     });
 
-    it("ignores a malformed property declaration when restoring constants", () => {
-      // `properties` values are `unknown`; a `null` entry must not throw on the
-      // way out of the form any more than it does on the way in.
+    it("declines a union carrying a malformed property declaration", () => {
+      // `properties` values are `unknown`; a `null` entry is not a schema, so
+      // the union is declined — and, the point of the test, nothing throws on
+      // the way out of the form any more than on the way in.
       const schema = {
         type: "object",
         anyOf: [
@@ -756,9 +757,10 @@ describe("schemaToForm", () => {
           { type: "object", properties: { kind: { const: "b" } } },
         ] as unknown[],
       };
+      // No union, so the form values pass through as they are.
       expect(
         decodeFormValues(schema, { __variant: "0", __b0__kind: "tampered" }),
-      ).toEqual({ kind: "a" });
+      ).toEqual({ __variant: "0", __b0__kind: "tampered" });
     });
   });
 

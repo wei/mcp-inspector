@@ -748,6 +748,35 @@ describe("resolveRootUnion", () => {
       expect(branches).toEqual([]);
     });
 
+    it("declines a member carrying a property that is not a schema", () => {
+      // A `null` or an array is not a schema, and the web form dereferences
+      // one on the way to choosing a widget — so the branch is declined rather
+      // than handed on to crash a tool panel.
+      for (const property of [null, [1]] as unknown[]) {
+        const { branches } = resolveRootUnion({
+          type: "object",
+          anyOf: [
+            EMAIL,
+            { type: "object", properties: { broken: property } },
+          ] as unknown[],
+        });
+        expect(branches).toEqual([]);
+      }
+    });
+
+    it("offers a member carrying a boolean property schema", () => {
+      // JSON Schema's boolean form is legal and answers every keyword lookup
+      // with `undefined`, so it renders through the JSON fallback harmlessly.
+      const { branches } = resolveRootUnion({
+        type: "object",
+        anyOf: [
+          { type: "object", properties: { anything: true } },
+          { type: "object", properties: { other: { type: "string" } } },
+        ] as unknown[],
+      });
+      expect(branches).toHaveLength(2);
+    });
+
     it("declines a member whose properties are not an object", () => {
       // Members arrive as `unknown`, so this is reachable and must not throw.
       expect(
@@ -977,6 +1006,33 @@ describe("resolveRootUnion", () => {
       expect(selectBranchIndex(versioned, { version: 1, phone: "555" })).toBe(
         1,
       );
+    });
+
+    it("prefers the branch the supplied names satisfy over a matching constant", () => {
+      // `{ kind: "email", phone: "555" }` agrees with the email branch's
+      // discriminator while missing its `address`, and satisfies the phone
+      // branch outright — the picker must show the one that can be called.
+      const mixed = resolveRootUnion({
+        type: "object",
+        anyOf: [
+          {
+            type: "object",
+            properties: {
+              kind: { const: "email" },
+              address: { type: "string" },
+            },
+            required: ["kind", "address"],
+          },
+          {
+            type: "object",
+            properties: { phone: { type: "string" } },
+            required: ["phone"],
+          },
+        ],
+      }).branches;
+      expect(selectBranchIndex(mixed, { kind: "email", phone: "555" })).toBe(1);
+      // …and the constant still decides when the names settle nothing.
+      expect(selectBranchIndex(mixed, { kind: "email" })).toBe(0);
     });
 
     it("reports none when the values identify nothing", () => {
