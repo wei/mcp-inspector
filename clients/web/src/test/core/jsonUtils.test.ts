@@ -334,6 +334,24 @@ describe("JSON Utils", () => {
       });
     });
 
+    it("treats textually equal constants of different types as ambiguous (#2123)", () => {
+      const indistinguishable: Tool = {
+        name: "indistinguishable",
+        inputSchema: {
+          type: "object",
+          anyOf: [
+            { type: "object", properties: { kind: { const: 1 }, a: {} } },
+            { type: "object", properties: { kind: { const: "1" }, b: {} } },
+          ],
+        },
+      };
+      // `kind=1` matches both, so neither typed constant may be assumed —
+      // the raw string is the honest answer.
+      expect(convertToolParameters(indistinguishable, { kind: "1" })).toEqual({
+        kind: "1",
+      });
+    });
+
     it("leaves an ambiguously typed argument uncoerced (#2123)", () => {
       const ambiguous: Tool = {
         name: "ambiguous",

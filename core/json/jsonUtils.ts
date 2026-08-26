@@ -209,7 +209,18 @@ function coercionProperties<T extends RootUnionSchema>(
       // first would then coerce `value=true` to `NaN`.
       .map((schema) => normalizeNullableUnion(schema as object));
     const types = new Set(declarations.map((schema) => typeNameOf(schema)));
-    if (types.size === 1 && declarations.length > 0) {
+    // The `const` has to agree too, not just the type: `{ const: 1 }` and
+    // `{ const: "1" }` both state no `type` and both match the text `1`, so
+    // agreeing on the type alone would send whichever typed constant came
+    // first rather than falling back to the raw string the user typed.
+    const pinnedOf = (schema: unknown) =>
+      typeof schema === "object" && schema !== null && "const" in schema
+        ? (schema as { const?: unknown }).const
+        : undefined;
+    const constsAgree = declarations.every((schema) =>
+      sameJsonValue(pinnedOf(schema), pinnedOf(declarations[0])),
+    );
+    if (types.size === 1 && constsAgree && declarations.length > 0) {
       Object.defineProperty(properties, name, {
         value: declarations[0],
         writable: true,
