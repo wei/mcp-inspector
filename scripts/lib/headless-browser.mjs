@@ -187,8 +187,11 @@ export async function loadBrowser(
     return await playwright[browserName].launch({ headless: true });
   } catch (err) {
     throw new Error(
-      `${browserName} failed to launch — run \`npx playwright install --with-deps ${browserName}\`, ` +
-        `which fetches the browser and (on a bare Linux box) its system libraries ` +
+      `${browserName} failed to launch — run \`npm run smoke:web:${browserName}\`, ` +
+        `or from clients/web run \`npx playwright install --with-deps ${browserName}\` ` +
+        `if you also need its system libraries. Playwright is pinned in ` +
+        `clients/web, so running that from the repo root can fetch a different ` +
+        `version and install a browser revision this one still cannot launch ` +
         `(${err instanceof Error ? err.message : String(err)})`,
     );
   }

@@ -479,7 +479,7 @@ SMOKE_BROWSER=webkit npm run smoke:web:app     # one smoke, one engine
 SMOKE_BROWSER=firefox npm run smoke:web:engine # all three smokes, one engine
 ```
 
-Unset, the engine is `chromium`, so `npm run smoke` is unchanged. **`npm run ci` — the mandatory pre-push gate — additionally runs all three smokes under Firefox** via `smoke:web:firefox`; **GitHub CI does not.** An unrecognized `SMOKE_BROWSER` is an error, not a fallback: a silent fallback would report a green Chromium run for a command that asked for `webkit`. A missing browser binary fails naming the engine and its `npx playwright install --with-deps <engine>`.
+Unset, the engine is `chromium`, so `npm run smoke` is unchanged. **`npm run ci` — the mandatory pre-push gate — additionally runs all three smokes under Firefox** via `smoke:web:firefox`; **GitHub CI does not.** An unrecognized `SMOKE_BROWSER` is an error, not a fallback: a silent fallback would report a green Chromium run for a command that asked for `webkit`. A missing browser binary fails naming the engine and a remedy that works from where you are — `npm run smoke:web:<engine>`, or `npx playwright install --with-deps <engine>` run from `clients/web`, where Playwright is pinned.
 
 **Firefox passes all three smokes. WebKit fails the two App smokes**, for reasons nobody has identified. Two things are known: it does **not** reproduce in real Safari (an MCP App opens there normally), and an isolated repro of the mechanism it was first blamed on did not reproduce it under Playwright's WebKit either. So it reads as a property of that particular build rather than a bug users hit, and chasing it further was judged not worth the effort — treat a WebKit failure as unexplained rather than as a defect until someone has looked.
 

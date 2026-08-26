@@ -16,6 +16,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { ENGINE_SMOKES } from "./run-engine-smokes.mjs";
+import { SUPPORTED_BROWSERS } from "./lib/headless-browser.mjs";
 
 const scriptDir = import.meta.dirname;
 const scripts = JSON.parse(
@@ -73,6 +74,20 @@ describe("every engine tier consumes ENGINE_SMOKES", () => {
   it("the Firefox tier goes through the runner and is in the pre-push gate", () => {
     assert.match(scripts["smoke:web:firefox"], /run-engine-smokes\.mjs/);
     assert.match(scripts.ci, /smoke:web:firefox/);
+  });
+
+  it("every supported engine has a `smoke:web:<engine>` script", () => {
+    // loadBrowser's launch-failure message tells the reader to run
+    // `npm run smoke:web:<engine>`. If a supported engine has no such script,
+    // that remedy is unrunnable — which is how the message shipped naming
+    // `smoke:web:webkit` before it existed (Copilot, #2133).
+    for (const name of SUPPORTED_BROWSERS) {
+      assert.match(
+        scripts[`smoke:web:${name}`] ?? "",
+        new RegExp(`run-engine-smokes\\.mjs ${name}$`),
+        `npm run smoke:web:${name} is promised by the launch-failure message`,
+      );
+    }
   });
 
   it("each gated tier names its engine explicitly rather than reading the env", () => {

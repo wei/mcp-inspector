@@ -16,7 +16,10 @@
  * naming *that engine* and its own `playwright install` command, which is
  * exactly the kind of string that rots into naming the wrong one.
  *
- * Only the successful launch is left to the smokes, since it needs a real binary.
+ * The successful path is covered here too, with distinct per-engine spies — the
+ * failure-path stand-in rejects identically for every engine, so it cannot tell
+ * a correct dispatch from a mis-dispatch that happens to print the right label.
+ * Only a launch against a REAL binary is left to the smokes.
  */
 
 import assert from "node:assert/strict";
@@ -108,6 +111,44 @@ describe("loadBrowser", () => {
     assert.equal(loaded, false);
   });
 
+  it("launches the engine that was asked for, and returns it", async () => {
+    // The load-bearing assertion, and the one the failure-path tests below
+    // CANNOT make (Copilot, #2133): their stand-in rejects identically for every
+    // engine, so `loadBrowser(root, "firefox")` could call `chromium.launch()`
+    // and still produce a correctly Firefox-labelled error. The smokes cannot
+    // catch that either — the Firefox gate runs after Chromium is already
+    // installed, so a mis-dispatched launch would succeed and report Firefox
+    // coverage that never happened. Only distinct per-engine spies pin it.
+    const launched = [];
+    const spyPlaywright = () =>
+      Object.fromEntries(
+        SUPPORTED_BROWSERS.map((name) => [
+          name,
+          {
+            launch: async (options) => {
+              launched.push({ name, options });
+              return { engine: name };
+            },
+          },
+        ]),
+      );
+
+    for (const name of SUPPORTED_BROWSERS) {
+      launched.length = 0;
+      const browser = await loadBrowser("/repo", name, {
+        loadPlaywright: spyPlaywright,
+      });
+      assert.deepEqual(
+        launched.map((l) => l.name),
+        [name],
+        `loadBrowser(…, "${name}") must launch ${name} and nothing else`,
+      );
+      // The returned handle is that engine's, not some other engine's.
+      assert.deepEqual(browser, { engine: name });
+      assert.deepEqual(launched[0].options, { headless: true });
+    }
+  });
+
   it("names the engine that failed, and its own install command", async () => {
     // The whole point of #2086's acceptance criterion: a reader whose WebKit
     // binary is missing must not be sent to install chromium.
@@ -119,10 +160,16 @@ describe("loadBrowser", () => {
           }),
         (err) => {
           assert.match(err.message, new RegExp(`^${name} failed to launch`));
+          // Names a remedy that works from where the caller is: the npm
+          // script, and the raw command scoped to clients/web (Playwright is
+          // pinned there; a bare root-level `npx playwright` can fetch a
+          // different version and install a revision this cannot launch).
+          assert.match(err.message, new RegExp(`npm run smoke:web:${name}`));
+          assert.match(err.message, /from clients\/web/);
           assert.match(
             err.message,
             new RegExp(
-              `npx playwright install --with-deps ${name}\\\`(?![\\s\\S]*--with-deps (?!${name}))`,
+              `--with-deps ${name}\\\`(?![\\s\\S]*--with-deps (?!${name}))`,
             ),
           );
           // The underlying cause survives, so the reader can tell a missing
