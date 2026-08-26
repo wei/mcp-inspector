@@ -44,9 +44,13 @@
  * ── Which engine ────────────────────────────────────────────────────────────
  *
  * `SMOKE_BROWSER` picks the engine (`chromium` — the default — `firefox`, or
- * `webkit`). **CI runs Chromium only.** The other engines are an on-demand tool,
- * not a gate: `SMOKE_BROWSER=firefox npm run smoke:web:engine` before touching
- * the sandbox is cheap and worth doing, but nothing runs it for you (#2086).
+ * `webkit`). Three tiers, deliberately (#2086):
+ *
+ *   - **GitHub CI** runs this smoke in **Chromium** only.
+ *   - **`npm run ci`**, the local pre-push gate, runs it in **Chromium and
+ *     Firefox** — the Firefox pass is `smoke:web:firefox`, and it is the one
+ *     gate step with no GitHub CI counterpart.
+ *   - **WebKit is on demand only**: `SMOKE_BROWSER=webkit npm run smoke:web:app`.
  *
  * Firefox passes. WebKit fails this smoke for reasons nobody has identified and
  * nobody is investigating: it does not reproduce in real Safari, and an isolated
