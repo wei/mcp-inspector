@@ -2002,9 +2002,15 @@ describe("SchemaForm enlarge keyboard access (#2138)", () => {
   // Seeds a value and holds it in real state. A stub `onChange` would leave the
   // field's value frozen, which makes "the value did not change" assertions
   // pass whatever the component does.
-  function SeededHarness({ maxLength }: { maxLength?: number }) {
+  function SeededHarness({
+    maxLength,
+    initial = "abc",
+  }: {
+    maxLength?: number;
+    initial?: unknown;
+  }) {
     const [values, setValues] = useState<Record<string, unknown>>({
-      note: "abc",
+      note: initial,
     });
     return (
       <SchemaForm
@@ -2250,6 +2256,34 @@ describe("SchemaForm enlarge keyboard access (#2138)", () => {
     fireEvent.keyDown(noteField(), { key: "Enter" });
 
     expect(noteField().value).toBe("a\n");
+  });
+
+  // `values` is a Record<string, unknown> fed by whatever a server declares, so
+  // a string field can arrive holding a number. It renders as text, and slicing
+  // it as a string would throw — turning one keystroke into a crashed panel
+  // (#2139 review). Reading the control's own value keeps it a string.
+  it("survives a non-string value on a string field", () => {
+    renderWithMantine(<SeededHarness initial={123} />);
+
+    expect(noteField().value).toBe("123");
+    noteField().setSelectionRange(3, 3);
+    fireEvent.keyDown(noteField(), { key: "Enter" });
+
+    expect(noteField().tagName).toBe("TEXTAREA");
+    expect(noteField().value).toBe("123\n");
+  });
+
+  // Even when the newline does not fit, the keyboard had a real caret position
+  // and it is kept — otherwise the user editing the middle of a full field is
+  // thrown to the end on top of not getting their newline.
+  it("keeps the caret where it was when the newline does not fit", () => {
+    renderWithMantine(<SeededHarness maxLength={3} />);
+
+    noteField().setSelectionRange(1, 1);
+    fireEvent.keyDown(noteField(), { key: "Enter" });
+
+    expect(noteField().value).toBe("abc");
+    expect(noteField().selectionStart).toBe(1);
   });
 
   // The control: the same seeded field with no maxLength does take the newline,

@@ -762,7 +762,14 @@ export function SchemaForm({
       // A field with no room left for the newline is enlarged without one,
       // since the alternative is breaching a maxLength the schema states.
       const enlargeWithNewline = (input: HTMLInputElement) => {
-        const current = (rawValue as string) ?? "";
+        // The control's own value, not the form's. Two reasons, and the second
+        // is the one that bites: it is the exact string the selection offsets
+        // below index into, and it is always a string. `values` is a
+        // `Record<string, unknown>` fed by whatever a server's schema declares,
+        // so a non-string default on a string field (`default: 123`) arrives
+        // here as a number — it renders as text, and would then throw on
+        // `.slice`, turning a keystroke into a crashed panel.
+        const current = input.value;
         // A control that cannot report a selection (`selectionStart` is null
         // for some input types) is treated as a caret at the end.
         const start = input.selectionStart ?? current.length;
@@ -771,13 +778,15 @@ export function SchemaForm({
         const fits =
           fieldSchema.maxLength === undefined ||
           next.length <= fieldSchema.maxLength;
-        if (fits) {
-          handleFieldChange(fieldName, next);
-          setEnlargeCarets((previous) => ({
-            ...previous,
-            [fieldName]: start + 1,
-          }));
-        }
+        if (fits) handleFieldChange(fieldName, next);
+        // The caret is recorded either way. The keyboard route always has a
+        // real position, so dropping it when the newline does not fit would
+        // send the caret to the end of a field the user was editing the middle
+        // of — a second surprise on top of the newline they did not get.
+        setEnlargeCarets((previous) => ({
+          ...previous,
+          [fieldName]: fits ? start + 1 : start,
+        }));
         enlarge();
       };
 
