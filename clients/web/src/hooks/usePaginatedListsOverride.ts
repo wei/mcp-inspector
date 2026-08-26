@@ -82,8 +82,13 @@ export function usePaginatedListsOverride(
   }, [servers]);
 
   const record = useCallback((serverId: string, value: boolean) => {
+    // Read outside the updater. A functional updater must be pure — React may
+    // defer or replay it — and this one would otherwise resolve the ref at
+    // whatever moment it happened to run. A list read committing in between
+    // would then be paired with the record as its baseline, so the very read
+    // that should have superseded the override would instead certify it.
+    const list = serversRef.current;
     setRecords((previous) => {
-      const list = serversRef.current;
       const next = new Map<string, OverrideRecord>();
       // Carry forward only the records the list has not moved past, so a
       // session that toggles across many servers does not accumulate a record
