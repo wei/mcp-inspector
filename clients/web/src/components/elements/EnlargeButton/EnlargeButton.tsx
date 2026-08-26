@@ -23,6 +23,7 @@ const EnlargeActionIcon = ActionIcon.withProps({
   variant: "subtle",
   color: "gray",
   size: "sm",
+  tabIndex: -1,
 });
 
 /**
@@ -35,10 +36,18 @@ const EnlargeActionIcon = ActionIcon.withProps({
  * the newlines already typed, and either answer (silently discard them, or keep
  * a value the field can no longer display) is worse than staying enlarged.
  *
- * Unlike ClearButton it stays in the keyboard tab order. Clearing a field has a
- * keyboard equivalent (select-all, delete), so #1487 could take that button out
- * of the tab order without cost; entering multiline mode has none, so removing
- * this one would put the feature out of reach of keyboard users entirely.
+ * `tabIndex={-1}` keeps it clickable but out of the keyboard tab order, the same
+ * as ClearButton (#1487) — a form's string fields each carry one, so leaving
+ * them in doubled the tab stops between one field and the next (#2138).
+ *
+ * That is only affordable because the keyboard keeps its own way in: SchemaForm
+ * binds Enter on the single-line field, which enlarges it and enters the
+ * newline in one go. Nothing else is listening for that key there, and it is
+ * the one a user presses trying to type the newline the field cannot hold — so
+ * the gesture that fails is the gesture that fixes it. Do not take this button
+ * out of the tab order anywhere that binding is absent; unlike clearing
+ * (select-all, delete) there is no built-in equivalent, and multiline mode
+ * would simply be unreachable by keyboard.
  */
 export function EnlargeButton({
   onClick,
