@@ -19,6 +19,7 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type KeyboardEvent,
 } from "react";
 import { ClearButton } from "../../elements/ClearButton/ClearButton";
 import { EnlargeButton } from "../../elements/EnlargeButton/EnlargeButton";
@@ -774,43 +775,46 @@ export function SchemaForm({
         enlarge();
       };
 
+      // The keyboard's way into multiline mode, now that the enlarge button is
+      // out of the tab order (#2138). Enter is inert in this field — nothing
+      // renders SchemaForm inside a `<form>`, so there is no implicit
+      // submission to displace — and it is the very key a user presses trying
+      // to enter the newline a single-line input swallows, which is what #2042
+      // exists to fix. So the gesture that fails is the one that enlarges,
+      // rather than a shortcut nobody would guess.
+      //
+      // Every condition below is load-bearing; none is incidental:
+      //
+      // - Shift+Enter is the other newline gesture, so it enlarges too.
+      // - `isComposing` is the IME guard. Enter is also how a Japanese, Chinese
+      //   or Korean input method commits the candidate being composed, and that
+      //   keystroke means "accept this word", not "new line". Acting on it
+      //   would enlarge the field and insert a stray newline every time such a
+      //   user finished a word, making the field unusable for them.
+      // - The Ctrl/Cmd/Alt chords are deliberately left alone: those read as
+      //   "submit" in a form, and a consumer binding one (run the tool) must
+      //   not be overridden into enlarging a field instead.
+      const handleEnlargeKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+        if (
+          event.key !== "Enter" ||
+          event.nativeEvent.isComposing ||
+          event.ctrlKey ||
+          event.metaKey ||
+          event.altKey
+        ) {
+          return;
+        }
+        event.preventDefault();
+        enlargeWithNewline(event.currentTarget);
+      };
+
       return (
         <TextInput
           key={fieldName}
           {...sharedProps}
           rightSectionPointerEvents="auto"
           rightSectionWidth={clearButton ? TWO_ACTION_WIDTH : ONE_ACTION_WIDTH}
-          // The keyboard's way into multiline mode, now that the enlarge button
-          // is out of the tab order (#2138). Enter is inert in this field —
-          // nothing renders SchemaForm inside a `<form>`, so there is no
-          // implicit submission to displace — and it is the very key a user
-          // presses trying to enter the newline a single-line input swallows,
-          // which is what #2042 exists to fix. So the gesture that fails is the
-          // one that enlarges, rather than a shortcut nobody would guess.
-          onKeyDown={(event) => {
-            // Shift+Enter is the other newline gesture, so it enlarges too. The
-            // Ctrl/Cmd/Alt chords are deliberately left alone: those read as
-            // "submit" in a form, and a consumer binding one (run the tool)
-            // must not be overridden into enlarging a field instead.
-            //
-            // `isComposing` guards the IME case: Enter is also how a Japanese,
-            // Chinese or Korean input method commits the candidate being
-            // composed. That keystroke means "accept this word", not "new
-            // line", so acting on it would enlarge the field and insert a
-            // newline every time such a user finished a word — the shortcut
-            // would make the field unusable for them.
-            if (
-              event.key !== "Enter" ||
-              event.nativeEvent.isComposing ||
-              event.ctrlKey ||
-              event.metaKey ||
-              event.altKey
-            ) {
-              return;
-            }
-            event.preventDefault();
-            enlargeWithNewline(event.currentTarget);
-          }}
+          onKeyDown={handleEnlargeKeyDown}
           // Announces that the field carries a shortcut at all. A keyboard user
           // no longer meets the button by tabbing, so without this the binding
           // is undiscoverable rather than merely unlabelled.
