@@ -440,6 +440,15 @@ const ANNOTATION_ONLY_KEYWORDS = new Set([
   "readOnly",
   "writeOnly",
   "$comment",
+  // Core keywords that identify or declare rather than assert. `$ref` is
+  // deliberately absent: it applies whatever it points at, which is exactly an
+  // assertion this module cannot see.
+  "$defs",
+  "$id",
+  "$schema",
+  "$anchor",
+  "$dynamicAnchor",
+  "$vocabulary",
 ]);
 
 /** Whether a schema states no assertion at all. */

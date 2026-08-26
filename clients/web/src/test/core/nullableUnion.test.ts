@@ -774,6 +774,16 @@ describe("admitsNull", () => {
       expect(admitsNull({ const: null, anyOf: [false] })).toBe(false);
     });
 
+    it("treats core identifier keywords as asserting nothing", () => {
+      // `$defs` declares subschemas for reference; it constrains nothing on its
+      // own, so this branch is unconstrained and admits null.
+      expect(admitsNull({ const: null, anyOf: [{ $defs: {} }] })).toBe(true);
+      // `$ref` is different — it applies whatever it points at.
+      expect(admitsNull({ const: null, anyOf: [{ $ref: "#/$defs/T" }] })).toBe(
+        false,
+      );
+    });
+
     it("does not override a sibling that rejects null", () => {
       // `const` is conjunctive with its siblings, not an override: both of
       // these reject every value, so claiming nullability would let the

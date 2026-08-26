@@ -245,6 +245,42 @@ describe("JSON Utils", () => {
       });
     });
 
+    it("keeps a converted argument named __proto__ (#2123)", () => {
+      const protoNamed: Tool = {
+        name: "proto-named",
+        inputSchema: {
+          type: "object",
+          properties: Object.fromEntries([["__proto__", { type: "number" }]]),
+        },
+      };
+      const converted = convertToolParameters(protoNamed, {
+        ["__proto__"]: "3",
+      });
+      expect(Object.hasOwn(converted, "__proto__")).toBe(true);
+    });
+
+    it("reads an array type as a set when branches agree (#2123)", () => {
+      const setTyped: Tool = {
+        name: "set-typed",
+        inputSchema: {
+          type: "object",
+          anyOf: [
+            {
+              type: "object",
+              properties: { v: { type: ["number", "null"] }, a: {} },
+            },
+            {
+              type: "object",
+              properties: { v: { type: ["null", "number"] }, b: {} },
+            },
+          ],
+        },
+      };
+      // The same declaration written in the other order — not a disagreement,
+      // so the coercion survives.
+      expect(convertToolParameters(setTyped, { v: "2" })).toEqual({ v: 2 });
+    });
+
     it("leaves an ambiguously typed argument uncoerced (#2123)", () => {
       const ambiguous: Tool = {
         name: "ambiguous",
@@ -293,8 +329,9 @@ describe("JSON Utils", () => {
           ],
         },
       };
-      // Both spell the type the same way, so it is not ambiguous.
-      expect(convertToolParameters(arrayTyped, { v: "2" })).toEqual({ v: "2" });
+      // Both spell the type the same way, so it is not ambiguous — and the
+      // nullable declaration collapses to `number`, which is what coerces.
+      expect(convertToolParameters(arrayTyped, { v: "2" })).toEqual({ v: 2 });
     });
 
     it("ignores a malformed branch declaration when matching constants (#2123)", () => {

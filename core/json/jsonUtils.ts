@@ -1,4 +1,5 @@
 import type { Tool } from "@modelcontextprotocol/client";
+import { normalizeNullableUnion } from "./nullableUnion.js";
 import {
   narrowBySuppliedNames,
   resolveRootUnion,
@@ -220,8 +221,11 @@ function coercionProperties<T extends RootUnionSchema>(
 function typeNameOf(schema: unknown): string {
   if (typeof schema !== "object" || schema === null) return "";
   const { type } = schema as { type?: unknown };
+  // Sorted: JSON Schema reads an array `type` as a SET, so `["number","null"]`
+  // and `["null","number"]` are the same declaration and must not read as a
+  // disagreement that drops the property from the coercion map.
   return Array.isArray(type)
-    ? type.join(",")
+    ? [...type].map(String).sort().join(",")
     : typeof type === "string"
       ? type
       : "";
@@ -262,7 +266,15 @@ export function convertToolParameters(
   const { base, branches } = resolveRootUnion(tool.inputSchema ?? {});
   const properties = coercionProperties(base, branches, params);
   for (const [key, value] of Object.entries(params)) {
-    const paramSchema = properties[key] as ParameterSchema | undefined;
+    const declared = properties[key];
+    // Collapsed first: a nullable declaration (`type: ["number","null"]`, or an
+    // `anyOf` with a null branch) states its real type on the surviving branch,
+    // and `convertParameterValue` dispatches on a single `type` string — so
+    // without this a nullable number is sent as the string it was typed as.
+    const paramSchema =
+      typeof declared === "object" && declared !== null
+        ? (normalizeNullableUnion(declared) as ParameterSchema)
+        : (declared as ParameterSchema | undefined);
 
     // A `const` the supplied text names is sent as the schema's own typed
     // value, not as the text: a branch pinned to `const: 2` is selected by
@@ -270,13 +282,21 @@ export function convertToolParameters(
     // rejects. Only an exact match is substituted — anything else is the
     // user's input and is left alone.
     const pinned = (paramSchema as { const?: unknown } | undefined)?.const;
-    if (pinned !== undefined && String(pinned) === value) {
-      result[key] = pinned as JsonValue;
-    } else if (paramSchema) {
-      result[key] = convertParameterValue(value, paramSchema);
-    } else {
-      result[key] = value;
-    }
+    const converted =
+      pinned !== undefined && String(pinned) === value
+        ? (pinned as JsonValue)
+        : paramSchema
+          ? convertParameterValue(value, paramSchema)
+          : value;
+    // `defineProperty`, not assignment: `__proto__` is a legal argument name —
+    // a discriminator can carry it — and assigning it would invoke the legacy
+    // prototype setter instead of putting it in the call.
+    Object.defineProperty(result, key, {
+      value: converted,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
   }
 
   return result;
