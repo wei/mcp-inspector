@@ -141,9 +141,10 @@ jobs:
   browser-engine-smokes:
     runs-on: ubuntu-latest
     strategy:
-      # Report every engine's verdict. Failing fast would hide a WebKit-only
-      # regression behind a Firefox-only one, which is the exact distinction
-      # this job exists to draw.
+      # Kept on despite the matrix currently holding one engine: the moment a
+      # second is added back (see below), failing fast would hide one engine's
+      # regression behind another's — which is the exact distinction this job
+      # exists to draw, so the flag should not have to be remembered then.
       fail-fast: false
       matrix:
         # `webkit` belongs here and is deliberately absent: the smokes RUN in it
