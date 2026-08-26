@@ -312,6 +312,28 @@ describe("JSON Utils", () => {
       ).toEqual({ value: "true" });
     });
 
+    it("matches a structured const by parsing the supplied text (#2123)", () => {
+      const structured: Tool = {
+        name: "structured-const",
+        inputSchema: {
+          type: "object",
+          properties: { tag: { const: { kind: "x", n: 1 } } },
+        },
+      };
+      // `String({...})` is "[object Object]", which no argument can equal — so
+      // the only value the schema accepts would never have matched.
+      expect(
+        convertToolParameters(structured, { tag: '{"n":1,"kind":"x"}' }),
+      ).toEqual({ tag: { kind: "x", n: 1 } });
+      // Text that is not that value, or not JSON at all, is left alone.
+      expect(convertToolParameters(structured, { tag: "{}" })).toEqual({
+        tag: "{}",
+      });
+      expect(convertToolParameters(structured, { tag: "nope" })).toEqual({
+        tag: "nope",
+      });
+    });
+
     it("leaves an ambiguously typed argument uncoerced (#2123)", () => {
       const ambiguous: Tool = {
         name: "ambiguous",

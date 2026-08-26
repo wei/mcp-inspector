@@ -503,6 +503,24 @@ describe("schemaToForm", () => {
       });
     });
 
+    it("never marks a const control required", () => {
+      // Its one option may be the empty string, which ink-form's required gate
+      // can never accept — the call would not even reach `decodeFormValues`.
+      const form = schemaToForm(
+        {
+          type: "object",
+          properties: { kind: { type: "string", const: "" } },
+          required: ["kind"],
+        },
+        "empty_const",
+      );
+      expect(form.sections[0]!.fields[0]).toMatchObject({
+        name: "kind",
+        type: "select",
+        required: false,
+      });
+    });
+
     it("renders a const outside a union the same way", () => {
       const form = schemaToForm(
         {

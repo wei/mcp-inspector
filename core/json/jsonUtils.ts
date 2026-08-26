@@ -2,6 +2,7 @@ import type { Tool } from "@modelcontextprotocol/client";
 import { normalizeNullableUnion } from "./nullableUnion.js";
 import {
   narrowBySuppliedNames,
+  sameJsonValue,
   resolveRootUnion,
   type RootUnionBranch,
   type RootUnionSchema,
@@ -253,8 +254,27 @@ function matchesConstants(
     // read the inherited one and rule out every branch that pins that name.
     if (!Object.hasOwn(params, name)) return true;
     const supplied = params[name];
-    return supplied === undefined || supplied === String(constValue);
+    return supplied === undefined || suppliedMatchesConst(supplied, constValue);
   });
+}
+
+/**
+ * Whether the text a CLI argument carries is the value a `const` fixes.
+ *
+ * A primitive constant is compared as text, which is all a command line has. A
+ * structured one — a `const` may be an object or an array, with or without a
+ * `type` — is parsed first: `String({...})` is `"[object Object]"`, which no
+ * argument can equal, so the only value the schema accepts would never match.
+ */
+function suppliedMatchesConst(value: string, constValue: unknown): boolean {
+  if (constValue === null || typeof constValue !== "object") {
+    return value === String(constValue);
+  }
+  try {
+    return sameJsonValue(JSON.parse(value), constValue);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -288,7 +308,7 @@ export function convertToolParameters(
     // user's input and is left alone.
     const pinned = (paramSchema as { const?: unknown } | undefined)?.const;
     const converted =
-      pinned !== undefined && String(pinned) === value
+      pinned !== undefined && suppliedMatchesConst(value, pinned)
         ? (pinned as JsonValue)
         : paramSchema
           ? convertParameterValue(value, paramSchema)

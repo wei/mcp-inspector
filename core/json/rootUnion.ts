@@ -240,7 +240,17 @@ function canonicalJson(value: unknown): string {
   return JSON.stringify(value) ?? "undefined";
 }
 
-/** Structural equality, via canonical JSON — enough for schema keyword values. */
+/**
+ * Structural equality, via canonical JSON — enough for schema keyword values.
+ *
+ * Exported because a caller comparing a *supplied* value against a schema's
+ * `const` has to reach the same answer this module does; two implementations
+ * would disagree the moment one of them met an object.
+ */
+export function sameJsonValue(a: unknown, b: unknown): boolean {
+  return sameValue(a, b);
+}
+
 function sameValue(a: unknown, b: unknown): boolean {
   return a === b || canonicalJson(a) === canonicalJson(b);
 }

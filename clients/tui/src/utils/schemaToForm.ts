@@ -357,6 +357,12 @@ function buildFields(schema: JsonSchemaObject): FormField[] {
       fields.push({
         type: "select",
         ...baseField,
+        // Never required: the one option may legitimately be the empty string,
+        // which ink-form's required gate can never accept — submission would
+        // not even reach `decodeFormValues`, which reapplies the constant. The
+        // value is fixed by the schema, and `missingRequiredFields` still
+        // validates the decoded call.
+        required: false,
         initialValue: String(pinned),
         options: [{ label: String(pinned), value: String(pinned) }],
       } as FormField);
