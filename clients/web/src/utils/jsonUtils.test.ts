@@ -493,6 +493,15 @@ describe("root composition (#2123)", () => {
     expect(hasMissingRequiredFields(UNION, { kind: "email" })).toBe(true);
   });
 
+  it("does not count a branch whose discriminator the values contradict", () => {
+    // `{ kind: "sms", address: … }` supplies everything the EMAIL branch
+    // requires while carrying a `kind` that branch rejects — and the SMS
+    // branch it does name is still missing `phone`.
+    expect(
+      hasMissingRequiredFields(UNION, { kind: "sms", address: "a@b.c" }),
+    ).toBe(true);
+  });
+
   it("allows submission once one branch is satisfied", () => {
     expect(hasMissingRequiredFields(UNION, { kind: "sms", phone: "555" })).toBe(
       false,

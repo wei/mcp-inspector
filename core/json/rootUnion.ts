@@ -676,7 +676,18 @@ export function selectBranchIndex<T extends RootUnionSchema>(
   branches: RootUnionBranch<T>[],
   values: Record<string, unknown>,
 ): number | null {
-  const matches: number[] = [];
+  const supplied = (name: string) =>
+    // `hasOwn`: a field legally named `constructor` would otherwise read the
+    // inherited one as a supplied value.
+    Object.hasOwn(values, name) && values[name] !== undefined;
+
+  // A branch is out of the running as soon as a supplied value disagrees with
+  // one of its constants; one whose constants agree is a candidate. A constant
+  // the caller did not supply is one this identification exists to *seed*, so
+  // it is not evidence either way — which is why a branch that pins nothing
+  // relevant stays a candidate rather than being ruled in or out.
+  const candidates: number[] = [];
+  const agreeing: number[] = [];
   branches.forEach((branch, index) => {
     const pinned = Object.entries(propertiesOf(branch.schema) ?? {})
       .map(
@@ -686,58 +697,45 @@ export function selectBranchIndex<T extends RootUnionSchema>(
             (toBranch(schema) as { const?: unknown } | null)?.const,
           ] as const,
       )
-      .filter(([, constValue]) => constValue !== undefined);
-    // Only the pinned names the caller actually supplied are evidence. A
-    // constant it did not supply is one this identification exists to *seed* —
-    // requiring it would mean a deep link naming `kind` alone matched no branch
-    // whenever the branches also pin, say, a `version`.
-    // `hasOwn`: a pinned field legally named `constructor` would otherwise read
-    // the inherited one as a supplied value and rule its own branch out.
-    const supplied = pinned.filter(
-      ([name]) => Object.hasOwn(values, name) && values[name] !== undefined,
+      .filter(
+        ([name, constValue]) => constValue !== undefined && supplied(name),
+      );
+    // Structural, not reference: a `const` may be an object or an array, and
+    // deep-link arguments arrive as freshly parsed instances that could never
+    // be `===` the schema's own.
+    const agrees = pinned.every(([name, constValue]) =>
+      sameValue(values[name], constValue),
     );
-    if (
-      supplied.length > 0 &&
-      // Structural, not reference: a `const` may be an object or an array, and
-      // deep-link arguments arrive as freshly parsed instances that could never
-      // be `===` the schema's own.
-      supplied.every(([name, constValue]) =>
-        sameValue(values[name], constValue),
-      )
-    ) {
-      matches.push(index);
-    }
+    if (!agrees) return;
+    candidates.push(index);
+    if (pinned.length > 0) agreeing.push(index);
   });
-  if (matches.length === 1) return matches[0];
-  if (matches.length > 1) return null;
 
-  // No discriminator settled it. A union need not have one, and values still
-  // belong to a shape — so fall back to the branch whose own required fields
-  // the values supply, when exactly one branch's do. Without this, values for
-  // an undiscriminated branch open the picker on the first branch while the
-  // required-field gate (which accepts *any* satisfied branch) lets them be
-  // submitted, so the form shows one shape and sends another.
-  if (Object.keys(values).length === 0) return null;
-  const supplied = (name: string) =>
-    Object.hasOwn(values, name) && values[name] !== undefined;
+  // One branch's discriminator matched and no other's did — the plain case.
+  if (agreeing.length === 1) return agreeing[0];
+  if (candidates.length === 1) return candidates[0];
+  if (candidates.length === 0 || Object.keys(values).length === 0) return null;
 
-  const satisfied = branches.filter((branch) => {
+  // Several branches remain — they share the constant that was supplied, or
+  // none was. The values still belong to a shape, so keep looking among the
+  // candidates: first the branch whose own required fields they supply.
+  const satisfied = candidates.filter((index) => {
+    const branch = branches[index]!;
     const required = branch.schema.required ?? [];
     const own = required.filter((name) => branch.declaredFields.includes(name));
     return own.length > 0 && own.every(supplied);
   });
-  if (satisfied.length === 1) return branches.indexOf(satisfied[0]);
+  if (satisfied.length === 1) return satisfied[0];
 
-  // Nothing is required, or several branches are satisfied. A name only ONE
-  // alternative declares is still evidence: supplying `phone` where only the
+  // Then a name only ONE candidate declares: supplying `phone` where only the
   // SMS branch declares it names that shape as clearly as a discriminator
   // would. A name more than one declares is ambiguous and says nothing.
   const exclusiveTo = new Map<string, number>();
-  branches.forEach((branch, index) => {
-    for (const name of branch.declaredFields) {
+  for (const index of candidates) {
+    for (const name of branches[index]!.declaredFields) {
       exclusiveTo.set(name, exclusiveTo.has(name) ? -1 : index);
     }
-  });
+  }
   const named = new Set(
     Object.keys(values)
       .filter(supplied)
@@ -745,4 +743,30 @@ export function selectBranchIndex<T extends RootUnionSchema>(
       .filter((index): index is number => index !== undefined && index >= 0),
   );
   return named.size === 1 ? [...named][0] : null;
+}
+
+/**
+ * Whether a branch's own constants are compatible with the values in hand — the
+ * question "could this call be making this shape".
+ *
+ * A required-field check alone is not that question: in an email/SMS union,
+ * `{ kind: "sms", address: "x" }` supplies everything the *email* branch
+ * requires while carrying a discriminator that branch rejects, so treating it
+ * as satisfiable would enable a submit the server refuses.
+ */
+export function branchAcceptsValues<T extends RootUnionSchema>(
+  branch: RootUnionBranch<T>,
+  values: Record<string, unknown>,
+): boolean {
+  return Object.entries(propertiesOf(branch.schema) ?? {}).every(
+    ([name, schema]) => {
+      const constValue = (toBranch(schema) as { const?: unknown } | null)
+        ?.const;
+      if (constValue === undefined) return true;
+      if (!Object.hasOwn(values, name) || values[name] === undefined) {
+        return true;
+      }
+      return sameValue(values[name], constValue);
+    },
+  );
 }

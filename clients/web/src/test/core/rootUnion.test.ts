@@ -811,6 +811,30 @@ describe("resolveRootUnion", () => {
       expect(selectBranchIndex(pinnedOnInherited, { x: "supplied" })).toBe(0);
     });
 
+    it("keeps looking when several branches share the supplied constant", () => {
+      // Both pin `version`, so that constant settles nothing — but `phone`
+      // belongs to one branch alone and does.
+      const versioned = resolveRootUnion({
+        type: "object",
+        anyOf: [
+          {
+            type: "object",
+            properties: {
+              version: { const: 1 },
+              address: { type: "string" },
+            },
+          },
+          {
+            type: "object",
+            properties: { version: { const: 1 }, phone: { type: "string" } },
+          },
+        ],
+      }).branches;
+      expect(selectBranchIndex(versioned, { version: 1, phone: "555" })).toBe(
+        1,
+      );
+    });
+
     it("reports none when the values identify nothing", () => {
       expect(selectBranchIndex(branches, {})).toBeNull();
       expect(selectBranchIndex(branches, { kind: "other" })).toBeNull();

@@ -178,9 +178,13 @@ function coercionProperties(
     // specialization of a root property carries the root's keywords too.
     const declarations = branches
       .filter((branch) => branch.declaredFields.includes(name))
-      .map((branch) => branch.schema.properties?.[name]);
+      .map((branch) => branch.schema.properties?.[name])
+      // A malformed declaration (`properties: { x: null }`) is not a vote about
+      // the type, and storing it as the coercion schema would put a value that
+      // is not a schema where one is expected.
+      .filter((schema) => typeof schema === "object" && schema !== null);
     const types = new Set(declarations.map((schema) => typeNameOf(schema)));
-    if (types.size === 1) {
+    if (types.size === 1 && declarations.length > 0) {
       Object.defineProperty(properties, name, {
         value: declarations[0],
         writable: true,

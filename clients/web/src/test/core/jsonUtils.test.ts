@@ -269,6 +269,27 @@ describe("JSON Utils", () => {
       });
     });
 
+    it("ignores a malformed branch declaration when agreeing on a type (#2123)", () => {
+      const malformedDeclaration: Tool = {
+        name: "malformed-declaration",
+        inputSchema: {
+          type: "object",
+          anyOf: [
+            { type: "object", properties: { count: null as unknown, a: {} } },
+            {
+              type: "object",
+              properties: { count: { type: "number" }, b: {} },
+            },
+          ],
+        },
+      };
+      // The `null` is not a vote about the type, and must not end up standing
+      // in for one — the surviving declaration is what coerces.
+      expect(
+        convertToolParameters(malformedDeclaration, { count: "3" }),
+      ).toEqual({ count: 3 });
+    });
+
     it("coerces a value whose schema lives on a root allOf branch (#2123)", () => {
       const allOfTool: Tool = {
         name: "allof-tool",

@@ -3,6 +3,7 @@ import {
   normalizeNullableUnion,
 } from "@inspector/core/json/nullableUnion.js";
 import {
+  branchAcceptsValues,
   resolveRootUnion,
   selectBranchIndex,
 } from "@inspector/core/json/rootUnion.js";
@@ -266,7 +267,14 @@ export function hasMissingRequiredFields(
   // direction that matters: it never blocks arguments the schema accepts.
   const { base, branches } = resolveRootUnion(schema);
   if (branches.length > 0) {
-    return branches.every((branch) => hasMissingIn(branch.schema, values));
+    // Only the branches the values could actually be making are considered: a
+    // required-name count alone would let `{ kind: "sms", address: "x" }` look
+    // like a complete *email* call, whose discriminator it contradicts.
+    const applicable = branches.filter((branch) =>
+      branchAcceptsValues(branch, values),
+    );
+    if (applicable.length === 0) return true;
+    return applicable.every((branch) => hasMissingIn(branch.schema, values));
   }
   return hasMissingIn(base, values);
 }
