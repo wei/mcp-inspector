@@ -6,6 +6,7 @@
 import { readFileSync } from "fs";
 import path from "path";
 import YAML from "yaml";
+import { isOriginRelativePath } from "./test-server-oauth.js";
 
 export interface PresetRef {
   preset: string;
@@ -19,6 +20,8 @@ export interface ConfigFileOAuth {
   mode?: "combined" | "protected-resource";
   authorizationServers?: string[];
   resource?: string;
+  /** Serve RFC 9728 metadata from this path and advertise it on 401 (#2071). */
+  resourceMetadataPath?: string;
   issuerUrl?: string;
   accessTokenIssuers?: string[];
   jwksUri?: string;
@@ -60,6 +63,10 @@ export interface ConfigFile {
    * and wire its handlers + `modern_task` / `modern_input_task` tools. Pair with
    * `transport.modern`. */
   tasksExtension?: boolean;
+  /** Advertise the MCP Apps `io.modelcontextprotocol/ui` extension with the nested
+   * `elicitation` setting — the server half of app-rendered form elicitation
+   * (#1854). Pair with the `app_choose_option` tool + `choose_option_app` resource. */
+  appElicitation?: boolean;
   maxPageSize?: {
     tools?: number;
     resources?: number;
@@ -72,6 +79,15 @@ export interface ConfigFile {
    * no preset can produce. See {@link ServerConfig.duplicateToolNames} (#1957).
    */
   duplicateToolNames?: string[];
+  /**
+   * Replace a registered tool's advertised `inputSchema`/`outputSchema` with a
+   * raw JSON Schema document — the constructs a Zod-built preset cannot emit.
+   * See {@link ServerConfig.rawToolSchemas} (#1005).
+   */
+  rawToolSchemas?: Record<
+    string,
+    { inputSchema?: unknown; outputSchema?: unknown }
+  >;
   /**
    * Gate a tool's `tools/list` visibility on a client-declared extension. Maps
    * extension id → tool name; the tool appears only when the connected client
@@ -195,6 +211,12 @@ function validateConfig(
           );
         }
       }
+    }
+    const metadataPath = oauth.resourceMetadataPath;
+    if (metadataPath !== undefined && !isOriginRelativePath(metadataPath)) {
+      throw new Error(
+        `Invalid config in ${filePath}: oauth.resourceMetadataPath must be an origin-relative path (e.g. "/custom/protected-resource") — a value such as "//host/doc" would advertise a document the server does not serve`,
+      );
     }
     if (transportType === "stdio" && oauth.enabled === true) {
       throw new Error(

@@ -73,6 +73,17 @@ jobs:
         # gate. It restores the mutated entry afterward (see the script).
         run: npm run verify:build-gate
 
+      - name: Verify no externalized dependency was inlined (#2067)
+        # The mirror of the "must be bundled" rule. `undici` was declared only in
+        # the root and `clients/cli` manifests, so tsup — which auto-externalizes
+        # what the NEAREST manifest declares — inlined 1.05MB of it into the web
+        # and TUI bundles. Inlined CommonJS in an ESM bundle throws
+        # `Dynamic require of "assert" is not supported` on first use, and the
+        # rewritten relative specifier meant no user-side install could fix it.
+        # This reads the built output rather than the config, because those two
+        # disagreed for four releases.
+        run: npm run verify:bundle-externals
+
       # Playwright chromium is installed BEFORE the smokes because
       # `smoke:web:browser` (the headless-browser boot smoke, #1615) drives the
       # prod web bundle in chromium — restoring/installing it here lets that

@@ -1,4 +1,4 @@
-import { Alert, Button, Group, Text } from "@mantine/core";
+import { Alert, Button, Group, Stack, Text } from "@mantine/core";
 
 export const DEFAULT_REAUTH_BANNER_TITLE = "Re-authentication required";
 export const DEFAULT_REAUTH_BANNER_ACTION_LABEL = "Re-authenticate";
@@ -24,11 +24,16 @@ const ReAuthAlert = Alert.withProps({
   closeButtonLabel: "Dismiss",
 });
 
-const BannerRow = Group.withProps({
-  justify: "space-between",
-  align: "center",
-  wrap: "nowrap",
-  gap: "md",
+// Message above the action rather than beside it: this renders in a ~420px
+// popup, where a side-by-side row squeezes the message into a few words per
+// line while the button keeps its full width.
+const BannerBody = Stack.withProps({
+  gap: "xs",
+});
+
+const BannerActions = Group.withProps({
+  justify: "flex-end",
+  gap: "xs",
 });
 
 const MessageText = Text.withProps({
@@ -50,10 +55,12 @@ export function ReAuthBanner({
 }: ReAuthBannerProps) {
   return (
     <ReAuthAlert title={title} onClose={onDismiss}>
-      <BannerRow>
+      <BannerBody>
         <MessageText>{message}</MessageText>
-        <ReAuthButton onClick={onReauthenticate}>{actionLabel}</ReAuthButton>
-      </BannerRow>
+        <BannerActions>
+          <ReAuthButton onClick={onReauthenticate}>{actionLabel}</ReAuthButton>
+        </BannerActions>
+      </BannerBody>
     </ReAuthAlert>
   );
 }

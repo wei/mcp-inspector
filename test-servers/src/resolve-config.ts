@@ -90,8 +90,10 @@ export function resolveConfig(config: ConfigFile): ServerConfig {
     subscriptions: config.subscriptions,
     tasks: config.tasks,
     tasksExtension: config.tasksExtension,
+    appElicitation: config.appElicitation,
     maxPageSize: config.maxPageSize,
     duplicateToolNames: config.duplicateToolNames,
+    rawToolSchemas: config.rawToolSchemas,
     extensionGatedTools: config.extensionGatedTools,
     serverType: isHttp
       ? (transport.type as "sse" | "streamable-http")

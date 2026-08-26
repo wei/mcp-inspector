@@ -32,11 +32,14 @@ ENV HOST=0.0.0.0 \
     DANGEROUSLY_BIND_ALL_INTERFACES=true \
     CLIENT_PORT=6274 \
     MCP_SANDBOX_PORT=6275 \
+    MCP_APP_ORIGIN_PORT=6278 \
     MCP_AUTO_OPEN_ENABLED=false
-# 6275 is the MCP Apps sandbox, a second listener the browser reaches directly.
-# It is only needed for the Apps tab, so it is EXPOSEd but publishing it is
+# 6275 is the MCP Apps sandbox and 6278 the dedicated app origin (#2056) — two
+# further listeners the browser reaches DIRECTLY, so neither works through the
+# 6274 publish alone. Both are only needed for the Apps tab (6278 only for an
+# App declaring `_meta.ui.domain`), so they are EXPOSEd but publishing them is
 # optional — see the Docker section of the root README.
-EXPOSE 6274 6275
+EXPOSE 6274 6275 6278
 
 # Run as the non-root `node` user the base image ships. The inspector resolves
 # its runtime-state dir (default catalog, OAuth token storage) from `HOME`

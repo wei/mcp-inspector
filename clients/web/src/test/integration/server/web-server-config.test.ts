@@ -26,6 +26,7 @@ const MUTATED_ENV_KEYS = [
   "MCP_STORAGE_DIR",
   "ALLOWED_ORIGINS",
   "MCP_SANDBOX_PORT",
+  "MCP_APP_ORIGIN_PORT",
   "SERVER_PORT",
   "MCP_LOG_FILE",
   "MCP_AUTO_OPEN_ENABLED",
@@ -43,6 +44,7 @@ const baseConfig = (): WebServerConfig => ({
   storageDir: undefined,
   allowedOrigins: ["http://localhost:6274"],
   sandboxPort: 0,
+  appOriginPort: 0,
   sandboxHost: "127.0.0.1",
   logger: undefined,
   autoOpen: false,
@@ -299,6 +301,53 @@ describe("buildWebServerConfigFromEnv", () => {
     process.env.MCP_SANDBOX_PORT = "";
     process.env.SERVER_PORT = "9100";
     expect(buildWebServerConfigFromEnv().sandboxPort).toBe(9100);
+  });
+
+  it("resolves appOriginPort from MCP_APP_ORIGIN_PORT, defaulting to 6278", () => {
+    // The dedicated app origin (#2056). Deliberately NOT sharing the sandbox's
+    // SERVER_PORT fallback: it is a different listener and must be pinnable
+    // (and forwardable) on its own.
+    delete process.env.MCP_APP_ORIGIN_PORT;
+    process.env.SERVER_PORT = "9100";
+    expect(buildWebServerConfigFromEnv().appOriginPort).toBe(6278);
+    process.env.MCP_APP_ORIGIN_PORT = "9300";
+    expect(buildWebServerConfigFromEnv().appOriginPort).toBe(9300);
+  });
+
+  it.each([
+    ["the web server", "CLIENT_PORT", "the web server (CLIENT_PORT)"],
+    [
+      "the sandbox",
+      "MCP_SANDBOX_PORT",
+      "the MCP Apps sandbox (MCP_SANDBOX_PORT)",
+    ],
+  ])(
+    "yields a dynamic app-origin port when it collides with %s",
+    (_label, envVar, expectedReason) => {
+      // The app-origin listener starts BEFORE the web server binds, so a
+      // configured collision is not a race it loses — it WINS the port and the
+      // Inspector then dies with EADDRINUSE. `CLIENT_PORT=6278` was a valid
+      // config before this feature existed.
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        process.env[envVar] = "6500";
+        process.env.MCP_APP_ORIGIN_PORT = "6500";
+        expect(buildWebServerConfigFromEnv().appOriginPort).toBe(0);
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(expectedReason),
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
+    },
+  );
+
+  it("leaves an explicit dynamic app-origin port alone", () => {
+    // 0 means "OS-assigned" for both, so two zeros are not a collision.
+    process.env.CLIENT_PORT = "6274";
+    process.env.MCP_SANDBOX_PORT = "0";
+    process.env.MCP_APP_ORIGIN_PORT = "0";
+    expect(buildWebServerConfigFromEnv().appOriginPort).toBe(0);
   });
 
   it("sets MCP_STORAGE_DIR when present", () => {
@@ -583,6 +632,28 @@ describe("webServerConfigToInitialPayload", () => {
     expect(payload.defaultTransport).toBe("streamable-http");
     expect(payload.defaultServerUrl).toBe("https://srv/other");
   });
+
+  it("omits secretStorage when the caller didn't resolve a store", () => {
+    // The UI treats an absent descriptor as "unknown" and shows nothing. A
+    // defaulted value would put a confident wrong answer under a secret field.
+    expect(webServerConfigToInitialPayload(baseConfig()).secretStorage).toBe(
+      undefined,
+    );
+  });
+
+  it("passes the resolved store through verbatim (#1950)", () => {
+    const secretStorage = {
+      kind: "file",
+      reason: "fallback",
+      durable: true,
+      plaintext: true,
+      path: "/home/node/.mcp-inspector/secrets.json",
+    } as const;
+    expect(
+      webServerConfigToInitialPayload(baseConfig(), secretStorage)
+        .secretStorage,
+    ).toEqual(secretStorage);
+  });
 });
 
 describe("printServerBanner", () => {
@@ -667,6 +738,38 @@ describe("printServerBanner", () => {
     withAuto.autoOpen = true;
     printServerBanner(withAuto, 6274, "tok", undefined);
     expect(logSpy.lines.some((l) => l.includes("Opening browser"))).toBe(true);
+  });
+
+  it("prints the secret store for every kind, not only the alarming ones", () => {
+    // A line that appears only when something is wrong can't be used to
+    // confirm that nothing is.
+    printServerBanner(baseConfig(), 6274, "tok", undefined, {
+      kind: "keyring",
+      reason: "default",
+      durable: true,
+    });
+    expect(logSpy.lines.some((l) => l.includes("Secrets: OS keychain"))).toBe(
+      true,
+    );
+  });
+
+  it("names the path and the fallback for a file-backed store", () => {
+    printServerBanner(baseConfig(), 6274, "tok", undefined, {
+      kind: "file",
+      reason: "fallback",
+      durable: true,
+      plaintext: true,
+      path: "/home/node/.mcp-inspector/secrets.json",
+    });
+    const line = logSpy.lines.find((l) => l.includes("Secrets:"));
+    expect(line).toContain("File (unencrypted)");
+    expect(line).toContain("/home/node/.mcp-inspector/secrets.json");
+    expect(line).toContain("fell back");
+  });
+
+  it("prints no secrets line when no store was resolved", () => {
+    printServerBanner(baseConfig(), 6274, "tok", undefined);
+    expect(logSpy.lines.some((l) => l.includes("Secrets:"))).toBe(false);
   });
 });
 

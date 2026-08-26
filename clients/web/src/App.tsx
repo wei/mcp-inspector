@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import {
   Anchor,
   Box,
@@ -18,6 +25,7 @@ import type {
   LoggingMessageNotification,
   Progress,
   ProgressToken,
+  Resource,
   Task,
   Tool,
 } from "@modelcontextprotocol/client";
@@ -62,6 +70,7 @@ import { ManagedResourceTemplatesState } from "@inspector/core/mcp/state/managed
 import { ManagedRequestorTasksState } from "@inspector/core/mcp/state/managedRequestorTasksState.js";
 import { ResourceSubscriptionsState } from "@inspector/core/mcp/state/resourceSubscriptionsState.js";
 import {
+  applyStdioSettingsToConfig,
   cleanRoots,
   oauthAuthorizationParamsFromSettings,
   oauthEndpointOverridesFromSettings,
@@ -91,7 +100,10 @@ import {
 } from "@inspector/core/auth/index.js";
 import { RemoteInspectorClientStorage } from "@inspector/core/mcp/remote/index.js";
 import { useInspectorClient } from "@inspector/core/react/useInspectorClient.js";
-import { useServers } from "@inspector/core/react/useServers.js";
+import {
+  ServerListReloadError,
+  useServers,
+} from "@inspector/core/react/useServers.js";
 import { useSettingsDraft } from "@inspector/core/react/useSettingsDraft.js";
 import { useClientSettingsDraft } from "@inspector/core/react/useClientSettingsDraft.js";
 import { useEmaIdpLoginState } from "@inspector/core/react/useEmaIdpLoginState.js";
@@ -103,6 +115,9 @@ import { usePagedTools } from "@inspector/core/react/usePagedTools.js";
 import { usePagedPrompts } from "@inspector/core/react/usePagedPrompts.js";
 import { usePagedResources } from "@inspector/core/react/usePagedResources.js";
 import { usePaginatedList } from "./hooks/usePaginatedList";
+import { useLastPersistedSettings } from "./hooks/useLastPersistedSettings";
+import { usePaginatedListsOverride } from "./hooks/usePaginatedListsOverride";
+import { useValueChange } from "./hooks/useValueChange";
 import type { ListPaginationControlsProps } from "./components/elements/ListPaginationControls/ListPaginationControls";
 import { useManagedResourceTemplates } from "@inspector/core/react/useManagedResourceTemplates.js";
 import { useManagedRequestorTasks } from "@inspector/core/react/useManagedRequestorTasks.js";
@@ -111,6 +126,7 @@ import { useMessageLog } from "@inspector/core/react/useMessageLog.js";
 import { useFetchRequestLog } from "@inspector/core/react/useFetchRequestLog.js";
 import { useStderrLog } from "@inspector/core/react/useStderrLog.js";
 import { useInitialConfig } from "@inspector/core/react/useInitialConfig.js";
+import { refreshingPersist } from "./lib/refreshingPersist";
 import { usePendingClientRequests } from "@inspector/core/react/usePendingClientRequests.js";
 import { InspectorView } from "./components/views/InspectorView/InspectorView";
 import type {
@@ -134,6 +150,12 @@ import {
 import { clearScrollMemory } from "./hooks/useScrollMemory";
 import type { AppRendererHandle } from "./components/elements/AppRenderer/AppRenderer";
 import { createAppBridgeFactory } from "./components/elements/AppRenderer/createAppBridgeFactory";
+import { publishAppDocument } from "./lib/publishAppDocument";
+import { AppElicitationHost } from "./components/elements/AppElicitation/AppElicitationHost";
+import {
+  AppElicitationController,
+  type AppElicitationSession,
+} from "./lib/appElicitationController";
 import type { LogEntryData } from "./components/elements/LogEntry/LogEntry";
 import {
   ServerConfigModal,
@@ -371,7 +393,7 @@ async function replayProtocolRequest(
 const EMPTY_SETTINGS: InspectorServerSettings = {
   headers: [],
   env: [],
-  metadata: [],
+  metadata: {},
   connectionTimeout: 0,
   requestTimeout: 0,
   taskTtl: DEFAULT_TASK_TTL_MS,
@@ -402,20 +424,41 @@ const ToastLinkButton = Anchor.withProps({
   size: "sm",
 });
 
-// Sticky re-auth banner bar. A `Paper` so every static style is a prop: `shadow`
-// emits `var(--mantine-shadow-sm)` (identical to the old CSS), and the stacking
+// The re-auth popup. A `Paper` so every static style is a prop; the stacking
 // order goes through `styles.root` since Mantine has no `z` prop.
+//
+// Floats top-right rather than spanning the top as a sticky full-bleed bar.
+// The bar cost the whole view a band of vertical space for what is a
+// notification about one server, and it sat directly above the monitoring
+// sidebar that an OAuth failure now opens (#2108) — the two things a user needs
+// at once here are this affordance and those requests, so it must not push them
+// around. `fixed`, not `sticky`, so scrolling the server list leaves it put.
+//
+// Centered, and deliberately WITHOUT an overlay. Every corner is spoken for —
+// the toast stack owns bottom-right (see `main.tsx`), the right edge is the
+// monitoring sidebar whose toolbar this would cover, and top-left is the
+// Servers header — so anchoring it anywhere hides something. Centering is the
+// one placement that reads as addressed to the whole window rather than
+// attached to the wrong panel.
+//
+// The missing overlay is the point, not an omission: this is a notification,
+// not a decision that must be made now. An OAuth failure opens the monitoring
+// sidebar (#2108), and blocking the page would force a choice between reading
+// those requests and keeping the affordance — dismissing is not free, since
+// "Authorize again" also clears the stale OAuth state, which a plain reconnect
+// does not do. So it floats above the page and leaves it usable.
+//
+// `transform` goes through `styles.root` for the same reason `zIndex` does:
+// Mantine exposes neither as a style prop.
 const ReAuthBannerBar = Paper.withProps({
-  px: "md",
-  pt: "xs",
-  pos: "sticky",
-  top: 60,
+  pos: "fixed",
+  top: "50%",
+  left: "50%",
+  w: 420,
   bg: "var(--mantine-color-body)",
-  shadow: "sm",
-  styles: { root: { zIndex: 200 } },
-  // Paper's default `radius: "md"` would round this full-bleed sticky bar's
-  // corners; the bar it replaced (a Box) had none.
-  radius: 0,
+  shadow: "xl",
+  radius: "md",
+  styles: { root: { transform: "translate(-50%, -50%)", zIndex: 200 } },
 });
 
 // Body of the "response body dropped" warning toast: a one-line summary of what
@@ -741,6 +784,9 @@ function App() {
     sandboxUrl,
     writable: serverListWritable,
     version: inspectorVersion,
+    secretStorage,
+    refresh: refreshInitialConfig,
+    loading: initialConfigLoading,
   } = useInitialConfig({
     baseUrl: configBaseUrl,
     authToken: getAuthToken(),
@@ -766,10 +812,45 @@ function App() {
       });
   }, [configBaseUrl]);
 
+  // The `resources/list` entries, read lazily by the App bridge factories below.
+  // ext-apps treats a listing entry's `_meta.ui` as the static default for its
+  // UI resource (a read content item's own `_meta.ui` wins), so the sandbox CSP
+  // has to be able to see it. A ref rather than a dependency: `resources` is
+  // derived further down this component, and the factories only read it inside
+  // an async sandboxready handler, long after any render that produced it.
+  const listedResourcesRef = useRef<Resource[]>([]);
+  // Best-effort by construction: this reads the list as it stands when the app
+  // opens, and does not distinguish "no entry for this URI" from "the list
+  // hasn't arrived yet". Both yield no hints, which is the same outcome as
+  // having no listing carrier at all. Blocking the render on list readiness
+  // instead would mean waiting on a request that, for a server advertising no
+  // `resources` capability or whose list errored, never resolves — trading a
+  // missing default for an app that never renders.
+  const getListedResourceMeta = useCallback(
+    (uri: string) =>
+      listedResourcesRef.current.find((r) => r.uri === uri)?._meta,
+    [],
+  );
+
+  // `_meta.ui.domain` support (#2056): hand a wrapped app document to the
+  // backend so it can serve it from a dedicated origin, giving the app's
+  // requests a real `Origin`. Resolves `null` on any backend that can't, and
+  // the factory then renders the app the default (opaque-origin) way.
+  const publishDocument = useCallback(
+    (doc: { html: string; csp?: string }) =>
+      publishAppDocument(doc, {
+        baseUrl: configBaseUrl,
+        authToken: getAuthToken(),
+      }),
+    [configBaseUrl],
+  );
+
   const sandboxBridgeFactory = useMemo(
     () =>
       createAppBridgeFactory({
+        publishAppDocument: publishDocument,
         getClient: () => inspectorClient?.getAppRendererClient() ?? null,
+        getListedResourceMeta,
         readResource: async (uri) => {
           if (!inspectorClient) throw new Error("No MCP client connected.");
           const invocation = await inspectorClient.readResource(uri);
@@ -789,7 +870,104 @@ function App() {
           });
         },
       }),
-    [inspectorClient],
+    [inspectorClient, getListedResourceMeta, publishDocument],
+  );
+
+  // App-rendered form elicitations (#1854). The controller is created once and
+  // handed to every InspectorClient at construction — its `render` is what opts
+  // this client into advertising the nested MCP Apps `elicitation` capability,
+  // which is why only the web client (the one with a sandbox) claims it.
+  const appElicitationControllerRef = useRef<AppElicitationController>(null);
+  appElicitationControllerRef.current ??= new AppElicitationController();
+  const appElicitationController = appElicitationControllerRef.current;
+  // The window onto the controller for the CURRENT client. Closing it when the
+  // client is replaced both rejects that connection's queued requests and
+  // refuses any it enqueues during its own (asynchronous) teardown — a late
+  // entry would otherwise be rendered by a factory bound to the replacement
+  // client, i.e. read and answered through a different server.
+  const appElicitationSessionRef = useRef<AppElicitationSession>(null);
+  // `setupClientForServer` is synchronous and memoized, so a caller that
+  // awaited the config would still resume with the `sandboxUrl` captured by the
+  // render it STARTED in — undefined, on the very load this matters for. The
+  // ref is written every render, so client construction reads the current value
+  // whichever entry point (connect, deep link, OAuth callback) reached it.
+  const sandboxUrlRef = useRef<string | undefined>(undefined);
+  sandboxUrlRef.current = sandboxUrl;
+  // Whether the sandbox exists is only known once `/api/config` resolves, and
+  // the answer is baked into the client at construction (it decides whether the
+  // nested MCP Apps `elicitation` capability is advertised). So a connect waits
+  // for it rather than guessing: guessing "available" over-claims a capability
+  // we may not have, and guessing "unavailable" strands the whole session on
+  // the native form despite having a sandbox. The wait is a local fetch already
+  // in flight since mount.
+  const initialConfigSettledRef = useRef<{
+    promise: Promise<void>;
+    resolve: () => void;
+  }>(null);
+  initialConfigSettledRef.current ??= (() => {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => (resolve = r));
+    return { promise, resolve };
+  })();
+  useEffect(() => {
+    if (!initialConfigLoading) initialConfigSettledRef.current?.resolve();
+  }, [initialConfigLoading]);
+  const appElicitations = useSyncExternalStore(
+    appElicitationController.subscribe,
+    appElicitationController.getEntries,
+  );
+  // A SECOND factory, differing from `sandboxBridgeFactory` only in that it
+  // advertises `hostCapabilities.elicitation`. An App-tool frame is never handed
+  // an elicitation, so telling those apps otherwise would be a false claim.
+  const elicitationBridgeFactory = useMemo(
+    () =>
+      createAppBridgeFactory({
+        advertiseElicitation: true,
+        publishAppDocument: publishDocument,
+        getClient: () => inspectorClient?.getAppRendererClient() ?? null,
+        getListedResourceMeta,
+        readResource: async (uri) => {
+          if (!inspectorClient) throw new Error("No MCP client connected.");
+          const invocation = await inspectorClient.readResource(uri);
+          return invocation.result;
+        },
+        // Unlike the Apps tab there is no persistent surface to show the
+        // failure on — the modal is about to be replaced by the native form —
+        // so the toast is the only place the user learns why.
+        onResourceError: (err) => {
+          notifications.show({
+            title: "Elicitation app failed to load",
+            message: err.message,
+            color: "red",
+          });
+        },
+      }),
+    [inspectorClient, getListedResourceMeta, publishDocument],
+  );
+  /**
+   * Close the previous client's session and open one for the client being
+   * constructed. Synchronous, and called at construction, so the swap itself is
+   * the moment ownership changes hands.
+   */
+  const newAppElicitationSession = useCallback(() => {
+    appElicitationSessionRef.current?.close(
+      new Error("Connection replaced before the app answered"),
+    );
+    const session = appElicitationController.openSession();
+    appElicitationSessionRef.current = session;
+    return session;
+  }, [appElicitationController]);
+  const handleAppElicitationSettle = useCallback(
+    (requestId: string, result: ElicitResult) => {
+      appElicitationController.settle(requestId, result);
+    },
+    [appElicitationController],
+  );
+  const handleAppElicitationFail = useCallback(
+    (requestId: string, error: Error) => {
+      appElicitationController.fail(requestId, error);
+    },
+    [appElicitationController],
   );
 
   const [managedToolsState, setManagedToolsState] =
@@ -1048,20 +1226,24 @@ function App() {
     error: pagedResourcesLoadError,
     loadPage: loadResourcesPage,
   } = usePagedResources(inspectorClient, pagedResourcesState);
+  // What every settings write that landed on disk actually wrote, so a later
+  // failed write can be rolled back to that rather than to a `servers` entry
+  // frozen at the last successful list read (#2089).
+  const lastPersistedSettings = useLastPersistedSettings(servers);
   // The active server's persisted paginated setting drives the display mode.
   // The sidebar toggle edits it (optimistically, below) and persists it.
+  const activeServerEntry = servers.find((s) => s.id === activeServerId);
   const persistedPaginatedLists =
-    servers.find((s) => s.id === activeServerId)?.settings?.paginatedLists ??
-    false;
-  const [paginatedListsOverride, setPaginatedListsOverride] = useState<
-    boolean | null
-  >(null);
-  // Drop the optimistic override once the persisted value catches up (or the
-  // active server changes), so the persisted setting is the resting source.
-  useEffect(() => {
-    setPaginatedListsOverride(null);
-  }, [persistedPaginatedLists, activeServerId]);
-  const paginatedLists = paginatedListsOverride ?? persistedPaginatedLists;
+    activeServerEntry?.settings?.paginatedLists ?? false;
+  // The optimistic override, held per server and superseded by the first
+  // successful list read that rebuilds that server's entry. Per server rather
+  // than one app-wide slot cleared on every active-entry change: the previous
+  // shape dropped the override on a plain server switch, so an A → B → A round
+  // trip fell back to A's stale entry and showed a value neither disk nor the
+  // live client held (#2095).
+  const paginatedListsOverride = usePaginatedListsOverride(servers);
+  const paginatedLists =
+    paginatedListsOverride.valueFor(activeServerId) ?? persistedPaginatedLists;
   // The malformed-entry report is written by the aggregate walk's salvage. In
   // paginated mode the tools/prompts/resources panels render the paged stores
   // instead, which never write or clear it — so it would linger above a page it
@@ -1110,6 +1292,14 @@ function App() {
   const tools = toolsPagination.items;
   const prompts = promptsPagination.items;
   const resources = resourcesPagination.items;
+  // Whatever the resource list currently holds — every page in the default
+  // aggregate mode, only the pages fetched so far under `paginatedLists`. The
+  // listing is a documented *default* that a read content item overrides, and
+  // an app whose entry sits on an unfetched page simply falls back to no hints
+  // (`connect-src 'none'`), exactly as before this wiring existed. Walking the
+  // whole list to close that would issue the very requests the user opted out
+  // of by turning pagination on, so the setting wins.
+  listedResourcesRef.current = resources;
   const {
     tasks,
     refresh: refreshTasks,
@@ -1604,11 +1794,18 @@ function App() {
   const activeServerNameRef = useRef<string | undefined>(undefined);
   const activeServerIdRef = useRef<string | undefined>(activeServerId);
   const serversRef = useRef(servers);
+  // The live client, mirrored for the same reason: a settings write that
+  // outlives a disconnect/reconnect to the *same* server would otherwise push
+  // its value into the instance captured when it was issued — which has since
+  // been destroyed — while the replacement client, built from the stale list
+  // entry, keeps the value the write replaced (#2089).
+  const inspectorClientRef = useRef<InspectorClient | null>(inspectorClient);
   useEffect(() => {
     if (activeServer) activeServerNameRef.current = activeServer.name;
     activeServerIdRef.current = activeServerId;
     serversRef.current = servers;
-  }, [activeServer, activeServerId, servers]);
+    inspectorClientRef.current = inspectorClient;
+  }, [activeServer, activeServerId, servers, inspectorClient]);
 
   // Last connection-level error message, surfaced as `data-error-message` on
   // the InspectorView header so an automated driver can read *why* a connect
@@ -1794,6 +1991,43 @@ function App() {
   // pre-redirect hook below can read the current Network log without being
   // rebound every time the active server (and its log state) changes.
   const fetchLogRef = useRef<FetchRequestLogState | null>(null);
+
+  // Make the live client reflect one settings value, in full. Every path that
+  // decides what the active server's settings *are* goes through this: the
+  // settings modal's close (#1444), and each write's settled / rolled-back
+  // reconciliation (#2089). It is one function because the live surface is more
+  // than `setServerSettings` — a partial re-application would leave the Network
+  // log sized for, and the server advertised roots from, a value that is not on
+  // disk. Reads the client through its ref so a write outliving a reconnect
+  // applies to the instance that exists now.
+  const applyLiveServerSettings = useCallback(
+    (settings: InspectorServerSettings) => {
+      const client = inspectorClientRef.current;
+      if (!client) return;
+      // Settings the managed state reads at notification time
+      // (auto-refresh-on-list-changed) take effect without a reconnect (#1444).
+      // Connection-time inputs (transport, OAuth, timeouts) still only apply on
+      // the next connect.
+      client.setServerSettings(settings);
+      // Resize the Network log buffer live so a maxFetchRequests edit takes
+      // effect without a reconnect (shrinking trims immediately).
+      fetchLogRef.current?.setMaxFetchRequests(settings.maxFetchRequests);
+      // Root edits are diffed against what the client currently advertises
+      // (both cleaned) and notified only when they differ: `setRoots` fires
+      // `notifications/roots/list_changed`, which makes the server re-request
+      // `roots/list`.
+      const nextRoots = cleanRoots(settings.roots);
+      const currentRoots = cleanRoots(client.getRoots());
+      if (JSON.stringify(nextRoots) !== JSON.stringify(currentRoots)) {
+        void client.setRoots(nextRoots).catch(() => {
+          // setRoots swallows notification failures internally; a throw here
+          // only means the client is mid-teardown — the persisted roots will
+          // re-advertise on the next connect, so nothing to surface.
+        });
+      }
+    },
+    [],
+  );
 
   // Flush the pre-redirect Network log to backend storage, keyed by the OAuth
   // authId carried in the authorization URL's `state`. Runs synchronously from
@@ -2350,18 +2584,23 @@ function App() {
       );
       // The settings node persisted in mcp.json for this server — distinct
       // from the InspectorClient options we're about to derive from it.
-      const savedSettings = server.settings;
+      //
+      // Through the tracker, not `server.settings` directly: the entry only
+      // advances on a successful list read, so a write that landed while reads
+      // were failing — including one made from the settings modal for a server
+      // that was not connected at the time — would otherwise be undone at the
+      // next connect, which builds the client from that frozen entry. This is
+      // the one place the whole connection is configured, so every construction
+      // path (connect, reconnect, OAuth resume) goes through it (#2089).
+      const savedSettings =
+        lastPersistedSettings.resolve(server.id) ?? server.settings;
       const activeIdp = getActiveEnterpriseManagedAuthIdp(clientConfig);
       const activeCimdUrl = getActiveCimdClientMetadataUrl(clientConfig);
       // Flatten the persisted settings into the InspectorClient options shape.
       // Empty / zero values stay unset so the SDK defaults apply.
-      const defaultMetadata = savedSettings?.metadata
-        ? Object.fromEntries(
-            savedSettings.metadata
-              .filter((m) => m.key.trim() !== "")
-              .map((m) => [m.key, m.value]),
-          )
-        : undefined;
+      // Per-server default `_meta` is already a JSON object (#1910) — no
+      // pair-array flattening left to do; `{}` means "no defaults".
+      const defaultMetadata = savedSettings?.metadata;
       const serverAuthorizationParams = savedSettings
         ? oauthAuthorizationParamsFromSettings(savedSettings)
         : undefined;
@@ -2375,7 +2614,8 @@ function App() {
           savedSettings.oauthScopes ||
           serverAuthorizationParams ||
           serverEndpointOverrides ||
-          savedSettings.enterpriseManaged)
+          savedSettings.enterpriseManaged ||
+          savedSettings.oauthRequestRefreshToken === false)
           ? {
               ...(savedSettings.oauthClientId && {
                 clientId: savedSettings.oauthClientId,
@@ -2393,6 +2633,11 @@ function App() {
               ...(savedSettings.enterpriseManaged && {
                 enterpriseManaged: true,
               }),
+              // #2068: only the explicit opt-out is forwarded; omitting the key
+              // leaves the provider's default (declare `refresh_token`) in place.
+              ...(savedSettings.oauthRequestRefreshToken === false && {
+                requestRefreshToken: false,
+              }),
             }
           : undefined;
       const oauth =
@@ -2402,7 +2647,19 @@ function App() {
               ...(activeCimdUrl && { clientMetadataUrl: activeCimdUrl }),
             }
           : undefined;
-      const client = new InspectorClient(server.config, {
+      // The stdio `env` / `cwd` are edited as *settings* but stored on — and
+      // read by the transport from — *config*, so the tracker's account of the
+      // former has to be carried onto the latter. `server.config` comes off the
+      // same frozen `servers` entry `server.settings` does, so without this a
+      // save that landed while list reads were failing spawns the child process
+      // with the pre-save environment while the modal, re-seeded from the
+      // tracker, shows the new one (#2096). Same mapping the PUT route applies
+      // when persisting it, from the same helper.
+      const effectiveConfig = applyStdioSettingsToConfig(
+        server.config,
+        savedSettings,
+      );
+      const client = new InspectorClient(effectiveConfig, {
         environment,
         // The Tasks tab needs the receiver-task pipeline; the
         // requestor-task list comes from the client's task store.
@@ -2410,6 +2667,16 @@ function App() {
         // Sampling / elicitation are on by default; keep the parameterized
         // options off until the UI grows the surface to render them.
         elicit: { form: true, url: true },
+        // Web only, and only when the sandbox renderer is actually available:
+        // supplying this advertises the nested MCP Apps `elicitation`
+        // capability, and a client that cannot host an app must not claim it
+        // (#1854). Callers await `initialConfigSettled` first, so `sandboxUrl`
+        // here means "confirmed absent" rather than "not known yet" — a
+        // connection that reaches this with no sandbox behaves like the
+        // CLI/TUI: native elicitation queue, no claim made to the server.
+        ...(sandboxUrlRef.current && {
+          appElicitation: newAppElicitationSession().render,
+        }),
         // Always advertise the roots capability (even with no configured
         // roots) so the server can issue roots/list and receive
         // roots/list_changed; the configured roots are the answer to
@@ -2511,6 +2778,8 @@ function App() {
       sessionStorageAdapter,
       onBeforeOAuthRedirect,
       clientConfig,
+      newAppElicitationSession,
+      lastPersistedSettings,
     ],
   );
 
@@ -2602,6 +2871,13 @@ function App() {
     if (!params.successful) {
       const pendingId = resumeSnapshot?.serverId;
       if (pendingId) {
+        // Red border only (#1621), not a sidebar. This arm returns before a
+        // client is rebuilt, so the persisted `auth` entries are never
+        // restored and the content-gated column stays shut — correctly: the
+        // provider's own `error` param is the whole diagnostic, and the
+        // re-auth banner below is already showing it. The flag is still right,
+        // because the attempt did fail.
+        setFailedServerId(pendingId);
         queueMicrotask(() => {
           showReAuthBanner(pendingId, generateOAuthErrorDescription(params));
         });
@@ -2630,10 +2906,17 @@ function App() {
     }
 
     void (async () => {
+      // Same reason as the connect path: whether this client may advertise
+      // app-rendered elicitation is fixed at construction.
+      await initialConfigSettledRef.current?.promise;
       try {
         await webOAuthStorage.load();
       } catch (err) {
         connectStartRef.current = undefined;
+        // Red border only, for the same reason as the provider-error arm above
+        // — and here the network log would not help anyway: this is a failure
+        // to read local OAuth storage, not a request that went out.
+        setFailedServerId(server.id);
         queueMicrotask(() => {
           showReAuthBanner(server.id, err instanceof Error ? err : String(err));
         });
@@ -2649,6 +2932,26 @@ function App() {
         });
       } catch (err) {
         connectStartRef.current = undefined;
+        // `resumeAfterOAuth` carries the reconnect, and that reconnect can
+        // reject with an auth-recovery error — which holds the status at
+        // `"connecting"` instead of moving it to `"error"`. Nothing downstream
+        // of here ends the attempt, so without this the toggle is stuck and the
+        // active-server lock is never released. Before the EMA guard, since a
+        // stuck session is worth clearing whichever way the error classifies.
+        await client.disconnect().catch(() => {});
+        // `activeServerId` is deliberately NOT cleared here, even though the
+        // disconnect above often cannot announce itself: it emits only on a
+        // status *change*, and the commonest failure — a rejected token
+        // exchange — throws inside `completeOAuthFlow` before the reconnect
+        // runs, so this freshly built client is still at its initial
+        // `"disconnected"` and the listener that would clear it never fires.
+        //
+        // That looks like a leak and is not. The next step after a callback
+        // failure is the re-auth banner below, and its "Authorize again" hands
+        // `clearServerOAuthState` the live client only when the banner's server
+        // *is* the active one. Releasing it here would pass `null` instead, and
+        // the stale tokens would never be cleared from the client that holds
+        // them — the one thing that recovery exists to do.
         if (isEmaClientNotConfiguredError(err)) {
           notifications.show({
             title: `Cannot connect to "${server.name}"`,
@@ -2658,6 +2961,19 @@ function App() {
           });
           return;
         }
+        // The token exchange (or the re-handshake behind it) failed. Flag the
+        // server (#1621) so the monitoring sidebar opens onto the OAuth
+        // requests that explain it (#2108) — the rebuilt client restored the
+        // pre-redirect `auth` fetch entries from the session, so discovery,
+        // DCR and the token exchange are all there.
+        //
+        // Below the EMA guard, not above it: an unconfigured enterprise client
+        // is a *configuration* error rather than a failed attempt, and both
+        // connect-path arms already return on it without flagging. Flagging it
+        // only here would make the three disagree about what the red border
+        // means. Above every other arm, so the classification fan-out that
+        // follows carries it whichever way it goes.
+        setFailedServerId(server.id);
         // SEP-2352 issuer binding (#1808). Two very different failures share
         // one SDK error class, so classify before falling through to the
         // generic re-auth banner (whose detail line would otherwise be the raw
@@ -2730,6 +3046,12 @@ function App() {
 
   const onToggleConnection = useCallback(
     async (id: string) => {
+      // Whether this client may advertise app-rendered elicitation is decided
+      // at construction and cannot be revised afterwards, so wait for the fact
+      // rather than guess it (see `initialConfigSettledRef`). Already resolved
+      // by the time any human clicks; this only orders a deep-link auto-connect
+      // that races the same page load.
+      await initialConfigSettledRef.current?.promise;
       // Same server, already connected → disconnect.
       if (
         id === activeServerId &&
@@ -2800,9 +3122,42 @@ function App() {
         // against the right client. The redirect unloads this page, so there's
         // nothing to do after the await on the success path.
         if (err instanceof AuthRecoveryRequiredError) {
-          if (await client.checkAuthChallengeSatisfied(err.authChallenge)) {
-            connectStartRef.current = Date.now();
-            await client.connect();
+          try {
+            if (await client.checkAuthChallengeSatisfied(err.authChallenge)) {
+              connectStartRef.current = Date.now();
+              await client.connect();
+              return;
+            }
+          } catch (recoveryErr) {
+            // Both awaits above are unguarded connect work sitting inside a
+            // `catch`, so a rejection escapes `onToggleConnection` altogether:
+            // no toast, no red border, no sidebar — the #2108 failure mode in
+            // its most invisible form. Surface it as the failed connect attempt
+            // it is. A throw from `checkAuthChallengeSatisfied` lands here too
+            // rather than falling through to `prepareOAuthRedirect`: it is not
+            // the same as the challenge being *unsatisfied*, and navigating the
+            // whole page away on the strength of an error would bury it.
+            connectStartRef.current = undefined;
+            // Tear the session down before reporting, as the sibling OAuth
+            // catch below does. The outer `connect()` rejected with an
+            // auth-recovery error, which deliberately holds the status at
+            // `"connecting"` rather than moving it to `"error"` — so if the
+            // challenge check is what rejected, nothing else ever ends the
+            // attempt and the toggle spins while the active-server lock is
+            // held. The fetch log survives a disconnect, so the Network
+            // diagnostics this issue is about are unaffected.
+            await client.disconnect().catch(() => {});
+            setFailedServerId(id);
+            const message =
+              recoveryErr instanceof Error
+                ? recoveryErr.message
+                : String(recoveryErr);
+            setConnectErrorMessage(message);
+            notifications.show({
+              title: `Failed to connect to "${target.name}"`,
+              message,
+              color: "red",
+            });
             return;
           }
           prepareOAuthRedirect({
@@ -2843,6 +3198,13 @@ function App() {
               });
               return;
             }
+            // The connect attempt failed, same as any other handshake error —
+            // flag the card (#1621) and, with it, open the monitoring sidebar
+            // onto the OAuth requests that explain the failure (#2108). This
+            // leg never reaches the `"error"` connection status (the
+            // `disconnect()` above settles it at `"disconnected"`), so this
+            // flag is the only signal the view has that a connect attempt died.
+            setFailedServerId(id);
             const message =
               authErr instanceof Error ? authErr.message : String(authErr);
             setConnectErrorMessage(message);
@@ -3596,12 +3958,19 @@ function App() {
   // gating reads it now, and a persisted PUT so it survives reconnects (#1721).
   const onTogglePaginatedLists = useCallback(
     (value: boolean) => {
-      setPaginatedListsOverride(value);
       const current = servers.find((s) => s.id === activeServerId);
       if (!current || activeServerId === undefined) return;
-      const prevSettings = current.settings ?? EMPTY_SETTINGS;
+      // Recorded against this server rather than app-wide, so it survives a
+      // switch away and back (#2095). Ordered after the id guard because the
+      // record is keyed by that id; with no active server there is nothing the
+      // toggle could have been flipped for.
+      paginatedListsOverride.record(activeServerId, value);
+      // Not `current.settings` directly: that entry only advances on a
+      // successful list read, so once one has failed it describes disk as it
+      // was *before* the writes made since. Build on the last write known to
+      // have landed while that is the fresher account (#2089).
       const next: InspectorServerSettings = {
-        ...prevSettings,
+        ...(lastPersistedSettings.resolve(activeServerId) ?? EMPTY_SETTINGS),
         paginatedLists: value,
       };
       inspectorClient?.setServerSettings(next);
@@ -3622,25 +3991,115 @@ function App() {
           runCommandInBackground(() => refreshResources(), "ambient");
         }
       }
-      void updateServerSettings(activeServerId, next).catch((err: unknown) => {
-        // Persist failed: revert the optimistic override (the effect only
-        // clears it when the persisted value changes, which won't happen here)
-        // and roll the live client setting back, so the UI and client reflect
-        // the value that's actually on disk rather than the failed edit (#1721).
-        setPaginatedListsOverride(null);
-        inspectorClient?.setServerSettings(prevSettings);
-        notifications.show({
-          title: "Failed to save pagination setting",
-          message: err instanceof Error ? err.message : String(err),
-          color: "red",
+      // Refreshed like every other secret-store mutation: this resends the
+      // server's rehydrated secrets, so it can trigger the pending
+      // plaintext-to-encrypted upgrade even though the user only toggled
+      // pagination (#1950 review r22).
+      // Announced before the request goes out, so two toggles in flight at once
+      // are ordered by when they were issued rather than by which one's list
+      // reload finished first (#2089).
+      const write = lastPersistedSettings.begin(activeServerId);
+      // This value is on disk now. Remember it as the rollback baseline for
+      // whatever is written next, since the `servers` entry it was derived
+      // from will keep describing the old value if the reload behind this
+      // write — or any later one — fails (#2089).
+      //
+      // Re-apply it when this write is the settled one: an overlapping toggle
+      // that failed *first* rolled the UI and the live client back to a
+      // baseline this write has since replaced, and if the list read behind
+      // this write failed too, nothing else would ever correct them. Through
+      // the *current* client, not this continuation's closure: a reconnect to
+      // the same server passes the id check while the captured instance is
+      // already destroyed.
+      const settlePaginationWrite = () => {
+        const settled = write.landed(next);
+        if (!settled) return;
+        // The override is keyed by server, so it is re-applied whatever is
+        // active now — it is this server's value and is only ever displayed
+        // while this server is the active one. The live client is not: it
+        // belongs to whichever server is connected (#2095).
+        paginatedListsOverride.record(
+          activeServerId,
+          next.paginatedLists ?? false,
+        );
+        if (activeServerIdRef.current === activeServerId) {
+          applyLiveServerSettings(next);
+        }
+      };
+      void refreshingPersist(updateServerSettings, refreshInitialConfig)(
+        activeServerId,
+        next,
+      )
+        .then(settlePaginationWrite)
+        .catch((err: unknown) => {
+          // A `ServerListReloadError` means the PUT landed and only reading the
+          // list back failed, so the new setting IS on disk (#1914). That is a
+          // landed write, not a failed one: rolling back would put the UI and
+          // the live client on the *old* value and contradict disk. Settle it
+          // exactly as the success path does and report only the failed reload.
+          if (err instanceof ServerListReloadError) {
+            settlePaginationWrite();
+            notifications.show({
+              title:
+                "Pagination setting saved, but the server list did not reload",
+              message: err.message,
+              color: "red",
+            });
+            return;
+          }
+          // This write is over and never reached disk, so it stops counting as
+          // in flight: an earlier write still running is the settled state once
+          // it lands, and is what re-applies the UI this rollback is about to
+          // set (#2089).
+          write.failed();
+          // Persist failed: revert the optimistic override and roll the live
+          // client setting back, so the UI and client reflect the value that's
+          // actually on disk rather than the failed edit (#1721).
+          //
+          // The baseline is resolved *here*, not captured when this write was
+          // issued: another toggle can land in between, and its value is what
+          // disk holds by the time this one fails. The override is set to that
+          // baseline rather than cleared, because clearing it falls back to
+          // `persistedPaginatedLists` — read from a `servers` entry that may be
+          // stale, showing the same wrong value from the other side (#2089).
+          //
+          // The override is recorded whatever is active by the time this
+          // rejection arrives: it is keyed by this write's server and is only
+          // ever displayed while that server is the active one, so a switch in
+          // between costs nothing and dropping it would leave the stale entry
+          // to answer for A the next time it comes back (#2095).
+          //
+          // The live client is the half that stays gated — it belongs to
+          // whichever server is connected now, so pushing this server's value
+          // into it after a switch would apply it to another one. It is taken
+          // from the ref for the same reason the success path does: a reconnect
+          // to the same server passes the id check while this continuation's
+          // captured instance is already destroyed.
+          const baseline =
+            lastPersistedSettings.resolve(activeServerId) ?? EMPTY_SETTINGS;
+          paginatedListsOverride.record(
+            activeServerId,
+            baseline.paginatedLists ?? false,
+          );
+          if (activeServerIdRef.current === activeServerId) {
+            applyLiveServerSettings(baseline);
+          }
+          notifications.show({
+            title: "Failed to save pagination setting",
+            message: err instanceof Error ? err.message : String(err),
+            color: "red",
+          });
         });
-      });
     },
     [
       servers,
       activeServerId,
+      lastPersistedSettings,
+      paginatedListsOverride,
+      applyLiveServerSettings,
       inspectorClient,
       updateServerSettings,
+      refreshInitialConfig,
       connected,
       loadToolsPage,
       loadPromptsPage,
@@ -3889,7 +4348,10 @@ function App() {
       setStderrLogState(null);
       setActiveServerId(undefined);
     }
-    await removeServer(id);
+    // Deleting sweeps the server's secrets from the store, which for a
+    // file-backed store is a write — and a write is what performs the pending
+    // plaintext-to-encrypted upgrade (#1950 review r22).
+    await refreshingPersist(removeServer, refreshInitialConfig)(id);
     setRemoveTarget(null);
   }, [
     removeTarget,
@@ -3908,6 +4370,7 @@ function App() {
     fetchRequestLogState,
     stderrLogState,
     removeServer,
+    refreshInitialConfig,
   ]);
 
   // Submit handler for the Add / Edit / Clone modal. Add and Clone both go
@@ -3920,8 +4383,20 @@ function App() {
   // opens (see the menu handlers).
   const addServerHighlighted = useCallback(
     async (id: string, config: MCPServerConfig) => {
-      await addServer(id, config);
-      setHighlightedServerIds((ids) => (ids.includes(id) ? ids : [...ids, id]));
+      const markAdded = () =>
+        setHighlightedServerIds((ids) =>
+          ids.includes(id) ? ids : [...ids, id],
+        );
+      try {
+        await addServer(id, config);
+      } catch (err) {
+        // A failed list reload still means the row is on disk, so it belongs
+        // in the highlight batch — the next successful refresh is what
+        // renders it, and it would otherwise arrive unmarked (#1914 r2).
+        if (err instanceof ServerListReloadError) markAdded();
+        throw err;
+      }
+      markAdded();
     },
     [addServer],
   );
@@ -3931,10 +4406,24 @@ function App() {
     async (id: string, config: MCPServerConfig) => {
       if (configModal?.mode === "edit" && configModal.targetId) {
         const originalId = configModal.targetId;
-        await updateServer(originalId, id, config);
-        if (originalId === activeServerId && id !== originalId) {
-          setActiveServerId(id);
+        const followRename = () => {
+          if (originalId === activeServerId && id !== originalId) {
+            setActiveServerId(id);
+          }
+        };
+        try {
+          await updateServer(originalId, id, config);
+        } catch (err) {
+          // A `ServerListReloadError` means the PUT landed and only reading
+          // the list back failed — the rename IS on disk. The active
+          // selection has to follow it anyway, or the next successful
+          // refresh leaves `activeServerId` pointing at an id that no longer
+          // exists (#1914 r2). Still rethrow, so the modal shows the reload
+          // error rather than closing as if nothing happened.
+          if (err instanceof ServerListReloadError) followRename();
+          throw err;
         }
+        followRename();
         return;
       }
       // add or clone
@@ -3958,6 +4447,30 @@ function App() {
     if (!configModal?.targetId) return undefined;
     return servers.find((s) => s.id === configModal.targetId);
   }, [configModal, servers]);
+
+  // An edit/clone modal whose target has left the list can no longer render a
+  // coherent form: `initialId`/`initialConfig` go undefined, and
+  // ServerConfigModal's own `useValueChange` reset then blanks the open form
+  // *and* clears the error it is showing.
+  //
+  // Only reachable since #1914 made the modal stay open on a failed post-write
+  // reload: rename A → B, the PUT lands, the reload fails, and the modal sits
+  // there targeting A. The write itself is what triggers the backend's change
+  // broadcast, so the SSE-driven background refresh that lands B (and drops A)
+  // is the *likely* next event, not a remote one. Closing is right — the edit
+  // is on disk and the list now agrees — and it covers the ordinary case too,
+  // where an external mcp.json edit removes the server being edited.
+  //
+  // Adjusted during render rather than in an effect (see `useValueChange`), so
+  // no frame ever paints the blanked form.
+  useValueChange(
+    configModal?.mode === "add" || configModal?.targetId === undefined
+      ? true
+      : servers.some((s) => s.id === configModal.targetId),
+    (targetPresent) => {
+      if (!targetPresent) setConfigModal(null);
+    },
+  );
 
   const settingsModalTarget = useMemo(() => {
     if (!settingsModalTargetId) return undefined;
@@ -3991,16 +4504,90 @@ function App() {
     flush: flushSettingsDraft,
   } = useSettingsDraft<InspectorServerSettings>({
     targetId: settingsModalTargetId,
-    resolveInitial: (id) =>
-      servers.find((s) => s.id === id)?.settings ?? EMPTY_SETTINGS,
-    onPersist: updateServerSettings,
+    // Through the tracker rather than off `servers` directly: after a write
+    // lands whose list reload failed, that entry still describes the previous
+    // value, so seeding from it and saving an unrelated field would write the
+    // superseded value straight back to disk (#2089). `resolve` falls back to
+    // the entry when nothing has landed, so the ordinary case is unchanged.
+    resolveInitial: (id) => lastPersistedSettings.resolve(id) ?? EMPTY_SETTINGS,
+    // The saved settings may include an OAuth client secret or a stdio `env:`
+    // value, and writing one can change what the secrets file *is* — the first
+    // save under a newly-set passphrase re-encrypts a pre-existing plaintext
+    // file. `refreshingPersist` re-asks the backend afterwards; it is a named
+    // unit rather than an inline `await …; refresh()` because this file is
+    // outside the coverage gate, so wiring written here is tested by nothing
+    // (#1950 review r17).
+    onPersist: async (id: string, value: InspectorServerSettings) => {
+      // Announced before the request, like the toggle's own write: the debounced
+      // flush can put two saves for one server in flight, and the later-issued
+      // one describes disk however the two happen to finish (#2089).
+      const write = lastPersistedSettings.begin(id);
+      const settleSettingsWrite = () => {
+        const settled = write.landed(value);
+        if (!settled) return;
+        paginatedListsOverride.record(id, value.paginatedLists ?? false);
+        if (activeServerIdRef.current === id) {
+          applyLiveServerSettings(value);
+        }
+      };
+      try {
+        await refreshingPersist(updateServerSettings, refreshInitialConfig)(
+          id,
+          value,
+        );
+      } catch (err) {
+        // A `ServerListReloadError` means the PUT landed and only reading the
+        // list back failed, so this write did reach disk (#1914): record it
+        // like the success path below instead of rolling anything back, and
+        // rethrow so `onError` can say the reload — not the save — failed.
+        if (err instanceof ServerListReloadError) {
+          settleSettingsWrite();
+          throw err;
+        }
+        // Stop counting as in flight before the rejection goes on to
+        // `onError` — an earlier write still running settles the state once it
+        // lands, and cannot know that while this one looks pending (#2089).
+        write.failed();
+        // A write that landed while this one was pending was told it was not
+        // settled and so applied nothing; this save never reached disk, so that
+        // write is the account of it and nothing else will re-apply it. Same
+        // reconciliation the toggle's own failure path does.
+        const baseline = lastPersistedSettings.resolve(id);
+        if (baseline) {
+          paginatedListsOverride.record(id, baseline.paginatedLists ?? false);
+          if (activeServerIdRef.current === id) {
+            applyLiveServerSettings(baseline);
+          }
+        }
+        throw err;
+      }
+      // Recorded for the same reason the pagination toggle records its own
+      // write: this is what disk holds now, and the `servers` entry it was
+      // edited from will keep describing the previous value for as long as list
+      // reads keep failing. Both settings writers feed the same per-server
+      // record, so a rollback in either takes the most recent write for that
+      // server, not just the most recent write *of its own kind*.
+      //
+      // And the reconciliation is shared too, for the mixed-writer overlap: a
+      // toggle failing while this save is in flight rolls the UI and the live
+      // client back to a baseline this save then replaces on disk, so a settled
+      // save has to re-apply itself exactly as a settled toggle does (#2089).
+      settleSettingsWrite();
+    },
     // Surface failures via toast — the modal usually closes
     // immediately on user dismiss, so a silent fail-on-flush would
     // leave the user thinking their last edits saved when they
     // didn't (especially painful for the OAuth client secret).
     onError: (id, err) => {
       notifications.show({
-        title: `Failed to save settings for "${id}"`,
+        // A `ServerListReloadError` means the PUT landed and only reading the
+        // list back failed, so "Failed to save" would be false — and this
+        // toast is the user's only signal here, since the modal has usually
+        // closed by the time a flush rejects (#1914 r3).
+        title:
+          err instanceof ServerListReloadError
+            ? `Saved settings for "${id}", but the server list did not reload`
+            : `Failed to save settings for "${id}"`,
         message: err instanceof Error ? err.message : String(err),
         color: "red",
       });
@@ -4017,7 +4604,10 @@ function App() {
   } = useClientSettingsDraft({
     opened: clientSettingsOpen,
     resolveInitial: () => clientConfigToFormValues(clientConfig),
-    onPersist: async (values) => {
+    // Wrapped for the same reason as the server-settings persist above: this
+    // one can carry the enterprise IdP client secret, and that write is what
+    // flips a pending-encryption file to encrypted.
+    onPersist: refreshingPersist(async (values) => {
       if (!canPersistClientSettingsDraft(values)) return;
       const next = formValuesToClientConfig(values);
       await saveClientConfigRemote(next, {
@@ -4025,7 +4615,7 @@ function App() {
         authToken: getAuthToken(),
       });
       setClientConfig(next);
-    },
+    }, refreshInitialConfig),
     onError: (err) => {
       notifications.show({
         title: "Failed to save client settings",
@@ -4123,25 +4713,20 @@ function App() {
       settingsModalTargetId === activeServerId &&
       settingsDraft
     ) {
-      // Push the edited settings onto the live client so settings the managed
-      // state reads at notification time (auto-refresh-on-list-changed) take
-      // effect without a reconnect (#1444). Connection-time inputs (transport,
-      // OAuth, timeouts) still only apply on the next connect.
-      inspectorClient.setServerSettings(settingsDraft);
-      // Resize the Network log buffer live so a maxFetchRequests edit takes
-      // effect without a reconnect (shrinking trims immediately). Connect-time
-      // construction also reads this, so a reconnect would apply it anyway —
-      // this just makes the toast→adjust flow responsive.
-      fetchLogRef.current?.setMaxFetchRequests(settingsDraft.maxFetchRequests);
-      const nextRoots = cleanRoots(settingsDraft.roots);
-      const currentRoots = cleanRoots(inspectorClient.getRoots());
-      if (JSON.stringify(nextRoots) !== JSON.stringify(currentRoots)) {
-        void inspectorClient.setRoots(nextRoots).catch(() => {
-          // setRoots swallows notification failures internally; a throw here
-          // only means the client is mid-teardown — the persisted roots will
-          // re-advertise on the next connect, so nothing to surface.
-        });
-      }
+      // Normally the draft is what the user just saved, so it is also what is
+      // on disk. When this server's last write *rejected* it is not: the draft
+      // still holds the failed edit, and applying it here would contradict disk
+      // and undo the rollback that reported the failure — so apply what landed
+      // instead. `EMPTY_SETTINGS`, not the draft, when nothing has ever landed
+      // for this server: falling back to the draft would re-apply the very
+      // values that failed (#2089).
+      const applied = lastPersistedSettings.lastWriteFailed(
+        settingsModalTargetId,
+      )
+        ? (lastPersistedSettings.resolve(settingsModalTargetId) ??
+          EMPTY_SETTINGS)
+        : settingsDraft;
+      applyLiveServerSettings(applied);
     }
     setSettingsModalTargetId(undefined);
   }, [
@@ -4150,6 +4735,8 @@ function App() {
     settingsModalTargetId,
     activeServerId,
     settingsDraft,
+    lastPersistedSettings,
+    applyLiveServerSettings,
   ]);
 
   // The Resources screen needs `isSubscribed` to flip the Subscribe button
@@ -4571,6 +5158,13 @@ function App() {
           onRefreshApps={onRefreshTools}
         />
       </Box>
+      <AppElicitationHost
+        entries={appElicitations}
+        sandboxPath={sandboxUrl}
+        bridgeFactory={elicitationBridgeFactory}
+        onSettle={handleAppElicitationSettle}
+        onFail={handleAppElicitationFail}
+      />
       <ServerConfigModal
         opened={configModal !== null}
         mode={configModal?.mode ?? "add"}
@@ -4578,12 +5172,27 @@ function App() {
         initialConfig={configModalTarget?.config}
         existingIds={existingIds}
         onClose={() => setConfigModal(null)}
-        onSubmit={onConfigSubmit}
+        // Wrapped like the settings persists: this submit carries stdio `env`
+        // values, so it can perform the pending plaintext-to-encrypted
+        // upgrade and change the descriptor the footer reports.
+        onSubmit={refreshingPersist(onConfigSubmit, refreshInitialConfig)}
+        secretStorage={secretStorage}
       />
       <ServerImportConfigModal
         opened={importConfigOpen}
         existingIds={existingIds}
-        onClose={() => setImportConfigOpen(false)}
+        // Refreshed once per import batch, not per entry. `useImportClientConfig`
+        // applies every addition and conflict sequentially, and on an encrypted
+        // file store each `/api/config` authenticates the whole file with a
+        // scrypt derivation — so wrapping the per-entry callbacks made a
+        // 20-server import pay 20 serialized KDFs and round trips. Closing is
+        // the batch boundary: the modal must be dismissed before the settings
+        // footer that reads this descriptor can be reached, and closing also
+        // covers a partially-failed batch (#1950 review r26).
+        onClose={() => {
+          setImportConfigOpen(false);
+          refreshInitialConfig();
+        }}
         onFetchSource={importSource}
         onAddServer={addServerHighlighted}
         onUpdateServer={updateServer}
@@ -4592,7 +5201,10 @@ function App() {
         opened={importJsonOpen}
         existingIds={existingIds}
         onClose={() => setImportJsonOpen(false)}
-        onAddServer={addServerHighlighted}
+        onAddServer={refreshingPersist(
+          addServerHighlighted,
+          refreshInitialConfig,
+        )}
       />
       <ServerSettingsModal
         // Remount per open (and per target server) so the accordion resets to
@@ -4618,6 +5230,7 @@ function App() {
         onClearStoredOAuth={
           settingsModalIsStdio ? undefined : handleClearStoredOAuthFromSettings
         }
+        secretStorage={secretStorage}
       />
       <ClientSettingsModal
         key={
@@ -4629,6 +5242,7 @@ function App() {
         onSettingsChange={onClientSettingsChange}
         emaIdpLoginState={emaIdpLoginState}
         onEmaIdpLogout={logoutEmaIdp}
+        secretStorage={secretStorage}
       />
       {initializeResult && activeServer && (
         <ConnectionInfoModal

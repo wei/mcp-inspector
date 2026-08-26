@@ -76,7 +76,7 @@ describe("runner client auth options", () => {
       taskTtl: 60000,
       maxFetchRequests: 10,
       autoRefreshOnListChanged: false,
-      metadata: [],
+      metadata: {},
       headers: [],
       env: [],
       roots: [],
@@ -84,6 +84,34 @@ describe("runner client auth options", () => {
     const opts = buildRunnerClientAuthOptions({}, settings);
     expect(opts.oauth?.enterpriseManaged).toBe(true);
     expect(opts.oauth?.clientId).toBe("resource-client");
+  });
+
+  // #2068 — the refresh-token opt-out is a per-server setting, so the CLI/TUI
+  // leg honors it exactly as the web leg does.
+  it("buildRunnerClientAuthOptions forwards the refresh-token opt-out", () => {
+    const base: InspectorServerSettings = {
+      requestTimeout: 0,
+      connectionTimeout: 0,
+      taskTtl: 60000,
+      maxFetchRequests: 10,
+      metadata: {},
+      headers: [],
+      env: [],
+      roots: [],
+    };
+    expect(
+      buildRunnerClientAuthOptions(
+        {},
+        {
+          ...base,
+          oauthRequestRefreshToken: false,
+        },
+      ).oauth?.requestRefreshToken,
+    ).toBe(false);
+    // On (the default) forwards nothing, so the provider keeps its own default.
+    expect(
+      buildRunnerClientAuthOptions({}, base).oauth?.requestRefreshToken,
+    ).toBeUndefined();
   });
 
   // #2018 — the CLI/TUI leg picks the authorization parameters up from the same
@@ -99,7 +127,7 @@ describe("runner client auth options", () => {
       taskTtl: 60000,
       maxFetchRequests: 10,
       autoRefreshOnListChanged: false,
-      metadata: [],
+      metadata: {},
       headers: [],
       env: [],
       roots: [],
@@ -116,7 +144,7 @@ describe("runner client auth options", () => {
       taskTtl: 60000,
       maxFetchRequests: 10,
       autoRefreshOnListChanged: false,
-      metadata: [],
+      metadata: {},
       headers: [],
       env: [],
       roots: [],
@@ -135,7 +163,7 @@ describe("runner client auth options", () => {
       taskTtl: 60000,
       maxFetchRequests: 10,
       autoRefreshOnListChanged: false,
-      metadata: [],
+      metadata: {},
       headers: [],
       env: [],
       roots: [],
@@ -156,7 +184,7 @@ describe("runner client auth options", () => {
       taskTtl: 60000,
       maxFetchRequests: 10,
       autoRefreshOnListChanged: false,
-      metadata: [],
+      metadata: {},
       headers: [],
       env: [],
       roots: [],
@@ -187,7 +215,7 @@ describe("runner client auth options", () => {
       taskTtl: 60000,
       maxFetchRequests: 10,
       autoRefreshOnListChanged: false,
-      metadata: [],
+      metadata: {},
       headers: [],
       env: [],
       roots: [],

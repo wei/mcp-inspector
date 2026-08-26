@@ -26,7 +26,7 @@ import {
 import {
   buildOAuthConnectionState,
   hasPersistedOAuthServerState,
-  isAccessTokenUsable,
+  isAccessTokenProvablyUnexpired,
   isServerOAuthConfigured,
   protocolFromOAuthConfig,
 } from "../auth/connection-state.js";
@@ -39,6 +39,7 @@ import type {
   HandleAuthChallengeOptions,
 } from "../auth/challenge.js";
 import {
+  challengeResourceMetadataUrl,
   parseScopeString,
   unionAuthorizationScopes,
 } from "../auth/challenge.js";
@@ -47,6 +48,7 @@ import {
   isStrictScopeSuperset,
   resolveEffectiveGrantedScope,
   resolvePersistedScopeAfterGrant,
+  scopeForDeclinedRefreshGrant,
 } from "../auth/scopes.js";
 import { stepUpInsufficientScopeMessage } from "../auth/oauthUx.js";
 import type {
@@ -81,6 +83,12 @@ export class OAuthManager {
   private oauthFlowState: OAuthFlowState | null = null;
   /** SEP-2350 union scope pending until interactive step-up completes. */
   private pendingAuthorizationScope: string | undefined;
+
+  /**
+   * The RFC 9728 metadata URL from the last 401/403 the transport observed.
+   * See {@link noteObservedAuthChallenge}.
+   */
+  private observedResourceMetadataUrl: URL | undefined;
   private authChallengeMutex: Promise<void> = Promise.resolve();
 
   constructor(params: OAuthManagerParams) {
@@ -98,6 +106,8 @@ export class OAuthManager {
     authorizationParams?: Record<string, string>;
     authorizationUrl?: string;
     tokenUrl?: string;
+    /** Declare the `refresh_token` grant in client metadata (#2068). */
+    requestRefreshToken?: boolean;
   }): void {
     this.oauthConfig = {
       ...this.oauthConfig,
@@ -169,6 +179,13 @@ export class OAuthManager {
       // read from mcp.json, and nothing in the flow needs to persist or union
       // them.
       authorizationParams: this.oauthConfig.authorizationParams,
+      // #2068: per-server opt-out of the `refresh_token` grant. Like
+      // `authorizationParams` this is pure config off mcp.json, so it lives on
+      // the provider rather than in OAuth storage.
+      requestRefreshToken: this.oauthConfig.requestRefreshToken,
+      // #2068: lets the provider tell an `offline_access` the user asked for
+      // from one inherited from a previous grant's persisted scope.
+      configuredScope: this.oauthConfig.scope,
     });
 
     provider.setEventTarget(this.params.getEventTarget());
@@ -262,6 +279,20 @@ export class OAuthManager {
     return authorizationUrl;
   }
 
+  /**
+   * Record a challenge the transport saw but did not raise as one.
+   *
+   * The legacy first-authorization path connects with no `authProvider` and no
+   * challenge interception, so the client calls {@link authenticate} off a
+   * headerless SDK `UnauthorizedError` — this is what carries the advertised
+   * RFC 9728 metadata URL across that gap (#2071). Latest-wins: every
+   * challenge comes from the same server, so the most recent one is what that
+   * server currently says, including when it says nothing.
+   */
+  noteObservedAuthChallenge(challenge: AuthChallenge): void {
+    this.observedResourceMetadataUrl = challengeResourceMetadataUrl(challenge);
+  }
+
   async authenticate(): Promise<URL | undefined> {
     if (this.isEnterpriseManaged()) {
       return this.authenticateEnterpriseManaged();
@@ -272,16 +303,26 @@ export class OAuthManager {
 
     provider.clearCapturedAuthUrl();
 
+    // No challenge is passed to this entry point — it is reached from a plain
+    // unauthorized error — so the last one the transport observed is the only
+    // source for the advertised metadata URL.
+    const resourceMetadataUrl = this.observedResourceMetadataUrl;
+
     await ensureCimdClientRegistration({
       serverUrl,
       provider,
       fetchFn: this.params.effectiveAuthFetch,
+      resourceMetadataUrl,
     });
 
+    // Read once: the getter filters (#2068), so this is what was actually
+    // requested and what the callback leg has to persist.
+    const requestedScope = provider.scope;
     const result = await mcpAuth(provider, {
       serverUrl,
-      scope: provider.scope,
+      scope: requestedScope,
       fetchFn: this.params.effectiveAuthFetch,
+      resourceMetadataUrl,
     });
 
     if (result === "AUTHORIZED") {
@@ -294,6 +335,8 @@ export class OAuthManager {
     if (!capturedUrl) {
       throw new Error("Failed to capture authorization URL");
     }
+
+    this.recordAuthorizationRequestScope(capturedUrl, requestedScope);
 
     const stateParam = capturedUrl.searchParams.get("state");
     if (stateParam && this.params.onBeforeOAuthRedirect) {
@@ -313,6 +356,36 @@ export class OAuthManager {
     return capturedUrl;
   }
 
+  /**
+   * Remember what an interactive authorization asked for, so the callback can
+   * apply RFC 6749 §5.1 — a token response that omits `scope` granted exactly
+   * the requested scope (#2117). Without it, an ordinary grant whose AS echoes
+   * no scope leaves the previous stored scope standing as though it were what
+   * the current token carries.
+   *
+   * The authorize URL is the authority, not the scope handed to `auth()`: the
+   * SDK augments the request with `offline_access` when the AS advertises it
+   * and the client asks for a refresh token, so the input can be a strict
+   * subset of what was actually requested. The fallback covers an authorize
+   * URL that carries no `scope` parameter at all.
+   *
+   * This composes with the #2068 refresh-token opt-out rather than defeating
+   * it. The SDK's augmentation is gated on `clientMetadata.grant_types`
+   * including `refresh_token`, which the provider drops when the opt-out is
+   * on — so with the grant declined the URL carries the *filtered* scope, and
+   * that is what gets persisted. #2068 recorded the same value here behind a
+   * `requestRefreshToken === false` gate; reading the URL makes the gate
+   * unnecessary, so one wire case now has one persistence behavior instead of
+   * two selected by a checkbox (#2117).
+   */
+  private recordAuthorizationRequestScope(
+    authorizationUrl: URL,
+    requestedScope: string | undefined,
+  ): void {
+    this.pendingAuthorizationScope =
+      authorizationUrl.searchParams.get("scope")?.trim() || requestedScope;
+  }
+
   async completeOAuthFlow(
     authorizationCode: string,
     iss?: string,
@@ -324,22 +397,13 @@ export class OAuthManager {
         const config = scopeForMint
           ? { ...emaConfig, scope: scopeForMint }
           : emaConfig;
-        const tokens = await completeEmaIdpAuthorizationAndMint(
+        // The EMA flow persists the granted scope alongside the tokens, for
+        // every mint rather than only this one — see saveMintedTokens.
+        const { tokens } = await completeEmaIdpAuthorizationAndMint(
           config,
           authorizationCode,
           iss,
         );
-        const requestedScope = this.pendingAuthorizationScope;
-        const scopeToPersist = resolvePersistedScopeAfterGrant(
-          tokens.scope,
-          requestedScope,
-        );
-        if (scopeToPersist) {
-          await this.requireStorage().saveScope(
-            this.getServerUrl(),
-            scopeToPersist,
-          );
-        }
         this.pendingAuthorizationScope = undefined;
         const completedAt = Date.now();
         this.oauthFlowState = {
@@ -494,9 +558,12 @@ export class OAuthManager {
    * satisfied without an authorization-server round-trip.
    *
    * Returns `true` for `insufficient_scope` when stored + token scope cover the
-   * SEP-2350 union. For `token_expired`, returns `true` when a usable access
-   * token is already in storage. `invalid_token` and `unauthorized` always
-   * return `false` — the resource server explicitly rejected the credential.
+   * SEP-2350 union. For `token_expired`, returns `true` only when storage holds
+   * a *provably* unexpired token — a JWT whose `exp` is still in the future. An
+   * opaque token carries no local expiry evidence, so the resource server's
+   * verdict stands and re-authorization proceeds. `invalid_token` and
+   * `unauthorized` always return `false` — the resource server explicitly
+   * rejected the credential.
    */
   async checkAuthChallengeSatisfied(
     challenge: AuthChallenge,
@@ -514,7 +581,8 @@ export class OAuthManager {
 
     if (challenge.reason !== "insufficient_scope") {
       return (
-        challenge.reason === "token_expired" && isAccessTokenUsable(tokens)
+        challenge.reason === "token_expired" &&
+        isAccessTokenProvablyUnexpired(tokens)
       );
     }
 
@@ -729,19 +797,50 @@ export class OAuthManager {
 
     provider.clearCapturedAuthUrl();
 
+    // RFC 9728: honor the metadata document the challenge advertised rather
+    // than probing the default locations derived from the MCP server URL
+    // (#2071). The SDK persists it in its discovery state, so the callback leg
+    // recovers it without our passing it again.
+    const resourceMetadataUrl = challengeResourceMetadataUrl(enriched);
+
     await ensureCimdClientRegistration({
       serverUrl,
       provider,
       fetchFn: this.params.effectiveAuthFetch,
+      resourceMetadataUrl,
     });
 
-    const scopeForAuth =
+    // #2068 — the step-up union is built from *raw* storage
+    // (`enrichChallengeWithScopes`) and handed to the SDK directly, so it never
+    // passes through the provider's filtering `scope` getter. Without this an
+    // `offline_access` inherited from an earlier grant reappears here and the
+    // SDK re-adds `prompt=consent` even with the setting off — the same failure
+    // the option exists to prevent, on the one path that bypasses it. A scope
+    // the challenge itself requires is preserved, since stripping that would
+    // just re-earn the same challenge.
+    const requestedScopeForAuth =
       enriched.reason === "insufficient_scope"
         ? enriched.authorizationScopes?.join(" ")
         : this.oauthConfig.scope?.trim() ||
           (enriched.requiredScopes?.length
             ? enriched.requiredScopes.join(" ")
             : undefined);
+    const scopeForAuth =
+      this.oauthConfig.requestRefreshToken === false
+        ? scopeForDeclinedRefreshGrant(
+            requestedScopeForAuth,
+            this.oauthConfig.scope,
+            // The RAW challenge scopes, not `enriched.requiredScopes`:
+            // `enrichChallengeWithScopes` narrows that to the *missing* subset,
+            // so a challenge requiring `offline_access tools:write` against a
+            // stored scope that already has `offline_access` arrives here as
+            // just `["tools:write"]`. Passing the narrowed list would read the
+            // server's explicit requirement as inherited and strip it — then
+            // re-authorization earns the same challenge forever, which is the
+            // loop this argument exists to prevent.
+            challenge.requiredScopes,
+          )
+        : requestedScopeForAuth;
 
     provider.setSuppressAuthorizationNavigation(true);
     let result: Awaited<ReturnType<typeof mcpAuth>>;
@@ -750,6 +849,7 @@ export class OAuthManager {
         serverUrl,
         scope: scopeForAuth,
         fetchFn: this.params.effectiveAuthFetch,
+        resourceMetadataUrl,
         ...(enriched.reason === "insufficient_scope" && {
           forceReauthorization: isStrictScopeSuperset(
             scopeForAuth,
@@ -800,9 +900,12 @@ export class OAuthManager {
       };
     }
 
-    if (enriched.reason === "insufficient_scope" && scopeForAuth) {
-      this.pendingAuthorizationScope = scopeForAuth;
-    }
+    // Every interactive redirect from here lands back in completeOAuthFlow,
+    // so every one of them needs its request recorded — not just the step-up
+    // (#2117). A plain `unauthorized` / `token_expired` challenge can request
+    // a scope that differs from what storage holds, and used to persist
+    // nothing when the AS answered without a `scope`.
+    this.recordAuthorizationRequestScope(capturedUrl, scopeForAuth);
 
     const clientInfo = await provider.clientInformation();
     await this.recordAuthorizationCodeFlowState(
@@ -879,6 +982,7 @@ export class OAuthManager {
         serverUrl,
         scope: scopeForAuth,
         fetchFn: this.params.effectiveAuthFetch,
+        resourceMetadataUrl: challengeResourceMetadataUrl(enriched),
         forceReauthorization: true,
       });
     } finally {

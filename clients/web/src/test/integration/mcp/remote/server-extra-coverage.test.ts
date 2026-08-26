@@ -12,7 +12,16 @@
  *   - GET fast-path re-check when a concurrent write removed the plaintext
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -292,6 +301,37 @@ describe("server.ts supplemental coverage", () => {
     let target: ServerType;
     let targetUrl: string;
 
+    // Isolate the WHOLE suite from the developer's (or CI's) proxy environment.
+    // Setting only uppercase HTTP_PROXY in the one proxy test would not be
+    // enough: undici's EnvHttpProxyAgent prefers lowercase `http_proxy`, and
+    // honors NO_PROXY dynamically, so an ambient value could route the request
+    // elsewhere or bypass the proxy and fail the assertion. Suite-level rather
+    // than per-test because the agent is memoized process-wide once built.
+    const PROXY_VARS = [
+      "HTTP_PROXY",
+      "http_proxy",
+      "HTTPS_PROXY",
+      "https_proxy",
+      "NO_PROXY",
+      "no_proxy",
+    ] as const;
+    const savedProxyEnv: Partial<Record<string, string | undefined>> = {};
+
+    beforeAll(() => {
+      for (const name of PROXY_VARS) {
+        savedProxyEnv[name] = process.env[name];
+        delete process.env[name];
+      }
+    });
+
+    afterAll(() => {
+      for (const name of PROXY_VARS) {
+        const previous = savedProxyEnv[name];
+        if (previous === undefined) delete process.env[name];
+        else process.env[name] = previous;
+      }
+    });
+
     beforeEach(async () => {
       h = await start();
       // A tiny upstream HTTP server we can point /api/fetch at.
@@ -339,6 +379,60 @@ describe("server.ts supplemental coverage", () => {
         ),
       );
       await stop(h);
+    });
+
+    it("routes the outbound request through HTTP_PROXY (#2067)", async () => {
+      // /api/fetch is the browser's ONLY way out to the network — the web
+      // client's `environment.fetch` is `createRemoteFetch()`, which forwards
+      // OAuth discovery and token requests here. On the bare global `fetch` a
+      // corporate-proxy user could connect to a server but never authorize
+      // against it, and Node's native NODE_USE_ENV_PROXY does not cover them
+      // (unsupported at the 22.19 engine floor).
+      const { createServer } = await import("node:http");
+      const { request } = await import("node:http");
+      const seen: string[] = [];
+      const proxy = createServer((req, res) => {
+        seen.push(req.url ?? "");
+        const u = new URL(req.url ?? "");
+        const up = request(
+          {
+            host: u.hostname,
+            port: u.port,
+            path: u.pathname + u.search,
+            method: req.method,
+            headers: req.headers,
+          },
+          (r) => {
+            res.writeHead(r.statusCode ?? 502, r.headers);
+            r.pipe(res);
+          },
+        );
+        up.on("error", () => {
+          res.writeHead(502);
+          res.end();
+        });
+        req.pipe(up);
+      });
+      await new Promise<void>((r) => proxy.listen(0, "127.0.0.1", () => r()));
+      const proxyAddr = proxy.address();
+      const proxyPort =
+        typeof proxyAddr === "object" && proxyAddr !== null
+          ? proxyAddr.port
+          : 0;
+      process.env.HTTP_PROXY = `http://127.0.0.1:${proxyPort}`;
+
+      try {
+        const res = await fetch(`${h.baseUrl}/api/fetch`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ url: `${targetUrl}/plain` }),
+        });
+        expect(res.status).toBe(200);
+        expect(seen).toEqual([`${targetUrl}/plain`]);
+      } finally {
+        delete process.env.HTTP_PROXY;
+        await new Promise<void>((r) => proxy.close(() => r()));
+      }
     });
 
     it("forwards method + headers and returns the response body", async () => {
@@ -457,7 +551,7 @@ describe("server.ts supplemental coverage", () => {
 
     const base = {
       headers: [],
-      metadata: [],
+      metadata: {},
       connectionTimeout: 0,
       requestTimeout: 0,
     };
@@ -537,6 +631,14 @@ describe("server.ts supplemental coverage", () => {
       expect((await res.json()).error).toMatch(/enterpriseManaged/);
     });
 
+    it("rejects a non-boolean oauthRequestRefreshToken (#2068)", async () => {
+      const res = await postSettings({
+        ...base,
+        oauthRequestRefreshToken: "no",
+      });
+      expect((await res.json()).error).toMatch(/oauthRequestRefreshToken/);
+    });
+
     it("rejects malformed roots", async () => {
       const res = await postSettings({ ...base, roots: [{ uri: 1 }] });
       expect((await res.json()).error).toMatch(/roots/);
@@ -573,6 +675,39 @@ describe("server.ts supplemental coverage", () => {
       expect(res.status).toBe(200);
     });
 
+    // #2068 — a 200 only proves the payload validated. Without reading the
+    // saved entry back, deleting the `oauthRequestRefreshToken` line from
+    // `normalizeSettings` leaves every other test green while saves through
+    // this route silently revert to the default.
+    it("persists the refresh-token opt-out through a save", async () => {
+      expect(
+        (await postSettings({ ...base, oauthRequestRefreshToken: false }))
+          .status,
+      ).toBe(200);
+
+      const res = await fetch(`${h.baseUrl}/api/servers`);
+      const body = (await res.json()) as {
+        mcpServers: Record<
+          string,
+          { oauth?: { requestRefreshToken?: boolean } }
+        >;
+      };
+      expect(body.mcpServers.srv?.oauth?.requestRefreshToken).toBe(false);
+    });
+
+    it("writes no refresh-token field when the setting is on", async () => {
+      expect(
+        (await postSettings({ ...base, oauthRequestRefreshToken: true }))
+          .status,
+      ).toBe(200);
+
+      const res = await fetch(`${h.baseUrl}/api/servers`);
+      const body = (await res.json()) as {
+        mcpServers: Record<string, { oauth?: Record<string, unknown> }>;
+      };
+      expect(body.mcpServers.srv?.oauth?.requestRefreshToken).toBeUndefined();
+    });
+
     it("accepts a fully-populated valid settings payload", async () => {
       const res = await postSettings({
         ...base,
@@ -588,6 +723,7 @@ describe("server.ts supplemental coverage", () => {
         oauthClientId: "cid",
         oauthScopes: "a b",
         enterpriseManaged: true,
+        oauthRequestRefreshToken: false,
         roots: [{ uri: "file:///x", name: "x" }],
       });
       expect(res.status).toBe(200);
@@ -725,6 +861,57 @@ describe("server.ts supplemental coverage", () => {
           mcpServers: Record<string, Record<string, unknown>>;
         };
         expect(body.mcpServers.srv).not.toHaveProperty("oauth");
+      } finally {
+        await stop(h);
+      }
+    });
+
+    // #2068 — same all-or-nothing rule for the refresh-token opt-out: a
+    // non-boolean drops the whole `oauth` node rather than reaching the
+    // provider, where only an explicit `false` means anything.
+    it("drops oauth whose requestRefreshToken is not a boolean", async () => {
+      const h = await start({
+        seedConfig: JSON.stringify({
+          mcpServers: {
+            srv: {
+              type: "streamable-http",
+              url: "https://x.test/mcp",
+              oauth: { requestRefreshToken: "no" },
+            },
+          },
+        }),
+      });
+      try {
+        const res = await fetch(`${h.baseUrl}/api/servers`);
+        const body = (await res.json()) as {
+          mcpServers: Record<string, Record<string, unknown>>;
+        };
+        expect(body.mcpServers.srv).not.toHaveProperty("oauth");
+      } finally {
+        await stop(h);
+      }
+    });
+
+    it("keeps a well-formed requestRefreshToken opt-out on read (#2068)", async () => {
+      const h = await start({
+        seedConfig: JSON.stringify({
+          mcpServers: {
+            srv: {
+              type: "streamable-http",
+              url: "https://x.test/mcp",
+              oauth: { requestRefreshToken: false },
+            },
+          },
+        }),
+      });
+      try {
+        const res = await fetch(`${h.baseUrl}/api/servers`);
+        const body = (await res.json()) as {
+          mcpServers: Record<string, Record<string, unknown>>;
+        };
+        expect(body.mcpServers.srv?.oauth).toEqual({
+          requestRefreshToken: false,
+        });
       } finally {
         await stop(h);
       }
@@ -891,7 +1078,7 @@ describe("server.ts supplemental coverage", () => {
             config: { type: "streamable-http", url: "https://x.test/mcp" },
             settings: {
               headers: [],
-              metadata: [],
+              metadata: {},
               connectionTimeout: 0,
               requestTimeout: 0,
               oauthClientSecret: "shh",
@@ -991,7 +1178,9 @@ describe("server.ts supplemental coverage", () => {
         const warned = cap.records.filter(
           (r) =>
             r.level === "warn" &&
-            JSON.stringify(r.args).includes("Keychain unavailable"),
+            // Wording broadened with the store: a file-backed store fails for
+            // reasons that have nothing to do with a keychain.
+            JSON.stringify(r.args).includes("Secret store unavailable"),
         );
         expect(warned.length).toBeGreaterThan(0);
       } finally {
@@ -1037,7 +1226,7 @@ describe("server.ts supplemental coverage", () => {
             config: { type: "streamable-http", url: "https://x.test/mcp" },
             settings: {
               headers: [],
-              metadata: [],
+              metadata: {},
               connectionTimeout: 0,
               requestTimeout: 0,
               oauthClientSecret: "new-secret",

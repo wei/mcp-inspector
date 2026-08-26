@@ -165,14 +165,55 @@ function legacySessionId(json: RemoteConnectResponse): string | undefined {
 }
 
 /**
- * Parse SSE stream from a ReadableStream.
- * Yields { event, data } for each SSE message.
+ * Parse an SSE stream from a ReadableStream.
+ * Yields `{ event, data }` for each complete SSE message.
+ *
+ * ⚠️ **The in-progress event must live OUTSIDE the read loop.** A `read()`
+ * returns an arbitrary slice of bytes, not a whole frame, so a frame's `data:`
+ * line can arrive in one chunk and the blank line terminating it in the next.
+ * Declaring `currentEvent` / `currentData` inside the loop — which this did
+ * until #2134 — discards the accumulated payload at that boundary: the frame is
+ * never yielded, the JSON-RPC response it carried never settles, and the caller
+ * hangs forever with no error on any channel. `buffer` already carries a partial
+ * *line* across reads; these carry the partial *frame*.
+ *
+ * It survived because Chromium and Firefox happen to deliver whole frames at the
+ * payload sizes this transport sees. That is luck rather than a guarantee —
+ * chunk boundaries are a function of payload size, TCP segmentation and any
+ * intermediary — and the exposure grows with payload size, so a large
+ * `resources/read` is the most likely first victim.
+ *
+ * Exported for `clients/web/src/test/core/mcp/remote/parseSSE.test.ts`, which is
+ * the only way to reach the defect deterministically: driving a real transport
+ * cannot steer where the chunk boundary lands, but a test that supplies the
+ * reader can put it exactly on the terminator.
  */
-async function* parseSSE(
+export async function* parseSSE(
   reader: ReadableStreamDefaultReader<Uint8Array>,
 ): AsyncGenerator<{ event: string; data: string }> {
   const decoder = new TextDecoder();
   let buffer = "";
+  // Carried ACROSS reads, not per chunk — see the header.
+  let currentEvent = "message";
+  let currentData: string[] = [];
+
+  const consume = (line: string): { event: string; data: string } | null => {
+    if (line.startsWith("event:")) {
+      currentEvent = line.slice(6).trim();
+    } else if (line.startsWith("data:")) {
+      currentData.push(line.slice(5).trimStart());
+    } else if (line === "") {
+      const complete =
+        currentData.length > 0
+          ? { event: currentEvent, data: currentData.join("\n") }
+          : null;
+      currentEvent = "message";
+      currentData = [];
+      return complete;
+    }
+    // Anything else (a `:` keep-alive comment, `id:`, `retry:`) is ignored.
+    return null;
+  };
 
   while (true) {
     const { done, value } = await reader.read();
@@ -183,36 +224,21 @@ async function* parseSSE(
     /* v8 ignore next -- String.split always returns a non-empty array, so pop() is never undefined; the ?? "" fallback is unreachable. */
     buffer = lines.pop() ?? "";
 
-    let currentEvent = "message";
-    let currentData: string[] = [];
-
     for (const line of lines) {
-      if (line.startsWith("event:")) {
-        currentEvent = line.slice(6).trim();
-      } else if (line.startsWith("data:")) {
-        currentData.push(line.slice(5).trimStart());
-      } else if (line === "") {
-        if (currentData.length > 0) {
-          yield { event: currentEvent, data: currentData.join("\n") };
-        }
-        currentEvent = "message";
-        currentData = [];
-      }
+      const complete = consume(line);
+      if (complete) yield complete;
     }
   }
 
-  if (buffer.trim()) {
-    const lines = buffer.split("\n");
-    let currentEvent = "message";
-    const currentData: string[] = [];
-    for (const line of lines) {
-      if (line.startsWith("event:")) currentEvent = line.slice(6).trim();
-      else if (line.startsWith("data:"))
-        currentData.push(line.slice(5).trimStart());
-    }
-    if (currentData.length > 0) {
-      yield { event: currentEvent, data: currentData.join("\n") };
-    }
+  // Stream ended: flush the trailing partial line, then anything still held. A
+  // server that closes without a final blank line has still delivered a complete
+  // frame, and dropping it would lose the last message of every such stream.
+  if (buffer) {
+    const complete = consume(buffer);
+    if (complete) yield complete;
+  }
+  if (currentData.length > 0) {
+    yield { event: currentEvent, data: currentData.join("\n") };
   }
 }
 

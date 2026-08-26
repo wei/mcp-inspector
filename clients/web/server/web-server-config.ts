@@ -15,8 +15,11 @@ import {
   LEGACY_AUTH_TOKEN_ENV,
 } from "../../../core/mcp/remote/constants.ts";
 import type { InitialConfigPayload } from "../../../core/mcp/remote/node/server.ts";
+import type { SecretStorageInfo } from "../../../core/auth/secret-storage-info.ts";
+import { secretStorageSummary } from "../../../core/auth/secret-storage-info.ts";
 import { readInspectorVersionSafe } from "../../../core/node/version.ts";
 import { resolveSandboxPort } from "./sandbox-controller.js";
+import { resolveAppOriginPort } from "./app-origin-controller.js";
 import { resolveBindHostname } from "./resolve-bind-host.js";
 import {
   canonicalUrlHost,
@@ -64,6 +67,13 @@ export interface WebServerConfig {
   /** Sandbox port (0 = dynamic). */
   sandboxPort: number;
   sandboxHost: string;
+  /**
+   * Port for the dedicated app origin (#2056) — the listener that serves an
+   * MCP App declaring `_meta.ui.domain` so its requests carry a real `Origin`
+   * instead of `null`. `0` = dynamic. Bound on {@link sandboxHost}, the same
+   * address the sandbox uses.
+   */
+  appOriginPort: number;
   logger: Logger | undefined;
   /** When true, open browser after server starts. */
   autoOpen: boolean;
@@ -112,8 +122,17 @@ function defaultEnvironmentFromProcess(
  */
 export function webServerConfigToInitialPayload(
   config: WebServerConfig,
+  secretStorage?: SecretStorageInfo,
 ): InitialConfigPayload {
-  return { ...transportDefaults(config), version: inspectorVersion };
+  return {
+    ...transportDefaults(config),
+    version: inspectorVersion,
+    // Omitted rather than defaulted when the caller didn't resolve a store:
+    // the UI treats an absent descriptor as "unknown" and shows nothing,
+    // which is the only honest rendering. A default of "keychain" would put a
+    // confident wrong answer under the field where a secret is typed.
+    ...(secretStorage ? { secretStorage } : {}),
+  };
 }
 
 /** The transport-specific defaults half of the `/api/config` payload. */
@@ -168,6 +187,7 @@ export function printServerBanner(
   actualPort: number,
   resolvedToken: string,
   sandboxUrl: string | undefined,
+  secretStorage?: SecretStorageInfo,
 ): string {
   // Advertise `localhost` for a wildcard bind (`http://0.0.0.0:PORT` is an
   // awkward URL to click and points the user at a reachable, allow-listed
@@ -195,6 +215,14 @@ export function printServerBanner(
     console.log("   Auth: disabled (DANGEROUSLY_OMIT_AUTH)\n");
   } else {
     console.log(`   Auth token: ${resolvedToken}\n`);
+  }
+
+  // Where a secret typed into this session lands (#1950). Printed for every
+  // store, not only the surprising ones: the fallback already warns
+  // separately at selection time, and a line that appears only when
+  // something is wrong can't be used to confirm that nothing is.
+  if (secretStorage) {
+    console.log(`   Secrets: ${secretStorageSummary(secretStorage)}\n`);
   }
 
   if (config.autoOpen) {
@@ -349,6 +377,35 @@ export function buildWebServerConfig(
       "");
 
   const sandboxPort = resolveSandboxPort();
+  // The app-origin listener starts BEFORE the web server binds (both in prod
+  // `startHonoServer` and in the Vite plugin), so a configured collision is not
+  // a harmless race — the app origin wins the port and the Inspector itself
+  // then dies with EADDRINUSE. `CLIENT_PORT=6278` is now such a config, and it
+  // was perfectly valid before this feature existed.
+  //
+  // Resolved to a dynamic port rather than by refusing to boot: of the three
+  // listeners this is the only one that can move (the sandbox URL and the web
+  // port are both advertised to the browser as fixed), and its own EADDRINUSE
+  // path already degrades this way. Losing a predictable app origin costs an
+  // app declaring `_meta.ui.domain` its forwarded port; refusing to boot costs
+  // the user the whole Inspector over a feature they may not be using.
+  const requestedAppOriginPort = resolveAppOriginPort();
+  const appOriginCollidesWith =
+    requestedAppOriginPort !== 0 &&
+    (requestedAppOriginPort === port
+      ? "the web server (CLIENT_PORT)"
+      : requestedAppOriginPort === sandboxPort
+        ? "the MCP Apps sandbox (MCP_SANDBOX_PORT)"
+        : null);
+  if (appOriginCollidesWith) {
+    console.warn(
+      `App origin: port ${requestedAppOriginPort} is already ${appOriginCollidesWith}; ` +
+        `using an OS-assigned port instead. Apps declaring _meta.ui.domain will still ` +
+        `render, but the origin they are served from is no longer predictable — set ` +
+        `MCP_APP_ORIGIN_PORT to a free one if your app's backend allowlists it.`,
+    );
+  }
+  const appOriginPort = appOriginCollidesWith ? 0 : requestedAppOriginPort;
 
   let logger: Logger | undefined;
   if (process.env.MCP_LOG_FILE) {
@@ -419,6 +476,7 @@ export function buildWebServerConfig(
       : defaultAllowedOrigins(hostname, port),
     sandboxPort,
     sandboxHost: hostname,
+    appOriginPort,
     logger,
     autoOpen: resolveAutoOpen(),
   };

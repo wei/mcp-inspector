@@ -82,6 +82,41 @@ describe("ToolsScreen", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("drops an enlarged field when switching between duplicated tool names", async () => {
+    // The panel is reused across selections, so SchemaForm resets per-field
+    // state on `resetKey`. That key must be the ROW identity: two rows sharing
+    // a name would otherwise look like the same entity, and the first copy's
+    // enlarged field would stay enlarged over the second copy's (#2042/#1957).
+    const user = userEvent.setup();
+    const duplicated: Tool[] = [
+      {
+        name: "get_weather",
+        inputSchema: {
+          type: "object",
+          properties: { city: { type: "string", title: "City" } },
+        },
+      },
+      {
+        name: "get_weather",
+        inputSchema: {
+          type: "object",
+          properties: { city: { type: "string", title: "City" } },
+        },
+      },
+    ];
+    renderWithMantine(<ControlledToolsScreen tools={duplicated} />);
+    const rows = screen.getAllByText("get_weather");
+
+    await user.click(rows[0] as HTMLElement);
+    await user.click(screen.getByRole("button", { name: "Enlarge City" }));
+    expect(screen.getByRole("textbox", { name: /City/ }).tagName).toBe(
+      "TEXTAREA",
+    );
+
+    await user.click(rows[1] as HTMLElement);
+    expect(screen.getByRole("textbox", { name: /City/ }).tagName).toBe("INPUT");
+  });
+
   it("opens the second copy of a duplicated tool name and calls it by its protocol name", async () => {
     // A `tools/list` may repeat a name with a different schema. Selection is
     // keyed by row identity, so the later copy is reachable and the detail
@@ -111,7 +146,7 @@ describe("ToolsScreen", () => {
     const rows = screen.getAllByText("get_weather");
     await user.click(rows[1] as HTMLElement);
     // The second copy's own field renders — the first copy's does not.
-    expect(screen.getByLabelText(/zip/i)).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: /zip/i })).toBeInTheDocument();
     expect(screen.queryByLabelText(/city/i)).toBeNull();
 
     await user.click(screen.getByRole("button", { name: /Execute/ }));
@@ -137,7 +172,7 @@ describe("ToolsScreen", () => {
     renderWithMantine(<ControlledToolsScreen onCallTool={onCallTool} />);
     await user.click(screen.getByText("gamma"));
     // gamma seeds { mode: "fast" }; editing the field flows through onUiChange.
-    const field = screen.getByLabelText(/mode/i);
+    const field = screen.getByRole("textbox", { name: /mode/i });
     await user.clear(field);
     await user.type(field, "slow");
     await user.click(screen.getByRole("button", { name: /Execute/ }));

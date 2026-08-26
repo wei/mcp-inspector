@@ -24,7 +24,7 @@ describe("SchemaForm", () => {
     renderWithMantine(
       <SchemaForm schema={schema} values={{}} onChange={onChange} />,
     );
-    const input = screen.getByLabelText(/Name/);
+    const input = screen.getByRole("textbox", { name: /Name/ });
     await user.type(input, "a");
     expect(onChange).toHaveBeenCalledWith({ name: "a" });
   });
@@ -669,7 +669,7 @@ describe("SchemaForm", () => {
     );
     expect(screen.getByText("Address")).toBeInTheDocument();
     expect(screen.getByText("Street and city")).toBeInTheDocument();
-    expect(screen.getByLabelText(/Street/)).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: /Street/ })).toBeInTheDocument();
   });
 
   it("propagates nested object changes back to top-level onChange", async () => {
@@ -690,7 +690,7 @@ describe("SchemaForm", () => {
     renderWithMantine(
       <SchemaForm schema={schema} values={{}} onChange={onChange} />,
     );
-    await user.type(screen.getByLabelText(/Street/), "1");
+    await user.type(screen.getByRole("textbox", { name: /Street/ }), "1");
     expect(onChange).toHaveBeenCalled();
     const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1][0];
     expect(lastCall.address).toEqual({ street: "1" });
@@ -881,7 +881,7 @@ describe("SchemaForm", () => {
         disabled
       />,
     );
-    expect(screen.getByLabelText(/Name/)).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: /Name/ })).toBeDisabled();
     expect(screen.getByLabelText("Active")).toBeDisabled();
   });
 
@@ -895,7 +895,9 @@ describe("SchemaForm", () => {
     renderWithMantine(
       <SchemaForm schema={schema} values={{}} onChange={vi.fn()} />,
     );
-    expect(screen.getByLabelText(/rawField/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("textbox", { name: /rawField/ }),
+    ).toBeInTheDocument();
   });
 
   it("renders nothing inside the form when properties are missing", () => {
@@ -1027,7 +1029,7 @@ describe("SchemaForm nullable unions", () => {
     renderWithMantine(
       <SchemaForm schema={schema} values={{}} onChange={onChange} />,
     );
-    await user.type(screen.getByLabelText(/Note/), "a");
+    await user.type(screen.getByRole("textbox", { name: /Note/ }), "a");
     expect(onChange).toHaveBeenCalledWith({ note: "a" });
   });
 
@@ -1096,7 +1098,7 @@ describe("SchemaForm nullable unions", () => {
     renderWithMantine(
       <SchemaForm schema={schema} values={{}} onChange={onChange} />,
     );
-    await user.type(screen.getByLabelText(/Nick/), "z");
+    await user.type(screen.getByRole("textbox", { name: /Nick/ }), "z");
     expect(onChange).toHaveBeenCalledWith({ profile: { nick: "z" } });
   });
 
@@ -1202,7 +1204,7 @@ describe("SchemaForm nullable unions", () => {
     renderWithMantine(
       <SchemaForm schema={schema} values={{}} onChange={vi.fn()} />,
     );
-    expect(screen.getByLabelText(/Mode/).tagName).toBe("INPUT");
+    expect(screen.getByRole("textbox", { name: /Mode/ }).tagName).toBe("INPUT");
   });
 
   it("still renders a MultiSelect when every anyOf branch has a distinct const", () => {
@@ -1541,7 +1543,9 @@ describe("JSON editor escaping (#1853, #1856, #1885)", () => {
       <EscapingHarness schema={schema} initial={{ note: "" }} />,
     );
 
-    const jsonInput = screen.getByLabelText(/Note/) as HTMLTextAreaElement;
+    const jsonInput = screen.getByRole("textbox", {
+      name: /Note/,
+    }) as HTMLTextAreaElement;
     await user.click(jsonInput);
     await user.keyboard("{End}a");
 
@@ -1788,5 +1792,597 @@ describe("SchemaForm defaulted fields (#2026)", () => {
     const jsonInput = screen.getByLabelText(/Tags/) as HTMLTextAreaElement;
     await user.click(screen.getByRole("button", { name: "load example" }));
     expect(jsonInput.value).toBe('[\n  "z"\n]');
+  });
+});
+
+// A plain `<input>` swallows Enter, so a string argument could not be given a
+// value containing newlines (#2042). Each string field carries an enlarge button
+// that swaps it for a text area, one-way.
+describe("SchemaForm multiline strings (#2042)", () => {
+  const stringSchema: InspectorFormSchema = {
+    type: "object",
+    properties: {
+      note: { type: "string", title: "Note", maxLength: 40 },
+    },
+  };
+
+  function StringHarness({ resetKey }: { resetKey?: string }) {
+    const [values, setValues] = useState<Record<string, unknown>>({});
+    return (
+      <SchemaForm
+        schema={stringSchema}
+        values={values}
+        onChange={setValues}
+        resetKey={resetKey}
+      />
+    );
+  }
+
+  it("renders a single-line input with an enlarge button by default", () => {
+    renderWithMantine(<StringHarness />);
+    expect(screen.getByRole("textbox", { name: /Note/ }).tagName).toBe("INPUT");
+    expect(
+      screen.getByRole("button", { name: "Enlarge Note" }),
+    ).toBeInTheDocument();
+  });
+
+  it("swaps the input for a text area that accepts newlines", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<StringHarness />);
+
+    await user.click(screen.getByRole("button", { name: "Enlarge Note" }));
+
+    const textarea = screen.getByRole("textbox", {
+      name: /Note/,
+    }) as HTMLTextAreaElement;
+    expect(textarea.tagName).toBe("TEXTAREA");
+    await user.type(textarea, "one{Enter}two");
+    expect(textarea.value).toBe("one\ntwo");
+  });
+
+  it("carries the constraints of the field it replaced", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<StringHarness />);
+    await user.click(screen.getByRole("button", { name: "Enlarge Note" }));
+    expect(screen.getByRole("textbox", { name: /Note/ })).toHaveAttribute(
+      "maxlength",
+      "40",
+    );
+  });
+
+  it("is one-way — the enlarge button is gone once used", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<StringHarness />);
+    await user.click(screen.getByRole("button", { name: "Enlarge Note" }));
+    expect(
+      screen.queryByRole("button", { name: "Enlarge Note" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the clear button working after enlarging", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<StringHarness />);
+
+    await user.type(screen.getByRole("textbox", { name: /Note/ }), "typed");
+    await user.click(screen.getByRole("button", { name: "Enlarge Note" }));
+    const textarea = screen.getByRole("textbox", {
+      name: /Note/,
+    }) as HTMLTextAreaElement;
+    expect(textarea.value).toBe("typed");
+
+    await user.click(screen.getByRole("button", { name: "Clear" }));
+    expect(textarea.value).toBe("");
+  });
+
+  it("shows no clear button until the field holds a value", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<StringHarness />);
+    expect(
+      screen.queryByRole("button", { name: "Clear" }),
+    ).not.toBeInTheDocument();
+    await user.type(screen.getByRole("textbox", { name: /Note/ }), "x");
+    expect(screen.getByRole("button", { name: "Clear" })).toBeInTheDocument();
+  });
+
+  // Enlarging belongs to the field the user enlarged, not to its name — the
+  // same reasoning resetKey documents for the number field's draft.
+  it("goes back to a single-line input when resetKey moves to another entity", async () => {
+    const user = userEvent.setup();
+    const { rerender } = renderWithMantine(<StringHarness resetKey="tool-a" />);
+
+    await user.click(screen.getByRole("button", { name: "Enlarge Note" }));
+    expect(screen.getByRole("textbox", { name: /Note/ }).tagName).toBe(
+      "TEXTAREA",
+    );
+
+    rerender(<StringHarness resetKey="tool-b" />);
+    expect(screen.getByRole("textbox", { name: /Note/ }).tagName).toBe("INPUT");
+  });
+
+  it("stays enlarged while resetKey is unchanged", async () => {
+    const user = userEvent.setup();
+    const { rerender } = renderWithMantine(<StringHarness resetKey="tool-a" />);
+
+    await user.click(screen.getByRole("button", { name: "Enlarge Note" }));
+    rerender(<StringHarness resetKey="tool-a" />);
+    expect(screen.getByRole("textbox", { name: /Note/ }).tagName).toBe(
+      "TEXTAREA",
+    );
+  });
+
+  it("gives each field's enlarge button a distinct accessible name", () => {
+    renderWithMantine(
+      <SchemaForm
+        schema={{
+          type: "object",
+          properties: {
+            note: { type: "string", title: "Note" },
+            summary: { type: "string", title: "Summary" },
+          },
+        }}
+        values={{}}
+        onChange={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Enlarge Note" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Enlarge Summary" }),
+    ).toBeInTheDocument();
+  });
+
+  // The button unmounts in the same commit that mounts the text area, taking
+  // the focused element with it, so without an explicit hand-off the user is
+  // left focused on nothing. (The keyboard route hands off from the field
+  // instead — see the #2138 suite.)
+  it("moves focus into the text area, caret last, when activated", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<StringHarness />);
+
+    await user.type(screen.getByRole("textbox", { name: /Note/ }), "typed");
+    await user.click(screen.getByRole("button", { name: "Enlarge Note" }));
+
+    const textarea = screen.getByRole("textbox", {
+      name: /Note/,
+    }) as HTMLTextAreaElement;
+    expect(textarea.tagName).toBe("TEXTAREA");
+    expect(textarea).toHaveFocus();
+    // Clicking asks for a bigger box and nothing else: the value is carried
+    // over untouched, and only Enter — the key that means "new line" — enters
+    // one (#2138).
+    expect(textarea.value).toBe("typed");
+    expect(textarea.selectionStart).toBe("typed".length);
+
+    // And the caret really is at the end: typing appends rather than prepends.
+    await user.keyboard("{Enter}more");
+    expect(textarea.value).toBe("typed\nmore");
+  });
+
+  // A disabled form (a tool call in flight) must be inert as a whole: a live
+  // button there would swap in a text area that mounts disabled, cannot take
+  // focus, and so drops keyboard focus to the document.
+  it("disables the enlarge button along with the field", () => {
+    renderWithMantine(
+      <SchemaForm
+        schema={stringSchema}
+        values={{}}
+        onChange={vi.fn()}
+        disabled
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Enlarge Note" })).toBeDisabled();
+  });
+});
+
+// The enlarge button is clickable but out of the tab order, so tabbing runs
+// field to field; Enter in a single-line string field takes its place as the
+// keyboard route into multiline mode (#2138).
+describe("SchemaForm enlarge keyboard access (#2138)", () => {
+  const twoStringSchema: InspectorFormSchema = {
+    type: "object",
+    properties: {
+      note: { type: "string", title: "Note" },
+      summary: { type: "string", title: "Summary" },
+    },
+  };
+
+  function TwoStringHarness({ disabled }: { disabled?: boolean }) {
+    const [values, setValues] = useState<Record<string, unknown>>({});
+    return (
+      <SchemaForm
+        schema={twoStringSchema}
+        values={values}
+        onChange={setValues}
+        disabled={disabled}
+      />
+    );
+  }
+
+  // Seeds a value and holds it in real state. A stub `onChange` would leave the
+  // field's value frozen, which makes "the value did not change" assertions
+  // pass whatever the component does.
+  function SeededHarness({
+    maxLength,
+    initial = "abc",
+  }: {
+    maxLength?: number;
+    initial?: unknown;
+  }) {
+    const [values, setValues] = useState<Record<string, unknown>>({
+      note: initial,
+    });
+    return (
+      <SchemaForm
+        schema={{
+          type: "object",
+          properties: { note: { type: "string", title: "Note", maxLength } },
+        }}
+        values={values}
+        onChange={setValues}
+      />
+    );
+  }
+
+  const noteField = () =>
+    screen.getByRole("textbox", { name: /Note/ }) as HTMLTextAreaElement;
+
+  // The defect the issue was filed for: an extra stop per field, on every
+  // string field of every tool form.
+  it("tabs from one string field to the next, skipping the enlarge buttons", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness />);
+
+    noteField().focus();
+    await user.tab();
+
+    expect(screen.getByRole("textbox", { name: /Summary/ })).toHaveFocus();
+  });
+
+  // A populated field renders the clear button too, so this is the widest the
+  // right section ever gets — and still must not add a stop.
+  it("skips both right-section buttons when the field holds a value", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness />);
+
+    await user.type(noteField(), "typed");
+    expect(screen.getByRole("button", { name: "Clear" })).toBeInTheDocument();
+    await user.tab();
+
+    expect(screen.getByRole("textbox", { name: /Summary/ })).toHaveFocus();
+  });
+
+  it("enlarges the focused field when Enter is pressed", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness />);
+
+    expect(noteField().tagName).toBe("INPUT");
+    noteField().focus();
+    await user.keyboard("{Enter}");
+
+    expect(noteField().tagName).toBe("TEXTAREA");
+  });
+
+  // Enlarging is per field: the key must not reach the neighbour.
+  it("enlarges only the focused field", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness />);
+
+    noteField().focus();
+    await user.keyboard("{Enter}");
+
+    expect(screen.getByRole("textbox", { name: /Summary/ }).tagName).toBe(
+      "INPUT",
+    );
+  });
+
+  // The other gesture a user reaches for when an input will not take a newline.
+  it("enlarges on Shift+Enter too", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness />);
+
+    noteField().focus();
+    await user.keyboard("{Shift>}{Enter}{/Shift}");
+
+    expect(noteField().tagName).toBe("TEXTAREA");
+  });
+
+  // Those chords read as "submit" and stay free for a consumer to bind to
+  // running the tool; claiming them would silently enlarge a field instead.
+  it.each([
+    ["Ctrl", "{Control>}{Enter}{/Control}"],
+    ["Meta", "{Meta>}{Enter}{/Meta}"],
+    ["Alt", "{Alt>}{Enter}{/Alt}"],
+  ])("leaves %s+Enter alone", async (_name, keys) => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness />);
+
+    noteField().focus();
+    await user.keyboard(keys);
+
+    expect(noteField().tagName).toBe("INPUT");
+  });
+
+  // Enter is also how an IME commits the candidate being composed, so acting on
+  // it there would enlarge the field and insert a newline every time a
+  // Japanese/Chinese/Korean user finished a word. userEvent has no composition
+  // mode, so the event is dispatched directly with the flag React reads.
+  it("ignores the Enter that commits an IME composition", () => {
+    renderWithMantine(<TwoStringHarness />);
+
+    fireEvent.keyDown(noteField(), { key: "Enter", isComposing: true });
+
+    expect(noteField().tagName).toBe("INPUT");
+    expect(noteField().value).toBe("");
+  });
+
+  // WebKit is reported to fire `compositionend` before the committing keydown,
+  // so `isComposing` is already false there and the guard above cannot see it.
+  // 229 is the older sentinel for "this key went to the IME", which that event
+  // still carries (#2139 review).
+  it("ignores a committing IME keydown that only reports keyCode 229", () => {
+    renderWithMantine(<TwoStringHarness />);
+
+    fireEvent.keyDown(noteField(), {
+      key: "Enter",
+      isComposing: false,
+      keyCode: 229,
+    });
+
+    expect(noteField().tagName).toBe("INPUT");
+    expect(noteField().value).toBe("");
+  });
+
+  // The control for the sentinel: a real Enter reports 13 and must still work,
+  // so the guard cannot be swallowing ordinary keystrokes.
+  it("still enlarges on an Enter reporting keyCode 13", () => {
+    renderWithMantine(<TwoStringHarness />);
+
+    fireEvent.keyDown(noteField(), { key: "Enter", keyCode: 13 });
+
+    expect(noteField().tagName).toBe("TEXTAREA");
+  });
+
+  // Same event without the flag, to prove the guard above is what turned it
+  // away rather than fireEvent simply not reaching the handler.
+  it("still enlarges on an Enter that is not composing", () => {
+    renderWithMantine(<TwoStringHarness />);
+
+    fireEvent.keyDown(noteField(), { key: "Enter", isComposing: false });
+
+    expect(noteField().tagName).toBe("TEXTAREA");
+  });
+
+  it("leaves the field alone for any other key", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness />);
+
+    await user.type(noteField(), "text ");
+    await user.keyboard("{Escape}{ArrowDown} ");
+
+    expect(noteField().tagName).toBe("INPUT");
+  });
+
+  // The keystroke has to mean what it says. Enlarging without entering the
+  // newline consumes the key and leaves the next word running on from the last
+  // one — the user pressed "new line" and got a reshaped box.
+  it("enters the newline it was asked for, not just the text area", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness />);
+
+    await user.type(noteField(), "before");
+    await user.keyboard("{Enter}");
+    expect(noteField().value).toBe("before\n");
+
+    await user.keyboard("after");
+    expect(noteField().value).toBe("before\nafter");
+  });
+
+  // The caret follows the newline, so what is typed next lands under it rather
+  // than back on the first line.
+  it("leaves the caret after the newline", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness />);
+
+    await user.type(noteField(), "before");
+    await user.keyboard("{Enter}");
+
+    expect(noteField().selectionStart).toBe("before\n".length);
+  });
+
+  // The newline goes in where the caret is, exactly as it would in a text area.
+  // Appending at the end instead silently rewrites the value whenever the caret
+  // was not already there — `abc|def` would become `abcdef` with a trailing
+  // blank line (#2139 review).
+  it("inserts the newline at the caret, not at the end", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness />);
+
+    await user.type(noteField(), "abcdef");
+    noteField().setSelectionRange(3, 3);
+    fireEvent.keyDown(noteField(), { key: "Enter" });
+
+    expect(noteField().value).toBe("abc\ndef");
+    expect(noteField().selectionStart).toBe(4);
+  });
+
+  // And a selected range is replaced, not kept — again matching what typing
+  // Enter into a real text area does.
+  it("replaces a selected range with the newline", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness />);
+
+    await user.type(noteField(), "abcdef");
+    noteField().setSelectionRange(3, 6);
+    fireEvent.keyDown(noteField(), { key: "Enter" });
+
+    expect(noteField().value).toBe("abc\n");
+    expect(noteField().selectionStart).toBe(4);
+  });
+
+  // Splitting at the very start is the boundary the slice arithmetic is most
+  // likely to get wrong.
+  it("splits at the start of the value", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness />);
+
+    await user.type(noteField(), "abc");
+    noteField().setSelectionRange(0, 0);
+    fireEvent.keyDown(noteField(), { key: "Enter" });
+
+    expect(noteField().value).toBe("\nabc");
+    expect(noteField().selectionStart).toBe(1);
+  });
+
+  // A newline is a character, so a field with no room for one is enlarged
+  // without it rather than pushed past a constraint its schema states.
+  it("enlarges without a newline when the field is at its maxLength", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<SeededHarness maxLength={3} />);
+
+    noteField().focus();
+    await user.keyboard("{Enter}");
+
+    expect(noteField().tagName).toBe("TEXTAREA");
+    expect(noteField().value).toBe("abc");
+  });
+
+  // Replacing a selection frees room, so the same full field does take the
+  // newline when the keystroke is removing something to make space for it.
+  it("enters the newline at maxLength when a selection makes room", () => {
+    renderWithMantine(<SeededHarness maxLength={3} />);
+
+    noteField().setSelectionRange(1, 3);
+    fireEvent.keyDown(noteField(), { key: "Enter" });
+
+    expect(noteField().value).toBe("a\n");
+  });
+
+  // `values` is a Record<string, unknown> fed by whatever a server declares, so
+  // a string field can arrive holding a number. It renders as text, and slicing
+  // it as a string would throw — turning one keystroke into a crashed panel
+  // (#2139 review). Reading the control's own value keeps it a string.
+  it("survives a non-string value on a string field", () => {
+    renderWithMantine(<SeededHarness initial={123} />);
+
+    expect(noteField().value).toBe("123");
+    noteField().setSelectionRange(3, 3);
+    fireEvent.keyDown(noteField(), { key: "Enter" });
+
+    expect(noteField().tagName).toBe("TEXTAREA");
+    expect(noteField().value).toBe("123\n");
+  });
+
+  // Even when the newline does not fit, the keyboard had a real caret position
+  // and it is kept — otherwise the user editing the middle of a full field is
+  // thrown to the end on top of not getting their newline.
+  it("keeps the caret where it was when the newline does not fit", () => {
+    renderWithMantine(<SeededHarness maxLength={3} />);
+
+    noteField().setSelectionRange(1, 1);
+    fireEvent.keyDown(noteField(), { key: "Enter" });
+
+    expect(noteField().value).toBe("abc");
+    expect(noteField().selectionStart).toBe(1);
+  });
+
+  // JSON Schema counts maxLength in Unicode code points; String.length counts
+  // UTF-16 code units, so an emoji reads as 2 and a field with room left is
+  // treated as full (#2139 review).
+  it("counts maxLength in code points, not UTF-16 units", () => {
+    renderWithMantine(<SeededHarness maxLength={2} initial="😀" />);
+
+    noteField().setSelectionRange(2, 2);
+    fireEvent.keyDown(noteField(), { key: "Enter" });
+
+    // One emoji plus one newline is two characters, so it fits.
+    expect(noteField().value).toBe("😀\n");
+  });
+
+  // A field name that collides with something on Object.prototype must still
+  // take the documented end-of-value fallback when enlarged by pointer, rather
+  // than reading an inherited value off a bare record (#2139 review).
+  it("handles a field named after an Object.prototype member", async () => {
+    const user = userEvent.setup();
+
+    // Both halves are annotated rather than inlined. Under a `constructor` key
+    // the contextual type does not reach the nested literal, so `type: "string"`
+    // widens to `string` and fails to typecheck — the type-level echo of the
+    // very prototype collision this test is about.
+    const ctorField: InspectorFormSchema = { type: "string", title: "Ctor" };
+    const prototypeSchema: InspectorFormSchema = {
+      type: "object",
+      properties: { constructor: ctorField },
+    };
+
+    function PrototypeHarness() {
+      const [values, setValues] = useState<Record<string, unknown>>({
+        constructor: "abc",
+      });
+      return (
+        <SchemaForm
+          schema={prototypeSchema}
+          values={values}
+          onChange={setValues}
+        />
+      );
+    }
+
+    renderWithMantine(<PrototypeHarness />);
+    await user.click(screen.getByRole("button", { name: "Enlarge Ctor" }));
+
+    const field = screen.getByRole("textbox", {
+      name: /Ctor/,
+    }) as HTMLTextAreaElement;
+    expect(field.tagName).toBe("TEXTAREA");
+    expect(field.selectionStart).toBe("abc".length);
+  });
+
+  // The control: the same seeded field with no maxLength does take the newline,
+  // so the test above is showing the constraint at work rather than a field
+  // that never accepts one.
+  it("enters the newline when the field has no maxLength", () => {
+    renderWithMantine(<SeededHarness />);
+
+    noteField().setSelectionRange(3, 3);
+    fireEvent.keyDown(noteField(), { key: "Enter" });
+
+    expect(noteField().value).toBe("abc\n");
+  });
+
+  // An empty field still has room, so the newline is entered there too.
+  it("enters a newline in an empty field", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness />);
+
+    noteField().focus();
+    await user.keyboard("{Enter}");
+
+    expect(noteField().value).toBe("\n");
+  });
+
+  // The binding is the keyboard's only route in now, so announce that the
+  // field carries one rather than leaving it undiscoverable.
+  it("advertises the shortcut on the single-line field, not the text area", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness />);
+
+    expect(noteField()).toHaveAttribute("aria-keyshortcuts", "Enter");
+    noteField().focus();
+    await user.keyboard("{Enter}");
+
+    expect(noteField()).not.toHaveAttribute("aria-keyshortcuts");
+  });
+
+  // Same reasoning as the disabled button: a text area mounting disabled cannot
+  // take focus, so it would drop focus to the document.
+  it("cannot be enlarged by keyboard while the form is disabled", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness disabled />);
+
+    noteField().focus();
+    await user.keyboard("{Enter}");
+
+    expect(noteField().tagName).toBe("INPUT");
   });
 });

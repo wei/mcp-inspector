@@ -22,7 +22,7 @@
     "validate": "npm run format:check && npm run lint && npm run typecheck && npm run build && npm run test",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "lint": "eslint .",
+    "lint": "eslint . --max-warnings 0",
     "format": "prettier --write src __tests__ \"*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}\"",
     "format:check": "prettier --check src __tests__ \"*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}\""
   },
@@ -40,7 +40,8 @@
     "zod": "^4.4.3"
   },
   "overrides": {
-    "ink-select-input": "^6.2.0"
+    "ink-select-input": "^6.2.0",
+    "esbuild": "^0.28.2"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

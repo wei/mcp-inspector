@@ -16,8 +16,13 @@ import type { Context } from "hono";
 import { createRemoteApp } from "../../../core/mcp/remote/node/server.ts";
 import { formatHostForUrl } from "../../../core/node/hostUrl.ts";
 import { createSandboxController } from "./sandbox-controller.js";
+import {
+  createAppOriginController,
+  appDocumentEmbedders,
+} from "./app-origin-controller.js";
 import { injectAuthToken } from "./inject-auth-token.js";
 import type { WebServerConfig } from "./web-server-config.js";
+import { getSecretStorageInfo } from "../../../core/auth/node/secret-store-selection.ts";
 import {
   webServerConfigToInitialPayload,
   printServerBanner,
@@ -43,12 +48,29 @@ export async function startHonoServer(
     allowedOrigins: config.allowedOrigins,
   });
   await sandboxController.start();
+  // The dedicated origin apps declaring `_meta.ui.domain` are served from
+  // (#2056). Started after the sandbox because its `frame-ancestors` names the
+  // sandbox proxy's origin — the proxy is what embeds the app frame.
+  const appOriginController = createAppOriginController({
+    port: config.appOriginPort,
+    host: config.sandboxHost,
+    embedderOrigins: appDocumentEmbedders(
+      sandboxController.getUrl(),
+      config.allowedOrigins,
+    ),
+  });
+  await appOriginController.start();
 
   const resolvedAuthToken =
     config.authToken ||
     (config.dangerouslyOmitAuth ? "" : randomBytes(32).toString("hex"));
 
   const rootPath = config.staticRoot ?? __dirname;
+  // Resolve the secret store before the API is built so the descriptor the
+  // browser reads (`/api/config`) and the one the banner prints come from the
+  // same resolution — the selection is cached, so this is also the only place
+  // the keychain probe actually runs.
+  const secretStorage = await getSecretStorageInfo();
 
   const { app: apiApp, close: closeApi } = createRemoteApp({
     authToken: config.dangerouslyOmitAuth ? undefined : resolvedAuthToken,
@@ -59,8 +81,14 @@ export async function startHonoServer(
     initialServers: config.initialServers ?? undefined,
     allowedOrigins: config.allowedOrigins,
     sandboxUrl: sandboxController.getUrl() ?? undefined,
+    publishAppDocument: (doc) => appOriginController.publish(doc),
     logger: config.logger,
-    initialConfig: webServerConfigToInitialPayload(config),
+    initialConfig: webServerConfigToInitialPayload(config, secretStorage),
+    // The startup value above is what the banner printed; the route
+    // re-resolves per request, because the first write under a newly-set
+    // passphrase encrypts a pre-existing plaintext file and a captured
+    // descriptor would keep reporting the old state until a restart.
+    secretStorageResolver: getSecretStorageInfo,
   });
 
   const app = new Hono();
@@ -123,6 +151,7 @@ export async function startHonoServer(
         info.port,
         resolvedAuthToken,
         sandboxUrl ?? undefined,
+        secretStorage,
       );
       if (config.autoOpen) {
         // Never a bare `open(url)`: this callback is synchronous, so a
@@ -147,6 +176,7 @@ export async function startHonoServer(
     async close(): Promise<void> {
       await closeApi();
       await sandboxController.close();
+      await appOriginController.close();
       if ("closeAllConnections" in httpServer) {
         httpServer.closeAllConnections();
       }

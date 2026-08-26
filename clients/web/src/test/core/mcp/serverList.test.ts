@@ -11,12 +11,19 @@ import {
   mcpConfigToServerEntries,
   mergeSecretsIntoStored,
   normalizeServerType,
+  normalizeStoredMetadata,
+  applyStdioSettingsToConfig,
+  stdioConfigFieldsFromSettings,
   oauthAuthorizationParamsFromSettings,
   oauthEndpointOverridesFromSettings,
   serverEntriesToMcpConfig,
   serializeMcpConfig,
   storedFieldsToInspectorSettings,
 } from "@inspector/core/mcp/serverList.js";
+import type {
+  InspectorServerSettings,
+  MCPServerConfig,
+} from "@inspector/core/mcp/types.js";
 import {
   SECRET_FIELD_OAUTH_CLIENT_SECRET,
   envSecretField,
@@ -240,7 +247,7 @@ describe("serverEntriesToMcpConfig", () => {
   });
 
   it("round-trips a populated set of Inspector-extension fields (post-#1358 flat shape)", () => {
-    // Disk shape: top-level `headers` (Record), `metadata` (pair-array),
+    // Disk shape: top-level `headers` (Record), `metadata` (JSON object),
     // numeric timeouts, nested `oauth`. Round-trip must preserve the on-
     // disk shape byte-equivalent so a hand-edited file is stable.
     const original: MCPConfig = {
@@ -249,7 +256,7 @@ describe("serverEntriesToMcpConfig", () => {
           type: "streamable-http",
           url: "https://x.test/mcp",
           headers: { Authorization: "Bearer xyz" },
-          metadata: [{ key: "tenant", value: "acme" }],
+          metadata: { tenant: "acme", limits: { rps: 10 } },
           connectionTimeout: 30000,
           requestTimeout: 60000,
           oauth: {
@@ -581,7 +588,7 @@ describe("serverEntriesToMcpConfig", () => {
       headers: [{ key: "X-Tenant", value: "acme" }],
       // Non-stdio server → empty env mirror in memory (for the form)
       env: [],
-      metadata: [],
+      metadata: {},
       connectionTimeout: 0,
       requestTimeout: 0,
       // Absent taskTtl on disk → product default in memory (for the form)
@@ -663,7 +670,7 @@ describe("serverEntriesToMcpConfig", () => {
             { key: "   ", value: "whitespace" },
           ],
           env: [],
-          metadata: [],
+          metadata: {},
           connectionTimeout: 0,
           requestTimeout: 0,
           taskTtl: 0,
@@ -690,7 +697,7 @@ describe("serverEntriesToMcpConfig", () => {
         settings: {
           headers: [],
           env: [],
-          metadata: [],
+          metadata: {},
           connectionTimeout: 0,
           requestTimeout: 0,
           taskTtl: 0,
@@ -719,7 +726,7 @@ describe("serverEntriesToMcpConfig", () => {
         settings: {
           headers: [],
           env: [],
-          metadata: [],
+          metadata: {},
           connectionTimeout: 0,
           requestTimeout: 0,
           taskTtl: 0,
@@ -758,7 +765,7 @@ describe("serverEntriesToMcpConfig", () => {
         settings: {
           headers: [],
           env: [],
-          metadata: [],
+          metadata: {},
           connectionTimeout: 0,
           requestTimeout: 0,
           taskTtl: 0,
@@ -785,7 +792,7 @@ describe("serverEntriesToMcpConfig", () => {
         settings: {
           headers: [],
           env: [],
-          metadata: [],
+          metadata: {},
           connectionTimeout: 0,
           requestTimeout: 0,
           taskTtl: 0,
@@ -1163,7 +1170,7 @@ describe("enterpriseManaged oauth settings", () => {
     const stored = inspectorSettingsToStoredFields({
       headers: [],
       env: [],
-      metadata: [],
+      metadata: {},
       connectionTimeout: 0,
       requestTimeout: 0,
       taskTtl: 60000,
@@ -1180,7 +1187,7 @@ describe("enterpriseManaged oauth settings", () => {
     const stored = inspectorSettingsToStoredFields({
       headers: [],
       env: [],
-      metadata: [],
+      metadata: {},
       connectionTimeout: 0,
       requestTimeout: 0,
       taskTtl: 60000,
@@ -1192,11 +1199,73 @@ describe("enterpriseManaged oauth settings", () => {
   });
 });
 
+describe("oauth.requestRefreshToken (#2068)", () => {
+  const baseSettings = {
+    headers: [],
+    env: [],
+    metadata: {},
+    connectionTimeout: 0,
+    requestTimeout: 0,
+    taskTtl: 60000,
+    maxFetchRequests: 1000,
+    roots: [],
+  };
+
+  it("lifts an explicit false to settings.oauthRequestRefreshToken", () => {
+    const settings = storedFieldsToInspectorSettings({
+      oauth: { clientId: "cid", requestRefreshToken: false },
+    });
+    expect(settings?.oauthRequestRefreshToken).toBe(false);
+  });
+
+  it("leaves the setting unset when the field is absent (default: on)", () => {
+    const settings = storedFieldsToInspectorSettings({
+      oauth: { clientId: "cid" },
+    });
+    expect(settings?.oauthRequestRefreshToken).toBeUndefined();
+  });
+
+  it("leaves the setting unset for an explicit true, which means the default", () => {
+    const settings = storedFieldsToInspectorSettings({
+      oauth: { clientId: "cid", requestRefreshToken: true },
+    });
+    expect(settings?.oauthRequestRefreshToken).toBeUndefined();
+  });
+
+  it("persists the opt-out under oauth on disk", () => {
+    const stored = inspectorSettingsToStoredFields({
+      ...baseSettings,
+      oauthRequestRefreshToken: false,
+    });
+    expect(stored.oauth?.requestRefreshToken).toBe(false);
+  });
+
+  it("writes nothing when the setting is on", () => {
+    expect(
+      inspectorSettingsToStoredFields({
+        ...baseSettings,
+        oauthRequestRefreshToken: true,
+      }).oauth,
+    ).toBeUndefined();
+    expect(inspectorSettingsToStoredFields(baseSettings).oauth).toBeUndefined();
+  });
+
+  it("round-trips the opt-out", () => {
+    const stored = inspectorSettingsToStoredFields({
+      ...baseSettings,
+      oauthRequestRefreshToken: false,
+    });
+    expect(
+      storedFieldsToInspectorSettings(stored)?.oauthRequestRefreshToken,
+    ).toBe(false);
+  });
+});
+
 describe("oauthOnInsufficientScope (SEP-2350)", () => {
   const baseSettings = {
     headers: [],
     env: [],
-    metadata: [],
+    metadata: {},
     connectionTimeout: 0,
     requestTimeout: 0,
     taskTtl: 60000,
@@ -1374,6 +1443,185 @@ describe("oauthOnInsufficientScope (SEP-2350)", () => {
   });
 });
 
+describe("normalizeStoredMetadata (#1910)", () => {
+  let warn: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    warn.mockRestore();
+  });
+
+  it("passes an object through, values of any JSON type intact", () => {
+    const meta = {
+      s: "a",
+      n: 1,
+      b: false,
+      z: null,
+      arr: [1, { k: 2 }],
+      o: { deep: true },
+    };
+    expect(normalizeStoredMetadata(meta)).toEqual(meta);
+  });
+
+  it("copies rather than aliasing the stored object", () => {
+    // The settings object is edited in place by the form; sharing the
+    // reference with the parsed catalog would mutate it behind the caller.
+    const meta = { a: 1 };
+    const out = normalizeStoredMetadata(meta);
+    out.b = 2;
+    expect(meta).toEqual({ a: 1 });
+  });
+
+  it("reads the pre-#1910 pair array so an existing mcp.json keeps working", () => {
+    expect(
+      normalizeStoredMetadata([
+        { key: "tenant", value: "acme" },
+        { key: "n", value: 3 },
+      ]),
+    ).toEqual({ tenant: "acme", n: 3 });
+  });
+
+  it("skips a blank-key legacy pair", () => {
+    expect(
+      normalizeStoredMetadata([
+        { key: "", value: "orphan" },
+        { key: "  ", value: "orphan" },
+        { key: "kept", value: "yes" },
+      ]),
+    ).toEqual({ kept: "yes" });
+  });
+
+  it("preserves an explicit null in a legacy pair rather than blanking it", () => {
+    // `null` is a legal `_meta` value, so the migration must not fold it into
+    // `""` — only a genuinely absent `value` defaults.
+    expect(normalizeStoredMetadata([{ key: "z", value: null }])).toEqual({
+      z: null,
+    });
+  });
+
+  it.each([
+    ["the object form", { __proto__: { polluted: true } } as unknown],
+    [
+      "a hand-edited file's object form",
+      JSON.parse('{"__proto__":{"polluted":true}}'),
+    ],
+    ["the legacy pair form", [{ key: "__proto__", value: { polluted: true } }]],
+  ])("stores a `__proto__` key from %s as an own property", (_label, input) => {
+    // Plain assignment hits the prototype setter: the entry vanishes and, for
+    // an object value, the result gets a caller-controlled prototype. Both
+    // branches must define rather than set — the object branch regressed once
+    // when it changed from a spread to a per-key loop.
+    const out = normalizeStoredMetadata(input);
+    expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
+  it("stores a legacy `__proto__` key as an own property", () => {
+    // Plain assignment would hit the prototype setter: the entry would vanish
+    // (and an object value would mutate the prototype) instead of being stored.
+    const out = normalizeStoredMetadata([
+      { key: "__proto__", value: { polluted: true } },
+    ]);
+    expect(Object.hasOwn(out, "__proto__")).toBe(true);
+    expect(out["__proto__"]).toEqual({ polluted: true });
+    expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
+  it("reads a legacy pair with no value as an empty string", () => {
+    expect(normalizeStoredMetadata([{ key: "k" }])).toEqual({ k: "" });
+  });
+
+  it("drops a malformed legacy entry with a warning, keeping its siblings", () => {
+    expect(
+      normalizeStoredMetadata([
+        "nope",
+        null,
+        { value: "no key" },
+        { key: "kept", value: 1 },
+      ]),
+    ).toEqual({ kept: 1 });
+    expect(warn).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    ["undefined", undefined],
+    ["null", null],
+  ])("reads %s as the empty object without warning", (_label, input) => {
+    expect(normalizeStoredMetadata(input)).toEqual({});
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a string", "oops"],
+    ["a number", 7],
+    ["a boolean", true],
+  ])("drops %s with a warning", (_label, input) => {
+    expect(normalizeStoredMetadata(input)).toEqual({});
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops a value that parses but cannot be sent, keeping its siblings", () => {
+    // A hand-edited catalog reaches this untouched by any editor, so it is a
+    // real source of `1e400` — which parses to Infinity and serializes to null.
+    const out = normalizeStoredMetadata(
+      JSON.parse('{"good":1,"bad":1e400,"alsoGood":{"n":2}}'),
+    );
+    expect(out).toEqual({ good: 1, alsoGood: { n: 2 } });
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops a non-serializable value nested inside an object", () => {
+    const out = normalizeStoredMetadata(JSON.parse('{"a":{"deep":[1e400]}}'));
+    expect(out).toEqual({});
+  });
+
+  it("applies the same check to a legacy pair value", () => {
+    const out = normalizeStoredMetadata([
+      { key: "ok", value: 1 },
+      { key: "bad", value: JSON.parse("1e400") },
+    ]);
+    expect(out).toEqual({ ok: 1 });
+  });
+
+  it("never prints the offending value in a warning", () => {
+    // `_meta` can hold credentials, and these warnings go to ordinary console
+    // output — so a diagnostic may name the key and the type, never the value.
+    normalizeStoredMetadata([
+      { value: { accessToken: "sk-live-nope" } },
+      { key: "leaky", value: JSON.parse('{"token":1e400}') },
+    ]);
+    normalizeStoredMetadata("sk-live-also-nope");
+    const printed = JSON.stringify(warn.mock.calls);
+    expect(printed).not.toContain("sk-live");
+    expect(printed).not.toContain("accessToken");
+    // The key is still named, so the warning stays actionable.
+    expect(printed).toContain("leaky");
+  });
+
+  it("migrates a legacy file to the object shape on the next write", () => {
+    // Read side accepts the pair array; write side emits only the object, so
+    // one round-trip is the migration.
+    // The legacy on-disk shape no longer matches `MCPConfig` — that is what
+    // the test is about — so the fixture is untyped and cast once where it
+    // crosses into the typed parser, the same boundary a real file crosses.
+    const legacyFile: unknown = {
+      mcpServers: {
+        legacy: {
+          type: "streamable-http",
+          url: "https://x.test/mcp",
+          metadata: [{ key: "tenant", value: "acme" }],
+        },
+      },
+    };
+    const entries = mcpConfigToServerEntries(legacyFile as MCPConfig);
+    expect(entries[0]?.settings?.metadata).toEqual({ tenant: "acme" });
+    const round = serverEntriesToMcpConfig(entries);
+    expect(round.mcpServers.legacy?.metadata).toEqual({ tenant: "acme" });
+  });
+});
+
 describe("envRecordToPairs / envPairsToRecord", () => {
   it("envRecordToPairs preserves key insertion order", () => {
     expect(envRecordToPairs({ B: "2", A: "1" })).toEqual([
@@ -1469,7 +1717,7 @@ describe("stdio env / cwd mirroring", () => {
       headers: [],
       env: [{ key: "API_KEY", value: "secret" }],
       cwd: "/srv/app",
-      metadata: [],
+      metadata: {},
       connectionTimeout: 0,
       requestTimeout: 0,
       taskTtl: 60000,
@@ -1589,5 +1837,124 @@ describe("cleanAuthorizationParams", () => {
     expect(settings?.oauthAuthorizationParams).toEqual([
       { key: "kc_idp_hint", value: "corp" },
     ]);
+  });
+});
+
+describe("stdio env/cwd settings → config mapping (#2096)", () => {
+  // `env` and `cwd` are edited as settings but read by the transport off the
+  // config, so both sides of the wire have to derive one from the other. This
+  // is the single mapping they share — the PUT write-through persists it, the
+  // web client applies it when constructing an InspectorClient.
+  const settings = (
+    over: Partial<InspectorServerSettings> = {},
+  ): InspectorServerSettings => ({
+    headers: [],
+    env: [],
+    metadata: {},
+    connectionTimeout: 0,
+    requestTimeout: 0,
+    taskTtl: 60000,
+    maxFetchRequests: 1000,
+    roots: [],
+    ...over,
+  });
+
+  describe("stdioConfigFieldsFromSettings", () => {
+    it("collapses the pair rows into a record and trims the cwd", () => {
+      expect(
+        stdioConfigFieldsFromSettings(
+          settings({
+            env: [
+              { key: "FOO", value: "after" },
+              { key: "BAR", value: "" },
+            ],
+            cwd: "  /tmp/after  ",
+          }),
+        ),
+      ).toEqual({ env: { FOO: "after", BAR: "" }, cwd: "/tmp/after" });
+    });
+
+    it("reports an empty list and a blank cwd as unset, i.e. cleared", () => {
+      // The modal deletes a value by emptying it, so "no rows" cannot mean
+      // "leave it alone" — it has to remove the field.
+      expect(
+        stdioConfigFieldsFromSettings(settings({ env: [], cwd: "   " })),
+      ).toEqual({ env: undefined, cwd: undefined });
+      // A row the user started and left blank is dropped, so it does not
+      // materialize an env consisting of one nameless variable.
+      expect(
+        stdioConfigFieldsFromSettings(
+          settings({ env: [{ key: "  ", value: "x" }] }),
+        ).env,
+      ).toBeUndefined();
+    });
+  });
+
+  describe("applyStdioSettingsToConfig", () => {
+    const stdio: MCPServerConfig = {
+      type: "stdio",
+      command: "node",
+      args: ["server.js"],
+      env: { FOO: "before" },
+      cwd: "/tmp/before",
+    };
+
+    it("overwrites env/cwd and leaves the rest of the config alone", () => {
+      expect(
+        applyStdioSettingsToConfig(
+          stdio,
+          settings({
+            env: [{ key: "FOO", value: "after" }],
+            cwd: "/tmp/after",
+          }),
+        ),
+      ).toEqual({
+        type: "stdio",
+        command: "node",
+        args: ["server.js"],
+        env: { FOO: "after" },
+        cwd: "/tmp/after",
+      });
+    });
+
+    it("removes the fields the settings cleared", () => {
+      expect(applyStdioSettingsToConfig(stdio, settings())).toEqual({
+        type: "stdio",
+        command: "node",
+        args: ["server.js"],
+      });
+    });
+
+    it("does not mutate the config it was given", () => {
+      const before = { ...stdio };
+      applyStdioSettingsToConfig(stdio, settings());
+      expect(stdio).toEqual(before);
+    });
+
+    it("treats a typeless entry as stdio, matching the on-disk default", () => {
+      // An `mcp.json` entry written without a `type` key is stdio (the Claude
+      // Desktop convention), and the modal edits its env like any other.
+      const applied = applyStdioSettingsToConfig(
+        { command: "node" } as MCPServerConfig,
+        settings({ env: [{ key: "FOO", value: "after" }] }),
+      );
+      expect(applied).toEqual({ command: "node", env: { FOO: "after" } });
+    });
+
+    it("returns a non-stdio config untouched", () => {
+      // An HTTP server carries neither field, matching the modal's stdio-only
+      // UI — applying an empty mirror to it must not invent one.
+      const http: MCPServerConfig = {
+        type: "streamable-http",
+        url: "https://mcp.example.com/mcp",
+      };
+      expect(applyStdioSettingsToConfig(http, settings())).toBe(http);
+    });
+
+    it("returns the config untouched when there are no settings", () => {
+      // A server with no settings node has nothing to apply; treating that as
+      // an empty mirror would clear an env the file does hold.
+      expect(applyStdioSettingsToConfig(stdio, undefined)).toBe(stdio);
+    });
   });
 });

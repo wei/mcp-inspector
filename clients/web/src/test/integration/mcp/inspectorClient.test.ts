@@ -53,7 +53,9 @@ import type {
   MessageEntry,
   ConnectionStatus,
   FetchRequestEntryBase,
+  RequestMetadata,
 } from "@inspector/core/mcp/types.js";
+import type { InspectorLogger } from "@inspector/core/logging/logger.js";
 import type { JsonValue } from "@inspector/core/json/jsonUtils.js";
 import type {
   TypedEvent,
@@ -164,7 +166,7 @@ function settleInFlight(call: Promise<unknown>): InFlightCall {
 /** Get all resources from the client via listResources() (paginates if needed). */
 async function getAllResources(
   client: InspectorClient,
-  metadata?: Record<string, string>,
+  metadata?: RequestMetadata,
 ): Promise<Resource[]> {
   const collected: Resource[] = [];
   let cursor: string | undefined;
@@ -180,7 +182,7 @@ async function getAllResources(
 /** Get all resource templates via listResourceTemplates() (paginates if needed). */
 async function getAllResourceTemplates(
   client: InspectorClient,
-  metadata?: Record<string, string>,
+  metadata?: RequestMetadata,
 ): Promise<ResourceTemplate[]> {
   const collected: ResourceTemplate[] = [];
   let cursor: string | undefined;
@@ -196,7 +198,7 @@ async function getAllResourceTemplates(
 /** Get all prompts via listPrompts() (paginates if needed). */
 async function getAllPrompts(
   client: InspectorClient,
-  metadata?: Record<string, string>,
+  metadata?: RequestMetadata,
 ): Promise<Prompt[]> {
   const collected: Prompt[] = [];
   let cursor: string | undefined;
@@ -386,7 +388,7 @@ describe("InspectorClient", () => {
           serverSettings: {
             headers: [],
             env: [],
-            metadata: [],
+            metadata: {},
             connectionTimeout: 50,
             requestTimeout: 0,
             taskTtl: 0,
@@ -756,7 +758,7 @@ describe("InspectorClient", () => {
       const initial = {
         headers: [],
         env: [],
-        metadata: [],
+        metadata: {},
         connectionTimeout: 0,
         requestTimeout: 0,
         taskTtl: 0,
@@ -1369,6 +1371,256 @@ describe("InspectorClient", () => {
         tenant: "acme",
         env: "prod",
       });
+      messageLogState.destroy();
+    });
+
+    it("sends a structured default _meta value as JSON, not as a string (#1910)", async () => {
+      // The whole point of #1910: a `_meta` value may be an object, an array,
+      // a number, a boolean or `null`. The Inspector used to type this map as
+      // `Record<string, string>`, so a nested payload could only be sent by
+      // stringifying it — which is a different wire message than the one the
+      // user configured.
+      const structured = {
+        trace: { id: "abc123", sampled: true, hops: [1, 2] },
+        retries: 3,
+        beta: false,
+        unset: null,
+      };
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+          defaultMetadata: structured,
+        },
+      );
+      const messageLogState = new MessageLogState(client);
+      await client.connect();
+      await client.listTools();
+
+      const listToolsReq = messageLogState
+        .getMessages()
+        .find(
+          (m) =>
+            m.direction === "request" &&
+            (m.message as { method?: string }).method === "tools/list",
+        );
+      expect(listToolsReq).toBeDefined();
+      expect(metaOf(listToolsReq!)).toMatchObject(structured);
+      messageLogState.destroy();
+    });
+
+    it.each([
+      ["a float", 3.5],
+      ["an object", { id: 1 }],
+      ["an array", [1]],
+      ["null", null],
+      ["a boolean", true],
+      // Past `Number.MAX_SAFE_INTEGER` the float64 value is no longer the
+      // integer it was written as, and zod 4's `.int()` rejects it — so
+      // `Number.isInteger` is too loose a check here.
+      ["an unsafe integer", Number.MAX_SAFE_INTEGER + 1],
+    ])(
+      "drops a reserved progressToken that is %s rather than sending it",
+      async (_label, badToken) => {
+        // Every other `_meta` value may be any JSON (#1910), but the spec
+        // constrains `progressToken` to `string | integer`
+        // (`ProgressTokenSchema`). Sending a bad one would make a conforming
+        // server reject the whole request, so the member is dropped — the key
+        // is optional, so what goes out is still well-formed.
+        //
+        // `progress: false` is what makes this observable. With progress on
+        // (the default) the SDK sets `onprogress` and stamps its own message
+        // id over `_meta.progressToken`, so a caller's value never reaches the
+        // wire either way; with it off nothing overwrites the member and a bad
+        // one would ship.
+        client = new InspectorClient(
+          {
+            type: "stdio",
+            command: serverCommand.command,
+            args: serverCommand.args,
+          },
+          {
+            environment: { transport: createTransportNode },
+            progress: false,
+            defaultMetadata: { progressToken: badToken, keep: "me" },
+          },
+        );
+        const messageLogState = new MessageLogState(client);
+        await client.connect();
+        await client.listTools();
+
+        const listToolsReq = messageLogState
+          .getMessages()
+          .find(
+            (m) =>
+              m.direction === "request" &&
+              (m.message as { method?: string }).method === "tools/list",
+          );
+        expect(listToolsReq).toBeDefined();
+        const meta = metaOf(listToolsReq!);
+        expect(meta).not.toHaveProperty("progressToken");
+        // Only the offending member is dropped, not the whole payload.
+        expect(meta.keep).toBe("me");
+        messageLogState.destroy();
+      },
+    );
+
+    it.each([
+      ["an array", [1]],
+      ["a string", "t1"],
+      ["an object with a non-string taskId", { taskId: 5 }],
+    ])(
+      "drops a related-task member that is %s, keeping its siblings",
+      async (_label, badRelatedTask) => {
+        // `progressToken` is not the only reserved member: the pinned SDK also
+        // constrains `io.modelcontextprotocol/related-task` to
+        // `{ taskId: string }`. A bad one makes a conforming server reject the
+        // whole request, so it is dropped the same way.
+        client = new InspectorClient(
+          {
+            type: "stdio",
+            command: serverCommand.command,
+            args: serverCommand.args,
+          },
+          {
+            environment: { transport: createTransportNode },
+            progress: false,
+            defaultMetadata: {
+              "io.modelcontextprotocol/related-task": badRelatedTask,
+              keep: "me",
+            },
+          },
+        );
+        const messageLogState = new MessageLogState(client);
+        await client.connect();
+        await client.listTools();
+
+        const req = messageLogState
+          .getMessages()
+          .find(
+            (m) =>
+              m.direction === "request" &&
+              (m.message as { method?: string }).method === "tools/list",
+          );
+        const meta = metaOf(req!);
+        expect(meta).not.toHaveProperty("io.modelcontextprotocol/related-task");
+        expect(meta.keep).toBe("me");
+        messageLogState.destroy();
+      },
+    );
+
+    it("keeps a well-formed related-task member", async () => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+          progress: false,
+          defaultMetadata: {
+            "io.modelcontextprotocol/related-task": { taskId: "task-1" },
+          },
+        },
+      );
+      const messageLogState = new MessageLogState(client);
+      await client.connect();
+      await client.listTools();
+
+      const req = messageLogState
+        .getMessages()
+        .find(
+          (m) =>
+            m.direction === "request" &&
+            (m.message as { method?: string }).method === "tools/list",
+        );
+      expect(metaOf(req!)["io.modelcontextprotocol/related-task"]).toEqual({
+        taskId: "task-1",
+      });
+      messageLogState.destroy();
+    });
+
+    it("warns with the rejected progressToken's type, never its value", async () => {
+      // This logger is persisted by real clients (the TUI writes it to
+      // `~/.mcp-inspector/auth.log`), and an invalid `progressToken` can now be
+      // an object holding credentials — so the warning must not echo it.
+      const warn = vi.fn();
+      const noop = () => {};
+      const logger: InspectorLogger = {
+        level: "warn",
+        fatal: noop,
+        error: noop,
+        warn,
+        info: noop,
+        debug: noop,
+        trace: noop,
+        silent: noop,
+        child: () => logger,
+      };
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode, logger },
+          progress: false,
+          defaultMetadata: {
+            progressToken: { accessToken: "sk-live-should-not-appear" },
+          },
+        },
+      );
+      await client.connect();
+      await client.listTools();
+
+      // The offending key travels in the log's bindings, not in the message —
+      // the message is shared by every reserved member the sanitizer drops.
+      const call = warn.mock.calls.find(
+        (c) => (c[0] as { key?: string })?.key === "progressToken",
+      );
+      expect(call).toBeDefined();
+      expect(call![0]).toEqual({ key: "progressToken", received: "object" });
+      // Belt and braces: the secret must not appear anywhere in the record.
+      expect(JSON.stringify(warn.mock.calls)).not.toContain("sk-live");
+    });
+
+    it.each([
+      ["a string", "tok-1"],
+      ["an integer", 7],
+      // The boundary itself is still valid.
+      ["the largest safe integer", Number.MAX_SAFE_INTEGER],
+    ])("keeps a valid progressToken that is %s", async (_label, token) => {
+      client = new InspectorClient(
+        {
+          type: "stdio",
+          command: serverCommand.command,
+          args: serverCommand.args,
+        },
+        {
+          environment: { transport: createTransportNode },
+          // See the note above: with progress on, the SDK overwrites this.
+          progress: false,
+          defaultMetadata: { progressToken: token },
+        },
+      );
+      const messageLogState = new MessageLogState(client);
+      await client.connect();
+      await client.listTools();
+
+      const listToolsReq = messageLogState
+        .getMessages()
+        .find(
+          (m) =>
+            m.direction === "request" &&
+            (m.message as { method?: string }).method === "tools/list",
+        );
+      expect(metaOf(listToolsReq!).progressToken).toBe(token);
       messageLogState.destroy();
     });
 
@@ -4241,7 +4493,7 @@ describe("InspectorClient", () => {
         timestamp: Date;
         success: boolean;
         error?: string;
-        metadata?: Record<string, string>;
+        metadata?: RequestMetadata;
       }> = [];
 
       client!.addEventListener(

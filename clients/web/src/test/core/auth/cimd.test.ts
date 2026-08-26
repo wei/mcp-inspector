@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import type { OAuthStorage } from "@inspector/core/auth/storage.js";
 import { BaseOAuthClientProvider } from "@inspector/core/auth/providers.js";
 import { ensureCimdClientRegistration } from "@inspector/core/auth/cimd.js";
@@ -29,6 +29,10 @@ describe("ensureCimdClientRegistration", () => {
       saveTokens: vi.fn(async () => {}),
       clear: vi.fn(),
     } as unknown as OAuthStorage;
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it("pre-registers URL-based client id when AS supports CIMD", async () => {
@@ -95,6 +99,63 @@ describe("ensureCimdClientRegistration", () => {
     });
 
     expect(storage.saveClientInformation).not.toHaveBeenCalled();
+  });
+
+  it("discovers protected-resource metadata at the challenge-advertised URL (#2071)", async () => {
+    const metadataUrl = new URL(
+      "http://127.0.0.1:9999/custom/protected-resource",
+    );
+    // Both discovery legs must run through the configured fetch — on web that
+    // is the backend proxy, so a leg that fell back to the global would fail
+    // on CORS and be swallowed.
+    const fetchFn = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === metadataUrl.href) {
+        return new Response(
+          JSON.stringify({
+            resource: SERVER_URL,
+            authorization_servers: ["http://127.0.0.1:9999"],
+          }),
+        );
+      }
+      if (url.includes("/.well-known/oauth-authorization-server")) {
+        return new Response(
+          JSON.stringify({
+            issuer: "http://127.0.0.1:9999",
+            authorization_endpoint: "http://127.0.0.1:9999/oauth/authorize",
+            token_endpoint: "http://127.0.0.1:9999/oauth/token",
+            response_types_supported: ["code"],
+            client_id_metadata_document_supported: true,
+          }),
+        );
+      }
+      return new Response(null, { status: 404 });
+    });
+    // Nothing may reach the network directly; a call here means a leg fell
+    // back to the global fetch.
+    const globalFetch = vi.fn();
+    vi.stubGlobal("fetch", globalFetch);
+
+    await ensureCimdClientRegistration({
+      serverUrl: SERVER_URL,
+      provider: createProvider(storage),
+      fetchFn,
+      resourceMetadataUrl: metadataUrl,
+    });
+
+    expect(globalFetch).not.toHaveBeenCalled();
+    const requested = fetchFn.mock.calls.map(([input]) => String(input));
+    expect(requested).toContain(metadataUrl.href);
+    expect(
+      requested.filter((url) =>
+        url.includes("/.well-known/oauth-protected-resource"),
+      ),
+    ).toEqual([]);
+    expect(storage.saveClientInformation).toHaveBeenCalledWith(
+      SERVER_URL,
+      { client_id: METADATA_URL },
+      { registrationKind: "cimd" },
+    );
   });
 
   it("no-ops when client information is already stored", async () => {
