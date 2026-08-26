@@ -119,6 +119,12 @@ const TWO_ACTION_WIDTH = rem(
   ENLARGE_WIDTH + ACTION_GAP + CLEAR_WIDTH + SECTION_INSET,
 );
 
+// `keyCode` reported for a keydown the IME consumed — the pre-`isComposing`
+// sentinel every browser still sets during composition. Only needed for the
+// browsers whose composition events land too late for `isComposing` to help
+// (#2138 review); a real Enter reports 13, so this cannot swallow one.
+const IME_KEY_CODE = 229;
+
 function serializeJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
@@ -791,6 +797,13 @@ export function SchemaForm({
       //   keystroke means "accept this word", not "new line". Acting on it
       //   would enlarge the field and insert a stray newline every time such a
       //   user finished a word, making the field unusable for them.
+      // - `keyCode === 229` is the same guard again, for WebKit. It is reported
+      //   to fire `compositionend` *before* the committing keydown, which
+      //   leaves `isComposing` already false by the time this runs; 229 is the
+      //   pre-`isComposing` sentinel for "this key went to the IME" and is
+      //   still set there. Kept despite `keyCode` being deprecated because
+      //   nothing non-deprecated distinguishes that event, and it cannot misfire
+      //   on a real Enter, which reports 13.
       // - The Ctrl/Cmd/Alt chords are deliberately left alone: those read as
       //   "submit" in a form, and a consumer binding one (run the tool) must
       //   not be overridden into enlarging a field instead.
@@ -798,6 +811,7 @@ export function SchemaForm({
         if (
           event.key !== "Enter" ||
           event.nativeEvent.isComposing ||
+          event.keyCode === IME_KEY_CODE ||
           event.ctrlKey ||
           event.metaKey ||
           event.altKey

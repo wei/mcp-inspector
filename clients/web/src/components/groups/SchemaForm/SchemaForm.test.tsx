@@ -2110,6 +2110,33 @@ describe("SchemaForm enlarge keyboard access (#2138)", () => {
     expect(noteField().value).toBe("");
   });
 
+  // WebKit is reported to fire `compositionend` before the committing keydown,
+  // so `isComposing` is already false there and the guard above cannot see it.
+  // 229 is the older sentinel for "this key went to the IME", which that event
+  // still carries (#2139 review).
+  it("ignores a committing IME keydown that only reports keyCode 229", () => {
+    renderWithMantine(<TwoStringHarness />);
+
+    fireEvent.keyDown(noteField(), {
+      key: "Enter",
+      isComposing: false,
+      keyCode: 229,
+    });
+
+    expect(noteField().tagName).toBe("INPUT");
+    expect(noteField().value).toBe("");
+  });
+
+  // The control for the sentinel: a real Enter reports 13 and must still work,
+  // so the guard cannot be swallowing ordinary keystrokes.
+  it("still enlarges on an Enter reporting keyCode 13", () => {
+    renderWithMantine(<TwoStringHarness />);
+
+    fireEvent.keyDown(noteField(), { key: "Enter", keyCode: 13 });
+
+    expect(noteField().tagName).toBe("TEXTAREA");
+  });
+
   // Same event without the flag, to prove the guard above is what turned it
   // away rather than fireEvent simply not reaching the handler.
   it("still enlarges on an Enter that is not composing", () => {
