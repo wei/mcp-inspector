@@ -106,3 +106,50 @@ describe("every engine tier consumes ENGINE_SMOKES", () => {
     assert.match(scripts["smoke:web:engine"], /run-engine-smokes\.mjs$/);
   });
 });
+
+describe("each smoke's own docs point at its own command", () => {
+  /** The npm script that runs each engine-sensitive smoke on its own. */
+  const OWN_SCRIPT = {
+    "smoke-web-browser.mjs": "smoke:web:browser",
+    "smoke-web-app.mjs": "smoke:web:app",
+    "smoke-web-elicitation.mjs": "smoke:web:elicit",
+  };
+
+  it("never tells the reader to run a sibling smoke", () => {
+    // `smoke-web-elicitation.mjs` shipped an on-demand example invoking
+    // `smoke:web:app` (Copilot, #2133) — a direct cost of my deciding the two
+    // App headers should be word-for-word identical so they could not drift.
+    // The shared PROSE should be identical; the example command is the one line
+    // that must not be, and copy-paste does not distinguish them.
+    //
+    // Following such an example does not fail — it runs a real smoke and passes.
+    // It just never exercises the file you were reading about, which is why
+    // nothing else catches this.
+    for (const [file, own] of Object.entries(OWN_SCRIPT)) {
+      const source = readFileSync(join(scriptDir, file), "utf8");
+      const siblings = Object.values(OWN_SCRIPT).filter((s) => s !== own);
+      for (const sibling of siblings) {
+        assert.ok(
+          !source.includes(`npm run ${sibling}`),
+          `${file} tells the reader to run \`npm run ${sibling}\` — a sibling ` +
+            `smoke. Its examples must use \`${own}\`, or the reader never ` +
+            `exercises the path this file documents.`,
+        );
+      }
+    }
+  });
+
+  it("every command it does name is a real script", () => {
+    // A command that does not exist is worse than none, and the header is the
+    // one place nothing executes to find out.
+    for (const file of Object.keys(OWN_SCRIPT)) {
+      const source = readFileSync(join(scriptDir, file), "utf8");
+      for (const [, name] of source.matchAll(/npm run ([\w:]+)/g)) {
+        assert.ok(
+          Object.hasOwn(scripts, name),
+          `${file} names \`npm run ${name}\`, which is not a script`,
+        );
+      }
+    }
+  });
+});

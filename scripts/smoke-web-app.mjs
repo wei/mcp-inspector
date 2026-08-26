@@ -50,7 +50,8 @@
  *   - **`npm run ci`**, the local pre-push gate, runs it in **Chromium and
  *     Firefox** — the Firefox pass is `smoke:web:firefox`, and it is the one
  *     gate step with no GitHub CI counterpart.
- *   - **WebKit is on demand only**: `SMOKE_BROWSER=webkit npm run smoke:web:app`.
+ *   - **WebKit is on demand only**: `SMOKE_BROWSER=webkit npm run smoke:web:app`
+ *     for this smoke alone, or `npm run smoke:web:webkit` for all three.
  *
  * Firefox passes. WebKit fails this smoke for reasons nobody has identified and
  * nobody is investigating: it does not reproduce in real Safari, and an isolated
