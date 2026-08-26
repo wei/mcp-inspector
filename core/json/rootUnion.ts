@@ -605,7 +605,12 @@ export function selectBranchIndex<T extends RootUnionSchema>(
     const supplied = pinned.filter(([name]) => values[name] !== undefined);
     if (
       supplied.length > 0 &&
-      supplied.every(([name, constValue]) => values[name] === constValue)
+      // Structural, not reference: a `const` may be an object or an array, and
+      // deep-link arguments arrive as freshly parsed instances that could never
+      // be `===` the schema's own.
+      supplied.every(([name, constValue]) =>
+        sameValue(values[name], constValue),
+      )
     ) {
       matches.push(index);
     }

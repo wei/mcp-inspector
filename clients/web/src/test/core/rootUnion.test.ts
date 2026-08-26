@@ -695,6 +695,25 @@ describe("resolveRootUnion", () => {
       expect(selectBranchIndex(undiscriminated, {})).toBeNull();
     });
 
+    it("matches an object-valued discriminator structurally", () => {
+      // Deep-link arguments are freshly parsed instances, never `===` the
+      // schema's own constant.
+      const objectPinned = resolveRootUnion({
+        type: "object",
+        anyOf: [
+          {
+            type: "object",
+            properties: { tag: { const: { a: 1 } }, x: { type: "string" } },
+          },
+          {
+            type: "object",
+            properties: { tag: { const: { a: 2 } }, y: { type: "string" } },
+          },
+        ],
+      }).branches;
+      expect(selectBranchIndex(objectPinned, { tag: { a: 2 } })).toBe(1);
+    });
+
     it("reports none when the values identify nothing", () => {
       expect(selectBranchIndex(branches, {})).toBeNull();
       expect(selectBranchIndex(branches, { kind: "other" })).toBeNull();

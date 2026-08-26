@@ -6,6 +6,7 @@ import {
   getValueAtPath,
   collectSchemaDefaults,
   hasMissingRequiredFields,
+  applySchemaConstants,
 } from "./jsonUtils";
 import type { InspectorFormSchema } from "./jsonUtils";
 
@@ -430,6 +431,28 @@ describe("root composition (#2123)", () => {
     const values = collectSchemaDefaults(schema);
     expect(values).toEqual({ nothing: null });
     expect(hasMissingRequiredFields(schema, values)).toBe(false);
+  });
+
+  it("re-applies a branch's constants over conflicting supplied values", () => {
+    // A read-only field cannot be corrected by the user, so a deep link
+    // disagreeing with a `const` must not survive into the submitted arguments.
+    expect(applySchemaConstants(UNION, { kind: "sms", note: "hi" })).toEqual({
+      kind: "sms",
+      note: "hi",
+    });
+    expect(applySchemaConstants(UNION, { kind: "nonsense" })).toEqual({
+      kind: "email",
+    });
+  });
+
+  it("leaves values alone when nothing is pinned", () => {
+    const values = { a: 1 };
+    expect(
+      applySchemaConstants(
+        { type: "object", properties: { a: { type: "number" } } },
+        values,
+      ),
+    ).toBe(values);
   });
 
   it("blocks submission while no branch is satisfied", () => {

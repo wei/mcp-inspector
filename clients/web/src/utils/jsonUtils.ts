@@ -175,6 +175,36 @@ export function collectSchemaDefaults(
 }
 
 /**
+ * Overwrite every `const`-pinned field with the value its schema fixes.
+ *
+ * The form renders such a field read-only, so a value disagreeing with it can
+ * only have come from outside the form — an App deep link's `appArgs`, which
+ * are spread over the seeded defaults and would otherwise leave the arguments
+ * claiming a shape the user is being shown the opposite of (#2123). Apply this
+ * *after* any such overlay.
+ *
+ * The branch is chosen the same way {@link collectSchemaDefaults} chooses it,
+ * from the values themselves, so the constants applied belong to the shape the
+ * form will display.
+ */
+export function applySchemaConstants(
+  schema: InspectorFormSchema,
+  values: Record<string, unknown>,
+): Record<string, unknown> {
+  const { base, branches } = resolveRootUnion(schema);
+  const selected = selectBranchIndex(branches, values) ?? 0;
+  const properties = (branches[selected]?.schema ?? base).properties ?? {};
+  const pinned = Object.entries(properties).filter(
+    ([, fieldSchema]) => fieldSchema.const !== undefined,
+  );
+  if (pinned.length === 0) return values;
+  return Object.fromEntries([
+    ...Object.entries(values),
+    ...pinned.map(([name, fieldSchema]) => [name, fieldSchema.const]),
+  ]);
+}
+
+/**
  * Whether any of the schema's required top-level fields is missing a value in
  * `values` (absent, null, or empty string). Used to gate a form's submit
  * action until required fields are supplied.
