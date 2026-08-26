@@ -194,14 +194,34 @@ export function applySchemaConstants(
   const { base, branches } = resolveRootUnion(schema);
   const selected = selectBranchIndex(branches, values) ?? 0;
   const properties = (branches[selected]?.schema ?? base).properties ?? {};
-  const pinned = Object.entries(properties).filter(
-    ([, fieldSchema]) => fieldSchema.const !== undefined,
-  );
-  if (pinned.length === 0) return values;
-  return Object.fromEntries([
-    ...Object.entries(values),
-    ...pinned.map(([name, fieldSchema]) => [name, fieldSchema.const]),
-  ]);
+
+  const corrections: [string, unknown][] = [];
+  for (const [name, rawSchema] of Object.entries(properties)) {
+    const fieldSchema = normalizeNullableUnion(rawSchema);
+    if (fieldSchema.const !== undefined) {
+      corrections.push([name, fieldSchema.const]);
+      continue;
+    }
+    // Recurse: a nested object renders its own read-only fields, and the
+    // overlay replaces the whole object rather than merging into it — so a
+    // link naming `{ config: { kind: "sms" } }` would otherwise slip a value
+    // past the pinned `kind` the nested form is displaying.
+    const nested = values[name];
+    if (
+      typeof nested === "object" &&
+      nested !== null &&
+      !Array.isArray(nested)
+    ) {
+      const corrected = applySchemaConstants(
+        fieldSchema,
+        nested as Record<string, unknown>,
+      );
+      if (corrected !== nested) corrections.push([name, corrected]);
+    }
+  }
+
+  if (corrections.length === 0) return values;
+  return Object.fromEntries([...Object.entries(values), ...corrections]);
 }
 
 /**

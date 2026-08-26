@@ -445,6 +445,27 @@ describe("root composition (#2123)", () => {
     });
   });
 
+  it("re-applies a nested object's constants", () => {
+    // The overlay replaces the whole nested object rather than merging into it,
+    // so a link naming `{ config: { kind: "sms" } }` would otherwise slip past
+    // the pinned `kind` the nested form displays.
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        config: {
+          type: "object",
+          properties: {
+            kind: { type: "string", const: "email" },
+            to: { type: "string" },
+          },
+        },
+      },
+    };
+    expect(
+      applySchemaConstants(schema, { config: { kind: "sms", to: "a@b.c" } }),
+    ).toEqual({ config: { kind: "email", to: "a@b.c" } });
+  });
+
   it("leaves values alone when nothing is pinned", () => {
     const values = { a: 1 };
     expect(
