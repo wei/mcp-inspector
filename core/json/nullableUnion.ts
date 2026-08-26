@@ -454,6 +454,9 @@ function anyOfAdmitsNull(schema: NullableUnionSchema): boolean {
   const branches = schema.anyOf;
   if (!Array.isArray(branches)) return false;
   return branches.some((entry) => {
+    // JSON Schema's boolean form: `true` is the unconstrained schema and admits
+    // every value, `null` among them, while `false` admits none.
+    if (typeof entry === "boolean") return entry;
     const branch = toBranch(entry);
     if (branch === null) return false;
     const branchSchema = branch as NullableUnionSchema;

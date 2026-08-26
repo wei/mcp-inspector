@@ -768,6 +768,12 @@ describe("admitsNull", () => {
       );
     });
 
+    it("reads the boolean schema form", () => {
+      // `true` is the unconstrained schema; `false` admits nothing at all.
+      expect(admitsNull({ const: null, anyOf: [true] })).toBe(true);
+      expect(admitsNull({ const: null, anyOf: [false] })).toBe(false);
+    });
+
     it("does not override a sibling that rejects null", () => {
       // `const` is conjunctive with its siblings, not an override: both of
       // these reject every value, so claiming nullability would let the
