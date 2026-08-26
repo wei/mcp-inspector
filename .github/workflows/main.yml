@@ -149,10 +149,10 @@ jobs:
       matrix:
         # `webkit` belongs here and is deliberately absent: the smokes RUN in it
         # (`SMOKE_BROWSER=webkit` works, and smoke:web:browser passes), but the
-        # two App smokes fail on #2132 — the SSE stream's last message is not
-        # delivered, so an App never leaves "loading". That is NOT reproduced in
-        # real Safari, so read it as a property of Playwright's WebKit build
-        # rather than a browser bug. Adding it here is a one-word diff once it is
+        # two App smokes fail on #2132, by a mechanism not yet identified — the
+        # first diagnosis was retracted when an isolated repro did not reproduce
+        # it. Not reproduced in real Safari either, so read it as a property of
+        # Playwright's WebKit build rather than a browser bug. Adding it here is a one-word diff once it is
         # resolved. An engine is either green or absent; a `continue-on-error`
         # job would report coverage nobody is holding to a standard.
         browser: [firefox]
