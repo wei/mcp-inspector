@@ -49,10 +49,7 @@ describe("parseSSE chunk boundaries", () => {
     // THE BUG. Chunk 1 ends after the data line's newline; chunk 2 carries only
     // the blank line that closes the frame. Nothing is malformed — this is one
     // valid frame, delivered in two reads.
-    const split = [
-      'event: message\ndata: {"id":1,"result":"payload"}\n',
-      "\n",
-    ];
+    const split = ['event: message\ndata: {"id":1,"result":"payload"}\n', "\n"];
     expect(split.join("")).toBe(FRAME); // same bytes as above, different reads
     expect(await collect(split)).toEqual([
       { event: "message", data: '{"id":1,"result":"payload"}' },
