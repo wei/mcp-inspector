@@ -799,8 +799,11 @@ export function SchemaForm({
       Object.entries(nextProperties)
         .filter(
           ([name, fieldSchema]) =>
+            // Own-property presence alone, `undefined` included: clearing a
+            // number or JSON field leaves the name present with no value, and
+            // that is the user's answer. Dropping it would let the defaults
+            // below put the field's default back and undo the clear.
             Object.hasOwn(values, name) &&
-            values[name] !== undefined &&
             fieldSchema.const === undefined &&
             // Carried only where the incoming branch leaves the root's
             // declaration as it found it. Anything the incoming branch declares

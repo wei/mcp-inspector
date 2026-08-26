@@ -2291,6 +2291,31 @@ describe("SchemaForm multiline strings (#2042)", () => {
       expect(onChange).not.toHaveBeenCalled();
     });
 
+    it("keeps a cleared root field cleared across a branch switch", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      const schema: InspectorFormSchema = {
+        type: "object",
+        properties: { count: { type: "number", default: 7, title: "Count" } },
+        anyOf: [
+          { type: "object", title: "A", properties: { x: {} } },
+          { type: "object", title: "B", properties: { y: {} } },
+        ],
+      };
+      renderWithMantine(
+        <SchemaForm
+          schema={schema}
+          // What clearing a number field leaves behind: the name is present
+          // with no value, which is the user's answer and not an absence.
+          values={{ count: undefined }}
+          onChange={onChange}
+        />,
+      );
+      await user.click(screen.getByRole("textbox", { name: /Variant/ }));
+      await user.click(screen.getByRole("option", { name: "B" }));
+      expect(onChange).toHaveBeenCalledWith({ count: undefined });
+    });
+
     it("renders no picker for a single-branch union but still shows its fields", () => {
       const schema: InspectorFormSchema = {
         type: "object",
