@@ -4063,13 +4063,18 @@ function App() {
           // `persistedPaginatedLists` — read from a `servers` entry that may be
           // stale, showing the same wrong value from the other side (#2089).
           //
-          // Applied only while this write's server is still the active one: the
-          // override is a single app-wide boolean and the live client belongs to
-          // whichever server is connected now, so a rejection arriving after the
-          // user switched would render this server's value on another one.
-          // The client is taken from the ref for the same reason the success
-          // path does: a reconnect to the same server passes the id check while
-          // this continuation's captured instance is already destroyed.
+          // The override is recorded whatever is active by the time this
+          // rejection arrives: it is keyed by this write's server and is only
+          // ever displayed while that server is the active one, so a switch in
+          // between costs nothing and dropping it would leave the stale entry
+          // to answer for A the next time it comes back (#2095).
+          //
+          // The live client is the half that stays gated — it belongs to
+          // whichever server is connected now, so pushing this server's value
+          // into it after a switch would apply it to another one. It is taken
+          // from the ref for the same reason the success path does: a reconnect
+          // to the same server passes the id check while this continuation's
+          // captured instance is already destroyed.
           const baseline =
             lastPersistedSettings.resolve(activeServerId) ?? EMPTY_SETTINGS;
           paginatedListsOverride.record(
