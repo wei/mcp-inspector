@@ -368,6 +368,46 @@ function hasDiscriminator(
 }
 
 /**
+ * Whether a schema's `additionalProperties` rejects names its own `properties`
+ * does not list.
+ *
+ * A schema that constrains nothing is the equivalent of `true`, and that is not
+ * only the empty object: `{ title: "Extra value" }` is annotation and no more.
+ * Treating either as restrictive would decline a legal permissive schema.
+ */
+function restrictsAdditional(schema: RootUnionSchema): boolean {
+  const additional = schema.additionalProperties;
+  return (
+    additional === false ||
+    (typeof additional === "object" &&
+      additional !== null &&
+      Object.keys(additional).some(
+        (keyword) => !ANNOTATION_KEYWORDS.has(keyword),
+      ))
+  );
+}
+
+/**
+ * Whether folding a member into a base would make names the base forbids look
+ * allowed.
+ *
+ * `additionalProperties` constrains whatever its **sibling** `properties` does
+ * not name, so under a restrictive one the base rejects every field the member
+ * adds. Merging moves those fields beside the keyword, where they read as
+ * permitted — and a form built from that submits what the schema forbids.
+ */
+function addsForbiddenNames(
+  base: RootUnionSchema,
+  member: RootUnionSchema,
+): boolean {
+  if (!restrictsAdditional(base)) return false;
+  const baseNames = propertiesOf(base) ?? {};
+  return Object.keys(propertiesOf(member) ?? {}).some(
+    (name) => !Object.hasOwn(baseNames, name),
+  );
+}
+
+/**
  * Every property name the schema's composition members declare, whether or not
  * the composition could be flattened.
  *
@@ -526,7 +566,8 @@ export function resolveRootUnion<T extends RootUnionSchema>(
     if (
       branch === null ||
       !isFlattenable(member) ||
-      conflictsWithBase(merged, branch)
+      conflictsWithBase(merged, branch) ||
+      addsForbiddenNames(merged, branch)
     ) {
       return { base: schema as ResolvedSchema<T>, branches: [] };
     }
@@ -562,25 +603,9 @@ export function resolveRootUnion<T extends RootUnionSchema>(
   // branches add — the original schema admits none of them. Flattening moves
   // those fields *beside* the keyword, where they would read as allowed, so a
   // form built from it would submit what the schema forbids.
-  const additional = base.additionalProperties;
-  const restrictsAdditional =
-    additional === false ||
-    // A schema that constrains nothing is the equivalent of `true`, and that is
-    // not only the empty object: `{ title: "Extra value" }` is annotation and
-    // no more. Declining on key count alone would recreate the empty form for a
-    // legal permissive schema, so what counts is whether an assertion is there.
-    (typeof additional === "object" &&
-      additional !== null &&
-      Object.keys(additional).some(
-        (keyword) => !ANNOTATION_KEYWORDS.has(keyword),
-      ));
-  const baseNames = propertiesOf(base) ?? {};
   if (
-    restrictsAdditional &&
     branches.some((branch) =>
-      Object.keys(propertiesOf(branch as RootUnionSchema) ?? {}).some(
-        (name) => !Object.hasOwn(baseNames, name),
-      ),
+      addsForbiddenNames(base, branch as RootUnionSchema),
     )
   ) {
     return { base, branches: [] };
@@ -646,7 +671,11 @@ export function selectBranchIndex<T extends RootUnionSchema>(
     // constant it did not supply is one this identification exists to *seed* —
     // requiring it would mean a deep link naming `kind` alone matched no branch
     // whenever the branches also pin, say, a `version`.
-    const supplied = pinned.filter(([name]) => values[name] !== undefined);
+    // `hasOwn`: a pinned field legally named `constructor` would otherwise read
+    // the inherited one as a supplied value and rule its own branch out.
+    const supplied = pinned.filter(
+      ([name]) => Object.hasOwn(values, name) && values[name] !== undefined,
+    );
     if (
       supplied.length > 0 &&
       // Structural, not reference: a `const` may be an object or an array, and

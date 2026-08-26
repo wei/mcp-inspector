@@ -147,6 +147,24 @@ describe("resolveRootUnion", () => {
     expect(base.properties).toBeUndefined();
   });
 
+  it("leaves an allOf that adds names a restrictive additionalProperties forbids", () => {
+    // The root rejects `x` as an additional property; folding the member in
+    // would move it beside the keyword, where it reads as allowed.
+    const { base } = resolveRootUnion({
+      type: "object",
+      additionalProperties: false,
+      allOf: [
+        {
+          type: "object",
+          properties: { x: { type: "string" } },
+          required: ["x"],
+        },
+      ],
+    });
+    expect(base.allOf).toHaveLength(1);
+    expect(base.properties).toBeUndefined();
+  });
+
   it("merges allOf branches unconditionally", () => {
     const { base, branches } = resolveRootUnion({
       type: "object",
@@ -752,6 +770,31 @@ describe("resolveRootUnion", () => {
         ],
       }).branches;
       expect(selectBranchIndex(objectPinned, { tag: { a: 2 } })).toBe(1);
+    });
+
+    it("does not read an inherited property as a supplied constant", () => {
+      // `constructor` is a legal field name; reading the inherited one would
+      // rule out the very branch that pins it.
+      const pinnedOnInherited = resolveRootUnion({
+        type: "object",
+        anyOf: [
+          {
+            type: "object",
+            properties: Object.fromEntries([
+              ["constructor", { const: "a" }],
+              ["x", { type: "string" }],
+            ]),
+          },
+          {
+            type: "object",
+            properties: Object.fromEntries([
+              ["constructor", { const: "b" }],
+              ["y", { type: "string" }],
+            ]),
+          },
+        ] as unknown[],
+      }).branches;
+      expect(selectBranchIndex(pinnedOnInherited, { x: "supplied" })).toBe(0);
     });
 
     it("reports none when the values identify nothing", () => {
