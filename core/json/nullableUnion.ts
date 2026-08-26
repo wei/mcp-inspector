@@ -427,6 +427,28 @@ export function admitsNull(schema: NullableUnionSchema): boolean {
   return anyOfAdmitsNull(schema);
 }
 
+/**
+ * Keywords that annotate rather than constrain — a schema carrying only these
+ * (or nothing at all) is the equivalent of `true`.
+ */
+const ANNOTATION_ONLY_KEYWORDS = new Set([
+  "title",
+  "description",
+  "examples",
+  "default",
+  "deprecated",
+  "readOnly",
+  "writeOnly",
+  "$comment",
+]);
+
+/** Whether a schema states no assertion at all. */
+function constrainsNothing(schema: NullableUnionSchema): boolean {
+  return Object.keys(schema).every((keyword) =>
+    ANNOTATION_ONLY_KEYWORDS.has(keyword),
+  );
+}
+
 /** Whether some `anyOf` branch is one that admits `null`. */
 function anyOfAdmitsNull(schema: NullableUnionSchema): boolean {
   const branches = schema.anyOf;
@@ -440,6 +462,11 @@ function anyOfAdmitsNull(schema: NullableUnionSchema): boolean {
     // a composition-free schema, which `admitsNull` answers without reaching
     // back into this function.
     if (hasUnevaluatedComposition(branchSchema)) return false;
+    // A branch that constrains nothing admits every value, `null` among them.
+    // `admitsNull` cannot say so on its own — an unconstrained schema tells it
+    // nothing either way, and it declines rather than guesses — but here the
+    // question is only whether this alternative leaves null on the table.
+    if (constrainsNothing(branchSchema)) return true;
     // Asked through `admitsNull` rather than by testing `type` alone, so a
     // branch spelling its nullability another way — `{ const: null }`,
     // `{ nullable: true }` — is recognized the same way the wrapper's own

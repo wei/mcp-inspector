@@ -264,7 +264,15 @@ export function convertToolParameters(
   for (const [key, value] of Object.entries(params)) {
     const paramSchema = properties[key] as ParameterSchema | undefined;
 
-    if (paramSchema) {
+    // A `const` the supplied text names is sent as the schema's own typed
+    // value, not as the text: a branch pinned to `const: 2` is selected by
+    // `kind=2` and would otherwise be sent `"2"`, which that same branch
+    // rejects. Only an exact match is substituted — anything else is the
+    // user's input and is left alone.
+    const pinned = (paramSchema as { const?: unknown } | undefined)?.const;
+    if (pinned !== undefined && String(pinned) === value) {
+      result[key] = pinned as JsonValue;
+    } else if (paramSchema) {
       result[key] = convertParameterValue(value, paramSchema);
     } else {
       result[key] = value;

@@ -759,6 +759,15 @@ describe("admitsNull", () => {
       );
     });
 
+    it("admits null when a sibling branch constrains nothing", () => {
+      // `{}` is the equivalent of `true` — it admits every value, null among
+      // them — so the pinned null stays reachable and its field submittable.
+      expect(admitsNull({ const: null, anyOf: [{}] })).toBe(true);
+      expect(admitsNull({ const: null, anyOf: [{ title: "anything" }] })).toBe(
+        true,
+      );
+    });
+
     it("does not override a sibling that rejects null", () => {
       // `const` is conjunctive with its siblings, not an override: both of
       // these reject every value, so claiming nullability would let the

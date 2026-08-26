@@ -215,6 +215,36 @@ describe("JSON Utils", () => {
       });
     });
 
+    it("sends a non-string discriminator as its typed constant (#2123)", () => {
+      const numericallyPinned: Tool = {
+        name: "numerically-pinned",
+        inputSchema: {
+          type: "object",
+          oneOf: [
+            {
+              type: "object",
+              properties: { kind: { const: 1 }, a: { type: "string" } },
+              required: ["kind"],
+            },
+            {
+              type: "object",
+              properties: { kind: { const: 2 }, b: { type: "string" } },
+              required: ["kind"],
+            },
+          ],
+        },
+      };
+      // `kind=2` selects the second branch, which then rejects `"2"` — the
+      // schema's own typed value is what goes on the wire.
+      expect(convertToolParameters(numericallyPinned, { kind: "2" })).toEqual({
+        kind: 2,
+      });
+      // Text that matches no constant is the user's input and is left alone.
+      expect(convertToolParameters(numericallyPinned, { kind: "9" })).toEqual({
+        kind: "9",
+      });
+    });
+
     it("leaves an ambiguously typed argument uncoerced (#2123)", () => {
       const ambiguous: Tool = {
         name: "ambiguous",
