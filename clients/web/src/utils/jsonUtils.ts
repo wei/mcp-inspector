@@ -195,6 +195,60 @@ export function collectSchemaDefaults(
 }
 
 /**
+ * Seed a schema's defaults underneath values a caller already holds, merging
+ * the two **per level** rather than with one shallow spread.
+ *
+ * The App deep link is the caller: it holds `appArgs` and needs the defaults
+ * the form would otherwise display. A shallow `{ ...defaults, ...args }`
+ * replaces a nested object wholesale, so `{ config: { kind: "sms" } }` discards
+ * the nested SMS branch's own defaults — which the form then shows while the
+ * submitted arguments omit them (#2123). Recursing also lets each nested level
+ * pick its branch from the nested values, rather than from the top-level ones.
+ *
+ * The supplied value always wins where the two meet; only what it does not
+ * mention is seeded.
+ */
+export function seedSchemaValues(
+  schema: InspectorFormSchema,
+  suppliedValues: Record<string, unknown>,
+): Record<string, unknown> {
+  const { base, branches } = resolveRootUnion(schema);
+  const selected = selectBranchIndex(branches, suppliedValues) ?? 0;
+  const effective = branches[selected]?.schema ?? base;
+  const properties = effective.properties ?? {};
+
+  const merged: Record<string, unknown> = {
+    ...collectSchemaDefaults(effective, suppliedValues),
+  };
+  for (const [name, value] of Object.entries(suppliedValues)) {
+    const fieldSchema = normalizeNullableUnion(properties[name] ?? {});
+    const mergedValue =
+      isPlainObject(value) &&
+      fieldSchema.type === "object" &&
+      declaresAnyFields(fieldSchema)
+        ? seedSchemaValues(
+            fieldSchema,
+            // The nested defaults are re-derived by the recursion, so only the
+            // supplied half is passed down.
+            value,
+          )
+        : value;
+    Object.defineProperty(merged, name, {
+      value: mergedValue,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+  }
+  return merged;
+}
+
+/** Whether a value is a plain object a nested schema could describe. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
  * Overwrite every `const`-pinned field with the value its schema fixes.
  *
  * The form renders such a field read-only, so a value disagreeing with it can

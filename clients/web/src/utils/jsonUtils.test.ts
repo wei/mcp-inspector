@@ -7,6 +7,7 @@ import {
   collectSchemaDefaults,
   hasMissingRequiredFields,
   applySchemaConstants,
+  seedSchemaValues,
 } from "./jsonUtils";
 import type { InspectorFormSchema } from "./jsonUtils";
 
@@ -486,6 +487,65 @@ describe("root composition (#2123)", () => {
         },
       }),
     ).toEqual({ config: { kind: "email" } });
+  });
+
+  describe("seedSchemaValues", () => {
+    const NESTED: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        config: {
+          type: "object",
+          anyOf: [
+            {
+              type: "object",
+              properties: {
+                kind: { type: "string", const: "email" },
+                retries: { type: "number", default: 1 },
+              },
+            },
+            {
+              type: "object",
+              properties: {
+                kind: { type: "string", const: "sms" },
+                retries: { type: "number", default: 3 },
+              },
+            },
+          ],
+        },
+      },
+    };
+
+    it("keeps a nested branch's defaults beside the supplied values", () => {
+      // A shallow spread would replace the whole `config` object, so the SMS
+      // branch's `retries` would be displayed by the form and never submitted.
+      expect(seedSchemaValues(NESTED, { config: { kind: "sms" } })).toEqual({
+        config: { kind: "sms", retries: 3 },
+      });
+    });
+
+    it("lets the supplied value win where the two meet", () => {
+      expect(
+        seedSchemaValues(NESTED, { config: { kind: "sms", retries: 9 } }),
+      ).toEqual({ config: { kind: "sms", retries: 9 } });
+    });
+
+    it("does not treat an array as a nested object", () => {
+      const withArray: InspectorFormSchema = {
+        type: "object",
+        properties: { items: { type: "array" } },
+      };
+      expect(seedSchemaValues(withArray, { items: [1, 2] })).toEqual({
+        items: [1, 2],
+      });
+    });
+
+    it("keeps a supplied argument named __proto__", () => {
+      const seeded = seedSchemaValues(
+        { type: "object", properties: {} },
+        Object.fromEntries([["__proto__", "kept"]]),
+      );
+      expect(Object.hasOwn(seeded, "__proto__")).toBe(true);
+    });
   });
 
   it("re-applies a nested object's constants", () => {

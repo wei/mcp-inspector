@@ -105,7 +105,7 @@ import {
 } from "../../../utils/correlateTransportErrors";
 import {
   applySchemaConstants,
-  collectSchemaDefaults,
+  seedSchemaValues,
   toFormSchema,
 } from "../../../utils/jsonUtils";
 import { MONITOR_COLUMN_ANIM_MS } from "./monitorColumnAnimation";
@@ -1049,10 +1049,13 @@ export function InspectorView({
     // link disagreeing with one would otherwise auto-open with a hidden value
     // contradicting the shape on screen.
     const appFormSchema = toFormSchema(target.inputSchema) ?? {};
-    const formValues = applySchemaConstants(appFormSchema, {
-      ...collectSchemaDefaults(appFormSchema, deepLink.appArgs ?? {}),
-      ...deepLink.appArgs,
-    });
+    const formValues = applySchemaConstants(
+      appFormSchema,
+      // Merged per level, not with one shallow spread: a nested object in the
+      // args would otherwise replace the whole seeded object, discarding the
+      // nested defaults the form goes on displaying.
+      seedSchemaValues(appFormSchema, deepLink.appArgs ?? {}),
+    );
     // Seed the selection directly rather than routing through
     // AppsScreen.handleSelect. This deliberately bypasses handleSelect's
     // no-input-app auto-launch: a deep link must never invoke a tool against
