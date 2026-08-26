@@ -27,11 +27,12 @@
  * `SMOKE_BROWSER` picks the engine (`chromium` — the default — `firefox`, or
  * `webkit`). CI gates **Chromium** (in the `build` job's `npm run smoke`) and
  * **Firefox** (in the `Sandbox smokes` matrix job); WebKit runs here but is not
- * gated yet — it fails on #2132 under Playwright's WebKit, by a mechanism that
- * is NOT yet identified (the first diagnosis was retracted when an isolated
- * repro did not reproduce it, and the failure stage varies between runs). It has
- * NOT been reproduced in real Safari, so treat it as a property of that build
- * rather than a browser bug until someone shows otherwise (#2086).
+ * gated: this smoke fails under Playwright's WebKit for reasons nobody has
+ * identified, and nobody is currently investigating. It does NOT reproduce in
+ * real Safari, and an isolated SSE repro did not reproduce it in Playwright's
+ * WebKit either — so it is a property of that build, not a browser bug, and it
+ * was judged not worth chasing. Run WebKit locally if you want the signal; do
+ * not read a failure here as a defect until someone has looked (#2086).
  *
  * Along with `smoke:web:app` this is one
  * of the two places the MCP Apps sandbox is actually loaded, and the two nested

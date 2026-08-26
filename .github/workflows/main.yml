@@ -127,9 +127,8 @@ jobs:
   # there plus whatever the matrix below names.
   #
   # This is the only place the MCP Apps sandbox is exercised on a non-Chromium
-  # engine, and it earned its keep immediately: pointing the smokes at WebKit is
-  # what found #2132, an undelivered-SSE-tail hang no Chromium-only tier could
-  # see. (Note #2132 is NOT known to affect Safari — see the matrix comment.)
+  # engine — which is why Firefox is gated here rather than assumed to behave
+  # like Chromium.
   #
   # The unit tests cannot substitute — `sandbox-csp.test.ts` asserts
   # which policy STRING is built, which passes identically on an engine that
@@ -149,10 +148,11 @@ jobs:
       matrix:
         # `webkit` belongs here and is deliberately absent: the smokes RUN in it
         # (`SMOKE_BROWSER=webkit` works, and smoke:web:browser passes), but the
-        # two App smokes fail on #2132, by a mechanism not yet identified — the
-        # first diagnosis was retracted when an isolated repro did not reproduce
-        # it. Not reproduced in real Safari either, so read it as a property of
-        # Playwright's WebKit build rather than a browser bug. Adding it here is a one-word diff once it is
+        # two App smokes fail there for reasons nobody has identified. It does
+        # NOT reproduce in real Safari, and an isolated SSE repro did not
+        # reproduce it under Playwright's WebKit either, so it reads as a
+        # property of that build rather than a browser bug — and chasing it
+        # further was judged not worth the effort. Adding it here is a one-word diff once it is
         # resolved. An engine is either green or absent; a `continue-on-error`
         # job would report coverage nobody is holding to a standard.
         browser: [firefox]

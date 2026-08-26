@@ -27,11 +27,12 @@
  * catch engine-level CSP and iframe divergence, and not close enough to certify
  * Safari specifically — a green run here is not a Safari guarantee.
  *
- * **And that cuts both ways: a RED run here is not a Safari indictment.** #2132
- * was written up as a Safari bug on the strength of a failure in this build
- * alone; a manual check in Safari did not reproduce it. The divergence is widest
- * in the networking layer, which is exactly where that failure lives. Reproduce
- * in the real browser before describing a finding as one users hit.
+ * **And that cuts both ways: a RED run here is not a Safari indictment.** The
+ * WebKit App-smoke failure was once written up as a Safari bug on the strength
+ * of a failure in this build alone; a manual check in Safari did not reproduce
+ * it, an isolated repro of the claimed mechanism did not reproduce it here
+ * either, and the whole line of investigation was dropped. Reproduce in the real
+ * browser before describing a finding as one users hit.
  *
  * Playwright is resolved with a `createRequire` based at
  * clients/web/package.json rather than a bare `import("playwright")`: a bare ESM
