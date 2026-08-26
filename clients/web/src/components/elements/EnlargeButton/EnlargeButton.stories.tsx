@@ -11,12 +11,15 @@ const meta: Meta<typeof EnlargeButton> = {
 export default meta;
 type Story = StoryObj<typeof EnlargeButton>;
 
-// Default: labelled "Enlarge", reachable by keyboard, and clickable.
+// Default: labelled "Enlarge", clickable, and out of the tab order (#2138) —
+// a form's string fields each carry one, so leaving them in doubled the tab
+// stops between adjacent fields. SchemaForm binds Enter on the field itself as
+// the keyboard route in.
 export const Default: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const button = await canvas.findByRole("button", { name: "Enlarge" });
-    await expect(button).not.toHaveAttribute("tabindex", "-1");
+    await expect(button).toHaveAttribute("tabindex", "-1");
     await userEvent.click(button);
   },
 };
