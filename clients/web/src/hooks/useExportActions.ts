@@ -20,9 +20,14 @@ export type ProtocolSection = "pinned" | "history";
 export interface UseExportActionsParams {
   /** The active server's id, stamped into every export filename. */
   activeServerId?: string;
-  messageLogState: MessageLogState | null;
-  fetchRequestLogState: FetchRequestLogState | null;
-  stderrLogState: StderrLogState | null;
+  /**
+   * Only the clearing method of each store is named, rather than the whole
+   * class: that is all these handlers touch, and a narrower parameter lets a
+   * test supply a structurally-checked double instead of a cast-away stand-in.
+   */
+  messageLogState: Pick<MessageLogState, "clearMessages"> | null;
+  fetchRequestLogState: Pick<FetchRequestLogState, "clearFetchRequests"> | null;
+  stderrLogState: Pick<StderrLogState, "clearStderrLogs"> | null;
   /** The Protocol view's entries (the message log). */
   messages: MessageEntry[];
   /** The Network view's entries. */

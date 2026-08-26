@@ -44,9 +44,12 @@ export interface TabUiStateResult {
   togglePinProtocol: (id: string) => void;
   /**
    * Reset every screen's UI object and the pin set to their empty defaults.
-   * Stable, so the session-reset callback that drives it needs no dependency
-   * on this hook. Deliberately leaves `activeTab` alone: the tab the user is
-   * on is shell state, reset separately on an *explicit* disconnect.
+   * Its identity never changes, so naming it in the dependency array of the
+   * session-reset callback that drives it — which `exhaustive-deps` requires,
+   * since the rule cannot infer stability across a custom-hook boundary —
+   * costs that callback no churn. Deliberately leaves `activeTab` alone: the
+   * tab the user is on is shell state, reset separately on an *explicit*
+   * disconnect.
    */
   resetTabUiState: () => void;
 }

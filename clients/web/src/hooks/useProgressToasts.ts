@@ -1,15 +1,27 @@
 import { useEffect, useRef } from "react";
 import { notifications } from "@mantine/notifications";
-import type {
-  InspectorClient,
-  InspectorClientEventMap,
-} from "@inspector/core/mcp/index.js";
+import type { InspectorClientEventMap } from "@inspector/core/mcp/index.js";
+import type { InspectorClientEventTarget } from "@inspector/core/mcp/inspectorClientEventTarget.js";
 import type { TypedEventGeneric } from "@inspector/core/mcp/typedEventTarget.js";
 import {
   formatProgressToastMessage,
   PROGRESS_TOAST_AUTOCLOSE_MS,
   progressToastId,
 } from "../utils/toasts/progressToasts";
+
+/**
+ * The only part of the client the toast hooks touch: its typed event-listener
+ * surface. Naming that rather than the whole `InspectorClient` states the real
+ * dependency, and lets a test drive them with a plain
+ * `InspectorClientEventTarget` instead of a stand-in cast to a full client.
+ *
+ * Declared here (rather than in a module of its own) because it has no runtime
+ * half, and `useTaskToasts` — its only other consumer — is a sibling.
+ */
+export type InspectorClientEventSource = Pick<
+  InspectorClientEventTarget,
+  "addEventListener" | "removeEventListener"
+>;
 
 /**
  * Surface incoming `notifications/progress` as toasts so the user can watch a
@@ -21,7 +33,9 @@ import {
  * (see `progressToastId`) and replaced per tick, so a chatty server updates one
  * toast rather than stacking one per tick.
  */
-export function useProgressToasts(inspectorClient: InspectorClient | null) {
+export function useProgressToasts(
+  inspectorClient: InspectorClientEventSource | null,
+) {
   // Which progress streams currently have a live toast. Entries are removed
   // when their toast closes (auto-dismiss or user). A ref (not state) because
   // it is incidental bookkeeping that must not trigger re-renders.

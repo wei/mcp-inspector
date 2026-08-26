@@ -87,14 +87,22 @@ describe("useTabUiState", () => {
     expect(h.api().activeTab).toBe("Tools");
   });
 
-  it("keeps resetTabUiState stable so a []-dep session reset can call it", () => {
+  it("keeps its callbacks stable, so naming them in a dependency array costs no churn", () => {
     const h = harness();
-    const before = h.api().resetTabUiState;
+    // Captured BEFORE the update: comparing the post-render values to each
+    // other would hold however the identities changed.
+    const resetBefore = h.api().resetTabUiState;
+    const toggleBefore = h.api().togglePinProtocol;
+    const setPinsBefore = h.api().setPinnedProtocolIds;
+    const setTabBefore = h.api().setActiveTab;
+
     h.run((api) => api.setActiveTab("Logs"));
-    expect(h.api().resetTabUiState).toBe(before);
-    expect(h.api().togglePinProtocol).toBe(
-      // togglePin is likewise stable — it is passed straight into the JSX.
-      h.api().togglePinProtocol,
-    );
+    h.run((api) => api.togglePinProtocol("m1"));
+
+    expect(h.renders()).toBeGreaterThan(1);
+    expect(h.api().resetTabUiState).toBe(resetBefore);
+    expect(h.api().togglePinProtocol).toBe(toggleBefore);
+    expect(h.api().setPinnedProtocolIds).toBe(setPinsBefore);
+    expect(h.api().setActiveTab).toBe(setTabBefore);
   });
 });

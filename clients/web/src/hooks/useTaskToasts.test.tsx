@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { act } from "react";
 import type { Task } from "@modelcontextprotocol/client";
-import type { InspectorClient } from "@inspector/core/mcp/index.js";
+import { InspectorClientEventTarget } from "@inspector/core/mcp/inspectorClientEventTarget.js";
 import { renderWithMantine } from "../test/renderWithMantine";
 import { taskToastId } from "../utils/toasts/taskToasts";
 import { useTaskToasts, type TaskToasts } from "./useTaskToasts";
@@ -18,46 +18,72 @@ vi.mock("@mantine/notifications", () => ({
   notifications: notificationsMock,
 }));
 
-/** The hook only calls `add/removeEventListener`, so a bare EventTarget does. */
-function fakeClient(): InspectorClient & EventTarget {
-  return new EventTarget() as unknown as InspectorClient & EventTarget;
+/**
+ * The client's own typed event target — exactly the surface the hook declares,
+ * so the events dispatched below are the same typed events the client emits.
+ */
+function fakeClient(): InspectorClientEventTarget {
+  return new InspectorClientEventTarget();
 }
 
-const task = (status: Task["status"]): Pick<Task, "status"> => ({ status });
+/** A complete `Task`; only `status` varies across these tests. */
+const task = (taskId: string, status: Task["status"]): Task => ({
+  taskId,
+  status,
+  ttl: null,
+  createdAt: "2026-01-01T00:00:00.000Z",
+  lastUpdatedAt: "2026-01-01T00:00:00.000Z",
+});
 
-function harness(client: InspectorClient & EventTarget) {
+function harness(client: InspectorClientEventTarget) {
   let latest: TaskToasts | undefined;
-  function Probe({ c }: { c: InspectorClient | null }) {
+  function Probe({ c }: { c: InspectorClientEventTarget | null }) {
     latest = useTaskToasts(c);
     return null;
   }
   const { rerender, unmount } = renderWithMantine(<Probe c={client} />);
-  const fire = (type: string, detail: unknown) =>
-    act(() => {
-      client.dispatchEvent(new CustomEvent(type, { detail }));
-    });
+  const dispatch = (fn: () => void) => act(fn);
   return {
     api: () => {
       if (!latest) throw new Error("hook did not render");
       return latest;
     },
     taskProgress: (taskId: string, progress: number, total?: number) =>
-      fire("requestorTaskProgress", {
-        taskId,
-        progress: { progress, total },
-      }),
+      dispatch(() =>
+        client.dispatchTypedEvent("requestorTaskProgress", {
+          taskId,
+          progress: { progress, total },
+        }),
+      ),
     statusChange: (taskId: string, status: Task["status"]) =>
-      fire("taskStatusChange", { taskId, task: task(status) }),
+      dispatch(() =>
+        client.dispatchTypedEvent("taskStatusChange", {
+          taskId,
+          task: task(taskId, status),
+        }),
+      ),
     requestorUpdate: (taskId: string, status: Task["status"]) =>
-      fire("requestorTaskUpdated", { taskId, task: task(status) }),
-    cancelled: (taskId: string) => fire("taskCancelled", { taskId }),
-    toolCallTask: (taskId: string) => fire("toolCallTaskUpdated", { taskId }),
+      dispatch(() =>
+        client.dispatchTypedEvent("requestorTaskUpdated", {
+          taskId,
+          task: task(taskId, status),
+        }),
+      ),
+    cancelled: (taskId: string) =>
+      dispatch(() => client.dispatchTypedEvent("taskCancelled", { taskId })),
+    toolCallTask: (taskId: string) =>
+      dispatch(() =>
+        client.dispatchTypedEvent("toolCallTaskUpdated", {
+          taskId,
+          task: task(taskId, "working"),
+        }),
+      ),
     run: (fn: (api: TaskToasts) => void) =>
       act(() => {
         if (!latest) throw new Error("hook did not render");
         fn(latest);
       }),
-    swapClient: (next: InspectorClient | null) =>
+    swapClient: (next: InspectorClientEventTarget | null) =>
       act(() => rerender(<Probe c={next} />)),
     unmount: () => act(() => unmount()),
   };
@@ -213,9 +239,10 @@ describe("useTaskToasts", () => {
       const h = harness(first);
       h.swapClient(null);
       act(() => {
-        first.dispatchEvent(
-          new CustomEvent("toolCallTaskUpdated", { detail: { taskId: "t9" } }),
-        );
+        first.dispatchTypedEvent("toolCallTaskUpdated", {
+          taskId: "t9",
+          task: task("t9", "working"),
+        });
       });
       expect(h.api().activeToolCallTaskIdRef.current).toBeUndefined();
     });
@@ -235,11 +262,10 @@ describe("useTaskToasts", () => {
       h.swapClient(fakeClient());
       notificationsMock.show.mockClear();
       act(() => {
-        first.dispatchEvent(
-          new CustomEvent("taskStatusChange", {
-            detail: { taskId: "t1", task: task("working") },
-          }),
-        );
+        first.dispatchTypedEvent("taskStatusChange", {
+          taskId: "t1",
+          task: task("t1", "working"),
+        });
       });
       expect(notificationsMock.show).not.toHaveBeenCalled();
     });
@@ -256,11 +282,10 @@ describe("useTaskToasts", () => {
       const h = harness(first);
       h.swapClient(null);
       act(() => {
-        first.dispatchEvent(
-          new CustomEvent("requestorTaskProgress", {
-            detail: { taskId: "t1", progress: { progress: 1 } },
-          }),
-        );
+        first.dispatchTypedEvent("requestorTaskProgress", {
+          taskId: "t1",
+          progress: { progress: 1 },
+        });
       });
       expect(h.api().progressByTaskId).toEqual({});
     });

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { act } from "react";
-import type { InspectorClient } from "@inspector/core/mcp/index.js";
+import { InspectorClientEventTarget } from "@inspector/core/mcp/inspectorClientEventTarget.js";
 import { renderWithMantine } from "../test/renderWithMantine";
 import { progressToastId } from "../utils/toasts/progressToasts";
 import { useProgressToasts } from "./useProgressToasts";
@@ -20,16 +20,16 @@ vi.mock("@mantine/notifications", () => ({
 }));
 
 /**
- * The hook only ever calls `add/removeEventListener`, so a bare `EventTarget`
- * is a faithful stand-in for the client — the events are real DOM events and
- * the listener wiring under test is the real wiring.
+ * The client's own typed event target, which is exactly the surface the hook
+ * declares — so this is the real wiring under test, not a stand-in: the events
+ * dispatched below are the same typed events the client emits.
  */
-function fakeClient(): InspectorClient & EventTarget {
-  return new EventTarget() as unknown as InspectorClient & EventTarget;
+function fakeClient(): InspectorClientEventTarget {
+  return new InspectorClientEventTarget();
 }
 
-function harness(client: InspectorClient & EventTarget) {
-  function Probe({ c }: { c: InspectorClient | null }) {
+function harness(client: InspectorClientEventTarget) {
+  function Probe({ c }: { c: InspectorClientEventTarget | null }) {
     useProgressToasts(c);
     return null;
   }
@@ -37,13 +37,13 @@ function harness(client: InspectorClient & EventTarget) {
   return {
     progress: (progressToken: string, progress: number, total?: number) =>
       act(() => {
-        client.dispatchEvent(
-          new CustomEvent("progressNotification", {
-            detail: { progressToken, progress, total },
-          }),
-        );
+        client.dispatchTypedEvent("progressNotification", {
+          progressToken,
+          progress,
+          total,
+        });
       }),
-    swapClient: (next: InspectorClient | null) =>
+    swapClient: (next: InspectorClientEventTarget | null) =>
       act(() => rerender(<Probe c={next} />)),
     unmount: () => act(() => unmount()),
   };
@@ -125,11 +125,10 @@ describe("useProgressToasts", () => {
     h.swapClient(fakeClient());
     notificationsMock.show.mockClear();
     act(() => {
-      first.dispatchEvent(
-        new CustomEvent("progressNotification", {
-          detail: { progressToken: "tok-1", progress: 1 },
-        }),
-      );
+      first.dispatchTypedEvent("progressNotification", {
+        progressToken: "tok-1",
+        progress: 1,
+      });
     });
     expect(notificationsMock.show).not.toHaveBeenCalled();
   });

@@ -32,21 +32,21 @@ const { replayProtocolRequest } = vi.hoisted(() => ({
 }));
 vi.mock("../lib/protocolReplay", () => ({ replayProtocolRequest }));
 
-const request = (id: string, method: string): MessageEntry =>
-  ({
-    id,
-    direction: "request",
-    timestamp: 0,
-    message: { jsonrpc: "2.0", id: 1, method, params: { a: 1 } },
-  }) as unknown as MessageEntry;
+const AT = new Date(0);
 
-const logNotification = (id: string): MessageEntry =>
-  ({
-    id,
-    direction: "notification",
-    timestamp: 0,
-    message: { jsonrpc: "2.0", method: "notifications/message" },
-  }) as unknown as MessageEntry;
+const request = (id: string, method: string): MessageEntry => ({
+  id,
+  direction: "request",
+  timestamp: AT,
+  message: { jsonrpc: "2.0", id: 1, method, params: { a: 1 } },
+});
+
+const logNotification = (id: string): MessageEntry => ({
+  id,
+  direction: "notification",
+  timestamp: AT,
+  message: { jsonrpc: "2.0", method: "notifications/message" },
+});
 
 function harness(overrides: Partial<UseExportActionsParams> = {}) {
   const messageLogState = { clearMessages: vi.fn() };
@@ -55,12 +55,11 @@ function harness(overrides: Partial<UseExportActionsParams> = {}) {
   const setPinnedProtocolIds = vi.fn();
   const params: UseExportActionsParams = {
     activeServerId: "srv",
-    messageLogState:
-      messageLogState as unknown as UseExportActionsParams["messageLogState"],
-    fetchRequestLogState:
-      fetchRequestLogState as unknown as UseExportActionsParams["fetchRequestLogState"],
-    stderrLogState:
-      stderrLogState as unknown as UseExportActionsParams["stderrLogState"],
+    // Structurally checked against the hook's narrowed store parameters — each
+    // names only the clearing method these handlers call.
+    messageLogState,
+    fetchRequestLogState,
+    stderrLogState,
     messages: [],
     fetchRequests: [],
     logs: [],
@@ -281,9 +280,9 @@ describe("useExportActions", () => {
           {
             id: "r1",
             direction: "response",
-            timestamp: 0,
+            timestamp: AT,
             message: { jsonrpc: "2.0", id: 1, result: {} },
-          } as unknown as MessageEntry,
+          },
         ],
       });
       result.run((api) => api.onReplayProtocol("r1"));
@@ -298,9 +297,9 @@ describe("useExportActions", () => {
           {
             id: "r1",
             direction: "request",
-            timestamp: 0,
+            timestamp: AT,
             message: { jsonrpc: "2.0", id: 1, method: "ping" },
-          } as unknown as MessageEntry,
+          },
         ],
       });
       h.run((api) => api.onReplayProtocol("r1"));

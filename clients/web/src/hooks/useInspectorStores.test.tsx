@@ -127,7 +127,16 @@ vi.mock("@inspector/core/react/useStderrLog.js", () => ({
   useStderrLog: () => ({ stderrLogs: [{ id: "s1" }] }),
 }));
 
-const client = () => ({ id: "client" }) as unknown as InspectorClient;
+/**
+ * A per-call identity token standing in for the client. Every store
+ * constructor is mocked away below, so nothing here ever reads a property off
+ * it — the assertions only check *which* value each constructor received, and
+ * that a second `createStores` passes a different one. The double cast is what
+ * that isolation buys: building a real `InspectorClient` would drag in a
+ * transport and an environment to assert on object identity.
+ */
+const client = () =>
+  ({ marker: Symbol("client") }) as unknown as InspectorClient;
 
 const fetchLogOptions = {
   maxFetchRequests: 42,

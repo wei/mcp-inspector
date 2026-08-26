@@ -1,10 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { notifications } from "@mantine/notifications";
-import type {
-  InspectorClient,
-  InspectorClientEventMap,
-} from "@inspector/core/mcp/index.js";
+import type { InspectorClientEventMap } from "@inspector/core/mcp/index.js";
 import type { TypedEventGeneric } from "@inspector/core/mcp/typedEventTarget.js";
+import type { InspectorClientEventSource } from "./useProgressToasts";
 import type { TaskProgress } from "../components/groups/TaskCard/TaskCard";
 import {
   formatTaskToastMessage,
@@ -47,7 +45,7 @@ export interface TaskToasts {
  * status history still lives in the Protocol view.
  */
 export function useTaskToasts(
-  inspectorClient: InspectorClient | null,
+  inspectorClient: InspectorClientEventSource | null,
 ): TaskToasts {
   // One live task-status toast per taskId, so each `notifications/tasks/status`
   // tick replaces the existing toast rather than stacking a fresh one.
