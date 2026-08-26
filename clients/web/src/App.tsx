@@ -116,6 +116,7 @@ import { usePagedPrompts } from "@inspector/core/react/usePagedPrompts.js";
 import { usePagedResources } from "@inspector/core/react/usePagedResources.js";
 import { usePaginatedList } from "./hooks/usePaginatedList";
 import { useLastPersistedSettings } from "./hooks/useLastPersistedSettings";
+import { usePaginatedListsOverride } from "./hooks/usePaginatedListsOverride";
 import { useValueChange } from "./hooks/useValueChange";
 import type { ListPaginationControlsProps } from "./components/elements/ListPaginationControls/ListPaginationControls";
 import { useManagedResourceTemplates } from "@inspector/core/react/useManagedResourceTemplates.js";
@@ -1234,26 +1235,15 @@ function App() {
   const activeServerEntry = servers.find((s) => s.id === activeServerId);
   const persistedPaginatedLists =
     activeServerEntry?.settings?.paginatedLists ?? false;
-  const [paginatedListsOverride, setPaginatedListsOverride] = useState<
-    boolean | null
-  >(null);
-  // Drop the optimistic override once the persisted value catches up (or the
-  // active server changes), so the persisted setting is the resting source.
-  //
-  // Keyed on the entry object rather than on the boolean it carries: the
-  // override can hold a *concrete* value (a rollback sets one instead of
-  // clearing), and if a later successful read reports the value that override
-  // replaced — an outside edit overtaking the write — the boolean and the
-  // server id are both unchanged and the UI stays stuck on it. Every successful
-  // read rebuilds the list, so the entry is the signal that supersedes it, and
-  // it subsumes the other two: the value is read off this entry, and switching
-  // servers selects a different one (#2089).
-  //
-  // Adjusted during render rather than in an effect, per this repo's rule
-  // against resetting state from render data in `useEffect` — the entry is
-  // referentially stable between reads, which is what `useValueChange` needs.
-  useValueChange(activeServerEntry, () => setPaginatedListsOverride(null));
-  const paginatedLists = paginatedListsOverride ?? persistedPaginatedLists;
+  // The optimistic override, held per server and superseded by the first
+  // successful list read that rebuilds that server's entry. Per server rather
+  // than one app-wide slot cleared on every active-entry change: the previous
+  // shape dropped the override on a plain server switch, so an A → B → A round
+  // trip fell back to A's stale entry and showed a value neither disk nor the
+  // live client held (#2095).
+  const paginatedListsOverride = usePaginatedListsOverride(servers);
+  const paginatedLists =
+    paginatedListsOverride.valueFor(activeServerId) ?? persistedPaginatedLists;
   // The malformed-entry report is written by the aggregate walk's salvage. In
   // paginated mode the tools/prompts/resources panels render the paged stores
   // instead, which never write or clear it — so it would linger above a page it
@@ -3968,9 +3958,13 @@ function App() {
   // gating reads it now, and a persisted PUT so it survives reconnects (#1721).
   const onTogglePaginatedLists = useCallback(
     (value: boolean) => {
-      setPaginatedListsOverride(value);
       const current = servers.find((s) => s.id === activeServerId);
       if (!current || activeServerId === undefined) return;
+      // Recorded against this server rather than app-wide, so it survives a
+      // switch away and back (#2095). Ordered after the id guard because the
+      // record is keyed by that id; with no active server there is nothing the
+      // toggle could have been flipped for.
+      paginatedListsOverride.record(activeServerId, value);
       // Not `current.settings` directly: that entry only advances on a
       // successful list read, so once one has failed it describes disk as it
       // was *before* the writes made since. Build on the last write known to
@@ -4019,8 +4013,16 @@ function App() {
       // already destroyed.
       const settlePaginationWrite = () => {
         const settled = write.landed(next);
-        if (settled && activeServerIdRef.current === activeServerId) {
-          setPaginatedListsOverride(next.paginatedLists ?? false);
+        if (!settled) return;
+        // The override is keyed by server, so it is re-applied whatever is
+        // active now — it is this server's value and is only ever displayed
+        // while this server is the active one. The live client is not: it
+        // belongs to whichever server is connected (#2095).
+        paginatedListsOverride.record(
+          activeServerId,
+          next.paginatedLists ?? false,
+        );
+        if (activeServerIdRef.current === activeServerId) {
           applyLiveServerSettings(next);
         }
       };
@@ -4070,8 +4072,11 @@ function App() {
           // this continuation's captured instance is already destroyed.
           const baseline =
             lastPersistedSettings.resolve(activeServerId) ?? EMPTY_SETTINGS;
+          paginatedListsOverride.record(
+            activeServerId,
+            baseline.paginatedLists ?? false,
+          );
           if (activeServerIdRef.current === activeServerId) {
-            setPaginatedListsOverride(baseline.paginatedLists ?? false);
             applyLiveServerSettings(baseline);
           }
           notifications.show({
@@ -4085,6 +4090,7 @@ function App() {
       servers,
       activeServerId,
       lastPersistedSettings,
+      paginatedListsOverride,
       applyLiveServerSettings,
       inspectorClient,
       updateServerSettings,
@@ -4513,8 +4519,9 @@ function App() {
       const write = lastPersistedSettings.begin(id);
       const settleSettingsWrite = () => {
         const settled = write.landed(value);
-        if (settled && activeServerIdRef.current === id) {
-          setPaginatedListsOverride(value.paginatedLists ?? false);
+        if (!settled) return;
+        paginatedListsOverride.record(id, value.paginatedLists ?? false);
+        if (activeServerIdRef.current === id) {
           applyLiveServerSettings(value);
         }
       };
@@ -4541,9 +4548,11 @@ function App() {
         // write is the account of it and nothing else will re-apply it. Same
         // reconciliation the toggle's own failure path does.
         const baseline = lastPersistedSettings.resolve(id);
-        if (baseline && activeServerIdRef.current === id) {
-          setPaginatedListsOverride(baseline.paginatedLists ?? false);
-          applyLiveServerSettings(baseline);
+        if (baseline) {
+          paginatedListsOverride.record(id, baseline.paginatedLists ?? false);
+          if (activeServerIdRef.current === id) {
+            applyLiveServerSettings(baseline);
+          }
         }
         throw err;
       }
