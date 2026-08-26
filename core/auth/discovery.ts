@@ -74,33 +74,35 @@ export function getAuthorizationServerUrlCandidates(
   return [primary, new URL("/", primary)];
 }
 
+export interface DiscoveredAuthorizationServer {
+  /** The candidate that answered — not necessarily the first one tried. */
+  authorizationServerUrl: URL;
+  metadata: NonNullable<AuthorizationServerMetadata>;
+}
+
 /**
- * Discovers authorization server metadata for an MCP server, walking the
- * candidates above until one answers.
+ * Walks `candidates` until one answers, and reports **which** one did.
  *
  * A candidate that fails — a 5xx, or an RFC 8414 §3.3 issuer mismatch, both of
  * which the SDK raises rather than returning `undefined` — is not fatal while
  * another candidate remains. If every candidate fails, the first error is
  * rethrown, so a caller still sees the original diagnosis rather than a bare
  * `undefined`.
+ *
+ * `discover` is injected rather than closed over so a caller that already owns
+ * a discovery function — the CLI's `refreshStoredAuthToken`, which takes one as
+ * a test seam — can walk the same candidates without giving that seam up.
  */
-export async function discoverAuthorizationServerMetadataForServer(
-  serverUrl: string,
-  resourceMetadata?: OAuthProtectedResourceMetadata | null,
-  fetchFn?: typeof fetch,
-): Promise<AuthorizationServerMetadata> {
-  const candidates = getAuthorizationServerUrlCandidates(
-    serverUrl,
-    resourceMetadata,
-  );
+export async function discoverAuthorizationServerMetadataFromCandidates(
+  candidates: URL[],
+  discover: (url: URL) => Promise<AuthorizationServerMetadata>,
+): Promise<DiscoveredAuthorizationServer | undefined> {
   let firstError: unknown;
   let sawError = false;
   for (const candidate of candidates) {
     try {
-      const metadata = await discoverAuthorizationServerMetadata(candidate, {
-        fetchFn,
-      });
-      if (metadata) return metadata;
+      const metadata = await discover(candidate);
+      if (metadata) return { authorizationServerUrl: candidate, metadata };
     } catch (err) {
       if (!sawError) {
         firstError = err;
@@ -110,6 +112,22 @@ export async function discoverAuthorizationServerMetadataForServer(
   }
   if (sawError) throw firstError;
   return undefined;
+}
+
+/**
+ * Discovers authorization server metadata for an MCP server, walking the
+ * candidates above until one answers.
+ */
+export async function discoverAuthorizationServerMetadataForServer(
+  serverUrl: string,
+  resourceMetadata?: OAuthProtectedResourceMetadata | null,
+  fetchFn?: typeof fetch,
+): Promise<AuthorizationServerMetadata> {
+  const found = await discoverAuthorizationServerMetadataFromCandidates(
+    getAuthorizationServerUrlCandidates(serverUrl, resourceMetadata),
+    (candidate) => discoverAuthorizationServerMetadata(candidate, { fetchFn }),
+  );
+  return found?.metadata;
 }
 
 /**

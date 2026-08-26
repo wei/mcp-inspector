@@ -473,12 +473,12 @@ describe("path-hosted MCP servers (#2110)", () => {
       vi.mocked(discoverAuthorizationServerMetadata).mockResolvedValue(
         undefined,
       );
-      const fetchFn = vi.fn();
+      const fetchFn = vi.fn<typeof fetch>();
 
       await discoverAuthorizationServerMetadataForServer(
         pathServerUrl,
         undefined,
-        fetchFn as unknown as typeof fetch,
+        fetchFn,
       );
 
       expect(discoverAuthorizationServerMetadata).toHaveBeenCalledWith(

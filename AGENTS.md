@@ -90,7 +90,17 @@ v2/main/
 │   │                                   #   what keeps a server that merely lives
 │   │                                   #   under a path while publishing metadata
 │   │                                   #   at the root working, so do not drop it
-│   │                                   #   in favour of a straight swap — #2110;
+│   │                                   #   in favour of a straight swap. EVERY
+│   │                                   #   consumer of the fallback must walk:
+│   │                                   #   discoverScopes, the CIMD probe, and
+│   │                                   #   the CLI's refreshStoredAuthToken,
+│   │                                   #   which is why the walk is also exposed
+│   │                                   #   as ...FromCandidates(candidates,
+│   │                                   #   discover) — the CLI injects its own
+│   │                                   #   discovery function as a test seam and
+│   │                                   #   needs to know WHICH candidate
+│   │                                   #   answered, since that is the base its
+│   │                                   #   token request is made against — #2110;
 │   │                                   #   scopes.ts SEP-2350 scope union, oauthUx.ts
 │   │                                   #   shared copy, mcpAuth.ts force-reauthorization,
 │   │                                   #   issuerBinding.ts SEP-2352 callback-leg failure
