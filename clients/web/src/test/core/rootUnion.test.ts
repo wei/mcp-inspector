@@ -764,9 +764,9 @@ describe("resolveRootUnion", () => {
       }
     });
 
-    it("offers a member carrying a boolean property schema", () => {
-      // JSON Schema's boolean form is legal and answers every keyword lookup
-      // with `undefined`, so it renders through the JSON fallback harmlessly.
+    it("offers a member carrying a `true` property schema", () => {
+      // `true` constrains nothing and answers every keyword lookup with
+      // `undefined`, so it renders through the JSON fallback harmlessly.
       const { branches } = resolveRootUnion({
         type: "object",
         anyOf: [
@@ -775,6 +775,19 @@ describe("resolveRootUnion", () => {
         ] as unknown[],
       });
       expect(branches).toHaveLength(2);
+    });
+
+    it("declines a member carrying a `false` property schema", () => {
+      // `false` admits no value at all, so the field can never be filled — and
+      // a required one makes the branch unsatisfiable.
+      const { branches } = resolveRootUnion({
+        type: "object",
+        anyOf: [
+          { type: "object", properties: { nothing: false } },
+          { type: "object", properties: { other: { type: "string" } } },
+        ] as unknown[],
+      });
+      expect(branches).toEqual([]);
     });
 
     it("declines a member whose properties are not an object", () => {

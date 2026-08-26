@@ -180,15 +180,17 @@ function isOfferable(branch: RootUnionSchema): boolean {
   const properties = Object.values(propertiesOf(branch));
   return (
     properties.length > 0 &&
-    // Every value has to be something a renderer can read. JSON Schema's
-    // boolean form is legal and harmless — `true`/`false` answer every keyword
-    // lookup with `undefined` — but a `null` or an array is not a schema at
-    // all, and the web form dereferences one on the way to choosing a widget.
-    // A branch carrying one is declined rather than handed on to crash a tool
-    // panel that would otherwise have rendered.
+    // Every value has to be something a renderer can read AND something a
+    // caller can satisfy. A `null` or an array is not a schema at all, and the
+    // web form dereferences one on the way to choosing a widget. JSON Schema's
+    // boolean form is legal, but only `true` is harmless — it constrains
+    // nothing and answers every keyword lookup with `undefined`, while `false`
+    // admits no value whatsoever, so a field declared with it can never be
+    // filled and a required one makes the whole branch unsatisfiable. Either
+    // way the branch is declined rather than offered as a callable shape.
     properties.every(
       (property) =>
-        typeof property === "boolean" ||
+        property === true ||
         (typeof property === "object" &&
           property !== null &&
           !Array.isArray(property)),
