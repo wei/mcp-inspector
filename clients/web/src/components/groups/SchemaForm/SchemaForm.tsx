@@ -706,6 +706,41 @@ export function SchemaForm({
     [],
   );
 
+  // Report the schema's own fixed values upward once per entity, for a caller
+  // that mounts the form with nothing seeded.
+  //
+  // A `const` field is rendered read-only, so the user cannot supply it — and a
+  // required one then leaves submit disabled forever, on a value that was never
+  // in doubt. Most callers seed through `collectSchemaDefaults` before mounting;
+  // this covers the ones that do not, rather than making every caller
+  // responsible for a value the form is already displaying.
+  //
+  // An effect, not a render-time update: `onChange` belongs to the parent, and
+  // calling it during our render would update another component mid-render.
+  // Only names absent from `values` are added, so a caller that has already
+  // seeded them sees no call at all, and re-running cannot loop.
+  const latestSeed = useRef({ schema: effectiveSchema, values, onChange });
+  // Written in an effect, not during render — the same shape the validity
+  // reporter below uses, and what `react-hooks/refs` requires.
+  useEffect(() => {
+    latestSeed.current = { schema: effectiveSchema, values, onChange };
+  });
+  useEffect(() => {
+    const {
+      schema: current,
+      values: held,
+      onChange: report,
+    } = latestSeed.current;
+    const missing = Object.entries(collectSchemaDefaults(current)).filter(
+      ([name]) => !Object.hasOwn(held, name),
+    );
+    if (missing.length > 0) {
+      report({ ...held, ...Object.fromEntries(missing) });
+    }
+    // Keyed by the entity and branch being edited: a different one has
+    // different fixed values, and the same one needs this only once.
+  }, [draftKey]);
+
   // Read through a ref so the callback's identity is not a dependency. It has
   // to be one or the other, and a *stable* dependency is what this needs: a
   // nested form is handed a fresh closure every render, and re-running the

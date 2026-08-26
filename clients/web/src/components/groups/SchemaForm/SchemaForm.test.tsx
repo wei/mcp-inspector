@@ -7,6 +7,7 @@ import {
   fireEvent,
   renderWithMantine,
   screen,
+  waitFor,
 } from "../../../test/renderWithMantine";
 import { SchemaForm } from "./SchemaForm";
 
@@ -2262,6 +2263,32 @@ describe("SchemaForm multiline strings (#2042)", () => {
       // The nested form is still mounted, so only a changed reset key can stop
       // it displaying a branch the newly seeded values do not describe.
       expect(screen.getByRole("textbox", { name: /Alpha/ })).toBeTruthy();
+    });
+
+    it("reports the branch's fixed values upward when mounted with none", async () => {
+      // A read-only `const` the caller never seeded would otherwise be
+      // displayed and, if required, keep submit disabled forever.
+      const onChange = vi.fn();
+      renderWithMantine(
+        <SchemaForm schema={UNION_SCHEMA} values={{}} onChange={onChange} />,
+      );
+      await waitFor(() =>
+        expect(onChange).toHaveBeenCalledWith({ kind: "email" }),
+      );
+    });
+
+    it("reports nothing when the caller already seeded them", async () => {
+      const onChange = vi.fn();
+      renderWithMantine(
+        <SchemaForm
+          schema={UNION_SCHEMA}
+          values={{ kind: "email" }}
+          onChange={onChange}
+        />,
+      );
+      // Nothing is missing, so the form does not touch the caller's values.
+      await Promise.resolve();
+      expect(onChange).not.toHaveBeenCalled();
     });
 
     it("renders no picker for a single-branch union but still shows its fields", () => {
