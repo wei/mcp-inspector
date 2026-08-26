@@ -719,6 +719,11 @@ export function SchemaForm({
   // calling it during our render would update another component mid-render.
   // Only names absent from `values` are added, so a caller that has already
   // seeded them sees no call at all, and re-running cannot loop.
+  // The fixed values themselves, as a stable key: callers rebuild the schema
+  // object every render, so its identity says nothing, while this changes
+  // exactly when what has to be seeded changes.
+  const seedKey = serializeJson(collectSchemaDefaults(effectiveSchema));
+
   const latestSeed = useRef({ schema: effectiveSchema, values, onChange });
   // Written in an effect, not during render — the same shape the validity
   // reporter below uses, and what `react-hooks/refs` requires.
@@ -737,9 +742,11 @@ export function SchemaForm({
     if (missing.length > 0) {
       report({ ...held, ...Object.fromEntries(missing) });
     }
-    // Keyed by the entity and branch being edited: a different one has
-    // different fixed values, and the same one needs this only once.
-  }, [draftKey]);
+    // Keyed by the entity and branch being edited, and by the fixed values
+    // themselves: a tool refreshed in place keeps its `resetKey` and its branch
+    // while its schema changes underneath, and a newly pinned field would
+    // otherwise be rendered read-only and never seeded.
+  }, [draftKey, seedKey]);
 
   // Read through a ref so the callback's identity is not a dependency. It has
   // to be one or the other, and a *stable* dependency is what this needs: a

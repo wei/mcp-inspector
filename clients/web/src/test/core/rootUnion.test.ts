@@ -583,6 +583,20 @@ describe("resolveRootUnion", () => {
       expect(branches[0].label).toBe("email");
     });
 
+    it("labels boolean and null constants by their values", () => {
+      // `hasDiscriminator` accepts these, so the label must too — otherwise a
+      // perfectly discriminated union reads as "Option 1"/"Option 2".
+      const { branches } = resolveRootUnion({
+        type: "object",
+        required: ["v"],
+        oneOf: [
+          { type: "object", properties: { v: { const: true }, a: {} } },
+          { type: "object", properties: { v: { const: null }, b: {} } },
+        ],
+      });
+      expect(branches.map((branch) => branch.label)).toEqual(["true", "null"]);
+    });
+
     it("labels a numeric const by its value", () => {
       const { branches } = resolveRootUnion({
         type: "object",

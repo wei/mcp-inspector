@@ -2316,6 +2316,45 @@ describe("SchemaForm multiline strings (#2042)", () => {
       expect(onChange).toHaveBeenCalledWith({ count: undefined });
     });
 
+    it("seeds a newly pinned field when the schema changes in place", async () => {
+      // A tool refreshed in place keeps its `resetKey` and its branch while the
+      // schema changes underneath — the new read-only field must still be
+      // seeded, or a required one leaves submit disabled with no way to fix it.
+      const onChange = vi.fn();
+      const before: InspectorFormSchema = {
+        type: "object",
+        properties: { a: { type: "string", title: "A" } },
+      };
+      const { rerender } = renderWithMantine(
+        <SchemaForm
+          schema={before}
+          values={{}}
+          onChange={onChange}
+          resetKey="same-tool"
+        />,
+      );
+      await Promise.resolve();
+      onChange.mockClear();
+
+      rerender(
+        <SchemaForm
+          schema={{
+            type: "object",
+            properties: {
+              a: { type: "string", title: "A" },
+              version: { type: "string", const: "2" },
+            },
+          }}
+          values={{}}
+          onChange={onChange}
+          resetKey="same-tool"
+        />,
+      );
+      await waitFor(() =>
+        expect(onChange).toHaveBeenCalledWith({ version: "2" }),
+      );
+    });
+
     it("renders no picker for a single-branch union but still shows its fields", () => {
       const schema: InspectorFormSchema = {
         type: "object",

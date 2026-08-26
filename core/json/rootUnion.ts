@@ -586,20 +586,27 @@ function branchLabel(
     return branch.title;
   }
   const properties = propertiesOf(branch);
-  const constOf = (name: string): string | null => {
+  // Every primitive constant is a usable label, not just the string and number
+  // cases: `hasDiscriminator` accepts distinct booleans and nulls, so a
+  // `true`/`false` union would otherwise be labelled "Option 1"/"Option 2"
+  // while being discriminated perfectly well. An object or array constant is
+  // not a label — `undefined` marks "nothing usable here", which lets a `null`
+  // constant be a value rather than the sentinel.
+  const constOf = (name: string): string | undefined => {
     const property = toBranch(properties[name]) as { const?: unknown } | null;
-    const value = property?.const;
-    return typeof value === "string" || typeof value === "number"
+    if (property === null || !("const" in property)) return undefined;
+    const value = property.const;
+    return value === null || typeof value !== "object"
       ? String(value)
-      : null;
+      : undefined;
   };
   if (discriminatorProperty !== undefined) {
     const value = constOf(discriminatorProperty);
-    if (value !== null) return value;
+    if (value !== undefined) return value;
   }
   const constants = Object.keys(properties)
     .map((name) => constOf(name))
-    .filter((value): value is string => value !== null);
+    .filter((value): value is string => value !== undefined);
   if (constants.length === 1) return constants[0];
   return `Option ${index + 1}`;
 }
