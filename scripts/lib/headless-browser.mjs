@@ -99,11 +99,27 @@ export const BROWSER_ENV_VAR = "SMOKE_BROWSER";
  * An unrecognized value FAILS rather than falling back to Chromium: a silent
  * fallback would report a green Chromium run under a job labelled "webkit",
  * which is worse than no coverage — it claims coverage that never ran.
+ *
+ * **Only an ABSENT variable selects the default. A present-but-empty one is an
+ * error**, because that is what an unresolved CI expression looks like: GitHub
+ * Actions renders `SMOKE_BROWSER: ${{ matrix.browsr }}` (or any undefined key)
+ * as the empty string rather than omitting the variable. Treating that as "not
+ * set" would run Chromium inside a job named for another engine — precisely the
+ * false-coverage failure this resolver exists to prevent, arriving through a
+ * typo instead of a bad value. Unsetting the variable is how you ask for the
+ * default; setting it to nothing is not.
  */
 export function resolveBrowserName(env = process.env) {
   const raw = env[BROWSER_ENV_VAR];
-  if (raw === undefined || raw.trim() === "") return DEFAULT_BROWSER;
+  if (raw === undefined) return DEFAULT_BROWSER;
   const name = raw.trim().toLowerCase();
+  if (name === "") {
+    throw new Error(
+      `${BROWSER_ENV_VAR} is set but empty — an unresolved CI expression ` +
+        `(a misspelled \`matrix\` key renders as "") looks exactly like this. ` +
+        `Unset it to use ${DEFAULT_BROWSER}, or set one of ${SUPPORTED_BROWSERS.join(", ")}.`,
+    );
+  }
   if (!SUPPORTED_BROWSERS.includes(name)) {
     throw new Error(
       `${BROWSER_ENV_VAR}="${raw}" is not a supported browser — expected one of ${SUPPORTED_BROWSERS.join(", ")}`,

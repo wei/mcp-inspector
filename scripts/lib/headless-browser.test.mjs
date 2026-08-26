@@ -35,13 +35,25 @@ describe("resolveBrowserName", () => {
     assert.equal(resolveBrowserName({}), DEFAULT_BROWSER);
   });
 
-  it("treats an empty or whitespace-only value as unset", () => {
-    // A CI expression that resolves to nothing (`SMOKE_BROWSER: ${{ … }}` with
-    // an undefined matrix key) sets the variable to "" rather than removing it.
-    for (const raw of ["", "   "]) {
-      assert.equal(
-        resolveBrowserName({ [BROWSER_ENV_VAR]: raw }),
-        DEFAULT_BROWSER,
+  it("rejects a present-but-empty value instead of defaulting", () => {
+    // This is the case worth being strict about. A CI expression that resolves
+    // to nothing (`SMOKE_BROWSER: ${{ matrix.browsr }}`, an undefined key) sets
+    // the variable to "" rather than removing it — so defaulting here would run
+    // Chromium inside a job named for another engine, which is the very
+    // false-coverage outcome the unrecognized-value branch exists to stop. Only
+    // an ABSENT variable may select the default.
+    for (const raw of ["", "   ", "\t\n"]) {
+      assert.throws(
+        () => resolveBrowserName({ [BROWSER_ENV_VAR]: raw }),
+        (err) => {
+          assert.match(err.message, /set but empty/);
+          // Names the likely cause and the actual remedy — "unset it", which is
+          // different from "set it to nothing" and is the whole point here.
+          assert.match(err.message, /matrix/);
+          assert.match(err.message, /Unset it/);
+          return true;
+        },
+        `expected ${JSON.stringify(raw)} to be rejected`,
       );
     }
   });
