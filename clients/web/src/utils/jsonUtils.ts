@@ -4,6 +4,7 @@ import {
 } from "@inspector/core/json/nullableUnion.js";
 import {
   branchAcceptsValues,
+  declaresAnyFields,
   resolveRootUnion,
   selectBranchIndex,
 } from "@inspector/core/json/rootUnion.js";
@@ -176,7 +177,14 @@ export function collectSchemaDefaults(
       seed(fieldName, fieldSchema.const);
     } else if (fieldSchema.default !== undefined) {
       seed(fieldName, fieldSchema.default);
-    } else if (fieldSchema.type === "object" && fieldSchema.properties) {
+    } else if (
+      fieldSchema.type === "object" &&
+      // Not `fieldSchema.properties`: a nested object can keep its fields on a
+      // composition branch too, and `SchemaForm` renders that branch — so
+      // skipping it here would leave its read-only discriminator displayed but
+      // never submitted, and the server would reject the call (#2123).
+      declaresAnyFields(fieldSchema)
+    ) {
       const nested = collectSchemaDefaults(fieldSchema);
       if (Object.keys(nested).length > 0) {
         seed(fieldName, nested);

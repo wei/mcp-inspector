@@ -457,6 +457,37 @@ describe("root composition (#2123)", () => {
     expect(Object.hasOwn(seeded, "__proto__")).toBe(true);
   });
 
+  it("seeds defaults from a nested object's own union branch", () => {
+    // The nested form renders that branch, so its read-only discriminator has
+    // to reach the submitted values too.
+    expect(
+      collectSchemaDefaults({
+        type: "object",
+        properties: {
+          config: {
+            type: "object",
+            anyOf: [
+              {
+                type: "object",
+                properties: {
+                  kind: { type: "string", const: "email" },
+                  address: { type: "string" },
+                },
+              },
+              {
+                type: "object",
+                properties: {
+                  kind: { type: "string", const: "sms" },
+                  phone: { type: "string" },
+                },
+              },
+            ],
+          },
+        },
+      }),
+    ).toEqual({ config: { kind: "email" } });
+  });
+
   it("re-applies a nested object's constants", () => {
     // The overlay replaces the whole nested object rather than merging into it,
     // so a link naming `{ config: { kind: "sms" } }` would otherwise slip past
