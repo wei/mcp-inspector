@@ -258,10 +258,26 @@ function jsonTypeOf(value: unknown): string {
  * it leaves nothing satisfiable. An `integer` const satisfies a `number` type,
  * which is the one direction JSON Schema widens.
  */
+const CONST_CHECKABLE = new Set(["const", "type", "enum"]);
+
 function constSatisfiesSiblings(schema: Record<string, unknown>): boolean {
   if (!("const" in schema)) return true;
   const value = schema.const;
   const { type, enum: allowed } = schema;
+  // A `const` can be contradicted by any assertion, and only `type` and `enum`
+  // are evaluated here — `minimum: 10` beside `const: 1` is as unsatisfiable as
+  // a type mismatch. Rather than partially evaluate JSON Schema, a merged
+  // declaration pairing a `const` with an assertion this cannot check is
+  // declined: proving the conjunction safe is the requirement, not disproving
+  // it. Annotations are exempt, since they assert nothing.
+  if (
+    Object.keys(schema).some(
+      (keyword) =>
+        !CONST_CHECKABLE.has(keyword) && !ANNOTATION_KEYWORDS.has(keyword),
+    )
+  ) {
+    return false;
+  }
   const actual = jsonTypeOf(value);
   const admits = (name: unknown) =>
     name === actual || (name === "number" && actual === "integer");
@@ -420,6 +436,10 @@ export function declaresAnyFields(
 ): boolean {
   if (schema === undefined) return false;
   if (Object.keys(propertiesOf(schema) ?? {}).length > 0) return true;
+  // A `$ref`'s shape is unknown rather than empty, so it counts. Reporting "no
+  // fields" for `anyOf: [{ $ref: … }, { $ref: … }]` would auto-invoke an App
+  // tool with `{}` on the strength of something never read.
+  if (schema.$ref !== undefined) return true;
   const members = [
     ...(schema.allOf ?? []),
     ...(schema.anyOf ?? []),

@@ -606,6 +606,16 @@ export function SchemaForm({
   const properties = effectiveSchema.properties ?? {};
   const requiredFields = effectiveSchema.required ?? [];
 
+  // The key the draft-holding fields are remounted by. Switching branches is a
+  // reset for them too: two alternatives may declare the same name with the
+  // same widget, and a half-typed `-` or an unparsed JSON draft would otherwise
+  // survive into a field the switch was supposed to clear — with both parent
+  // values `undefined`, nothing else tells them the entity changed.
+  const draftKey =
+    activeBranch === null
+      ? resetKey
+      : `${resetKey ?? ""}#${branches.indexOf(activeBranch)}`;
+
   // The names of fields currently holding unsendable text. Held here rather
   // than in each field because only the form sees them all, and only the form
   // knows when the last one cleared.
@@ -867,7 +877,7 @@ export function SchemaForm({
         <SchemaNumberInput
           // The only field holding local state, so the only one that has to be
           // remounted when `resetKey` says the form moved to another entity.
-          key={resetKey === undefined ? fieldName : `${resetKey}:${fieldName}`}
+          key={draftKey === undefined ? fieldName : `${draftKey}:${fieldName}`}
           fieldName={fieldName}
           label={label}
           description={description}
@@ -980,7 +990,7 @@ export function SchemaForm({
       <SchemaJsonField
         // Holds local draft state, so — like the number field — it has to be
         // remounted when `resetKey` says the form moved to another entity.
-        key={resetKey === undefined ? fieldName : `${resetKey}:${fieldName}`}
+        key={draftKey === undefined ? fieldName : `${draftKey}:${fieldName}`}
         fieldName={fieldName}
         label={label}
         description={description}

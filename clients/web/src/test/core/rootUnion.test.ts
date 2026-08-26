@@ -402,6 +402,20 @@ describe("resolveRootUnion", () => {
     expect(branches).toEqual([]);
   });
 
+  it("declines a const paired with an assertion it cannot evaluate", () => {
+    // `minimum: 10` beside `const: 1` is as unsatisfiable as a type mismatch,
+    // and proving the conjunction safe is the requirement here.
+    const { branches } = resolveRootUnion({
+      type: "object",
+      properties: { x: { type: "number", minimum: 10 } },
+      anyOf: [
+        { type: "object", properties: { x: { const: 1 } } },
+        { type: "object", properties: { other: { type: "string" } } },
+      ] as unknown[],
+    });
+    expect(branches).toEqual([]);
+  });
+
   it("accepts a const its root type and enum admit", () => {
     const { branches } = resolveRootUnion({
       type: "object",

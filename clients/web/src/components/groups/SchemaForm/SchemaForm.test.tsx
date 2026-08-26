@@ -2182,6 +2182,39 @@ describe("SchemaForm multiline strings (#2042)", () => {
       expect(onChange).toHaveBeenCalledWith({ count: 3 });
     });
 
+    it("clears an in-progress draft when the branch changes", async () => {
+      const user = userEvent.setup();
+      const schema: InspectorFormSchema = {
+        type: "object",
+        anyOf: [
+          {
+            type: "object",
+            title: "A",
+            properties: { value: { type: "number", title: "Value" } },
+          },
+          {
+            type: "object",
+            title: "B",
+            properties: { value: { type: "number", title: "Value" } },
+          },
+        ],
+      };
+      renderWithMantine(
+        <SchemaForm schema={schema} values={{}} onChange={vi.fn()} />,
+      );
+      const before = screen.getByLabelText(/Value/) as HTMLInputElement;
+      // A lone `-` parses to nothing, so the parent value stays `undefined` on
+      // both sides of the switch — the field's own key is what has to change.
+      await user.type(before, "-");
+      expect(before.value).toBe("-");
+
+      await user.click(screen.getByRole("textbox", { name: /Variant/ }));
+      await user.click(screen.getByRole("option", { name: "B" }));
+      expect((screen.getByLabelText(/Value/) as HTMLInputElement).value).toBe(
+        "",
+      );
+    });
+
     it("renders no picker for a single-branch union but still shows its fields", () => {
       const schema: InspectorFormSchema = {
         type: "object",

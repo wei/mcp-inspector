@@ -134,6 +134,17 @@ describe("hasInputFields with root composition (#2123)", () => {
     ).toBe(true);
   });
 
+  it("counts a $ref member, whose shape is unknown rather than empty", () => {
+    expect(
+      hasInputFields(
+        tool({
+          type: "object",
+          anyOf: [{ $ref: "#/$defs/Email" }, { $ref: "#/$defs/Sms" }],
+        }),
+      ),
+    ).toBe(true);
+  });
+
   it("still reports no fields for a bare object schema", () => {
     expect(hasInputFields(tool({ type: "object" }))).toBe(false);
   });
