@@ -465,6 +465,35 @@ describe("schemaToForm", () => {
       ]);
     });
 
+    it("labels a branch field by the name the schema declared", () => {
+      // The prefix is an internal field name; `buildFields` falls back to its
+      // map key for a label, so the user would otherwise see `__b0__address`.
+      const form = schemaToForm(UNION, "union_tool");
+      expect(form.sections[1]!.fields[1]).toMatchObject({
+        name: "__b0__address",
+        label: "address",
+      });
+    });
+
+    it("keeps a declared title ahead of the fallback", () => {
+      const form = schemaToForm(
+        {
+          type: "object",
+          anyOf: [
+            {
+              type: "object",
+              properties: { a: { type: "string", title: "Street address" } },
+            },
+            { type: "object", properties: { b: { type: "string" } } },
+          ],
+        },
+        "titled",
+      );
+      expect(form.sections[1]!.fields[0]).toMatchObject({
+        label: "Street address",
+      });
+    });
+
     it("offers a variant select listing the alternatives", () => {
       const form = schemaToForm(UNION, "union_tool");
       expect(form.sections[0]!.fields[0]).toMatchObject({

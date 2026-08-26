@@ -2391,6 +2391,43 @@ describe("SchemaForm multiline strings (#2042)", () => {
       expect(screen.getByRole("textbox", { name: /Address/ })).toBeTruthy();
     });
 
+    it("corrects a stale const when the schema changes in place", async () => {
+      // The user cannot edit a read-only field, so a `const` that moves under
+      // an unchanged `resetKey` would display the new value while the old one
+      // sat in `values`, waiting to be submitted.
+      const onChange = vi.fn();
+      const pinned = (value: string): InspectorFormSchema => ({
+        type: "object",
+        properties: {
+          kind: { type: "string", const: value },
+          note: { type: "string", title: "Note" },
+        },
+      });
+      const { rerender } = renderWithMantine(
+        <SchemaForm
+          schema={pinned("email")}
+          values={{ kind: "email", note: "kept" }}
+          onChange={onChange}
+          resetKey="same-tool"
+        />,
+      );
+      await Promise.resolve();
+      onChange.mockClear();
+
+      rerender(
+        <SchemaForm
+          schema={pinned("sms")}
+          values={{ kind: "email", note: "kept" }}
+          onChange={onChange}
+          resetKey="same-tool"
+        />,
+      );
+      // The constant is corrected; what the user typed is left alone.
+      await waitFor(() =>
+        expect(onChange).toHaveBeenCalledWith({ kind: "sms", note: "kept" }),
+      );
+    });
+
     it("renders no picker for a single-branch union but still shows its fields", () => {
       const schema: InspectorFormSchema = {
         type: "object",

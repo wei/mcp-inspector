@@ -36,7 +36,10 @@ import {
   resolveRootUnion,
   selectBranchIndex,
 } from "@inspector/core/json/rootUnion.js";
-import { collectSchemaDefaults } from "../../../utils/jsonUtils";
+import {
+  applySchemaConstants,
+  collectSchemaDefaults,
+} from "../../../utils/jsonUtils";
 
 const FieldLabel = Text.withProps({
   fw: 500,
@@ -751,9 +754,20 @@ export function SchemaForm({
     const missing = Object.entries(collectSchemaDefaults(current)).filter(
       ([name]) => !Object.hasOwn(held, name),
     );
-    if (missing.length > 0) {
-      report({ ...held, ...Object.fromEntries(missing) });
-    }
+    // Constants are re-applied as well as seeded: an in-place schema change can
+    // move a `const` the user cannot edit — the read-only field then displays
+    // the new value while `values` still holds the old one, which is what would
+    // be submitted. Ordinary defaults are only ever *added*, so an edited field
+    // keeps what the user put there.
+    const next = applySchemaConstants(
+      current,
+      missing.length > 0 ? { ...held, ...Object.fromEntries(missing) } : held,
+    );
+    const changed = Object.keys(next).some(
+      (name) =>
+        !Object.hasOwn(held, name) || !Object.is(next[name], held[name]),
+    );
+    if (changed) report(next);
     // Keyed by the entity and branch being edited, and by the fixed values
     // themselves: a tool refreshed in place keeps its `resetKey` and its branch
     // while its schema changes underneath, and a newly pinned field would

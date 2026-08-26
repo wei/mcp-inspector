@@ -601,6 +601,20 @@ describe("root composition (#2123)", () => {
     ).toBe(true);
   });
 
+  it("does not read an inherited property as a supplied answer", () => {
+    // `constructor` is a legal argument name; reading it off the prototype
+    // would enable a submit the schema rejects.
+    const schema: InspectorFormSchema = {
+      type: "object",
+      // Built through `fromEntries`: in an object literal, `constructor` is
+      // TypeScript's own inherited member rather than a plain key.
+      properties: Object.fromEntries([["constructor", { type: "string" }]]),
+      required: ["constructor"],
+    };
+    expect(hasMissingRequiredFields(schema, {})).toBe(true);
+    expect(hasMissingRequiredFields(schema, { constructor: "x" })).toBe(false);
+  });
+
   it("blocks submission while no branch is satisfied", () => {
     expect(hasMissingRequiredFields(UNION, {})).toBe(true);
     expect(hasMissingRequiredFields(UNION, { kind: "email" })).toBe(true);

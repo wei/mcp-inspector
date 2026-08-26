@@ -143,6 +143,19 @@ function branchFields(
   return [...new Set([...own, ...sharedFieldNames(base, branches)])];
 }
 
+/**
+ * A property declaration carrying the name it was declared under as its
+ * fallback `title`, so a renamed field still displays the schema's own name.
+ */
+function labelled(property: unknown, name: string): unknown {
+  if (typeof property !== "object" || property === null) {
+    // JSON Schema's `true` constrains nothing, so a title-only object says the
+    // same thing and carries the label.
+    return { title: name };
+  }
+  return { title: name, ...property };
+}
+
 /** The `const` a property schema pins its value to, if any. */
 function constOf(schema: unknown): unknown {
   if (typeof schema !== "object" || schema === null) return undefined;
@@ -217,7 +230,11 @@ export function schemaToForm(
     const properties = Object.fromEntries(
       branchFields(base, branches, index).map((name) => [
         branchFieldName(prefix, index, name),
-        branch.schema.properties?.[name],
+        // The prefix is an internal field NAME, never a label: `buildFields`
+        // falls back to its map key when a declaration carries no `title`, so
+        // without this the form would show `__b0__address` where the schema
+        // says `address`.
+        labelled(branch.schema.properties?.[name], name),
       ]),
     );
     sections.push({

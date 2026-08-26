@@ -352,6 +352,10 @@ function hasMissingIn(
   const required = Array.isArray(schema.required) ? schema.required : [];
   const properties = schema.properties ?? {};
   return required.some((field) => {
+    // `hasOwn` first: an argument legally named `constructor` would otherwise
+    // resolve to the inherited one and read as supplied, enabling a submit the
+    // schema rejects.
+    if (!Object.hasOwn(values, field)) return true;
     const value = values[field];
     if (value === null) {
       const fieldSchema = properties[field];
