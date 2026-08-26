@@ -28,8 +28,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: '22.x'
-          cache: 'npm'
+          node-version: "22.x"
+          cache: "npm"
 
       - name: Install dependencies (root + all clients)
         # The root postinstall (scripts/install-clients.mjs) cascades
@@ -115,6 +115,84 @@ jobs:
         working-directory: ./clients/web
         run: npm run test:storybook
 
+  # The same headless web smokes the `build` job already runs in Chromium, run
+  # again in the other engines this repo supports (#2086).
+  #
+  # Why this is a job of its own rather than a matrix over `build`: `build` also
+  # runs validate, the coverage gate, two verify gates and Storybook, none of
+  # which are engine-dependent — matrixing it would triple all of that to gain
+  # three browser smokes. Chromium is deliberately NOT in the matrix here for
+  # the same reason: `npm run smoke` inside `build` is exactly the local
+  # `npm run ci` path, and it already covers it. Supported set = the Chromium run
+  # there plus whatever the matrix below names.
+  #
+  # This is the only place the MCP Apps sandbox is exercised on a non-Chromium
+  # engine, and it earned its keep immediately: pointing the smokes at WebKit is
+  # what found #2132, a Safari-only hang in the web client's SSE transport that
+  # every Chromium-only tier had been green through.
+  #
+  # The unit tests cannot substitute — `sandbox-csp.test.ts` asserts
+  # which policy STRING is built, which passes identically on an engine that
+  # ignores `<meta>` CSP entirely — and no Storybook story reaches the sandbox at
+  # all (all three App stories use a `data:` placeholder iframe and a mock
+  # bridge). Note Playwright's WebKit is a WebKit build, not Safari: close enough
+  # to catch engine-level CSP and iframe divergence, not close enough to certify
+  # Safari.
+  browser-engine-smokes:
+    runs-on: ubuntu-latest
+    strategy:
+      # Report every engine's verdict. Failing fast would hide a WebKit-only
+      # regression behind a Firefox-only one, which is the exact distinction
+      # this job exists to draw.
+      fail-fast: false
+      matrix:
+        # `webkit` belongs here and is deliberately absent: the smokes RUN in it
+        # (`SMOKE_BROWSER=webkit` works, and smoke:web:browser passes), but the
+        # two App smokes fail on a real, pre-existing Safari incompatibility in
+        # the web client's SSE transport — #2132, which carries the diagnosis and
+        # the verified fix. Adding it here is a one-word diff once that lands.
+        # An engine is either green or absent; a `continue-on-error` job would
+        # report coverage nobody is holding to a standard.
+        browser: [firefox]
+    name: Sandbox smokes (${{ matrix.browser }})
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22.x"
+          cache: "npm"
+
+      - name: Install dependencies (root + all clients)
+        run: npm install
+
+      - name: Build all clients
+        # The smokes need clients/web/dist and the cli/tui/launcher bundles.
+        # `build` rather than `validate` — the format/lint/typecheck half is
+        # engine-independent and already ran in the `build` job.
+        run: npm run build
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ matrix.browser }}-${{ runner.os }}-${{ hashFiles('clients/web/package-lock.json') }}
+
+      - name: Install Playwright ${{ matrix.browser }}
+        working-directory: ./clients/web
+        # `--with-deps` for the system libraries a bare runner lacks; WebKit is
+        # the large download here and dominates this step.
+        run: npx playwright install --with-deps ${{ matrix.browser }}
+
+      - name: Run the headless web smokes in ${{ matrix.browser }}
+        # The set of smokes lives in the `smoke:web:engine` npm script, not
+        # enumerated here, so adding one covers every engine automatically.
+        env:
+          SMOKE_BROWSER: ${{ matrix.browser }}
+        run: npm run smoke:web:engine
+
   # Publish the single `@modelcontextprotocol/inspector` package to npm on a
   # published GitHub release. v2 is not an npm workspace, so there is no
   # `publish-all` / `--workspaces` (v1) — just one `npm publish`, whose `prepack`
@@ -127,7 +205,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'release'
     environment: release
-    needs: build
+    needs: [build, browser-engine-smokes]
     # Serialize publishes so two releases cut in quick succession can't run
     # overlapping `npm publish`es. Never cancel an in-flight publish.
     concurrency:
@@ -145,9 +223,9 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: '22.x'
-          cache: 'npm'
-          registry-url: 'https://registry.npmjs.org'
+          node-version: "22.x"
+          cache: "npm"
+          registry-url: "https://registry.npmjs.org"
 
       - name: Assert release tag matches package version
         # `npm publish` ships whatever `version` is in the root package.json,
@@ -220,7 +298,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'release'
     environment: release
-    needs: build
+    needs: [build, browser-engine-smokes]
     permissions:
       contents: read
       packages: write
