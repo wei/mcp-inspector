@@ -202,6 +202,33 @@ describe("resolveRootUnion", () => {
     });
   });
 
+  it("carries an identical non-object declaration across", () => {
+    // JSON Schema's boolean form is legal as a property schema. There are no
+    // keywords to merge, so the two agree only by being the same declaration.
+    const { branches } = resolveRootUnion({
+      type: "object",
+      properties: { x: true as unknown },
+      anyOf: [
+        { type: "object", properties: { x: true as unknown } },
+        { type: "object", properties: { other: { type: "string" } } },
+      ],
+    });
+    expect(branches).toHaveLength(2);
+    expect(branches[0].schema.properties?.x).toBe(true);
+  });
+
+  it("declines a union whose branch redeclares a non-object property differently", () => {
+    const { branches } = resolveRootUnion({
+      type: "object",
+      properties: { x: true as unknown },
+      anyOf: [
+        { type: "object", properties: { x: false as unknown } },
+        { type: "object", properties: { other: { type: "string" } } },
+      ],
+    });
+    expect(branches).toEqual([]);
+  });
+
   it("declines a union whose branch contradicts the root's type for a field", () => {
     // `string` under a base `number` describes a value that cannot exist, so
     // flattening it would render one type and accept what the schema rejects.

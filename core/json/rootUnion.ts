@@ -183,9 +183,11 @@ function conflicts(baseProperty: unknown, branchProperty: unknown): boolean {
   const a = toBranch(baseProperty);
   const b = toBranch(branchProperty);
   if (a === null || b === null) {
-    return (
-      baseProperty !== undefined && !sameValue(baseProperty, branchProperty)
-    );
+    // At least one side is not a readable schema object — JSON Schema's boolean
+    // form, or something malformed. Nothing can be merged keyword-wise, so the
+    // two agree only if they are the same declaration. (Only reached for a name
+    // the base declares, so `baseProperty` is never simply absent here.)
+    return !sameValue(baseProperty, branchProperty);
   }
   const left = a as Record<string, unknown>;
   const right = b as Record<string, unknown>;
