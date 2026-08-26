@@ -631,9 +631,12 @@ export function SchemaForm({
   // reordered or rewritten — and a numeric index then points at a different
   // branch than the one whose values are held, showing SMS while submitting
   // email. Re-derived from the values, which is where the answer actually is.
-  const branchesKey = branches
-    .map((branch) => `${branch.label}:${branch.declaredFields.join(",")}`)
-    .join("|");
+  // The whole resolved alternative, not just its label and field names: two
+  // branches can share both while pinning different discriminators or typing a
+  // field differently, and a reorder of those would otherwise go unnoticed.
+  const branchesKey = serializeJson(
+    branches.map((branch) => [branch.label, branch.schema]),
+  );
   useValueChange(branchesKey, () =>
     setBranchIndex(selectBranchIndex(branches, values) ?? 0),
   );
