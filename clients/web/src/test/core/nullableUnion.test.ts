@@ -751,6 +751,14 @@ describe("admitsNull", () => {
       expect(admitsNull({ const: null, anyOf: [{ type: "null" }] })).toBe(true);
     });
 
+    it("recognizes a branch that spells its nullability another way", () => {
+      // The branch admits null through `const`, not through `type`.
+      expect(admitsNull({ const: null, anyOf: [{ const: null }] })).toBe(true);
+      expect(admitsNull({ const: null, anyOf: [{ nullable: true }] })).toBe(
+        true,
+      );
+    });
+
     it("does not override a sibling that rejects null", () => {
       // `const` is conjunctive with its siblings, not an override: both of
       // these reject every value, so claiming nullability would let the

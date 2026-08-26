@@ -181,6 +181,36 @@ describe("JSON Utils", () => {
       ).toEqual({ a: "x", value: 3 });
     });
 
+    it("does not read an inherited property as a supplied constant (#2123)", () => {
+      const pinnedOnInherited: Tool = {
+        name: "pinned-on-inherited",
+        inputSchema: {
+          type: "object",
+          anyOf: [
+            {
+              type: "object",
+              properties: Object.fromEntries([
+                ["constructor", { const: "a" }],
+                ["count", { type: "number" }],
+              ]),
+            },
+            {
+              type: "object",
+              properties: Object.fromEntries([
+                ["constructor", { const: "b" }],
+                ["other", { type: "string" }],
+              ]),
+            },
+          ],
+        },
+      };
+      // `constructor` was not supplied, so it rules nothing out — `count`
+      // belongs to the first branch alone and settles it.
+      expect(convertToolParameters(pinnedOnInherited, { count: "3" })).toEqual({
+        count: 3,
+      });
+    });
+
     it("leaves an ambiguously typed argument uncoerced (#2123)", () => {
       const ambiguous: Tool = {
         name: "ambiguous",

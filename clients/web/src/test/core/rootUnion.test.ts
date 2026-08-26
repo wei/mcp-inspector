@@ -668,10 +668,13 @@ describe("resolveRootUnion", () => {
       // These schemas describe the wire, and every member arrives as `unknown`
       // — reading `anyOf: {}` as a list would throw and take all three clients
       // down rather than declining one malformed tool.
+      // A single assertion, from an `unknown`-typed value: the point is a wire
+      // shape TypeScript would never produce, not a cast chain.
+      const malformed: unknown = {};
       const { base, branches } = resolveRootUnion({
         type: "object",
         properties: { a: { type: "string" } },
-        anyOf: {} as unknown as unknown[],
+        anyOf: malformed as unknown[],
       });
       expect(branches).toEqual([]);
       expect(Object.keys(base.properties ?? {})).toEqual(["a"]);

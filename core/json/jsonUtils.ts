@@ -240,6 +240,9 @@ function matchesConstants(
     if (typeof schema !== "object" || schema === null) return true;
     const constValue = (schema as { const?: unknown }).const;
     if (constValue === undefined) return true;
+    // `hasOwn`: an absent argument legally named `constructor` would otherwise
+    // read the inherited one and rule out every branch that pins that name.
+    if (!Object.hasOwn(params, name)) return true;
     const supplied = params[name];
     return supplied === undefined || supplied === String(constValue);
   });

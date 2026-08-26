@@ -433,17 +433,19 @@ function anyOfAdmitsNull(schema: NullableUnionSchema): boolean {
   if (!Array.isArray(branches)) return false;
   return branches.some((entry) => {
     const branch = toBranch(entry);
-    if (branch === null || !typeNamesNull(branch.type)) {
-      return false;
-    }
-    // A branch that names null can still admit nothing: `{ type: "null",
-    // const: "x" }` is unsatisfiable, and a nested union or applicator inside
-    // it is as opaque here as one on the wrapper.
+    if (branch === null) return false;
     const branchSchema = branch as NullableUnionSchema;
-    return (
-      !nullExcludedBySiblings(branchSchema) &&
-      !hasUnevaluatedComposition(branchSchema)
-    );
+    // A nested union or applicator inside a branch is as opaque here as one on
+    // the wrapper, and refusing it also bounds this recursion: what remains is
+    // a composition-free schema, which `admitsNull` answers without reaching
+    // back into this function.
+    if (hasUnevaluatedComposition(branchSchema)) return false;
+    // Asked through `admitsNull` rather than by testing `type` alone, so a
+    // branch spelling its nullability another way — `{ const: null }`,
+    // `{ nullable: true }` — is recognized the same way the wrapper's own
+    // forms are, and an unsatisfiable `{ type: "null", const: "x" }` is still
+    // rejected by the sibling check inside it.
+    return admitsNull(branchSchema);
   });
 }
 
