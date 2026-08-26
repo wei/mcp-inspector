@@ -292,7 +292,13 @@ function hasMissingIn(
       const fieldSchema = properties[field];
       return fieldSchema === undefined ? true : !admitsNull(fieldSchema);
     }
-    return value === undefined || value === "";
+    if (value === "") {
+      // A schema may pin a field to the empty string, and the form renders such
+      // a field read-only — so reporting the seeded value as missing would
+      // disable submit on a value the user cannot change (#2123).
+      return properties[field]?.const !== "";
+    }
+    return value === undefined;
   });
 }
 

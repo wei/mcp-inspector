@@ -488,6 +488,28 @@ describe("root composition (#2123)", () => {
     ).toBe(values);
   });
 
+  it("accepts an empty string a const pins the field to", () => {
+    // Rendered read-only, so treating the seeded value as missing would
+    // disable submit on a value the user cannot change.
+    const pinnedEmpty: InspectorFormSchema = {
+      type: "object",
+      properties: { kind: { type: "string", const: "" } },
+      required: ["kind"],
+    };
+    expect(hasMissingRequiredFields(pinnedEmpty, { kind: "" })).toBe(false);
+    // An ordinary required string is still missing when left blank.
+    expect(
+      hasMissingRequiredFields(
+        {
+          type: "object",
+          properties: { kind: { type: "string" } },
+          required: ["kind"],
+        },
+        { kind: "" },
+      ),
+    ).toBe(true);
+  });
+
   it("blocks submission while no branch is satisfied", () => {
     expect(hasMissingRequiredFields(UNION, {})).toBe(true);
     expect(hasMissingRequiredFields(UNION, { kind: "email" })).toBe(true);
