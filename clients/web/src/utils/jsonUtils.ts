@@ -284,7 +284,10 @@ function hasMissingIn(
   schema: InspectorFormSchema,
   values: Record<string, unknown>,
 ): boolean {
-  const required = schema.required ?? [];
+  // `Array.isArray`, not `?? []`: these schemas describe the wire, and a
+  // nonconforming server can send `required: "x"` — which `.some` would throw
+  // on, taking the whole panel down rather than one malformed tool.
+  const required = Array.isArray(schema.required) ? schema.required : [];
   const properties = schema.properties ?? {};
   return required.some((field) => {
     const value = values[field];

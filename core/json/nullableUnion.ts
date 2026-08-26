@@ -397,10 +397,13 @@ export function admitsNull(schema: NullableUnionSchema): boolean {
   // would let the gate accept a `null` the schema forbids. The opaque
   // applicators (`not`, `allOf`, `oneOf`) are already refused above.
   if (schema.const === null) {
-    return (
-      schema.anyOf === undefined &&
-      (schema.nullable === true || typeAdmitsNull(schema.type))
-    );
+    if (schema.nullable !== true && !typeAdmitsNull(schema.type)) return false;
+    // A sibling `anyOf` is conjunctive with the `const`, so it decides too —
+    // but it decides in *both* directions: `{ const: null, anyOf: [{ type:
+    // "null" }] }` admits null just as plainly as an all-string union rejects
+    // it. Evaluating the branches is what keeps the first case usable, since
+    // the field is rendered read-only and seeded with the only value it takes.
+    return schema.anyOf === undefined || anyOfAdmitsNull(schema);
   }
 
   if (schema.nullable === true) {
@@ -421,25 +424,27 @@ export function admitsNull(schema: NullableUnionSchema): boolean {
     }
     return typeNamesNull(schema.type);
   }
-  return (
-    schema.anyOf?.some((entry) => {
-      const branch = toBranch(entry);
-      if (branch === null || !typeNamesNull(branch.type)) {
-        return false;
-      }
-      // A branch that names null can still admit nothing: `{ type: "null",
-      // const: "x" }` is unsatisfiable, and its own applicators are as opaque
-      // here as the wrapper's.
-      const branchSchema = branch as NullableUnionSchema;
-      // A branch that names null can still admit nothing: `{ type: "null",
-      // const: "x" }` is unsatisfiable, and a nested union or applicator inside
-      // it is as opaque here as one on the wrapper.
-      return (
-        !nullExcludedBySiblings(branchSchema) &&
-        !hasUnevaluatedComposition(branchSchema)
-      );
-    }) ?? false
-  );
+  return anyOfAdmitsNull(schema);
+}
+
+/** Whether some `anyOf` branch is one that admits `null`. */
+function anyOfAdmitsNull(schema: NullableUnionSchema): boolean {
+  const branches = schema.anyOf;
+  if (!Array.isArray(branches)) return false;
+  return branches.some((entry) => {
+    const branch = toBranch(entry);
+    if (branch === null || !typeNamesNull(branch.type)) {
+      return false;
+    }
+    // A branch that names null can still admit nothing: `{ type: "null",
+    // const: "x" }` is unsatisfiable, and a nested union or applicator inside
+    // it is as opaque here as one on the wrapper.
+    const branchSchema = branch as NullableUnionSchema;
+    return (
+      !nullExcludedBySiblings(branchSchema) &&
+      !hasUnevaluatedComposition(branchSchema)
+    );
+  });
 }
 
 /**

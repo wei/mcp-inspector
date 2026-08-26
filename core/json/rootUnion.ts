@@ -100,6 +100,27 @@ export interface ResolvedRootUnion<T extends RootUnionSchema> {
   branches: RootUnionBranch<T>[];
 }
 
+/**
+ * A composition keyword's members, or `[]` when the value is not a list.
+ *
+ * These annotations describe the wire, and the wire is whatever a server sent:
+ * the web client narrows its schema with a cast and every member arrives as
+ * `unknown`, so `anyOf: {}` really can reach this module. Reading it as a list
+ * would throw and take all three clients down with it, which is a worse answer
+ * than declining to flatten a schema nobody can interpret.
+ */
+function membersOf(value: readonly unknown[] | undefined): readonly unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+/** A schema's `required`, keeping only the string entries a list-shaped one holds. */
+function requiredOf(schema: RootUnionSchema): string[] {
+  const { required } = schema;
+  return Array.isArray(required)
+    ? required.filter((name): name is string => typeof name === "string")
+    : [];
+}
+
 /** Narrow a composition member to a readable object, or `null` if it isn't one. */
 function toBranch(value: unknown): RootUnionSchema | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -441,9 +462,9 @@ export function declaresAnyFields(
   // tool with `{}` on the strength of something never read.
   if (schema.$ref !== undefined) return true;
   const members = [
-    ...(schema.allOf ?? []),
-    ...(schema.anyOf ?? []),
-    ...(schema.oneOf ?? []),
+    ...membersOf(schema.allOf),
+    ...membersOf(schema.anyOf),
+    ...membersOf(schema.oneOf),
   ];
   return members.some((member) => {
     const branch = toBranch(member);
@@ -479,11 +500,10 @@ function mergeBranch<T extends RootUnionSchema>(
         : branchProperty,
     ]),
   ]);
+  const baseRequired = requiredOf(base);
   const required = [
-    ...(base.required ?? []),
-    ...(branch.required ?? []).filter(
-      (name) => !(base.required ?? []).includes(name),
-    ),
+    ...baseRequired,
+    ...requiredOf(branch).filter((name) => !baseRequired.includes(name)),
   ];
   // One cast, owned here: a branch member is `unknown` on the wire, so its
   // property schemas are whatever the server sent however `T` declares them —
@@ -576,7 +596,7 @@ export function resolveRootUnion<T extends RootUnionSchema>(
   // composition keywords stay on it, and no union is offered either, since a
   // branch would otherwise be merged against a base whose constraints are not
   // all known.
-  const allOfMembers = schema.allOf ?? [];
+  const allOfMembers = membersOf(schema.allOf);
   let merged = schema as ResolvedSchema<T>;
   for (const member of allOfMembers) {
     const branch = toBranch(member);
@@ -599,7 +619,7 @@ export function resolveRootUnion<T extends RootUnionSchema>(
     return { base, branches: [] };
   }
   const isExclusiveUnion = schema.oneOf !== undefined;
-  const members = schema.oneOf ?? schema.anyOf ?? [];
+  const members = membersOf(schema.oneOf ?? schema.anyOf);
   const branches = members.map(toBranch);
   if (
     branches.length === 0 ||
@@ -745,7 +765,7 @@ export function narrowBySuppliedNames<T extends RootUnionSchema>(
 
   const satisfied = candidates.filter((index) => {
     const branch = branches[index]!;
-    const required = branch.schema.required ?? [];
+    const required = requiredOf(branch.schema);
     const own = required.filter((name) => branch.declaredFields.includes(name));
     return own.length > 0 && own.every((name) => supplied.has(name));
   });

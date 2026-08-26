@@ -322,7 +322,9 @@ function applyConstants<T>(
 function buildFields(schema: JsonSchemaObject): FormField[] {
   const fields: FormField[] = [];
   const properties = schema.properties || {};
-  const required = schema.required || [];
+  // `Array.isArray`, not `|| []`: a nonconforming server can send
+  // `required: "x"`, and `.includes` on a string silently matches substrings.
+  const required = Array.isArray(schema.required) ? schema.required : [];
 
   for (const [key, prop] of Object.entries(properties)) {
     // `properties` values are `unknown` (the SDK schema admits anything), so
@@ -463,7 +465,8 @@ export function missingRequiredFields(
       ? base
       : branches[selectedBranchIndex(base, branches, rawValues)]!.schema;
   const properties = effective.properties ?? {};
-  return (effective.required ?? []).filter((name) => {
+  const required = Array.isArray(effective.required) ? effective.required : [];
+  return required.filter((name) => {
     // `hasOwn` first: an argument legally named `constructor` would otherwise
     // resolve to the inherited one and read as supplied, and the call would go
     // out without it.

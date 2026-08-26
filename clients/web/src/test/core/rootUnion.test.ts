@@ -664,6 +664,35 @@ describe("resolveRootUnion", () => {
       expect(branches).toEqual([]);
     });
 
+    it("survives a composition keyword that is not a list", () => {
+      // These schemas describe the wire, and every member arrives as `unknown`
+      // — reading `anyOf: {}` as a list would throw and take all three clients
+      // down rather than declining one malformed tool.
+      const { base, branches } = resolveRootUnion({
+        type: "object",
+        properties: { a: { type: "string" } },
+        anyOf: {} as unknown as unknown[],
+      });
+      expect(branches).toEqual([]);
+      expect(Object.keys(base.properties ?? {})).toEqual(["a"]);
+    });
+
+    it("survives a required that is not a list", () => {
+      const { branches } = resolveRootUnion({
+        type: "object",
+        anyOf: [
+          {
+            type: "object",
+            properties: { a: { type: "string" } },
+            required: "a",
+          },
+          { type: "object", properties: { b: { type: "string" } } },
+        ] as unknown[],
+      });
+      expect(branches).toHaveLength(2);
+      expect(branches[0].schema.required).toBeUndefined();
+    });
+
     it("declines an empty union", () => {
       expect(resolveRootUnion({ type: "object", anyOf: [] }).branches).toEqual(
         [],

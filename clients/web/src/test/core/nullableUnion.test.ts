@@ -745,6 +745,12 @@ describe("admitsNull", () => {
       );
     });
 
+    it("admits null when a sibling anyOf branch does", () => {
+      // The union decides in both directions: an all-string one rejects null,
+      // and a null branch admits it just as plainly.
+      expect(admitsNull({ const: null, anyOf: [{ type: "null" }] })).toBe(true);
+    });
+
     it("does not override a sibling that rejects null", () => {
       // `const` is conjunctive with its siblings, not an override: both of
       // these reject every value, so claiming nullability would let the
