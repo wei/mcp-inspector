@@ -22,9 +22,29 @@
  * therefore needs `frameLocator(...).frameLocator(...)`, not one hop.
  *
  * Set `SMOKE_SCREENSHOT_DIR` to capture PNGs of each state (used to attach
- * proof to a PR); unset, it asserts only. Playwright is resolved with a
- * `createRequire` based at clients/web/package.json for the reason documented at
- * length in smoke-web-browser.mjs.
+ * proof to a PR); unset, it asserts only.
+ *
+ * `SMOKE_BROWSER` picks the engine (`chromium` — the default — `firefox`, or
+ * `webkit`). Three tiers, deliberately (#2086):
+ *
+ *   - **GitHub CI** runs this smoke in **Chromium** only.
+ *   - **`npm run ci`**, the local pre-push gate, runs it in **Chromium and
+ *     Firefox** — the Firefox pass is `smoke:web:firefox`, and it is the one
+ *     gate step with no GitHub CI counterpart.
+ *   - **WebKit is on demand only**: `SMOKE_BROWSER=webkit npm run smoke:web:elicit`
+ *     for this smoke alone, or `npm run smoke:web:webkit` for all three.
+ *
+ * Firefox passes. WebKit fails this smoke for reasons nobody has identified and
+ * nobody is investigating: it does not reproduce in real Safari, and an isolated
+ * SSE repro did not reproduce it under Playwright's WebKit either, so it reads
+ * as a property of that build rather than a browser bug. Do not read a WebKit
+ * failure here as a defect until someone has actually looked.
+ *
+ * Along with `smoke:web:app` this is one
+ * of the two places the MCP Apps sandbox is actually loaded, and the two nested
+ * frames below are precisely the surface that diverges between engines. See
+ * `lib/headless-browser.mjs`, including why a green WebKit run is not a Safari
+ * guarantee.
  *
  * Expects `clients/web/dist` and `clients/launcher/build` to be built first.
  * `test-servers/build` is rebuilt on every run, as in smoke:web:app — see
@@ -33,20 +53,35 @@
 
 import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
-import { createRequire } from "node:module";
 import { setTimeout as delay } from "node:timers/promises";
 import { join, resolve } from "node:path";
 import { startProdWebServer } from "./lib/prod-web-server.mjs";
 import { stopChild } from "./lib/child-cleanup.mjs";
+import {
+  attachPageDiagnostics,
+  loadBrowser,
+  resolveBrowserName,
+} from "./lib/headless-browser.mjs";
 import {
   ensureTestServers,
   testServerEntryPath,
 } from "./lib/ensure-test-servers.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
-const requireFromWeb = createRequire(
-  resolve(repoRoot, "clients/web/package.json"),
-);
+
+// Resolved before anything is started, so an unsupported SMOKE_BROWSER fails
+// immediately rather than after a web server and two MCP servers are up. Every
+// message carries the engine, so a failure names which one broke.
+let BROWSER;
+try {
+  BROWSER = resolveBrowserName();
+} catch (err) {
+  console.error(
+    `smoke:web:elicit FAILED — ${err instanceof Error ? err.message : String(err)}`,
+  );
+  process.exit(1);
+}
+const LABEL = `smoke:web:elicit [${BROWSER}]`;
 
 const composableServer = testServerEntryPath(repoRoot, "composable");
 const configPath = (name) =>
@@ -59,9 +94,6 @@ const PORT = process.env.SMOKE_WEB_ELICIT_PORT ?? "6296";
 const TOKEN = "smoke-web-elicit-token";
 const TOOL = "app_choose_option";
 const SHOT_DIR = process.env.SMOKE_SCREENSHOT_DIR;
-// The async half of the uncaught-crash class. Kept identical to
-// smoke-web-browser.mjs / smoke-web-app.mjs.
-const FATAL_CONSOLE = /^Uncaught\b|Failed to fetch dynamically imported module/;
 
 const servers = [];
 let browser = null;
@@ -69,7 +101,7 @@ const web = startProdWebServer({
   host: HOST,
   port: PORT,
   token: TOKEN,
-  label: "smoke:web:elicit",
+  label: LABEL,
 });
 
 async function shutdown() {
@@ -84,14 +116,14 @@ async function shutdown() {
   await web.stop();
   while (servers.length) {
     await stopChild(servers.pop(), {
-      label: "smoke:web:elicit",
+      label: LABEL,
       what: "MCP test server",
     });
   }
 }
 
 async function fail(message) {
-  console.error(`smoke:web:elicit FAILED — ${message}`);
+  console.error(`${LABEL} FAILED — ${message}`);
   await shutdown();
   process.exit(1);
 }
@@ -134,24 +166,6 @@ async function startMcpServer(configName) {
   throw new Error(`MCP test server did not start within 30s:\n${out}`);
 }
 
-async function loadChromium() {
-  let chromium;
-  try {
-    ({ chromium } = requireFromWeb("playwright"));
-  } catch (err) {
-    throw new Error(
-      `could not resolve the Playwright package from clients/web — run \`npm install\` at the repo root (${err instanceof Error ? err.message : String(err)})`,
-    );
-  }
-  try {
-    return await chromium.launch({ headless: true });
-  } catch (err) {
-    throw new Error(
-      `chromium failed to launch — on a bare Linux box run \`npx playwright install --with-deps chromium\` for the system libraries (${err instanceof Error ? err.message : String(err)})`,
-    );
-  }
-}
-
 async function shot(page, name) {
   if (!SHOT_DIR) return;
   mkdirSync(SHOT_DIR, { recursive: true });
@@ -159,7 +173,7 @@ async function shot(page, name) {
     path: join(SHOT_DIR, `${name}.png`),
     fullPage: false,
   });
-  console.log(`smoke:web:elicit — captured ${name}.png`);
+  console.log(`${LABEL} — captured ${name}.png`);
 }
 
 /** Connect to `mcpUrl` through the deep link and wait for the Tools list. */
@@ -207,31 +221,24 @@ try {
   // Rebuilt on every run — presence is not freshness (#2111).
   ensureTestServers({
     repoRoot,
-    label: "smoke:web:elicit",
+    label: LABEL,
     requires: ["composable"],
   });
   const appUrl = await startMcpServer("app-elicitation-http");
   const nativeUrl = await startMcpServer("app-elicitation-native-http");
   await web.waitForReady();
-  browser = await loadChromium();
+  browser = await loadBrowser(repoRoot, BROWSER);
   const page = await browser.newPage({
     viewport: { width: 1280, height: 900 },
   });
 
-  // Uncaught *synchronous* page errors, and their *async* twin (an unhandled
-  // rejection or a failed dynamic import), which Chromium reports on the
-  // console channel instead. Both are hard failures; every other console error
-  // is only a diagnostic, so benign font/React noise cannot flake CI. Same
-  // split as smoke:web:browser and smoke:web:app, which document it at length.
-  const pageErrors = [];
-  const consoleErrors = [];
-  page.on("pageerror", (err) =>
-    pageErrors.push(err instanceof Error ? err.message : String(err)),
-  );
-  page.on("console", (msg) => {
-    if (msg.type() === "error") consoleErrors.push(msg.text());
-  });
-  const fatalConsole = () => consoleErrors.filter((m) => FATAL_CONSOLE.test(m));
+  // Uncaught *synchronous* page errors, plus their *async* twin (an unhandled
+  // rejection or a failed dynamic import), which arrives on the console channel
+  // instead. Both are hard failures; every other console error is only a
+  // diagnostic, so benign font/React noise cannot flake CI. Shared with
+  // smoke:web:app rather than re-hand-rolled — the split is subtle enough that
+  // two copies would drift, and it is documented at length on the helper.
+  const diagnostics = attachPageDiagnostics(page);
 
   const drive = async () => {
     // ── 1. Negotiated: the server's app answers the elicitation ────────────
@@ -297,27 +304,25 @@ try {
   try {
     await Promise.race([web.whenChildExits(), drive()]);
   } catch (err) {
-    const diagnostics = [
-      ...pageErrors,
-      ...fatalConsole().map((m) => `console: ${m}`),
+    const notes = [
+      ...diagnostics.pageErrors,
+      ...diagnostics.fatalConsole().map((m) => `console: ${m}`),
     ];
     await fail(
       `${err instanceof Error ? err.message : String(err)}${
-        diagnostics.length
-          ? ` — page diagnostics: ${diagnostics.join("; ")}`
-          : ""
+        notes.length ? ` — page diagnostics: ${notes.join("; ")}` : ""
       }`,
     );
   }
 
   // A drive that reached all of its assertions still fails if the page threw on
   // the way: without this the smoke prints OK over a broken bundle.
-  const fatal = [...pageErrors, ...fatalConsole()];
+  const fatal = diagnostics.fatal();
   if (fatal.length > 0) {
     await fail(`page logged uncaught error(s): ${fatal.join("; ")}`);
   }
 
-  console.log("smoke:web:elicit OK — app-rendered and native paths both drive");
+  console.log(`${LABEL} OK — app-rendered and native paths both drive`);
   await shutdown();
 } catch (err) {
   await fail(err instanceof Error ? err.message : String(err));

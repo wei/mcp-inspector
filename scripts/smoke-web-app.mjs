@@ -41,6 +41,31 @@
  * renamed* without its reader being updated, a repo-tree failure pack:verify
  * would only find later.
  *
+ * ── Which engine ────────────────────────────────────────────────────────────
+ *
+ * `SMOKE_BROWSER` picks the engine (`chromium` — the default — `firefox`, or
+ * `webkit`). Three tiers, deliberately (#2086):
+ *
+ *   - **GitHub CI** runs this smoke in **Chromium** only.
+ *   - **`npm run ci`**, the local pre-push gate, runs it in **Chromium and
+ *     Firefox** — the Firefox pass is `smoke:web:firefox`, and it is the one
+ *     gate step with no GitHub CI counterpart.
+ *   - **WebKit is on demand only**: `SMOKE_BROWSER=webkit npm run smoke:web:app`
+ *     for this smoke alone, or `npm run smoke:web:webkit` for all three.
+ *
+ * Firefox passes. WebKit fails this smoke for reasons nobody has identified and
+ * nobody is investigating: it does not reproduce in real Safari, and an isolated
+ * SSE repro did not reproduce it under Playwright's WebKit either, so it reads
+ * as a property of that build rather than a browser bug. Do not read a WebKit
+ * failure here as a defect until someone has actually looked.
+ *
+ * This smoke is one of the two places the
+ * MCP Apps sandbox is genuinely exercised, and the sandbox is built out of the
+ * primitives that actually diverge between engines — `srcdoc` CSP inheritance,
+ * nested sandboxed iframes, `Permissions-Policy`, cross-frame `postMessage`. See
+ * `lib/headless-browser.mjs`, including why a green WebKit run is not a Safari
+ * guarantee.
+ *
  * Expects `clients/web/dist` and `clients/launcher/build` to be built first —
  * the validate / CI ordering guarantees this. `test-servers/build` is rebuilt on
  * every run, as in smoke:cli — see `scripts/lib/ensure-test-servers.mjs` for why
@@ -54,17 +79,34 @@ import { join, resolve } from "node:path";
 import { startProdWebServer } from "./lib/prod-web-server.mjs";
 import { stopChild } from "./lib/child-cleanup.mjs";
 import {
-  APP_TOOL,
   attachPageDiagnostics,
+  loadBrowser,
+  resolveBrowserName,
+} from "./lib/headless-browser.mjs";
+import {
+  APP_TOOL,
   buildAppDeepLink,
   driveAppFlow,
-  loadChromium,
   sandboxProxyPageFor,
   startMcpAppServer,
 } from "./lib/mcp-app-flow.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
-const LABEL = "smoke:web:app";
+
+// Resolved before anything is started, so an unsupported SMOKE_BROWSER fails
+// immediately rather than after a web server and two MCP servers are up. Every
+// message this smoke prints carries the engine, so a failure names which one
+// broke rather than leaving the reader to remember what they invoked it with.
+let BROWSER;
+try {
+  BROWSER = resolveBrowserName();
+} catch (err) {
+  console.error(
+    `smoke:web:app FAILED — ${err instanceof Error ? err.message : String(err)}`,
+  );
+  process.exit(1);
+}
+const LABEL = `smoke:web:app [${BROWSER}]`;
 
 // Resolved exactly as the runtime does, from the built runner's directory.
 const sandboxProxyPage = sandboxProxyPageFor(
@@ -141,7 +183,7 @@ try {
     label: LABEL,
   });
   await server.waitForReady();
-  browser = await loadChromium(repoRoot);
+  browser = await loadBrowser(repoRoot, BROWSER);
   const page = await browser.newPage();
   const diagnostics = attachPageDiagnostics(page);
 

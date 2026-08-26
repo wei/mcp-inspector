@@ -2,15 +2,21 @@
  * Shared boot/readiness helper for the prod web smokes.
  *
  * `scripts/smoke-web.mjs` (serves-the-HTML check), `scripts/smoke-web-browser.mjs`
- * (runs-the-bundle check, #1615), and `scripts/smoke-web-app.mjs` (MCP Apps
- * end-to-end, #1859) all boot the *same* prod `mcp-inspector --web` server, so the
- * spawn + readiness-poll boilerplate lives here once instead of being copy-pasted
- * (and drifting) in each script. Catalog isolation (#1977) lives here for the same
- * reason — it is a property every web smoke needs, not one script's concern.
+ * (runs-the-bundle check, #1615), `scripts/smoke-web-app.mjs` (MCP Apps
+ * end-to-end, #1859) and `scripts/smoke-web-elicitation.mjs` (app-rendered
+ * elicitations, #1854) all boot the *same* prod `mcp-inspector --web` server, so
+ * the spawn + readiness-poll boilerplate lives here once instead of being
+ * copy-pasted (and drifting) in each script. Catalog isolation (#1977) lives here
+ * for the same reason — it is a property every web smoke needs, not one script's
+ * concern.
  *
- * Repo-root paths are derived from import.meta.url, so a caller's cwd (e.g.
- * `smoke:web:browser` does `cd clients/web` first so its `npx playwright
- * install` finds the local bin) doesn't affect which launcher/build tree runs.
+ * Repo-root paths are derived from import.meta.url rather than the cwd, so it
+ * does not matter where a caller is run from. (Until #2086 the browser-driven
+ * smokes were invoked through a `cd clients/web && npx playwright install …`
+ * prefix, which is what originally made that independence load-bearing; they now
+ * run from the repo root via `scripts/install-smoke-browser.mjs`. Deriving from
+ * import.meta.url is still the right call — it is what lets a smoke be run by
+ * hand from any directory.)
  */
 
 import { spawn } from "node:child_process";
