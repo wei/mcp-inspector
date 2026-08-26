@@ -571,6 +571,36 @@ function resolveValue(
   return getDefaultValue(fieldSchema);
 }
 
+/**
+ * The branch a set of values already identifies, or `null` when they identify
+ * none uniquely.
+ *
+ * A discriminated union pins its discriminator with `const`, so values carrying
+ * one name the branch they belong to. This matters because the form is not
+ * always mounted empty: an App deep link overlays `appArgs` on the initial
+ * defaults, so `{ kind: "sms", … }` can arrive while the picker would otherwise
+ * open on the first branch — showing one shape's controls while a differently
+ * shaped set of values sits underneath, ready to be submitted (#2123).
+ */
+function matchBranchIndex(
+  branches: { schema: InspectorFormSchema }[],
+  values: Record<string, unknown>,
+): number | null {
+  const matches: number[] = [];
+  branches.forEach((branch, index) => {
+    const pinned = Object.entries(branch.schema.properties ?? {}).filter(
+      ([, fieldSchema]) => fieldSchema.const !== undefined,
+    );
+    if (
+      pinned.length > 0 &&
+      pinned.every(([name, fieldSchema]) => values[name] === fieldSchema.const)
+    ) {
+      matches.push(index);
+    }
+  });
+  return matches.length === 1 ? matches[0] : null;
+}
+
 export function SchemaForm({
   schema,
   values,
@@ -588,7 +618,9 @@ export function SchemaForm({
   // Which alternative the form is currently showing. Held here because it is a
   // property of this rendering, not of the arguments: `values` carries what the
   // user typed, and nothing in it names a branch.
-  const [branchIndex, setBranchIndex] = useState(0);
+  const [branchIndex, setBranchIndex] = useState(
+    () => matchBranchIndex(branches, values) ?? 0,
+  );
   // A form reused for another entity can be handed a shorter union, so the
   // index is clamped rather than trusted — `resetKey` resets it below, but a
   // caller that omits it (the elicitation panels mount fresh) supplies none.
@@ -622,8 +654,10 @@ export function SchemaForm({
   useValueChange(resetKey, () => {
     setEnlargedFields(new Set());
     // Which branch is selected belongs to the entity it was chosen for, for the
-    // same reason enlargement does.
-    setBranchIndex(0);
+    // same reason enlargement does — reset to whichever branch the new values
+    // identify, so the visible selection cannot disagree with what would be
+    // submitted, and to the first when they identify none.
+    setBranchIndex(matchBranchIndex(branches, values) ?? 0);
   });
 
   // Stable so a field's reporting effect subscribes once, not per render. The
@@ -687,13 +721,21 @@ export function SchemaForm({
     if (!nextBranch) return;
     setBranchIndex(nextIndex);
     const nextProperties = nextBranch.schema.properties ?? {};
+    // Only what the *base* contributed is carried across — a value the outgoing
+    // branch declared belongs to that branch's shape, and a name the two
+    // branches type differently would arrive as the wrong type entirely (a `3`
+    // typed into branch A's number field landing in branch B's checkbox). A
+    // field the incoming branch pins to a `const` is likewise not carried: the
+    // branches of a discriminated union share the discriminator's *name* and
+    // disagree about its value.
+    const outgoing = new Set(activeBranch?.declaredFields ?? []);
     const carried: Record<string, unknown> = {};
     for (const [name, fieldSchema] of Object.entries(nextProperties)) {
-      // A field the incoming branch pins to a `const` is not carried: the two
-      // branches of a discriminated union share the discriminator's *name* and
-      // disagree about its value, so keeping what the outgoing branch put
-      // there would leave the arguments claiming the shape they no longer have.
-      if (values[name] !== undefined && fieldSchema.const === undefined) {
+      if (
+        values[name] !== undefined &&
+        fieldSchema.const === undefined &&
+        !outgoing.has(name)
+      ) {
         carried[name] = values[name];
       }
     }

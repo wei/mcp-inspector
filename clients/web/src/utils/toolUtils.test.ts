@@ -118,6 +118,22 @@ describe("hasInputFields with root composition (#2123)", () => {
     ).toBe(true);
   });
 
+  it("sees fields on a union the form declines to flatten", () => {
+    // Otherwise an App tool with such a schema is treated as input-free and
+    // invoked immediately with `{}`.
+    expect(
+      hasInputFields(
+        tool({
+          type: "object",
+          anyOf: [
+            { type: "object", properties: { a: { type: "string" } } },
+            { $ref: "#/$defs/Other" },
+          ],
+        }),
+      ),
+    ).toBe(true);
+  });
+
   it("still reports no fields for a bare object schema", () => {
     expect(hasInputFields(tool({ type: "object" }))).toBe(false);
   });

@@ -536,6 +536,32 @@ describe("schemaToForm", () => {
       });
     });
 
+    it("offers a shared base property in every branch's section", () => {
+      const schema = {
+        type: "object",
+        properties: { count: {} },
+        required: ["count"],
+        anyOf: [
+          { type: "object", properties: { count: { type: "integer" } } },
+          { type: "object", properties: { other: { type: "string" } } },
+        ],
+      };
+      const form = schemaToForm(schema, "shared");
+      // Rendered only in branch A's section, branch B could never supply the
+      // required root argument — the chosen branch's fields are what decode.
+      expect(form.sections[2]!.fields.map((field) => field.name)).toEqual([
+        "__b1__other",
+        "__b1__count",
+      ]);
+      expect(
+        decodeFormValues(schema, {
+          __variant: "1",
+          __b1__other: "x",
+          __b1__count: "4",
+        }),
+      ).toEqual({ other: "x", count: "4" });
+    });
+
     it("keeps its generated names clear of the schema's own", () => {
       const form = schemaToForm(
         {

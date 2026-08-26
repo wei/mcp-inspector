@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { resolveRootUnion } from "@inspector/core/json/rootUnion.js";
+import {
+  declaresAnyFields,
+  resolveRootUnion,
+} from "@inspector/core/json/rootUnion.js";
 
 const EMAIL = {
   type: "object",
@@ -76,6 +79,43 @@ describe("resolveRootUnion", () => {
     expect(Object.keys(base.properties ?? {})).toEqual(["note"]);
   });
 
+  it("leaves an unsatisfiable allOf alone rather than dropping it", () => {
+    // `allOf: [false, …]` admits nothing. Treating the boolean member as a
+    // no-op and stripping the keyword would render a fillable form for a schema
+    // that can never be satisfied.
+    const schema = {
+      type: "object" as const,
+      allOf: [
+        false as unknown,
+        { type: "object", properties: { x: { type: "string" } } },
+      ],
+    };
+    const { base, branches } = resolveRootUnion(schema);
+    expect(branches).toEqual([]);
+    expect(base.properties).toBeUndefined();
+    expect(base.allOf).toBe(schema.allOf);
+  });
+
+  it("leaves an allOf carrying a $ref alone", () => {
+    // The referent is not resolved here, so its constraints are unknown rather
+    // than absent.
+    const { base } = resolveRootUnion({
+      type: "object",
+      allOf: [{ $ref: "#/$defs/Thing" }],
+    });
+    expect(base.allOf).toHaveLength(1);
+    expect(base.properties).toBeUndefined();
+  });
+
+  it("declines a union when the allOf beneath it could not be flattened", () => {
+    const { branches } = resolveRootUnion({
+      type: "object",
+      allOf: [{ $ref: "#/$defs/Thing" }],
+      anyOf: [EMAIL, SMS],
+    });
+    expect(branches).toEqual([]);
+  });
+
   it("merges allOf branches unconditionally", () => {
     const { base, branches } = resolveRootUnion({
       type: "object",
@@ -126,6 +166,40 @@ describe("resolveRootUnion", () => {
     expect(branches[0].schema.required).toEqual(["id"]);
     // The branch declares the name, even though the base did too.
     expect(branches[0].declaredFields).toEqual(["id"]);
+  });
+
+  it("declines a union whose branch restates a constraint differently", () => {
+    // Both apply, so root `minimum: 10` under branch `minimum: 0` is still 10.
+    // Rendering either side would accept a value the schema rejects.
+    const { branches } = resolveRootUnion({
+      type: "object",
+      properties: { x: { type: "number", minimum: 10 } },
+      anyOf: [
+        { type: "object", properties: { x: { minimum: 0 } } },
+        { type: "object", properties: { other: { type: "string" } } },
+      ],
+    });
+    expect(branches).toEqual([]);
+  });
+
+  it("tolerates a branch disagreeing only about annotations", () => {
+    const { branches } = resolveRootUnion({
+      type: "object",
+      properties: { x: { type: "number", description: "root" } },
+      anyOf: [
+        {
+          type: "object",
+          properties: { x: { description: "branch", maximum: 3 } },
+        },
+        { type: "object", properties: { other: { type: "string" } } },
+      ],
+    });
+    expect(branches).toHaveLength(2);
+    expect(branches[0].schema.properties?.x).toEqual({
+      type: "number",
+      description: "branch",
+      maximum: 3,
+    });
   });
 
   it("declines a union whose branch contradicts the root's type for a field", () => {
@@ -278,6 +352,33 @@ describe("resolveRootUnion", () => {
         allOf: [null as unknown, 3 as unknown],
       });
       expect(Object.keys(base.properties ?? {})).toEqual(["a"]);
+    });
+  });
+
+  describe("declaresAnyFields", () => {
+    it("sees fields on a union the resolver declines", () => {
+      // A declined union still HAS fields — reporting none would auto-invoke an
+      // App tool with `{}` instead of asking for them.
+      const schema = {
+        type: "object" as const,
+        anyOf: [EMAIL, { $ref: "#/$defs/SMS" }],
+      };
+      expect(resolveRootUnion(schema).branches).toEqual([]);
+      expect(declaresAnyFields(schema)).toBe(true);
+    });
+
+    it("sees fields nested a level down", () => {
+      expect(
+        declaresAnyFields({
+          type: "object",
+          allOf: [{ type: "object", anyOf: [EMAIL, SMS] }],
+        }),
+      ).toBe(true);
+    });
+
+    it("reports none for a bare object schema", () => {
+      expect(declaresAnyFields({ type: "object" })).toBe(false);
+      expect(declaresAnyFields(undefined)).toBe(false);
     });
   });
 });

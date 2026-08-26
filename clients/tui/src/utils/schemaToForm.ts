@@ -116,6 +116,32 @@ function branchFieldName(
   return `${prefix}${branchIndex}__${name}`;
 }
 
+/**
+ * Base-declared names that at least one branch also declares. They move out of
+ * the base section and into every branch's, so the branch showing is the one
+ * whose declaration renders — and so a branch that does not specialize the name
+ * still offers it rather than losing a root argument it must supply.
+ */
+function sharedFieldNames(
+  base: { properties?: Record<string, unknown> },
+  branches: { declaredFields: string[] }[],
+): string[] {
+  const declared = new Set(branches.flatMap((branch) => branch.declaredFields));
+  return Object.keys(base.properties ?? {}).filter((name) =>
+    declared.has(name),
+  );
+}
+
+/** The property names one branch's section renders, under prefixed names. */
+function branchFields(
+  base: { properties?: Record<string, unknown> },
+  branches: { declaredFields: string[] }[],
+  index: number,
+): string[] {
+  const own = branches[index]?.declaredFields ?? [];
+  return [...new Set([...own, ...sharedFieldNames(base, branches)])];
+}
+
 /** The `const` a property schema pins its value to, if any. */
 function constOf(schema: unknown): unknown {
   if (typeof schema !== "object" || schema === null) return undefined;
@@ -148,17 +174,18 @@ export function schemaToForm(
   }
 
   const { variant, prefix } = generatedNames(base, branches);
-  const branchDeclared = new Set(
-    branches.flatMap((branch) => branch.declaredFields),
-  );
+  const shared = sharedFieldNames(base, branches);
 
-  // The base section renders what the base *alone* declares. A property a
-  // branch also declares is rendered in that branch's section instead, showing
-  // the branch's specialization — root `count: {}` under branch
-  // `count: { type: "number" }` is a number field there, not a string here.
+  // The base section renders what the base *alone* declares. A property some
+  // branch also declares moves into every branch's section, so the branch's
+  // specialization is what renders there — root `count: {}` under branch
+  // `count: { type: "number" }` is a number field, not a string — while a
+  // branch that does not specialize it still offers it, under its own inherited
+  // declaration. Rendering it once in the base section instead would strand it:
+  // the chosen branch's decoded fields are what reach the call.
   const baseProperties = Object.fromEntries(
     Object.entries(base.properties ?? {}).filter(
-      ([name]) => !branchDeclared.has(name),
+      ([name]) => !shared.includes(name),
     ),
   );
 
@@ -187,7 +214,7 @@ export function schemaToForm(
   // a form that can never be submitted.
   branches.forEach((branch, index) => {
     const properties = Object.fromEntries(
-      branch.declaredFields.map((name) => [
+      branchFields(base, branches, index).map((name) => [
         branchFieldName(prefix, index, name),
         branch.schema.properties?.[name],
       ]),
@@ -237,8 +264,8 @@ export function decodeFormValues<T>(
   const branch = branches[branchIndex]!;
 
   const generated = new Set<string>([variant]);
-  branches.forEach((each, index) => {
-    for (const name of each.declaredFields) {
+  branches.forEach((_each, index) => {
+    for (const name of branchFields(base, branches, index)) {
       generated.add(branchFieldName(prefix, index, name));
     }
   });
@@ -249,7 +276,7 @@ export function decodeFormValues<T>(
       decoded[name] = value;
     }
   }
-  for (const name of branch.declaredFields) {
+  for (const name of branchFields(base, branches, branchIndex)) {
     const value = values[branchFieldName(prefix, branchIndex, name)];
     if (value !== undefined) {
       decoded[name] = value;

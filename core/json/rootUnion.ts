@@ -42,6 +42,11 @@ export interface RootUnionSchema {
    * own repro does). Read only to *label* a branch — never to validate.
    */
   discriminator?: { propertyName?: string };
+  /**
+   * Read only to *decline* a member: its referent is not resolved here, so a
+   * `$ref` member's constraints are unknown rather than absent.
+   */
+  $ref?: string;
 }
 
 /**
@@ -143,16 +148,59 @@ function isOfferable(branch: RootUnionSchema): boolean {
 }
 
 /**
- * Merge two declarations of the same property name.
+ * Keywords that annotate rather than constrain. Two declarations may disagree
+ * about these without describing different values, so a disagreement here is
+ * not a reason to refuse to flatten.
+ */
+const ANNOTATION_KEYWORDS = new Set([
+  "title",
+  "description",
+  "examples",
+  "deprecated",
+  "readOnly",
+  "writeOnly",
+  "$comment",
+]);
+
+/** Structural equality, via canonical JSON — enough for schema keyword values. */
+function sameValue(a: unknown, b: unknown): boolean {
+  return a === b || JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
+ * Whether two declarations of one property name disagree about a constraint.
  *
  * Where a base and a branch both name a property, JSON Schema applies **both**
- * — so keeping only the branch's would silently drop the base's constraints
- * (root `{ minimum: 0 }` plus branch `{ maximum: 10 }` must keep the floor).
- * A shallow union preserves every keyword only one side states, with the
- * branch winning a keyword both state, being the more specific declaration.
- *
- * A *contradiction* is not resolvable this way and is not resolved here — see
- * {@link contradicts}, which declines such a union outright.
+ * — the value must satisfy the two together. A keyword only one side states is
+ * therefore safe to carry across, but a keyword they state *differently* is a
+ * conjunction this module cannot compute: root `minimum: 10` under branch
+ * `minimum: 0` is still 10, disjoint `enum`s leave nothing satisfiable at all,
+ * and `type: "string"` under `type: "number"` describes a value that cannot
+ * exist. Taking either side would render a form that accepts what the schema
+ * rejects, so the caller declines the composition instead.
+ */
+function conflicts(baseProperty: unknown, branchProperty: unknown): boolean {
+  const a = toBranch(baseProperty);
+  const b = toBranch(branchProperty);
+  if (a === null || b === null) {
+    return (
+      baseProperty !== undefined && !sameValue(baseProperty, branchProperty)
+    );
+  }
+  const left = a as Record<string, unknown>;
+  const right = b as Record<string, unknown>;
+  return Object.keys(right).some(
+    (keyword) =>
+      !ANNOTATION_KEYWORDS.has(keyword) &&
+      keyword in left &&
+      !sameValue(left[keyword], right[keyword]),
+  );
+}
+
+/**
+ * Merge two declarations of the same property name — a shallow union, which is
+ * the whole conjunction once {@link conflicts} has ruled out a keyword the two
+ * state differently.
  */
 function mergeProperty(
   baseProperty: unknown,
@@ -167,25 +215,57 @@ function mergeProperty(
 }
 
 /**
- * Whether a branch states a property `type` its base declaration rules out.
+ * Whether a member can be folded into a base schema at all.
  *
- * The two are conjunctive, so `string` under a base `number` describes a value
- * that cannot exist. No form can express that, and flattening it would render
- * one of the two types and accept values the schema rejects — so the caller
- * declines the union instead of picking a side.
+ * Two ways it cannot, both of which would have the composition keyword
+ * *removed* while its constraint went unapplied — a form that submits fields
+ * the schema forbids:
+ *
+ * - **It is not an object schema.** JSON Schema's boolean form is legal, and
+ *   `allOf: [false, …]` is unsatisfiable, so silently treating a non-object
+ *   member as a no-op turns "nothing is valid here" into a fillable form.
+ * - **It is a `$ref`.** The referent is not resolved by this module, so its
+ *   constraints are unknown rather than absent.
  */
-function contradicts(base: RootUnionSchema, branch: RootUnionSchema): boolean {
+function isFlattenable(member: unknown): boolean {
+  const branch = toBranch(member);
+  return branch !== null && branch.$ref === undefined;
+}
+
+/** Whether any property declaration of `branch` conflicts with the base's. */
+function conflictsWithBase(
+  base: RootUnionSchema,
+  branch: RootUnionSchema,
+): boolean {
   const baseProperties = propertiesOf(base) ?? {};
   const branchProperties = propertiesOf(branch) ?? {};
-  return Object.entries(branchProperties).some(([name, branchProperty]) => {
-    const a = toBranch(baseProperties[name]);
-    const b = toBranch(branchProperty);
-    if (a === null || b === null) return false;
-    return (
-      typeof a.type === "string" &&
-      typeof b.type === "string" &&
-      a.type !== b.type
-    );
+  return Object.entries(branchProperties).some(
+    ([name, branchProperty]) =>
+      name in baseProperties && conflicts(baseProperties[name], branchProperty),
+  );
+}
+
+/**
+ * Every property name the schema's composition members declare, whether or not
+ * the composition could be flattened.
+ *
+ * A caller deciding whether a tool takes arguments at all must count these: a
+ * union this module declines still *has* fields, and reporting "no fields"
+ * would auto-invoke the tool with `{}` rather than asking for them.
+ */
+export function declaresAnyFields(
+  schema: RootUnionSchema | undefined,
+): boolean {
+  if (schema === undefined) return false;
+  if (Object.keys(propertiesOf(schema) ?? {}).length > 0) return true;
+  const members = [
+    ...(schema.allOf ?? []),
+    ...(schema.anyOf ?? []),
+    ...(schema.oneOf ?? []),
+  ];
+  return members.some((member) => {
+    const branch = toBranch(member);
+    return branch !== null && declaresAnyFields(branch);
   });
 }
 
@@ -299,11 +379,28 @@ function branchLabel(
 export function resolveRootUnion<T extends RootUnionSchema>(
   schema: T,
 ): ResolvedRootUnion<T> {
-  const merged = (schema.allOf ?? []).reduce<ResolvedSchema<T>>(
-    (acc, member) => {
-      const branch = toBranch(member);
-      return branch === null ? acc : mergeBranch(acc, branch);
-    },
+  // `allOf` is only folded in when EVERY member can be. A member this module
+  // cannot flatten would otherwise have its keyword stripped by
+  // `withoutComposition` while its constraint went unapplied — so an
+  // unsatisfiable `allOf: [false, …]` would render as a fillable form, and a
+  // `$ref` member's constraints would read as absent rather than unknown. When
+  // one cannot, nothing is flattened: the schema's own `properties` render, its
+  // composition keywords stay on it, and no union is offered either, since a
+  // branch would otherwise be merged against a base whose constraints are not
+  // all known.
+  const allOfMembers = schema.allOf ?? [];
+  const flattenable =
+    allOfMembers.every(isFlattenable) &&
+    allOfMembers.every(
+      (member) =>
+        !conflictsWithBase(schema, toBranch(member) as RootUnionSchema),
+    );
+  if (!flattenable) {
+    return { base: schema as ResolvedSchema<T>, branches: [] };
+  }
+
+  const merged = allOfMembers.reduce<ResolvedSchema<T>>(
+    (acc, member) => mergeBranch(acc, toBranch(member) as RootUnionSchema),
     schema as ResolvedSchema<T>,
   );
   const base = withoutComposition(merged);
@@ -317,7 +414,9 @@ export function resolveRootUnion<T extends RootUnionSchema>(
     branches.length === 0 ||
     branches.some(
       (branch) =>
-        branch === null || !isOfferable(branch) || contradicts(base, branch),
+        branch === null ||
+        !isOfferable(branch) ||
+        conflictsWithBase(base, branch),
     )
   ) {
     return { base, branches: [] };

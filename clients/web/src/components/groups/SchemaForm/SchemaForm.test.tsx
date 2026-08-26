@@ -2100,6 +2100,55 @@ describe("SchemaForm multiline strings (#2042)", () => {
       expect(mode.value).toBe("fast");
     });
 
+    it("opens on the branch the supplied values identify", () => {
+      // A deep link overlays its args on the initial defaults, so values for
+      // one branch can arrive while the picker would otherwise open on another.
+      renderWithMantine(
+        <SchemaForm
+          schema={UNION_SCHEMA}
+          values={{ kind: "sms", phone: "555" }}
+          onChange={vi.fn()}
+        />,
+      );
+      expect(
+        (screen.getByRole("textbox", { name: /Variant/ }) as HTMLInputElement)
+          .value,
+      ).toBe("sms");
+      expect(screen.getByRole("textbox", { name: /Phone/ })).toBeTruthy();
+    });
+
+    it("does not carry a value the outgoing branch declared", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      const schema: InspectorFormSchema = {
+        type: "object",
+        anyOf: [
+          {
+            type: "object",
+            title: "A",
+            properties: { value: { type: "number", title: "Value" } },
+          },
+          {
+            type: "object",
+            title: "B",
+            properties: { value: { type: "boolean", title: "Value" } },
+          },
+        ],
+      };
+      renderWithMantine(
+        <SchemaForm
+          schema={schema}
+          values={{ value: 3 }}
+          onChange={onChange}
+        />,
+      );
+      await user.click(screen.getByRole("textbox", { name: /Variant/ }));
+      await user.click(screen.getByRole("option", { name: "B" }));
+      // Branch B types `value` as a boolean; carrying the 3 would check the box
+      // and submit a number the branch rejects.
+      expect(onChange).toHaveBeenCalledWith({});
+    });
+
     it("renders no picker for a single-branch union but still shows its fields", () => {
       const schema: InspectorFormSchema = {
         type: "object",

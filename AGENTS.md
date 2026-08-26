@@ -206,12 +206,20 @@ v2/main/
 │   │                                   #   field; schemaToForm.decodeFormValues translates
 │   │                                   #   back on submit), and convertToolParameters (which
 │   │                                   #   branch's schema types a CLI --tool-arg).
-│   │                                   #   DECLINES rather than half-reads: a union whose
-│   │                                   #   members are not ALL field-carrying objects, and a
-│   │                                   #   schema carrying BOTH oneOf and anyOf (independent
-│   │                                   #   keywords, satisfied together — picking one drops
-│   │                                   #   real constraints). Does not interpret `not` at
-│   │                                   #   all — #2123;
+│   │                                   #   DECLINES rather than half-reads, since keywords at
+│   │                                   #   one level are CONJUNCTIVE and it computes no
+│   │                                   #   intersections: a union whose members are not ALL
+│   │                                   #   field-carrying objects (or whose member `type`
+│   │                                   #   rules objects out), a branch restating a
+│   │                                   #   constraint the root states differently, an allOf
+│   │                                   #   carrying a member it cannot fold in (`false`, a
+│   │                                   #   $ref) — dropping the keyword there would turn an
+│   │                                   #   UNSATISFIABLE schema into a fillable form — and a
+│   │                                   #   schema carrying BOTH oneOf and anyOf. Does not
+│   │                                   #   interpret `not` at all. Declining changes what
+│   │                                   #   RENDERS, never whether the tool takes arguments:
+│   │                                   #   declaresAnyFields counts the raw members, so an
+│   │                                   #   App tool is never auto-invoked with `{}` — #2123;
 │   │                                   #   schemaLint.ts: tool-schema PORTABILITY lint —
 │   │                                   #   constructs that are legal JSON Schema and are
 │   │                                   #   refused or mishandled by real MCP clients (a bare
