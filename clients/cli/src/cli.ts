@@ -47,7 +47,11 @@ import {
   serializeOAuthPersistBlob,
   type OAuthPersistSnapshot,
 } from "@inspector/core/auth/oauth-persist.js";
-import { getAuthorizationServerUrl } from "@inspector/core/auth/discovery.js";
+import {
+  discoverAuthorizationServerMetadataFromCandidates,
+  getAuthorizationServerUrl,
+  getAuthorizationServerUrlCandidates,
+} from "@inspector/core/auth/discovery.js";
 import { writeStoreFile } from "@inspector/core/storage/store-io.js";
 import {
   refreshAuthorization,
@@ -347,11 +351,27 @@ export async function refreshStoredAuthToken(
     );
   }
 
-  const authServerUrl = found.state.serverMetadata?.issuer
-    ? new URL(found.state.serverMetadata.issuer)
-    : getAuthorizationServerUrl(serverUrl);
-  const metadata =
-    found.state.serverMetadata ?? (await discover(authServerUrl)) ?? undefined;
+  // With stored metadata the issuer settles it. Without, the MCP server URL
+  // stands in as the authorization server — and a path-hosted server has two
+  // plausible answers, so walk them rather than committing to the path-scoped
+  // one: a server that merely lives under a path while publishing its metadata
+  // at the domain root must keep working (#2110). The candidate that *answered*
+  // becomes `authServerUrl`, since it is also the base the token request below
+  // is made against.
+  let authServerUrl: URL;
+  let metadata = found.state.serverMetadata ?? undefined;
+  if (found.state.serverMetadata?.issuer) {
+    authServerUrl = new URL(found.state.serverMetadata.issuer);
+  } else {
+    const discovered = await discoverAuthorizationServerMetadataFromCandidates(
+      getAuthorizationServerUrlCandidates(serverUrl),
+      discover,
+    );
+    authServerUrl =
+      discovered?.authorizationServerUrl ??
+      getAuthorizationServerUrl(serverUrl);
+    metadata = discovered?.metadata;
+  }
 
   let tokens: OAuthTokens;
   try {

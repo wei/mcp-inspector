@@ -158,6 +158,97 @@ describe("refreshStoredAuthToken", () => {
     }
   });
 
+  // #2110: with no stored metadata the MCP server URL stands in as the
+  // authorization server. A path-hosted server has two plausible answers, and
+  // both must keep working — the path-scoped URL for a server that publishes
+  // its metadata under its own path, the bare origin for one that merely lives
+  // under a path. The candidate that answers is also the base the token request
+  // is made against, so the walk has to report *which* one it was.
+  it("prefers the path-scoped authorization server for a path-hosted MCP server", async () => {
+    const path = writeOAuthFixture({
+      [SERVER]: {
+        tokens: { refresh_token: "old-refresh", token_type: "Bearer" },
+        clientInformation: { client_id: "cid" },
+      },
+    });
+    try {
+      const refresh = vi.fn().mockResolvedValue(freshTokens);
+      const pathMetadata = {
+        issuer: "https://api.example/mcp",
+        token_endpoint: "https://api.example/mcp/token",
+      };
+      const discover = vi.fn().mockResolvedValue(pathMetadata);
+
+      await refreshStoredAuthToken(SERVER, path, { refresh, discover });
+
+      expect(discover).toHaveBeenCalledTimes(1);
+      expect(discover).toHaveBeenCalledWith(new URL("https://api.example/mcp"));
+      const [authServerUrl, opts] = refresh.mock.calls[0]!;
+      expect(authServerUrl).toEqual(new URL("https://api.example/mcp"));
+      expect(opts.metadata).toEqual(pathMetadata);
+    } finally {
+      rmSync(path, { force: true });
+    }
+  });
+
+  it("falls back to the origin when a path-hosted server publishes metadata at the root", async () => {
+    const path = writeOAuthFixture({
+      [SERVER]: {
+        tokens: { refresh_token: "old-refresh", token_type: "Bearer" },
+        clientInformation: { client_id: "cid" },
+      },
+    });
+    try {
+      const refresh = vi.fn().mockResolvedValue(freshTokens);
+      const rootMetadata = {
+        issuer: "https://api.example",
+        token_endpoint: "https://api.example/token",
+      };
+      const discover = vi
+        .fn()
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce(rootMetadata);
+
+      const token = await refreshStoredAuthToken(SERVER, path, {
+        refresh,
+        discover,
+      });
+
+      expect(token).toBe("refreshed-access-token");
+      expect(discover).toHaveBeenNthCalledWith(
+        2,
+        new URL("https://api.example/"),
+      );
+      // The candidate that answered is the one the token request targets.
+      const [authServerUrl, opts] = refresh.mock.calls[0]!;
+      expect(authServerUrl).toEqual(new URL("https://api.example/"));
+      expect(opts.metadata).toEqual(rootMetadata);
+    } finally {
+      rmSync(path, { force: true });
+    }
+  });
+
+  it("keeps the path-scoped candidate as the token-request base when no candidate answers", async () => {
+    const path = writeOAuthFixture({
+      [SERVER]: {
+        tokens: { refresh_token: "old-refresh", token_type: "Bearer" },
+        clientInformation: { client_id: "cid" },
+      },
+    });
+    try {
+      const refresh = vi.fn().mockResolvedValue(freshTokens);
+      const discover = vi.fn().mockResolvedValue(undefined);
+
+      await refreshStoredAuthToken(SERVER, path, { refresh, discover });
+
+      expect(discover).toHaveBeenCalledTimes(2);
+      const [authServerUrl] = refresh.mock.calls[0]!;
+      expect(authServerUrl).toEqual(new URL("https://api.example/mcp"));
+    } finally {
+      rmSync(path, { force: true });
+    }
+  });
+
   it("uses the distinct no_client_information code when client info is missing", async () => {
     const path = writeOAuthFixture({
       [SERVER]: {
