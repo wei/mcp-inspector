@@ -1,0 +1,108 @@
+import type {
+  LoggingMessageNotification,
+  Tool,
+} from "@modelcontextprotocol/client";
+import type { InspectorClient } from "@inspector/core/mcp/index.js";
+import type { JsonValue } from "@inspector/core/mcp/index.js";
+import type { MessageEntry } from "@inspector/core/mcp/types.js";
+import type { LogEntryData } from "../components/elements/LogEntry/LogEntry";
+import { isReplayableProtocolMethod } from "../components/groups/protocolUtils.js";
+
+// Derive `LogEntryData[]` from the MessageLog by filtering for the
+// `notifications/message` notifications the server emits in response to
+// `logging/setLevel`. The Logs screen renders these; we transform here
+// rather than in the screen so the view stays prop-driven.
+export function messagesToLogEntries(messages: MessageEntry[]): LogEntryData[] {
+  const out: LogEntryData[] = [];
+  for (const m of messages) {
+    if (m.direction !== "notification") continue;
+    // MessageEntry.message is a JSONRPC union; notifications have `method`
+    // but not `id`. Narrow with an `in` check, then confirm the method.
+    if (!("method" in m.message)) continue;
+    if (m.message.method !== "notifications/message") continue;
+    // The method check pins this to a logging notification; its `params` are
+    // only generically typed on the JSONRPC union, so cast just that value.
+    const params = m.message.params as LoggingMessageNotification["params"];
+    out.push({
+      receivedAt: m.timestamp,
+      params,
+    });
+  }
+  return out;
+}
+
+// Re-issue the original request behind a Protocol entry. The call goes through
+// InspectorClient → tracked transport → message log, so the replayed
+// request+response surface as a fresh Protocol entry (protocol-local) — it
+// intentionally does NOT touch the Tools/Prompts/Resources panels. Returns a
+// human-readable reason when the entry can't be replayed (unsupported method,
+// or a tool that's no longer present), or null on a dispatched replay.
+export async function replayProtocolRequest(
+  client: InspectorClient,
+  method: string,
+  params: Record<string, unknown> | undefined,
+  tools: Tool[],
+): Promise<string | null> {
+  // Gate on the shared replayable-method set (the same one ProtocolEntry uses to
+  // show/hide the Replay button) so the two can't drift.
+  if (!isReplayableProtocolMethod(method)) {
+    return `Replay isn't supported for "${method}".`;
+  }
+  // Pagination cursor carried by the */list requests; replaying the same page
+  // reproduces the original call.
+  const cursor = typeof params?.cursor === "string" ? params.cursor : undefined;
+  switch (method) {
+    case "tools/call": {
+      const name = typeof params?.name === "string" ? params.name : undefined;
+      const tool = tools.find((t) => t.name === name);
+      if (!tool) {
+        return `Tool "${name ?? "?"}" is no longer available to replay.`;
+      }
+      await client.callTool(
+        tool,
+        (params?.arguments ?? {}) as Record<string, JsonValue>,
+      );
+      return null;
+    }
+    case "prompts/get": {
+      const name = typeof params?.name === "string" ? params.name : undefined;
+      if (!name) return "Prompt name is missing; cannot replay.";
+      await client.getPrompt(
+        name,
+        (params?.arguments ?? {}) as Record<string, JsonValue>,
+      );
+      return null;
+    }
+    case "resources/read": {
+      const uri = typeof params?.uri === "string" ? params.uri : undefined;
+      if (!uri) return "Resource URI is missing; cannot replay.";
+      await client.readResource(uri);
+      return null;
+    }
+    case "tools/list":
+      await client.listTools(cursor);
+      return null;
+    case "prompts/list":
+      await client.listPrompts(cursor);
+      return null;
+    case "resources/list":
+      await client.listResources(cursor);
+      return null;
+    case "resources/templates/list":
+      await client.listResourceTemplates(cursor);
+      return null;
+    case "tasks/list":
+      await client.listRequestorTasks(cursor);
+      return null;
+    case "ping":
+      await client.ping();
+      return null;
+    /* v8 ignore start -- unreachable: the guard above admits exactly the nine
+       methods this switch enumerates. Kept so a method added to
+       REPLAYABLE_PROTOCOL_METHODS without a case here reports a reason rather
+       than silently resolving as a dispatched replay. */
+    default:
+      return `Replay isn't supported for "${method}".`;
+    /* v8 ignore stop */
+  }
+}

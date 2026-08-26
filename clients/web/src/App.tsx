@@ -7,11 +7,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import {
-  Anchor,
   Box,
-  List,
-  Paper,
-  Stack,
   Text,
   useComputedColorScheme,
   useMantineColorScheme,
@@ -22,15 +18,10 @@ import type {
   ElicitResult,
   InitializeResult,
   LoggingLevel,
-  LoggingMessageNotification,
-  Progress,
-  ProgressToken,
   Resource,
-  Task,
   Tool,
 } from "@modelcontextprotocol/client";
 import { InspectorClient } from "@inspector/core/mcp/index.js";
-import { toRecord } from "@inspector/core/json/jsonUtils.js";
 import { getServerType } from "@inspector/core/mcp/config.js";
 import type {
   InspectorClientEventMap,
@@ -46,7 +37,6 @@ import type { TypedEventGeneric } from "@inspector/core/mcp/typedEventTarget.js"
 import type {
   InspectorServerSettings,
   MCPServerConfig,
-  MessageEntry,
   ServerEntry,
   ServerType,
 } from "@inspector/core/mcp/types.js";
@@ -56,10 +46,6 @@ import {
   eraToVersionNegotiation,
   resolveModernLogLevel,
 } from "@inspector/core/mcp/types.js";
-import {
-  API_SERVER_ENV_VARS,
-  INSPECTOR_API_TOKEN_GLOBAL,
-} from "@inspector/core/mcp/remote/constants.js";
 import { ManagedToolsState } from "@inspector/core/mcp/state/managedToolsState.js";
 import { ManagedPromptsState } from "@inspector/core/mcp/state/managedPromptsState.js";
 import { ManagedResourcesState } from "@inspector/core/mcp/state/managedResourcesState.js";
@@ -91,7 +77,6 @@ import { MessageLogState } from "@inspector/core/mcp/state/messageLogState.js";
 import { FetchRequestLogState } from "@inspector/core/mcp/state/fetchRequestLogState.js";
 import type { FetchRequestLogStateEventMap } from "@inspector/core/mcp/state/fetchRequestLogState.js";
 import { StderrLogState } from "@inspector/core/mcp/state/stderrLogState.js";
-import type { RedirectUrlProvider } from "@inspector/core/auth/index.js";
 import {
   parseOAuthCallbackParams,
   parseOAuthState,
@@ -175,7 +160,6 @@ import { ConnectionInfoModal } from "./components/groups/ConnectionInfoModal/Con
 import { oauthDetailsFromConnectionState } from "./components/groups/ConnectionInfoContent/oauthDetailsFromConnectionState";
 import { OutputValidationModal } from "./components/groups/OutputValidationModal/OutputValidationModal";
 import { UrlElicitationErrorModal } from "./components/groups/UrlElicitationErrorModal/UrlElicitationErrorModal";
-import { isReplayableProtocolMethod } from "./components/groups/protocolUtils.js";
 import type { OAuthDetails } from "./components/groups/ConnectionInfoContent/ConnectionInfoContent";
 import { ServerRemoveConfirmModal } from "./components/groups/ServerRemoveConfirmModal/ServerRemoveConfirmModal";
 import { StepUpAuthModal } from "./components/groups/StepUpAuthModal/StepUpAuthModal";
@@ -215,8 +199,6 @@ import {
   emaStepUpFailureMessage,
   emaStepUpInProgressMessage,
   emaStepUpSuccessMessage,
-  isEmaStepUp as isCoreEmaStepUp,
-  isStepUpConfirmation as isCoreStepUpConfirmation,
 } from "@inspector/core/auth/oauthUx.js";
 import { clearServerOAuthState } from "./lib/clearServerOAuthState";
 import {
@@ -236,437 +218,43 @@ import {
   onBrowserTabVisible,
 } from "./lib/browserTabVisibility";
 import type { PendingReauth } from "./utils/pendingReauth";
-
-// OAuth redirect URL provider — points at the dev backend's `/oauth/callback`
-// handler. The InspectorClient only consults this when the active server
-// requires OAuth; for stdio MCP servers it's never used. Created once and
-// reused so `BrowserOAuthClientProvider` doesn't re-instantiate per render.
-const redirectUrlProvider: RedirectUrlProvider = {
-  getRedirectUrl: () => `${window.location.origin}${OAUTH_CALLBACK_PATH}`,
-};
-
-// Recover the backend's auth token. Every browser request to /api/* needs it
-// in the `x-mcp-remote-auth: Bearer …` header or the Hono backend returns 401.
-// Three sources, in priority order:
-//   1. `window.__INSPECTOR_API_TOKEN__` — injected into index.html by the
-//      backend on every page load (dev Vite plugin + prod Hono server). This
-//      is the robust path: it survives a bare-URL reload, a bookmark, or a
-//      cleared sessionStorage, none of which carry the query string.
-//   2. `?MCP_INSPECTOR_API_TOKEN=…` — the URL the launcher banner prints. Kept
-//      as a fallback for pasted full URLs and older integrations.
-//   3. sessionStorage — backstop for SPA navigations / OAuth round-trips that
-//      land without either of the above.
-// Both the injected global and the URL value are persisted to sessionStorage
-// so a later navigation that drops them (e.g. a deep-link load that wasn't
-// injected, or an iframe) still authenticates from the backstop.
-function getAuthToken(): string | undefined {
-  if (typeof window === "undefined") return undefined;
-  const STORAGE_KEY = API_SERVER_ENV_VARS.AUTH_TOKEN;
-  // Best-effort persistence — sessionStorage may be unavailable (privacy
-  // mode, iframe sandboxing, etc.); the resolved value still works for the
-  // current page load regardless.
-  const persist = (token: string): void => {
-    try {
-      window.sessionStorage.setItem(STORAGE_KEY, token);
-    } catch {
-      // ignore — see note above
-    }
-  };
-  const fromGlobal = toRecord(window)[INSPECTOR_API_TOKEN_GLOBAL];
-  if (typeof fromGlobal === "string" && fromGlobal) {
-    persist(fromGlobal);
-    return fromGlobal;
-  }
-  const params = new URLSearchParams(window.location.search);
-  const fromUrl = params.get(API_SERVER_ENV_VARS.AUTH_TOKEN);
-  if (fromUrl) {
-    persist(fromUrl);
-    return fromUrl;
-  }
-  try {
-    return window.sessionStorage.getItem(STORAGE_KEY) ?? undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-// Derive `LogEntryData[]` from the MessageLog by filtering for the
-// `notifications/message` notifications the server emits in response to
-// `logging/setLevel`. The Logs screen renders these; we transform here
-// rather than in the screen so the view stays prop-driven.
-function messagesToLogEntries(messages: MessageEntry[]): LogEntryData[] {
-  const out: LogEntryData[] = [];
-  for (const m of messages) {
-    if (m.direction !== "notification") continue;
-    // MessageEntry.message is a JSONRPC union; notifications have `method`
-    // but not `id`. Narrow with an `in` check, then confirm the method.
-    if (!("method" in m.message)) continue;
-    if (m.message.method !== "notifications/message") continue;
-    // The method check pins this to a logging notification; its `params` are
-    // only generically typed on the JSONRPC union, so cast just that value.
-    const params = m.message.params as LoggingMessageNotification["params"];
-    out.push({
-      receivedAt: m.timestamp,
-      params,
-    });
-  }
-  return out;
-}
-
-// Re-issue the original request behind a Protocol entry. The call goes through
-// InspectorClient → tracked transport → message log, so the replayed
-// request+response surface as a fresh Protocol entry (protocol-local) — it
-// intentionally does NOT touch the Tools/Prompts/Resources panels. Returns a
-// human-readable reason when the entry can't be replayed (unsupported method,
-// or a tool that's no longer present), or null on a dispatched replay.
-async function replayProtocolRequest(
-  client: InspectorClient,
-  method: string,
-  params: Record<string, unknown> | undefined,
-  tools: Tool[],
-): Promise<string | null> {
-  // Gate on the shared replayable-method set (the same one ProtocolEntry uses to
-  // show/hide the Replay button) so the two can't drift.
-  if (!isReplayableProtocolMethod(method)) {
-    return `Replay isn't supported for "${method}".`;
-  }
-  // Pagination cursor carried by the */list requests; replaying the same page
-  // reproduces the original call.
-  const cursor = typeof params?.cursor === "string" ? params.cursor : undefined;
-  switch (method) {
-    case "tools/call": {
-      const name = typeof params?.name === "string" ? params.name : undefined;
-      const tool = tools.find((t) => t.name === name);
-      if (!tool) {
-        return `Tool "${name ?? "?"}" is no longer available to replay.`;
-      }
-      await client.callTool(
-        tool,
-        (params?.arguments ?? {}) as Record<string, JsonValue>,
-      );
-      return null;
-    }
-    case "prompts/get": {
-      const name = typeof params?.name === "string" ? params.name : undefined;
-      if (!name) return "Prompt name is missing; cannot replay.";
-      await client.getPrompt(
-        name,
-        (params?.arguments ?? {}) as Record<string, JsonValue>,
-      );
-      return null;
-    }
-    case "resources/read": {
-      const uri = typeof params?.uri === "string" ? params.uri : undefined;
-      if (!uri) return "Resource URI is missing; cannot replay.";
-      await client.readResource(uri);
-      return null;
-    }
-    case "tools/list":
-      await client.listTools(cursor);
-      return null;
-    case "prompts/list":
-      await client.listPrompts(cursor);
-      return null;
-    case "resources/list":
-      await client.listResources(cursor);
-      return null;
-    case "resources/templates/list":
-      await client.listResourceTemplates(cursor);
-      return null;
-    case "tasks/list":
-      await client.listRequestorTasks(cursor);
-      return null;
-    case "ping":
-      await client.ping();
-      return null;
-    default:
-      return `Replay isn't supported for "${method}".`;
-  }
-}
-
-// Stable empty-shell for `InspectorServerSettings`. Used both as the
-// initial draft for a server entry that hasn't been touched yet, and as
-// the fallback the settings modal renders against when it's closed
-// (Mantine renders the dialog shell regardless of `opened`). Hoisted to
-// module scope so both call sites share the same object identity and so
-// React doesn't re-allocate on every render.
-const EMPTY_SETTINGS: InspectorServerSettings = {
-  headers: [],
-  env: [],
-  metadata: {},
-  connectionTimeout: 0,
-  requestTimeout: 0,
-  taskTtl: DEFAULT_TASK_TTL_MS,
-  autoRefreshOnListChanged: false,
-  paginatedLists: false,
-  maxFetchRequests: DEFAULT_MAX_FETCH_REQUESTS,
-  roots: [],
-};
-
-// Stable toast id for the "response body dropped" warning, keyed per server so
-// a request storm updates one persistent toast rather than stacking thousands
-// (the drop event can fire rapidly). Mirrors the progress-toast dedupe pattern.
-function bodyDroppedToastId(serverId: string): string {
-  return `fetch-body-dropped-${serverId}`;
-}
-
-const CLIENT_CONFIG_LOAD_ERROR_NOTIFICATION_ID = "client-config-load-error";
-
-// Shared "list of likely causes" styling for the warning-toast bodies below.
-const ToastCauseList = List.withProps({ size: "sm", spacing: 2 });
-
-// The "open the relevant settings/details" link rendered at the bottom of each
-// warning-toast body. Same static shape across all three toasts; each passes
-// its own `onClick`.
-const ToastLinkButton = Anchor.withProps({
-  component: "button",
-  type: "button",
-  size: "sm",
-});
-
-// The re-auth popup. A `Paper` so every static style is a prop; the stacking
-// order goes through `styles.root` since Mantine has no `z` prop.
-//
-// Floats top-right rather than spanning the top as a sticky full-bleed bar.
-// The bar cost the whole view a band of vertical space for what is a
-// notification about one server, and it sat directly above the monitoring
-// sidebar that an OAuth failure now opens (#2108) — the two things a user needs
-// at once here are this affordance and those requests, so it must not push them
-// around. `fixed`, not `sticky`, so scrolling the server list leaves it put.
-//
-// Centered, and deliberately WITHOUT an overlay. Every corner is spoken for —
-// the toast stack owns bottom-right (see `main.tsx`), the right edge is the
-// monitoring sidebar whose toolbar this would cover, and top-left is the
-// Servers header — so anchoring it anywhere hides something. Centering is the
-// one placement that reads as addressed to the whole window rather than
-// attached to the wrong panel.
-//
-// The missing overlay is the point, not an omission: this is a notification,
-// not a decision that must be made now. An OAuth failure opens the monitoring
-// sidebar (#2108), and blocking the page would force a choice between reading
-// those requests and keeping the affordance — dismissing is not free, since
-// "Authorize again" also clears the stale OAuth state, which a plain reconnect
-// does not do. So it floats above the page and leaves it usable.
-//
-// `transform` goes through `styles.root` for the same reason `zIndex` does:
-// Mantine exposes neither as a style prop.
-const ReAuthBannerBar = Paper.withProps({
-  pos: "fixed",
-  top: "50%",
-  left: "50%",
-  w: 420,
-  bg: "var(--mantine-color-body)",
-  shadow: "xl",
-  radius: "md",
-  styles: { root: { transform: "translate(-50%, -50%)", zIndex: 200 } },
-});
-
-// Body of the "response body dropped" warning toast: a one-line summary of what
-// happened, the likely causes, and a link that opens this server's settings
-// (on the Options section) so the user can raise the Network Log Size if it's
-// just a high-traffic server. Surfaces the otherwise-invisible rotation drop
-// described in #1390.
-const FetchBodyDroppedToastMessage = ({
-  maxFetchRequests,
-  onAdjust,
-}: {
-  maxFetchRequests: number;
-  onAdjust: () => void;
-}) => (
-  <Stack gap={4}>
-    <Text size="sm">
-      A response body arrived after its Network log entry had already rotated
-      out (the log hit its {maxFetchRequests}-request limit), so the body
-      couldn&apos;t be shown. This usually indicates:
-    </Text>
-    <ToastCauseList>
-      <List.Item>
-        a chatty or misbehaving server (notification storms, rapid polling)
-      </List.Item>
-      <List.Item>an SSE/transport reconnect or retry storm</List.Item>
-      <List.Item>
-        a slow streaming call racing against high request volume
-      </List.Item>
-      <List.Item>
-        the Network Log Size set too low for this server&apos;s traffic
-      </List.Item>
-    </ToastCauseList>
-    <ToastLinkButton onClick={onAdjust}>
-      Adjust Network Log Size for this server
-    </ToastLinkButton>
-  </Stack>
-);
-
-// Body of the output-schema-mismatch warning toast: a one-line summary plus a
-// link that opens the full validation details in a modal (the raw error is far
-// too long for a toast).
-const OutputValidationToastMessage = ({
-  onViewDetails,
-}: {
-  onViewDetails: () => void;
-}) => (
-  <Stack gap={4}>
-    <Text size="sm">
-      The tool result&apos;s structuredContent doesn&apos;t match the
-      tool&apos;s outputSchema. The inspector renders it anyway, but strict MCP
-      clients may not.
-    </Text>
-    <ToastLinkButton onClick={onViewDetails}>
-      View validation details
-    </ToastLinkButton>
-  </Stack>
-);
-
-// Body of the non-spec URLElicitationRequired toast: the server returned a
-// -32042 error with no `elicitations` list, so there's no URL to open. We keep
-// the toast short and link to a modal with the raw error body.
-const UrlElicitationErrorToastMessage = ({
-  onViewDetails,
-}: {
-  onViewDetails: () => void;
-}) => (
-  <Stack gap={4}>
-    <Text size="sm">
-      The server reported a URLElicitationRequired error but listed no required
-      elicitations, so there&apos;s nothing to open.
-    </Text>
-    <ToastLinkButton onClick={onViewDetails}>
-      View error details
-    </ToastLinkButton>
-  </Stack>
-);
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
-// The numeric JSON-RPC code of a thrown protocol error (e.g. a `ProtocolError`
-// carrying `-32602`), or undefined for a plain Error. Duck-typed like
-// `formatErrorDetails` so we don't couple to the SDK's error class here — the
-// only consumer is the Tools error panel's unknown-tool (`-32602`) hint (#1632).
-function errorCodeOf(err: unknown): number | undefined {
-  if (err && typeof err === "object") {
-    const code = (err as { code?: unknown }).code;
-    if (typeof code === "number") return code;
-  }
-  return undefined;
-}
-
-// Pretty-print a thrown error for the URL-elicitation details modal: a ProtocolError
-// carries a `code`/`data` worth showing alongside the message, so include them
-// when present; otherwise fall back to the plain message.
-function formatErrorDetails(err: unknown): string {
-  if (err && typeof err === "object") {
-    const e = err as { code?: unknown; message?: unknown; data?: unknown };
-    if (e.code !== undefined || e.data !== undefined) {
-      return JSON.stringify(
-        { code: e.code, message: e.message, data: e.data },
-        null,
-        2,
-      );
-    }
-  }
-  return errorMessage(err);
-}
-
-// How long a progress toast lingers after its last tick. Each new tick on the
-// same progress stream resets this window (via `notifications.update`), so a
-// steady stream keeps one toast alive; the toast clears a few seconds after
-// progress stops (i.e. the call finished or went quiet).
-const PROGRESS_TOAST_AUTOCLOSE_MS = 5000;
-
-// A task cancellation is a one-shot confirmation (unlike the live status toast,
-// which stays open while the task runs), so it auto-dismisses after a moment.
-const TASK_CANCELLED_TOAST_AUTOCLOSE_MS = 5000;
-
-// Stable toast id for a progress stream. Notifications keyed by this id are
-// replaced (not stacked) so a chatty server updates one toast per stream
-// rather than flooding the corner. The injected `progressToken` correlates a
-// stream with the request that triggered it; when absent (the common case —
-// the inspector doesn't expose a caller token), all ticks share one toast.
-function progressToastId(token: ProgressToken | undefined): string {
-  return `progress-${String(token ?? "default")}`;
-}
-
-// One-line toast body: "<message> — <progress> / <total> (NN%)". The fraction
-// and percentage are omitted when the server sends no `total`.
-function formatProgressToastMessage(
-  detail: Progress & { progressToken?: ProgressToken },
-): string {
-  const { progress, total, message } = detail;
-  const ratio =
-    total !== undefined && total > 0
-      ? `${progress} / ${total} (${Math.round((progress / total) * 100)}%)`
-      : `${progress}`;
-  return message ? `${message} — ${ratio}` : ratio;
-}
-
-// Terminal task states — once a task reaches one of these it can't change, so
-// its toast is dismissed and its per-task progress entry is pruned.
-const TERMINAL_TASK_STATUSES: ReadonlySet<Task["status"]> = new Set([
-  "completed",
-  "failed",
-  "cancelled",
-]);
-
-function isTerminalTaskStatus(status: Task["status"]): boolean {
-  return TERMINAL_TASK_STATUSES.has(status);
-}
-
-// Stable toast id per task so live status updates replace one toast rather than
-// stacking a fresh one per `notifications/tasks/status` tick.
-function taskToastId(taskId: string): string {
-  return `task-${taskId}`;
-}
-
-// Toast color per task status — mirrors TaskStatusBadge's mapping so the toast
-// and the Tasks-screen badge read consistently.
-function taskToastColor(status: Task["status"]): string {
-  switch (status) {
-    case "completed":
-      return "green";
-    case "failed":
-      return "red";
-    case "cancelled":
-      return "gray";
-    case "input_required":
-      return "yellow";
-    default:
-      return "blue";
-  }
-}
-
-// The subset of Task fields the toast layer reads. Both task-event payloads —
-// the server `taskStatusChange` (full Task) and the client-origin
-// `requestorTaskUpdated` (Task with optional createdAt) — satisfy this.
-type TaskToastInput = Pick<Task, "status"> & { statusMessage?: string };
-
-// One-line toast body: the task's `statusMessage` when present, else a short
-// fallback naming the status. The title carries the status itself.
-function formatTaskToastMessage(task: TaskToastInput): string {
-  return task.statusMessage ?? `Task ${task.status}`;
-}
-
-function isEmaStepUp(
-  challenge: AuthChallenge,
-  server: ServerEntry | undefined,
-): boolean {
-  return isCoreEmaStepUp(challenge, {
-    enterpriseManaged: server?.settings?.enterpriseManaged,
-  });
-}
-
-function isStepUpConfirmation(
-  challenge: AuthChallenge,
-  server: ServerEntry | undefined,
-): boolean {
-  return isCoreStepUpConfirmation(challenge, {
-    enterpriseManaged: server?.settings?.enterpriseManaged,
-  });
-}
-
-/** Which in-flight action opened the step-up modal (for scoped cancel UX). */
-type StepUpSource = "tool" | "prompt" | "resource" | "ambient" | "app";
+import { getAuthToken, redirectUrlProvider } from "./lib/authToken";
+import {
+  messagesToLogEntries,
+  replayProtocolRequest,
+} from "./lib/protocolReplay";
+import {
+  errorCodeOf,
+  errorMessage,
+  formatErrorDetails,
+} from "./utils/errorFormat";
+import { EMPTY_SETTINGS } from "./utils/serverSettingsDefaults";
+import {
+  isEmaStepUp,
+  isStepUpConfirmation,
+  type StepUpSource,
+} from "./utils/stepUp";
+import {
+  bodyDroppedToastId,
+  CLIENT_CONFIG_LOAD_ERROR_NOTIFICATION_ID,
+} from "./utils/toasts/toastIds";
+import {
+  formatProgressToastMessage,
+  PROGRESS_TOAST_AUTOCLOSE_MS,
+  progressToastId,
+} from "./utils/toasts/progressToasts";
+import {
+  formatTaskToastMessage,
+  isTerminalTaskStatus,
+  TASK_CANCELLED_TOAST_AUTOCLOSE_MS,
+  taskToastColor,
+  taskToastId,
+  type TaskToastInput,
+} from "./utils/toasts/taskToasts";
+import { FetchBodyDroppedToastMessage } from "./components/elements/Toasts/FetchBodyDroppedToastMessage";
+import { OutputValidationToastMessage } from "./components/elements/Toasts/OutputValidationToastMessage";
+import { UrlElicitationErrorToastMessage } from "./components/elements/Toasts/UrlElicitationErrorToastMessage";
+import { ReAuthBannerBar } from "./components/groups/ReAuthBanner/ReAuthBannerBar";
 
 function App() {
   // Theme toggle plumbing (preserved from the pre-wire placeholder).

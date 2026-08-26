@@ -81,11 +81,11 @@ exercises every rule.
 
 Two grab-bag directories, split by one rule: **`utils` = functions that compute; `lib` = things that instantiate, adapt, or touch the environment.** If it does I/O or wraps a subsystem, it's `lib`; if it's a pure transform, it's `utils`.
 
-- **`src/utils/`** — pure, side-effect-free functions (no DOM/`window`/`sessionStorage` I/O, no subsystem ownership), trivially unit-testable with no mocks. Examples: `jsonUtils`, `schemaUtils`, `toolUtils`, `maskSecrets`, `inspectorTabs`, `deepLink`, `mcpNetworkHeaders`. Carve-outs that stay `utils`:
+- **`src/utils/`** — pure, side-effect-free functions (no DOM/`window`/`sessionStorage` I/O, no subsystem ownership), trivially unit-testable with no mocks. Examples: `jsonUtils`, `schemaUtils`, `toolUtils`, `maskSecrets`, `inspectorTabs`, `deepLink`, `mcpNetworkHeaders`, `errorFormat`, `stepUp`, and the toast ids/formatters under `utils/toasts/`. Carve-outs that stay `utils`:
   - _Diagnostic logging_ (`console.warn`/`console.error`) doesn't count as a side effect.
   - _Importing from `@inspector/core`_ — neither a type-only import nor re-exporting core's pure functions/constants is a subsystem dependency (what makes a module `lib` is wrapping core's stateful runtime).
   - _Pure domain types + their constructors_ (`customHeaders`) — there is no `types/` sub-bucket inside `lib`/`utils`.
-- **`src/lib/`** — infrastructure / stateful adapters: modules that compose subsystems, wrap the `@inspector/core` **runtime**, or produce side effects. Examples: `environmentFactory`, `remoteOAuthStorage`, `oauthResume` (sessionStorage), `browserTabVisibility` (DOM listeners), `clearServerOAuthState`, `downloadFile`.
+- **`src/lib/`** — infrastructure / stateful adapters: modules that compose subsystems, wrap the `@inspector/core` **runtime**, or produce side effects. Examples: `environmentFactory`, `remoteOAuthStorage`, `oauthResume` (sessionStorage), `browserTabVisibility` (DOM listeners), `clearServerOAuthState`, `downloadFile`, `authToken` (`window.location` + `sessionStorage`), `protocolReplay` (re-issues through the live client).
 
 The top-level `src/types/` is a separate sibling — ambient `.d.ts` module stubs, not the place for new domain types (the one that lingers there, dead `navigation.ts`, is tracked for removal in [#1785](https://github.com/modelcontextprotocol/inspector/issues/1785)).
 
