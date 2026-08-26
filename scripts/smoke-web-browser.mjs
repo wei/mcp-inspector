@@ -46,10 +46,9 @@
  * Launching the browser (and resolving Playwright from clients/web, which has
  * its own gotcha — see `lib/headless-browser.mjs`) is delegated to that module,
  * which is also where `SMOKE_BROWSER` picks the engine: `chromium` (the
- * default), `firefox`, or `webkit` (#2086). CI gates Chromium (in the `build`
- * job's `npm run smoke`) and Firefox (in the `Sandbox smokes` matrix job);
- * WebKit runs but is not gated — note this smoke PASSES in WebKit, it is the two
- * App smokes that do not (see their headers).
+ * default), `firefox`, or `webkit` (#2086). **CI runs Chromium only**; the other
+ * engines are an on-demand tool rather than a gate. This smoke passes in all
+ * three — it is the two App smokes that fail under WebKit (see their headers).
  *
  * The engine question here is narrower than in the App smokes — this asserts a clean
  * first paint, i.e. that the shipped bundle's syntax and API level are
@@ -73,8 +72,8 @@ import {
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 // Resolved before the web server is started, so an unsupported SMOKE_BROWSER
-// fails immediately. Every message carries the engine, so a matrix failure names
-// which one broke.
+// fails immediately. Every message carries the engine, so a failure names which
+// one broke.
 let BROWSER;
 try {
   BROWSER = resolveBrowserName();

@@ -567,7 +567,7 @@ async function verifyAppRender(baseUrl, token, whenWebServerExits) {
       label: LABEL,
     });
     // Chromium explicitly, not `resolveBrowserName()`: this is a *packaging*
-    // check, and the engine matrix (#2086) belongs to the smokes, where the
+    // check, and the engine question (#2086) belongs to the smokes, where the
     // sandbox surface is what is under test. Pinning it also means `pack:verify`
     // cannot be pointed at an engine its npm script never installed.
     browser = await loadBrowser(repoRoot, "chromium");

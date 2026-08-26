@@ -5,8 +5,8 @@
  * per process and then spends its whole run inside the happy path, so the branch
  * that matters most — an unrecognized `SMOKE_BROWSER` — is dead code from their
  * point of view. It is also the branch whose failure is silent rather than loud:
- * a fallback to Chromium there would report a green run under a job labelled
- * "webkit", claiming coverage that never ran.
+ * a fallback to Chromium there would report a green run to a caller who asked
+ * for another engine — coverage claimed that never ran.
  *
  * `loadBrowser`'s failure branches are covered here too, through its injectable
  * `loadPlaywright`. The smokes cannot reach them by construction —
@@ -36,20 +36,20 @@ describe("resolveBrowserName", () => {
   });
 
   it("rejects a present-but-empty value instead of defaulting", () => {
-    // This is the case worth being strict about. A CI expression that resolves
-    // to nothing (`SMOKE_BROWSER: ${{ matrix.browsr }}`, an undefined key) sets
-    // the variable to "" rather than removing it — so defaulting here would run
-    // Chromium inside a job named for another engine, which is the very
-    // false-coverage outcome the unrecognized-value branch exists to stop. Only
-    // an ABSENT variable may select the default.
+    // This is the case worth being strict about. `SMOKE_BROWSER="$ENGINE"` with
+    // ENGINE unset — or a CI expression naming a key that does not exist — sets
+    // the variable to "" rather than removing it, so defaulting here would
+    // silently run Chromium for a caller who asked for something else. That is
+    // the same false-coverage outcome the unrecognized-value branch exists to
+    // stop. Only an ABSENT variable may select the default.
     for (const raw of ["", "   ", "\t\n"]) {
       assert.throws(
         () => resolveBrowserName({ [BROWSER_ENV_VAR]: raw }),
         (err) => {
           assert.match(err.message, /set but empty/);
-          // Names the likely cause and the actual remedy — "unset it", which is
-          // different from "set it to nothing" and is the whole point here.
-          assert.match(err.message, /matrix/);
+          // Names the actual remedy — "unset it", which is different from
+          // "set it to nothing" and is the whole point here.
+          assert.match(err.message, /did not resolve/);
           assert.match(err.message, /Unset it/);
           return true;
         },

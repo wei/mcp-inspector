@@ -44,14 +44,15 @@
  * ── Which engine ────────────────────────────────────────────────────────────
  *
  * `SMOKE_BROWSER` picks the engine (`chromium` — the default — `firefox`, or
- * `webkit`). CI gates **Chromium** (in the `build` job's `npm run smoke`) and
- * **Firefox** (in the `Sandbox smokes` matrix job); WebKit runs here but is not
- * gated: this smoke fails under Playwright's WebKit for reasons nobody has
- * identified, and nobody is currently investigating. It does NOT reproduce in
- * real Safari, and an isolated SSE repro did not reproduce it in Playwright's
- * WebKit either — so it is a property of that build, not a browser bug, and it
- * was judged not worth chasing. Run WebKit locally if you want the signal; do
- * not read a failure here as a defect until someone has looked (#2086).
+ * `webkit`). **CI runs Chromium only.** The other engines are an on-demand tool,
+ * not a gate: `SMOKE_BROWSER=firefox npm run smoke:web:engine` before touching
+ * the sandbox is cheap and worth doing, but nothing runs it for you (#2086).
+ *
+ * Firefox passes. WebKit fails this smoke for reasons nobody has identified and
+ * nobody is investigating: it does not reproduce in real Safari, and an isolated
+ * SSE repro did not reproduce it under Playwright's WebKit either, so it reads
+ * as a property of that build rather than a browser bug. Do not read a WebKit
+ * failure here as a defect until someone has actually looked.
  *
  * This smoke is one of the two places the
  * MCP Apps sandbox is genuinely exercised, and the sandbox is built out of the
@@ -89,8 +90,8 @@ const repoRoot = resolve(import.meta.dirname, "..");
 
 // Resolved before anything is started, so an unsupported SMOKE_BROWSER fails
 // immediately rather than after a web server and two MCP servers are up. Every
-// message this smoke prints carries the engine, so a matrix failure names which
-// one broke without the reader having to match it to a job title.
+// message this smoke prints carries the engine, so a failure names which one
+// broke rather than leaving the reader to remember what they invoked it with.
 let BROWSER;
 try {
   BROWSER = resolveBrowserName();
