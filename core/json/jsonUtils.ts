@@ -126,6 +126,94 @@ export function convertParameterValue(
 }
 
 /**
+ * Which property schema types each supplied argument, for a tool whose
+ * `inputSchema` puts its fields on root composition branches (#2123).
+ *
+ * Reading only the root's `properties` finds no schema for any of them, so
+ * every value would be sent as the string the user typed — `--tool-arg count=3`
+ * reaching the server as `"3"`.
+ *
+ * The CLI has no branch picker, so which branch a call means is *inferred*:
+ * a discriminated union pins its discriminator with `const`, and the supplied
+ * arguments either match one branch's constants or they do not.
+ *
+ * - **Exactly one branch matches** — use its merged schema, which is also where
+ *   a branch's specialization of a root-declared property lives.
+ * - **No branch is identifiable** — coerce only the names every branch that
+ *   declares them types the *same* way. A name two branches type differently
+ *   is left uncoerced rather than coerced by an arbitrary branch: `value` as a
+ *   number in branch 0 and a boolean in branch 1 would otherwise turn
+ *   `value=true` into `Number("true")`, i.e. `NaN`. Passing the raw string
+ *   through is what this function did for every argument before it existed.
+ */
+function coercionProperties(
+  base: { properties?: Record<string, unknown> },
+  branches: {
+    schema: { properties?: Record<string, unknown> };
+    declaredFields: string[];
+  }[],
+  params: Record<string, string>,
+): Record<string, unknown> {
+  if (branches.length === 0) {
+    return { ...base.properties };
+  }
+
+  const matching = branches.filter((branch) =>
+    matchesConstants(branch.schema.properties ?? {}, params),
+  );
+  if (matching.length === 1) {
+    return { ...matching[0].schema.properties };
+  }
+
+  const properties: Record<string, unknown> = { ...base.properties };
+  for (const name of new Set(branches.flatMap((b) => b.declaredFields))) {
+    // Only the branches that *declare* the name have an opinion about it — a
+    // branch that merely inherited the root's declaration is not a second,
+    // disagreeing vote. Read through the merged schema so a branch's
+    // specialization of a root property carries the root's keywords too.
+    const declarations = branches
+      .filter((branch) => branch.declaredFields.includes(name))
+      .map((branch) => branch.schema.properties?.[name]);
+    const types = new Set(declarations.map((schema) => typeNameOf(schema)));
+    if (types.size === 1) {
+      properties[name] = declarations[0];
+    } else {
+      delete properties[name];
+    }
+  }
+  return properties;
+}
+
+/** A schema's `type`, as a comparable string (`""` when it states none). */
+function typeNameOf(schema: unknown): string {
+  if (typeof schema !== "object" || schema === null) return "";
+  const { type } = schema as { type?: unknown };
+  return Array.isArray(type)
+    ? type.join(",")
+    : typeof type === "string"
+      ? type
+      : "";
+}
+
+/**
+ * Whether every `const`-pinned property of a branch agrees with what was
+ * supplied. Values arrive as strings, so the comparison is stringified — which
+ * is exactly right for a discriminator, whose constants are string literals.
+ */
+function matchesConstants(
+  properties: Record<string, unknown>,
+  params: Record<string, string>,
+): boolean {
+  return Object.entries(properties).every(([name, schema]) => {
+    if (typeof schema !== "object" || schema === null) return true;
+    const constValue = (schema as { const?: unknown }).const;
+    if (constValue === undefined) return true;
+    const supplied = params[name];
+    return supplied === undefined || supplied === String(constValue);
+  });
+}
+
+/**
  * Convert string parameters to JSON values based on tool schema
  */
 export function convertToolParameters(
@@ -134,33 +222,10 @@ export function convertToolParameters(
 ): Record<string, JsonValue> {
   const result: Record<string, JsonValue> = {};
   // A property's schema can live on a root composition branch rather than on
-  // the root itself (#2123). Reading only the root's `properties` there finds
-  // no schema for any argument, so every value would be sent as the string the
-  // user typed — `--tool-arg count=3` reaching the server as `"3"`. The union
-  // is flattened by merging every branch, because the CLI has no branch
-  // selection to consult: an argument named by one branch is coerced by that
-  // branch's schema, and a name two branches type differently keeps the first,
-  // which is no worse than the untyped passthrough it replaces.
+  // the root itself (#2123); see `coercionProperties` for how the branch is
+  // identified when it does.
   const { base, branches } = resolveRootUnion(tool.inputSchema ?? {});
-  // Start from the FIRST branch's merged schema rather than from the base: a
-  // branch may *specialize* a property the root also declares (root
-  // `count: {}`, branch `count: { type: "number" }`), and merging branch-last
-  // is what gives the typed declaration — starting from the base would keep the
-  // untyped one and send `count=3` as `"3"`, the very coercion this restores.
-  // Later branches then contribute only names not seen yet, so first-branch
-  // precedence matches what the web form seeds and what a name two branches
-  // type differently resolves to.
-  const properties: Record<string, unknown> = {
-    ...(branches[0]?.schema.properties ?? base.properties),
-  };
-  for (const branch of branches.slice(1)) {
-    for (const [name, schema] of Object.entries(
-      branch.schema.properties ?? {},
-    )) {
-      properties[name] ??= schema;
-    }
-  }
-
+  const properties = coercionProperties(base, branches, params);
   for (const [key, value] of Object.entries(params)) {
     const paramSchema = properties[key] as ParameterSchema | undefined;
 

@@ -80,11 +80,46 @@ interface JsonSchemaObject {
  * submit the second branch's discriminator. Prefixing each branch's fields and
  * choosing between them explicitly is what makes the alternatives independent.
  */
-export const VARIANT_FIELD = "__variant";
+/**
+ * The generated field names a root-union form uses, chosen so they cannot
+ * collide with a property the schema itself declares.
+ *
+ * JSON object property names have no reserved namespace: a server may declare
+ * an argument called `__variant`, or one starting with `__b`. A fixed prefix
+ * would then either be shadowed by that argument or would silently swallow it
+ * on the way out, so both names are extended with `_` until nothing declared
+ * can be confused with them. Derived from the schema alone, so
+ * {@link schemaToForm} and {@link decodeFormValues} compute the same names
+ * without passing anything between them.
+ */
+function generatedNames(
+  base: { properties?: Record<string, unknown> },
+  branches: { declaredFields: string[] }[],
+): { variant: string; prefix: string } {
+  const declared = [
+    ...Object.keys(base.properties ?? {}),
+    ...branches.flatMap((branch) => branch.declaredFields),
+  ];
+  let variant = "__variant";
+  while (declared.includes(variant)) variant += "_";
+  let prefix = "__b";
+  while (declared.some((name) => name.startsWith(prefix))) prefix += "_";
+  return { variant, prefix };
+}
 
 /** The form-local name a branch's field is rendered under. */
-function branchFieldName(branchIndex: number, name: string): string {
-  return `__b${branchIndex}__${name}`;
+function branchFieldName(
+  prefix: string,
+  branchIndex: number,
+  name: string,
+): string {
+  return `${prefix}${branchIndex}__${name}`;
+}
+
+/** The `const` a property schema pins its value to, if any. */
+function constOf(schema: unknown): unknown {
+  if (typeof schema !== "object" || schema === null) return undefined;
+  return (schema as { const?: unknown }).const;
 }
 
 /**
@@ -105,14 +140,35 @@ export function schemaToForm(
   // could only be called with empty arguments.
   const { base, branches } = resolveRootUnion(schema);
 
-  const parameters = buildFields(base);
-  if (branches.length > 0) {
-    // ink-form is static, so there is no picker that can swap the fields out.
-    // Every branch is rendered instead, and this select says which one the
-    // call means — read back by {@link decodeFormValues}, which drops the rest.
-    parameters.unshift({
+  if (branches.length === 0) {
+    return {
+      title,
+      sections: [{ title: "Parameters", fields: buildFields(base) }],
+    };
+  }
+
+  const { variant, prefix } = generatedNames(base, branches);
+  const branchDeclared = new Set(
+    branches.flatMap((branch) => branch.declaredFields),
+  );
+
+  // The base section renders what the base *alone* declares. A property a
+  // branch also declares is rendered in that branch's section instead, showing
+  // the branch's specialization — root `count: {}` under branch
+  // `count: { type: "number" }` is a number field there, not a string here.
+  const baseProperties = Object.fromEntries(
+    Object.entries(base.properties ?? {}).filter(
+      ([name]) => !branchDeclared.has(name),
+    ),
+  );
+
+  // ink-form is static, so there is no picker that can swap the fields out.
+  // Every branch is rendered instead, and this select says which one the call
+  // means — read back by `decodeFormValues`, which drops the rest.
+  const parameters: FormField[] = [
+    {
       type: "select",
-      name: VARIANT_FIELD,
+      name: variant,
       label: "Variant",
       required: true,
       initialValue: "0",
@@ -120,8 +176,9 @@ export function schemaToForm(
         label: branch.label,
         value: String(index),
       })),
-    } as FormField);
-  }
+    } as FormField,
+    ...buildFields({ properties: baseProperties, required: base.required }),
+  ];
 
   const sections: FormSection[] = [{ title: "Parameters", fields: parameters }];
 
@@ -129,15 +186,15 @@ export function schemaToForm(
   // says: only one alternative applies to a call, so requiring them would build
   // a form that can never be submitted.
   branches.forEach((branch, index) => {
-    const ownProperties = Object.fromEntries(
-      branch.ownFields.map((name) => [
-        branchFieldName(index, name),
+    const properties = Object.fromEntries(
+      branch.declaredFields.map((name) => [
+        branchFieldName(prefix, index, name),
         branch.schema.properties?.[name],
       ]),
     );
     sections.push({
       title: branch.label,
-      fields: buildFields({ properties: ownProperties }),
+      fields: buildFields({ properties }),
     });
   });
 
@@ -146,45 +203,75 @@ export function schemaToForm(
 
 /**
  * Turn what the form submitted back into the arguments the server expects:
- * the base fields, plus the fields of the branch the {@link VARIANT_FIELD}
- * select names, under their real property names.
+ * the base fields, plus the fields of the branch the variant select names,
+ * under their real property names.
  *
  * Every other branch's fields are dropped rather than sent — they describe a
- * shape this call is not making, and the user filled at most one section. Call
- * this on the way out of the form; for a schema with no root union it returns
- * the values unchanged, so it is safe to apply unconditionally.
+ * shape this call is not making, and the user filled at most one section. The
+ * generated names are filtered by exact match rather than by prefix, so an
+ * argument the server really named `__b0__x` survives.
+ *
+ * A `const` is re-applied from the schema rather than taken from the form.
+ * ink-form has no immutable field, so a discriminator is rendered as a
+ * one-option select and its value is restored here regardless — which also
+ * keeps a non-string constant's type, since a select hands back a string.
+ *
+ * Call this on the way out of the form; for a schema with no root union it
+ * returns the values unchanged, so it is safe to apply unconditionally.
  */
 export function decodeFormValues<T>(
   schema: JsonSchemaObject | null | undefined,
   values: Record<string, T>,
 ): Record<string, T> {
-  const { branches } = resolveRootUnion(schema ?? {});
+  const { base, branches } = resolveRootUnion(schema ?? {});
   if (branches.length === 0) {
-    return values;
+    return applyConstants(base.properties ?? {}, values);
   }
 
-  const raw = values[VARIANT_FIELD];
-  const selected = Number(raw);
+  const { variant, prefix } = generatedNames(base, branches);
+  const selected = Number(values[variant]);
   const branchIndex =
     Number.isInteger(selected) && selected >= 0 && selected < branches.length
       ? selected
       : 0;
+  const branch = branches[branchIndex]!;
+
+  const generated = new Set<string>([variant]);
+  branches.forEach((each, index) => {
+    for (const name of each.declaredFields) {
+      generated.add(branchFieldName(prefix, index, name));
+    }
+  });
 
   const decoded: Record<string, T> = {};
   for (const [name, value] of Object.entries(values)) {
-    // Skip the select itself and every branch's prefixed field; the chosen
-    // branch's are re-added below under the names the schema declares.
-    if (name !== VARIANT_FIELD && !name.startsWith("__b")) {
+    if (!generated.has(name)) {
       decoded[name] = value;
     }
   }
-  for (const name of branches[branchIndex]!.ownFields) {
-    const value = values[branchFieldName(branchIndex, name)];
+  for (const name of branch.declaredFields) {
+    const value = values[branchFieldName(prefix, branchIndex, name)];
     if (value !== undefined) {
       decoded[name] = value;
     }
   }
-  return decoded;
+  return applyConstants(branch.schema.properties ?? {}, decoded);
+}
+
+/** Overwrite every `const`-pinned field with the value its schema fixes. */
+function applyConstants<T>(
+  properties: Record<string, unknown>,
+  values: Record<string, T>,
+): Record<string, T> {
+  const pinned = Object.entries(properties).filter(
+    ([, schema]) => constOf(schema) !== undefined,
+  );
+  if (pinned.length === 0) return values;
+  const result = { ...values };
+  for (const [name, schema] of pinned) {
+    result[name] = constOf(schema) as T;
+  }
+  return result;
 }
 
 /** Build the ink-form fields for one already-flattened object schema. */
@@ -214,6 +301,21 @@ function buildFields(schema: JsonSchemaObject): FormField[] {
     };
 
     let field: FormField;
+
+    // A `const` admits exactly one value, and ink-form has no read-only field —
+    // so it is rendered as a select with that single option, which the user
+    // cannot change (#2123). `decodeFormValues` restores the schema's own typed
+    // value on submit, since a select hands back a string.
+    const pinned = property.const;
+    if (pinned !== undefined) {
+      fields.push({
+        type: "select",
+        ...baseField,
+        initialValue: String(pinned),
+        options: [{ label: String(pinned), value: String(pinned) }],
+      } as FormField);
+      continue;
+    }
 
     // Handle enum -> select. Detect the array-of-enums case on `items.enum`
     // alone (matching the web SchemaForm guard) — a standard array-of-enums
@@ -279,17 +381,11 @@ function buildFields(schema: JsonSchemaObject): FormField[] {
     }
 
     // Set initial value from default (ink-form FormField allows initialValue for some types).
-    // A `const` is seeded the same way and OUTRANKS `default`: it is a
-    // one-value enumeration, so the only submittable value is already known and
-    // the user would otherwise have to hand-type a union's discriminator
-    // (#2123), while `default` is an annotation a schema may set to something
-    // its own `const` rejects. Tested against `undefined` rather than `??`
-    // chained, so an explicit `null` default is honored as a value.
-    const initialValue =
-      property.const !== undefined ? property.const : property.default;
-    if (initialValue !== undefined) {
+    // A `const` never reaches here — it was rendered as its own one-option
+    // select above, which is also why `default` needs no precedence rule.
+    if (property.default !== undefined) {
       (field as FormField & { initialValue?: unknown }).initialValue =
-        initialValue;
+        property.default;
     }
 
     fields.push(field);

@@ -50,8 +50,8 @@ describe("resolveRootUnion", () => {
       "address",
     ]);
     expect(branches[0].schema.required).toEqual(["note", "kind", "address"]);
-    expect(branches[0].ownFields).toEqual(["kind", "address"]);
-    expect(branches[1].ownFields).toEqual(["kind", "phone"]);
+    expect(branches[0].declaredFields).toEqual(["kind", "address"]);
+    expect(branches[1].declaredFields).toEqual(["kind", "phone"]);
   });
 
   it("strips the composition keywords it has absorbed", () => {
@@ -106,16 +106,40 @@ describe("resolveRootUnion", () => {
     );
   });
 
-  it("lets a branch's declaration win a name collision with the root", () => {
+  it("merges a name collision rather than replacing the root's declaration", () => {
+    // Both apply, so the root's floor must survive the branch's ceiling.
     const { branches } = resolveRootUnion({
       type: "object",
-      properties: { id: { type: "string" } },
+      properties: { id: { type: "number", minimum: 0 } },
       required: ["id"],
-      anyOf: [{ type: "object", properties: { id: { type: "number" } } }, SMS],
+      anyOf: [
+        { type: "object", properties: { id: { maximum: 10 } } },
+        { type: "object", properties: { other: { type: "string" } } },
+      ],
     });
-    expect(branches[0].schema.properties?.id).toEqual({ type: "number" });
+    expect(branches[0].schema.properties?.id).toEqual({
+      type: "number",
+      minimum: 0,
+      maximum: 10,
+    });
     // `required` unions rather than duplicating.
     expect(branches[0].schema.required).toEqual(["id"]);
+    // The branch declares the name, even though the base did too.
+    expect(branches[0].declaredFields).toEqual(["id"]);
+  });
+
+  it("declines a union whose branch contradicts the root's type for a field", () => {
+    // `string` under a base `number` describes a value that cannot exist, so
+    // flattening it would render one type and accept what the schema rejects.
+    const { branches } = resolveRootUnion({
+      type: "object",
+      properties: { id: { type: "number" } },
+      anyOf: [
+        { type: "object", properties: { id: { type: "string" } } },
+        { type: "object", properties: { other: { type: "string" } } },
+      ],
+    });
+    expect(branches).toEqual([]);
   });
 
   describe("branch labels", () => {
@@ -219,6 +243,26 @@ describe("resolveRootUnion", () => {
         anyOf: [EMAIL, { type: "null" }],
       });
       expect(branches).toEqual([]);
+    });
+
+    it("declines a member whose type rules objects out", () => {
+      // Tool arguments are a JSON object, so a `{ type: "string" }` member can
+      // never match — a fillable form for it would offer an invalid call.
+      const { branches } = resolveRootUnion({
+        type: "object",
+        anyOf: [EMAIL, { type: "string", properties: { a: {} } }],
+      });
+      expect(branches).toEqual([]);
+    });
+
+    it("declines a member whose properties are not an object", () => {
+      // Members arrive as `unknown`, so this is reachable and must not throw.
+      expect(
+        resolveRootUnion({
+          type: "object",
+          anyOf: [EMAIL, { type: "object", properties: null as unknown }],
+        }).branches,
+      ).toEqual([]);
     });
 
     it("declines an empty union", () => {

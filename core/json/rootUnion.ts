@@ -64,8 +64,13 @@ export interface RootUnionBranch<T extends RootUnionSchema> {
   schema: ResolvedSchema<T>;
   /** Human-readable name for the picker — see {@link branchLabel}. */
   label: string;
-  /** Names this branch contributes that the base does not. */
-  ownFields: string[];
+  /**
+   * The names **this branch itself declares** — including one the base also
+   * declares, since a branch commonly *specializes* a root property (root
+   * `count: {}`, branch `count: { type: "number" }`) and a renderer that showed
+   * only the base's version would render the untyped one.
+   */
+  declaredFields: string[];
 }
 
 /** What {@link resolveRootUnion} decomposes a root schema into. */
@@ -92,18 +97,96 @@ function toBranch(value: unknown): RootUnionSchema | null {
   return value as RootUnionSchema;
 }
 
+/** Whether a schema's `type` permits an object instance. */
+function admitsObject(schema: RootUnionSchema): boolean {
+  const { type } = schema;
+  if (type === undefined) return true;
+  return Array.isArray(type) ? type.includes("object") : type === "object";
+}
+
+/** A readable `properties` map, or `null` when the value is not one. */
+function propertiesOf(schema: RootUnionSchema): Record<string, unknown> | null {
+  const { properties } = schema;
+  if (
+    typeof properties !== "object" ||
+    properties === null ||
+    Array.isArray(properties)
+  ) {
+    return null;
+  }
+  return properties;
+}
+
 /**
- * Whether a branch contributes anything a form can render.
+ * Whether a branch is one a form can offer as an alternative.
  *
- * A `{ type: "null" }` member — the nullable encoding {@link
- * ./nullableUnion.ts} owns — and a `$ref`-only or empty branch carry no
- * properties, so offering them as alternatives would produce a picker whose
- * options render nothing.
+ * Three ways it is not, all of which would put an option in the picker that
+ * cannot be filled in:
+ *
+ * - **It carries no fields.** A `{ type: "null" }` member — the nullable
+ *   encoding {@link ./nullableUnion.ts} owns — and a `$ref`-only or empty
+ *   branch render nothing.
+ * - **`properties` is not an object.** Members arrive as `unknown`, so a
+ *   malformed `properties: null` is reachable and would throw in `Object.keys`
+ *   rather than being declined.
+ * - **Its `type` rules objects out.** Tool arguments are a JSON object, so a
+ *   `{ type: "string", properties: {…} }` member can never match — rendering it
+ *   as a fillable form would offer a call that cannot be valid.
  */
-function hasFields(branch: RootUnionSchema): boolean {
+function isOfferable(branch: RootUnionSchema): boolean {
+  const properties = propertiesOf(branch);
   return (
-    branch.properties !== undefined && Object.keys(branch.properties).length > 0
+    properties !== null &&
+    Object.keys(properties).length > 0 &&
+    admitsObject(branch)
   );
+}
+
+/**
+ * Merge two declarations of the same property name.
+ *
+ * Where a base and a branch both name a property, JSON Schema applies **both**
+ * — so keeping only the branch's would silently drop the base's constraints
+ * (root `{ minimum: 0 }` plus branch `{ maximum: 10 }` must keep the floor).
+ * A shallow union preserves every keyword only one side states, with the
+ * branch winning a keyword both state, being the more specific declaration.
+ *
+ * A *contradiction* is not resolvable this way and is not resolved here — see
+ * {@link contradicts}, which declines such a union outright.
+ */
+function mergeProperty(
+  baseProperty: unknown,
+  branchProperty: unknown,
+): unknown {
+  const a = toBranch(baseProperty);
+  const b = toBranch(branchProperty);
+  if (a === null || b === null) {
+    return branchProperty;
+  }
+  return { ...a, ...b };
+}
+
+/**
+ * Whether a branch states a property `type` its base declaration rules out.
+ *
+ * The two are conjunctive, so `string` under a base `number` describes a value
+ * that cannot exist. No form can express that, and flattening it would render
+ * one of the two types and accept values the schema rejects — so the caller
+ * declines the union instead of picking a side.
+ */
+function contradicts(base: RootUnionSchema, branch: RootUnionSchema): boolean {
+  const baseProperties = propertiesOf(base) ?? {};
+  const branchProperties = propertiesOf(branch) ?? {};
+  return Object.entries(branchProperties).some(([name, branchProperty]) => {
+    const a = toBranch(baseProperties[name]);
+    const b = toBranch(branchProperty);
+    if (a === null || b === null) return false;
+    return (
+      typeof a.type === "string" &&
+      typeof b.type === "string" &&
+      a.type !== b.type
+    );
+  });
 }
 
 /**
@@ -112,14 +195,22 @@ function hasFields(branch: RootUnionSchema): boolean {
  * Both keywords are **conjunctive** where they meet: a value satisfying an
  * `allOf` branch satisfies the base *and* the branch, and a value matching a
  * union branch must satisfy the root's own constraints too. So properties union
- * (branch wins a name collision, being the more specific declaration) and
- * `required` unions.
+ * — a name both declare merged through {@link mergeProperty} rather than
+ * replaced — and `required` unions.
  */
 function mergeBranch<T extends RootUnionSchema>(
   base: T,
   branch: RootUnionSchema,
 ): ResolvedSchema<T> {
-  const properties = { ...base.properties, ...branch.properties };
+  const baseProperties = propertiesOf(base) ?? {};
+  const branchProperties = propertiesOf(branch) ?? {};
+  const properties: Record<string, unknown> = { ...baseProperties };
+  for (const [name, branchProperty] of Object.entries(branchProperties)) {
+    properties[name] =
+      name in baseProperties
+        ? mergeProperty(baseProperties[name], branchProperty)
+        : branchProperty;
+  }
   const required = [
     ...(base.required ?? []),
     ...(branch.required ?? []).filter(
@@ -165,7 +256,7 @@ function branchLabel(
   if (typeof branch.title === "string" && branch.title.trim() !== "") {
     return branch.title;
   }
-  const properties = branch.properties ?? {};
+  const properties = propertiesOf(branch) ?? {};
   const constOf = (name: string): string | null => {
     const property = toBranch(properties[name]) as { const?: unknown } | null;
     const value = property?.const;
@@ -224,13 +315,15 @@ export function resolveRootUnion<T extends RootUnionSchema>(
   const branches = members.map(toBranch);
   if (
     branches.length === 0 ||
-    branches.some((branch) => branch === null || !hasFields(branch))
+    branches.some(
+      (branch) =>
+        branch === null || !isOfferable(branch) || contradicts(base, branch),
+    )
   ) {
     return { base, branches: [] };
   }
 
   const discriminatorProperty = schema.discriminator?.propertyName;
-  const baseFields = new Set(Object.keys(base.properties ?? {}));
   return {
     base,
     branches: branches
@@ -240,9 +333,7 @@ export function resolveRootUnion<T extends RootUnionSchema>(
         // `properties`/`required` off the branch, so the merge stays that way.
         schema: mergeBranch(base, branch),
         label: branchLabel(branch, index, discriminatorProperty),
-        ownFields: Object.keys(branch.properties ?? {}).filter(
-          (name) => !baseFields.has(name),
-        ),
+        declaredFields: Object.keys(propertiesOf(branch) ?? {}),
       })),
   };
 }

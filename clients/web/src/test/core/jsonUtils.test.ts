@@ -123,6 +123,152 @@ describe("JSON Utils", () => {
       });
     });
 
+    it("picks the branch its discriminator names (#2123)", () => {
+      const discriminated: Tool = {
+        name: "discriminated",
+        inputSchema: {
+          type: "object",
+          oneOf: [
+            {
+              type: "object",
+              properties: {
+                kind: { type: "string", const: "a" },
+                value: { type: "number" },
+              },
+            },
+            {
+              type: "object",
+              properties: {
+                kind: { type: "string", const: "b" },
+                value: { type: "boolean" },
+              },
+            },
+          ],
+        },
+      };
+      // `value` is a number in one branch and a boolean in the other, so the
+      // discriminator is the only thing that says how to coerce it.
+      expect(
+        convertToolParameters(discriminated, { kind: "b", value: "true" }),
+      ).toEqual({ kind: "b", value: true });
+      expect(
+        convertToolParameters(discriminated, { kind: "a", value: "3" }),
+      ).toEqual({ kind: "a", value: 3 });
+    });
+
+    it("leaves an ambiguously typed argument uncoerced (#2123)", () => {
+      const ambiguous: Tool = {
+        name: "ambiguous",
+        inputSchema: {
+          type: "object",
+          anyOf: [
+            {
+              type: "object",
+              properties: {
+                value: { type: "number" },
+                a: { type: "string" },
+              },
+            },
+            {
+              type: "object",
+              properties: {
+                value: { type: "boolean" },
+                b: { type: "string" },
+              },
+            },
+          ],
+        },
+      };
+      // Nothing identifies a branch, so coercing `value` by an arbitrary one
+      // would turn `true` into `Number("true")` — `NaN`, i.e. `null` on the
+      // wire. The raw string is honest; it is also what shipped before.
+      expect(convertToolParameters(ambiguous, { value: "true" })).toEqual({
+        value: "true",
+      });
+    });
+
+    it("agrees on an array-form type across branches (#2123)", () => {
+      const arrayTyped: Tool = {
+        name: "array-typed",
+        inputSchema: {
+          type: "object",
+          anyOf: [
+            {
+              type: "object",
+              properties: { v: { type: ["number", "null"] }, a: {} },
+            },
+            {
+              type: "object",
+              properties: { v: { type: ["number", "null"] }, b: {} },
+            },
+          ],
+        },
+      };
+      // Both spell the type the same way, so it is not ambiguous.
+      expect(convertToolParameters(arrayTyped, { v: "2" })).toEqual({ v: "2" });
+    });
+
+    it("ignores a malformed branch declaration when matching constants (#2123)", () => {
+      const malformed: Tool = {
+        name: "malformed",
+        inputSchema: {
+          type: "object",
+          anyOf: [
+            {
+              type: "object",
+              properties: {
+                kind: { type: "string", const: "a" },
+                broken: null as unknown,
+                value: { type: "number" },
+              },
+            },
+            {
+              type: "object",
+              properties: {
+                kind: { type: "string", const: "b" },
+                value: { type: "boolean" },
+              },
+            },
+          ],
+        },
+      };
+      // A `properties: { broken: null }` entry must not throw, and a branch is
+      // still identifiable by the discriminator that *is* well-formed.
+      expect(
+        convertToolParameters(malformed, { kind: "a", value: "3" }),
+      ).toEqual({ kind: "a", value: 3 });
+    });
+
+    it("falls back to the branch-agreement path when no constant is supplied (#2123)", () => {
+      const discriminated: Tool = {
+        name: "no-discriminator-supplied",
+        inputSchema: {
+          type: "object",
+          anyOf: [
+            {
+              type: "object",
+              properties: {
+                kind: { type: "string", const: "a" },
+                shared: { type: "number" },
+              },
+            },
+            {
+              type: "object",
+              properties: {
+                kind: { type: "string", const: "b" },
+                shared: { type: "number" },
+              },
+            },
+          ],
+        },
+      };
+      // Both branches match vacuously, so no single branch is identified — but
+      // they agree about `shared`, so it is still coerced.
+      expect(convertToolParameters(discriminated, { shared: "4" })).toEqual({
+        shared: 4,
+      });
+    });
+
     it("coerces a value whose schema lives on a root allOf branch (#2123)", () => {
       const allOfTool: Tool = {
         name: "allof-tool",

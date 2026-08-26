@@ -1,9 +1,5 @@
 import { describe, it, expect } from "vitest";
-import {
-  decodeFormValues,
-  schemaToForm,
-  VARIANT_FIELD,
-} from "../src/utils/schemaToForm.js";
+import { decodeFormValues, schemaToForm } from "../src/utils/schemaToForm.js";
 
 describe("schemaToForm", () => {
   it("returns an empty Parameters section when there is no schema", () => {
@@ -445,7 +441,7 @@ describe("schemaToForm", () => {
         "sms",
       ]);
       expect(form.sections[0]!.fields.map((field) => field.name)).toEqual([
-        VARIANT_FIELD,
+        "__variant",
         "note",
       ]);
     });
@@ -468,7 +464,7 @@ describe("schemaToForm", () => {
     it("offers a variant select listing the alternatives", () => {
       const form = schemaToForm(UNION, "union_tool");
       expect(form.sections[0]!.fields[0]).toMatchObject({
-        name: VARIANT_FIELD,
+        name: "__variant",
         type: "select",
         initialValue: "0",
         options: [
@@ -493,15 +489,17 @@ describe("schemaToForm", () => {
       }
     });
 
-    it("seeds a branch's discriminator const so it need not be typed", () => {
+    it("renders a const as a one-option select so it cannot be changed", () => {
       const form = schemaToForm(UNION, "union_tool");
       expect(form.sections[1]!.fields[0]).toMatchObject({
         name: "__b0__kind",
+        type: "select",
         initialValue: "email",
+        options: [{ label: "email", value: "email" }],
       });
     });
 
-    it("prefers a const over a conflicting default", () => {
+    it("renders a const outside a union the same way", () => {
       const form = schemaToForm(
         {
           type: "object",
@@ -509,14 +507,62 @@ describe("schemaToForm", () => {
         },
         "const_tool",
       );
-      expect(form.sections[0]!.fields[0]).toMatchObject({ initialValue: "a" });
+      expect(form.sections[0]!.fields[0]).toMatchObject({
+        type: "select",
+        initialValue: "a",
+        options: [{ label: "a", value: "a" }],
+      });
+    });
+
+    it("renders a branch's specialization of a root property in its section", () => {
+      const form = schemaToForm(
+        {
+          type: "object",
+          properties: { count: {} },
+          anyOf: [
+            { type: "object", properties: { count: { type: "integer" } } },
+            { type: "object", properties: { other: { type: "string" } } },
+          ],
+        },
+        "specializing",
+      );
+      // The untyped base declaration is not rendered a second time as a string.
+      expect(form.sections[0]!.fields.map((field) => field.name)).toEqual([
+        "__variant",
+      ]);
+      expect(form.sections[1]!.fields[0]).toMatchObject({
+        name: "__b0__count",
+        type: "integer",
+      });
+    });
+
+    it("keeps its generated names clear of the schema's own", () => {
+      const form = schemaToForm(
+        {
+          type: "object",
+          properties: { __variant: { type: "string" } },
+          anyOf: [
+            { type: "object", properties: { __b0__x: { type: "string" } } },
+            { type: "object", properties: { y: { type: "string" } } },
+          ],
+        },
+        "colliding",
+      );
+      const names = form.sections.flatMap((section) =>
+        section.fields.map((field) => field.name),
+      );
+      // The select steps aside for the declared `__variant`, and the branch
+      // prefix steps aside for the declared `__b0__x`.
+      expect(names).toContain("__variant_");
+      expect(names).toContain("__variant");
+      expect(names).toContain("__b_0____b0__x");
     });
 
     describe("decodeFormValues", () => {
       it("submits the chosen branch's fields under their real names", () => {
         expect(
           decodeFormValues(UNION, {
-            [VARIANT_FIELD]: "0",
+            __variant: "0",
             note: "hi",
             __b0__kind: "email",
             __b0__address: "a@b.c",
@@ -529,7 +575,7 @@ describe("schemaToForm", () => {
       it("drops the branches the call is not making", () => {
         expect(
           decodeFormValues(UNION, {
-            [VARIANT_FIELD]: "1",
+            __variant: "1",
             __b0__kind: "email",
             __b0__address: "a@b.c",
             __b1__kind: "sms",
@@ -541,7 +587,7 @@ describe("schemaToForm", () => {
       it("omits a branch field the user never filled", () => {
         expect(
           decodeFormValues(UNION, {
-            [VARIANT_FIELD]: "0",
+            __variant: "0",
             __b0__kind: "email",
           }),
         ).toEqual({ kind: "email" });
@@ -550,7 +596,7 @@ describe("schemaToForm", () => {
       it("falls back to the first branch on an unusable selection", () => {
         expect(
           decodeFormValues(UNION, {
-            [VARIANT_FIELD]: "nonsense",
+            __variant: "nonsense",
             __b0__kind: "email",
           }),
         ).toEqual({ kind: "email" });
@@ -561,6 +607,44 @@ describe("schemaToForm", () => {
         expect(decodeFormValues({ properties: { message: {} } }, values)).toBe(
           values,
         );
+      });
+
+      it("restores a const from the schema rather than trusting the form", () => {
+        // ink-form has no immutable field, and a select hands back a string —
+        // so the pinned value is re-applied on the way out, with its own type.
+        expect(
+          decodeFormValues(
+            {
+              type: "object",
+              anyOf: [
+                {
+                  type: "object",
+                  properties: { n: { const: 7 }, a: { type: "string" } },
+                },
+                { type: "object", properties: { n: { const: 8 } } },
+              ],
+            },
+            { __variant: "0", __b0__n: "tampered", __b0__a: "x" },
+          ),
+        ).toEqual({ n: 7, a: "x" });
+      });
+
+      it("keeps a base argument whose name looks generated", () => {
+        const schema = {
+          type: "object",
+          properties: { __b0__x: { type: "string" } },
+          anyOf: [
+            { type: "object", properties: { a: { type: "string" } } },
+            { type: "object", properties: { b: { type: "string" } } },
+          ],
+        };
+        expect(
+          decodeFormValues(schema, {
+            __variant: "0",
+            __b0__x: "mine",
+            __b_0__a: "chosen",
+          }),
+        ).toEqual({ __b0__x: "mine", a: "chosen" });
       });
     });
 
