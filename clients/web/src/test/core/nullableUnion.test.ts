@@ -784,6 +784,13 @@ describe("admitsNull", () => {
       );
     });
 
+    it("reads an enum that offers null", () => {
+      expect(admitsNull({ enum: [null] })).toBe(true);
+      expect(admitsNull({ const: null, anyOf: [{ enum: [null] }] })).toBe(true);
+      // …under the same sibling conditions a `const: null` answers to.
+      expect(admitsNull({ type: "string", enum: [null] })).toBe(false);
+    });
+
     it("does not override a sibling that rejects null", () => {
       // `const` is conjunctive with its siblings, not an override: both of
       // these reject every value, so claiming nullability would let the

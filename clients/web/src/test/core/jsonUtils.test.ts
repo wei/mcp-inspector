@@ -281,6 +281,37 @@ describe("JSON Utils", () => {
       expect(convertToolParameters(setTyped, { v: "2" })).toEqual({ v: 2 });
     });
 
+    it("sees through nullable encodings when branches disagree (#2123)", () => {
+      const nullableDisagreement: Tool = {
+        name: "nullable-disagreement",
+        inputSchema: {
+          type: "object",
+          anyOf: [
+            {
+              type: "object",
+              properties: {
+                value: { anyOf: [{ type: "number" }, { type: "null" }] },
+                a: {},
+              },
+            },
+            {
+              type: "object",
+              properties: {
+                value: { anyOf: [{ type: "boolean" }, { type: "null" }] },
+                b: {},
+              },
+            },
+          ],
+        },
+      };
+      // Neither declaration states a top-level `type`, so uncollapsed they
+      // would both read as "no type" and agree — and `value=true` would come
+      // back as `NaN` through the first branch's number.
+      expect(
+        convertToolParameters(nullableDisagreement, { value: "true" }),
+      ).toEqual({ value: "true" });
+    });
+
     it("leaves an ambiguously typed argument uncoerced (#2123)", () => {
       const ambiguous: Tool = {
         name: "ambiguous",

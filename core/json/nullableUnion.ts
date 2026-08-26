@@ -406,6 +406,16 @@ export function admitsNull(schema: NullableUnionSchema): boolean {
     return schema.anyOf === undefined || anyOfAdmitsNull(schema);
   }
 
+  // An `enum` offering `null` admits it, the same way a `const: null` does —
+  // and under the same sibling conditions, since the two are equally
+  // conjunctive with whatever else the schema states.
+  if (Array.isArray(schema.enum) && schema.enum.includes(null)) {
+    return (
+      (schema.nullable === true || typeAdmitsNull(schema.type)) &&
+      (schema.anyOf === undefined || anyOfAdmitsNull(schema))
+    );
+  }
+
   if (schema.nullable === true) {
     return true;
   }

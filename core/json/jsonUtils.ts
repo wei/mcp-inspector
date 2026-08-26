@@ -201,7 +201,12 @@ function coercionProperties<T extends RootUnionSchema>(
       // A malformed declaration (`properties: { x: null }`) is not a vote about
       // the type, and storing it as the coercion schema would put a value that
       // is not a schema where one is expected.
-      .filter((schema) => typeof schema === "object" && schema !== null);
+      .filter((schema) => typeof schema === "object" && schema !== null)
+      // Collapsed BEFORE the vote: a nullable declaration states its real type
+      // on the surviving branch, so `number | null` and `boolean | null` would
+      // otherwise both read as "no type" and be counted as agreeing — and the
+      // first would then coerce `value=true` to `NaN`.
+      .map((schema) => normalizeNullableUnion(schema as object));
     const types = new Set(declarations.map((schema) => typeNameOf(schema)));
     if (types.size === 1 && declarations.length > 0) {
       Object.defineProperty(properties, name, {
