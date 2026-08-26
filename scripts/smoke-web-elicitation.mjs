@@ -27,8 +27,10 @@
  * `SMOKE_BROWSER` picks the engine (`chromium` — the default — `firefox`, or
  * `webkit`). CI gates **Chromium** (in the `build` job's `npm run smoke`) and
  * **Firefox** (in the `Sandbox smokes` matrix job); WebKit runs here but is not
- * gated yet — it fails on #2132, a Safari incompatibility in the web client's
- * SSE transport that this smoke is what found (#2086).
+ * gated yet — it fails on #2132, where the SSE stream's last message is not
+ * delivered under Playwright's WebKit. That has NOT been reproduced in real
+ * Safari (an MCP App opens there fine), so treat it as a property of that
+ * build, not as a browser bug, until someone shows otherwise (#2086).
  *
  * Along with `smoke:web:app` this is one
  * of the two places the MCP Apps sandbox is actually loaded, and the two nested
