@@ -481,6 +481,12 @@ export function missingRequiredFields(
         !admitsNull(property)
       );
     }
-    return value === undefined || value === "";
+    if (value === "") {
+      // A branch may pin its discriminator to the empty string, and the
+      // one-option control cannot produce anything else — reporting the seeded
+      // value as missing would make that branch permanently uncallable.
+      return constOf(properties[name]) !== "";
+    }
+    return value === undefined;
   });
 }

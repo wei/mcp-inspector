@@ -837,6 +837,24 @@ describe("schemaToForm", () => {
       expect(missingRequiredFields(nullable, { a: null })).toEqual([]);
     });
 
+    it("accepts an empty string a const pins the field to", () => {
+      // The one-option control cannot produce anything else, so reporting the
+      // seeded value as missing would make the branch permanently uncallable.
+      const pinnedEmpty = {
+        type: "object",
+        properties: { kind: { type: "string", const: "" } },
+        required: ["kind"],
+      };
+      expect(missingRequiredFields(pinnedEmpty, { kind: "" })).toEqual([]);
+      // An ordinary required string is still missing when left blank.
+      const ordinary = {
+        type: "object",
+        properties: { kind: { type: "string" } },
+        required: ["kind"],
+      };
+      expect(missingRequiredFields(ordinary, { kind: "" })).toEqual(["kind"]);
+    });
+
     it("checks the root's own required fields when there is no union", () => {
       const schema = {
         type: "object",

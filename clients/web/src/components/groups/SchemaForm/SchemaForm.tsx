@@ -972,8 +972,12 @@ export function SchemaForm({
                 handleFieldChange(fieldName, nestedValues)
               }
               disabled={disabled}
-              // Sub-fields belong to the same entity, so they reset with it.
-              resetKey={resetKey}
+              // Sub-fields belong to the same entity, so they reset with it —
+              // and to the branch it is being edited under, since two outer
+              // alternatives can both carry this field and a nested form left
+              // mounted across the switch would keep displaying the nested
+              // branch chosen for the other one.
+              resetKey={draftKey}
               // A nested form's invalid draft is the outer form's invalid draft,
               // so it reports through the same channel under this field's name.
               onValidityChange={(nestedInvalid) =>

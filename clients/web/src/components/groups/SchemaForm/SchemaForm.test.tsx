@@ -2215,6 +2215,51 @@ describe("SchemaForm multiline strings (#2042)", () => {
       );
     });
 
+    it("resets a nested form's own branch when the outer branch changes", async () => {
+      const user = userEvent.setup();
+      const nested: InspectorFormSchema = {
+        type: "object",
+        properties: {
+          config: {
+            type: "object",
+            title: "Config",
+            properties: {},
+            anyOf: [
+              {
+                type: "object",
+                title: "Inner A",
+                properties: { alpha: { type: "string", title: "Alpha" } },
+              },
+              {
+                type: "object",
+                title: "Inner B",
+                properties: { beta: { type: "string", title: "Beta" } },
+              },
+            ],
+          },
+        },
+        anyOf: [
+          { type: "object", title: "Outer A", properties: { x: {} } },
+          { type: "object", title: "Outer B", properties: { y: {} } },
+        ],
+      };
+      renderWithMantine(
+        <SchemaForm schema={nested} values={{}} onChange={vi.fn()} />,
+      );
+      const [outer, inner] = screen.getAllByRole("textbox", {
+        name: /Variant/,
+      });
+      await user.click(inner!);
+      await user.click(screen.getByRole("option", { name: "Inner B" }));
+      expect(screen.getByRole("textbox", { name: /Beta/ })).toBeTruthy();
+
+      await user.click(outer!);
+      await user.click(screen.getByRole("option", { name: "Outer B" }));
+      // The nested form is still mounted, so only a changed reset key can stop
+      // it displaying a branch the newly seeded values do not describe.
+      expect(screen.getByRole("textbox", { name: /Alpha/ })).toBeTruthy();
+    });
+
     it("renders no picker for a single-branch union but still shows its fields", () => {
       const schema: InspectorFormSchema = {
         type: "object",
