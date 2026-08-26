@@ -327,6 +327,17 @@ describe("resolveRootUnion", () => {
     expect(branches).toEqual([]);
   });
 
+  it("treats an annotation-only additionalProperties schema as permissive", () => {
+    // `{ title: … }` asserts nothing, so it is the equivalent of `true` just
+    // as `{}` is — declining on key count alone would recreate the empty form.
+    const { branches } = resolveRootUnion({
+      type: "object",
+      additionalProperties: { title: "Extra value" },
+      anyOf: [EMAIL, SMS],
+    });
+    expect(branches).toHaveLength(2);
+  });
+
   it("treats an empty additionalProperties schema as permissive", () => {
     // `{}` is the JSON Schema equivalent of `true` — it constrains nothing.
     const { branches } = resolveRootUnion({
@@ -493,6 +504,25 @@ describe("resolveRootUnion", () => {
         ],
       });
       expect(branches).toHaveLength(2);
+    });
+
+    it("compares object constants irrespective of member order", () => {
+      // Member order carries no meaning in JSON, so these two alternatives are
+      // pinned to the SAME value and both match — not mutually exclusive.
+      const { branches } = resolveRootUnion({
+        type: "object",
+        oneOf: [
+          {
+            type: "object",
+            properties: { tag: { const: { a: 1, b: 2 } }, x: {} },
+          },
+          {
+            type: "object",
+            properties: { tag: { const: { b: 2, a: 1 } }, y: {} },
+          },
+        ],
+      });
+      expect(branches).toEqual([]);
     });
 
     it("declines a oneOf whose named discriminator does not distinguish", () => {
@@ -680,7 +710,9 @@ describe("resolveRootUnion", () => {
       expect(selectBranchIndex(ambiguous, { kind: "email" })).toBeNull();
     });
 
-    it("reports none for a branch that pins nothing", () => {
+    it("identifies a branch from a name only it declares", () => {
+      // Nothing is pinned and nothing is required, but `a` belongs to one
+      // alternative as plainly as a discriminator would.
       const unpinned = resolveRootUnion({
         type: "object",
         anyOf: [
@@ -688,7 +720,27 @@ describe("resolveRootUnion", () => {
           { type: "object", properties: { b: { type: "string" } } },
         ],
       }).branches;
-      expect(selectBranchIndex(unpinned, { a: "x" })).toBeNull();
+      expect(selectBranchIndex(unpinned, { a: "x" })).toBe(0);
+      expect(selectBranchIndex(unpinned, { b: "x" })).toBe(1);
+    });
+
+    it("treats a name several branches declare as saying nothing", () => {
+      const shared = resolveRootUnion({
+        type: "object",
+        anyOf: [
+          {
+            type: "object",
+            properties: { both: { type: "string" }, a: { type: "string" } },
+          },
+          {
+            type: "object",
+            properties: { both: { type: "string" }, b: { type: "string" } },
+          },
+        ],
+      }).branches;
+      expect(selectBranchIndex(shared, { both: "x" })).toBeNull();
+      // …and both branches named at once is no answer either.
+      expect(selectBranchIndex(shared, { a: "x", b: "y" })).toBeNull();
     });
   });
 });

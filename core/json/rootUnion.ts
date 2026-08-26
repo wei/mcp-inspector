@@ -171,9 +171,33 @@ const ANNOTATION_KEYWORDS = new Set([
   "default",
 ]);
 
+/**
+ * A JSON rendering whose object keys are sorted, so two values that differ only
+ * in the order their properties were written render identically.
+ *
+ * Member order carries no meaning in JSON, so `{ a: 1, b: 2 }` and
+ * `{ b: 2, a: 1 }` are the same value — a plain `JSON.stringify` comparison
+ * would call them different and, for a discriminator, would report two
+ * alternatives as mutually exclusive when both accept the same input.
+ */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(",")}]`;
+  }
+  if (typeof value === "object" && value !== null) {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(
+        ([key, member]) => `${JSON.stringify(key)}:${canonicalJson(member)}`,
+      );
+    return `{${entries.join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "undefined";
+}
+
 /** Structural equality, via canonical JSON — enough for schema keyword values. */
 function sameValue(a: unknown, b: unknown): boolean {
-  return a === b || JSON.stringify(a) === JSON.stringify(b);
+  return a === b || canonicalJson(a) === canonicalJson(b);
 }
 
 /**
@@ -294,7 +318,7 @@ function hasDiscriminator(
       return property?.const;
     });
     if (constants.some((value) => value === undefined)) return false;
-    const seen = new Set(constants.map((value) => JSON.stringify(value)));
+    const seen = new Set(constants.map(canonicalJson));
     return seen.size === constants.length;
   });
 }
@@ -497,12 +521,15 @@ export function resolveRootUnion<T extends RootUnionSchema>(
   const additional = base.additionalProperties;
   const restrictsAdditional =
     additional === false ||
-    // An EMPTY schema object is the JSON Schema equivalent of `true` — it
-    // constrains nothing, so it is no reason to decline. Only a schema that
-    // states something is.
+    // A schema that constrains nothing is the equivalent of `true`, and that is
+    // not only the empty object: `{ title: "Extra value" }` is annotation and
+    // no more. Declining on key count alone would recreate the empty form for a
+    // legal permissive schema, so what counts is whether an assertion is there.
     (typeof additional === "object" &&
       additional !== null &&
-      Object.keys(additional).length > 0);
+      Object.keys(additional).some(
+        (keyword) => !ANNOTATION_KEYWORDS.has(keyword),
+      ));
   const baseNames = propertiesOf(base) ?? {};
   if (
     restrictsAdditional &&
@@ -593,15 +620,31 @@ export function selectBranchIndex<T extends RootUnionSchema>(
   // required-field gate (which accepts *any* satisfied branch) lets them be
   // submitted, so the form shows one shape and sends another.
   if (Object.keys(values).length === 0) return null;
+  const supplied = (name: string) =>
+    Object.hasOwn(values, name) && values[name] !== undefined;
+
   const satisfied = branches.filter((branch) => {
     const required = branch.schema.required ?? [];
     const own = required.filter((name) => branch.declaredFields.includes(name));
-    return (
-      own.length > 0 &&
-      own.every(
-        (name) => Object.hasOwn(values, name) && values[name] !== undefined,
-      )
-    );
+    return own.length > 0 && own.every(supplied);
   });
-  return satisfied.length === 1 ? branches.indexOf(satisfied[0]) : null;
+  if (satisfied.length === 1) return branches.indexOf(satisfied[0]);
+
+  // Nothing is required, or several branches are satisfied. A name only ONE
+  // alternative declares is still evidence: supplying `phone` where only the
+  // SMS branch declares it names that shape as clearly as a discriminator
+  // would. A name more than one declares is ambiguous and says nothing.
+  const exclusiveTo = new Map<string, number>();
+  branches.forEach((branch, index) => {
+    for (const name of branch.declaredFields) {
+      exclusiveTo.set(name, exclusiveTo.has(name) ? -1 : index);
+    }
+  });
+  const named = new Set(
+    Object.keys(values)
+      .filter(supplied)
+      .map((name) => exclusiveTo.get(name))
+      .filter((index): index is number => index !== undefined && index >= 0),
+  );
+  return named.size === 1 ? [...named][0] : null;
 }

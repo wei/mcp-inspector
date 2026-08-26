@@ -100,7 +100,7 @@ describe("ToolTestModal", () => {
           },
         ],
       },
-    } as unknown as Partial<Tool>);
+    });
     const api = render(
       <ToolTestModal
         tool={tool}
@@ -129,7 +129,7 @@ describe("ToolTestModal", () => {
         properties: { a: { type: "string" }, b: { type: "string" } },
         required: ["a", "b"],
       },
-    } as unknown as Partial<Tool>);
+    });
     const api = render(
       <ToolTestModal
         tool={tool}
