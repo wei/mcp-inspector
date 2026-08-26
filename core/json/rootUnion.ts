@@ -430,6 +430,11 @@ export function resolveRootUnion<T extends RootUnionSchema>(
       (branch) =>
         branch === null ||
         !isOfferable(branch) ||
+        // The same faithfulness test the `allOf` fold applies: a member
+        // carrying a constraint the merge does not copy — a nested `allOf`, a
+        // `not`, a `$ref` — would have it erased along with the union keyword,
+        // which can present an unsatisfiable branch as a callable one.
+        !isFlattenable(branch) ||
         conflictsWithBase(base, branch),
     )
   ) {
@@ -476,9 +481,14 @@ export function selectBranchIndex<T extends RootUnionSchema>(
           ] as const,
       )
       .filter(([, constValue]) => constValue !== undefined);
+    // Only the pinned names the caller actually supplied are evidence. A
+    // constant it did not supply is one this identification exists to *seed* —
+    // requiring it would mean a deep link naming `kind` alone matched no branch
+    // whenever the branches also pin, say, a `version`.
+    const supplied = pinned.filter(([name]) => values[name] !== undefined);
     if (
-      pinned.length > 0 &&
-      pinned.every(([name, constValue]) => values[name] === constValue)
+      supplied.length > 0 &&
+      supplied.every(([name, constValue]) => values[name] === constValue)
     ) {
       matches.push(index);
     }

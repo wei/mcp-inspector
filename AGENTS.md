@@ -211,10 +211,13 @@ v2/main/
 │   │                                   #   intersections: a union whose members are not ALL
 │   │                                   #   field-carrying objects (or whose member `type`
 │   │                                   #   rules objects out), a branch restating a
-│   │                                   #   constraint the root states differently, an allOf
-│   │                                   #   carrying a member it cannot fold in (`false`, a
-│   │                                   #   $ref) — dropping the keyword there would turn an
-│   │                                   #   UNSATISFIABLE schema into a fillable form — and a
+│   │                                   #   constraint the root states differently, ANY member
+│   │                                   #   stating more than the merge applies (only
+│   │                                   #   type/properties/required — a `false`, a $ref, a
+│   │                                   #   nested applicator would have its constraint erased
+│   │                                   #   with the keyword, turning an UNSATISFIABLE schema
+│   │                                   #   into a fillable form; allOf members are checked
+│   │                                   #   against the ACCUMULATED merge, not the root), and a
 │   │                                   #   schema carrying BOTH oneOf and anyOf. Does not
 │   │                                   #   interpret `not` at all. Declining changes what
 │   │                                   #   RENDERS, never whether the tool takes arguments:

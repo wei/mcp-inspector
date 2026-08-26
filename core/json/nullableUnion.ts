@@ -368,16 +368,14 @@ function collapsed<T extends NullableUnionSchema>(
  * an optimistic guess, and a schema this module cannot read renders through the
  * JSON editor with its constraints intact.
  */
+/** Whether an absent or null-naming `type` leaves null on the table. */
+function typeAdmitsNull(type: string | string[] | undefined): boolean {
+  return type === undefined || typeNamesNull(type);
+}
+
 export function admitsNull(schema: NullableUnionSchema): boolean {
   if (nullExcludedBySiblings(schema)) {
     return false;
-  }
-  // `const: null` admits null and nothing else, whatever the schema says (or
-  // omits) about `type`. Without this a required field pinned to null is seeded
-  // with the only value it accepts and then reported as missing, leaving submit
-  // permanently disabled on a form the user cannot change (#2123).
-  if (schema.const === null) {
-    return true;
   }
   // Applicators this module does not evaluate. `not: { type: "null" }` rules
   // null out; `allOf` can add a member that does; and `oneOf` requires
@@ -388,6 +386,20 @@ export function admitsNull(schema: NullableUnionSchema): boolean {
   if (hasOpaqueApplicator(schema)) {
     return false;
   }
+  // `const: null` admits null and nothing else — the case a required field
+  // pinned to null needs, or it is seeded with the only value it accepts and
+  // then reported missing, leaving submit permanently disabled on a field the
+  // user cannot change (#2123).
+  //
+  // Claimed only where the siblings agree, since `const` is conjunctive with
+  // them rather than an override: `{ type: "string", const: null }` and
+  // `{ const: null, anyOf: [...] }` reject every value, and saying otherwise
+  // would let the gate accept a `null` the schema forbids. The opaque
+  // applicators (`not`, `allOf`, `oneOf`) are already refused above.
+  if (schema.const === null) {
+    return schema.anyOf === undefined && typeAdmitsNull(schema.type);
+  }
+
   if (schema.nullable === true) {
     return true;
   }

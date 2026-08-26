@@ -397,6 +397,24 @@ describe("resolveRootUnion", () => {
       ).toEqual([]);
     });
 
+    it("declines a member carrying a constraint the merge cannot apply", () => {
+      // Same faithfulness test the `allOf` fold applies — otherwise a branch
+      // whose nested `allOf: [false]` makes it unsatisfiable is offered as a
+      // callable alternative.
+      const { branches } = resolveRootUnion({
+        type: "object",
+        anyOf: [
+          EMAIL,
+          {
+            type: "object",
+            properties: { x: { type: "string" } },
+            allOf: [false as unknown],
+          },
+        ],
+      });
+      expect(branches).toEqual([]);
+    });
+
     it("declines an empty union", () => {
       expect(resolveRootUnion({ type: "object", anyOf: [] }).branches).toEqual(
         [],
@@ -448,6 +466,33 @@ describe("resolveRootUnion", () => {
 
     it("names the branch whose discriminator the values carry", () => {
       expect(selectBranchIndex(branches, { kind: "sms" })).toBe(1);
+    });
+
+    it("identifies a branch from the constants that were supplied", () => {
+      // Both branches pin `version` as well; a deep link naming only `kind`
+      // must still find its branch — the unsupplied constant is one this
+      // identification exists to seed.
+      const versioned = resolveRootUnion({
+        type: "object",
+        anyOf: [
+          {
+            type: "object",
+            properties: {
+              version: { const: "1" },
+              kind: { const: "email" },
+            },
+          },
+          {
+            type: "object",
+            properties: { version: { const: "1" }, kind: { const: "sms" } },
+          },
+        ],
+      }).branches;
+      expect(selectBranchIndex(versioned, { kind: "sms" })).toBe(1);
+      // A supplied constant that disagrees is still evidence against.
+      expect(selectBranchIndex(versioned, { version: "2", kind: "sms" })).toBe(
+        null,
+      );
     });
 
     it("reports none when the values identify nothing", () => {

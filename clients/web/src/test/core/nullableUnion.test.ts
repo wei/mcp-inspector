@@ -731,4 +731,23 @@ describe("admitsNull", () => {
       }),
     ).toBe(true);
   });
+
+  describe("a const-null schema (#2123)", () => {
+    it("admits null when nothing else rules it out", () => {
+      expect(admitsNull({ const: null })).toBe(true);
+      expect(admitsNull({ type: "null", const: null })).toBe(true);
+      expect(admitsNull({ type: ["string", "null"], const: null })).toBe(true);
+    });
+
+    it("does not override a sibling that rejects null", () => {
+      // `const` is conjunctive with its siblings, not an override: both of
+      // these reject every value, so claiming nullability would let the
+      // required-field gate accept a `null` the schema forbids.
+      expect(admitsNull({ type: "string", const: null })).toBe(false);
+      expect(admitsNull({ const: null, anyOf: [{ type: "string" }] })).toBe(
+        false,
+      );
+      expect(admitsNull({ const: null, not: { type: "null" } })).toBe(false);
+    });
+  });
 });
