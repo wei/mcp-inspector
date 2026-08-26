@@ -12,12 +12,15 @@
  */
 
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { ENGINE_SMOKES } from "./run-engine-smokes.mjs";
 
 const scriptDir = import.meta.dirname;
+const scripts = JSON.parse(
+  readFileSync(join(scriptDir, "..", "package.json"), "utf8"),
+).scripts;
 
 describe("ENGINE_SMOKES", () => {
   it("names every browser-driven smoke, and each one exists", () => {
@@ -41,5 +44,50 @@ describe("ENGINE_SMOKES", () => {
     // flow with 45s waits. Ordering it first is what makes "this engine cannot
     // run the bundle at all" fail in seconds rather than after two timeouts.
     assert.equal(ENGINE_SMOKES[0], "smoke-web-browser.mjs");
+  });
+});
+
+describe("every engine tier consumes ENGINE_SMOKES", () => {
+  // The point of the list is defeated if any tier enumerates the smokes itself.
+  // `npm run smoke` used to do exactly that (Copilot, #2133): a fourth entry in
+  // ENGINE_SMOKES would have reached the Firefox and on-demand runs and silently
+  // skipped the DEFAULT Chromium run — which is the one GitHub CI executes. That
+  // is invisible at runtime, because a tier running fewer smokes still passes.
+
+  it("the Chromium tier goes through the runner, not its own list", () => {
+    assert.match(scripts["smoke:web:chromium"], /run-engine-smokes\.mjs/);
+    assert.match(scripts.smoke, /smoke:web:chromium/);
+    for (const individual of [
+      "smoke:web:browser",
+      "smoke:web:app",
+      "smoke:web:elicit",
+    ]) {
+      assert.ok(
+        !scripts.smoke.includes(individual),
+        `\`smoke\` names ${individual} directly — it must route through ` +
+          "`smoke:web:chromium` so every tier reads one list",
+      );
+    }
+  });
+
+  it("the Firefox tier goes through the runner and is in the pre-push gate", () => {
+    assert.match(scripts["smoke:web:firefox"], /run-engine-smokes\.mjs/);
+    assert.match(scripts.ci, /smoke:web:firefox/);
+  });
+
+  it("each gated tier names its engine explicitly rather than reading the env", () => {
+    // An ambient SMOKE_BROWSER must not be able to redirect a gate: without the
+    // literal engine, `SMOKE_BROWSER=firefox npm run ci` would run Firefox twice
+    // and never exercise Chromium at all.
+    assert.match(
+      scripts["smoke:web:chromium"],
+      /run-engine-smokes\.mjs chromium$/,
+    );
+    assert.match(
+      scripts["smoke:web:firefox"],
+      /run-engine-smokes\.mjs firefox$/,
+    );
+    // The on-demand entry point is the one that SHOULD follow the environment.
+    assert.match(scripts["smoke:web:engine"], /run-engine-smokes\.mjs$/);
   });
 });

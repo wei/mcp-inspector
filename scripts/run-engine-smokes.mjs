@@ -8,10 +8,13 @@
  * from Node does, on every platform — the same reason `install-smoke-browser`
  * exists rather than an inline shell expansion.
  *
- * It also gives the smoke list ONE home. It used to be an `&&` chain in
- * package.json alongside a second chain in the workflow; adding a fourth smoke
- * meant remembering both. Now `ENGINE_SMOKES` is the list, and both the
- * on-demand command and the pre-push gate run through it.
+ * It also gives the smoke list ONE home. `ENGINE_SMOKES` is that list, and
+ * EVERY tier reads it — the default Chromium run inside `npm run smoke`
+ * (`smoke:web:chromium`), the Firefox pass in the pre-push gate
+ * (`smoke:web:firefox`), and the on-demand `smoke:web:engine`. Getting that
+ * wrong is silent: a tier that enumerated the smokes itself would simply run
+ * fewer of them and still pass, so `run-engine-smokes.test.mjs` asserts that no
+ * tier names an individual smoke.
  *
  * Usage: `node scripts/run-engine-smokes.mjs [engine]`. With no argument the
  * engine comes from `SMOKE_BROWSER` (default `chromium`).

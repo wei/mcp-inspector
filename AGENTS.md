@@ -946,7 +946,7 @@ SMOKE_BROWSER=webkit npm run smoke:web:engine    # any engine, on demand
 SMOKE_BROWSER=firefox npm run smoke:web:app      # one smoke, one engine
 ```
 
-**Firefox runs in the local pre-push gate (`npm run ci`) and NOT in GitHub CI.** That split is the whole design — see the gate bullet below. `ENGINE_SMOKES` in `scripts/run-engine-smokes.mjs` is the single list of which smokes are engine-sensitive; add a fourth there and every engine picks it up. `smoke:web:firefox` passes the engine as an argument rather than relying on the ambient `SMOKE_BROWSER`, so the gate cannot be silently redirected to another engine by a stray variable — verified, an explicit argument beats it.
+**Firefox runs in the local pre-push gate (`npm run ci`) and NOT in GitHub CI.** That split is the whole design — see the gate bullet below. `ENGINE_SMOKES` in `scripts/run-engine-smokes.mjs` is the single list of which smokes are engine-sensitive, and **every tier reads it** — the default Chromium run inside `npm run smoke`, the Firefox pass in the gate, and the on-demand command. Add a fourth there and all three pick it up. A tier that enumerated the smokes itself would silently run fewer and still pass, so `run-engine-smokes.test.mjs` asserts that none of them does. `smoke:web:firefox` passes the engine as an argument rather than relying on the ambient `SMOKE_BROWSER`, so the gate cannot be silently redirected to another engine by a stray variable — verified, an explicit argument beats it.
 
 Everything about the selection lives in **`scripts/lib/headless-browser.mjs`** — `resolveBrowserName`, `loadBrowser`, and the `attachPageDiagnostics` / `FATAL_CONSOLE` split the smokes had each hand-rolled. Reach for it rather than launching Playwright in a new script.
 
