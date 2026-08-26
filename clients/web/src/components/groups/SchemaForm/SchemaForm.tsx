@@ -694,20 +694,23 @@ export function SchemaForm({
     if (!nextBranch) return;
     setBranchIndex(nextIndex);
     const nextProperties = nextBranch.schema.properties ?? {};
-    // Only what the *base* contributed is carried across — a value the outgoing
-    // branch declared belongs to that branch's shape, and a name the two
-    // branches type differently would arrive as the wrong type entirely (a `3`
-    // typed into branch A's number field landing in branch B's checkbox). A
-    // field the incoming branch pins to a `const` is likewise not carried: the
-    // branches of a discriminated union share the discriminator's *name* and
-    // disagree about its value.
+    // A value is carried unless it belonged to the outgoing branch's own shape:
+    // a name **both** branches declare may be typed differently by each, so a
+    // `3` typed into branch A's number field must not arrive in branch B's
+    // checkbox. A name only the outgoing branch specialized still survives when
+    // the incoming branch merely inherits the root's declaration — it is a root
+    // argument there, and dropping it would erase a valid value. A field the
+    // incoming branch pins to a `const` is never carried: the branches of a
+    // discriminated union share the discriminator's *name* and disagree about
+    // its value.
     const outgoing = new Set(activeBranch?.declaredFields ?? []);
+    const incoming = new Set(nextBranch.declaredFields);
     const carried: Record<string, unknown> = {};
     for (const [name, fieldSchema] of Object.entries(nextProperties)) {
       if (
         values[name] !== undefined &&
         fieldSchema.const === undefined &&
-        !outgoing.has(name)
+        !(outgoing.has(name) && incoming.has(name))
       ) {
         carried[name] = values[name];
       }

@@ -165,7 +165,12 @@ function coercionProperties(
     return { ...matching[0].schema.properties };
   }
 
-  const properties: Record<string, unknown> = { ...base.properties };
+  // `hasOwn`/`fromEntries` rather than `in`/assignment throughout: `properties`
+  // is a JSON record, so `constructor` and `__proto__` are legal argument names
+  // that the prototype chain and the legacy setter would otherwise mishandle.
+  const properties: Record<string, unknown> = Object.fromEntries(
+    Object.entries(base.properties ?? {}),
+  );
   for (const name of new Set(branches.flatMap((b) => b.declaredFields))) {
     // Only the branches that *declare* the name have an opinion about it — a
     // branch that merely inherited the root's declaration is not a second,
@@ -176,7 +181,12 @@ function coercionProperties(
       .map((branch) => branch.schema.properties?.[name]);
     const types = new Set(declarations.map((schema) => typeNameOf(schema)));
     if (types.size === 1) {
-      properties[name] = declarations[0];
+      Object.defineProperty(properties, name, {
+        value: declarations[0],
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
     } else {
       delete properties[name];
     }

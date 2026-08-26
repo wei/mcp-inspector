@@ -260,6 +260,83 @@ describe("resolveRootUnion", () => {
     expect(branches).toEqual([]);
   });
 
+  it("tolerates a branch suggesting a different default", () => {
+    // `default` constrains nothing, so two declarations suggesting different
+    // initial values still accept the same values.
+    const { branches } = resolveRootUnion({
+      type: "object",
+      properties: { count: { default: 1 } },
+      anyOf: [
+        {
+          type: "object",
+          properties: { count: { type: "number", default: 2 } },
+        },
+        { type: "object", properties: { other: { type: "string" } } },
+      ],
+    });
+    expect(branches).toHaveLength(2);
+  });
+
+  it("does not mistake an inherited object property for a root declaration", () => {
+    // `constructor` is a legal argument name; finding it on `Object.prototype`
+    // would report a conflict the root never declared.
+    const anyOf: unknown[] = [
+      { type: "object", properties: { constructor: { type: "string" } } },
+      { type: "object", properties: { other: { type: "string" } } },
+    ];
+    const { branches } = resolveRootUnion({
+      type: "object",
+      properties: {},
+      anyOf,
+    });
+    expect(branches).toHaveLength(2);
+    expect(branches[0].schema.properties?.constructor).toEqual({
+      type: "string",
+    });
+  });
+
+  it("keeps a branch property named __proto__", () => {
+    // Assigning it would invoke the legacy prototype setter rather than create
+    // an own property, losing a renderable field.
+    const { branches } = resolveRootUnion({
+      type: "object",
+      properties: { keep: { type: "string" } },
+      // A computed key: `__proto__:` in an object literal is the prototype
+      // setter, so the literal form would not even create the property.
+      anyOf: [
+        { type: "object", properties: { ["__proto__"]: { type: "string" } } },
+        { type: "object", properties: { other: { type: "string" } } },
+      ] as unknown[],
+    });
+    expect(Object.keys(branches[0].schema.properties ?? {})).toEqual([
+      "keep",
+      "__proto__",
+    ]);
+  });
+
+  it("declines a union that adds fields under a restrictive additionalProperties", () => {
+    // `additionalProperties` constrains what its SIBLING `properties` does not
+    // name, so the original schema admits none of the branch fields — moving
+    // them beside the keyword would make them read as allowed.
+    const { branches } = resolveRootUnion({
+      type: "object",
+      properties: { known: { type: "string" } },
+      additionalProperties: false,
+      anyOf: [EMAIL, SMS],
+    });
+    expect(branches).toEqual([]);
+  });
+
+  it("allows a restrictive additionalProperties the branches stay within", () => {
+    const { branches } = resolveRootUnion({
+      type: "object",
+      properties: { kind: {}, address: {}, phone: {} },
+      additionalProperties: false,
+      anyOf: [EMAIL, SMS],
+    });
+    expect(branches).toHaveLength(2);
+  });
+
   it("declines a union whose branch contradicts the root's type for a field", () => {
     // `string` under a base `number` describes a value that cannot exist, so
     // flattening it would render one type and accept what the schema rejects.

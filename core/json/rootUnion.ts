@@ -43,6 +43,12 @@ export interface RootUnionSchema {
    */
   discriminator?: { propertyName?: string };
   /**
+   * Read only to *decline*: `additionalProperties` constrains the names its
+   * **sibling** `properties` does not list, so a restrictive one at the root
+   * rejects every field a branch adds. See {@link resolveRootUnion}.
+   */
+  additionalProperties?: unknown;
+  /**
    * Read only to *decline* a member: its referent is not resolved here, so a
    * `$ref` member's constraints are unknown rather than absent.
    */
@@ -160,6 +166,9 @@ const ANNOTATION_KEYWORDS = new Set([
   "readOnly",
   "writeOnly",
   "$comment",
+  // An annotation too: a suggested initial value constrains nothing, so two
+  // declarations suggesting different ones still accept the same values.
+  "default",
 ]);
 
 /** Structural equality, via canonical JSON — enough for schema keyword values. */
@@ -254,7 +263,11 @@ function conflictsWithBase(
   const branchProperties = propertiesOf(branch) ?? {};
   return Object.entries(branchProperties).some(
     ([name, branchProperty]) =>
-      name in baseProperties && conflicts(baseProperties[name], branchProperty),
+      // `hasOwn`, not `in`: `properties` is a JSON record, so `constructor` and
+      // `toString` are legal argument names that `in` would find on
+      // `Object.prototype` and report as collisions the root never declared.
+      Object.hasOwn(baseProperties, name) &&
+      conflicts(baseProperties[name], branchProperty),
   );
 }
 
@@ -297,13 +310,19 @@ function mergeBranch<T extends RootUnionSchema>(
 ): ResolvedSchema<T> {
   const baseProperties = propertiesOf(base) ?? {};
   const branchProperties = propertiesOf(branch) ?? {};
-  const properties: Record<string, unknown> = { ...baseProperties };
-  for (const [name, branchProperty] of Object.entries(branchProperties)) {
-    properties[name] =
-      name in baseProperties
+  // Built through `fromEntries` rather than by assignment: a property named
+  // `__proto__` is a legal argument name, and assigning it would invoke the
+  // legacy prototype setter instead of creating an own property — losing the
+  // field entirely. `hasOwn` for the same reason `conflictsWithBase` uses it.
+  const properties: Record<string, unknown> = Object.fromEntries([
+    ...Object.entries(baseProperties),
+    ...Object.entries(branchProperties).map(([name, branchProperty]) => [
+      name,
+      Object.hasOwn(baseProperties, name)
         ? mergeProperty(baseProperties[name], branchProperty)
-        : branchProperty;
-  }
+        : branchProperty,
+    ]),
+  ]);
   const required = [
     ...(base.required ?? []),
     ...(branch.required ?? []).filter(
@@ -436,6 +455,27 @@ export function resolveRootUnion<T extends RootUnionSchema>(
         // which can present an unsatisfiable branch as a callable one.
         !isFlattenable(branch) ||
         conflictsWithBase(base, branch),
+    )
+  ) {
+    return { base, branches: [] };
+  }
+
+  // `additionalProperties` applies to whatever its **sibling** `properties`
+  // does not name, so a restrictive one at the root rejects every field the
+  // branches add — the original schema admits none of them. Flattening moves
+  // those fields *beside* the keyword, where they would read as allowed, so a
+  // form built from it would submit what the schema forbids.
+  const additional = base.additionalProperties;
+  const restrictsAdditional =
+    additional === false ||
+    (typeof additional === "object" && additional !== null);
+  const baseNames = propertiesOf(base) ?? {};
+  if (
+    restrictsAdditional &&
+    branches.some((branch) =>
+      Object.keys(propertiesOf(branch as RootUnionSchema) ?? {}).some(
+        (name) => !Object.hasOwn(baseNames, name),
+      ),
     )
   ) {
     return { base, branches: [] };

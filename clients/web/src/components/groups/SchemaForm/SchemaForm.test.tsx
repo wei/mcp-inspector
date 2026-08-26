@@ -2149,6 +2149,39 @@ describe("SchemaForm multiline strings (#2042)", () => {
       expect(onChange).toHaveBeenCalledWith({});
     });
 
+    it("keeps a root value the incoming branch merely inherits", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      const schema: InspectorFormSchema = {
+        type: "object",
+        properties: { count: {} },
+        anyOf: [
+          {
+            type: "object",
+            title: "A",
+            properties: { count: { type: "number", title: "Count" } },
+          },
+          {
+            type: "object",
+            title: "B",
+            properties: { other: { type: "string", title: "Other" } },
+          },
+        ],
+      };
+      renderWithMantine(
+        <SchemaForm
+          schema={schema}
+          values={{ count: 3 }}
+          onChange={onChange}
+        />,
+      );
+      await user.click(screen.getByRole("textbox", { name: /Variant/ }));
+      await user.click(screen.getByRole("option", { name: "B" }));
+      // Branch B does not redeclare `count`, so it is a root argument there —
+      // dropping it would erase a value the schema still accepts.
+      expect(onChange).toHaveBeenCalledWith({ count: 3 });
+    });
+
     it("renders no picker for a single-branch union but still shows its fields", () => {
       const schema: InspectorFormSchema = {
         type: "object",
