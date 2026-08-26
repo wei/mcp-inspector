@@ -5,8 +5,11 @@ import type {
 import type { InspectorClient } from "@inspector/core/mcp/index.js";
 import type { JsonValue } from "@inspector/core/mcp/index.js";
 import type { MessageEntry } from "@inspector/core/mcp/types.js";
+// Type-only, so this creates no runtime edge into `components/` and the
+// `components → lib → utils` direction still holds: `LogEntryData` is the shape
+// the Logs screen renders, and this module exists to produce exactly that.
 import type { LogEntryData } from "../components/elements/LogEntry/LogEntry";
-import { isReplayableProtocolMethod } from "../components/groups/protocolUtils.js";
+import { isReplayableProtocolMethod } from "../utils/replayableProtocolMethods";
 
 // Derive `LogEntryData[]` from the MessageLog by filtering for the
 // `notifications/message` notifications the server emits in response to
@@ -37,8 +40,26 @@ export function messagesToLogEntries(messages: MessageEntry[]): LogEntryData[] {
 // intentionally does NOT touch the Tools/Prompts/Resources panels. Returns a
 // human-readable reason when the entry can't be replayed (unsupported method,
 // or a tool that's no longer present), or null on a dispatched replay.
+/**
+ * The slice of `InspectorClient` a replay actually reaches. Naming it — rather
+ * than taking the whole client — is what lets a caller (and a test) supply a
+ * value that satisfies the real contract instead of casting one in.
+ */
+export type ReplayClient = Pick<
+  InspectorClient,
+  | "callTool"
+  | "getPrompt"
+  | "readResource"
+  | "listTools"
+  | "listPrompts"
+  | "listResources"
+  | "listResourceTemplates"
+  | "listRequestorTasks"
+  | "ping"
+>;
+
 export async function replayProtocolRequest(
-  client: InspectorClient,
+  client: ReplayClient,
   method: string,
   params: Record<string, unknown> | undefined,
   tools: Tool[],

@@ -1,16 +1,24 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Tool } from "@modelcontextprotocol/client";
-import type { InspectorClient } from "@inspector/core/mcp/index.js";
 import type { MessageEntry } from "@inspector/core/mcp/types.js";
-import { messagesToLogEntries, replayProtocolRequest } from "./protocolReplay";
+import {
+  messagesToLogEntries,
+  replayProtocolRequest,
+  type ReplayClient,
+} from "./protocolReplay";
 
 describe("messagesToLogEntries", () => {
-  const notification = (method: string, params: unknown): MessageEntry =>
-    ({
-      direction: "notification",
-      timestamp: 1000,
-      message: { jsonrpc: "2.0", method, params },
-    }) as unknown as MessageEntry;
+  const at = new Date("2026-01-01T00:00:00Z");
+
+  const notification = (
+    method: string,
+    params: Record<string, unknown>,
+  ): MessageEntry => ({
+    id: `n-${method}`,
+    timestamp: at,
+    direction: "notification",
+    message: { jsonrpc: "2.0", method, params },
+  });
 
   it("keeps only notifications/message and carries the timestamp", () => {
     const entries = messagesToLogEntries([
@@ -18,49 +26,62 @@ describe("messagesToLogEntries", () => {
       notification("notifications/progress", { progress: 1 }),
     ]);
     expect(entries).toEqual([
-      { receivedAt: 1000, params: { level: "info", data: "hello" } },
+      { receivedAt: at, params: { level: "info", data: "hello" } },
     ]);
   });
 
   it("skips requests and responses", () => {
-    const request = {
+    const request: MessageEntry = {
+      id: "r-1",
+      timestamp: at,
       direction: "request",
-      timestamp: 1,
+      // A request frame carrying the same method — only `direction` should
+      // decide, so this must still be skipped.
       message: { jsonrpc: "2.0", id: 1, method: "notifications/message" },
-    } as unknown as MessageEntry;
-    const response = {
+    };
+    const response: MessageEntry = {
+      id: "r-2",
+      timestamp: at,
       direction: "response",
-      timestamp: 2,
       message: { jsonrpc: "2.0", id: 1, result: {} },
-    } as unknown as MessageEntry;
+    };
     expect(messagesToLogEntries([request, response])).toEqual([]);
   });
 
-  it("skips a notification carrying no method", () => {
-    const malformed = {
+  it("skips a frame labelled a notification that carries no method", () => {
+    // `direction` and the frame shape can disagree — the log records what
+    // arrived, so the `"method" in message` guard has to hold on its own.
+    const malformed: MessageEntry = {
+      id: "m-1",
+      timestamp: at,
       direction: "notification",
-      timestamp: 3,
-      message: { jsonrpc: "2.0", result: {} },
-    } as unknown as MessageEntry;
+      message: { jsonrpc: "2.0", id: 1, result: {} },
+    };
     expect(messagesToLogEntries([malformed])).toEqual([]);
   });
 });
 
 describe("replayProtocolRequest", () => {
-  const tool = { name: "echo", inputSchema: { type: "object" } } as Tool;
+  const tool: Tool = { name: "echo", inputSchema: { type: "object" } };
 
+  // Typed against `ReplayClient`, so the mock has to satisfy the same contract
+  // the function declares rather than being cast into a whole InspectorClient.
+  // Each mock is typed against the real method signature, so a drift in
+  // `InspectorClient` surfaces here rather than being absorbed by a cast. None
+  // of them needs a resolved value: `replayProtocolRequest` awaits the call and
+  // discards the result, so what is asserted is the dispatch, not the payload.
   function makeClient() {
     return {
-      callTool: vi.fn().mockResolvedValue({}),
-      getPrompt: vi.fn().mockResolvedValue({}),
-      readResource: vi.fn().mockResolvedValue({}),
-      listTools: vi.fn().mockResolvedValue({}),
-      listPrompts: vi.fn().mockResolvedValue({}),
-      listResources: vi.fn().mockResolvedValue({}),
-      listResourceTemplates: vi.fn().mockResolvedValue({}),
-      listRequestorTasks: vi.fn().mockResolvedValue({}),
-      ping: vi.fn().mockResolvedValue({}),
-    };
+      callTool: vi.fn<ReplayClient["callTool"]>(),
+      getPrompt: vi.fn<ReplayClient["getPrompt"]>(),
+      readResource: vi.fn<ReplayClient["readResource"]>(),
+      listTools: vi.fn<ReplayClient["listTools"]>(),
+      listPrompts: vi.fn<ReplayClient["listPrompts"]>(),
+      listResources: vi.fn<ReplayClient["listResources"]>(),
+      listResourceTemplates: vi.fn<ReplayClient["listResourceTemplates"]>(),
+      listRequestorTasks: vi.fn<ReplayClient["listRequestorTasks"]>(),
+      ping: vi.fn<ReplayClient["ping"]>(),
+    } satisfies ReplayClient;
   }
 
   const replay = (
@@ -68,13 +89,7 @@ describe("replayProtocolRequest", () => {
     method: string,
     params?: Record<string, unknown>,
     tools: Tool[] = [tool],
-  ) =>
-    replayProtocolRequest(
-      client as unknown as InspectorClient,
-      method,
-      params,
-      tools,
-    );
+  ) => replayProtocolRequest(client, method, params, tools);
 
   it("refuses a method outside the shared replayable set", async () => {
     const client = makeClient();
@@ -153,7 +168,7 @@ describe("replayProtocolRequest", () => {
     expect(client[fn]).toHaveBeenCalledWith("page-2");
   });
 
-  it("passes no cursor when the entry carried none", async () => {
+  it("passes no cursor when the entry carried none, or carried a non-string", async () => {
     const client = makeClient();
     await expect(replay(client, "tools/list", undefined)).resolves.toBeNull();
     expect(client.listTools).toHaveBeenCalledWith(undefined);

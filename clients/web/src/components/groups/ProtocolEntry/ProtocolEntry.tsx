@@ -30,8 +30,8 @@ import {
   extractMethod,
   extractResultType,
   extractSubscriptionId,
-  isReplayableProtocolMethod,
 } from "../protocolUtils.js";
+import { isReplayableProtocolMethod } from "../../../utils/replayableProtocolMethods";
 
 export interface ProtocolEntryProps {
   entry: MessageEntry;

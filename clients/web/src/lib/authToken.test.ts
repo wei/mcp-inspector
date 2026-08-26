@@ -44,9 +44,7 @@ describe("getAuthToken", () => {
   beforeEach(() => {
     setSearch("");
     window.sessionStorage.clear();
-    delete (window as unknown as Record<string, unknown>)[
-      INSPECTOR_API_TOKEN_GLOBAL
-    ];
+    Reflect.deleteProperty(window, INSPECTOR_API_TOKEN_GLOBAL);
   });
 
   afterEach(() => {
@@ -54,14 +52,11 @@ describe("getAuthToken", () => {
     restoreSessionStorage();
     setSearch("");
     window.sessionStorage.clear();
-    delete (window as unknown as Record<string, unknown>)[
-      INSPECTOR_API_TOKEN_GLOBAL
-    ];
+    Reflect.deleteProperty(window, INSPECTOR_API_TOKEN_GLOBAL);
   });
 
   it("prefers the injected global and persists it", () => {
-    (window as unknown as Record<string, unknown>)[INSPECTOR_API_TOKEN_GLOBAL] =
-      "from-global";
+    Reflect.set(window, INSPECTOR_API_TOKEN_GLOBAL, "from-global");
     setSearch(`?${KEY}=from-url`);
     window.sessionStorage.setItem(KEY, "from-storage");
 
@@ -70,14 +65,12 @@ describe("getAuthToken", () => {
   });
 
   it("ignores a non-string or empty global and falls through to the URL", () => {
-    (window as unknown as Record<string, unknown>)[INSPECTOR_API_TOKEN_GLOBAL] =
-      "";
+    Reflect.set(window, INSPECTOR_API_TOKEN_GLOBAL, "");
     setSearch(`?${KEY}=from-url`);
 
     expect(getAuthToken()).toBe("from-url");
 
-    (window as unknown as Record<string, unknown>)[INSPECTOR_API_TOKEN_GLOBAL] =
-      123;
+    Reflect.set(window, INSPECTOR_API_TOKEN_GLOBAL, 123);
     expect(getAuthToken()).toBe("from-url");
     expect(window.sessionStorage.getItem(KEY)).toBe("from-url");
   });
@@ -96,8 +89,7 @@ describe("getAuthToken", () => {
       throw new Error("blocked");
     });
     stubSessionStorage({ setItem });
-    (window as unknown as Record<string, unknown>)[INSPECTOR_API_TOKEN_GLOBAL] =
-      "from-global";
+    Reflect.set(window, INSPECTOR_API_TOKEN_GLOBAL, "from-global");
 
     expect(getAuthToken()).toBe("from-global");
     expect(setItem).toHaveBeenCalledWith(KEY, "from-global");

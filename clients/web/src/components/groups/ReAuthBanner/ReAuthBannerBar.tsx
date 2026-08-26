@@ -3,12 +3,12 @@ import { Paper } from "@mantine/core";
 // The re-auth popup. A `Paper` so every static style is a prop; the stacking
 // order goes through `styles.root` since Mantine has no `z` prop.
 //
-// Floats top-right rather than spanning the top as a sticky full-bleed bar.
-// The bar cost the whole view a band of vertical space for what is a
-// notification about one server, and it sat directly above the monitoring
-// sidebar that an OAuth failure now opens (#2108) — the two things a user needs
-// at once here are this affordance and those requests, so it must not push them
-// around. `fixed`, not `sticky`, so scrolling the server list leaves it put.
+// Floats rather than spanning the top as a sticky full-bleed bar. The bar cost
+// the whole view a band of vertical space for what is a notification about one
+// server, and it sat directly above the monitoring sidebar that an OAuth
+// failure now opens (#2108) — the two things a user needs at once here are this
+// affordance and those requests, so it must not push them around. `fixed`, not
+// `sticky`, so scrolling the server list leaves it put.
 //
 // Centered, and deliberately WITHOUT an overlay. Every corner is spoken for —
 // the toast stack owns bottom-right (see `main.tsx`), the right edge is the
