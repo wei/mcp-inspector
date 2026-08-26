@@ -819,6 +819,24 @@ describe("schemaToForm", () => {
       expect(missingRequiredFields(schema, {})).toEqual(["constructor"]);
     });
 
+    it("accepts null only where the schema admits it", () => {
+      // Branch fields render optional, so a `default: null` on a non-nullable
+      // required field reaches this check — and `type: "string"` rejects it.
+      const strict = {
+        type: "object",
+        properties: { a: { type: "string" } },
+        required: ["a"],
+      };
+      expect(missingRequiredFields(strict, { a: null })).toEqual(["a"]);
+
+      const nullable = {
+        type: "object",
+        properties: { a: { type: ["string", "null"] } },
+        required: ["a"],
+      };
+      expect(missingRequiredFields(nullable, { a: null })).toEqual([]);
+    });
+
     it("checks the root's own required fields when there is no union", () => {
       const schema = {
         type: "object",

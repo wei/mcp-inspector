@@ -713,23 +713,44 @@ export function selectBranchIndex<T extends RootUnionSchema>(
 
   // One branch's discriminator matched and no other's did — the plain case.
   if (agreeing.length === 1) return agreeing[0];
-  if (candidates.length === 1) return candidates[0];
-  if (candidates.length === 0 || Object.keys(values).length === 0) return null;
 
   // Several branches remain — they share the constant that was supplied, or
   // none was. The values still belong to a shape, so keep looking among the
-  // candidates: first the branch whose own required fields they supply.
+  // candidates by the names that were supplied.
+  return narrowBySuppliedNames(
+    branches,
+    candidates,
+    Object.keys(values).filter(supplied),
+  );
+}
+
+/**
+ * Choose among candidate branches using only *which* argument names were
+ * supplied — first the branch whose own required fields they cover, then a name
+ * only one candidate declares.
+ *
+ * Split out because two callers need the same answer from different evidence:
+ * the form holds typed values, while the CLI holds strings it has not coerced
+ * yet, and a name is a name in both. A name more than one candidate declares is
+ * ambiguous and says nothing.
+ */
+export function narrowBySuppliedNames<T extends RootUnionSchema>(
+  branches: RootUnionBranch<T>[],
+  candidates: number[],
+  suppliedNames: string[],
+): number | null {
+  if (candidates.length === 1) return candidates[0];
+  if (candidates.length === 0 || suppliedNames.length === 0) return null;
+  const supplied = new Set(suppliedNames);
+
   const satisfied = candidates.filter((index) => {
     const branch = branches[index]!;
     const required = branch.schema.required ?? [];
     const own = required.filter((name) => branch.declaredFields.includes(name));
-    return own.length > 0 && own.every(supplied);
+    return own.length > 0 && own.every((name) => supplied.has(name));
   });
   if (satisfied.length === 1) return satisfied[0];
 
-  // Then a name only ONE candidate declares: supplying `phone` where only the
-  // SMS branch declares it names that shape as clearly as a discriminator
-  // would. A name more than one declares is ambiguous and says nothing.
   const exclusiveTo = new Map<string, number>();
   for (const index of candidates) {
     for (const name of branches[index]!.declaredFields) {
@@ -737,8 +758,7 @@ export function selectBranchIndex<T extends RootUnionSchema>(
     }
   }
   const named = new Set(
-    Object.keys(values)
-      .filter(supplied)
+    suppliedNames
       .map((name) => exclusiveTo.get(name))
       .filter((index): index is number => index !== undefined && index >= 0),
   );

@@ -4,6 +4,7 @@
 
 import type { FormStructure, FormSection, FormField } from "ink-form";
 import {
+  admitsNull,
   isStringEnum,
   normalizeNullableUnion,
 } from "@inspector/core/json/nullableUnion.js";
@@ -461,12 +462,25 @@ export function missingRequiredFields(
     branches.length === 0
       ? base
       : branches[selectedBranchIndex(base, branches, rawValues)]!.schema;
+  const properties = effective.properties ?? {};
   return (effective.required ?? []).filter((name) => {
     // `hasOwn` first: an argument legally named `constructor` would otherwise
     // resolve to the inherited one and read as supplied, and the call would go
     // out without it.
     if (!Object.hasOwn(decoded, name)) return true;
     const value = decoded[name];
+    if (value === null) {
+      // `null` counts as supplied only where the schema admits it — the same
+      // test the web gate applies. A branch field is rendered optional here, so
+      // a `default: null` on a non-nullable one reaches this check and would
+      // otherwise send a value the schema rejects.
+      const property = properties[name];
+      return (
+        typeof property !== "object" ||
+        property === null ||
+        !admitsNull(property)
+      );
+    }
     return value === undefined || value === "";
   });
 }

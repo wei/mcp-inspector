@@ -156,6 +156,31 @@ describe("JSON Utils", () => {
       ).toEqual({ kind: "a", value: 3 });
     });
 
+    it("identifies the branch from the argument names supplied (#2123)", () => {
+      const undiscriminated: Tool = {
+        name: "undiscriminated",
+        inputSchema: {
+          type: "object",
+          anyOf: [
+            {
+              type: "object",
+              properties: { a: { type: "string" }, value: { type: "number" } },
+            },
+            {
+              type: "object",
+              properties: { b: { type: "string" }, value: { type: "boolean" } },
+            },
+          ],
+        },
+      };
+      // `a` belongs to the first branch alone, so `value` is that branch's
+      // number — falling straight through to cross-branch type agreement would
+      // drop the coercion and send "3".
+      expect(
+        convertToolParameters(undiscriminated, { a: "x", value: "3" }),
+      ).toEqual({ a: "x", value: 3 });
+    });
+
     it("leaves an ambiguously typed argument uncoerced (#2123)", () => {
       const ambiguous: Tool = {
         name: "ambiguous",

@@ -1,5 +1,10 @@
 import type { Tool } from "@modelcontextprotocol/client";
-import { resolveRootUnion } from "./rootUnion.js";
+import {
+  narrowBySuppliedNames,
+  resolveRootUnion,
+  type RootUnionBranch,
+  type RootUnionSchema,
+} from "./rootUnion.js";
 
 /**
  * JSON value type used across the inspector project
@@ -146,23 +151,34 @@ export function convertParameterValue(
  *   `value=true` into `Number("true")`, i.e. `NaN`. Passing the raw string
  *   through is what this function did for every argument before it existed.
  */
-function coercionProperties(
-  base: { properties?: Record<string, unknown> },
-  branches: {
-    schema: { properties?: Record<string, unknown> };
-    declaredFields: string[];
-  }[],
+function coercionProperties<T extends RootUnionSchema>(
+  base: T,
+  branches: RootUnionBranch<T>[],
   params: Record<string, string>,
 ): Record<string, unknown> {
   if (branches.length === 0) {
     return { ...base.properties };
   }
 
-  const matching = branches.filter((branch) =>
-    matchesConstants(branch.schema.properties ?? {}, params),
+  // Which branch the call means, from the constants it supplies and then — when
+  // those leave more than one standing — from the argument NAMES it supplies,
+  // through the same narrowing the form uses. Without the second step an
+  // undiscriminated union whose branches type a shared name differently loses
+  // the coercion for every argument in it, including the ones that identify
+  // the branch unambiguously.
+  const candidates = branches
+    .map((branch, index) => ({ branch, index }))
+    .filter(({ branch }) =>
+      matchesConstants(branch.schema.properties ?? {}, params),
+    )
+    .map(({ index }) => index);
+  const selected = narrowBySuppliedNames(
+    branches,
+    candidates,
+    Object.keys(params),
   );
-  if (matching.length === 1) {
-    return { ...matching[0].schema.properties };
+  if (selected !== null) {
+    return { ...branches[selected]!.schema.properties };
   }
 
   // `hasOwn`/`fromEntries` rather than `in`/assignment throughout: `properties`
@@ -171,12 +187,14 @@ function coercionProperties(
   const properties: Record<string, unknown> = Object.fromEntries(
     Object.entries(base.properties ?? {}),
   );
-  for (const name of new Set(branches.flatMap((b) => b.declaredFields))) {
+  const pool =
+    candidates.length > 0 ? candidates.map((i) => branches[i]!) : branches;
+  for (const name of new Set(pool.flatMap((b) => b.declaredFields))) {
     // Only the branches that *declare* the name have an opinion about it — a
     // branch that merely inherited the root's declaration is not a second,
     // disagreeing vote. Read through the merged schema so a branch's
     // specialization of a root property carries the root's keywords too.
-    const declarations = branches
+    const declarations = pool
       .filter((branch) => branch.declaredFields.includes(name))
       .map((branch) => branch.schema.properties?.[name])
       // A malformed declaration (`properties: { x: null }`) is not a vote about
