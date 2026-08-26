@@ -9,12 +9,31 @@ describe("EnlargeButton", () => {
     expect(screen.getByRole("button", { name: "Enlarge" })).toBeInTheDocument();
   });
 
-  it("stays in the keyboard tab order", () => {
+  // Out of the tab order like ClearButton (#2138) — a form's string fields each
+  // carry one, so leaving them in doubled the stops between adjacent fields.
+  it("is out of the keyboard tab order", () => {
     renderWithMantine(<EnlargeButton onClick={vi.fn()} />);
-    expect(screen.getByRole("button", { name: "Enlarge" })).not.toHaveAttribute(
+    expect(screen.getByRole("button", { name: "Enlarge" })).toHaveAttribute(
       "tabindex",
       "-1",
     );
+  });
+
+  // The property that matters is skipped-by-Tab, not the attribute that
+  // implements it — asserted by driving a real Tab past a neighbouring input.
+  it("is skipped when tabbing through the surrounding form", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(
+      <>
+        <input aria-label="Before" />
+        <EnlargeButton onClick={vi.fn()} />
+        <input aria-label="After" />
+      </>,
+    );
+
+    screen.getByRole("textbox", { name: "Before" }).focus();
+    await user.tab();
+    expect(screen.getByRole("textbox", { name: "After" })).toHaveFocus();
   });
 
   it("invokes onClick when clicked", async () => {

@@ -718,22 +718,67 @@ export function SchemaForm({
         );
       }
 
+      const enlarge = () =>
+        setEnlargedFields((previous) => new Set([...previous, fieldName]));
+
+      // Enter both enlarges the field and enters the newline that was asked
+      // for. Enlarging alone would consume the keystroke and leave the caret
+      // where it was, so the next thing typed runs on from the last word — the
+      // user pressed the key that means "new line" and got a reshaped box.
+      //
+      // The newline lands at the end rather than at the caret because that is
+      // where EnlargedStringField puts the caret regardless (see its comment);
+      // going anywhere else would separate the newline from the text that
+      // follows it. A field already at its maxLength is enlarged without one,
+      // since the alternative is breaching a constraint the schema states.
+      const enlargeWithNewline = () => {
+        const current = (rawValue as string) ?? "";
+        const room =
+          fieldSchema.maxLength === undefined ||
+          current.length < fieldSchema.maxLength;
+        if (room) handleFieldChange(fieldName, `${current}\n`);
+        enlarge();
+      };
+
       return (
         <TextInput
           key={fieldName}
           {...sharedProps}
           rightSectionPointerEvents="auto"
           rightSectionWidth={clearButton ? TWO_ACTION_WIDTH : ONE_ACTION_WIDTH}
+          // The keyboard's way into multiline mode, now that the enlarge button
+          // is out of the tab order (#2138). Enter is inert in this field —
+          // nothing renders SchemaForm inside a `<form>`, so there is no
+          // implicit submission to displace — and it is the very key a user
+          // presses trying to enter the newline a single-line input swallows,
+          // which is what #2042 exists to fix. So the gesture that fails is the
+          // one that enlarges, rather than a shortcut nobody would guess.
+          onKeyDown={(event) => {
+            // Shift+Enter is the other newline gesture, so it enlarges too. The
+            // Ctrl/Cmd/Alt chords are deliberately left alone: those read as
+            // "submit" in a form, and a consumer binding one (run the tool)
+            // must not be overridden into enlarging a field instead.
+            if (
+              event.key !== "Enter" ||
+              event.ctrlKey ||
+              event.metaKey ||
+              event.altKey
+            ) {
+              return;
+            }
+            event.preventDefault();
+            enlargeWithNewline();
+          }}
+          // Announces that the field carries a shortcut at all. A keyboard user
+          // no longer meets the button by tabbing, so without this the binding
+          // is undiscoverable rather than merely unlabelled.
+          aria-keyshortcuts="Enter"
           rightSection={
             <FieldActions>
               <EnlargeButton
                 ariaLabel={`Enlarge ${label}`}
                 disabled={disabled}
-                onClick={() =>
-                  setEnlargedFields(
-                    (previous) => new Set([...previous, fieldName]),
-                  )
-                }
+                onClick={enlarge}
               />
               {clearButton}
             </FieldActions>

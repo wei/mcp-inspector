@@ -1932,22 +1932,26 @@ describe("SchemaForm multiline strings (#2042)", () => {
     ).toBeInTheDocument();
   });
 
-  // The button unmounts in the same commit that mounts the text area, so
-  // without an explicit hand-off a keyboard user is left focused on nothing.
+  // The button unmounts in the same commit that mounts the text area, taking
+  // the focused element with it, so without an explicit hand-off the user is
+  // left focused on nothing. (The keyboard route hands off from the field
+  // instead — see the #2138 suite.)
   it("moves focus into the text area, caret last, when activated", async () => {
     const user = userEvent.setup();
     renderWithMantine(<StringHarness />);
 
     await user.type(screen.getByRole("textbox", { name: /Note/ }), "typed");
-    await user.tab();
-    expect(screen.getByRole("button", { name: "Enlarge Note" })).toHaveFocus();
-    await user.keyboard("{Enter}");
+    await user.click(screen.getByRole("button", { name: "Enlarge Note" }));
 
     const textarea = screen.getByRole("textbox", {
       name: /Note/,
     }) as HTMLTextAreaElement;
     expect(textarea.tagName).toBe("TEXTAREA");
     expect(textarea).toHaveFocus();
+    // Clicking asks for a bigger box and nothing else: the value is carried
+    // over untouched, and only Enter — the key that means "new line" — enters
+    // one (#2138).
+    expect(textarea.value).toBe("typed");
     expect(textarea.selectionStart).toBe("typed".length);
 
     // And the caret really is at the end: typing appends rather than prepends.
@@ -1968,5 +1972,204 @@ describe("SchemaForm multiline strings (#2042)", () => {
       />,
     );
     expect(screen.getByRole("button", { name: "Enlarge Note" })).toBeDisabled();
+  });
+});
+
+// The enlarge button is clickable but out of the tab order, so tabbing runs
+// field to field; Enter in a single-line string field takes its place as the
+// keyboard route into multiline mode (#2138).
+describe("SchemaForm enlarge keyboard access (#2138)", () => {
+  const twoStringSchema: InspectorFormSchema = {
+    type: "object",
+    properties: {
+      note: { type: "string", title: "Note" },
+      summary: { type: "string", title: "Summary" },
+    },
+  };
+
+  function TwoStringHarness({ disabled }: { disabled?: boolean }) {
+    const [values, setValues] = useState<Record<string, unknown>>({});
+    return (
+      <SchemaForm
+        schema={twoStringSchema}
+        values={values}
+        onChange={setValues}
+        disabled={disabled}
+      />
+    );
+  }
+
+  const noteField = () =>
+    screen.getByRole("textbox", { name: /Note/ }) as HTMLTextAreaElement;
+
+  // The defect the issue was filed for: an extra stop per field, on every
+  // string field of every tool form.
+  it("tabs from one string field to the next, skipping the enlarge buttons", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness />);
+
+    noteField().focus();
+    await user.tab();
+
+    expect(screen.getByRole("textbox", { name: /Summary/ })).toHaveFocus();
+  });
+
+  // A populated field renders the clear button too, so this is the widest the
+  // right section ever gets — and still must not add a stop.
+  it("skips both right-section buttons when the field holds a value", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness />);
+
+    await user.type(noteField(), "typed");
+    expect(screen.getByRole("button", { name: "Clear" })).toBeInTheDocument();
+    await user.tab();
+
+    expect(screen.getByRole("textbox", { name: /Summary/ })).toHaveFocus();
+  });
+
+  it("enlarges the focused field when Enter is pressed", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness />);
+
+    expect(noteField().tagName).toBe("INPUT");
+    noteField().focus();
+    await user.keyboard("{Enter}");
+
+    expect(noteField().tagName).toBe("TEXTAREA");
+  });
+
+  // Enlarging is per field: the key must not reach the neighbour.
+  it("enlarges only the focused field", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness />);
+
+    noteField().focus();
+    await user.keyboard("{Enter}");
+
+    expect(screen.getByRole("textbox", { name: /Summary/ }).tagName).toBe(
+      "INPUT",
+    );
+  });
+
+  // The other gesture a user reaches for when an input will not take a newline.
+  it("enlarges on Shift+Enter too", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness />);
+
+    noteField().focus();
+    await user.keyboard("{Shift>}{Enter}{/Shift}");
+
+    expect(noteField().tagName).toBe("TEXTAREA");
+  });
+
+  // Those chords read as "submit" and stay free for a consumer to bind to
+  // running the tool; claiming them would silently enlarge a field instead.
+  it.each([
+    ["Ctrl", "{Control>}{Enter}{/Control}"],
+    ["Meta", "{Meta>}{Enter}{/Meta}"],
+    ["Alt", "{Alt>}{Enter}{/Alt}"],
+  ])("leaves %s+Enter alone", async (_name, keys) => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness />);
+
+    noteField().focus();
+    await user.keyboard(keys);
+
+    expect(noteField().tagName).toBe("INPUT");
+  });
+
+  it("leaves the field alone for any other key", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness />);
+
+    await user.type(noteField(), "text ");
+    await user.keyboard("{Escape}{ArrowDown} ");
+
+    expect(noteField().tagName).toBe("INPUT");
+  });
+
+  // The keystroke has to mean what it says. Enlarging without entering the
+  // newline consumes the key and leaves the next word running on from the last
+  // one — the user pressed "new line" and got a reshaped box.
+  it("enters the newline it was asked for, not just the text area", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness />);
+
+    await user.type(noteField(), "before");
+    await user.keyboard("{Enter}");
+    expect(noteField().value).toBe("before\n");
+
+    await user.keyboard("after");
+    expect(noteField().value).toBe("before\nafter");
+  });
+
+  // The caret follows the newline, so what is typed next lands under it rather
+  // than back on the first line.
+  it("leaves the caret after the newline", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness />);
+
+    await user.type(noteField(), "before");
+    await user.keyboard("{Enter}");
+
+    expect(noteField().selectionStart).toBe("before\n".length);
+  });
+
+  // A newline is a character, so a field with no room for one is enlarged
+  // without it rather than pushed past a constraint its schema states.
+  it("enlarges without a newline when the field is at its maxLength", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(
+      <SchemaForm
+        schema={{
+          type: "object",
+          properties: { note: { type: "string", title: "Note", maxLength: 3 } },
+        }}
+        values={{ note: "abc" }}
+        onChange={vi.fn()}
+      />,
+    );
+
+    noteField().focus();
+    await user.keyboard("{Enter}");
+
+    expect(noteField().tagName).toBe("TEXTAREA");
+    expect(noteField().value).toBe("abc");
+  });
+
+  // An empty field still has room, so the newline is entered there too.
+  it("enters a newline in an empty field", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness />);
+
+    noteField().focus();
+    await user.keyboard("{Enter}");
+
+    expect(noteField().value).toBe("\n");
+  });
+
+  // The binding is the keyboard's only route in now, so announce that the
+  // field carries one rather than leaving it undiscoverable.
+  it("advertises the shortcut on the single-line field, not the text area", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness />);
+
+    expect(noteField()).toHaveAttribute("aria-keyshortcuts", "Enter");
+    noteField().focus();
+    await user.keyboard("{Enter}");
+
+    expect(noteField()).not.toHaveAttribute("aria-keyshortcuts");
+  });
+
+  // Same reasoning as the disabled button: a text area mounting disabled cannot
+  // take focus, so it would drop focus to the document.
+  it("cannot be enlarged by keyboard while the form is disabled", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness disabled />);
+
+    noteField().focus();
+    await user.keyboard("{Enter}");
+
+    expect(noteField().tagName).toBe("INPUT");
   });
 });
