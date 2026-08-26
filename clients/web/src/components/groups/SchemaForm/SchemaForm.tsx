@@ -758,8 +758,16 @@ export function SchemaForm({
             // Ctrl/Cmd/Alt chords are deliberately left alone: those read as
             // "submit" in a form, and a consumer binding one (run the tool)
             // must not be overridden into enlarging a field instead.
+            //
+            // `isComposing` guards the IME case: Enter is also how a Japanese,
+            // Chinese or Korean input method commits the candidate being
+            // composed. That keystroke means "accept this word", not "new
+            // line", so acting on it would enlarge the field and insert a
+            // newline every time such a user finished a word — the shortcut
+            // would make the field unusable for them.
             if (
               event.key !== "Enter" ||
+              event.nativeEvent.isComposing ||
               event.ctrlKey ||
               event.metaKey ||
               event.altKey

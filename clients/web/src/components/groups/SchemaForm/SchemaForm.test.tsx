@@ -2078,6 +2078,29 @@ describe("SchemaForm enlarge keyboard access (#2138)", () => {
     expect(noteField().tagName).toBe("INPUT");
   });
 
+  // Enter is also how an IME commits the candidate being composed, so acting on
+  // it there would enlarge the field and insert a newline every time a
+  // Japanese/Chinese/Korean user finished a word. userEvent has no composition
+  // mode, so the event is dispatched directly with the flag React reads.
+  it("ignores the Enter that commits an IME composition", () => {
+    renderWithMantine(<TwoStringHarness />);
+
+    fireEvent.keyDown(noteField(), { key: "Enter", isComposing: true });
+
+    expect(noteField().tagName).toBe("INPUT");
+    expect(noteField().value).toBe("");
+  });
+
+  // Same event without the flag, to prove the guard above is what turned it
+  // away rather than fireEvent simply not reaching the handler.
+  it("still enlarges on an Enter that is not composing", () => {
+    renderWithMantine(<TwoStringHarness />);
+
+    fireEvent.keyDown(noteField(), { key: "Enter", isComposing: false });
+
+    expect(noteField().tagName).toBe("TEXTAREA");
+  });
+
   it("leaves the field alone for any other key", async () => {
     const user = userEvent.setup();
     renderWithMantine(<TwoStringHarness />);
