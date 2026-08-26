@@ -145,6 +145,12 @@ describe("hasInputFields with root composition (#2123)", () => {
     ).toBe(true);
   });
 
+  it("counts a required name the schema never declares", () => {
+    expect(hasInputFields(tool({ type: "object", required: ["token"] }))).toBe(
+      true,
+    );
+  });
+
   it("still reports no fields for a bare object schema", () => {
     expect(hasInputFields(tool({ type: "object" }))).toBe(false);
   });

@@ -498,6 +498,11 @@ export function declaresAnyFields(
 ): boolean {
   if (schema === undefined) return false;
   if (Object.keys(propertiesOf(schema)).length > 0) return true;
+  // A schema may require a name it never declares — `{ required: ["token"] }`
+  // is a legal object schema, and the tool plainly takes an argument. Counting
+  // it here is what stops an App tool with that shape being auto-invoked with
+  // `{}` for want of a `properties` map.
+  if (requiredOf(schema).length > 0) return true;
   // A `$ref`'s shape is unknown rather than empty, so it counts. Reporting "no
   // fields" for `anyOf: [{ $ref: … }, { $ref: … }]` would auto-invoke an App
   // tool with `{}` on the strength of something never read.

@@ -901,6 +901,20 @@ describe("resolveRootUnion", () => {
       ).toBe(true);
     });
 
+    it("counts a required name a schema never declares", () => {
+      // Legal, and the tool plainly takes an argument — an App tool shaped this
+      // way must ask rather than being auto-invoked with `{}`.
+      expect(declaresAnyFields({ type: "object", required: ["token"] })).toBe(
+        true,
+      );
+      expect(
+        declaresAnyFields({
+          type: "object",
+          allOf: [{ type: "object", required: ["token"] }],
+        }),
+      ).toBe(true);
+    });
+
     it("reports none for a bare object schema", () => {
       expect(declaresAnyFields({ type: "object" })).toBe(false);
       expect(declaresAnyFields(undefined)).toBe(false);
