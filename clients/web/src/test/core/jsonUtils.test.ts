@@ -135,6 +135,9 @@ describe("JSON Utils", () => {
                 kind: { type: "string", const: "a" },
                 value: { type: "number" },
               },
+              // Required, or the alternatives are not exclusive and the
+              // resolver declines the `oneOf` outright.
+              required: ["kind"],
             },
             {
               type: "object",
@@ -142,6 +145,7 @@ describe("JSON Utils", () => {
                 kind: { type: "string", const: "b" },
                 value: { type: "boolean" },
               },
+              required: ["kind"],
             },
           ],
         },

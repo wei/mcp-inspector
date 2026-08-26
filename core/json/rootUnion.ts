@@ -136,17 +136,27 @@ function admitsObject(schema: RootUnionSchema): boolean {
   return Array.isArray(type) ? type.includes("object") : type === "object";
 }
 
-/** A readable `properties` map, or `null` when the value is not one. */
-function propertiesOf(schema: RootUnionSchema): Record<string, unknown> | null {
+/** Whether a schema's `properties` is a readable map rather than junk. */
+function hasReadableProperties(schema: RootUnionSchema): boolean {
   const { properties } = schema;
-  if (
-    typeof properties !== "object" ||
-    properties === null ||
-    Array.isArray(properties)
-  ) {
-    return null;
-  }
-  return properties;
+  return (
+    typeof properties === "object" &&
+    properties !== null &&
+    !Array.isArray(properties)
+  );
+}
+
+/**
+ * A schema's `properties`, or an empty map when it has none — or when what it
+ * has is not a map at all, which a wire schema really can be. Total by design:
+ * every caller but {@link isOfferable} wants to enumerate whatever is there,
+ * and a nullable return would leave each of them carrying a `?? {}` that
+ * nothing can reach.
+ */
+function propertiesOf(schema: RootUnionSchema): Record<string, unknown> {
+  return hasReadableProperties(schema)
+    ? (schema.properties as Record<string, unknown>)
+    : {};
 }
 
 /**
@@ -166,10 +176,9 @@ function propertiesOf(schema: RootUnionSchema): Record<string, unknown> | null {
  *   as a fillable form would offer a call that cannot be valid.
  */
 function isOfferable(branch: RootUnionSchema): boolean {
-  const properties = propertiesOf(branch);
   return (
-    properties !== null &&
-    Object.keys(properties).length > 0 &&
+    hasReadableProperties(branch) &&
+    Object.keys(propertiesOf(branch)).length > 0 &&
     admitsObject(branch)
   );
 }
@@ -364,8 +373,8 @@ function conflictsWithBase(
   base: RootUnionSchema,
   branch: RootUnionSchema,
 ): boolean {
-  const baseProperties = propertiesOf(base) ?? {};
-  const branchProperties = propertiesOf(branch) ?? {};
+  const baseProperties = propertiesOf(base);
+  const branchProperties = propertiesOf(branch);
   return Object.entries(branchProperties).some(
     ([name, branchProperty]) =>
       // `hasOwn`, not `in`: `properties` is a JSON record, so `constructor` and
@@ -388,12 +397,19 @@ function conflictsWithBase(
 function hasDiscriminator(
   members: RootUnionSchema[],
   named: string | undefined,
+  rootRequired: string[],
 ): boolean {
-  const first = propertiesOf(members[0] ?? {}) ?? {};
+  const first = propertiesOf(members[0] ?? {});
   const candidates = named !== undefined ? [named] : Object.keys(first);
   return candidates.some((name) => {
+    // Required, or it discriminates nothing: two branches pinning an OPTIONAL
+    // `kind` to different constants both match `{}`, so arguments omitting it
+    // satisfy more than one alternative — exactly what `oneOf` forbids.
     const constants = members.map((member) => {
-      const property = toBranch((propertiesOf(member) ?? {})[name]) as {
+      if (!rootRequired.includes(name) && !requiredOf(member).includes(name)) {
+        return undefined;
+      }
+      const property = toBranch(propertiesOf(member)[name]) as {
         const?: unknown;
       } | null;
       return property?.const;
@@ -438,8 +454,8 @@ function addsForbiddenNames(
   member: RootUnionSchema,
 ): boolean {
   if (!restrictsAdditional(base)) return false;
-  const baseNames = propertiesOf(base) ?? {};
-  return Object.keys(propertiesOf(member) ?? {}).some(
+  const baseNames = propertiesOf(base);
+  return Object.keys(propertiesOf(member)).some(
     (name) => !Object.hasOwn(baseNames, name),
   );
 }
@@ -456,7 +472,7 @@ export function declaresAnyFields(
   schema: RootUnionSchema | undefined,
 ): boolean {
   if (schema === undefined) return false;
-  if (Object.keys(propertiesOf(schema) ?? {}).length > 0) return true;
+  if (Object.keys(propertiesOf(schema)).length > 0) return true;
   // A `$ref`'s shape is unknown rather than empty, so it counts. Reporting "no
   // fields" for `anyOf: [{ $ref: … }, { $ref: … }]` would auto-invoke an App
   // tool with `{}` on the strength of something never read.
@@ -485,8 +501,8 @@ function mergeBranch<T extends RootUnionSchema>(
   base: T,
   branch: RootUnionSchema,
 ): ResolvedSchema<T> {
-  const baseProperties = propertiesOf(base) ?? {};
-  const branchProperties = propertiesOf(branch) ?? {};
+  const baseProperties = propertiesOf(base);
+  const branchProperties = propertiesOf(branch);
   // Built through `fromEntries` rather than by assignment: a property named
   // `__proto__` is a legal argument name, and assigning it would invoke the
   // legacy prototype setter instead of creating an own property — losing the
@@ -544,7 +560,7 @@ function branchLabel(
   if (typeof branch.title === "string" && branch.title.trim() !== "") {
     return branch.title;
   }
-  const properties = propertiesOf(branch) ?? {};
+  const properties = propertiesOf(branch);
   const constOf = (name: string): string | null => {
     const property = toBranch(properties[name]) as { const?: unknown } | null;
     const value = property?.const;
@@ -662,6 +678,7 @@ export function resolveRootUnion<T extends RootUnionSchema>(
     !hasDiscriminator(
       branches as RootUnionSchema[],
       schema.discriminator?.propertyName,
+      requiredOf(base),
     )
   ) {
     return { base, branches: [] };
@@ -677,7 +694,7 @@ export function resolveRootUnion<T extends RootUnionSchema>(
         // `properties`/`required` off the branch, so the merge stays that way.
         schema: mergeBranch(base, branch),
         label: branchLabel(branch, index, discriminatorProperty),
-        declaredFields: Object.keys(propertiesOf(branch) ?? {}),
+        declaredFields: Object.keys(propertiesOf(branch)),
       })),
   };
 }
@@ -709,7 +726,7 @@ export function selectBranchIndex<T extends RootUnionSchema>(
   const candidates: number[] = [];
   const agreeing: number[] = [];
   branches.forEach((branch, index) => {
-    const pinned = Object.entries(propertiesOf(branch.schema) ?? {})
+    const pinned = Object.entries(propertiesOf(branch.schema))
       .map(
         ([name, schema]) =>
           [
@@ -798,15 +815,12 @@ export function branchAcceptsValues<T extends RootUnionSchema>(
   branch: RootUnionBranch<T>,
   values: Record<string, unknown>,
 ): boolean {
-  return Object.entries(propertiesOf(branch.schema) ?? {}).every(
-    ([name, schema]) => {
-      const constValue = (toBranch(schema) as { const?: unknown } | null)
-        ?.const;
-      if (constValue === undefined) return true;
-      if (!Object.hasOwn(values, name) || values[name] === undefined) {
-        return true;
-      }
-      return sameValue(values[name], constValue);
-    },
-  );
+  return Object.entries(propertiesOf(branch.schema)).every(([name, schema]) => {
+    const constValue = (toBranch(schema) as { const?: unknown } | null)?.const;
+    if (constValue === undefined) return true;
+    if (!Object.hasOwn(values, name) || values[name] === undefined) {
+      return true;
+    }
+    return sameValue(values[name], constValue);
+  });
 }

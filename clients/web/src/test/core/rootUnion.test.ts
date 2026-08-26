@@ -444,6 +444,81 @@ describe("resolveRootUnion", () => {
     expect(branches).toEqual([]);
   });
 
+  describe("values it compares and types it recognizes", () => {
+    it("offers a branch whose type list names object", () => {
+      const { branches } = resolveRootUnion({
+        type: "object",
+        anyOf: [
+          {
+            type: ["object", "null"],
+            properties: { a: { type: "string" } },
+          },
+          { type: "object", properties: { b: { type: "string" } } },
+        ] as unknown[],
+      });
+      expect(branches).toHaveLength(2);
+    });
+
+    it("compares array-valued constants structurally", () => {
+      const { branches } = resolveRootUnion({
+        type: "object",
+        required: ["tag"],
+        oneOf: [
+          {
+            type: "object",
+            properties: { tag: { const: [1, 2] }, x: { type: "string" } },
+          },
+          {
+            type: "object",
+            properties: { tag: { const: [1, 2] }, y: { type: "string" } },
+          },
+        ],
+      });
+      // The same value twice, so the alternatives are not exclusive.
+      expect(branches).toEqual([]);
+    });
+
+    it("treats a keyword explicitly set to undefined as a disagreement", () => {
+      const { branches } = resolveRootUnion({
+        type: "object",
+        properties: { x: { minimum: undefined } },
+        anyOf: [
+          { type: "object", properties: { x: { minimum: 1 } } },
+          { type: "object", properties: { other: { type: "string" } } },
+        ] as unknown[],
+      });
+      expect(branches).toEqual([]);
+    });
+
+    it("recognizes each JSON type when checking a const", () => {
+      const accepts = (type: unknown, constValue: unknown) =>
+        resolveRootUnion({
+          type: "object",
+          properties: { x: { type } as unknown },
+          anyOf: [
+            { type: "object", properties: { x: { const: constValue } } },
+            { type: "object", properties: { other: { type: "string" } } },
+          ] as unknown[],
+        }).branches.length > 0;
+
+      expect(accepts("null", null)).toBe(true);
+      expect(accepts("array", [1])).toBe(true);
+      expect(accepts("number", 1)).toBe(true);
+      expect(accepts(["string", "integer"], 1)).toBe(true);
+      expect(accepts("integer", 1.5)).toBe(false);
+      expect(accepts(["string", "boolean"], 1)).toBe(false);
+    });
+
+    it("emits no properties when neither side declares any", () => {
+      const { base } = resolveRootUnion({
+        type: "object",
+        allOf: [{ type: "object", required: ["a"] }],
+      });
+      expect(base.properties).toBeUndefined();
+      expect(base.required).toEqual(["a"]);
+    });
+  });
+
   describe("branch labels", () => {
     it("uses the branch's own title first", () => {
       const { branches } = resolveRootUnion({
@@ -595,6 +670,43 @@ describe("resolveRootUnion", () => {
         ],
       });
       expect(branches).toEqual([]);
+    });
+
+    it("declines a oneOf whose discriminator is optional", () => {
+      // Two branches pinning an OPTIONAL `kind` both match `{}`, so arguments
+      // omitting it satisfy more than one alternative.
+      const { branches } = resolveRootUnion({
+        type: "object",
+        oneOf: [
+          {
+            type: "object",
+            properties: { kind: { const: "a" }, x: { type: "string" } },
+          },
+          {
+            type: "object",
+            properties: { kind: { const: "b" }, y: { type: "string" } },
+          },
+        ],
+      });
+      expect(branches).toEqual([]);
+    });
+
+    it("accepts a discriminator the root requires", () => {
+      const { branches } = resolveRootUnion({
+        type: "object",
+        required: ["kind"],
+        oneOf: [
+          {
+            type: "object",
+            properties: { kind: { const: "a" }, x: { type: "string" } },
+          },
+          {
+            type: "object",
+            properties: { kind: { const: "b" }, y: { type: "string" } },
+          },
+        ],
+      });
+      expect(branches).toHaveLength(2);
     });
 
     it("declines a oneOf whose named discriminator does not distinguish", () => {
