@@ -31,6 +31,8 @@ import {
   isStringEnum,
   normalizeNullableUnion,
 } from "@inspector/core/json/nullableUnion.js";
+import { resolveRootUnion } from "@inspector/core/json/rootUnion.js";
+import { collectSchemaDefaults } from "../../../utils/jsonUtils";
 
 const FieldLabel = Text.withProps({
   fw: 500,
@@ -44,6 +46,14 @@ const FieldDescription = Text.withProps({
 
 // Indented column for a nested object's sub-fields.
 const IndentedStack = Stack.withProps({ gap: "sm", pl: "md" });
+
+// The picker for a root `oneOf`/`anyOf` (#2123). Not clearable: one branch is
+// always in effect, so "no branch" is not a state the arguments can be in.
+const BranchSelect = Select.withProps({
+  label: "Variant",
+  description: "This tool accepts one of several argument shapes.",
+  allowDeselect: false,
+});
 
 const SchemaJsonInput = JsonInput.withProps({
   formatOnBlur: true,
@@ -569,8 +579,27 @@ export function SchemaForm({
   resetKey,
   onValidityChange,
 }: SchemaFormProps) {
-  const properties = schema.properties ?? {};
-  const requiredFields = schema.required ?? [];
+  // Composition at the root of the schema, flattened before anything is
+  // rendered (#2123). `allOf` is folded into `base`; a top-level `oneOf`/`anyOf`
+  // becomes the branches a picker chooses between. Both are empty for the
+  // ordinary object schema, where `base` is the schema itself.
+  const { base, branches } = resolveRootUnion(schema);
+
+  // Which alternative the form is currently showing. Held here because it is a
+  // property of this rendering, not of the arguments: `values` carries what the
+  // user typed, and nothing in it names a branch.
+  const [branchIndex, setBranchIndex] = useState(0);
+  // A form reused for another entity can be handed a shorter union, so the
+  // index is clamped rather than trusted — `resetKey` resets it below, but a
+  // caller that omits it (the elicitation panels mount fresh) supplies none.
+  const activeBranch =
+    branches.length > 0
+      ? (branches[Math.min(branchIndex, branches.length - 1)] ?? null)
+      : null;
+  const effectiveSchema = activeBranch?.schema ?? base;
+
+  const properties = effectiveSchema.properties ?? {};
+  const requiredFields = effectiveSchema.required ?? [];
 
   // The names of fields currently holding unsendable text. Held here rather
   // than in each field because only the form sees them all, and only the form
@@ -590,7 +619,12 @@ export function SchemaForm({
   // *name*, so it must not carry across to another entity's same-named field —
   // the same reasoning `resetKey` documents for the number field's draft. Reset
   // during render rather than in an effect so no frame paints the wrong shape.
-  useValueChange(resetKey, () => setEnlargedFields(new Set()));
+  useValueChange(resetKey, () => {
+    setEnlargedFields(new Set());
+    // Which branch is selected belongs to the entity it was chosen for, for the
+    // same reason enlargement does.
+    setBranchIndex(0);
+  });
 
   // Stable so a field's reporting effect subscribes once, not per render. The
   // updater returns the previous set unchanged when nothing moved, which is
@@ -635,6 +669,35 @@ export function SchemaForm({
 
   function handleFieldChange(fieldName: string, fieldValue: unknown) {
     onChange({ ...values, [fieldName]: fieldValue });
+  }
+
+  /**
+   * Switch branches, and move `values` with the form.
+   *
+   * The fields the outgoing branch owned are dropped rather than left behind:
+   * they are no longer rendered, so the user cannot see or clear them, and
+   * submitting them would send the server arguments belonging to a shape the
+   * call is not making. Whatever the base contributes is kept — it applies to
+   * every branch — and the incoming branch's defaults (a discriminator `const`
+   * among them) are seeded the way the initial ones were.
+   */
+  function handleBranchChange(nextIndex: number) {
+    const nextBranch = branches[nextIndex];
+    /* v8 ignore next -- the Select's options are built from `branches` */
+    if (!nextBranch) return;
+    setBranchIndex(nextIndex);
+    const nextProperties = nextBranch.schema.properties ?? {};
+    const carried: Record<string, unknown> = {};
+    for (const [name, fieldSchema] of Object.entries(nextProperties)) {
+      // A field the incoming branch pins to a `const` is not carried: the two
+      // branches of a discriminated union share the discriminator's *name* and
+      // disagree about its value, so keeping what the outgoing branch put
+      // there would leave the arguments claiming the shape they no longer have.
+      if (values[name] !== undefined && fieldSchema.const === undefined) {
+        carried[name] = values[name];
+      }
+    }
+    onChange({ ...collectSchemaDefaults(nextBranch.schema), ...carried });
   }
 
   function renderField(fieldName: string, rawSchema: InspectorFormSchema) {
@@ -683,6 +746,26 @@ export function SchemaForm({
           clearable={isClearable(fieldSchema)}
           value={(rawValue as string) ?? null}
           onChange={(val) => handleFieldChange(fieldName, val)}
+        />
+      );
+    }
+
+    // A string pinned to a single value. Rendered read-only rather than as an
+    // editable box: `const` admits exactly one value, so anything the user
+    // could type into it produces a call the schema rejects. This is what a
+    // discriminated union's `kind`/`by` field is (#2123), and the picker has
+    // already set it — but the rule is the keyword's, not the union's, so it
+    // holds for a lone `const` property too.
+    if (typeof fieldSchema.const === "string") {
+      return (
+        <TextInput
+          key={fieldName}
+          label={label}
+          description={description}
+          withAsterisk={isRequired}
+          readOnly
+          disabled={disabled}
+          value={fieldSchema.const}
         />
       );
     }
@@ -878,6 +961,20 @@ export function SchemaForm({
 
   return (
     <Stack gap="sm">
+      {activeBranch && branches.length > 1 && (
+        <BranchSelect
+          data={branches.map((branch, index) => ({
+            value: String(index),
+            label: branch.label,
+          }))}
+          value={String(branches.indexOf(activeBranch))}
+          disabled={disabled}
+          onChange={(value) =>
+            /* v8 ignore next -- Select only ever reports one of its own options */
+            value === null ? undefined : handleBranchChange(Number(value))
+          }
+        />
+      )}
       {Object.entries(properties).map(([fieldName, fieldSchema]) =>
         renderField(fieldName, fieldSchema),
       )}

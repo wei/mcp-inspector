@@ -408,4 +408,89 @@ describe("schemaToForm", () => {
       });
     });
   });
+  describe("root composition (#2123)", () => {
+    const UNION = {
+      type: "object",
+      properties: { note: { type: "string" } },
+      discriminator: { propertyName: "kind" },
+      oneOf: [
+        {
+          type: "object",
+          properties: {
+            kind: { type: "string", const: "email" },
+            address: { type: "string" },
+          },
+          required: ["kind", "address"],
+        },
+        {
+          type: "object",
+          properties: {
+            kind: { type: "string", const: "sms" },
+            count: { type: "integer" },
+          },
+          required: ["kind", "count"],
+        },
+      ],
+    };
+
+    it("gives each branch its own section instead of rendering no fields", () => {
+      const form = schemaToForm(UNION, "union_tool");
+      expect(form.sections.map((section) => section.title)).toEqual([
+        "Parameters",
+        "email",
+        "sms",
+      ]);
+      expect(form.sections[0]!.fields.map((field) => field.name)).toEqual([
+        "note",
+      ]);
+      expect(form.sections[1]!.fields.map((field) => field.name)).toEqual([
+        "kind",
+        "address",
+      ]);
+    });
+
+    it("keeps a branch's typed fields typed", () => {
+      const form = schemaToForm(UNION, "union_tool");
+      expect(form.sections[2]!.fields[1]).toMatchObject({
+        name: "count",
+        type: "integer",
+      });
+    });
+
+    it("renders branch fields optional, since only one branch applies", () => {
+      const form = schemaToForm(UNION, "union_tool");
+      for (const field of form.sections[1]!.fields) {
+        expect(field.required).toBe(false);
+      }
+    });
+
+    it("seeds a branch's discriminator const so it need not be typed", () => {
+      const form = schemaToForm(UNION, "union_tool");
+      expect(form.sections[1]!.fields[0]).toMatchObject({
+        name: "kind",
+        initialValue: "email",
+      });
+    });
+
+    it("merges a root allOf into the parameters section", () => {
+      const form = schemaToForm(
+        {
+          type: "object",
+          properties: { a: { type: "string" } },
+          allOf: [{ type: "object", properties: { b: { type: "boolean" } } }],
+        },
+        "allof_tool",
+      );
+      expect(form.sections).toHaveLength(1);
+      expect(form.sections[0]!.fields.map((field) => field.name)).toEqual([
+        "a",
+        "b",
+      ]);
+    });
+
+    it("still renders an empty form for a schema with no properties", () => {
+      const form = schemaToForm({ type: "object" }, "empty_tool");
+      expect(form.sections).toEqual([{ title: "Parameters", fields: [] }]);
+    });
+  });
 });

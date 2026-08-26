@@ -1,4 +1,5 @@
 import type { Tool } from "@modelcontextprotocol/client";
+import { resolveRootUnion } from "@inspector/core/json/rootUnion.js";
 
 /**
  * Returns the display label for an MCP entity that follows the BaseMetadata
@@ -14,10 +15,21 @@ export function resolveDisplayLabel(name: string, title?: string): string {
  * True when the tool's input schema declares at least one property — used by
  * App-flow callers to decide whether to render a form or auto-launch. Kept in
  * one place so the definition of "has fields" stays consistent if it ever
- * grows to consider `additionalProperties`, `anyOf`, etc.
+ * grows to consider `additionalProperties` etc.
+ *
+ * Root composition is resolved first, since a schema declaring its fields on a
+ * root `allOf`/`oneOf`/`anyOf` has none of its own (#2123) — an App tool with
+ * such a schema would otherwise launch with empty arguments rather than asking
+ * for them.
  */
 export function hasInputFields(tool: Tool): boolean {
-  return Object.keys(tool.inputSchema.properties ?? {}).length > 0;
+  const { base, branches } = resolveRootUnion(tool.inputSchema);
+  return (
+    Object.keys(base.properties ?? {}).length > 0 ||
+    branches.some(
+      (branch) => Object.keys(branch.schema.properties ?? {}).length > 0,
+    )
+  );
 }
 
 /**

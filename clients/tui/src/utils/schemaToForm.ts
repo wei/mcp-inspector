@@ -7,6 +7,7 @@ import {
   isStringEnum,
   normalizeNullableUnion,
 } from "@inspector/core/json/nullableUnion.js";
+import { resolveRootUnion } from "@inspector/core/json/rootUnion.js";
 
 /** Minimal JSON Schema property shape used when building tool parameter forms */
 interface JsonSchemaProperty {
@@ -24,6 +25,8 @@ interface JsonSchemaProperty {
   minimum?: number;
   maximum?: number;
   default?: unknown;
+  /** A one-value enumeration; seeded like a `default` — see below. */
+  const?: unknown;
   /** Present on a nullable union; see {@link normalizeNullableUnion}. */
   anyOf?: readonly unknown[];
 }
@@ -54,6 +57,17 @@ function toSelectOptions(
 interface JsonSchemaObject {
   properties?: Record<string, unknown>;
   required?: string[];
+  /**
+   * Root composition, read by {@link resolveRootUnion} before `properties` is
+   * enumerated (#2123). Members are `unknown` for the same reason property
+   * values are: the SDK's `Tool["inputSchema"]` types them as the recursive
+   * JSON type, and each is narrowed where it is used.
+   */
+  type?: string | string[];
+  allOf?: readonly unknown[];
+  anyOf?: readonly unknown[];
+  oneOf?: readonly unknown[];
+  discriminator?: { propertyName?: string };
 }
 
 /**
@@ -63,15 +77,44 @@ export function schemaToForm(
   schema: JsonSchemaObject | null | undefined,
   toolName: string,
 ): FormStructure {
-  const fields: FormField[] = [];
-
-  if (!schema || !schema.properties) {
-    return {
-      title: `Test Tool: ${toolName}`,
-      sections: [{ title: "Parameters", fields: [] }],
-    };
+  const title = `Test Tool: ${toolName}`;
+  if (!schema) {
+    return { title, sections: [{ title: "Parameters", fields: [] }] };
   }
 
+  // Flatten root composition before reading `properties` (#2123). Without it a
+  // tool whose arguments are declared as a root `oneOf`/`anyOf` — legal since
+  // the 2026-07-28 revision — rendered a form with no fields at all, so it
+  // could only be called with empty arguments.
+  const { base, branches } = resolveRootUnion(schema);
+
+  const sections: FormSection[] = [
+    { title: "Parameters", fields: buildFields(base) },
+  ];
+
+  // ink-form is static — there is no branch picker to hide the alternatives
+  // behind — so every branch gets its own section and the user fills the one
+  // they mean. A branch's fields are rendered **optional** whatever the branch
+  // says: only one alternative applies to a given call, so requiring them would
+  // make a form that can never be submitted. An untouched field reports no
+  // value and is dropped before the call, so the sections the user skipped
+  // contribute nothing to the arguments.
+  for (const branch of branches) {
+    const ownProperties = Object.fromEntries(
+      branch.ownFields.map((name) => [name, branch.schema.properties?.[name]]),
+    );
+    sections.push({
+      title: branch.label,
+      fields: buildFields({ properties: ownProperties }),
+    });
+  }
+
+  return { title, sections };
+}
+
+/** Build the ink-form fields for one already-flattened object schema. */
+function buildFields(schema: JsonSchemaObject): FormField[] {
+  const fields: FormField[] = [];
   const properties = schema.properties || {};
   const required = schema.required || [];
 
@@ -160,24 +203,18 @@ export function schemaToForm(
       }
     }
 
-    // Set initial value from default (ink-form FormField allows initialValue for some types)
-    if (property.default !== undefined) {
+    // Set initial value from default (ink-form FormField allows initialValue for some types).
+    // A `const` is seeded the same way: it is a one-value enumeration, so the
+    // only submittable value is already known and the user would otherwise have
+    // to hand-type a union's discriminator (#2123).
+    const initialValue = property.default ?? property.const;
+    if (initialValue !== undefined) {
       (field as FormField & { initialValue?: unknown }).initialValue =
-        property.default;
+        initialValue;
     }
 
     fields.push(field);
   }
 
-  const sections: FormSection[] = [
-    {
-      title: "Parameters",
-      fields,
-    },
-  ];
-
-  return {
-    title: `Test Tool: ${toolName}`,
-    sections,
-  };
+  return fields;
 }

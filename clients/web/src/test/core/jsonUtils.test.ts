@@ -75,6 +75,50 @@ describe("JSON Utils", () => {
       },
     };
 
+    it("coerces a value whose schema lives on a root union branch (#2123)", () => {
+      const unionTool: Tool = {
+        name: "union-tool",
+        inputSchema: {
+          type: "object",
+          properties: { note: { type: "string" } },
+          anyOf: [
+            {
+              type: "object",
+              properties: { count: { type: "number" } },
+            },
+            {
+              type: "object",
+              properties: { enabled: { type: "boolean" } },
+            },
+          ],
+        },
+      };
+      // Reading the root's `properties` alone finds no schema for either, so
+      // both would have been sent as the strings the user typed.
+      expect(
+        convertToolParameters(unionTool, {
+          note: "hi",
+          count: "42",
+          enabled: "true",
+        }),
+      ).toEqual({ note: "hi", count: 42, enabled: true });
+    });
+
+    it("coerces a value whose schema lives on a root allOf branch (#2123)", () => {
+      const allOfTool: Tool = {
+        name: "allof-tool",
+        inputSchema: {
+          type: "object",
+          allOf: [
+            { type: "object", properties: { count: { type: "number" } } },
+          ],
+        },
+      };
+      expect(convertToolParameters(allOfTool, { count: "7" })).toEqual({
+        count: 7,
+      });
+    });
+
     it("should convert string parameters", () => {
       const result = convertToolParameters(tool, {
         message: "hello",

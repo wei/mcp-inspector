@@ -2,6 +2,7 @@ import {
   admitsNull,
   normalizeNullableUnion,
 } from "@inspector/core/json/nullableUnion.js";
+import { resolveRootUnion } from "@inspector/core/json/rootUnion.js";
 
 export type JsonValue =
   | string
@@ -58,6 +59,11 @@ export type InspectorFormSchema = {
   const?: JsonValue;
   oneOf?: (InspectorFormSchema | JsonSchemaConst)[];
   anyOf?: (InspectorFormSchema | JsonSchemaConst)[];
+  // Root composition the form flattens before rendering (#2123). `allOf` is
+  // merged into the schema; `oneOf`/`anyOf` at the root become the branches the
+  // Variant picker chooses between, labelled via `discriminator` when present.
+  allOf?: InspectorFormSchema[];
+  discriminator?: { propertyName?: string };
   $ref?: string;
 };
 
@@ -119,7 +125,13 @@ export function getDataType(value: JsonValue): DataType {
 export function collectSchemaDefaults(
   schema: InspectorFormSchema,
 ): Record<string, unknown> {
-  const properties = schema.properties ?? {};
+  // Seed from the shape the form actually renders: root `allOf` merged in, and
+  // for a root union the branch the picker starts on (#2123). Seeding every
+  // branch would put fields of shapes the call is not making into the
+  // arguments; seeding none would leave the branch's defaults — its
+  // discriminator `const` among them — displayed but never submitted.
+  const { base, branches } = resolveRootUnion(schema);
+  const properties = (branches[0]?.schema ?? base).properties ?? {};
   const result: Record<string, unknown> = {};
   for (const [fieldName, rawSchema] of Object.entries(properties)) {
     // Collapse a nullable union first, for the same reason `SchemaForm` does:
@@ -129,6 +141,11 @@ export function collectSchemaDefaults(
     const fieldSchema = normalizeNullableUnion(rawSchema);
     if (fieldSchema.default !== undefined) {
       result[fieldName] = fieldSchema.default;
+    } else if (fieldSchema.const !== undefined) {
+      // `const` is a one-value enumeration, so the only submittable value is
+      // already known — seeding it spares the user hand-typing a discriminator
+      // the schema has fixed (#2123), and matches what a `default` would do.
+      result[fieldName] = fieldSchema.const;
     } else if (fieldSchema.type === "object" && fieldSchema.properties) {
       const nested = collectSchemaDefaults(fieldSchema);
       if (Object.keys(nested).length > 0) {
@@ -158,6 +175,25 @@ export function collectSchemaDefaults(
  * Gating on the collapse would reject a value the schema accepts.
  */
 export function hasMissingRequiredFields(
+  schema: InspectorFormSchema,
+  values: Record<string, unknown>,
+): boolean {
+  // Root composition first, so a schema keeping its `required` on branches is
+  // gated at all (#2123). For a union the answer is selection-independent by
+  // construction: valid arguments must satisfy *some* branch, so the submit is
+  // blocked only when **every** branch is still missing something. That is
+  // deliberately weaker than gating on the branch the picker is showing — this
+  // function is handed `values`, never the selection — but it is sound in the
+  // direction that matters: it never blocks arguments the schema accepts.
+  const { base, branches } = resolveRootUnion(schema);
+  if (branches.length > 0) {
+    return branches.every((branch) => hasMissingIn(branch.schema, values));
+  }
+  return hasMissingIn(base, values);
+}
+
+/** {@link hasMissingRequiredFields} against one already-flattened schema. */
+function hasMissingIn(
   schema: InspectorFormSchema,
   values: Record<string, unknown>,
 ): boolean {

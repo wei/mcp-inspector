@@ -35,8 +35,9 @@ inspector/
 │   │                 #   implementations, the selection policy, and the descriptor the banner and UI report
 │   ├── client/       # Install-level client config (`client.json`): browser-safe parse/validate + Node load/save, remote backend, secrets
 │   ├── json/         # JSON + parameter/argument conversion utilities, the nullable-union
-│   │                 #   schema collapse shared by the web and TUI form builders, and the
-│   │                 #   tool-schema portability lint all three clients report from
+│   │                 #   schema collapse and root-composition flattening shared by the web
+│   │                 #   and TUI form builders, and the tool-schema portability lint all
+│   │                 #   three clients report from
 │   ├── logging/      # Silent pino logger singleton
 │   ├── mcp/          # InspectorClient runtime, state stores, transports, config import,
 │   │                 #   and the RFC 6570 URI-template helpers the web form and TUI expand through
@@ -153,6 +154,7 @@ Each config below is a ready-made server for exercising one feature by hand. Loa
 | `structured-output-http.json`             | Tools tab: a result's `structuredContent` section  | [#1908](https://github.com/modelcontextprotocol/inspector/issues/1908) |
 | `duplicate-tool-names-http.json`          | A `tools/list` that repeats a tool name            | [#1957](https://github.com/modelcontextprotocol/inspector/issues/1957) |
 | `nullable-fields-http.json`               | Tools tab: nullable (`anyOf` + `null`) arguments   | [#1928](https://github.com/modelcontextprotocol/inspector/issues/1928) |
+| `root-union-schemas-http.json` **(legacy era)** | Tool schemas whose arguments are a root `anyOf` / `oneOf` | [#2123](https://github.com/modelcontextprotocol/inspector/issues/2123) |
 | `unportable-schemas-http.json` **(legacy era)** | Tool schemas a real client rejects, flagged in all three clients | [#1005](https://github.com/modelcontextprotocol/inspector/issues/1005) |
 | `rfc6570-templates-http.json`             | Resources tab: RFC 6570 resource-template expansion | [#1919](https://github.com/modelcontextprotocol/inspector/issues/1919) |
 | `advertised-extensions-http.json`         | Tool registration gated on advertised extensions    | [#1739](https://github.com/modelcontextprotocol/inspector/issues/1739) |
@@ -287,6 +289,22 @@ The duplicated copies are appended rather than placed beside their twin on purpo
 Open the Tools tab and select `record_shipment`: `direction` must render as a **Select** (`envio` / `recebimento`) with a clear button that sets it back to `null`, `reference` as a text input, `quantity` as a number input, and `express` as a checkbox. On the broken build every one of them fell through to the raw-JSON textarea, which re-escaped its own contents on each keystroke until the value was unusable ([#1928](https://github.com/modelcontextprotocol/inspector/issues/1928)). The tool echoes the arguments it received, so the result panel shows exactly what was sent.
 
 The **TUI** had the same gap and is worth checking against the same server (`--tui`, then test `record_shipment`): `direction` is a select, `quantity` an integer field, `express` a boolean. Both clients now share one collapse step — `normalizeNullableUnion` in [`core/json/nullableUnion.ts`](./core/json/nullableUnion.ts) — precisely so they cannot drift on which schemas they can render.
+
+#### Root-level unions
+
+`root-union-schemas-http.json` serves two tools whose arguments are declared as a **composition at the root** of `inputSchema` rather than as a flat `properties` map — `echo` with an `anyOf` beside its own `message` property, and `get_weather` with an OpenAPI-style `discriminator` over a `oneOf`. Plain streamable-HTTP — connect with the **default (legacy)** protocol era.
+
+The 2026-07-28 revision makes this shape explicitly legal: `type: "object"` is required at the root, and beyond that "any JSON Schema 2020-12 keyword may appear alongside `type`, including composition keywords (`oneOf`, `anyOf`, `allOf`, `not`)".
+
+Open the Tools tab and select `echo`. Above the fields is a **Variant** picker listing the union's alternatives — labelled from each branch's `title`, else its discriminator `const`, else its position — and choosing one swaps in that branch's fields with the discriminator already filled in. On the broken build both tools rendered **nothing but the Execute Tool button**: no picker, no fields, not even the raw-JSON editor a union-typed _property_ falls back to, so neither tool could be called with anything but empty arguments ([#2123](https://github.com/modelcontextprotocol/inspector/issues/2123)).
+
+Switching branches drops the values that belonged to the outgoing one. They are no longer on screen, so the user can neither see nor clear them, and submitting them would describe a shape the call is not making.
+
+The **TUI** has the same gap and is worth checking against the same server (`--tui`, then test `echo`). ink-form is static — there is no picker to hide the alternatives behind — so each branch becomes its own **section**, and the fields in it are rendered optional whatever the branch says: only one alternative applies to a call, so requiring them would build a form that can never be submitted. Untouched fields report no value and are dropped before the call, so the sections you skip contribute nothing.
+
+The **CLI** has no form at all, but the same flattening decides how `--tool-arg` values are typed: a branch's `count: { "type": "number" }` is what turns `--tool-arg count=3` into `3` rather than `"3"`. All three read one helper, [`core/json/rootUnion.ts`](./core/json/rootUnion.ts), so they cannot drift on which schemas they can render.
+
+Two things it deliberately does **not** do. A union whose members are not all field-carrying object schemas is left alone rather than offered as a picker with options that render nothing — the schema falls back to whatever its root `properties` describe. And `not` is not interpreted at all: there is no faithful form for "anything except this".
 
 #### Unportable tool schemas
 

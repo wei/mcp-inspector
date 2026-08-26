@@ -1,4 +1,5 @@
 import type { Tool } from "@modelcontextprotocol/client";
+import { resolveRootUnion } from "./rootUnion.js";
 
 /**
  * JSON value type used across the inspector project
@@ -132,7 +133,21 @@ export function convertToolParameters(
   params: Record<string, string>,
 ): Record<string, JsonValue> {
   const result: Record<string, JsonValue> = {};
-  const properties = tool.inputSchema?.properties || {};
+  // A property's schema can live on a root composition branch rather than on
+  // the root itself (#2123). Reading only the root's `properties` there finds
+  // no schema for any argument, so every value would be sent as the string the
+  // user typed — `--tool-arg count=3` reaching the server as `"3"`. The union
+  // is flattened by merging every branch, because the CLI has no branch
+  // selection to consult: an argument named by one branch is coerced by that
+  // branch's schema, and a name two branches type differently keeps the first,
+  // which is no worse than the untyped passthrough it replaces.
+  const { base, branches } = resolveRootUnion(tool.inputSchema ?? {});
+  const properties: Record<string, unknown> = { ...base.properties };
+  for (const branch of branches) {
+    for (const name of branch.ownFields) {
+      properties[name] ??= branch.schema.properties?.[name];
+    }
+  }
 
   for (const [key, value] of Object.entries(params)) {
     const paramSchema = properties[key] as ParameterSchema | undefined;

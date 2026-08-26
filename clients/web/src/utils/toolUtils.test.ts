@@ -86,3 +86,39 @@ describe("toolRowKey / findToolByRowKey", () => {
     expect(findToolByRowKey(tools, "1:get_weather")).toBeUndefined();
   });
 });
+
+describe("hasInputFields with root composition (#2123)", () => {
+  const tool = (inputSchema: Tool["inputSchema"]): Tool => ({
+    name: "t",
+    inputSchema,
+  });
+
+  it("sees fields declared on a root union branch", () => {
+    expect(
+      hasInputFields(
+        tool({
+          type: "object",
+          anyOf: [
+            { type: "object", properties: { a: { type: "string" } } },
+            { type: "object", properties: { b: { type: "string" } } },
+          ],
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("sees fields declared on a root allOf", () => {
+    expect(
+      hasInputFields(
+        tool({
+          type: "object",
+          allOf: [{ type: "object", properties: { a: { type: "string" } } }],
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("still reports no fields for a bare object schema", () => {
+    expect(hasInputFields(tool({ type: "object" }))).toBe(false);
+  });
+});

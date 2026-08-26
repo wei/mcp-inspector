@@ -340,3 +340,96 @@ describe("hasMissingRequiredFields", () => {
     expect(hasMissingRequiredFields(undescribed, { ghost: null })).toBe(true);
   });
 });
+
+describe("root composition (#2123)", () => {
+  const UNION: InspectorFormSchema = {
+    type: "object",
+    properties: { note: { type: "string" } },
+    anyOf: [
+      {
+        type: "object",
+        properties: {
+          kind: { type: "string", const: "email" },
+          address: { type: "string" },
+        },
+        required: ["kind", "address"],
+      },
+      {
+        type: "object",
+        properties: {
+          kind: { type: "string", const: "sms" },
+          phone: { type: "string" },
+        },
+        required: ["kind", "phone"],
+      },
+    ],
+  };
+
+  it("seeds the first branch's defaults, including its const", () => {
+    expect(collectSchemaDefaults(UNION)).toEqual({ kind: "email" });
+  });
+
+  it("does not seed fields of branches the form is not showing", () => {
+    expect(collectSchemaDefaults(UNION)).not.toHaveProperty("phone");
+  });
+
+  it("seeds a const property on an ordinary schema too", () => {
+    expect(
+      collectSchemaDefaults({
+        type: "object",
+        properties: { version: { type: "string", const: "1" } },
+      }),
+    ).toEqual({ version: "1" });
+  });
+
+  it("prefers an explicit default over a const", () => {
+    expect(
+      collectSchemaDefaults({
+        type: "object",
+        properties: {
+          v: { type: "string", const: "a", default: "b" },
+        },
+      }),
+    ).toEqual({ v: "b" });
+  });
+
+  it("collects defaults from a root allOf", () => {
+    expect(
+      collectSchemaDefaults({
+        type: "object",
+        allOf: [
+          {
+            type: "object",
+            properties: { merged: { type: "string", default: "m" } },
+          },
+        ],
+      }),
+    ).toEqual({ merged: "m" });
+  });
+
+  it("blocks submission while no branch is satisfied", () => {
+    expect(hasMissingRequiredFields(UNION, {})).toBe(true);
+    expect(hasMissingRequiredFields(UNION, { kind: "email" })).toBe(true);
+  });
+
+  it("allows submission once one branch is satisfied", () => {
+    expect(hasMissingRequiredFields(UNION, { kind: "sms", phone: "555" })).toBe(
+      false,
+    );
+  });
+
+  it("gates on required fields declared only in a root allOf", () => {
+    const schema: InspectorFormSchema = {
+      type: "object",
+      allOf: [
+        {
+          type: "object",
+          properties: { a: { type: "string" } },
+          required: ["a"],
+        },
+      ],
+    };
+    expect(hasMissingRequiredFields(schema, {})).toBe(true);
+    expect(hasMissingRequiredFields(schema, { a: "x" })).toBe(false);
+  });
+});

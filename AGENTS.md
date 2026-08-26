@@ -158,6 +158,25 @@ v2/main/
 │   │                                   #   and TUI schemaToForm — since each dispatches on
 │   │                                   #   a single `type` string and would otherwise miss
 │   │                                   #   a nullable field entirely — #1928/#2015;
+│   │                                   #   rootUnion.ts: flattens the COMPOSITION keywords a
+│   │                                   #   tool's inputSchema may carry at its ROOT — `allOf`
+│   │                                   #   merged unconditionally (conjunctive, so there is
+│   │                                   #   no choice to present), a root `oneOf`/`anyOf`
+│   │                                   #   returned as the BRANCHES a picker chooses between.
+│   │                                   #   Legal since 2026-07-28 and rendered as an EMPTY
+│   │                                   #   FORM before — no picker, no fields, not even the
+│   │                                   #   raw-JSON fallback a union-typed *property* gets,
+│   │                                   #   so the tool could only be called with empty
+│   │                                   #   arguments. Read by all three clients: web
+│   │                                   #   SchemaForm (the Variant picker + the branch-change
+│   │                                   #   value pruning), TUI schemaToForm (a section per
+│   │                                   #   branch, its fields forced OPTIONAL since only one
+│   │                                   #   alternative applies), and convertToolParameters
+│   │                                   #   (which branch's schema types a CLI --tool-arg).
+│   │                                   #   Declines a union whose members are not ALL
+│   │                                   #   field-carrying objects rather than offering a
+│   │                                   #   picker with options that render nothing, and does
+│   │                                   #   not interpret `not` at all — #2123;
 │   │                                   #   schemaLint.ts: tool-schema PORTABILITY lint —
 │   │                                   #   constructs that are legal JSON Schema and are
 │   │                                   #   refused or mishandled by real MCP clients (a bare

@@ -1,0 +1,67 @@
+{
+  "serverInfo": {
+    "name": "root-union-schemas-showcase",
+    "version": "1.0.0"
+  },
+  "tools": [{ "preset": "echo" }, { "preset": "get_weather" }],
+  "rawToolSchemas": {
+    "echo": {
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "message": { "type": "string" }
+        },
+        "required": ["message"],
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "kind": { "type": "string", "const": "email" },
+              "address": { "type": "string" }
+            },
+            "required": ["kind", "address"]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": { "type": "string", "const": "sms" },
+              "phone": { "type": "string" }
+            },
+            "required": ["kind", "phone"]
+          }
+        ]
+      }
+    },
+    "get_weather": {
+      "inputSchema": {
+        "type": "object",
+        "discriminator": { "propertyName": "by" },
+        "oneOf": [
+          {
+            "type": "object",
+            "title": "By city",
+            "properties": {
+              "by": { "type": "string", "const": "city" },
+              "city": { "type": "string" }
+            },
+            "required": ["by", "city"]
+          },
+          {
+            "type": "object",
+            "title": "By coordinates",
+            "properties": {
+              "by": { "type": "string", "const": "coords" },
+              "lat": { "type": "number" },
+              "lon": { "type": "number" }
+            },
+            "required": ["by", "lat", "lon"]
+          }
+        ]
+      }
+    }
+  },
+  "transport": {
+    "type": "streamable-http",
+    "port": 6604
+  }
+}
