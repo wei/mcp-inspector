@@ -555,6 +555,8 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
         switch-servers-tab
       </button>
       <button onClick={() => props.onToggleConnection("A")}>connect</button>
+      {/* A second target, so a test can drive an A -> B -> A switch (#2095). */}
+      <button onClick={() => props.onToggleConnection("B")}>connect-b</button>
       <button onClick={() => props.onConnectionInfo()}>
         open-connection-info
       </button>
@@ -3537,6 +3539,74 @@ describe("App paginated list pagination toggle (#1721)", () => {
       paginatedLists?: boolean;
     };
     expect(lastPush?.paginatedLists).toBe(true);
+  });
+
+  it("keeps the toggle on the last write after switching servers and back (#2095)", async () => {
+    // The override is what holds the display up while list reads are failing --
+    // the `servers` entry it would otherwise be read from is frozen at the last
+    // successful read, which this suite models exactly by mocking `useServers`
+    // to a fixed list.
+    //
+    // Held app-wide and cleared on every change of the *active* entry, it did
+    // not survive a plain server switch: A to B and back dropped it and the
+    // toggle fell back to that stale entry, reading `off` while disk, the
+    // tracker, and the client just built from it all said `on`. The lists were
+    // then rendered in all-pages mode showing an aggregate the client never
+    // fetched, with no Load-next-page control to fill them.
+    //
+    // Nothing here fails a list read explicitly: the fixed mock *is* that
+    // state, which is why one write is enough to reproduce it.
+    const user = userEvent.setup();
+    const previousUseServers = vi.mocked(useServers).getMockImplementation();
+    try {
+      vi.mocked(useServers).mockReturnValue({
+        servers: [
+          SERVER_A,
+          { ...SERVER_A, id: "B", name: "Other" },
+        ] as ServerEntry[],
+        loading: false,
+        error: undefined,
+        refresh: vi.fn().mockResolvedValue(undefined),
+        addServer: addServerSpy,
+        updateServer: updateServerSpy,
+        updateServerSettings: updateServerSettingsSpy,
+        removeServer: vi.fn(),
+        reorderServers: vi.fn(),
+        importSource: vi.fn().mockResolvedValue({ servers: {} }),
+      });
+      renderWithMantine(<App />);
+      await user.click(screen.getByText("connect"));
+      await waitFor(() => expect(clientInstances).toHaveLength(1));
+
+      await user.click(screen.getByText("paginated-on"));
+      await waitFor(() =>
+        expect(updateServerSettingsSpy).toHaveBeenCalledWith(
+          "A",
+          expect.objectContaining({ paginatedLists: true }),
+        ),
+      );
+      await waitFor(() =>
+        expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true"),
+      );
+
+      // Away to B, whose own entry has never been written and so reads false.
+      await user.click(screen.getByText("connect-b"));
+      await waitFor(() =>
+        expect(screen.getByTestId("active-server")).toHaveTextContent("B"),
+      );
+      expect(screen.getByTestId("tools-paginated")).toHaveTextContent("false");
+
+      // ...and back to A, which is still paginated on disk.
+      await user.click(screen.getByText("connect"));
+      await waitFor(() =>
+        expect(screen.getByTestId("active-server")).toHaveTextContent("A"),
+      );
+      expect(screen.getByTestId("tools-paginated")).toHaveTextContent("true");
+    } finally {
+      if (previousUseServers) {
+        vi.mocked(useServers).mockImplementation(previousUseServers);
+      }
+    }
   });
 });
 
