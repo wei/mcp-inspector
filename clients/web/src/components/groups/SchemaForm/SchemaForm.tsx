@@ -877,19 +877,49 @@ export function SchemaForm({
     // constant keeps its type on the wire however it is shown here.
     if (fieldSchema.const !== undefined) {
       const constValue = fieldSchema.const;
+      const constText =
+        typeof constValue === "string" ? constValue : serializeJson(constValue);
+
+      // An OPTIONAL pinned field is a yes/no, not a fixed answer: `const`
+      // constrains the value if the property is there, and the schema is
+      // equally happy without it. So it gets the one choice it has, clearable —
+      // the user can opt in or leave it out, and cannot type anything else.
+      if (!isRequired) {
+        return (
+          <Select
+            key={fieldName}
+            label={label}
+            description={description}
+            disabled={disabled}
+            data={[{ value: constText, label: constText }]}
+            clearable
+            value={
+              Object.hasOwn(values, fieldName) &&
+              values[fieldName] !== undefined
+                ? constText
+                : null
+            }
+            onChange={(picked) =>
+              handleFieldChange(
+                fieldName,
+                picked === null ? undefined : constValue,
+              )
+            }
+          />
+        );
+      }
+
+      // Required: there is nothing to decide, so it is displayed and not
+      // editable. The value itself is seeded by `collectSchemaDefaults`.
       return (
         <TextInput
           key={fieldName}
           label={label}
           description={description}
-          withAsterisk={isRequired}
+          withAsterisk
           readOnly
           disabled={disabled}
-          value={
-            typeof constValue === "string"
-              ? constValue
-              : serializeJson(constValue)
-          }
+          value={constText}
         />
       );
     }

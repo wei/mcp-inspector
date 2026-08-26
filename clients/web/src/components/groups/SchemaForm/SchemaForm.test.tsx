@@ -2054,6 +2054,46 @@ describe("SchemaForm multiline strings (#2042)", () => {
       expect(kind.value).toBe("email");
     });
 
+    it("lets an optional const be opted into and left out", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      const optional: InspectorFormSchema = {
+        type: "object",
+        properties: { dryRun: { type: "boolean", const: true, title: "Dry" } },
+      };
+      function Host() {
+        const [values, setValues] = useState<Record<string, unknown>>({});
+        return (
+          <SchemaForm
+            schema={optional}
+            values={values}
+            onChange={(next) => {
+              setValues(next);
+              onChange(next);
+            }}
+          />
+        );
+      }
+      renderWithMantine(<Host />);
+
+      const field = screen.getByRole("textbox", {
+        name: /Dry/,
+      }) as HTMLInputElement;
+      // Not supplied to begin with — `const` does not demand the property.
+      expect(field.value).toBe("");
+
+      await user.click(field);
+      await user.click(screen.getByRole("option", { name: "true" }));
+      // Opting in sends the schema's own typed value, not the label.
+      expect(onChange).toHaveBeenCalledWith({ dryRun: true });
+
+      // Mantine marks its combobox clear button `aria-hidden` (mouse-only,
+      // `tabIndex={-1}`), so it is only reachable with `hidden: true`.
+      await user.click(screen.getByRole("button", { hidden: true }));
+      // …and opting back out leaves the property absent from the call.
+      expect(onChange).toHaveBeenLastCalledWith({ dryRun: undefined });
+    });
+
     it("renders a non-string constant read-only too", () => {
       // Reached before the number/boolean dispatch, so neither offers a value
       // the `const` forbids.
@@ -2065,6 +2105,7 @@ describe("SchemaForm multiline strings (#2042)", () => {
               n: { type: "number", const: 7, title: "N" },
               b: { type: "boolean", const: true, title: "B" },
             },
+            required: ["n", "b"],
           }}
           values={{}}
           onChange={vi.fn()}
@@ -2093,6 +2134,7 @@ describe("SchemaForm multiline strings (#2042)", () => {
                 title: "Mode",
               },
             },
+            required: ["mode"],
           }}
           values={{}}
           onChange={vi.fn()}
