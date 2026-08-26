@@ -104,6 +104,25 @@ describe("JSON Utils", () => {
       ).toEqual({ note: "hi", count: 42, enabled: true });
     });
 
+    it("prefers a branch's specialization of a root property (#2123)", () => {
+      const specializing: Tool = {
+        name: "specializing",
+        inputSchema: {
+          type: "object",
+          // The root declares the name but constrains nothing; the branch is
+          // what says it is a number.
+          properties: { count: {} },
+          anyOf: [
+            { type: "object", properties: { count: { type: "number" } } },
+            { type: "object", properties: { other: { type: "string" } } },
+          ],
+        },
+      };
+      expect(convertToolParameters(specializing, { count: "3" })).toEqual({
+        count: 3,
+      });
+    });
+
     it("coerces a value whose schema lives on a root allOf branch (#2123)", () => {
       const allOfTool: Tool = {
         name: "allof-tool",

@@ -63,13 +63,17 @@ describe("resolveRootUnion", () => {
     expect(branches[0].schema.anyOf).toBeUndefined();
   });
 
-  it("prefers oneOf when a schema carries both", () => {
-    const { branches } = resolveRootUnion({
+  it("declines a schema carrying both oneOf and anyOf", () => {
+    // Independent keywords a value satisfies together, so reading one and
+    // dropping the other would build a form missing real constraints.
+    const { base, branches } = resolveRootUnion({
       type: "object",
+      properties: { note: { type: "string" } },
       oneOf: [EMAIL],
       anyOf: [EMAIL, SMS],
     });
-    expect(branches).toHaveLength(1);
+    expect(branches).toEqual([]);
+    expect(Object.keys(base.properties ?? {})).toEqual(["note"]);
   });
 
   it("merges allOf branches unconditionally", () => {

@@ -142,10 +142,22 @@ export function convertToolParameters(
   // branch's schema, and a name two branches type differently keeps the first,
   // which is no worse than the untyped passthrough it replaces.
   const { base, branches } = resolveRootUnion(tool.inputSchema ?? {});
-  const properties: Record<string, unknown> = { ...base.properties };
-  for (const branch of branches) {
-    for (const name of branch.ownFields) {
-      properties[name] ??= branch.schema.properties?.[name];
+  // Start from the FIRST branch's merged schema rather than from the base: a
+  // branch may *specialize* a property the root also declares (root
+  // `count: {}`, branch `count: { type: "number" }`), and merging branch-last
+  // is what gives the typed declaration — starting from the base would keep the
+  // untyped one and send `count=3` as `"3"`, the very coercion this restores.
+  // Later branches then contribute only names not seen yet, so first-branch
+  // precedence matches what the web form seeds and what a name two branches
+  // type differently resolves to.
+  const properties: Record<string, unknown> = {
+    ...(branches[0]?.schema.properties ?? base.properties),
+  };
+  for (const branch of branches.slice(1)) {
+    for (const [name, schema] of Object.entries(
+      branch.schema.properties ?? {},
+    )) {
+      properties[name] ??= schema;
     }
   }
 

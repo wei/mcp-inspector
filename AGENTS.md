@@ -171,12 +171,19 @@ v2/main/
 │   │                                   #   SchemaForm (the Variant picker + the branch-change
 │   │                                   #   value pruning), TUI schemaToForm (a section per
 │   │                                   #   branch, its fields forced OPTIONAL since only one
-│   │                                   #   alternative applies), and convertToolParameters
-│   │                                   #   (which branch's schema types a CLI --tool-arg).
-│   │                                   #   Declines a union whose members are not ALL
-│   │                                   #   field-carrying objects rather than offering a
-│   │                                   #   picker with options that render nothing, and does
-│   │                                   #   not interpret `not` at all — #2123;
+│   │                                   #   alternative applies — and rendered under PREFIXED
+│   │                                   #   names behind a variant select, because ink-form
+│   │                                   #   keys values by field name across the WHOLE form,
+│   │                                   #   so two branches' `kind` would otherwise be one
+│   │                                   #   field; schemaToForm.decodeFormValues translates
+│   │                                   #   back on submit), and convertToolParameters (which
+│   │                                   #   branch's schema types a CLI --tool-arg).
+│   │                                   #   DECLINES rather than half-reads: a union whose
+│   │                                   #   members are not ALL field-carrying objects, and a
+│   │                                   #   schema carrying BOTH oneOf and anyOf (independent
+│   │                                   #   keywords, satisfied together — picking one drops
+│   │                                   #   real constraints). Does not interpret `not` at
+│   │                                   #   all — #2123;
 │   │                                   #   schemaLint.ts: tool-schema PORTABILITY lint —
 │   │                                   #   constructs that are legal JSON Schema and are
 │   │                                   #   refused or mishandled by real MCP clients (a bare

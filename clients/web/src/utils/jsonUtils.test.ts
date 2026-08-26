@@ -382,7 +382,10 @@ describe("root composition (#2123)", () => {
     ).toEqual({ version: "1" });
   });
 
-  it("prefers an explicit default over a const", () => {
+  it("prefers a const over a conflicting default", () => {
+    // `default` is an annotation, not a constraint, so a schema may advertise
+    // one its own `const` rejects — seeding it would submit an invalid value
+    // through a read-only field.
     expect(
       collectSchemaDefaults({
         type: "object",
@@ -390,7 +393,7 @@ describe("root composition (#2123)", () => {
           v: { type: "string", const: "a", default: "b" },
         },
       }),
-    ).toEqual({ v: "b" });
+    ).toEqual({ v: "a" });
   });
 
   it("collects defaults from a root allOf", () => {

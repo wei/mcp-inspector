@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { schemaToForm } from "../src/utils/schemaToForm.js";
+import {
+  decodeFormValues,
+  schemaToForm,
+  VARIANT_FIELD,
+} from "../src/utils/schemaToForm.js";
 
 describe("schemaToForm", () => {
   it("returns an empty Parameters section when there is no schema", () => {
@@ -441,18 +445,43 @@ describe("schemaToForm", () => {
         "sms",
       ]);
       expect(form.sections[0]!.fields.map((field) => field.name)).toEqual([
+        VARIANT_FIELD,
         "note",
       ]);
+    });
+
+    it("names branch fields uniquely, since ink-form scopes by name alone", () => {
+      // Both branches declare `kind`. Rendered under their real names they
+      // would be one field, and the later section's initial value would decide
+      // what the earlier section submits.
+      const form = schemaToForm(UNION, "union_tool");
       expect(form.sections[1]!.fields.map((field) => field.name)).toEqual([
-        "kind",
-        "address",
+        "__b0__kind",
+        "__b0__address",
       ]);
+      expect(form.sections[2]!.fields.map((field) => field.name)).toEqual([
+        "__b1__kind",
+        "__b1__count",
+      ]);
+    });
+
+    it("offers a variant select listing the alternatives", () => {
+      const form = schemaToForm(UNION, "union_tool");
+      expect(form.sections[0]!.fields[0]).toMatchObject({
+        name: VARIANT_FIELD,
+        type: "select",
+        initialValue: "0",
+        options: [
+          { label: "email", value: "0" },
+          { label: "sms", value: "1" },
+        ],
+      });
     });
 
     it("keeps a branch's typed fields typed", () => {
       const form = schemaToForm(UNION, "union_tool");
       expect(form.sections[2]!.fields[1]).toMatchObject({
-        name: "count",
+        name: "__b1__count",
         type: "integer",
       });
     });
@@ -467,8 +496,71 @@ describe("schemaToForm", () => {
     it("seeds a branch's discriminator const so it need not be typed", () => {
       const form = schemaToForm(UNION, "union_tool");
       expect(form.sections[1]!.fields[0]).toMatchObject({
-        name: "kind",
+        name: "__b0__kind",
         initialValue: "email",
+      });
+    });
+
+    it("prefers a const over a conflicting default", () => {
+      const form = schemaToForm(
+        {
+          type: "object",
+          properties: { v: { type: "string", const: "a", default: "b" } },
+        },
+        "const_tool",
+      );
+      expect(form.sections[0]!.fields[0]).toMatchObject({ initialValue: "a" });
+    });
+
+    describe("decodeFormValues", () => {
+      it("submits the chosen branch's fields under their real names", () => {
+        expect(
+          decodeFormValues(UNION, {
+            [VARIANT_FIELD]: "0",
+            note: "hi",
+            __b0__kind: "email",
+            __b0__address: "a@b.c",
+            __b1__kind: "sms",
+            __b1__count: 3,
+          }),
+        ).toEqual({ note: "hi", kind: "email", address: "a@b.c" });
+      });
+
+      it("drops the branches the call is not making", () => {
+        expect(
+          decodeFormValues(UNION, {
+            [VARIANT_FIELD]: "1",
+            __b0__kind: "email",
+            __b0__address: "a@b.c",
+            __b1__kind: "sms",
+            __b1__count: 3,
+          }),
+        ).toEqual({ kind: "sms", count: 3 });
+      });
+
+      it("omits a branch field the user never filled", () => {
+        expect(
+          decodeFormValues(UNION, {
+            [VARIANT_FIELD]: "0",
+            __b0__kind: "email",
+          }),
+        ).toEqual({ kind: "email" });
+      });
+
+      it("falls back to the first branch on an unusable selection", () => {
+        expect(
+          decodeFormValues(UNION, {
+            [VARIANT_FIELD]: "nonsense",
+            __b0__kind: "email",
+          }),
+        ).toEqual({ kind: "email" });
+      });
+
+      it("returns the values untouched for a schema with no root union", () => {
+        const values = { message: "hi" };
+        expect(decodeFormValues({ properties: { message: {} } }, values)).toBe(
+          values,
+        );
       });
     });
 

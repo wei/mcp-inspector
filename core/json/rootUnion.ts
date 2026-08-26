@@ -193,8 +193,17 @@ function branchLabel(
  * `branches` only when **every** member is an object schema carrying fields:
  * a union mixing renderable and unrenderable members would give a picker
  * options that show nothing, and the whole point of this module is to stop
- * producing a form that cannot express the call. `oneOf` wins when a schema
- * carries both, being the stricter of the two.
+ * producing a form that cannot express the call.
+ *
+ * A schema carrying **both** `oneOf` and `anyOf` is declined rather than
+ * half-read. The two are independent keywords a value must satisfy *together*,
+ * not two spellings of one union, so picking one and dropping the other builds
+ * a form that silently omits real constraints — worse than the empty form this
+ * module exists to replace, because it looks complete. Satisfying both honestly
+ * means offering the cross product of their alternatives, which no real schema
+ * has yet asked for and which produces a picker whose option labels are pairs;
+ * until something does, declining leaves the root `properties` rendering
+ * unchanged and claims nothing that is not true.
  */
 export function resolveRootUnion<T extends RootUnionSchema>(
   schema: T,
@@ -208,6 +217,9 @@ export function resolveRootUnion<T extends RootUnionSchema>(
   );
   const base = withoutComposition(merged);
 
+  if (schema.oneOf !== undefined && schema.anyOf !== undefined) {
+    return { base, branches: [] };
+  }
   const members = schema.oneOf ?? schema.anyOf ?? [];
   const branches = members.map(toBranch);
   if (

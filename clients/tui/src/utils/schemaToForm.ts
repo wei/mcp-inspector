@@ -71,6 +71,23 @@ interface JsonSchemaObject {
 }
 
 /**
+ * The select that names which alternative of a root union the call is making.
+ *
+ * ink-form keeps **one** value object for the whole form, keyed by field name
+ * alone — sections are visual grouping, not scope. So two branches of a
+ * discriminated union both declaring `kind` are the *same* field: the later
+ * section's initial value wins, and filling the first branch's section would
+ * submit the second branch's discriminator. Prefixing each branch's fields and
+ * choosing between them explicitly is what makes the alternatives independent.
+ */
+export const VARIANT_FIELD = "__variant";
+
+/** The form-local name a branch's field is rendered under. */
+function branchFieldName(branchIndex: number, name: string): string {
+  return `__b${branchIndex}__${name}`;
+}
+
+/**
  * Converts a JSON Schema to ink-form structure
  */
 export function schemaToForm(
@@ -88,28 +105,86 @@ export function schemaToForm(
   // could only be called with empty arguments.
   const { base, branches } = resolveRootUnion(schema);
 
-  const sections: FormSection[] = [
-    { title: "Parameters", fields: buildFields(base) },
-  ];
+  const parameters = buildFields(base);
+  if (branches.length > 0) {
+    // ink-form is static, so there is no picker that can swap the fields out.
+    // Every branch is rendered instead, and this select says which one the
+    // call means — read back by {@link decodeFormValues}, which drops the rest.
+    parameters.unshift({
+      type: "select",
+      name: VARIANT_FIELD,
+      label: "Variant",
+      required: true,
+      initialValue: "0",
+      options: branches.map((branch, index) => ({
+        label: branch.label,
+        value: String(index),
+      })),
+    } as FormField);
+  }
 
-  // ink-form is static — there is no branch picker to hide the alternatives
-  // behind — so every branch gets its own section and the user fills the one
-  // they mean. A branch's fields are rendered **optional** whatever the branch
-  // says: only one alternative applies to a given call, so requiring them would
-  // make a form that can never be submitted. An untouched field reports no
-  // value and is dropped before the call, so the sections the user skipped
-  // contribute nothing to the arguments.
-  for (const branch of branches) {
+  const sections: FormSection[] = [{ title: "Parameters", fields: parameters }];
+
+  // One section per alternative, its fields **optional** whatever the branch
+  // says: only one alternative applies to a call, so requiring them would build
+  // a form that can never be submitted.
+  branches.forEach((branch, index) => {
     const ownProperties = Object.fromEntries(
-      branch.ownFields.map((name) => [name, branch.schema.properties?.[name]]),
+      branch.ownFields.map((name) => [
+        branchFieldName(index, name),
+        branch.schema.properties?.[name],
+      ]),
     );
     sections.push({
       title: branch.label,
       fields: buildFields({ properties: ownProperties }),
     });
-  }
+  });
 
   return { title, sections };
+}
+
+/**
+ * Turn what the form submitted back into the arguments the server expects:
+ * the base fields, plus the fields of the branch the {@link VARIANT_FIELD}
+ * select names, under their real property names.
+ *
+ * Every other branch's fields are dropped rather than sent — they describe a
+ * shape this call is not making, and the user filled at most one section. Call
+ * this on the way out of the form; for a schema with no root union it returns
+ * the values unchanged, so it is safe to apply unconditionally.
+ */
+export function decodeFormValues<T>(
+  schema: JsonSchemaObject | null | undefined,
+  values: Record<string, T>,
+): Record<string, T> {
+  const { branches } = resolveRootUnion(schema ?? {});
+  if (branches.length === 0) {
+    return values;
+  }
+
+  const raw = values[VARIANT_FIELD];
+  const selected = Number(raw);
+  const branchIndex =
+    Number.isInteger(selected) && selected >= 0 && selected < branches.length
+      ? selected
+      : 0;
+
+  const decoded: Record<string, T> = {};
+  for (const [name, value] of Object.entries(values)) {
+    // Skip the select itself and every branch's prefixed field; the chosen
+    // branch's are re-added below under the names the schema declares.
+    if (name !== VARIANT_FIELD && !name.startsWith("__b")) {
+      decoded[name] = value;
+    }
+  }
+  for (const name of branches[branchIndex]!.ownFields) {
+    const value = values[branchFieldName(branchIndex, name)];
+    if (value !== undefined) {
+      decoded[name] = value;
+    }
+  }
+  return decoded;
 }
 
 /** Build the ink-form fields for one already-flattened object schema. */
@@ -204,10 +279,14 @@ function buildFields(schema: JsonSchemaObject): FormField[] {
     }
 
     // Set initial value from default (ink-form FormField allows initialValue for some types).
-    // A `const` is seeded the same way: it is a one-value enumeration, so the
-    // only submittable value is already known and the user would otherwise have
-    // to hand-type a union's discriminator (#2123).
-    const initialValue = property.default ?? property.const;
+    // A `const` is seeded the same way and OUTRANKS `default`: it is a
+    // one-value enumeration, so the only submittable value is already known and
+    // the user would otherwise have to hand-type a union's discriminator
+    // (#2123), while `default` is an annotation a schema may set to something
+    // its own `const` rejects. Tested against `undefined` rather than `??`
+    // chained, so an explicit `null` default is honored as a value.
+    const initialValue =
+      property.const !== undefined ? property.const : property.default;
     if (initialValue !== undefined) {
       (field as FormField & { initialValue?: unknown }).initialValue =
         initialValue;

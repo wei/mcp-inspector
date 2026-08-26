@@ -2049,6 +2049,57 @@ describe("SchemaForm multiline strings (#2042)", () => {
       expect(kind.value).toBe("email");
     });
 
+    it("renders a non-string constant read-only too", () => {
+      // Reached before the number/boolean dispatch, so neither offers a value
+      // the `const` forbids.
+      renderWithMantine(
+        <SchemaForm
+          schema={{
+            type: "object",
+            properties: {
+              n: { type: "number", const: 7, title: "N" },
+              b: { type: "boolean", const: true, title: "B" },
+            },
+          }}
+          values={{}}
+          onChange={vi.fn()}
+        />,
+      );
+      expect(
+        (screen.getByRole("textbox", { name: /N/ }) as HTMLInputElement).value,
+      ).toBe("7");
+      expect(
+        (screen.getByRole("textbox", { name: /B/ }) as HTMLInputElement).value,
+      ).toBe("true");
+    });
+
+    it("keeps a const out of an enum select", () => {
+      // A schema carrying both would otherwise reach the select and offer the
+      // enum's other members, each of which the `const` rejects.
+      renderWithMantine(
+        <SchemaForm
+          schema={{
+            type: "object",
+            properties: {
+              mode: {
+                type: "string",
+                const: "fast",
+                enum: ["fast", "slow"],
+                title: "Mode",
+              },
+            },
+          }}
+          values={{}}
+          onChange={vi.fn()}
+        />,
+      );
+      const mode = screen.getByRole("textbox", {
+        name: /Mode/,
+      }) as HTMLInputElement;
+      expect(mode.readOnly).toBe(true);
+      expect(mode.value).toBe("fast");
+    });
+
     it("renders no picker for a single-branch union but still shows its fields", () => {
       const schema: InspectorFormSchema = {
         type: "object",

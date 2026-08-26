@@ -712,6 +712,35 @@ export function SchemaForm({
     const description = fieldSchema.description;
     const rawValue = resolveValue(values[fieldName], fieldSchema);
 
+    // A field pinned to a single value, checked **before** any type dispatch.
+    // `const` admits exactly one value, so every widget below it — the enum
+    // select, the number box, the checkbox — would offer values the schema
+    // forbids, and a schema carrying both `const` and `enum` would otherwise
+    // reach the select and submit a sibling of the one legal answer. Rendered
+    // read-only rather than editable for the same reason.
+    //
+    // Display only: the value that is *submitted* comes from `values`, seeded
+    // from the same `const` by `collectSchemaDefaults`, so a non-string
+    // constant keeps its type on the wire however it is shown here.
+    if (fieldSchema.const !== undefined) {
+      const constValue = fieldSchema.const;
+      return (
+        <TextInput
+          key={fieldName}
+          label={label}
+          description={description}
+          withAsterisk={isRequired}
+          readOnly
+          disabled={disabled}
+          value={
+            typeof constValue === "string"
+              ? constValue
+              : serializeJson(constValue)
+          }
+        />
+      );
+    }
+
     // string with enum
     if (fieldSchema.type === "string" && fieldSchema.enum) {
       return (
@@ -746,26 +775,6 @@ export function SchemaForm({
           clearable={isClearable(fieldSchema)}
           value={(rawValue as string) ?? null}
           onChange={(val) => handleFieldChange(fieldName, val)}
-        />
-      );
-    }
-
-    // A string pinned to a single value. Rendered read-only rather than as an
-    // editable box: `const` admits exactly one value, so anything the user
-    // could type into it produces a call the schema rejects. This is what a
-    // discriminated union's `kind`/`by` field is (#2123), and the picker has
-    // already set it — but the rule is the keyword's, not the union's, so it
-    // holds for a lone `const` property too.
-    if (typeof fieldSchema.const === "string") {
-      return (
-        <TextInput
-          key={fieldName}
-          label={label}
-          description={description}
-          withAsterisk={isRequired}
-          readOnly
-          disabled={disabled}
-          value={fieldSchema.const}
         />
       );
     }

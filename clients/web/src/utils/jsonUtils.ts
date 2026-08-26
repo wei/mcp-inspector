@@ -139,13 +139,19 @@ export function collectSchemaDefaults(
     // without this the form would *display* a hoisted default that never
     // reached the seeded values — the field would submit empty (#1928).
     const fieldSchema = normalizeNullableUnion(rawSchema);
-    if (fieldSchema.default !== undefined) {
-      result[fieldName] = fieldSchema.default;
-    } else if (fieldSchema.const !== undefined) {
+    if (fieldSchema.const !== undefined) {
       // `const` is a one-value enumeration, so the only submittable value is
       // already known — seeding it spares the user hand-typing a discriminator
-      // the schema has fixed (#2123), and matches what a `default` would do.
+      // the schema has fixed (#2123).
+      //
+      // It outranks `default`, which JSON Schema defines as an annotation
+      // rather than a constraint: a schema may advertise a default its own
+      // `const` rejects, and seeding that would submit an invalid argument
+      // through a field rendered read-only, leaving the user no way to correct
+      // it.
       result[fieldName] = fieldSchema.const;
+    } else if (fieldSchema.default !== undefined) {
+      result[fieldName] = fieldSchema.default;
     } else if (fieldSchema.type === "object" && fieldSchema.properties) {
       const nested = collectSchemaDefaults(fieldSchema);
       if (Object.keys(nested).length > 0) {
