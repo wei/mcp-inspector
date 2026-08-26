@@ -623,6 +623,18 @@ export function SchemaForm({
   const [branchIndex, setBranchIndex] = useState(
     () => selectBranchIndex(branches, values) ?? 0,
   );
+  // The alternatives themselves, as a stable key. A tool refreshed in place
+  // keeps its `resetKey`, so nothing else notices that the union underneath was
+  // reordered or rewritten — and a numeric index then points at a different
+  // branch than the one whose values are held, showing SMS while submitting
+  // email. Re-derived from the values, which is where the answer actually is.
+  const branchesKey = branches
+    .map((branch) => `${branch.label}:${branch.declaredFields.join(",")}`)
+    .join("|");
+  useValueChange(branchesKey, () =>
+    setBranchIndex(selectBranchIndex(branches, values) ?? 0),
+  );
+
   // A form reused for another entity can be handed a shorter union, so the
   // index is clamped rather than trusted — `resetKey` resets it below, but a
   // caller that omits it (the elicitation panels mount fresh) supplies none.

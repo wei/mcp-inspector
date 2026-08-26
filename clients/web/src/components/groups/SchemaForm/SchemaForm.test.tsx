@@ -2355,6 +2355,42 @@ describe("SchemaForm multiline strings (#2042)", () => {
       );
     });
 
+    it("re-derives the selection when the branches are reordered in place", () => {
+      // Same `resetKey`, same branch count — only the order changed, so a
+      // numeric index would now point at the other shape and the picker would
+      // show SMS while `values` describe email.
+      const reversed: InspectorFormSchema = {
+        ...UNION_SCHEMA,
+        anyOf: [...(UNION_SCHEMA.anyOf ?? [])].reverse(),
+      };
+      const values = { note: "hi", kind: "email", address: "a@b.c" };
+      const { rerender } = renderWithMantine(
+        <SchemaForm
+          schema={UNION_SCHEMA}
+          values={values}
+          onChange={vi.fn()}
+          resetKey="same-tool"
+        />,
+      );
+      expect(screen.getByRole("textbox", { name: /Address/ })).toBeTruthy();
+
+      rerender(
+        <SchemaForm
+          schema={reversed}
+          values={values}
+          onChange={vi.fn()}
+          resetKey="same-tool"
+        />,
+      );
+      // Still the email branch — the one the values describe — not whatever
+      // now sits at the old index.
+      expect(
+        (screen.getByRole("textbox", { name: /Variant/ }) as HTMLInputElement)
+          .value,
+      ).toBe("email");
+      expect(screen.getByRole("textbox", { name: /Address/ })).toBeTruthy();
+    });
+
     it("renders no picker for a single-branch union but still shows its fields", () => {
       const schema: InspectorFormSchema = {
         type: "object",
