@@ -65,16 +65,23 @@ const MultilineStringInput = Textarea.withProps({
  * A string field that has just been enlarged (#2042).
  *
  * Exists only to take focus on mount. This component mounts as a direct
- * consequence of the user activating the enlarge button — which unmounts in the
- * same commit, taking the focused element with it. Without this, a keyboard user
- * who activates it is left with focus on the document body, and the next Tab
- * restarts from the top of the page rather than continuing through the form.
+ * consequence of the user enlarging the field — and whichever control they used
+ * unmounts in the same commit, taking the focused element with it. Without this,
+ * the user is left with focus on the document body, and the next Tab restarts
+ * from the top of the page rather than continuing through the form.
  *
- * The caret is placed at the end of whatever was already typed, since focusing a
- * pre-filled text control does not agree across browsers on where it lands, and
- * the one answer that is never right is "before the text the user just wrote".
+ * `caretAt` says where the caret goes. The keyboard route passes one, because
+ * Enter inserts a newline at the user's selection and the caret belongs just
+ * after it (#2138). Pointer activation passes none: a click carries no
+ * meaningful position, so the caret falls to the end of whatever was already
+ * typed — focusing a pre-filled text control does not agree across browsers on
+ * where it lands, and the one answer that is never right is "before the text
+ * the user just wrote".
  */
-function EnlargedStringField(props: TextareaProps) {
+function EnlargedStringField({
+  caretAt,
+  ...props
+}: TextareaProps & { caretAt?: number }) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   // Layout, not passive: a passive effect runs after paint, so the browser would
@@ -85,8 +92,9 @@ function EnlargedStringField(props: TextareaProps) {
     /* v8 ignore next -- an effect runs after mount, so the ref is always set */
     if (!node) return;
     node.focus();
-    node.setSelectionRange(node.value.length, node.value.length);
-  }, []);
+    const caret = caretAt ?? node.value.length;
+    node.setSelectionRange(caret, caret);
+  }, [caretAt]);
 
   return <MultilineStringInput {...props} ref={inputRef} />;
 }
@@ -590,7 +598,17 @@ export function SchemaForm({
   // *name*, so it must not carry across to another entity's same-named field —
   // the same reasoning `resetKey` documents for the number field's draft. Reset
   // during render rather than in an effect so no frame paints the wrong shape.
-  useValueChange(resetKey, () => setEnlargedFields(new Set()));
+  // Where the caret goes when a field's text area mounts, for the fields
+  // enlarged by Enter (#2138). Absent for a field enlarged by the button, which
+  // carries no position — see EnlargedStringField.
+  const [enlargeCarets, setEnlargeCarets] = useState<
+    Readonly<Record<string, number>>
+  >({});
+
+  useValueChange(resetKey, () => {
+    setEnlargedFields(new Set());
+    setEnlargeCarets({});
+  });
 
   // Stable so a field's reporting effect subscribes once, not per render. The
   // updater returns the previous set unchanged when nothing moved, which is
@@ -712,6 +730,7 @@ export function SchemaForm({
           <EnlargedStringField
             key={fieldName}
             {...sharedProps}
+            caretAt={enlargeCarets[fieldName]}
             rightSectionWidth={ONE_ACTION_WIDTH}
             rightSection={clearButton}
           />
@@ -726,17 +745,32 @@ export function SchemaForm({
       // where it was, so the next thing typed runs on from the last word — the
       // user pressed the key that means "new line" and got a reshaped box.
       //
-      // The newline lands at the end rather than at the caret because that is
-      // where EnlargedStringField puts the caret regardless (see its comment);
-      // going anywhere else would separate the newline from the text that
-      // follows it. A field already at its maxLength is enlarged without one,
-      // since the alternative is breaching a constraint the schema states.
-      const enlargeWithNewline = () => {
+      // The newline goes in at the field's own selection, exactly as it would
+      // in a text area: split at the caret, and replace a selected range rather
+      // than keeping it. Appending at the end instead would silently rewrite
+      // the value whenever the caret was not already there — pressing Enter in
+      // the middle of `abc|def` would produce `abcdef` with a trailing blank
+      // line, which is not what any editor does and not what was asked for.
+      //
+      // A field with no room left for the newline is enlarged without one,
+      // since the alternative is breaching a maxLength the schema states.
+      const enlargeWithNewline = (input: HTMLInputElement) => {
         const current = (rawValue as string) ?? "";
-        const room =
+        // A control that cannot report a selection (`selectionStart` is null
+        // for some input types) is treated as a caret at the end.
+        const start = input.selectionStart ?? current.length;
+        const end = input.selectionEnd ?? start;
+        const next = `${current.slice(0, start)}\n${current.slice(end)}`;
+        const fits =
           fieldSchema.maxLength === undefined ||
-          current.length < fieldSchema.maxLength;
-        if (room) handleFieldChange(fieldName, `${current}\n`);
+          next.length <= fieldSchema.maxLength;
+        if (fits) {
+          handleFieldChange(fieldName, next);
+          setEnlargeCarets((previous) => ({
+            ...previous,
+            [fieldName]: start + 1,
+          }));
+        }
         enlarge();
       };
 
@@ -775,7 +809,7 @@ export function SchemaForm({
               return;
             }
             event.preventDefault();
-            enlargeWithNewline();
+            enlargeWithNewline(event.currentTarget);
           }}
           // Announces that the field carries a shortcut at all. A keyboard user
           // no longer meets the button by tabbing, so without this the binding

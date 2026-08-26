@@ -1999,6 +1999,25 @@ describe("SchemaForm enlarge keyboard access (#2138)", () => {
     );
   }
 
+  // Seeds a value and holds it in real state. A stub `onChange` would leave the
+  // field's value frozen, which makes "the value did not change" assertions
+  // pass whatever the component does.
+  function SeededHarness({ maxLength }: { maxLength?: number }) {
+    const [values, setValues] = useState<Record<string, unknown>>({
+      note: "abc",
+    });
+    return (
+      <SchemaForm
+        schema={{
+          type: "object",
+          properties: { note: { type: "string", title: "Note", maxLength } },
+        }}
+        values={values}
+        onChange={setValues}
+      />
+    );
+  }
+
   const noteField = () =>
     screen.getByRole("textbox", { name: /Note/ }) as HTMLTextAreaElement;
 
@@ -2138,26 +2157,84 @@ describe("SchemaForm enlarge keyboard access (#2138)", () => {
     expect(noteField().selectionStart).toBe("before\n".length);
   });
 
+  // The newline goes in where the caret is, exactly as it would in a text area.
+  // Appending at the end instead silently rewrites the value whenever the caret
+  // was not already there — `abc|def` would become `abcdef` with a trailing
+  // blank line (#2139 review).
+  it("inserts the newline at the caret, not at the end", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness />);
+
+    await user.type(noteField(), "abcdef");
+    noteField().setSelectionRange(3, 3);
+    fireEvent.keyDown(noteField(), { key: "Enter" });
+
+    expect(noteField().value).toBe("abc\ndef");
+    expect(noteField().selectionStart).toBe(4);
+  });
+
+  // And a selected range is replaced, not kept — again matching what typing
+  // Enter into a real text area does.
+  it("replaces a selected range with the newline", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness />);
+
+    await user.type(noteField(), "abcdef");
+    noteField().setSelectionRange(3, 6);
+    fireEvent.keyDown(noteField(), { key: "Enter" });
+
+    expect(noteField().value).toBe("abc\n");
+    expect(noteField().selectionStart).toBe(4);
+  });
+
+  // Splitting at the very start is the boundary the slice arithmetic is most
+  // likely to get wrong.
+  it("splits at the start of the value", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<TwoStringHarness />);
+
+    await user.type(noteField(), "abc");
+    noteField().setSelectionRange(0, 0);
+    fireEvent.keyDown(noteField(), { key: "Enter" });
+
+    expect(noteField().value).toBe("\nabc");
+    expect(noteField().selectionStart).toBe(1);
+  });
+
   // A newline is a character, so a field with no room for one is enlarged
   // without it rather than pushed past a constraint its schema states.
   it("enlarges without a newline when the field is at its maxLength", async () => {
     const user = userEvent.setup();
-    renderWithMantine(
-      <SchemaForm
-        schema={{
-          type: "object",
-          properties: { note: { type: "string", title: "Note", maxLength: 3 } },
-        }}
-        values={{ note: "abc" }}
-        onChange={vi.fn()}
-      />,
-    );
+    renderWithMantine(<SeededHarness maxLength={3} />);
 
     noteField().focus();
     await user.keyboard("{Enter}");
 
     expect(noteField().tagName).toBe("TEXTAREA");
     expect(noteField().value).toBe("abc");
+  });
+
+  // Replacing a selection frees room, so the same full field does take the
+  // newline when the keystroke is removing something to make space for it.
+  it("enters the newline at maxLength when a selection makes room", () => {
+    renderWithMantine(<SeededHarness maxLength={3} />);
+
+    noteField().setSelectionRange(1, 3);
+    fireEvent.keyDown(noteField(), { key: "Enter" });
+
+    expect(noteField().value).toBe("a\n");
+  });
+
+  // The control: the same seeded field with no maxLength does take the newline,
+  // so the test above is showing the constraint at work rather than a field
+  // that never accepts one.
+  it("enters the newline when the field has no maxLength", () => {
+    renderWithMantine(<SeededHarness />);
+
+    noteField().setSelectionRange(3, 3);
+    fireEvent.keyDown(noteField(), { key: "Enter" });
+
+    expect(noteField().value).toBe("abc\n");
   });
 
   // An empty field still has room, so the newline is entered there too.
