@@ -1035,8 +1035,16 @@ export function InspectorView({
     // value is absent from `formValues`, the schema-form's validity check
     // fails, and Open App is silently disabled — an automated driver's click
     // then no-ops and the iframe-wait spins forever.
+    // The args are passed to the seeding too, not just overlaid on it: for a
+    // schema whose arguments are a root union they can name a branch other
+    // than the first, and defaults seeded from the wrong branch would sit in
+    // the submitted arguments where the form — showing the branch the args
+    // identify — never displays them (#2123).
     const formValues = {
-      ...collectSchemaDefaults(toFormSchema(target.inputSchema) ?? {}),
+      ...collectSchemaDefaults(
+        toFormSchema(target.inputSchema) ?? {},
+        deepLink.appArgs ?? {},
+      ),
       ...deepLink.appArgs,
     };
     // Seed the selection directly rather than routing through

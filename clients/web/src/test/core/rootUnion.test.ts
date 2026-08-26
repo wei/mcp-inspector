@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   declaresAnyFields,
   resolveRootUnion,
+  selectBranchIndex,
 } from "@inspector/core/json/rootUnion.js";
 
 const EMAIL = {
@@ -114,6 +115,36 @@ describe("resolveRootUnion", () => {
       anyOf: [EMAIL, SMS],
     });
     expect(branches).toEqual([]);
+  });
+
+  it("leaves an allOf member carrying a constraint the merge cannot apply", () => {
+    // Only `properties`/`required` are merged, so a member stating anything
+    // further would have that constraint erased with the keyword.
+    for (const member of [
+      { type: "object", properties: { x: {} }, additionalProperties: false },
+      { type: "object", properties: { x: {} }, not: { properties: {} } },
+      { type: "string", properties: { x: {} } },
+    ]) {
+      const { base } = resolveRootUnion({
+        type: "object" as const,
+        allOf: [member as unknown],
+      });
+      expect(base.allOf).toHaveLength(1);
+      expect(base.properties).toBeUndefined();
+    }
+  });
+
+  it("declines an allOf whose members contradict each other", () => {
+    // Neither conflicts with the root, which declares no `x` at all.
+    const { base } = resolveRootUnion({
+      type: "object",
+      allOf: [
+        { type: "object", properties: { x: { minimum: 10 } } },
+        { type: "object", properties: { x: { minimum: 0 } } },
+      ],
+    });
+    expect(base.allOf).toHaveLength(2);
+    expect(base.properties).toBeUndefined();
   });
 
   it("merges allOf branches unconditionally", () => {
@@ -406,6 +437,43 @@ describe("resolveRootUnion", () => {
     it("reports none for a bare object schema", () => {
       expect(declaresAnyFields({ type: "object" })).toBe(false);
       expect(declaresAnyFields(undefined)).toBe(false);
+    });
+  });
+
+  describe("selectBranchIndex", () => {
+    const { branches } = resolveRootUnion({
+      type: "object",
+      anyOf: [EMAIL, SMS],
+    });
+
+    it("names the branch whose discriminator the values carry", () => {
+      expect(selectBranchIndex(branches, { kind: "sms" })).toBe(1);
+    });
+
+    it("reports none when the values identify nothing", () => {
+      expect(selectBranchIndex(branches, {})).toBeNull();
+      expect(selectBranchIndex(branches, { kind: "other" })).toBeNull();
+    });
+
+    it("reports none when two branches match", () => {
+      // An ambiguous answer is worse than none: the caller falls back to the
+      // first branch, where the picker and the values at least agree.
+      const ambiguous = resolveRootUnion({
+        type: "object",
+        anyOf: [EMAIL, { ...EMAIL, properties: { ...EMAIL.properties } }],
+      }).branches;
+      expect(selectBranchIndex(ambiguous, { kind: "email" })).toBeNull();
+    });
+
+    it("reports none for a branch that pins nothing", () => {
+      const unpinned = resolveRootUnion({
+        type: "object",
+        anyOf: [
+          { type: "object", properties: { a: { type: "string" } } },
+          { type: "object", properties: { b: { type: "string" } } },
+        ],
+      }).branches;
+      expect(selectBranchIndex(unpinned, { a: "x" })).toBeNull();
     });
   });
 });

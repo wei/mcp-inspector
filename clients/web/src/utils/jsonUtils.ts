@@ -2,7 +2,10 @@ import {
   admitsNull,
   normalizeNullableUnion,
 } from "@inspector/core/json/nullableUnion.js";
-import { resolveRootUnion } from "@inspector/core/json/rootUnion.js";
+import {
+  resolveRootUnion,
+  selectBranchIndex,
+} from "@inspector/core/json/rootUnion.js";
 
 export type JsonValue =
   | string
@@ -124,14 +127,23 @@ export function getDataType(value: JsonValue): DataType {
  */
 export function collectSchemaDefaults(
   schema: InspectorFormSchema,
+  knownValues: Record<string, unknown> = {},
 ): Record<string, unknown> {
   // Seed from the shape the form actually renders: root `allOf` merged in, and
-  // for a root union the branch the picker starts on (#2123). Seeding every
+  // for a root union the branch the picker will open on (#2123). Seeding every
   // branch would put fields of shapes the call is not making into the
   // arguments; seeding none would leave the branch's defaults — its
   // discriminator `const` among them — displayed but never submitted.
+  //
+  // `knownValues` is for a caller that already holds arguments it is about to
+  // overlay on these defaults, as the App deep link does with its `appArgs`.
+  // Those values can name a branch other than the first through its
+  // discriminator, and seeding the first branch's defaults underneath them
+  // would leave another shape's fields in the submitted arguments, invisible
+  // to a form showing the branch the values actually identify.
   const { base, branches } = resolveRootUnion(schema);
-  const properties = (branches[0]?.schema ?? base).properties ?? {};
+  const selected = selectBranchIndex(branches, knownValues) ?? 0;
+  const properties = (branches[selected]?.schema ?? base).properties ?? {};
   const result: Record<string, unknown> = {};
   for (const [fieldName, rawSchema] of Object.entries(properties)) {
     // Collapse a nullable union first, for the same reason `SchemaForm` does:

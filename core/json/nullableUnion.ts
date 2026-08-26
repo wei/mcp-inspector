@@ -372,6 +372,13 @@ export function admitsNull(schema: NullableUnionSchema): boolean {
   if (nullExcludedBySiblings(schema)) {
     return false;
   }
+  // `const: null` admits null and nothing else, whatever the schema says (or
+  // omits) about `type`. Without this a required field pinned to null is seeded
+  // with the only value it accepts and then reported as missing, leaving submit
+  // permanently disabled on a form the user cannot change (#2123).
+  if (schema.const === null) {
+    return true;
+  }
   // Applicators this module does not evaluate. `not: { type: "null" }` rules
   // null out; `allOf` can add a member that does; and `oneOf` requires
   // **exactly one** branch to match, so a null branch does not by itself mean

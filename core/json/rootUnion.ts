@@ -229,9 +229,20 @@ function mergeProperty(
  * - **It is a `$ref`.** The referent is not resolved by this module, so its
  *   constraints are unknown rather than absent.
  */
+const MERGEABLE_KEYWORDS = new Set(["type", "properties", "required"]);
+
 function isFlattenable(member: unknown): boolean {
   const branch = toBranch(member);
-  return branch !== null && branch.$ref === undefined;
+  if (branch === null || !admitsObject(branch)) return false;
+  // `mergeBranch` applies `properties` and `required` and nothing else, so a
+  // member stating anything further would have that constraint erased along
+  // with the keyword — a nested `anyOf`, a `not`, an `additionalProperties`,
+  // a `$ref` whose referent is not resolved here. Only the keywords the merge
+  // actually carries, plus annotations that constrain nothing, are accepted.
+  return Object.keys(branch).every(
+    (keyword) =>
+      MERGEABLE_KEYWORDS.has(keyword) || ANNOTATION_KEYWORDS.has(keyword),
+  );
 }
 
 /** Whether any property declaration of `branch` conflicts with the base's. */
@@ -391,20 +402,21 @@ export function resolveRootUnion<T extends RootUnionSchema>(
   // branch would otherwise be merged against a base whose constraints are not
   // all known.
   const allOfMembers = schema.allOf ?? [];
-  const flattenable =
-    allOfMembers.every(isFlattenable) &&
-    allOfMembers.every(
-      (member) =>
-        !conflictsWithBase(schema, toBranch(member) as RootUnionSchema),
-    );
-  if (!flattenable) {
-    return { base: schema as ResolvedSchema<T>, branches: [] };
+  let merged = schema as ResolvedSchema<T>;
+  for (const member of allOfMembers) {
+    const branch = toBranch(member);
+    // Each member is checked against what has been merged **so far**, not
+    // against the original root: two members declaring `x.minimum` as 10 and 0
+    // agree with a root that declares neither, while contradicting each other.
+    if (
+      branch === null ||
+      !isFlattenable(member) ||
+      conflictsWithBase(merged, branch)
+    ) {
+      return { base: schema as ResolvedSchema<T>, branches: [] };
+    }
+    merged = mergeBranch(merged, branch);
   }
-
-  const merged = allOfMembers.reduce<ResolvedSchema<T>>(
-    (acc, member) => mergeBranch(acc, toBranch(member) as RootUnionSchema),
-    schema as ResolvedSchema<T>,
-  );
   const base = withoutComposition(merged);
 
   if (schema.oneOf !== undefined && schema.anyOf !== undefined) {
@@ -437,4 +449,39 @@ export function resolveRootUnion<T extends RootUnionSchema>(
         declaredFields: Object.keys(propertiesOf(branch) ?? {}),
       })),
   };
+}
+
+/**
+ * The index of the branch a set of values already identifies, or `null` when
+ * they identify none uniquely.
+ *
+ * A discriminated union pins its discriminator with `const`, so values carrying
+ * one name the branch they belong to. Shared because more than one caller has
+ * to reach the same answer: the web form opens its picker on that branch, and
+ * the defaults seeded before the values are overlaid must belong to the same
+ * one, or the arguments carry a shape the picker is not showing.
+ */
+export function selectBranchIndex<T extends RootUnionSchema>(
+  branches: RootUnionBranch<T>[],
+  values: Record<string, unknown>,
+): number | null {
+  const matches: number[] = [];
+  branches.forEach((branch, index) => {
+    const pinned = Object.entries(propertiesOf(branch.schema) ?? {})
+      .map(
+        ([name, schema]) =>
+          [
+            name,
+            (toBranch(schema) as { const?: unknown } | null)?.const,
+          ] as const,
+      )
+      .filter(([, constValue]) => constValue !== undefined);
+    if (
+      pinned.length > 0 &&
+      pinned.every(([name, constValue]) => values[name] === constValue)
+    ) {
+      matches.push(index);
+    }
+  });
+  return matches.length === 1 ? matches[0] : null;
 }

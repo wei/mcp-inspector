@@ -410,6 +410,28 @@ describe("root composition (#2123)", () => {
     ).toEqual({ merged: "m" });
   });
 
+  it("seeds the branch the known values identify, not the first", () => {
+    // What the App deep link does: seed defaults, then overlay its `appArgs`.
+    // Seeding branch 0 underneath branch 1's args would leave `address` in the
+    // submitted arguments, invisible to a form showing the SMS branch.
+    expect(collectSchemaDefaults(UNION, { kind: "sms" })).toEqual({
+      kind: "sms",
+    });
+  });
+
+  it("accepts a required field pinned to null", () => {
+    // `const: null` admits null and nothing else, so seeding it must not leave
+    // submit disabled on a value the user cannot change.
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: { nothing: { const: null } },
+      required: ["nothing"],
+    };
+    const values = collectSchemaDefaults(schema);
+    expect(values).toEqual({ nothing: null });
+    expect(hasMissingRequiredFields(schema, values)).toBe(false);
+  });
+
   it("blocks submission while no branch is satisfied", () => {
     expect(hasMissingRequiredFields(UNION, {})).toBe(true);
     expect(hasMissingRequiredFields(UNION, { kind: "email" })).toBe(true);

@@ -31,7 +31,10 @@ import {
   isStringEnum,
   normalizeNullableUnion,
 } from "@inspector/core/json/nullableUnion.js";
-import { resolveRootUnion } from "@inspector/core/json/rootUnion.js";
+import {
+  resolveRootUnion,
+  selectBranchIndex,
+} from "@inspector/core/json/rootUnion.js";
 import { collectSchemaDefaults } from "../../../utils/jsonUtils";
 
 const FieldLabel = Text.withProps({
@@ -571,36 +574,6 @@ function resolveValue(
   return getDefaultValue(fieldSchema);
 }
 
-/**
- * The branch a set of values already identifies, or `null` when they identify
- * none uniquely.
- *
- * A discriminated union pins its discriminator with `const`, so values carrying
- * one name the branch they belong to. This matters because the form is not
- * always mounted empty: an App deep link overlays `appArgs` on the initial
- * defaults, so `{ kind: "sms", … }` can arrive while the picker would otherwise
- * open on the first branch — showing one shape's controls while a differently
- * shaped set of values sits underneath, ready to be submitted (#2123).
- */
-function matchBranchIndex(
-  branches: { schema: InspectorFormSchema }[],
-  values: Record<string, unknown>,
-): number | null {
-  const matches: number[] = [];
-  branches.forEach((branch, index) => {
-    const pinned = Object.entries(branch.schema.properties ?? {}).filter(
-      ([, fieldSchema]) => fieldSchema.const !== undefined,
-    );
-    if (
-      pinned.length > 0 &&
-      pinned.every(([name, fieldSchema]) => values[name] === fieldSchema.const)
-    ) {
-      matches.push(index);
-    }
-  });
-  return matches.length === 1 ? matches[0] : null;
-}
-
 export function SchemaForm({
   schema,
   values,
@@ -619,7 +592,7 @@ export function SchemaForm({
   // property of this rendering, not of the arguments: `values` carries what the
   // user typed, and nothing in it names a branch.
   const [branchIndex, setBranchIndex] = useState(
-    () => matchBranchIndex(branches, values) ?? 0,
+    () => selectBranchIndex(branches, values) ?? 0,
   );
   // A form reused for another entity can be handed a shorter union, so the
   // index is clamped rather than trusted — `resetKey` resets it below, but a
@@ -657,7 +630,7 @@ export function SchemaForm({
     // same reason enlargement does — reset to whichever branch the new values
     // identify, so the visible selection cannot disagree with what would be
     // submitted, and to the first when they identify none.
-    setBranchIndex(matchBranchIndex(branches, values) ?? 0);
+    setBranchIndex(selectBranchIndex(branches, values) ?? 0);
   });
 
   // Stable so a field's reporting effect subscribes once, not per render. The
