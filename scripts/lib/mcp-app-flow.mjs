@@ -22,14 +22,12 @@
  * **test server** is always a repo fixture — it is not in the tarball and
  * should not be.
  *
- * Playwright is resolved with a `createRequire` based at
- * clients/web/package.json rather than a bare `import("playwright")`: a bare ESM
- * specifier resolves relative to `scripts/`, not the cwd, so a `cd clients/web`
- * in the npm script would NOT make it resolvable. Same gotcha as
- * smoke-web-browser.mjs; see its header.
+ * Launching the browser is NOT this module's job — `lib/headless-browser.mjs`
+ * owns that, so the engine is a parameter rather than a hard-coded Chromium
+ * (#2086) and so `smoke:web:browser`, which does not drive an App at all, can
+ * share it without importing this file.
  */
 
-import { createRequire } from "node:module";
 import { join } from "node:path";
 import { startAnnouncedChild } from "./announced-child.mjs";
 import {
@@ -39,16 +37,6 @@ import {
 
 /** The App tool the `mcp-app-http.json` fixture serves. */
 export const APP_TOOL = "mcp_app_demo";
-
-/**
- * Console messages that are the async half of the uncaught-crash class (an
- * unhandled rejection or a failed dynamic import). Hard failures; every other
- * console error is a diagnostic, so benign font-CDN / React-warning noise can't
- * flake CI. Kept identical to smoke-web-browser.mjs, which documents the
- * reasoning at length.
- */
-export const FATAL_CONSOLE =
-  /^Uncaught\b|Failed to fetch dynamically imported module/;
 
 /** Path to the composable test server build, relative to the repo root. */
 export function composableServerPath(repoRoot) {
@@ -141,59 +129,6 @@ export function buildAppDeepLink({
     `&transport=http&autoConnect=${token}&openApp=${appTool}` +
     `&appArgs=${encodeAppArgs(appArgs)}&autoOpen=${token}`
   );
-}
-
-/**
- * Attach the two error channels a headless page reports on.
- *
- * An uncaught *synchronous* page error fires `pageerror`; its async twin — an
- * unhandled rejection or a failed dynamic import — is not a `pageerror` at all,
- * Chromium reports it on the console channel instead. Both are captured; only
- * `fatal()` is a failure, so ordinary console noise stays a diagnostic.
- */
-export function attachPageDiagnostics(page) {
-  const pageErrors = [];
-  const consoleErrors = [];
-  page.on("pageerror", (err) =>
-    pageErrors.push(err instanceof Error ? err.message : String(err)),
-  );
-  page.on("console", (msg) => {
-    if (msg.type() === "error") consoleErrors.push(msg.text());
-  });
-  return {
-    pageErrors,
-    consoleErrors,
-    fatalConsole: () => consoleErrors.filter((m) => FATAL_CONSOLE.test(m)),
-    benignConsole: () => consoleErrors.filter((m) => !FATAL_CONSOLE.test(m)),
-    fatal: () => [
-      ...pageErrors,
-      ...consoleErrors.filter((m) => FATAL_CONSOLE.test(m)),
-    ],
-  };
-}
-
-/** Launch headless Chromium, resolved from the web client's install. */
-export async function loadChromium(repoRoot) {
-  const requireFromWeb = createRequire(
-    join(repoRoot, "clients", "web", "package.json"),
-  );
-  let chromium;
-  try {
-    ({ chromium } = requireFromWeb("playwright"));
-  } catch (err) {
-    // Not resolvable means devDependencies are missing — fixed by `npm install`
-    // at the repo root, NOT by `playwright install` (which fetches binaries).
-    throw new Error(
-      `could not resolve the Playwright package from clients/web — run \`npm install\` at the repo root (${err instanceof Error ? err.message : String(err)})`,
-    );
-  }
-  try {
-    return await chromium.launch({ headless: true });
-  } catch (err) {
-    throw new Error(
-      `chromium failed to launch — on a bare Linux box run \`npx playwright install --with-deps chromium\` for the system libraries (${err instanceof Error ? err.message : String(err)})`,
-    );
-  }
 }
 
 /**
