@@ -445,6 +445,18 @@ describe("root composition (#2123)", () => {
     });
   });
 
+  it("seeds a field named __proto__", () => {
+    // A plain assignment would invoke the legacy prototype setter, leaving a
+    // required pinned field displayed read-only and seeded with nothing.
+    const seeded = collectSchemaDefaults({
+      type: "object",
+      properties: Object.fromEntries([
+        ["__proto__", { type: "string", const: "kept" }],
+      ]),
+    });
+    expect(Object.hasOwn(seeded, "__proto__")).toBe(true);
+  });
+
   it("re-applies a nested object's constants", () => {
     // The overlay replaces the whole nested object rather than merging into it,
     // so a link naming `{ config: { kind: "sms" } }` would otherwise slip past

@@ -145,6 +145,17 @@ export function collectSchemaDefaults(
   const selected = selectBranchIndex(branches, knownValues) ?? 0;
   const properties = (branches[selected]?.schema ?? base).properties ?? {};
   const result: Record<string, unknown> = {};
+  // `properties` is a JSON record, so `__proto__` is a legal field name that a
+  // plain assignment would drop into the legacy prototype setter rather than
+  // keep — a required one pinned by `const` would then display read-only and
+  // be seeded with nothing, leaving submit permanently disabled (#2123).
+  const seed = (name: string, value: unknown) =>
+    Object.defineProperty(result, name, {
+      value,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
   for (const [fieldName, rawSchema] of Object.entries(properties)) {
     // Collapse a nullable union first, for the same reason `SchemaForm` does:
     // a nested object's `properties` live on the union's surviving branch, so
@@ -161,13 +172,13 @@ export function collectSchemaDefaults(
       // `const` rejects, and seeding that would submit an invalid argument
       // through a field rendered read-only, leaving the user no way to correct
       // it.
-      result[fieldName] = fieldSchema.const;
+      seed(fieldName, fieldSchema.const);
     } else if (fieldSchema.default !== undefined) {
-      result[fieldName] = fieldSchema.default;
+      seed(fieldName, fieldSchema.default);
     } else if (fieldSchema.type === "object" && fieldSchema.properties) {
       const nested = collectSchemaDefaults(fieldSchema);
       if (Object.keys(nested).length > 0) {
-        result[fieldName] = nested;
+        seed(fieldName, nested);
       }
     }
   }
