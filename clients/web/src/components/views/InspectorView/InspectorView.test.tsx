@@ -867,6 +867,70 @@ describe("InspectorView", () => {
     expect(screen.getByDisplayValue("retention")).toBeInTheDocument();
   });
 
+  it("deep-link appArgs select their root-union branch and keep its defaults (#2123)", async () => {
+    const unionAppTool: Tool = {
+      name: "notify",
+      title: "Notify",
+      inputSchema: {
+        type: "object",
+        properties: { note: { type: "string" } },
+        anyOf: [
+          {
+            type: "object",
+            properties: {
+              kind: { type: "string", const: "email" },
+              address: { type: "string" },
+              retries: { type: "number", default: 1 },
+            },
+            required: ["kind", "address"],
+          },
+          {
+            type: "object",
+            properties: {
+              kind: { type: "string", const: "sms" },
+              phone: { type: "string" },
+              retries: { type: "number", default: 3 },
+            },
+            required: ["kind", "phone"],
+          },
+        ],
+      },
+      _meta: { ui: { resourceUri: "ui://apps/notify" } },
+    };
+    renderWithMantine(
+      <StatefulInspectorViewHost
+        {...makeProps({
+          servers: [sampleServer],
+          activeServer: "alpha",
+          connectionStatus: "connected",
+          initializeResult: connectedInit,
+          tools: [unionAppTool],
+          deepLink: {
+            serverId: "deep-link",
+            serverConfig: {
+              type: "streamable-http",
+              url: "https://example.com/mcp",
+            },
+            openApp: "notify",
+            // Names the SECOND branch. A shallow default-then-overlay would
+            // seed the first branch's fields underneath these values.
+            appArgs: { kind: "sms", phone: "555-0100" },
+            autoOpen: false,
+          },
+        })}
+      />,
+    );
+    // The picker opens on the branch the args describe…
+    expect(await screen.findByDisplayValue("555-0100")).toBeInTheDocument();
+    // Twice over: the Variant picker names the branch, and the read-only
+    // discriminator carries the value that will be submitted.
+    expect(screen.getAllByDisplayValue("sms")).toHaveLength(2);
+    // …with THAT branch's default, not the first branch's `1`.
+    expect(screen.getByDisplayValue("3")).toBeInTheDocument();
+    // …and nothing from the branch this call is not making.
+    expect(screen.queryByRole("textbox", { name: /address/i })).toBeNull();
+  });
+
   it("ignores a deep-link openApp whose tool is not an app (no tab switch)", async () => {
     renderWithMantine(
       <StatefulInspectorViewHost

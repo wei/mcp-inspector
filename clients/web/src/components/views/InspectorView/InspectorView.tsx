@@ -103,7 +103,11 @@ import {
   correlatedFetchStatusById,
   revealableMessageIds,
 } from "../../../utils/correlateTransportErrors";
-import { collectSchemaDefaults, toFormSchema } from "../../../utils/jsonUtils";
+import {
+  applySchemaConstants,
+  seedSchemaValues,
+  toFormSchema,
+} from "../../../utils/jsonUtils";
 import { MONITOR_COLUMN_ANIM_MS } from "./monitorColumnAnimation";
 
 const SORT_DEFAULT: SortDirection = "newest-first";
@@ -1035,10 +1039,23 @@ export function InspectorView({
     // value is absent from `formValues`, the schema-form's validity check
     // fails, and Open App is silently disabled — an automated driver's click
     // then no-ops and the iframe-wait spins forever.
-    const formValues = {
-      ...collectSchemaDefaults(toFormSchema(target.inputSchema) ?? {}),
-      ...deepLink.appArgs,
-    };
+    // The args are passed to the seeding too, not just overlaid on it: for a
+    // schema whose arguments are a root union they can name a branch other
+    // than the first, and defaults seeded from the wrong branch would sit in
+    // the submitted arguments where the form — showing the branch the args
+    // identify — never displays them (#2123).
+    // …and the schema's constants are re-applied *after* the overlay: a field
+    // the form renders read-only cannot be corrected by the user, so a deep
+    // link disagreeing with one would otherwise auto-open with a hidden value
+    // contradicting the shape on screen.
+    const appFormSchema = toFormSchema(target.inputSchema) ?? {};
+    const formValues = applySchemaConstants(
+      appFormSchema,
+      // Merged per level, not with one shallow spread: a nested object in the
+      // args would otherwise replace the whole seeded object, discarding the
+      // nested defaults the form goes on displaying.
+      seedSchemaValues(appFormSchema, deepLink.appArgs ?? {}),
+    );
     // Seed the selection directly rather than routing through
     // AppsScreen.handleSelect. This deliberately bypasses handleSelect's
     // no-input-app auto-launch: a deep link must never invoke a tool against

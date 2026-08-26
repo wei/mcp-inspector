@@ -186,6 +186,46 @@ v2/main/
 │   │                                   #   and TUI schemaToForm — since each dispatches on
 │   │                                   #   a single `type` string and would otherwise miss
 │   │                                   #   a nullable field entirely — #1928/#2015;
+│   │                                   #   rootUnion.ts: flattens the COMPOSITION keywords a
+│   │                                   #   tool's inputSchema may carry at its ROOT — `allOf`
+│   │                                   #   merged unconditionally (conjunctive, so there is
+│   │                                   #   no choice to present), a root `oneOf`/`anyOf`
+│   │                                   #   returned as the BRANCHES a picker chooses between.
+│   │                                   #   Legal since 2026-07-28 and rendered as an EMPTY
+│   │                                   #   FORM before — no picker, no fields, not even the
+│   │                                   #   raw-JSON fallback a union-typed *property* gets,
+│   │                                   #   so the tool could only be called with empty
+│   │                                   #   arguments. Read by all three clients: web
+│   │                                   #   SchemaForm (the Variant picker + the branch-change
+│   │                                   #   value pruning), TUI schemaToForm (a section per
+│   │                                   #   branch, its fields forced OPTIONAL since only one
+│   │                                   #   alternative applies — the chosen branch's
+│   │                                   #   `required` is then checked at SUBMIT
+│   │                                   #   (missingRequiredFields), since optional fields make
+│   │                                   #   the FORM satisfiable, not the call — and rendered under PREFIXED
+│   │                                   #   names behind a variant select, because ink-form
+│   │                                   #   keys values by field name across the WHOLE form,
+│   │                                   #   so two branches' `kind` would otherwise be one
+│   │                                   #   field; schemaToForm.decodeFormValues translates
+│   │                                   #   back on submit), and convertToolParameters (which
+│   │                                   #   branch's schema types a CLI --tool-arg).
+│   │                                   #   DECLINES rather than half-reads, since keywords at
+│   │                                   #   one level are CONJUNCTIVE and it computes no
+│   │                                   #   intersections: a union whose members are not ALL
+│   │                                   #   field-carrying objects (or whose member `type`
+│   │                                   #   rules objects out), a branch restating a
+│   │                                   #   constraint the root states differently, ANY member
+│   │                                   #   stating more than the merge applies (only
+│   │                                   #   type/properties/required — a `false`, a $ref, a
+│   │                                   #   nested applicator would have its constraint erased
+│   │                                   #   with the keyword, turning an UNSATISFIABLE schema
+│   │                                   #   into a fillable form; allOf members are checked
+│   │                                   #   against the ACCUMULATED merge, not the root), and a
+│   │                                   #   schema carrying BOTH oneOf and anyOf. Does not
+│   │                                   #   interpret `not` at all. Declining changes what
+│   │                                   #   RENDERS, never whether the tool takes arguments:
+│   │                                   #   declaresAnyFields counts the raw members, so an
+│   │                                   #   App tool is never auto-invoked with `{}` — #2123;
 │   │                                   #   schemaLint.ts: tool-schema PORTABILITY lint —
 │   │                                   #   constructs that are legal JSON Schema and are
 │   │                                   #   refused or mishandled by real MCP clients (a bare

@@ -32,6 +32,14 @@ import {
   isStringEnum,
   normalizeNullableUnion,
 } from "@inspector/core/json/nullableUnion.js";
+import {
+  resolveRootUnion,
+  selectBranchIndex,
+} from "@inspector/core/json/rootUnion.js";
+import {
+  applySchemaConstants,
+  collectSchemaDefaults,
+} from "../../../utils/jsonUtils";
 
 const FieldLabel = Text.withProps({
   fw: 500,
@@ -45,6 +53,14 @@ const FieldDescription = Text.withProps({
 
 // Indented column for a nested object's sub-fields.
 const IndentedStack = Stack.withProps({ gap: "sm", pl: "md" });
+
+// The picker for a root `oneOf`/`anyOf` (#2123). Not clearable: one branch is
+// always in effect, so "no branch" is not a state the arguments can be in.
+const BranchSelect = Select.withProps({
+  label: "Variant",
+  description: "This tool accepts one of several argument shapes.",
+  allowDeselect: false,
+});
 
 const SchemaJsonInput = JsonInput.withProps({
   formatOnBlur: true,
@@ -598,8 +614,54 @@ export function SchemaForm({
   resetKey,
   onValidityChange,
 }: SchemaFormProps) {
-  const properties = schema.properties ?? {};
-  const requiredFields = schema.required ?? [];
+  // Composition at the root of the schema, flattened before anything is
+  // rendered (#2123). `allOf` is folded into `base`; a top-level `oneOf`/`anyOf`
+  // becomes the branches a picker chooses between. Both are empty for the
+  // ordinary object schema, where `base` is the schema itself.
+  const { base, branches } = resolveRootUnion(schema);
+
+  // Which alternative the form is currently showing. Held here because it is a
+  // property of this rendering, not of the arguments: `values` carries what the
+  // user typed, and nothing in it names a branch.
+  const [branchIndex, setBranchIndex] = useState(
+    () => selectBranchIndex(branches, values) ?? 0,
+  );
+  // The alternatives themselves, as a stable key. A tool refreshed in place
+  // keeps its `resetKey`, so nothing else notices that the union underneath was
+  // reordered or rewritten — and a numeric index then points at a different
+  // branch than the one whose values are held, showing SMS while submitting
+  // email. Re-derived from the values, which is where the answer actually is.
+  // The whole resolved alternative, not just its label and field names: two
+  // branches can share both while pinning different discriminators or typing a
+  // field differently, and a reorder of those would otherwise go unnoticed.
+  const branchesKey = serializeJson(
+    branches.map((branch) => [branch.label, branch.schema]),
+  );
+  useValueChange(branchesKey, () =>
+    setBranchIndex(selectBranchIndex(branches, values) ?? 0),
+  );
+
+  // A form reused for another entity can be handed a shorter union, so the
+  // index is clamped rather than trusted — `resetKey` resets it below, but a
+  // caller that omits it (the elicitation panels mount fresh) supplies none.
+  const activeBranch =
+    branches.length > 0
+      ? (branches[Math.min(branchIndex, branches.length - 1)] ?? null)
+      : null;
+  const effectiveSchema = activeBranch?.schema ?? base;
+
+  const properties = effectiveSchema.properties ?? {};
+  const requiredFields = effectiveSchema.required ?? [];
+
+  // The key the draft-holding fields are remounted by. Switching branches is a
+  // reset for them too: two alternatives may declare the same name with the
+  // same widget, and a half-typed `-` or an unparsed JSON draft would otherwise
+  // survive into a field the switch was supposed to clear — with both parent
+  // values `undefined`, nothing else tells them the entity changed.
+  const draftKey =
+    activeBranch === null
+      ? resetKey
+      : `${resetKey ?? ""}#${branches.indexOf(activeBranch)}`;
 
   // The names of fields currently holding unsendable text. Held here rather
   // than in each field because only the form sees them all, and only the form
@@ -634,6 +696,11 @@ export function SchemaForm({
   useValueChange(resetKey, () => {
     setEnlargedFields(new Set());
     setEnlargeCarets(new Map());
+    // Which branch is selected belongs to the entity it was chosen for, for the
+    // same reason enlargement does — reset to whichever branch the new values
+    // identify, so the visible selection cannot disagree with what would be
+    // submitted, and to the first when they identify none.
+    setBranchIndex(selectBranchIndex(branches, values) ?? 0);
   });
 
   // Stable so a field's reporting effect subscribes once, not per render. The
@@ -656,6 +723,59 @@ export function SchemaForm({
     },
     [],
   );
+
+  // Report the schema's own fixed values upward once per entity, for a caller
+  // that mounts the form with nothing seeded.
+  //
+  // A `const` field is rendered read-only, so the user cannot supply it — and a
+  // required one then leaves submit disabled forever, on a value that was never
+  // in doubt. Most callers seed through `collectSchemaDefaults` before mounting;
+  // this covers the ones that do not, rather than making every caller
+  // responsible for a value the form is already displaying.
+  //
+  // An effect, not a render-time update: `onChange` belongs to the parent, and
+  // calling it during our render would update another component mid-render.
+  // Only names absent from `values` are added, so a caller that has already
+  // seeded them sees no call at all, and re-running cannot loop.
+  // The fixed values themselves, as a stable key: callers rebuild the schema
+  // object every render, so its identity says nothing, while this changes
+  // exactly when what has to be seeded changes.
+  const seedKey = serializeJson(collectSchemaDefaults(effectiveSchema));
+
+  const latestSeed = useRef({ schema: effectiveSchema, values, onChange });
+  // Written in an effect, not during render — the same shape the validity
+  // reporter below uses, and what `react-hooks/refs` requires.
+  useEffect(() => {
+    latestSeed.current = { schema: effectiveSchema, values, onChange };
+  });
+  useEffect(() => {
+    const {
+      schema: current,
+      values: held,
+      onChange: report,
+    } = latestSeed.current;
+    const missing = Object.entries(collectSchemaDefaults(current)).filter(
+      ([name]) => !Object.hasOwn(held, name),
+    );
+    // Constants are re-applied as well as seeded: an in-place schema change can
+    // move a `const` the user cannot edit — the read-only field then displays
+    // the new value while `values` still holds the old one, which is what would
+    // be submitted. Ordinary defaults are only ever *added*, so an edited field
+    // keeps what the user put there.
+    const next = applySchemaConstants(
+      current,
+      missing.length > 0 ? { ...held, ...Object.fromEntries(missing) } : held,
+    );
+    const changed = Object.keys(next).some(
+      (name) =>
+        !Object.hasOwn(held, name) || !Object.is(next[name], held[name]),
+    );
+    if (changed) report(next);
+    // Keyed by the entity and branch being edited, and by the fixed values
+    // themselves: a tool refreshed in place keeps its `resetKey` and its branch
+    // while its schema changes underneath, and a newly pinned field would
+    // otherwise be rendered read-only and never seeded.
+  }, [draftKey, seedKey]);
 
   // Read through a ref so the callback's identity is not a dependency. It has
   // to be one or the other, and a *stable* dependency is what this needs: a
@@ -681,6 +801,58 @@ export function SchemaForm({
     onChange({ ...values, [fieldName]: fieldValue });
   }
 
+  /**
+   * Switch branches, and move `values` with the form.
+   *
+   * The fields the outgoing branch owned are dropped rather than left behind:
+   * they are no longer rendered, so the user cannot see or clear them, and
+   * submitting them would send the server arguments belonging to a shape the
+   * call is not making. Whatever the base contributes is kept — it applies to
+   * every branch — and the incoming branch's defaults (a discriminator `const`
+   * among them) are seeded the way the initial ones were.
+   */
+  function handleBranchChange(nextIndex: number) {
+    const nextBranch = branches[nextIndex];
+    /* v8 ignore next -- the Select's options are built from `branches` */
+    if (!nextBranch) return;
+    setBranchIndex(nextIndex);
+    const nextProperties = nextBranch.schema.properties ?? {};
+    // A value is carried unless it belonged to the outgoing branch's own shape:
+    // a name **both** branches declare may be typed differently by each, so a
+    // `3` typed into branch A's number field must not arrive in branch B's
+    // checkbox. A name only the outgoing branch specialized still survives when
+    // the incoming branch merely inherits the root's declaration — it is a root
+    // argument there, and dropping it would erase a valid value. A field the
+    // incoming branch pins to a `const` is never carried: the branches of a
+    // discriminated union share the discriminator's *name* and disagree about
+    // its value.
+    const incoming = new Set(nextBranch.declaredFields);
+    // `hasOwn` and `fromEntries`, never `values[name]` on its own or an
+    // assignment: `constructor` is a legal argument name whose inherited value
+    // would otherwise be read as one the user supplied, and `__proto__` is one
+    // an assignment would drop into the legacy prototype setter.
+    const carried = Object.fromEntries(
+      Object.entries(nextProperties)
+        .filter(
+          ([name, fieldSchema]) =>
+            // Own-property presence alone, `undefined` included: clearing a
+            // number or JSON field leaves the name present with no value, and
+            // that is the user's answer. Dropping it would let the defaults
+            // below put the field's default back and undo the clear.
+            Object.hasOwn(values, name) &&
+            fieldSchema.const === undefined &&
+            // Carried only where the incoming branch leaves the root's
+            // declaration as it found it. Anything the incoming branch declares
+            // itself is reset: it may type the name differently from wherever
+            // the value was typed, so a `3` from a number field would otherwise
+            // land in its checkbox.
+            !incoming.has(name),
+        )
+        .map(([name]) => [name, values[name]]),
+    );
+    onChange({ ...collectSchemaDefaults(nextBranch.schema), ...carried });
+  }
+
   function renderField(fieldName: string, rawSchema: InspectorFormSchema) {
     // Flatten a nullable union (`anyOf: [X, {type:"null"}]`, `type: [X,"null"]`)
     // before dispatching. Every branch below tests a single `type` string, so
@@ -692,6 +864,65 @@ export function SchemaForm({
     const label = fieldSchema.title ?? fieldName;
     const description = fieldSchema.description;
     const rawValue = resolveValue(values[fieldName], fieldSchema);
+
+    // A field pinned to a single value, checked **before** any type dispatch.
+    // `const` admits exactly one value, so every widget below it — the enum
+    // select, the number box, the checkbox — would offer values the schema
+    // forbids, and a schema carrying both `const` and `enum` would otherwise
+    // reach the select and submit a sibling of the one legal answer. Rendered
+    // read-only rather than editable for the same reason.
+    //
+    // Display only: the value that is *submitted* comes from `values`, seeded
+    // from the same `const` by `collectSchemaDefaults`, so a non-string
+    // constant keeps its type on the wire however it is shown here.
+    if (fieldSchema.const !== undefined) {
+      const constValue = fieldSchema.const;
+      const constText =
+        typeof constValue === "string" ? constValue : serializeJson(constValue);
+
+      // An OPTIONAL pinned field is a yes/no, not a fixed answer: `const`
+      // constrains the value if the property is there, and the schema is
+      // equally happy without it. So it gets the one choice it has, clearable —
+      // the user can opt in or leave it out, and cannot type anything else.
+      if (!isRequired) {
+        return (
+          <Select
+            key={fieldName}
+            label={label}
+            description={description}
+            disabled={disabled}
+            data={[{ value: constText, label: constText }]}
+            clearable
+            value={
+              Object.hasOwn(values, fieldName) &&
+              values[fieldName] !== undefined
+                ? constText
+                : null
+            }
+            onChange={(picked) =>
+              handleFieldChange(
+                fieldName,
+                picked === null ? undefined : constValue,
+              )
+            }
+          />
+        );
+      }
+
+      // Required: there is nothing to decide, so it is displayed and not
+      // editable. The value itself is seeded by `collectSchemaDefaults`.
+      return (
+        <TextInput
+          key={fieldName}
+          label={label}
+          description={description}
+          withAsterisk
+          readOnly
+          disabled={disabled}
+          value={constText}
+        />
+      );
+    }
 
     // string with enum
     if (fieldSchema.type === "string" && fieldSchema.enum) {
@@ -880,7 +1111,7 @@ export function SchemaForm({
         <SchemaNumberInput
           // The only field holding local state, so the only one that has to be
           // remounted when `resetKey` says the form moved to another entity.
-          key={resetKey === undefined ? fieldName : `${resetKey}:${fieldName}`}
+          key={draftKey === undefined ? fieldName : `${draftKey}:${fieldName}`}
           fieldName={fieldName}
           label={label}
           description={description}
@@ -975,8 +1206,12 @@ export function SchemaForm({
                 handleFieldChange(fieldName, nestedValues)
               }
               disabled={disabled}
-              // Sub-fields belong to the same entity, so they reset with it.
-              resetKey={resetKey}
+              // Sub-fields belong to the same entity, so they reset with it —
+              // and to the branch it is being edited under, since two outer
+              // alternatives can both carry this field and a nested form left
+              // mounted across the switch would keep displaying the nested
+              // branch chosen for the other one.
+              resetKey={draftKey}
               // A nested form's invalid draft is the outer form's invalid draft,
               // so it reports through the same channel under this field's name.
               onValidityChange={(nestedInvalid) =>
@@ -993,7 +1228,7 @@ export function SchemaForm({
       <SchemaJsonField
         // Holds local draft state, so — like the number field — it has to be
         // remounted when `resetKey` says the form moved to another entity.
-        key={resetKey === undefined ? fieldName : `${resetKey}:${fieldName}`}
+        key={draftKey === undefined ? fieldName : `${draftKey}:${fieldName}`}
         fieldName={fieldName}
         label={label}
         description={description}
@@ -1010,6 +1245,20 @@ export function SchemaForm({
 
   return (
     <Stack gap="sm">
+      {activeBranch && branches.length > 1 && (
+        <BranchSelect
+          data={branches.map((branch, index) => ({
+            value: String(index),
+            label: branch.label,
+          }))}
+          value={String(branches.indexOf(activeBranch))}
+          disabled={disabled}
+          onChange={(value) =>
+            /* v8 ignore next -- Select only ever reports one of its own options */
+            value === null ? undefined : handleBranchChange(Number(value))
+          }
+        />
+      )}
       {Object.entries(properties).map(([fieldName, fieldSchema]) =>
         renderField(fieldName, fieldSchema),
       )}

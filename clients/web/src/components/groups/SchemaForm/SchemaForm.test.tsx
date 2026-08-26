@@ -7,6 +7,7 @@ import {
   fireEvent,
   renderWithMantine,
   screen,
+  waitFor,
 } from "../../../test/renderWithMantine";
 import { SchemaForm } from "./SchemaForm";
 
@@ -1972,6 +1973,586 @@ describe("SchemaForm multiline strings (#2042)", () => {
       />,
     );
     expect(screen.getByRole("button", { name: "Enlarge Note" })).toBeDisabled();
+  });
+  describe("a root-level union (#2123)", () => {
+    const UNION_SCHEMA: InspectorFormSchema = {
+      type: "object",
+      properties: { note: { type: "string", title: "Note" } },
+      anyOf: [
+        {
+          type: "object",
+          properties: {
+            kind: { type: "string", const: "email" },
+            address: { type: "string", title: "Address" },
+          },
+          required: ["kind", "address"],
+        },
+        {
+          type: "object",
+          properties: {
+            kind: { type: "string", const: "sms" },
+            phone: { type: "string", title: "Phone" },
+          },
+          required: ["kind", "phone"],
+        },
+      ],
+    };
+
+    it("renders the first branch's fields with a picker, not an empty form", () => {
+      renderWithMantine(
+        <SchemaForm schema={UNION_SCHEMA} values={{}} onChange={vi.fn()} />,
+      );
+      expect(screen.getByRole("textbox", { name: /Note/ })).toBeTruthy();
+      expect(screen.getByRole("textbox", { name: /Address/ })).toBeTruthy();
+      expect(screen.queryByRole("textbox", { name: /Phone/ })).toBeNull();
+      expect(
+        (screen.getByRole("textbox", { name: /Variant/ }) as HTMLInputElement)
+          .value,
+      ).toBe("email");
+    });
+
+    it("switches to the chosen branch's fields", async () => {
+      const user = userEvent.setup();
+      renderWithMantine(
+        <SchemaForm schema={UNION_SCHEMA} values={{}} onChange={vi.fn()} />,
+      );
+      await user.click(screen.getByRole("textbox", { name: /Variant/ }));
+      await user.click(screen.getByRole("option", { name: "sms" }));
+      expect(screen.getByRole("textbox", { name: /Phone/ })).toBeTruthy();
+      expect(screen.queryByRole("textbox", { name: /Address/ })).toBeNull();
+    });
+
+    it("drops the outgoing branch's values and seeds the incoming branch's const", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      renderWithMantine(
+        <SchemaForm
+          schema={UNION_SCHEMA}
+          values={{ note: "hi", kind: "email", address: "a@b.c" }}
+          onChange={onChange}
+        />,
+      );
+      await user.click(screen.getByRole("textbox", { name: /Variant/ }));
+      await user.click(screen.getByRole("option", { name: "sms" }));
+      // `address` belongs to a shape this call is no longer making, so it must
+      // not ride along invisibly into the submitted arguments.
+      expect(onChange).toHaveBeenCalledWith({ note: "hi", kind: "sms" });
+    });
+
+    it("renders a const-pinned field read-only", () => {
+      renderWithMantine(
+        <SchemaForm
+          schema={UNION_SCHEMA}
+          values={{ kind: "email" }}
+          onChange={vi.fn()}
+        />,
+      );
+      const kind = screen.getByRole("textbox", {
+        name: /kind/,
+      }) as HTMLInputElement;
+      expect(kind.readOnly).toBe(true);
+      expect(kind.value).toBe("email");
+    });
+
+    it("lets an optional const be opted into and left out", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      const optional: InspectorFormSchema = {
+        type: "object",
+        properties: { dryRun: { type: "boolean", const: true, title: "Dry" } },
+      };
+      function Host() {
+        const [values, setValues] = useState<Record<string, unknown>>({});
+        return (
+          <SchemaForm
+            schema={optional}
+            values={values}
+            onChange={(next) => {
+              setValues(next);
+              onChange(next);
+            }}
+          />
+        );
+      }
+      renderWithMantine(<Host />);
+
+      const field = screen.getByRole("textbox", {
+        name: /Dry/,
+      }) as HTMLInputElement;
+      // Not supplied to begin with — `const` does not demand the property.
+      expect(field.value).toBe("");
+
+      await user.click(field);
+      await user.click(screen.getByRole("option", { name: "true" }));
+      // Opting in sends the schema's own typed value, not the label.
+      expect(onChange).toHaveBeenCalledWith({ dryRun: true });
+
+      // Mantine marks its combobox clear button `aria-hidden` (mouse-only,
+      // `tabIndex={-1}`), so it is only reachable with `hidden: true`.
+      await user.click(screen.getByRole("button", { hidden: true }));
+      // …and opting back out leaves the property absent from the call.
+      expect(onChange).toHaveBeenLastCalledWith({ dryRun: undefined });
+    });
+
+    it("renders a non-string constant read-only too", () => {
+      // Reached before the number/boolean dispatch, so neither offers a value
+      // the `const` forbids.
+      renderWithMantine(
+        <SchemaForm
+          schema={{
+            type: "object",
+            properties: {
+              n: { type: "number", const: 7, title: "N" },
+              b: { type: "boolean", const: true, title: "B" },
+            },
+            required: ["n", "b"],
+          }}
+          values={{}}
+          onChange={vi.fn()}
+        />,
+      );
+      expect(
+        (screen.getByRole("textbox", { name: /N/ }) as HTMLInputElement).value,
+      ).toBe("7");
+      expect(
+        (screen.getByRole("textbox", { name: /B/ }) as HTMLInputElement).value,
+      ).toBe("true");
+    });
+
+    it("keeps a const out of an enum select", () => {
+      // A schema carrying both would otherwise reach the select and offer the
+      // enum's other members, each of which the `const` rejects.
+      renderWithMantine(
+        <SchemaForm
+          schema={{
+            type: "object",
+            properties: {
+              mode: {
+                type: "string",
+                const: "fast",
+                enum: ["fast", "slow"],
+                title: "Mode",
+              },
+            },
+            required: ["mode"],
+          }}
+          values={{}}
+          onChange={vi.fn()}
+        />,
+      );
+      const mode = screen.getByRole("textbox", {
+        name: /Mode/,
+      }) as HTMLInputElement;
+      expect(mode.readOnly).toBe(true);
+      expect(mode.value).toBe("fast");
+    });
+
+    it("opens on the branch the supplied values identify", () => {
+      // A deep link overlays its args on the initial defaults, so values for
+      // one branch can arrive while the picker would otherwise open on another.
+      renderWithMantine(
+        <SchemaForm
+          schema={UNION_SCHEMA}
+          values={{ kind: "sms", phone: "555" }}
+          onChange={vi.fn()}
+        />,
+      );
+      expect(
+        (screen.getByRole("textbox", { name: /Variant/ }) as HTMLInputElement)
+          .value,
+      ).toBe("sms");
+      expect(screen.getByRole("textbox", { name: /Phone/ })).toBeTruthy();
+    });
+
+    it("does not carry a value the outgoing branch declared", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      const schema: InspectorFormSchema = {
+        type: "object",
+        anyOf: [
+          {
+            type: "object",
+            title: "A",
+            properties: { value: { type: "number", title: "Value" } },
+          },
+          {
+            type: "object",
+            title: "B",
+            properties: { value: { type: "boolean", title: "Value" } },
+          },
+        ],
+      };
+      renderWithMantine(
+        <SchemaForm
+          schema={schema}
+          values={{ value: 3 }}
+          onChange={onChange}
+        />,
+      );
+      await user.click(screen.getByRole("textbox", { name: /Variant/ }));
+      await user.click(screen.getByRole("option", { name: "B" }));
+      // Branch B types `value` as a boolean; carrying the 3 would check the box
+      // and submit a number the branch rejects.
+      expect(onChange).toHaveBeenCalledWith({});
+    });
+
+    it("keeps a root value the incoming branch merely inherits", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      const schema: InspectorFormSchema = {
+        type: "object",
+        properties: { count: {} },
+        anyOf: [
+          {
+            type: "object",
+            title: "A",
+            properties: { count: { type: "number", title: "Count" } },
+          },
+          {
+            type: "object",
+            title: "B",
+            properties: { other: { type: "string", title: "Other" } },
+          },
+        ],
+      };
+      renderWithMantine(
+        <SchemaForm
+          schema={schema}
+          values={{ count: 3 }}
+          onChange={onChange}
+        />,
+      );
+      await user.click(screen.getByRole("textbox", { name: /Variant/ }));
+      await user.click(screen.getByRole("option", { name: "B" }));
+      // Branch B does not redeclare `count`, so it is a root argument there —
+      // dropping it would erase a value the schema still accepts.
+      expect(onChange).toHaveBeenCalledWith({ count: 3 });
+    });
+
+    it("clears an in-progress draft when the branch changes", async () => {
+      const user = userEvent.setup();
+      const schema: InspectorFormSchema = {
+        type: "object",
+        anyOf: [
+          {
+            type: "object",
+            title: "A",
+            properties: { value: { type: "number", title: "Value" } },
+          },
+          {
+            type: "object",
+            title: "B",
+            properties: { value: { type: "number", title: "Value" } },
+          },
+        ],
+      };
+      renderWithMantine(
+        <SchemaForm schema={schema} values={{}} onChange={vi.fn()} />,
+      );
+      const before = screen.getByLabelText(/Value/) as HTMLInputElement;
+      // A lone `-` parses to nothing, so the parent value stays `undefined` on
+      // both sides of the switch — the field's own key is what has to change.
+      await user.type(before, "-");
+      expect(before.value).toBe("-");
+
+      await user.click(screen.getByRole("textbox", { name: /Variant/ }));
+      await user.click(screen.getByRole("option", { name: "B" }));
+      expect((screen.getByLabelText(/Value/) as HTMLInputElement).value).toBe(
+        "",
+      );
+    });
+
+    it("resets a nested form's own branch when the outer branch changes", async () => {
+      const user = userEvent.setup();
+      const nested: InspectorFormSchema = {
+        type: "object",
+        properties: {
+          config: {
+            type: "object",
+            title: "Config",
+            properties: {},
+            anyOf: [
+              {
+                type: "object",
+                title: "Inner A",
+                properties: { alpha: { type: "string", title: "Alpha" } },
+              },
+              {
+                type: "object",
+                title: "Inner B",
+                properties: { beta: { type: "string", title: "Beta" } },
+              },
+            ],
+          },
+        },
+        anyOf: [
+          { type: "object", title: "Outer A", properties: { x: {} } },
+          { type: "object", title: "Outer B", properties: { y: {} } },
+        ],
+      };
+      renderWithMantine(
+        <SchemaForm schema={nested} values={{}} onChange={vi.fn()} />,
+      );
+      const [outer, inner] = screen.getAllByRole("textbox", {
+        name: /Variant/,
+      });
+      await user.click(inner!);
+      await user.click(screen.getByRole("option", { name: "Inner B" }));
+      expect(screen.getByRole("textbox", { name: /Beta/ })).toBeTruthy();
+
+      await user.click(outer!);
+      await user.click(screen.getByRole("option", { name: "Outer B" }));
+      // The nested form is still mounted, so only a changed reset key can stop
+      // it displaying a branch the newly seeded values do not describe.
+      expect(screen.getByRole("textbox", { name: /Alpha/ })).toBeTruthy();
+    });
+
+    it("reports the branch's fixed values upward when mounted with none", async () => {
+      // A read-only `const` the caller never seeded would otherwise be
+      // displayed and, if required, keep submit disabled forever.
+      const onChange = vi.fn();
+      renderWithMantine(
+        <SchemaForm schema={UNION_SCHEMA} values={{}} onChange={onChange} />,
+      );
+      await waitFor(() =>
+        expect(onChange).toHaveBeenCalledWith({ kind: "email" }),
+      );
+    });
+
+    it("reports nothing when the caller already seeded them", async () => {
+      const onChange = vi.fn();
+      renderWithMantine(
+        <SchemaForm
+          schema={UNION_SCHEMA}
+          values={{ kind: "email" }}
+          onChange={onChange}
+        />,
+      );
+      // Nothing is missing, so the form does not touch the caller's values.
+      await Promise.resolve();
+      expect(onChange).not.toHaveBeenCalled();
+    });
+
+    it("keeps a cleared root field cleared across a branch switch", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      const schema: InspectorFormSchema = {
+        type: "object",
+        properties: { count: { type: "number", default: 7, title: "Count" } },
+        anyOf: [
+          { type: "object", title: "A", properties: { x: {} } },
+          { type: "object", title: "B", properties: { y: {} } },
+        ],
+      };
+      renderWithMantine(
+        <SchemaForm
+          schema={schema}
+          // What clearing a number field leaves behind: the name is present
+          // with no value, which is the user's answer and not an absence.
+          values={{ count: undefined }}
+          onChange={onChange}
+        />,
+      );
+      await user.click(screen.getByRole("textbox", { name: /Variant/ }));
+      await user.click(screen.getByRole("option", { name: "B" }));
+      expect(onChange).toHaveBeenCalledWith({ count: undefined });
+    });
+
+    it("seeds a newly pinned field when the schema changes in place", async () => {
+      // A tool refreshed in place keeps its `resetKey` and its branch while the
+      // schema changes underneath — the new read-only field must still be
+      // seeded, or a required one leaves submit disabled with no way to fix it.
+      const onChange = vi.fn();
+      const before: InspectorFormSchema = {
+        type: "object",
+        properties: { a: { type: "string", title: "A" } },
+      };
+      const { rerender } = renderWithMantine(
+        <SchemaForm
+          schema={before}
+          values={{}}
+          onChange={onChange}
+          resetKey="same-tool"
+        />,
+      );
+      await Promise.resolve();
+      onChange.mockClear();
+
+      rerender(
+        <SchemaForm
+          schema={{
+            type: "object",
+            properties: {
+              a: { type: "string", title: "A" },
+              version: { type: "string", const: "2" },
+            },
+            required: ["version"],
+          }}
+          values={{}}
+          onChange={onChange}
+          resetKey="same-tool"
+        />,
+      );
+      await waitFor(() =>
+        expect(onChange).toHaveBeenCalledWith({ version: "2" }),
+      );
+    });
+
+    it("re-derives the selection when the branches are reordered in place", () => {
+      // Same `resetKey`, same branch count — only the order changed, so a
+      // numeric index would now point at the other shape and the picker would
+      // show SMS while `values` describe email.
+      const reversed: InspectorFormSchema = {
+        ...UNION_SCHEMA,
+        anyOf: [...(UNION_SCHEMA.anyOf ?? [])].reverse(),
+      };
+      const values = { note: "hi", kind: "email", address: "a@b.c" };
+      const { rerender } = renderWithMantine(
+        <SchemaForm
+          schema={UNION_SCHEMA}
+          values={values}
+          onChange={vi.fn()}
+          resetKey="same-tool"
+        />,
+      );
+      expect(screen.getByRole("textbox", { name: /Address/ })).toBeTruthy();
+
+      rerender(
+        <SchemaForm
+          schema={reversed}
+          values={values}
+          onChange={vi.fn()}
+          resetKey="same-tool"
+        />,
+      );
+      // Still the email branch — the one the values describe — not whatever
+      // now sits at the old index.
+      expect(
+        (screen.getByRole("textbox", { name: /Variant/ }) as HTMLInputElement)
+          .value,
+      ).toBe("email");
+      expect(screen.getByRole("textbox", { name: /Address/ })).toBeTruthy();
+    });
+
+    it("corrects a stale const when the schema changes in place", async () => {
+      // The user cannot edit a read-only field, so a `const` that moves under
+      // an unchanged `resetKey` would display the new value while the old one
+      // sat in `values`, waiting to be submitted.
+      const onChange = vi.fn();
+      const pinned = (value: string): InspectorFormSchema => ({
+        type: "object",
+        properties: {
+          kind: { type: "string", const: value },
+          note: { type: "string", title: "Note" },
+        },
+        required: ["kind"],
+      });
+      const { rerender } = renderWithMantine(
+        <SchemaForm
+          schema={pinned("email")}
+          values={{ kind: "email", note: "kept" }}
+          onChange={onChange}
+          resetKey="same-tool"
+        />,
+      );
+      await Promise.resolve();
+      onChange.mockClear();
+
+      rerender(
+        <SchemaForm
+          schema={pinned("sms")}
+          values={{ kind: "email", note: "kept" }}
+          onChange={onChange}
+          resetKey="same-tool"
+        />,
+      );
+      // The constant is corrected; what the user typed is left alone.
+      await waitFor(() =>
+        expect(onChange).toHaveBeenCalledWith({ kind: "sms", note: "kept" }),
+      );
+    });
+
+    it("renders no picker for a single-branch union but still shows its fields", () => {
+      const schema: InspectorFormSchema = {
+        type: "object",
+        anyOf: [
+          {
+            type: "object",
+            properties: { only: { type: "string", title: "Only" } },
+          },
+        ],
+      };
+      renderWithMantine(
+        <SchemaForm schema={schema} values={{}} onChange={vi.fn()} />,
+      );
+      expect(screen.getByRole("textbox", { name: /Only/ })).toBeTruthy();
+      expect(screen.queryByRole("textbox", { name: /Variant/ })).toBeNull();
+    });
+
+    it("renders root allOf fields", () => {
+      const schema: InspectorFormSchema = {
+        type: "object",
+        allOf: [
+          {
+            type: "object",
+            properties: { merged: { type: "string", title: "Merged" } },
+          },
+        ],
+      };
+      renderWithMantine(
+        <SchemaForm schema={schema} values={{}} onChange={vi.fn()} />,
+      );
+      expect(screen.getByRole("textbox", { name: /Merged/ })).toBeTruthy();
+    });
+
+    it("returns to the first branch when resetKey says the form moved on", async () => {
+      const user = userEvent.setup();
+      const { rerender } = renderWithMantine(
+        <SchemaForm
+          schema={UNION_SCHEMA}
+          values={{}}
+          onChange={vi.fn()}
+          resetKey="tool-a"
+        />,
+      );
+      await user.click(screen.getByRole("textbox", { name: /Variant/ }));
+      await user.click(screen.getByRole("option", { name: "sms" }));
+      expect(screen.getByRole("textbox", { name: /Phone/ })).toBeTruthy();
+
+      rerender(
+        <SchemaForm
+          schema={UNION_SCHEMA}
+          values={{}}
+          onChange={vi.fn()}
+          resetKey="tool-b"
+        />,
+      );
+      expect(screen.getByRole("textbox", { name: /Address/ })).toBeTruthy();
+      expect(screen.queryByRole("textbox", { name: /Phone/ })).toBeNull();
+    });
+
+    it("clamps a selection the next schema's shorter union cannot hold", async () => {
+      const user = userEvent.setup();
+      const { rerender } = renderWithMantine(
+        <SchemaForm schema={UNION_SCHEMA} values={{}} onChange={vi.fn()} />,
+      );
+      await user.click(screen.getByRole("textbox", { name: /Variant/ }));
+      await user.click(screen.getByRole("option", { name: "sms" }));
+
+      // No `resetKey`, so nothing resets the selection: index 1 must be clamped
+      // rather than reaching past the end of a one-branch union.
+      const shorter: InspectorFormSchema = {
+        type: "object",
+        anyOf: [
+          {
+            type: "object",
+            properties: { solo: { type: "string", title: "Solo" } },
+          },
+        ],
+      };
+      rerender(<SchemaForm schema={shorter} values={{}} onChange={vi.fn()} />);
+      expect(screen.getByRole("textbox", { name: /Solo/ })).toBeTruthy();
+    });
   });
 });
 

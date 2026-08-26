@@ -180,3 +180,41 @@ export const Disabled: Story = {
     disabled: true,
   },
 };
+
+/**
+ * Arguments declared as a composition at the root of the schema (#2123): a
+ * picker chooses the alternative, and its fields render beneath. Before this,
+ * such a schema produced a form with no controls at all.
+ */
+export const RootUnion: Story = {
+  args: {
+    schema: {
+      type: "object",
+      properties: {
+        message: { type: "string", title: "Message" },
+      },
+      required: ["message"],
+      anyOf: [
+        {
+          type: "object",
+          title: "By email",
+          properties: {
+            kind: { type: "string", const: "email" },
+            address: { type: "string", title: "Address" },
+          },
+          required: ["kind", "address"],
+        },
+        {
+          type: "object",
+          title: "By SMS",
+          properties: {
+            kind: { type: "string", const: "sms" },
+            phone: { type: "string", title: "Phone" },
+          },
+          required: ["kind", "phone"],
+        },
+      ],
+    },
+    values: { kind: "email" },
+  },
+};

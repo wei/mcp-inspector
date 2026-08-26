@@ -35,8 +35,9 @@ inspector/
 │   │                 #   implementations, the selection policy, and the descriptor the banner and UI report
 │   ├── client/       # Install-level client config (`client.json`): browser-safe parse/validate + Node load/save, remote backend, secrets
 │   ├── json/         # JSON + parameter/argument conversion utilities, the nullable-union
-│   │                 #   schema collapse shared by the web and TUI form builders, and the
-│   │                 #   tool-schema portability lint all three clients report from
+│   │                 #   schema collapse and root-composition flattening shared by the web
+│   │                 #   and TUI form builders, and the tool-schema portability lint all
+│   │                 #   three clients report from
 │   ├── logging/      # Silent pino logger singleton
 │   ├── mcp/          # InspectorClient runtime, state stores, transports, config import,
 │   │                 #   and the RFC 6570 URI-template helpers the web form and TUI expand through
@@ -153,6 +154,7 @@ Each config below is a ready-made server for exercising one feature by hand. Loa
 | `structured-output-http.json`             | Tools tab: a result's `structuredContent` section  | [#1908](https://github.com/modelcontextprotocol/inspector/issues/1908) |
 | `duplicate-tool-names-http.json`          | A `tools/list` that repeats a tool name            | [#1957](https://github.com/modelcontextprotocol/inspector/issues/1957) |
 | `nullable-fields-http.json`               | Tools tab: nullable (`anyOf` + `null`) arguments   | [#1928](https://github.com/modelcontextprotocol/inspector/issues/1928) |
+| `root-union-schemas-http.json` **(legacy era)** | Tool schemas whose arguments are a root `anyOf` / `oneOf` | [#2123](https://github.com/modelcontextprotocol/inspector/issues/2123) |
 | `unportable-schemas-http.json` **(legacy era)** | Tool schemas a real client rejects, flagged in all three clients | [#1005](https://github.com/modelcontextprotocol/inspector/issues/1005) |
 | `rfc6570-templates-http.json`             | Resources tab: RFC 6570 resource-template expansion | [#1919](https://github.com/modelcontextprotocol/inspector/issues/1919) |
 | `advertised-extensions-http.json`         | Tool registration gated on advertised extensions    | [#1739](https://github.com/modelcontextprotocol/inspector/issues/1739) |
@@ -287,6 +289,38 @@ The duplicated copies are appended rather than placed beside their twin on purpo
 Open the Tools tab and select `record_shipment`: `direction` must render as a **Select** (`envio` / `recebimento`) with a clear button that sets it back to `null`, `reference` as a text input, `quantity` as a number input, and `express` as a checkbox. On the broken build every one of them fell through to the raw-JSON textarea, which re-escaped its own contents on each keystroke until the value was unusable ([#1928](https://github.com/modelcontextprotocol/inspector/issues/1928)). The tool echoes the arguments it received, so the result panel shows exactly what was sent.
 
 The **TUI** had the same gap and is worth checking against the same server (`--tui`, then test `record_shipment`): `direction` is a select, `quantity` an integer field, `express` a boolean. Both clients now share one collapse step — `normalizeNullableUnion` in [`core/json/nullableUnion.ts`](./core/json/nullableUnion.ts) — precisely so they cannot drift on which schemas they can render.
+
+#### Root-level unions
+
+`root-union-schemas-http.json` serves two tools whose arguments are declared as a **composition at the root** of `inputSchema` rather than as a flat `properties` map — `echo` with an `anyOf` beside its own `message` property, and `get_weather` with an OpenAPI-style `discriminator` over a `oneOf`. Plain streamable-HTTP — connect with the **default (legacy)** protocol era.
+
+The 2026-07-28 revision makes this shape explicitly legal: `type: "object"` is required at the root, and beyond that "any JSON Schema 2020-12 keyword may appear alongside `type`, including composition keywords (`oneOf`, `anyOf`, `allOf`, `not`)".
+
+Open the Tools tab and select `echo`. Above the fields is a **Variant** picker listing the union's alternatives — labelled from each branch's `title`, else its discriminator `const`, else its position — and choosing one swaps in that branch's fields with the discriminator already filled in. A field the schema pins with `const` renders read-only, and is filled in automatically only where the schema also **requires** it: `const` constrains a value that is present rather than demanding one, so an optional pinned field stays omittable.
+
+The two tools show the two halves of the old behavior. On the broken build `echo` rendered its root `message` and **nothing from either branch**, so it could only ever be called with half its arguments; `get_weather`, whose fields live entirely on its `oneOf`, rendered **nothing but the Execute Tool button** — no picker, no fields, not even the raw-JSON editor a union-typed _property_ falls back to ([#2123](https://github.com/modelcontextprotocol/inspector/issues/2123)).
+
+Switching branches drops the values that belonged to the outgoing one. They are no longer on screen, so the user can neither see nor clear them, and submitting them would describe a shape the call is not making.
+
+The **TUI** has the same gap and is worth checking against the same server (`--tui`, then test `echo`). ink-form is static — there is no picker to hide the alternatives behind — so each branch becomes its own **section**, preceded by a **Variant** select naming which one the call means. The fields in a branch section are rendered optional whatever the branch says: only one alternative applies to a call, so requiring them would build a form that can never be submitted. That makes the *form* satisfiable, not the call, so the chosen branch's own `required` list is checked at submit and reported — never sent as a call already known to violate the schema.
+
+The sections are not as independent as they look, which is why the select is not cosmetic: ink-form keeps one value object for the whole form, keyed by field name alone, so two branches both declaring `kind` would be **one** field and the later section's initial value would decide what the earlier one submits. Each branch's fields are therefore rendered under a prefixed name and translated back on submit, where every branch but the chosen one is dropped.
+
+The **CLI** has no form at all, but the same flattening decides how `--tool-arg` values are typed: a branch's `count: { "type": "number" }` is what turns `--tool-arg count=3` into `3` rather than `"3"`. Which branch is *inferred* rather than chosen — a discriminated union pins its discriminator with `const`, so the supplied arguments either identify one branch or they do not. When nothing identifies one, only the names every branch that declares them types the same way are coerced; a name one branch calls a number and another a boolean is passed through as the string it was typed as, rather than run through an arbitrary branch's schema.
+
+All three read one helper, [`core/json/rootUnion.ts`](./core/json/rootUnion.ts), so they cannot drift on which schemas they can render.
+
+What it declines to flatten is as deliberate as what it flattens, and every case falls back to whatever the schema's own `properties` describe rather than claiming something untrue:
+
+- **A union whose members are not all field-carrying object schemas** — including one whose member `type` rules objects out, since tool arguments are a JSON object and such a member can never match. A picker whose options render nothing is no better than no picker.
+- **A branch that restates a constraint the root already states.** The two are conjunctive, so root `minimum: 10` under branch `minimum: 0` is still 10, disjoint `enum`s leave nothing satisfiable, and `type: "string"` under `type: "number"` describes a value that cannot exist — rendering either side would accept what the schema rejects. A property both declare *compatibly* is merged rather than replaced, so a root's `minimum` survives a branch's `maximum`, and a disagreement about `title`/`description` is not a conflict at all.
+- **A composition member stating anything the merge cannot apply.** Only `type`, `properties` and `required` are folded in, so a member carrying a nested `allOf`/`anyOf`, a `not`, an `additionalProperties`, or a `$ref` would have that constraint erased along with the keyword — turning an unsatisfiable schema (`allOf: [false, …]` admits nothing) into a fillable form. `allOf` members are checked against the accumulated merge rather than the root alone, so two of them contradicting each other is caught even when neither contradicts the root.
+- **A `oneOf` whose alternatives are not mutually exclusive.** `oneOf` demands that *exactly one* alternative match, which flattening cannot preserve — the branches are offered as if any would do. It is only safe with a discriminator: a property every branch pins to a `const` of its own **and requires**, since an optional one leaves `{}` matching every branch. An undiscriminated `oneOf` is declined; `anyOf` makes no such claim and is offered either way.
+- **A union that adds fields under a restrictive root `additionalProperties`.** That keyword constrains whatever its *sibling* `properties` does not name, so a root `additionalProperties: false` rejects every field the branches add — flattening would move them beside the keyword, where they read as allowed. An empty schema (`{}`) constrains nothing and is treated as permissive.
+- **A schema carrying both `oneOf` and `anyOf`** — independent keywords a value satisfies *together*, not two spellings of one union, so reading one and dropping the other omits real constraints while looking complete. Satisfying both honestly means the cross product of their alternatives, which no real schema has yet asked for.
+- **`not`**, which is not interpreted at all: there is no faithful form for "anything except this".
+
+Declining changes what *renders*, never whether the tool is treated as taking arguments: a declined union still has fields, so an App tool carrying one still asks for them rather than auto-invoking with `{}`.
 
 #### Unportable tool schemas
 
