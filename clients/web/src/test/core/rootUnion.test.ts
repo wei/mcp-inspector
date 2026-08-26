@@ -358,6 +358,46 @@ describe("resolveRootUnion", () => {
     expect(branches).toHaveLength(2);
   });
 
+  it("declines a branch whose const its root type rejects", () => {
+    // The two share no keyword, yet nothing satisfies both — and the merged
+    // declaration would seed an immutable `1` into a string field.
+    const { branches } = resolveRootUnion({
+      type: "object",
+      properties: { x: { type: "string" } },
+      anyOf: [
+        { type: "object", properties: { x: { const: 1 } } },
+        { type: "object", properties: { other: { type: "string" } } },
+      ] as unknown[],
+    });
+    expect(branches).toEqual([]);
+  });
+
+  it("declines a branch whose const its root enum excludes", () => {
+    const { branches } = resolveRootUnion({
+      type: "object",
+      properties: { x: { enum: ["a", "b"] } },
+      anyOf: [
+        { type: "object", properties: { x: { const: "c" } } },
+        { type: "object", properties: { other: { type: "string" } } },
+      ] as unknown[],
+    });
+    expect(branches).toEqual([]);
+  });
+
+  it("accepts a const its root type and enum admit", () => {
+    const { branches } = resolveRootUnion({
+      type: "object",
+      properties: { x: { type: "number", enum: [1, 2] } },
+      anyOf: [
+        // An integer const satisfies a `number` type — the one direction JSON
+        // Schema widens.
+        { type: "object", properties: { x: { const: 1 } } },
+        { type: "object", properties: { other: { type: "string" } } },
+      ] as unknown[],
+    });
+    expect(branches).toHaveLength(2);
+  });
+
   it("declines a union whose branch contradicts the root's type for a field", () => {
     // `string` under a base `number` describes a value that cannot exist, so
     // flattening it would render one type and accept what the schema rejects.

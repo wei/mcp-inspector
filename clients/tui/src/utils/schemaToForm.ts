@@ -462,6 +462,10 @@ export function missingRequiredFields(
       ? base
       : branches[selectedBranchIndex(base, branches, rawValues)]!.schema;
   return (effective.required ?? []).filter((name) => {
+    // `hasOwn` first: an argument legally named `constructor` would otherwise
+    // resolve to the inherited one and read as supplied, and the call would go
+    // out without it.
+    if (!Object.hasOwn(decoded, name)) return true;
     const value = decoded[name];
     return value === undefined || value === "";
   });

@@ -808,6 +808,17 @@ describe("schemaToForm", () => {
       ).toEqual([]);
     });
 
+    it("does not mistake an inherited property for a supplied argument", () => {
+      // `constructor` is a legal argument name; reading it off the prototype
+      // would report it as present and send the call without it.
+      const schema = {
+        type: "object",
+        properties: { constructor: { type: "string" } },
+        required: ["constructor"],
+      };
+      expect(missingRequiredFields(schema, {})).toEqual(["constructor"]);
+    });
+
     it("checks the root's own required fields when there is no union", () => {
       const schema = {
         type: "object",

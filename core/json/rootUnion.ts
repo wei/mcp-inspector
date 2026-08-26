@@ -224,12 +224,56 @@ function conflicts(baseProperty: unknown, branchProperty: unknown): boolean {
   }
   const left = a as Record<string, unknown>;
   const right = b as Record<string, unknown>;
-  return Object.keys(right).some(
-    (keyword) =>
-      !ANNOTATION_KEYWORDS.has(keyword) &&
-      keyword in left &&
-      !sameValue(left[keyword], right[keyword]),
-  );
+  if (
+    Object.keys(right).some(
+      (keyword) =>
+        !ANNOTATION_KEYWORDS.has(keyword) &&
+        keyword in left &&
+        !sameValue(left[keyword], right[keyword]),
+    )
+  ) {
+    return true;
+  }
+  // Keywords the two sides state *separately* can still contradict each other:
+  // root `{ type: "string" }` under branch `{ const: 1 }` shares no keyword at
+  // all, yet nothing satisfies both — and the merged declaration would seed an
+  // immutable `1` into a field the schema rejects.
+  return !constSatisfiesSiblings({ ...left, ...right });
+}
+
+/** The JSON type name of a value, in JSON Schema's vocabulary. */
+function jsonTypeOf(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  if (typeof value === "number") {
+    return Number.isInteger(value) ? "integer" : "number";
+  }
+  return typeof value;
+}
+
+/**
+ * Whether a merged declaration's `const` is one its own `type` and `enum` admit.
+ *
+ * `const` names the single value the schema accepts, so a sibling that excludes
+ * it leaves nothing satisfiable. An `integer` const satisfies a `number` type,
+ * which is the one direction JSON Schema widens.
+ */
+function constSatisfiesSiblings(schema: Record<string, unknown>): boolean {
+  if (!("const" in schema)) return true;
+  const value = schema.const;
+  const { type, enum: allowed } = schema;
+  const actual = jsonTypeOf(value);
+  const admits = (name: unknown) =>
+    name === actual || (name === "number" && actual === "integer");
+  if (typeof type === "string" && !admits(type)) return false;
+  if (Array.isArray(type) && !type.some(admits)) return false;
+  if (
+    Array.isArray(allowed) &&
+    !allowed.some((member) => sameValue(member, value))
+  ) {
+    return false;
+  }
+  return true;
 }
 
 /**
