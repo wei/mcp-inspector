@@ -46,8 +46,12 @@
  * Launching the browser (and resolving Playwright from clients/web, which has
  * its own gotcha — see `lib/headless-browser.mjs`) is delegated to that module,
  * which is also where `SMOKE_BROWSER` picks the engine: `chromium` (the
- * default), `firefox`, or `webkit`, all three of which CI runs (#2086). The
- * engine question here is narrower than in the App smokes — this asserts a clean
+ * default), `firefox`, or `webkit` (#2086). CI gates Chromium (in the `build`
+ * job's `npm run smoke`) and Firefox (in the `Sandbox smokes` matrix job);
+ * WebKit runs but is not gated yet, pending #2132 — note this smoke PASSES in
+ * WebKit, it is the two App smokes that do not.
+ *
+ * The engine question here is narrower than in the App smokes — this asserts a clean
  * first paint, i.e. that the shipped bundle's syntax and API level are
  * *reachable* on the engine at all, rather than anything about the sandbox — but
  * it is real, and it is nearly free to include.

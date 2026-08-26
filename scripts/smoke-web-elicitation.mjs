@@ -25,7 +25,12 @@
  * proof to a PR); unset, it asserts only.
  *
  * `SMOKE_BROWSER` picks the engine (`chromium` — the default — `firefox`, or
- * `webkit`); CI runs all three (#2086). Along with `smoke:web:app` this is one
+ * `webkit`). CI gates **Chromium** (in the `build` job's `npm run smoke`) and
+ * **Firefox** (in the `Sandbox smokes` matrix job); WebKit runs here but is not
+ * gated yet — it fails on #2132, a Safari incompatibility in the web client's
+ * SSE transport that this smoke is what found (#2086).
+ *
+ * Along with `smoke:web:app` this is one
  * of the two places the MCP Apps sandbox is actually loaded, and the two nested
  * frames below are precisely the surface that diverges between engines. See
  * `lib/headless-browser.mjs`, including why a green WebKit run is not a Safari
