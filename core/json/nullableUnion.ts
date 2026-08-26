@@ -397,7 +397,10 @@ export function admitsNull(schema: NullableUnionSchema): boolean {
   // would let the gate accept a `null` the schema forbids. The opaque
   // applicators (`not`, `allOf`, `oneOf`) are already refused above.
   if (schema.const === null) {
-    return schema.anyOf === undefined && typeAdmitsNull(schema.type);
+    return (
+      schema.anyOf === undefined &&
+      (schema.nullable === true || typeAdmitsNull(schema.type))
+    );
   }
 
   if (schema.nullable === true) {

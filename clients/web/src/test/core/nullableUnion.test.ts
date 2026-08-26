@@ -739,6 +739,12 @@ describe("admitsNull", () => {
       expect(admitsNull({ type: ["string", "null"], const: null })).toBe(true);
     });
 
+    it("honors a sibling `nullable` flag", () => {
+      expect(admitsNull({ type: "string", nullable: true, const: null })).toBe(
+        true,
+      );
+    });
+
     it("does not override a sibling that rejects null", () => {
       // `const` is conjunctive with its siblings, not an override: both of
       // these reject every value, so claiming nullability would let the

@@ -272,6 +272,34 @@ function conflictsWithBase(
 }
 
 /**
+ * Whether some property discriminates the alternatives: declared by **every**
+ * member, pinned by each to a `const`, and pinned to a *different* one by each.
+ * That is what makes at most one alternative matchable, which is the constraint
+ * `oneOf` states and flattening cannot otherwise keep.
+ *
+ * When the schema names a `discriminator`, only that property is considered —
+ * the author has said which one carries the distinction.
+ */
+function hasDiscriminator(
+  members: RootUnionSchema[],
+  named: string | undefined,
+): boolean {
+  const first = propertiesOf(members[0] ?? {}) ?? {};
+  const candidates = named !== undefined ? [named] : Object.keys(first);
+  return candidates.some((name) => {
+    const constants = members.map((member) => {
+      const property = toBranch((propertiesOf(member) ?? {})[name]) as {
+        const?: unknown;
+      } | null;
+      return property?.const;
+    });
+    if (constants.some((value) => value === undefined)) return false;
+    const seen = new Set(constants.map((value) => JSON.stringify(value)));
+    return seen.size === constants.length;
+  });
+}
+
+/**
  * Every property name the schema's composition members declare, whether or not
  * the composition could be flattened.
  *
@@ -441,6 +469,7 @@ export function resolveRootUnion<T extends RootUnionSchema>(
   if (schema.oneOf !== undefined && schema.anyOf !== undefined) {
     return { base, branches: [] };
   }
+  const isExclusiveUnion = schema.oneOf !== undefined;
   const members = schema.oneOf ?? schema.anyOf ?? [];
   const branches = members.map(toBranch);
   if (
@@ -468,7 +497,12 @@ export function resolveRootUnion<T extends RootUnionSchema>(
   const additional = base.additionalProperties;
   const restrictsAdditional =
     additional === false ||
-    (typeof additional === "object" && additional !== null);
+    // An EMPTY schema object is the JSON Schema equivalent of `true` — it
+    // constrains nothing, so it is no reason to decline. Only a schema that
+    // states something is.
+    (typeof additional === "object" &&
+      additional !== null &&
+      Object.keys(additional).length > 0);
   const baseNames = propertiesOf(base) ?? {};
   if (
     restrictsAdditional &&
@@ -476,6 +510,22 @@ export function resolveRootUnion<T extends RootUnionSchema>(
       Object.keys(propertiesOf(branch as RootUnionSchema) ?? {}).some(
         (name) => !Object.hasOwn(baseNames, name),
       ),
+    )
+  ) {
+    return { base, branches: [] };
+  }
+
+  // `oneOf` demands that **exactly one** alternative match, which flattening
+  // cannot preserve: the merged branches are offered as if any of them would
+  // do. That is only safe when the alternatives are mutually exclusive by
+  // construction — a discriminator, i.e. some property every branch pins to a
+  // `const` of its own. Without one, two branches can accept the same
+  // arguments, and a call the form calls valid is one the server refuses.
+  if (
+    isExclusiveUnion &&
+    !hasDiscriminator(
+      branches as RootUnionSchema[],
+      schema.discriminator?.propertyName,
     )
   ) {
     return { base, branches: [] };
@@ -533,5 +583,25 @@ export function selectBranchIndex<T extends RootUnionSchema>(
       matches.push(index);
     }
   });
-  return matches.length === 1 ? matches[0] : null;
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) return null;
+
+  // No discriminator settled it. A union need not have one, and values still
+  // belong to a shape — so fall back to the branch whose own required fields
+  // the values supply, when exactly one branch's do. Without this, values for
+  // an undiscriminated branch open the picker on the first branch while the
+  // required-field gate (which accepts *any* satisfied branch) lets them be
+  // submitted, so the form shows one shape and sends another.
+  if (Object.keys(values).length === 0) return null;
+  const satisfied = branches.filter((branch) => {
+    const required = branch.schema.required ?? [];
+    const own = required.filter((name) => branch.declaredFields.includes(name));
+    return (
+      own.length > 0 &&
+      own.every(
+        (name) => Object.hasOwn(values, name) && values[name] !== undefined,
+      )
+    );
+  });
+  return satisfied.length === 1 ? branches.indexOf(satisfied[0]) : null;
 }

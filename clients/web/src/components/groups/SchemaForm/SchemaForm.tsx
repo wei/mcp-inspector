@@ -703,18 +703,27 @@ export function SchemaForm({
     // incoming branch pins to a `const` is never carried: the branches of a
     // discriminated union share the discriminator's *name* and disagree about
     // its value.
-    const outgoing = new Set(activeBranch?.declaredFields ?? []);
     const incoming = new Set(nextBranch.declaredFields);
-    const carried: Record<string, unknown> = {};
-    for (const [name, fieldSchema] of Object.entries(nextProperties)) {
-      if (
-        values[name] !== undefined &&
-        fieldSchema.const === undefined &&
-        !(outgoing.has(name) && incoming.has(name))
-      ) {
-        carried[name] = values[name];
-      }
-    }
+    // `hasOwn` and `fromEntries`, never `values[name]` on its own or an
+    // assignment: `constructor` is a legal argument name whose inherited value
+    // would otherwise be read as one the user supplied, and `__proto__` is one
+    // an assignment would drop into the legacy prototype setter.
+    const carried = Object.fromEntries(
+      Object.entries(nextProperties)
+        .filter(
+          ([name, fieldSchema]) =>
+            Object.hasOwn(values, name) &&
+            values[name] !== undefined &&
+            fieldSchema.const === undefined &&
+            // Carried only where the incoming branch leaves the root's
+            // declaration as it found it. Anything the incoming branch declares
+            // itself is reset: it may type the name differently from wherever
+            // the value was typed, so a `3` from a number field would otherwise
+            // land in its checkbox.
+            !incoming.has(name),
+        )
+        .map(([name]) => [name, values[name]]),
+    );
     onChange({ ...collectSchemaDefaults(nextBranch.schema), ...carried });
   }
 

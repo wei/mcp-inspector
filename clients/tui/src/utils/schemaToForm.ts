@@ -138,7 +138,7 @@ function branchFields(
   branches: { declaredFields: string[] }[],
   index: number,
 ): string[] {
-  const own = branches[index]?.declaredFields ?? [];
+  const own = branches[index]!.declaredFields;
   return [...new Set([...own, ...sharedFieldNames(base, branches)])];
 }
 
@@ -256,11 +256,7 @@ export function decodeFormValues<T>(
   }
 
   const { variant, prefix } = generatedNames(base, branches);
-  const selected = Number(values[variant]);
-  const branchIndex =
-    Number.isInteger(selected) && selected >= 0 && selected < branches.length
-      ? selected
-      : 0;
+  const branchIndex = selectedBranchIndex(base, branches, values);
   const branch = branches[branchIndex]!;
 
   const generated = new Set<string>([variant]);
@@ -270,19 +266,40 @@ export function decodeFormValues<T>(
     }
   });
 
-  const decoded: Record<string, T> = {};
-  for (const [name, value] of Object.entries(values)) {
-    if (!generated.has(name)) {
-      decoded[name] = value;
-    }
-  }
-  for (const name of branchFields(base, branches, branchIndex)) {
-    const value = values[branchFieldName(prefix, branchIndex, name)];
-    if (value !== undefined) {
-      decoded[name] = value;
-    }
-  }
+  // Built through `fromEntries` rather than by assignment: `__proto__` is a
+  // legal argument name, and assigning it would invoke the legacy prototype
+  // setter — the field would be prefixed safely in the form and then vanish on
+  // the way to the call.
+  const decoded: Record<string, T> = Object.fromEntries([
+    ...Object.entries(values).filter(([name]) => !generated.has(name)),
+    ...branchFields(base, branches, branchIndex)
+      .map(
+        (name) =>
+          [name, values[branchFieldName(prefix, branchIndex, name)]] as const,
+      )
+      .filter(([, value]) => value !== undefined),
+  ]);
+  /* v8 ignore next -- an offerable branch always carries properties */
   return applyConstants(branch.schema.properties ?? {}, decoded);
+}
+
+/**
+ * Which branch the variant select names, clamped to one that exists — a form
+ * value is whatever the user's terminal produced, and the fallback is the first
+ * branch, which is what the select opens on.
+ */
+function selectedBranchIndex(
+  base: { properties?: Record<string, unknown> },
+  branches: { declaredFields: string[] }[],
+  values: Record<string, unknown>,
+): number {
+  const { variant } = generatedNames(base, branches);
+  const selected = Number(values[variant]);
+  return Number.isInteger(selected) &&
+    selected >= 0 &&
+    selected < branches.length
+    ? selected
+    : 0;
 }
 
 /** Overwrite every `const`-pinned field with the value its schema fixes. */
@@ -294,11 +311,10 @@ function applyConstants<T>(
     ([, schema]) => constOf(schema) !== undefined,
   );
   if (pinned.length === 0) return values;
-  const result = { ...values };
-  for (const [name, schema] of pinned) {
-    result[name] = constOf(schema) as T;
-  }
-  return result;
+  return Object.fromEntries([
+    ...Object.entries(values),
+    ...pinned.map(([name, schema]) => [name, constOf(schema) as T]),
+  ]);
 }
 
 /** Build the ink-form fields for one already-flattened object schema. */
@@ -365,6 +381,7 @@ function buildFields(schema: JsonSchemaObject): FormField[] {
       field = {
         type: "select",
         ...baseField,
+        /* v8 ignore next -- guarded by `isStringEnum(property.enum)` above */
         options: toSelectOptions(property.enum ?? [], property.enumNames),
       } as FormField;
     } else {
@@ -419,4 +436,33 @@ function buildFields(schema: JsonSchemaObject): FormField[] {
   }
 
   return fields;
+}
+
+/**
+ * The required fields the chosen shape does not supply — what a static form
+ * cannot enforce for itself.
+ *
+ * A branch's fields are rendered optional because only one alternative applies
+ * to a call and ink-form would otherwise demand every branch's, deadlocking the
+ * form. That makes the *form* satisfiable, not the call: selecting `email` and
+ * leaving `address` empty still violates the schema. So the requirement is
+ * checked at submit instead, against the branch the variant select names, and
+ * the caller reports it rather than sending a call known to be invalid.
+ *
+ * Takes the **decoded** values — what would actually be sent.
+ */
+export function missingRequiredFields(
+  schema: JsonSchemaObject | null | undefined,
+  decoded: Record<string, unknown>,
+  rawValues: Record<string, unknown> = {},
+): string[] {
+  const { base, branches } = resolveRootUnion(schema ?? {});
+  const effective =
+    branches.length === 0
+      ? base
+      : branches[selectedBranchIndex(base, branches, rawValues)]!.schema;
+  return (effective.required ?? []).filter((name) => {
+    const value = decoded[name];
+    return value === undefined || value === "";
+  });
 }

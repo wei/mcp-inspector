@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { decodeFormValues, schemaToForm } from "../src/utils/schemaToForm.js";
+import {
+  decodeFormValues,
+  missingRequiredFields,
+  schemaToForm,
+} from "../src/utils/schemaToForm.js";
 
 describe("schemaToForm", () => {
   it("returns an empty Parameters section when there is no schema", () => {
@@ -655,6 +659,26 @@ describe("schemaToForm", () => {
         ).toEqual({ n: 7, a: "x" });
       });
 
+      it("keeps a decoded argument named __proto__", () => {
+        // Assigning it would invoke the legacy prototype setter, so a field
+        // prefixed safely in the form would vanish on the way to the call.
+        const schema = {
+          type: "object",
+          anyOf: [
+            {
+              type: "object",
+              properties: { ["__proto__"]: { type: "string" } },
+            },
+            { type: "object", properties: { other: { type: "string" } } },
+          ] as unknown[],
+        };
+        const decoded = decodeFormValues(schema, {
+          __variant: "0",
+          __b0____proto__: "kept",
+        });
+        expect(Object.hasOwn(decoded, "__proto__")).toBe(true);
+      });
+
       it("keeps a base argument whose name looks generated", () => {
         const schema = {
           type: "object",
@@ -693,6 +717,105 @@ describe("schemaToForm", () => {
     it("still renders an empty form for a schema with no properties", () => {
       const form = schemaToForm({ type: "object" }, "empty_tool");
       expect(form.sections).toEqual([{ title: "Parameters", fields: [] }]);
+    });
+  });
+
+  describe("edge shapes (#2123)", () => {
+    it("renders a union that declares no root properties", () => {
+      const form = schemaToForm(
+        {
+          type: "object",
+          anyOf: [
+            { type: "object", properties: { a: { type: "string" } } },
+            { type: "object", properties: { b: { type: "string" } } },
+          ],
+        },
+        "no_base",
+      );
+      expect(form.sections[0]!.fields.map((f) => f.name)).toEqual([
+        "__variant",
+      ]);
+      expect(form.sections[1]!.fields.map((f) => f.name)).toEqual(["__b0__a"]);
+    });
+
+    it("returns the values unchanged for a schema with no properties", () => {
+      const values = { anything: "x" };
+      expect(decodeFormValues({ type: "object" }, values)).toBe(values);
+    });
+
+    it("ignores a malformed property declaration when restoring constants", () => {
+      // `properties` values are `unknown`; a `null` entry must not throw on the
+      // way out of the form any more than it does on the way in.
+      const schema = {
+        type: "object",
+        anyOf: [
+          {
+            type: "object",
+            properties: { broken: null, kind: { const: "a" } },
+          },
+          { type: "object", properties: { kind: { const: "b" } } },
+        ] as unknown[],
+      };
+      expect(
+        decodeFormValues(schema, { __variant: "0", __b0__kind: "tampered" }),
+      ).toEqual({ kind: "a" });
+    });
+  });
+
+  describe("missingRequiredFields (#2123)", () => {
+    const REQUIRED_UNION = {
+      type: "object",
+      oneOf: [
+        {
+          type: "object",
+          properties: {
+            kind: { type: "string", const: "email" },
+            address: { type: "string" },
+          },
+          required: ["kind", "address"],
+        },
+        {
+          type: "object",
+          properties: {
+            kind: { type: "string", const: "sms" },
+            phone: { type: "string" },
+          },
+          required: ["kind", "phone"],
+        },
+      ],
+    };
+
+    it("reports what the chosen branch requires and the values omit", () => {
+      // A branch's fields render optional — a static form cannot demand every
+      // branch's — so the requirement is checked against the chosen shape here
+      // rather than sending a call known to violate the schema.
+      expect(
+        missingRequiredFields(
+          REQUIRED_UNION,
+          { kind: "email" },
+          { __variant: "0" },
+        ),
+      ).toEqual(["address"]);
+    });
+
+    it("reports nothing once the chosen branch is satisfied", () => {
+      expect(
+        missingRequiredFields(
+          REQUIRED_UNION,
+          { kind: "sms", phone: "555" },
+          { __variant: "1" },
+        ),
+      ).toEqual([]);
+    });
+
+    it("checks the root's own required fields when there is no union", () => {
+      const schema = {
+        type: "object",
+        properties: { message: { type: "string" } },
+        required: ["message"],
+      };
+      expect(missingRequiredFields(schema, {})).toEqual(["message"]);
+      expect(missingRequiredFields(schema, { message: "hi" })).toEqual([]);
     });
   });
 });

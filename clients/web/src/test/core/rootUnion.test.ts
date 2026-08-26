@@ -327,6 +327,16 @@ describe("resolveRootUnion", () => {
     expect(branches).toEqual([]);
   });
 
+  it("treats an empty additionalProperties schema as permissive", () => {
+    // `{}` is the JSON Schema equivalent of `true` — it constrains nothing.
+    const { branches } = resolveRootUnion({
+      type: "object",
+      additionalProperties: {},
+      anyOf: [EMAIL, SMS],
+    });
+    expect(branches).toHaveLength(2);
+  });
+
   it("allows a restrictive additionalProperties the branches stay within", () => {
     const { branches } = resolveRootUnion({
       type: "object",
@@ -432,6 +442,66 @@ describe("resolveRootUnion", () => {
         anyOf: [{ ...EMAIL, title: "  " }, SMS],
       });
       expect(branches[0].label).toBe("email");
+    });
+  });
+
+  describe("oneOf exclusivity", () => {
+    it("offers a discriminated oneOf", () => {
+      expect(
+        resolveRootUnion({ type: "object", oneOf: [EMAIL, SMS] }).branches,
+      ).toHaveLength(2);
+    });
+
+    it("declines a oneOf whose alternatives are not mutually exclusive", () => {
+      // `oneOf` demands that EXACTLY one alternative match; flattening offers
+      // them as if any would do. Here entering `a` satisfies both, so a call
+      // the form calls valid is one the server refuses.
+      const { branches } = resolveRootUnion({
+        type: "object",
+        oneOf: [
+          {
+            type: "object",
+            properties: { a: { type: "string" } },
+            required: ["a"],
+          },
+          {
+            type: "object",
+            properties: { a: { type: "string" }, b: { type: "string" } },
+            required: ["a"],
+          },
+        ],
+      });
+      expect(branches).toEqual([]);
+    });
+
+    it("still offers the same alternatives under anyOf", () => {
+      // `anyOf` makes no exclusivity claim, so overlapping alternatives are
+      // exactly what it means.
+      const { branches } = resolveRootUnion({
+        type: "object",
+        anyOf: [
+          {
+            type: "object",
+            properties: { a: { type: "string" } },
+            required: ["a"],
+          },
+          {
+            type: "object",
+            properties: { a: { type: "string" }, b: { type: "string" } },
+            required: ["a"],
+          },
+        ],
+      });
+      expect(branches).toHaveLength(2);
+    });
+
+    it("declines a oneOf whose named discriminator does not distinguish", () => {
+      const { branches } = resolveRootUnion({
+        type: "object",
+        discriminator: { propertyName: "kind" },
+        oneOf: [EMAIL, { ...EMAIL, properties: { ...EMAIL.properties } }],
+      });
+      expect(branches).toEqual([]);
     });
   });
 
@@ -570,6 +640,29 @@ describe("resolveRootUnion", () => {
       expect(selectBranchIndex(versioned, { version: "2", kind: "sms" })).toBe(
         null,
       );
+    });
+
+    it("falls back to the branch whose required fields the values supply", () => {
+      // An undiscriminated union still has shapes, and the required-field gate
+      // accepts any satisfied branch — so the picker must open on the one the
+      // values satisfy rather than showing a shape they do not describe.
+      const undiscriminated = resolveRootUnion({
+        type: "object",
+        anyOf: [
+          {
+            type: "object",
+            properties: { address: { type: "string" } },
+            required: ["address"],
+          },
+          {
+            type: "object",
+            properties: { phone: { type: "string" } },
+            required: ["phone"],
+          },
+        ],
+      }).branches;
+      expect(selectBranchIndex(undiscriminated, { phone: "555" })).toBe(1);
+      expect(selectBranchIndex(undiscriminated, {})).toBeNull();
     });
 
     it("reports none when the values identify nothing", () => {

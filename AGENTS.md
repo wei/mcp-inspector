@@ -199,7 +199,10 @@ v2/main/
 │   │                                   #   SchemaForm (the Variant picker + the branch-change
 │   │                                   #   value pruning), TUI schemaToForm (a section per
 │   │                                   #   branch, its fields forced OPTIONAL since only one
-│   │                                   #   alternative applies — and rendered under PREFIXED
+│   │                                   #   alternative applies — the chosen branch's
+│   │                                   #   `required` is then checked at SUBMIT
+│   │                                   #   (missingRequiredFields), since optional fields make
+│   │                                   #   the FORM satisfiable, not the call — and rendered under PREFIXED
 │   │                                   #   names behind a variant select, because ink-form
 │   │                                   #   keys values by field name across the WHOLE form,
 │   │                                   #   so two branches' `kind` would otherwise be one
