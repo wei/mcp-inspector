@@ -146,8 +146,15 @@ export function runRenderSmoke({
     let childExited = false;
     let childClosed = false;
     let markerAt = null;
-    /** @type {ReturnType<typeof setTimeout> | undefined} */
+    /**
+     * Both deadlines. Declared up front because `onData` and `done` each clear
+     * them from closures defined above the `setTimeout` calls that assign them.
+     *
+     * @type {ReturnType<typeof setTimeout> | undefined}
+     */
     let surviveTimer;
+    /** @type {ReturnType<typeof setTimeout> | undefined} */
+    let renderTimer;
 
     const t0 = Date.now();
     const since = () => Date.now() - t0;
@@ -233,6 +240,12 @@ export function runRenderSmoke({
       output += chunk.toString();
       if (markerAt !== null || !output.includes(marker)) return;
       markerAt = since();
+      // Disarm the first-paint deadline. It is first-caller-wins with `done`,
+      // so leaving it armed means a paint landing near `timeoutMs` lets it fire
+      // *during* the survival window and settle the run as "did not render
+      // <marker>" — quoting an output tail that visibly contains the marker.
+      // First paint has happened; its deadline no longer has a question to ask.
+      clearTimeout(renderTimer);
       // First paint is not the verdict — it only starts the clock on the
       // question this smoke actually asks.
       surviveTimer = setTimeout(() => {
@@ -269,7 +282,7 @@ export function runRenderSmoke({
       done(1, `failed to spawn ${command}: ${err.message}`);
     });
 
-    const renderTimer = setTimeout(() => {
+    renderTimer = setTimeout(() => {
       done(
         1,
         () =>

@@ -57,6 +57,28 @@ test("passes when the child paints the marker and keeps running", async () => {
   assert.match(r.message, /still running 400ms later/);
 });
 
+// The first-paint deadline and the survival window overlap: `done` is
+// first-caller-wins, so an armed render timer firing during the survival window
+// settles the run as "did not render" — while quoting an output tail that
+// visibly contains the marker. A slow-but-fine TUI would fail, intermittently,
+// with a diagnostic pointing at the wrong thing entirely.
+test("a paint landing just under the deadline is not failed by the render timer", async () => {
+  const paintAt = 250;
+  const r = await runRenderSmoke({
+    ...opts,
+    ...stub(
+      `setTimeout(() => { console.log(${JSON.stringify(MARKER)}); ` +
+        `setInterval(() => {}, 1000); }, ${paintAt});`,
+    ),
+    // Deliberately tight: the render deadline expires while the survival window
+    // is still open, which is the whole shape of the bug.
+    timeoutMs: paintAt + 150,
+    surviveMs: 400,
+  });
+  assert.equal(r.code, 0, `expected pass, got: ${r.message}`);
+  assert.doesNotMatch(r.message, /did not render/);
+});
+
 test("fails when the child exits before painting", async () => {
   const r = await runRenderSmoke({
     ...opts,
