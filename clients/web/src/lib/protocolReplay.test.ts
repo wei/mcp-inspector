@@ -4,6 +4,7 @@ import type { MessageEntry } from "@inspector/core/mcp/types.js";
 import {
   messagesToLogEntries,
   replayProtocolRequest,
+  replayableParams,
   type ReplayClient,
 } from "./protocolReplay";
 
@@ -58,6 +59,79 @@ describe("messagesToLogEntries", () => {
       message: { jsonrpc: "2.0", id: 1, result: {} },
     };
     expect(messagesToLogEntries([malformed])).toEqual([]);
+  });
+});
+
+// The projection the Edit-and-replay editor seeds from. It is the other half
+// of the dispatch switch: replay re-issues through the typed client methods
+// rather than re-sending the frame, so anything those signatures have no room
+// for is dropped — and an editor that offered it would invite an edit that Send
+// silently discards.
+describe("replayableParams", () => {
+  it("keeps the name and arguments of a tool call, and drops _meta", () => {
+    expect(
+      replayableParams("tools/call", {
+        name: "get_weather",
+        arguments: { city: "Boston" },
+        _meta: { progressToken: 2 },
+      }),
+    ).toEqual({
+      params: { name: "get_weather", arguments: { city: "Boston" } },
+      dropped: ["_meta"],
+    });
+  });
+
+  it("keeps the name and arguments of a prompt get", () => {
+    expect(
+      replayableParams("prompts/get", { name: "greet", arguments: { a: 1 } }),
+    ).toEqual({
+      params: { name: "greet", arguments: { a: 1 } },
+      dropped: [],
+    });
+  });
+
+  it("keeps only the uri of a resource read", () => {
+    expect(
+      replayableParams("resources/read", { uri: "file:///a", _meta: {} }),
+    ).toEqual({ params: { uri: "file:///a" }, dropped: ["_meta"] });
+  });
+
+  it("keeps only a string cursor on a list request", () => {
+    expect(
+      replayableParams("tools/list", { cursor: "abc", _meta: {} }),
+    ).toEqual({ params: { cursor: "abc" }, dropped: ["_meta"] });
+  });
+
+  // The dispatcher ignores a non-string cursor, so keeping it would put a value
+  // in the editor that changes nothing about what is sent.
+  it("drops a cursor that is not a string", () => {
+    expect(replayableParams("resources/list", { cursor: 7 })).toEqual({
+      params: undefined,
+      dropped: ["cursor"],
+    });
+  });
+
+  it("keeps nothing for ping", () => {
+    expect(replayableParams("ping", { _meta: {} })).toEqual({
+      params: undefined,
+      dropped: ["_meta"],
+    });
+  });
+
+  it("reports no params for a request that carried none", () => {
+    expect(replayableParams("tools/list", undefined)).toEqual({
+      params: undefined,
+      dropped: [],
+    });
+  });
+
+  // A name only counts as dropped if it was there: an absent `arguments` is not
+  // something the user is being told they will lose.
+  it("does not report absent names as dropped", () => {
+    expect(replayableParams("tools/call", { name: "echo" })).toEqual({
+      params: { name: "echo" },
+      dropped: [],
+    });
   });
 });
 

@@ -34,7 +34,10 @@ import {
   extractSubscriptionId,
 } from "../protocolUtils.js";
 import { isReplayableProtocolMethod } from "../../../utils/replayableProtocolMethods";
-import type { ReplayParamsOverride } from "../../../lib/protocolReplay";
+import {
+  replayableParams,
+  type ReplayParamsOverride,
+} from "../../../lib/protocolReplay";
 
 export interface ProtocolEntryProps {
   entry: MessageEntry;
@@ -333,6 +336,7 @@ export function ProtocolEntry({
   const status = extractStatus(entry);
   const requestParams = extractParams(entry);
   const canReplay = isReplayableProtocolMethod(method);
+  const editableParams = replayableParams(method, requestParams);
   const resultType = extractResultType(entry);
   const subscriptionId = extractSubscriptionId(entry);
 
@@ -480,7 +484,10 @@ export function ProtocolEntry({
           <EditReplayModal
             opened={isEditingReplay}
             method={method}
-            params={requestParams}
+            // Seeded with what replay will actually read, not the whole frame:
+            // the editor must not offer a field that Send would drop.
+            params={editableParams.params}
+            droppedParamKeys={editableParams.dropped}
             onSend={onReplay}
             onClose={() => setIsEditingReplay(false)}
           />
@@ -513,6 +520,10 @@ export function ProtocolEntry({
                     text: serializeMessage(requestParams),
                   }}
                   copyable
+                  // Named, because an expanded entry holds two of these and a
+                  // list holds many pairs — unnamed they all announce the same
+                  // thing, leaving only the visible headings to tell them apart.
+                  jsonLabel={`${method} request parameters JSON`}
                 />
               </Stack>
             )}
@@ -525,6 +536,7 @@ export function ProtocolEntry({
                     text: serializeMessage(entry.response),
                   }}
                   copyable
+                  jsonLabel={`${method} response JSON`}
                 />
               </Stack>
             )}

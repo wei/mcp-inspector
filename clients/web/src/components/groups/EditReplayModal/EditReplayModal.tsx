@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button, Group, Modal, Stack, Text } from "@mantine/core";
+import { Alert, Button, Group, Modal, Stack, Text } from "@mantine/core";
 import { JsonEditor } from "../../elements/JsonEditor/JsonEditor";
 import { isJsonObject } from "../../../utils/jsonObjectDraft";
 import { isSerializableJson } from "@inspector/core/json/jsonUtils.js";
@@ -8,8 +8,22 @@ export interface EditReplayModalProps {
   opened: boolean;
   /** The method being replayed, shown so the editor is unambiguous. */
   method: string;
-  /** The originating entry's params, seeded into the editor. */
+  /**
+   * The originating entry's params, seeded into the editor — already reduced to
+   * the ones replay will actually read. See {@link droppedParamKeys}.
+   */
   params?: Record<string, unknown>;
+  /**
+   * Param names the entry carried that replay cannot re-send, so the modal can
+   * say so rather than leave the difference to be discovered.
+   *
+   * Replay dispatches through the typed `InspectorClient` methods rather than
+   * re-sending the captured frame, and those signatures have no room for
+   * `_meta` (or for anything but `cursor` on a list request). Seeding the
+   * editor with them would invite an edit that Send silently discards, which is
+   * the one thing an inspector must not do.
+   */
+  droppedParamKeys?: string[];
   /**
    * Re-issue the request with these params. `null` means "send no params",
    * which is a request an empty editor can legitimately express — see
@@ -26,6 +40,17 @@ const MethodText = Text.withProps({
 });
 
 const Footer = Group.withProps({ justify: "flex-end", gap: "sm" });
+
+// Names the params replay cannot carry. `light` and gray rather than a warning
+// colour: nothing is wrong and there is nothing for the user to fix — it is a
+// property of how replay dispatches.
+const DroppedNote = Alert.withProps({ variant: "light", color: "gray" });
+
+/** "`a`, `b` are" / "`a` is" — the list, agreeing with its verb. */
+function formatDroppedKeys(keys: string[]): string {
+  const names = keys.map((key) => `\`${key}\``).join(", ");
+  return `${names} ${keys.length === 1 ? "is" : "are"}`;
+}
 
 /**
  * What the editor's text currently means: the params to send, or why they
@@ -75,6 +100,7 @@ function parseParamsDraft(
 function EditReplayForm({
   method,
   params,
+  droppedParamKeys,
   onSend,
   onClose,
 }: Omit<EditReplayModalProps, "opened">) {
@@ -86,6 +112,15 @@ function EditReplayForm({
   return (
     <Stack gap="sm">
       <MethodText>{method}</MethodText>
+      {droppedParamKeys && droppedParamKeys.length > 0 && (
+        <DroppedNote>
+          <Text size="xs">
+            {`Replay re-issues this request through the client's own ${method}
+              method, which carries only the fields below, so
+              ${formatDroppedKeys(droppedParamKeys)} not re-sent.`}
+          </Text>
+        </DroppedNote>
+      )}
       <JsonEditor
         ariaLabel="Request params"
         label="Params"
@@ -130,6 +165,7 @@ export function EditReplayModal({
   opened,
   method,
   params,
+  droppedParamKeys,
   onSend,
   onClose,
 }: EditReplayModalProps) {
@@ -138,6 +174,7 @@ export function EditReplayModal({
       <EditReplayForm
         method={method}
         params={params}
+        droppedParamKeys={droppedParamKeys}
         onSend={onSend}
         onClose={onClose}
       />

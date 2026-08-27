@@ -7,7 +7,7 @@ import {
   getMimeKind,
   isSafeHref,
   isTextualKind,
-  isJsonDocument,
+  formatJsonDocument,
   looksLikeJson,
   PREVIEW_HTML_CSP,
   tryDecodeBase64ToBytes,
@@ -113,26 +113,26 @@ describe("looksLikeJson", () => {
   });
 });
 
-describe("isJsonDocument", () => {
-  it("accepts text that really parses as JSON", () => {
-    expect(isJsonDocument('  {"a":1}')).toBe(true);
-    expect(isJsonDocument("[1,2]")).toBe(true);
+describe("formatJsonDocument", () => {
+  it("pretty-prints text that really parses as JSON", () => {
+    expect(formatJsonDocument('  {"a":1}')).toBe('{\n  "a": 1\n}');
+    expect(formatJsonDocument("[1,2]")).toBe("[\n  1,\n  2\n]");
   });
 
   // The stricter half of the heuristic (#2151). Text that merely *starts* like
   // JSON must not be handed to the JSON editor: a note beginning `{` would then
   // be presented as a document, in a JSON gutter, framed as malformed.
-  it("rejects text that only looks like JSON", () => {
-    expect(isJsonDocument("{ broken")).toBe(false);
-    expect(isJsonDocument("[unclosed")).toBe(false);
-    expect(isJsonDocument("plain")).toBe(false);
+  it("reports text that only looks like JSON as not JSON", () => {
+    expect(formatJsonDocument("{ broken")).toBeNull();
+    expect(formatJsonDocument("[unclosed")).toBeNull();
+    expect(formatJsonDocument("plain")).toBeNull();
   });
 
   // A bare scalar is valid JSON but never looked like a document, so it stays
   // on the plain renderer — otherwise ordinary prose that happens to be a
   // number would open an editor.
   it("rejects a scalar that never looked like a document", () => {
-    expect(isJsonDocument("42")).toBe(false);
+    expect(formatJsonDocument("42")).toBeNull();
   });
 });
 

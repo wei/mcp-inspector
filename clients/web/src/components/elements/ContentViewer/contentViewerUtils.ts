@@ -143,7 +143,8 @@ export function looksLikeJson(text: string): boolean {
 }
 
 /**
- * Whether untyped text really is a JSON document, not merely shaped like one.
+ * Pretty-print untyped text if it really is a JSON document, or report that it
+ * is not.
  *
  * {@link looksLikeJson} only tests the first character, which is enough to
  * decide whether to *try* pretty-printing — a failed parse falls back to the
@@ -152,14 +153,18 @@ export function looksLikeJson(text: string): boolean {
  * JSON document, in a JSON gutter, with the server's plain text framed as
  * malformed. A declared `application/json` is different — there the server said
  * what it sent, so its own broken payload is shown as JSON on purpose.
+ *
+ * Returns the formatted text rather than a boolean so the caller does not parse
+ * a second time to render what this already parsed to decide. Protocol and
+ * Network entries hand their serialized bodies over as untyped text and are not
+ * virtualized, so a long history pays for every parse on every render.
  */
-export function isJsonDocument(text: string): boolean {
-  if (!looksLikeJson(text)) return false;
+export function formatJsonDocument(text: string): string | null {
+  if (!looksLikeJson(text)) return null;
   try {
-    JSON.parse(text);
-    return true;
+    return JSON.stringify(JSON.parse(text), null, 2);
   } catch {
-    return false;
+    return null;
   }
 }
 

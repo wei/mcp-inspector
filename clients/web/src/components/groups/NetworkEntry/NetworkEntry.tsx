@@ -371,9 +371,16 @@ const RevealButton = Button.withProps({
 function BodyPreview({
   body,
   contentType,
+  label,
 }: {
   body: string;
   contentType?: string;
+  /**
+   * What this body *is* ("Request body", "Response body"), so a JSON payload's
+   * editor is named. An expanded entry holds both, and the list holds many
+   * pairs, so unnamed they all announce identically to a screen reader.
+   */
+  label: string;
 }) {
   // Reveal state for masked secrets. Hooks run before any early return so the
   // order stays stable across the too-large / has-secrets branches. The reveal
@@ -413,7 +420,13 @@ function BodyPreview({
   }
 
   if (!hasSecrets) {
-    return <ContentViewer block={{ type: "text", text: body }} copyable />;
+    return (
+      <ContentViewer
+        block={{ type: "text", text: body }}
+        copyable
+        jsonLabel={`${label} JSON`}
+      />
+    );
   }
 
   const shown = revealed ? body : masked;
@@ -432,7 +445,11 @@ function BodyPreview({
           {revealed ? "Hide" : "Reveal"}
         </RevealButton>
       </Group>
-      <ContentViewer block={{ type: "text", text: shown }} copyable />
+      <ContentViewer
+        block={{ type: "text", text: shown }}
+        copyable
+        jsonLabel={`${label} JSON`}
+      />
     </Stack>
   );
 }
@@ -587,6 +604,7 @@ export function NetworkEntry({
                   key={`${entry.requestHeaders["content-type"] ?? ""}|${entry.requestBody}`}
                   body={entry.requestBody}
                   contentType={entry.requestHeaders["content-type"]}
+                  label="Request body"
                 />
               </Stack>
             )}
@@ -604,6 +622,7 @@ export function NetworkEntry({
                     key={`${entry.responseHeaders?.["content-type"] ?? ""}|${entry.responseBody}`}
                     body={entry.responseBody}
                     contentType={entry.responseHeaders?.["content-type"]}
+                    label="Response body"
                   />
                 ) : (
                   <DimmedNote>

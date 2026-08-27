@@ -70,6 +70,69 @@ export type ReplayClient = Pick<
  */
 export type ReplayParamsOverride = Record<string, unknown> | null | undefined;
 
+/**
+ * The params of a replayed request that `replayProtocolRequest` actually reads,
+ * per method.
+ *
+ * This is the other half of the switch below, and the two must move together.
+ * Replay does not re-send a captured frame verbatim — it dispatches through the
+ * typed `InspectorClient` methods, which take named arguments. Everything those
+ * signatures have no room for is dropped: `_meta` on any method (a captured
+ * `tools/call` carries `_meta.progressToken`), and every key of a list request
+ * other than `cursor`.
+ *
+ * That is invisible and harmless for one-click Replay, which re-sends what it
+ * was given. It is neither once the params are put in front of the user to
+ * edit (#2151): an editor showing `_meta` invites them to change it, and Send
+ * would then transmit something other than what they were looking at. So the
+ * Edit-and-replay modal seeds from *this* rather than from the raw frame, and
+ * names what it left out.
+ */
+export function replayableParams(
+  method: string,
+  params: Record<string, unknown> | undefined,
+): { params: Record<string, unknown> | undefined; dropped: string[] } {
+  if (!params) return { params: undefined, dropped: [] };
+
+  const keep = (...names: string[]): string[] =>
+    names.filter((name) => Object.hasOwn(params, name));
+
+  let kept: string[];
+  switch (method) {
+    case "tools/call":
+    case "prompts/get":
+      kept = keep("name", "arguments");
+      break;
+    case "resources/read":
+      kept = keep("uri");
+      break;
+    case "tools/list":
+    case "prompts/list":
+    case "resources/list":
+    case "resources/templates/list":
+    case "tasks/list":
+      // Only a *string* cursor survives: the dispatcher ignores any other type,
+      // so keeping it would put a value in the editor that changes nothing.
+      kept = typeof params.cursor === "string" ? ["cursor"] : [];
+      break;
+    default:
+      // `ping` takes nothing, and an unreplayable method never reaches here.
+      kept = [];
+      break;
+  }
+
+  const dropped = Object.keys(params).filter((name) => !kept.includes(name));
+  // `fromEntries`, never an assignment loop: an argument legitimately named
+  // `__proto__` would otherwise reach the prototype setter.
+  return {
+    params:
+      kept.length > 0
+        ? Object.fromEntries(kept.map((name) => [name, params[name]]))
+        : undefined,
+    dropped,
+  };
+}
+
 export async function replayProtocolRequest(
   client: ReplayClient,
   method: string,

@@ -15,8 +15,8 @@ import { ResourceLinkInfo } from "../ResourceLinkInfo/ResourceLinkInfo";
 import {
   formatJson,
   formatXml,
+  formatJsonDocument,
   getMimeKind,
-  isJsonDocument,
   isSafeHref,
   isTextualKind,
   looksLikeJson,
@@ -60,6 +60,19 @@ export interface ContentViewerProps {
    * one line — don't pass it for multi-line content.
    */
   wrap?: boolean;
+  /**
+   * Accessible name for the read-only JSON editor a JSON payload renders in.
+   *
+   * Say what the payload *is* whenever a screen can hold more than one: an
+   * expanded Protocol entry carries both its parameters and its response, and
+   * a list of them carries many such pairs — so the default leaves a screen
+   * reader tabbing through textboxes that all announce the same thing, with
+   * only the visible section headings to tell them apart.
+   *
+   * Reaches the JSON branch only; every other renderer here is not a control
+   * and takes no name.
+   */
+  jsonLabel?: string;
 }
 
 /**
@@ -185,12 +198,24 @@ function HighlightedContent({
  * It copies the *original* text, not the pretty-printed form, matching every
  * other branch here.
  */
-function JsonContent({ text, copyable }: { text: string; copyable: boolean }) {
+function JsonContent({
+  text,
+  formatted,
+  copyable,
+  label,
+}: {
+  /** The original payload — what the copy button copies. */
+  text: string;
+  /** Its pretty-printed form, already parsed once by whoever decided to use it. */
+  formatted: string;
+  copyable: boolean;
+  label: string;
+}) {
   return (
     <CopyableWrapper copyable={copyable} copyValue={text}>
       <JsonEditor
-        ariaLabel="JSON content"
-        value={formatJson(text)}
+        ariaLabel={label}
+        value={formatted}
         readOnly
         // Sized to the payload, and capped.
         //
@@ -221,17 +246,30 @@ function PlainTextContent({
   text,
   copyable,
   wrap,
+  jsonLabel,
 }: {
   text: string;
   copyable: boolean;
   wrap: boolean;
+  jsonLabel: string;
 }) {
   // Untyped text that really parses as JSON gets the JSON renderer too — the
   // heuristic is how a server that sent no MIME type still reads well. Not when
   // `wrap` is false, though: that caller wants one clipped line at a fixed
   // height, which a multi-line editor is not.
-  if (wrap && isJsonDocument(text)) {
-    return <JsonContent text={text} copyable={copyable} />;
+  //
+  // The formatted text comes back from the same call that decided, so the
+  // payload is parsed once rather than once to test and again to render.
+  const asJson = wrap ? formatJsonDocument(text) : null;
+  if (asJson !== null) {
+    return (
+      <JsonContent
+        text={text}
+        formatted={asJson}
+        copyable={copyable}
+        label={jsonLabel}
+      />
+    );
   }
   const displayText = looksLikeJson(text) ? formatJson(text) : text;
   return (
@@ -262,11 +300,13 @@ function TextualContent({
   mimeType,
   copyable,
   wrap,
+  jsonLabel,
 }: {
   text: string;
   mimeType: string | undefined;
   copyable: boolean;
   wrap: boolean;
+  jsonLabel: string;
 }) {
   const kind = mimeType ? getMimeKind(mimeType) : "text";
   switch (kind) {
@@ -278,9 +318,23 @@ function TextualContent({
       // line is exactly what that prop is documented not to be used for, so
       // that caller keeps the plain renderer.
       return wrap ? (
-        <JsonContent text={text} copyable={copyable} />
+        <JsonContent
+          text={text}
+          // A *declared* `application/json` renders as JSON even when it does
+          // not parse — the server said what it sent — so this cannot go
+          // through `formatJsonDocument`, which reports unparseable text as
+          // not-JSON. `formatJson` returns the original on failure.
+          formatted={formatJson(text)}
+          copyable={copyable}
+          label={jsonLabel}
+        />
       ) : (
-        <PlainTextContent text={text} copyable={copyable} wrap={wrap} />
+        <PlainTextContent
+          text={text}
+          copyable={copyable}
+          wrap={wrap}
+          jsonLabel={jsonLabel}
+        />
       );
     case "xml":
       return (
@@ -313,7 +367,14 @@ function TextualContent({
         </Stack>
       );
     default:
-      return <PlainTextContent text={text} copyable={copyable} wrap={wrap} />;
+      return (
+        <PlainTextContent
+          text={text}
+          copyable={copyable}
+          wrap={wrap}
+          jsonLabel={jsonLabel}
+        />
+      );
   }
 }
 
@@ -341,11 +402,13 @@ function ResourceContent({
   mimeType,
   copyable,
   wrap,
+  jsonLabel,
 }: {
   contents: TextResourceContents | BlobResourceContents;
   mimeType: string;
   copyable: boolean;
   wrap: boolean;
+  jsonLabel: string;
 }) {
   if ("text" in contents) {
     return (
@@ -354,6 +417,7 @@ function ResourceContent({
         mimeType={mimeType}
         copyable={copyable}
         wrap={wrap}
+        jsonLabel={jsonLabel}
       />
     );
   }
@@ -382,6 +446,7 @@ function ResourceContent({
         mimeType={mimeType}
         copyable={copyable}
         wrap={wrap}
+        jsonLabel={jsonLabel}
       />
     );
   }
@@ -394,11 +459,13 @@ function BlockContent({
   mimeType,
   copyable,
   wrap,
+  jsonLabel,
 }: {
   block: ContentBlock;
   mimeType: string | undefined;
   copyable: boolean;
   wrap: boolean;
+  jsonLabel: string;
 }) {
   switch (block.type) {
     case "text":
@@ -408,6 +475,7 @@ function BlockContent({
           mimeType={mimeType}
           copyable={copyable}
           wrap={wrap}
+          jsonLabel={jsonLabel}
         />
       );
     case "image":
@@ -448,6 +516,7 @@ export function ContentViewer({
   copyable = false,
   mimeType,
   wrap = true,
+  jsonLabel = "JSON content",
 }: ContentViewerProps) {
   if (contents) {
     const effective =
@@ -458,6 +527,7 @@ export function ContentViewer({
         mimeType={effective}
         copyable={copyable}
         wrap={wrap}
+        jsonLabel={jsonLabel}
       />
     );
   }
@@ -468,6 +538,7 @@ export function ContentViewer({
       mimeType={mimeType}
       copyable={copyable}
       wrap={wrap}
+      jsonLabel={jsonLabel}
     />
   );
 }

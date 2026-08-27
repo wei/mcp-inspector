@@ -221,6 +221,28 @@ describe("ProtocolEntry", () => {
       });
     });
 
+    // The entry's frame carries `_meta.progressToken`, which replay cannot
+    // re-send — so it must not appear in the editor as though it could.
+    it("seeds only the params replay will actually read", async () => {
+      const user = userEvent.setup();
+      const withMeta: MessageEntry = {
+        ...successEntry,
+        message: {
+          ...successEntry.message,
+          params: {
+            name: "get_weather",
+            arguments: { city: "San Francisco" },
+            _meta: { progressToken: 2 },
+          },
+        },
+      } as MessageEntry;
+      renderWithMantine(<ProtocolEntry {...baseProps} entry={withMeta} />);
+      await openEditor(user);
+
+      expect(getAceText()).not.toContain("_meta");
+      expect(screen.getByText(/`_meta` is not re-sent/)).toBeInTheDocument();
+    });
+
     it("replays with the edited params", async () => {
       const user = userEvent.setup();
       const onReplay = vi.fn();
@@ -416,6 +438,24 @@ describe("ProtocolEntry", () => {
     );
     expect(
       screen.getByRole("button", { name: "Collapse" }),
+    ).toBeInTheDocument();
+  });
+
+  // Both payloads render the same kind of control, so without distinct names a
+  // screen reader announces them identically.
+  it("names the parameters and response editors distinctly", () => {
+    renderWithMantine(
+      <ProtocolEntry
+        {...baseProps}
+        entry={successEntry}
+        isListExpanded={true}
+      />,
+    );
+    expect(
+      screen.getByLabelText(/tools\/call request parameters JSON/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText(/tools\/call response JSON/),
     ).toBeInTheDocument();
   });
 

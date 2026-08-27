@@ -98,6 +98,44 @@ describe("EditReplayModal", () => {
     expect(screen.getByText(/Numbers must be finite/)).toBeInTheDocument();
   });
 
+  // Replay dispatches through the typed client methods, so a param they have no
+  // room for is dropped. Saying which, rather than seeding it into the editor,
+  // is what keeps the modal from inviting an edit that Send discards.
+  it("names the params replay cannot re-send", () => {
+    renderWithMantine(
+      <EditReplayModal
+        {...baseProps}
+        params={{ name: "echo" }}
+        droppedParamKeys={["_meta"]}
+      />,
+    );
+    expect(screen.getByText(/`_meta` is not re-sent/)).toBeInTheDocument();
+  });
+
+  it("says nothing when every param survives", () => {
+    renderWithMantine(
+      <EditReplayModal
+        {...baseProps}
+        params={{ name: "echo" }}
+        droppedParamKeys={[]}
+      />,
+    );
+    expect(screen.queryByText(/not re-sent/)).toBeNull();
+  });
+
+  it("agrees with its verb for several dropped params", () => {
+    renderWithMantine(
+      <EditReplayModal
+        {...baseProps}
+        params={{ cursor: "abc" }}
+        droppedParamKeys={["_meta", "extra"]}
+      />,
+    );
+    expect(
+      screen.getByText(/`_meta`, `extra` are not re-sent/),
+    ).toBeInTheDocument();
+  });
+
   it("closes without sending when cancelled", async () => {
     const user = userEvent.setup();
     const onSend = vi.fn();

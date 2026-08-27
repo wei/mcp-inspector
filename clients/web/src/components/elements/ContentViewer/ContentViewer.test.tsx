@@ -232,6 +232,29 @@ describe("ContentViewer", () => {
     expect(screen.getByText(/"a": 1/)).toBeInTheDocument();
   });
 
+  // An expanded Protocol entry holds two of these and a list holds many pairs,
+  // so an unnamed editor leaves a screen reader tabbing through textboxes that
+  // all announce the same thing.
+  it("names the JSON editor from jsonLabel", () => {
+    const block: ContentBlock = { type: "text", text: '{"a":1}' };
+    renderWithMantine(
+      <ContentViewer
+        block={block}
+        mimeType="application/json"
+        jsonLabel="tools/call response JSON"
+      />,
+    );
+    expect(
+      screen.getByLabelText(/tools\/call response JSON/),
+    ).toBeInTheDocument();
+  });
+
+  it("falls back to a generic name when no label is given", () => {
+    const block: ContentBlock = { type: "text", text: '{"a":1}' };
+    renderWithMantine(<ContentViewer block={block} />);
+    expect(screen.getByLabelText(/JSON content/)).toBeInTheDocument();
+  });
+
   it("keeps the copy overlay above the JSON editor", () => {
     const block: ContentBlock = { type: "text", text: '{"a":1}' };
     renderWithMantine(
