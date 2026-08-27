@@ -566,3 +566,22 @@ describe("ResourcePreviewPanel", () => {
     });
   });
 });
+
+// The `data-testid` the headless tab smoke waits on (#2148) — see the
+// PromptMessagesDisplay counterpart: `data-read-status="ok"` flips as soon as
+// `resources/read` resolves, so only this proves the preview rendered.
+describe("automation contract (#2148)", () => {
+  it("exposes a stable data-testid on the panel", () => {
+    renderWithMantine(
+      <ResourcePreviewPanel
+        resource={textResource}
+        contents={textContents}
+        isSubscribed={false}
+        onRefresh={vi.fn()}
+        onSubscribe={vi.fn()}
+        onUnsubscribe={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("resource-preview")).toBeInTheDocument();
+  });
+});

@@ -85,3 +85,15 @@ describe("StructuredOutputPanel", () => {
     expect(screen.getByTestId("code-highlight")).toHaveTextContent("{}");
   });
 });
+
+// The `data-testid` the headless tab smoke waits on (#2148). Asserting the
+// section by its heading copy would make the smoke fail on a rewording, so the
+// smoke keys off this attribute — pinned here so a rename fails loudly.
+describe("automation contract (#2148)", () => {
+  it("exposes a stable data-testid on the section", () => {
+    renderWithMantine(
+      <StructuredOutputPanel structuredContent={structuredContent} />,
+    );
+    expect(screen.getByTestId("structured-output")).toBeInTheDocument();
+  });
+});

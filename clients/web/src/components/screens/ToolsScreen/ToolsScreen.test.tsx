@@ -445,3 +445,41 @@ describe("ToolsScreen", () => {
     expect(screen.getByText("invalid_header_tool")).toBeInTheDocument();
   });
 });
+
+// The `data-*` readiness contract the headless tab smoke drives (#2148). It is
+// a documented public contract (clients/web/README.md), and a smoke asserting
+// it fails as an opaque 45s timeout rather than a mismatch — so the attribute
+// names are pinned here, where a rename fails loudly instead.
+describe("automation contract (#2148)", () => {
+  it("reports the tool count and an idle call status", () => {
+    renderWithMantine(<ToolsScreen {...baseProps} />);
+    const root = screen.getByTestId("tools-screen");
+    expect(root).toHaveAttribute("data-tool-count", String(tools.length));
+    // Absent call state reads `idle`, not empty: the smoke waits on a value.
+    expect(root).toHaveAttribute("data-call-status", "idle");
+  });
+
+  it("reports an empty list distinctly from a missing one", () => {
+    renderWithMantine(<ToolsScreen {...baseProps} tools={[]} />);
+    expect(screen.getByTestId("tools-screen")).toHaveAttribute(
+      "data-tool-count",
+      "0",
+    );
+  });
+
+  it("tracks the call status through to a result", () => {
+    renderWithMantine(
+      <ToolsScreen
+        {...baseProps}
+        callState={{
+          status: "ok",
+          result: { content: [{ type: "text", text: "done" }] },
+        }}
+      />,
+    );
+    expect(screen.getByTestId("tools-screen")).toHaveAttribute(
+      "data-call-status",
+      "ok",
+    );
+  });
+});

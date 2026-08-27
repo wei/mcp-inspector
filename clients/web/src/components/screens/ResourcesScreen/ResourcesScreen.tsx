@@ -319,7 +319,14 @@ export function ResourcesScreen({
   }
 
   return (
-    <ScreenLayout>
+    // `data-*` readiness contract for the headless tab smoke (#2148); see
+    // clients/web/README.md#core-tab-automation-contract.
+    <ScreenLayout
+      data-testid="resources-screen"
+      data-resource-count={resources.length}
+      data-template-count={templates.length}
+      data-read-status={readState?.status ?? "idle"}
+    >
       <Sidebar>
         <SidebarCard>
           <ResourceControls
