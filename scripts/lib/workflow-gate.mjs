@@ -55,9 +55,10 @@
  * Those belong in CI and are there today — `smoke:tui` self-skips under
  * `process.env.CI` on its own, so it needs no guarding.
  *
- * ONLY EXECUTABLE POSITIONS ARE SCANNED — `run:` scalars (inline and block),
- * and the values of an `env:` or `with:` mapping, found by parsing the file
- * rather than by matching lines. Everything else in a workflow is metadata that
+ * ONLY EXECUTABLE POSITIONS ARE SCANNED, found by parsing the file rather than
+ * by matching lines: `run:` scalars (inline and block), a custom `shell:`
+ * command template (step-level, and `defaults.run.shell` at workflow and job
+ * level), and the values of an `env:`, `container.env:` or `with:` mapping. Everything else in a workflow is metadata that
  * runs nothing, so scanning it produces findings that are simply false:
  * `name: Explain why smoke:web:firefox stays local` executes nothing, and
  * failing the suite on it would contradict the "what it forbids, and nothing
@@ -67,8 +68,8 @@
  * the wrong thing.
  *
  * That is a real limit, stated rather than hidden: an execution vector outside
- * those three positions — a custom action that reads a script name from
- * somewhere else, say — is not seen. The alternative, scanning everything, was
+ * those positions — a custom action that reads a script name from somewhere
+ * else, say — is not seen. The alternative, scanning everything, was
  * measured against this repo's own workflow and produces false positives on
  * ordinary step names, which is the faster way to get a guard deleted.
  */
@@ -180,6 +181,16 @@ const BROWSER_ASSIGNMENTS = [
   {
     re: new RegExp(
       String.raw`\$\{?env:${BROWSER_ENV_VAR}\}?\s*=\s*${ASSIGNED_VALUE}`,
+      "gi",
+    ),
+    value: 1,
+  },
+  // PowerShell's Env: DRIVE, the other standard way to write the environment
+  // there: `Set-Item Env:SMOKE_BROWSER firefox`, or with `-Path`/`-Value`
+  // (Copilot). The value may be positional or named.
+  {
+    re: new RegExp(
+      String.raw`\b(?:Set|New)-Item(?:Property)?\b[^\n]*?\bEnv:${BROWSER_ENV_VAR}\b\s*(?:-Value\s+)?${ASSIGNED_VALUE}`,
       "gi",
     ),
     value: 1,

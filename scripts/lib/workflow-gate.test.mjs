@@ -349,6 +349,36 @@ describe("findWorkflowViolations", () => {
       rules: [],
     },
     {
+      // Copilot, eleventh review: PowerShell's Env: drive is the other standard
+      // way to write the environment there.
+      name: "flags a Set-Item write to the Env: drive",
+      text: workflow(
+        "      - run: Set-Item Env:SMOKE_BROWSER firefox; npm run smoke",
+      ),
+      rules: [VIOLATION.BROWSER_ENV],
+    },
+    {
+      name: "flags the named -Path/-Value spelling too",
+      text: workflow(
+        '      - run: New-Item -Path Env:SMOKE_BROWSER -Value "firefox"',
+      ),
+      rules: [VIOLATION.BROWSER_ENV],
+    },
+    {
+      name: "allows a Set-Item write pinning chromium",
+      text: workflow(
+        '      - run: Set-Item -Path Env:SMOKE_BROWSER -Value "chromium"',
+      ),
+      rules: [],
+    },
+    {
+      // Reading the variable is not setting it — the same distinction as
+      // `echo "SMOKE_BROWSER: firefox"` from round 5.
+      name: "does not flag a Get-Item read of the same variable",
+      text: workflow("      - run: Get-Item Env:SMOKE_BROWSER; npm run smoke"),
+      rules: [],
+    },
+    {
       // Copilot, tenth review: GitHub's multiline environment-file syntax.
       // Reported as unreadable rather than parsed — see the comment on the
       // pattern for why parsing it would be a coverage claim that only holds
