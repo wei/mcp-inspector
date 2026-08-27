@@ -49,14 +49,15 @@
  * `process.env.CI` on its own, so it needs no guarding.
  *
  * ONLY EXECUTABLE POSITIONS ARE SCANNED — `run:` scalars (inline and block),
- * and the values of an `env:` or `with:` mapping. Everything else in a workflow
- * is metadata that runs nothing, so scanning it produces findings that are
- * simply false: `name: Explain why smoke:web:firefox stays local` executes
- * nothing, and failing the suite on it would contradict the "what it forbids,
- * and nothing more" contract above (Copilot). Comments are skipped for the same
- * reason and one more: the workflow's value is largely in its prose, and a
- * guard that made the two tiers undocumentable in the file implementing one of
- * them would be traded for the wrong thing.
+ * and the values of an `env:` or `with:` mapping, found by parsing the file
+ * rather than by matching lines. Everything else in a workflow is metadata that
+ * runs nothing, so scanning it produces findings that are simply false:
+ * `name: Explain why smoke:web:firefox stays local` executes nothing, and
+ * failing the suite on it would contradict the "what it forbids, and nothing
+ * more" contract above (Copilot). Comments fall out for the same reason — and
+ * the workflow's value is largely in its prose, so a guard that made the two
+ * tiers undocumentable in the file implementing one of them would be traded for
+ * the wrong thing.
  *
  * That is a real limit, stated rather than hidden: an execution vector outside
  * those three positions — a custom action that reads a script name from
@@ -65,6 +66,7 @@
  * ordinary step names, which is the faster way to get a guard deleted.
  */
 
+import { LineCounter, parseAllDocuments, visit } from "yaml";
 import { SUPPORTED_BROWSERS, DEFAULT_BROWSER } from "./headless-browser.mjs";
 
 /** Scripts whose `local:` prefix declares them local-only. */
@@ -110,72 +112,102 @@ const DYNAMIC_ENGINE_RE = new RegExp(
   "gi",
 );
 // The value may be quoted (`SMOKE_BROWSER: "firefox"`), assigned
-// (`SMOKE_BROWSER=firefox`), or an expression — capture whatever follows.
-const BROWSER_ENV_RE = /\bSMOKE_BROWSER\s*[:=]\s*(\S+)/gi;
+// (`SMOKE_BROWSER=firefox`), an expression, or ABSENT — `SMOKE_BROWSER:` with
+// no value is valid YAML that sets the variable to the empty string, which
+// `resolveBrowserName` rejects as present-but-empty rather than treating as
+// unset (Copilot). So the value is `\S*`, and an empty capture is a finding.
+const BROWSER_ENV_RE = /\bSMOKE_BROWSER\s*[:=]\s*(\S*)/gi;
 
-function isComment(line) {
-  return line.trimStart().startsWith("#");
-}
-
-function indentOf(line) {
-  return line.length - line.trimStart().length;
-}
-
-/** `run:` with an inline command, optionally as the first key of a `- ` item. */
-const RUN_INLINE_RE = /^\s*(?:-\s+)?run:\s*(.*)$/;
-/** A key that opens a block whose nested lines are executable: `run: |`, `env:`, `with:`. */
-const BLOCK_OPEN_RE = /^\s*(?:-\s+)?(run|env|with):\s*(?:[|>][-+]?\d*)?\s*$/;
-
-/**
- * The executable scalars of a workflow, with the line each came from.
- *
- * Deliberately hand-rolled rather than YAML-parsed: the guard runs in
- * `test:scripts`, which is `node --test` with no dependencies by design, and
- * the three shapes it needs are simple enough to recognize by indentation.
- *
- * @param {string} text
- * @returns {Array<{line: number, kind: string, text: string}>}
- */
-export function extractExecutableRegions(text) {
-  const regions = [];
-  let blockKind = null;
-  let blockIndent = 0;
-
-  text.split(/\r?\n/).forEach((line, index) => {
-    if (isComment(line)) return;
-    const lineNumber = index + 1;
-
-    if (blockKind !== null) {
-      // A blank line neither ends a block scalar nor carries anything.
-      if (line.trim() === "") return;
-      if (indentOf(line) > blockIndent) {
-        regions.push({ line: lineNumber, kind: blockKind, text: line });
-        return;
-      }
-      // Dedented out of the block — fall through and re-read this line as a key.
-      blockKind = null;
-    }
-
-    const block = BLOCK_OPEN_RE.exec(line);
-    if (block) {
-      blockKind = block[1];
-      blockIndent = indentOf(line);
-      return;
-    }
-
-    const run = RUN_INLINE_RE.exec(line);
-    if (run && run[1].trim() !== "") {
-      regions.push({ line: lineNumber, kind: "run", text: run[1] });
-    }
-  });
-
-  return regions;
-}
-
+// A shell assignment inside a `run:` script can still be quoted; a YAML value
+// arrives already unquoted from the parser, so this is a no-op there.
 function stripQuotes(value) {
   const trimmed = value.trim().replace(/[,;]+$/, "");
   const quoted = /^(["'])(.*)\1$/.exec(trimmed);
   return quoted ? quoted[2] : trimmed;
+}
+
+/** The mapping keys whose values a workflow actually executes. */
+export const EXECUTABLE_KEYS = ["run", "env", "with"];
+
+/**
+ * The executable scalars of a workflow, with the line each came from.
+ *
+ * Parsed with the `yaml` package rather than by hand. The first two rounds of
+ * this guard did hand-roll it, and both were wrong in the same direction — a
+ * regex that stopped at the first `}`, then an opener that could not see
+ * `run: | # explanation` or the flow mapping `env: { SMOKE_BROWSER: firefox }`
+ * (Copilot, twice). Each miss is a workflow that invokes a forbidden pass while
+ * `test:scripts` stays green, which is worse than no guard, because it reports
+ * a coverage that is not there. YAML has too many spellings of the same thing
+ * to recognize by indentation; a real parser knows all of them.
+ *
+ * `yaml` is already a root **dependency**, so this adds no install — and
+ * `test:scripts` staying dependency-free was always about not adding one, not
+ * about refusing what the repo has. This file is not in the published `files`
+ * allowlist, so it changes nothing about the tarball.
+ *
+ * A parse error THROWS rather than yielding no regions: a workflow the guard
+ * cannot read must not pass as a workflow with nothing in it.
+ *
+ * A multi-line `run:` block is one region carrying the whole script, reported
+ * at the line of its `run:` key rather than at the offending line inside it.
+ * The finding also prints what it matched, so that is still actionable.
+ *
+ * @param {string} text
+ * @param {string} [file] only for the parse-error message
+ * @returns {Array<{line: number, kind: string, text: string}>}
+ */
+export function extractExecutableRegions(text, file = "<workflow>") {
+  const lineCounter = new LineCounter();
+  const docs = parseAllDocuments(text, { lineCounter });
+  const regions = [];
+  const lineOf = (node) => lineCounter.linePos(node.range[0]).line;
+  const isScalar = (node) => node?.range != null && !("items" in node);
+
+  for (const doc of docs) {
+    if (doc.errors.length > 0) {
+      throw new Error(
+        `workflow-gate: could not parse ${file}: ${doc.errors[0].message}`,
+      );
+    }
+
+    visit(doc, {
+      Pair(_key, pair) {
+        const key = isScalar(pair.key) ? String(pair.key.value) : null;
+        if (key === null || !EXECUTABLE_KEYS.includes(key)) return;
+
+        // `run:` — one scalar holding the command (inline or block).
+        if (isScalar(pair.value)) {
+          regions.push({
+            line: lineOf(pair.value),
+            kind: key,
+            text: String(pair.value.value ?? ""),
+          });
+          return;
+        }
+
+        // `env:` / `with:` — a mapping, in either block or flow form. Each
+        // entry is rebuilt as `NAME: value` so the rules below read it the way
+        // they read a shell assignment, and so an entry with NO value (valid
+        // YAML, and an empty-string override) still reaches them.
+        visit(pair.value, {
+          Pair(_k, entry) {
+            if (!isScalar(entry.key)) return;
+            const value = isScalar(entry.value)
+              ? String(entry.value.value ?? "")
+              : "";
+            regions.push({
+              line: lineOf(entry.key),
+              kind: key,
+              text: `${String(entry.key.value)}: ${value}`,
+            });
+          },
+        });
+      },
+    });
+  }
+
+  return regions;
 }
 
 /**
@@ -240,15 +272,20 @@ export function findWorkflowViolations(text, file = "<workflow>") {
     for (const match of line.matchAll(BROWSER_ENV_RE)) {
       const value = stripQuotes(match[1]);
       if (value === DEFAULT_BROWSER) continue;
+      // Setting it to nothing is not the same as leaving it out: the variable
+      // is then present and empty, which `resolveBrowserName` rejects outright
+      // rather than falling back to the default.
+      const described = value === "" ? "an empty value" : `\`${value}\``;
       findings.push({
         file,
         line: lineNumber,
         rule: VIOLATION.BROWSER_ENV,
         match: match[0].trim(),
         message:
-          `SMOKE_BROWSER must not be set to \`${value}\` in a workflow — only ` +
-          `\`${DEFAULT_BROWSER}\` runs in GitHub CI, and an expression cannot be ` +
-          `checked statically. Leave it unset; the default is \`${DEFAULT_BROWSER}\`.`,
+          `SMOKE_BROWSER must not be set to ${described} in a workflow — only ` +
+          `\`${DEFAULT_BROWSER}\` runs in GitHub CI, an expression cannot be ` +
+          `checked statically, and an empty value is rejected rather than ` +
+          `defaulted. Leave it unset; the default is \`${DEFAULT_BROWSER}\`.`,
       });
     }
   }

@@ -145,6 +145,30 @@ describe("findWorkflowViolations", () => {
       rules: [VIOLATION.LOCAL_SCRIPT],
     },
     {
+      // Copilot, third review: a hand-rolled opener could not see either of
+      // these, and each is a forbidden invocation that would have passed.
+      name: "flags a block scalar opened with a trailing comment",
+      text: "      - run: | # why this step exists\n          npm run local:gate\n",
+      rules: [VIOLATION.LOCAL_SCRIPT],
+    },
+    {
+      name: "flags an env override written as a flow mapping",
+      text: "      - env: { SMOKE_BROWSER: firefox }\n        run: npm run smoke\n",
+      rules: [VIOLATION.BROWSER_ENV],
+    },
+    {
+      // Present-but-empty is not unset: `resolveBrowserName` rejects it rather
+      // than falling back to chromium, so a workflow must not write it either.
+      name: "flags SMOKE_BROWSER set to nothing at all",
+      text: "        env:\n          SMOKE_BROWSER:\n",
+      rules: [VIOLATION.BROWSER_ENV],
+    },
+    {
+      name: "flags an empty shell assignment too",
+      text: "      - run: SMOKE_BROWSER= npm run smoke\n",
+      rules: [VIOLATION.BROWSER_ENV],
+    },
+    {
       // Copilot, second review: metadata executes nothing, so a finding there
       // is simply false — and the fastest way to get a guard deleted.
       name: "does not read a step name as an invocation",
@@ -157,8 +181,8 @@ describe("findWorkflowViolations", () => {
       rules: [],
     },
     {
-      name: "does not read a bare mapping line outside env/with/run",
-      text: "          SMOKE_BROWSER-ish-doc: firefox\n",
+      name: "does not read a similarly-named key as the override",
+      text: "        env:\n          SMOKE_BROWSER_DOC: firefox\n",
       rules: [],
     },
     {
@@ -212,19 +236,30 @@ describe("extractExecutableRegions", () => {
     // rest of the file as executable.
     const regions = extractExecutableRegions(
       [
-        "        env:",
-        "          SMOKE_BROWSER: chromium",
-        "      - name: smoke:web:firefox is local-only",
-        "      - run: npm run smoke",
+        "steps:",
+        "  - name: smoke:web:firefox is local-only",
+        "    env:",
+        "      SMOKE_BROWSER: chromium",
+        "    run: npm run smoke",
         "",
       ].join("\n"),
     );
+    // The step `name:` is absent, and the two executable values are not.
     assert.deepEqual(
       regions.map((r) => [r.kind, r.text.trim()]),
       [
         ["env", "SMOKE_BROWSER: chromium"],
         ["run", "npm run smoke"],
       ],
+    );
+  });
+
+  it("throws on a workflow it cannot parse, rather than finding nothing", () => {
+    // A file that does not parse must not read as a file with nothing in it —
+    // that is the one failure mode where an unreadable workflow passes.
+    assert.throws(
+      () => extractExecutableRegions("jobs:\n  - a\n  b: c\n", "broken.yml"),
+      /could not parse broken\.yml/,
     );
   });
 });
