@@ -301,6 +301,70 @@ describe("findWorkflowViolations", () => {
       rules: [],
     },
     {
+      // Copilot, ninth review: a custom `shell:` is a COMMAND TEMPLATE Actions
+      // runs around every script, so the invocation hides beside a `run:` value
+      // that looks harmless.
+      name: "flags a command in a step's shell template",
+      text: [
+        "on: push",
+        "jobs:",
+        "  build:",
+        "    steps:",
+        "      - shell: npm run local:gate && bash {0}",
+        "        run: echo hello",
+      ].join("\n"),
+      rules: [VIOLATION.LOCAL_SCRIPT],
+    },
+    {
+      name: "flags one in a job's defaults.run.shell",
+      text: [
+        "on: push",
+        "jobs:",
+        "  build:",
+        "    defaults:",
+        "      run:",
+        "        shell: npm run smoke:web:firefox && bash {0}",
+        "    steps:",
+        "      - run: echo hello",
+      ].join("\n"),
+      rules: [VIOLATION.ENGINE_SCRIPT],
+    },
+    {
+      name: "flags one in the workflow-level defaults.run.shell",
+      text: [
+        "on: push",
+        "defaults:",
+        "  run:",
+        "    shell: npm run local:gate && bash {0}",
+        "jobs:",
+        "  build:",
+        "    steps:",
+        "      - run: echo hello",
+      ].join("\n"),
+      rules: [VIOLATION.LOCAL_SCRIPT],
+    },
+    {
+      name: "leaves an ordinary shell name alone",
+      text: workflow("      - shell: pwsh\n        run: npm run smoke"),
+      rules: [],
+    },
+    {
+      // Copilot, tenth review: GitHub's multiline environment-file syntax.
+      // Reported as unreadable rather than parsed — see the comment on the
+      // pattern for why parsing it would be a coverage claim that only holds
+      // for the shapes someone thought of.
+      name: "flags a multi-line $GITHUB_ENV override",
+      text: workflow(
+        [
+          "      - run: |",
+          '          echo "SMOKE_BROWSER<<EOF" >> $GITHUB_ENV',
+          '          echo "firefox" >> $GITHUB_ENV',
+          '          echo "EOF" >> $GITHUB_ENV',
+        ].join("\n"),
+      ),
+      rules: [VIOLATION.BROWSER_ENV],
+    },
+    {
       name: "flags a workflow-level env override",
       text: [
         "on: push",

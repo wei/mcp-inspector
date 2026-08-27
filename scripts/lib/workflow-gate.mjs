@@ -184,6 +184,17 @@ const BROWSER_ASSIGNMENTS = [
     ),
     value: 1,
   },
+  // GitHub's MULTILINE environment-file syntax: `SMOKE_BROWSER<<EOF`, the value
+  // on following lines, then the delimiter. Reported as unreadable rather than
+  // parsed (Copilot): the value can arrive through any number of shapes — a
+  // brace group redirected to $GITHUB_ENV, a heredoc nested in another heredoc
+  // — and a parser that handled some of them would be a coverage claim that
+  // holds only for the shapes someone thought of. Nobody spells `chromium` this
+  // way; if they did, `SMOKE_BROWSER=chromium` is the fix.
+  {
+    re: new RegExp(String.raw`\b${BROWSER_ENV_VAR}\s*<<[^\n]*`, "gi"),
+    unreadable: true,
+  },
   // .NET, reachable from PowerShell: SetEnvironmentVariable("NAME", "value").
   // The value arm accepts an UNQUOTED second argument as well — `$engine`, or a
   // `${{ }}` expression — because that spelling sets the environment just the
@@ -225,8 +236,8 @@ function stripQuotes(value) {
  * allowlist, so it changes nothing about the tarball.
  *
  * The walk is STRUCTURAL — it descends the schema's executable paths
- * (workflow `env`, job `env`/`container.env`/`with`, step `run`/`env`/`with`)
- * rather than
+ * (workflow `env`/`defaults.run.shell`, job `env`/`container.env`/`with`/
+ * `defaults.run.shell`, step `run`/`shell`/`env`/`with`) rather than
  * matching pairs by key name anywhere in the tree. Key-name matching looks
  * equivalent and is not: workflow input ids are user-defined, so an input
  * legitimately named `env` puts its own `description` and `default` in front of
@@ -305,9 +316,20 @@ export function extractExecutableRegions(text, file = "<workflow>") {
 
     const at = (node, key) => (isMap(node) ? node.get(key, true) : undefined);
 
+    /**
+     * `defaults.run.shell` — a custom `shell:` is a COMMAND TEMPLATE that
+     * Actions runs around every script (`{0}` is the script path), so
+     * `shell: npm run local:gate && bash {0}` invokes the gate while the `run:`
+     * value beside it looks harmless (Copilot). An ordinary `bash`/`pwsh`/`cmd`
+     * matches none of the rules, so naming it here costs nothing.
+     */
+    const addDefaultShell = (node) =>
+      addCommand(at(deref(at(deref(node), "run")), "shell"));
+
     const root = deref(doc.contents);
     if (!isMap(root)) continue;
     addMapping("env", at(root, "env"));
+    addDefaultShell(at(root, "defaults"));
 
     const jobs = deref(at(root, "jobs"));
     if (!isMap(jobs)) continue;
@@ -322,6 +344,7 @@ export function extractExecutableRegions(text, file = "<workflow>") {
       // job-level `env` would (Copilot). `container:` may also be a bare image
       // string, which `addMapping` ignores.
       addMapping("env", at(deref(at(job, "container")), "env"));
+      addDefaultShell(at(job, "defaults"));
 
       const steps = deref(at(job, "steps"));
       if (!isSeq(steps)) continue;
@@ -329,6 +352,7 @@ export function extractExecutableRegions(text, file = "<workflow>") {
         const step = deref(stepNode);
         if (!isMap(step)) continue;
         addCommand(at(step, "run"));
+        addCommand(at(step, "shell"));
         addMapping("env", at(step, "env"));
         addMapping("with", at(step, "with"));
       }
@@ -418,9 +442,10 @@ export function findWorkflowViolations(text, file = "<workflow>") {
           ? [{ value: region.value, match: region.text.trim() }]
           : []
         : kind === "run"
-          ? BROWSER_ASSIGNMENTS.flatMap(({ re, value }) =>
+          ? BROWSER_ASSIGNMENTS.flatMap(({ re, value, unreadable }) =>
               [...line.matchAll(re)].map((m) => ({
-                value: m[value],
+                value: unreadable ? null : m[value],
+                unreadable,
                 match: m[0].trim(),
               })),
             )
@@ -429,12 +454,17 @@ export function findWorkflowViolations(text, file = "<workflow>") {
             [];
 
     for (const override of overrides) {
-      const value = stripQuotes(override.value);
+      const value = override.unreadable ? null : stripQuotes(override.value);
       if (value === DEFAULT_BROWSER) continue;
       // Setting it to nothing is not the same as leaving it out: the variable
       // is then present and empty, which `resolveBrowserName` rejects outright
       // rather than falling back to the default.
-      const described = value === "" ? "an empty value" : `\`${value}\``;
+      const described =
+        value === null
+          ? "a multi-line value this guard cannot read"
+          : value === ""
+            ? "an empty value"
+            : `\`${value}\``;
       findings.push({
         file,
         line: lineNumber,
