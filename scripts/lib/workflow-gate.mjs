@@ -8,11 +8,11 @@
  *     `smoke:launcher`, `smoke:cli`, `smoke:tui`, `smoke:web` and
  *     `smoke:web:chromium` — all of which BELONG there.
  *   - **`npm run local:gate`**, the pre-push gate, is a strict superset: it adds
- *     the non-Chromium engine passes, and `smoke:tui` really runs there rather
- *     than self-skipping.
+ *     the **Firefox** engine pass, and `smoke:tui` really runs there rather than
+ *     self-skipping. WebKit is on demand and belongs to neither tier.
  *
- * The narrow thing that must never reach CI is the **non-Chromium engine
- * passes**. `smoke:web:firefox` was placed in the local gate on purpose (#2086,
+ * The narrow thing that must never reach CI is a **non-Chromium engine pass**.
+ * `smoke:web:firefox` was placed in the local gate on purpose (#2086,
  * #2133) after a CI job was trialled and removed for never once disagreeing
  * with Chromium, and `smoke:web:webkit` fails two of the three smokes outright
  * for reasons nobody has identified. Confidence in the cross-engine runs is not
@@ -33,9 +33,16 @@
  *   3. Invoking `smoke:web:engine`, whose engine comes from the environment and
  *      therefore cannot be read off the workflow at all.
  *   4. Setting `SMOKE_BROWSER` to anything but a literal `chromium` — the back
- *      door that would redirect an otherwise innocent `npm run smoke`. An
- *      expression (`${{ matrix.browser }}`) is flagged for the same reason as
- *      `smoke:web:engine`: the guard cannot tell what it resolves to.
+ *      door that would redirect an otherwise innocent `npm run smoke`.
+ *   5. Naming either family through a workflow **expression** —
+ *      `npm run smoke:web:${{ matrix.browser }}`, `npm run local:${{ … }}`, or
+ *      `SMOKE_BROWSER: ${{ matrix.browser }}`. This is rule 3's reason applied
+ *      consistently: a matrix whose values the guard cannot read is a matrix
+ *      that may well contain `firefox`, so an unreadable name is treated as a
+ *      forbidden one rather than waved through (Copilot). Note the limit — a
+ *      fully opaque `npm run ${{ matrix.script }}` names no family at all and
+ *      is not detectable here; the guard covers the constructions that spell
+ *      out a forbidden one.
  *
  * WHAT IT MUST NOT FORBID: `npm run smoke`, `smoke:web:chromium`, `smoke:tui`.
  * Those belong in CI and are there today — `smoke:tui` self-skips under
@@ -71,7 +78,13 @@ export const VIOLATION = {
   BROWSER_ENV: "smoke-browser-override",
 };
 
-const LOCAL_SCRIPT_RE = /\blocal:[a-z0-9][a-z0-9:-]*/gi;
+// The name may be spelled out (`local:gate`) or built from an expression
+// (`local:${{ matrix.task }}`) — both are `local:` scripts, and neither may be
+// invoked from a workflow.
+const LOCAL_SCRIPT_RE = /\blocal:(?:[a-z0-9][a-z0-9:-]*|\$\{\{[^}]*\}\})/gi;
+// Same reasoning one level down: `smoke:web:` followed by an expression could
+// resolve to any engine, so it is read as a forbidden one.
+const DYNAMIC_ENGINE_RE = /\bsmoke:web:\$\{\{[^}]*\}\}/gi;
 // The value may be quoted (`SMOKE_BROWSER: "firefox"`), assigned
 // (`SMOKE_BROWSER=firefox`), or an expression — capture whatever follows.
 const BROWSER_ENV_RE = /\bSMOKE_BROWSER\s*[:=]\s*(\S+)/gi;
@@ -132,6 +145,19 @@ export function findWorkflowViolations(text, file = "<workflow>") {
             `(#2086). GitHub CI runs \`npm run smoke\`, which covers \`smoke:web:chromium\`.`,
         });
       }
+    }
+
+    for (const match of line.matchAll(DYNAMIC_ENGINE_RE)) {
+      findings.push({
+        file,
+        line: lineNumber,
+        rule: VIOLATION.ENGINE_SCRIPT,
+        match: match[0],
+        message:
+          `\`${match[0]}\` builds an engine-pass name from an expression, so the guard cannot ` +
+          `tell which engine it runs — and a matrix that a workflow can vary may well contain ` +
+          `\`firefox\`. Name \`smoke:web:${DEFAULT_BROWSER}\` outright, or just run \`npm run smoke\`.`,
+      });
     }
 
     for (const match of line.matchAll(BROWSER_ENV_RE)) {

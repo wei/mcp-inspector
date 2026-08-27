@@ -54,6 +54,18 @@ describe("findWorkflowViolations", () => {
       rules: [VIOLATION.ENGINE_SCRIPT],
     },
     {
+      // Copilot, first review: the matrix form is exactly how a forbidden
+      // engine reaches CI without anyone typing its name.
+      name: "flags an engine pass whose name is built from an expression",
+      text: "      - run: npm run smoke:web:${{ matrix.browser }}\n",
+      rules: [VIOLATION.ENGINE_SCRIPT],
+    },
+    {
+      name: "flags a local: script whose name is built from an expression",
+      text: "      - run: npm run local:${{ matrix.task }}\n",
+      rules: [VIOLATION.LOCAL_SCRIPT],
+    },
+    {
       name: "flags SMOKE_BROWSER pointed at another engine",
       text: "        env:\n          SMOKE_BROWSER: firefox\n",
       rules: [VIOLATION.BROWSER_ENV],
