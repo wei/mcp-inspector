@@ -6,12 +6,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import {
-  Box,
-  Text,
-  useComputedColorScheme,
-  useMantineColorScheme,
-} from "@mantine/core";
+import { Box, Text } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import type {
   CreateMessageResult,
@@ -23,10 +18,8 @@ import type {
 } from "@modelcontextprotocol/client";
 import { InspectorClient } from "@inspector/core/mcp/index.js";
 import { getServerType } from "@inspector/core/mcp/config.js";
-import type {
-  InspectorClientEventMap,
-  JsonValue,
-} from "@inspector/core/mcp/index.js";
+import type { JsonValue } from "@inspector/core/mcp/index.js";
+
 import type { TypedEvent } from "@inspector/core/mcp/inspectorClientEventTarget.js";
 import {
   getUrlElicitationsFromError,
@@ -46,15 +39,6 @@ import {
   eraToVersionNegotiation,
   resolveModernLogLevel,
 } from "@inspector/core/mcp/types.js";
-import { ManagedToolsState } from "@inspector/core/mcp/state/managedToolsState.js";
-import { ManagedPromptsState } from "@inspector/core/mcp/state/managedPromptsState.js";
-import { ManagedResourcesState } from "@inspector/core/mcp/state/managedResourcesState.js";
-import { PagedToolsState } from "@inspector/core/mcp/state/pagedToolsState.js";
-import { PagedPromptsState } from "@inspector/core/mcp/state/pagedPromptsState.js";
-import { PagedResourcesState } from "@inspector/core/mcp/state/pagedResourcesState.js";
-import { ManagedResourceTemplatesState } from "@inspector/core/mcp/state/managedResourceTemplatesState.js";
-import { ManagedRequestorTasksState } from "@inspector/core/mcp/state/managedRequestorTasksState.js";
-import { ResourceSubscriptionsState } from "@inspector/core/mcp/state/resourceSubscriptionsState.js";
 import {
   applyStdioSettingsToConfig,
   cleanRoots,
@@ -73,10 +57,7 @@ import {
   saveClientConfigRemote,
 } from "@inspector/core/client/remote.js";
 import { formatClientConfigLoadError } from "@inspector/core/client/config-parse.js";
-import { MessageLogState } from "@inspector/core/mcp/state/messageLogState.js";
-import { FetchRequestLogState } from "@inspector/core/mcp/state/fetchRequestLogState.js";
 import type { FetchRequestLogStateEventMap } from "@inspector/core/mcp/state/fetchRequestLogState.js";
-import { StderrLogState } from "@inspector/core/mcp/state/stderrLogState.js";
 import {
   parseOAuthCallbackParams,
   parseOAuthState,
@@ -93,23 +74,16 @@ import { useSettingsDraft } from "@inspector/core/react/useSettingsDraft.js";
 import { useClientSettingsDraft } from "@inspector/core/react/useClientSettingsDraft.js";
 import { useEmaIdpLoginState } from "@inspector/core/react/useEmaIdpLoginState.js";
 import { getWebRemoteOAuthStorage } from "./lib/remoteOAuthStorage";
-import { useManagedTools } from "@inspector/core/react/useManagedTools.js";
-import { useManagedPrompts } from "@inspector/core/react/useManagedPrompts.js";
-import { useManagedResources } from "@inspector/core/react/useManagedResources.js";
-import { usePagedTools } from "@inspector/core/react/usePagedTools.js";
-import { usePagedPrompts } from "@inspector/core/react/usePagedPrompts.js";
-import { usePagedResources } from "@inspector/core/react/usePagedResources.js";
-import { usePaginatedList } from "./hooks/usePaginatedList";
 import { useLastPersistedSettings } from "./hooks/useLastPersistedSettings";
 import { usePaginatedListsOverride } from "./hooks/usePaginatedListsOverride";
 import { useValueChange } from "./hooks/useValueChange";
+import { useThemeToggle } from "./hooks/useThemeToggle";
+import { useTabUiState } from "./hooks/useTabUiState";
+import { useInspectorStores } from "./hooks/useInspectorStores";
+import { useExportActions } from "./hooks/useExportActions";
+import { useProgressToasts } from "./hooks/useProgressToasts";
+import { useTaskToasts } from "./hooks/useTaskToasts";
 import type { ListPaginationControlsProps } from "./components/elements/ListPaginationControls/ListPaginationControls";
-import { useManagedResourceTemplates } from "@inspector/core/react/useManagedResourceTemplates.js";
-import { useManagedRequestorTasks } from "@inspector/core/react/useManagedRequestorTasks.js";
-import { useResourceSubscriptions } from "@inspector/core/react/useResourceSubscriptions.js";
-import { useMessageLog } from "@inspector/core/react/useMessageLog.js";
-import { useFetchRequestLog } from "@inspector/core/react/useFetchRequestLog.js";
-import { useStderrLog } from "@inspector/core/react/useStderrLog.js";
 import { useInitialConfig } from "@inspector/core/react/useInitialConfig.js";
 import { refreshingPersist } from "./lib/refreshingPersist";
 import { usePendingClientRequests } from "@inspector/core/react/usePendingClientRequests.js";
@@ -120,18 +94,6 @@ import type {
 } from "./components/screens/ToolsScreen/ToolsScreen";
 import type { GetPromptState } from "./components/screens/PromptsScreen/PromptsScreen";
 import type { ReadResourceState } from "./components/screens/ResourcesScreen/ResourcesScreen";
-import type { TaskProgress } from "./components/groups/TaskCard/TaskCard";
-import {
-  EMPTY_TOOLS_UI,
-  EMPTY_PROMPTS_UI,
-  EMPTY_RESOURCES_UI,
-  EMPTY_APPS_UI,
-  EMPTY_TASKS_UI,
-  EMPTY_LOGS_UI,
-  EMPTY_PROTOCOL_UI,
-  EMPTY_NETWORK_UI,
-  EMPTY_CONSOLE_UI,
-} from "./components/screens/screenUiState";
 import { clearScrollMemory } from "./hooks/useScrollMemory";
 import type { AppRendererHandle } from "./components/elements/AppRenderer/AppRenderer";
 import { createAppBridgeFactory } from "./components/elements/AppRenderer/createAppBridgeFactory";
@@ -168,7 +130,7 @@ import {
   PendingClientRequestModal,
   type PendingClientRequestContent,
 } from "./components/groups/PendingClientRequestModal/PendingClientRequestModal";
-import { buildExportFilename, downloadJsonFile } from "./lib/downloadFile";
+import { downloadJsonFile } from "./lib/downloadFile";
 import { INSPECTOR_SERVERS_TAB } from "./utils/inspectorTabs";
 import { enrichProtocolEntries } from "./utils/correlateTransportErrors";
 import { visibleMalformedListItems } from "./utils/malformedListReport";
@@ -219,10 +181,7 @@ import {
 } from "./lib/browserTabVisibility";
 import type { PendingReauth } from "./utils/pendingReauth";
 import { getAuthToken, redirectUrlProvider } from "./lib/authToken";
-import {
-  messagesToLogEntries,
-  replayProtocolRequest,
-} from "./lib/protocolReplay";
+import { messagesToLogEntries } from "./lib/protocolReplay";
 import {
   errorCodeOf,
   errorMessage,
@@ -238,32 +197,13 @@ import {
   bodyDroppedToastId,
   CLIENT_CONFIG_LOAD_ERROR_NOTIFICATION_ID,
 } from "./utils/toasts/toastIds";
-import {
-  formatProgressToastMessage,
-  PROGRESS_TOAST_AUTOCLOSE_MS,
-  progressToastId,
-} from "./utils/toasts/progressToasts";
-import {
-  formatTaskToastMessage,
-  isTerminalTaskStatus,
-  TASK_CANCELLED_TOAST_AUTOCLOSE_MS,
-  taskToastColor,
-  taskToastId,
-  type TaskToastInput,
-} from "./utils/toasts/taskToasts";
 import { FetchBodyDroppedToastMessage } from "./components/elements/Toasts/FetchBodyDroppedToastMessage";
 import { OutputValidationToastMessage } from "./components/elements/Toasts/OutputValidationToastMessage";
 import { UrlElicitationErrorToastMessage } from "./components/elements/Toasts/UrlElicitationErrorToastMessage";
 import { ReAuthBannerBar } from "./components/groups/ReAuthBanner/ReAuthBannerBar";
 
 function App() {
-  // Theme toggle plumbing (preserved from the pre-wire placeholder).
-  const { setColorScheme } = useMantineColorScheme();
-  const computedColorScheme = useComputedColorScheme("light");
-  const isDark = computedColorScheme === "dark";
-  const onToggleTheme = useCallback(() => {
-    setColorScheme(isDark ? "light" : "dark");
-  }, [isDark, setColorScheme]);
+  const { onToggleTheme } = useThemeToggle();
 
   // Server list — sourced from ~/.mcp-inspector/mcp.json via the backend's
   // `/api/servers` routes. First-launch seeds are written by the backend when
@@ -558,34 +498,6 @@ function App() {
     [appElicitationController],
   );
 
-  const [managedToolsState, setManagedToolsState] =
-    useState<ManagedToolsState | null>(null);
-  const [managedPromptsState, setManagedPromptsState] =
-    useState<ManagedPromptsState | null>(null);
-  const [managedResourcesState, setManagedResourcesState] =
-    useState<ManagedResourcesState | null>(null);
-  // Paged (paginated) counterparts, used when the `paginatedLists` setting
-  // is on (#1721). Created/destroyed alongside the managed states.
-  const [pagedToolsState, setPagedToolsState] =
-    useState<PagedToolsState | null>(null);
-  const [pagedPromptsState, setPagedPromptsState] =
-    useState<PagedPromptsState | null>(null);
-  const [pagedResourcesState, setPagedResourcesState] =
-    useState<PagedResourcesState | null>(null);
-  const [managedResourceTemplatesState, setManagedResourceTemplatesState] =
-    useState<ManagedResourceTemplatesState | null>(null);
-  const [managedRequestorTasksState, setManagedRequestorTasksState] =
-    useState<ManagedRequestorTasksState | null>(null);
-  const [resourceSubscriptionsState, setResourceSubscriptionsState] =
-    useState<ResourceSubscriptionsState | null>(null);
-  const [messageLogState, setMessageLogState] =
-    useState<MessageLogState | null>(null);
-  const [fetchRequestLogState, setFetchRequestLogState] =
-    useState<FetchRequestLogState | null>(null);
-  const [stderrLogState, setStderrLogState] = useState<StderrLogState | null>(
-    null,
-  );
-
   // Optimistic log level — `logging/setLevel` has no echo notification, so
   // the parent keeps the current value locally.
   const [currentLogLevel, setCurrentLogLevel] = useState<LoggingLevel>("info");
@@ -620,22 +532,16 @@ function App() {
   // navigation (#1414/#1417). The in-flight result panels (`toolCallState` /
   // `getPromptState` / `readResourceState`) stay separate — they're written by
   // the async action handlers below, not by the screens.
-  const [toolsUi, setToolsUi] = useState(EMPTY_TOOLS_UI);
-  const [promptsUi, setPromptsUi] = useState(EMPTY_PROMPTS_UI);
-  const [resourcesUi, setResourcesUi] = useState(EMPTY_RESOURCES_UI);
-  const [appsUi, setAppsUi] = useState(EMPTY_APPS_UI);
-  const [tasksUi, setTasksUi] = useState(EMPTY_TASKS_UI);
-  const [logsUi, setLogsUi] = useState(EMPTY_LOGS_UI);
-  const [protocolUi, setProtocolUi] = useState(EMPTY_PROTOCOL_UI);
-  // Protocol entries the user pinned (by entry id). Session-scoped — the ids
-  // reference message-log entries, which clear on disconnect, so this resets
-  // with the rest of the per-screen state.
-  const [pinnedProtocolIds, setPinnedProtocolIds] = useState<Set<string>>(
-    () => new Set(),
-  );
-  const [networkUi, setNetworkUi] = useState(EMPTY_NETWORK_UI);
-  const [consoleUi, setConsoleUi] = useState(EMPTY_CONSOLE_UI);
-  const [activeTab, setActiveTab] = useState(INSPECTOR_SERVERS_TAB);
+  const {
+    ui,
+    setUi,
+    activeTab,
+    setActiveTab,
+    pinnedProtocolIds,
+    setPinnedProtocolIds,
+    togglePinProtocol,
+    resetTabUiState,
+  } = useTabUiState();
   const [pendingStepUp, setPendingStepUp] = useState<{
     challenge: AuthChallenge;
     authorizationUrl: URL;
@@ -719,32 +625,12 @@ function App() {
   /** Guards against applying the same OAuth resume snapshot more than once per load. */
   const oauthResumeUiAppliedRef = useRef(false);
 
-  // Tracks which progress streams currently have a live toast, so each new tick
-  // updates the existing toast instead of stacking a fresh one. Entries are
-  // removed when their toast closes (auto-dismiss or user). A ref (not state)
-  // because it's incidental bookkeeping that must not trigger re-renders.
-  const progressToastIdsRef = useRef<Set<string>>(new Set());
-
-  // Same bookkeeping for live task-status toasts (one per taskId), so each
-  // `notifications/tasks/status` tick replaces the existing toast.
-  const taskToastIdsRef = useRef<Set<string>>(new Set());
-
-  // The taskId of the in-flight task-augmented tool call, captured from the
-  // `toolCallTaskUpdated` event `callToolStream` dispatches. Lets the Tool
-  // detail panel's Cancel button cancel the underlying task on the server
-  // (#1455) instead of no-op'ing. Reset at the start of every call, so an
-  // ordinary (non-task) call leaves it undefined and its Cancel doesn't fire a
-  // stray task cancellation. A ref (not state) because it's only read at the
-  // moment Cancel is clicked and must not trigger re-renders.
-  const activeToolCallTaskIdRef = useRef<string | undefined>(undefined);
-
-  // Per-task progress, keyed by taskId. Sourced from the core `requestorTaskProgress`
-  // event (emitted by callToolStream, which owns the taskId), fed to the Tasks
-  // screen so `TaskCard`'s progress bar renders for active tasks. Pruned on
-  // terminal status (below) and reset on disconnect (`resetSessionScopedUiState`).
-  const [progressByTaskId, setProgressByTaskId] = useState<
-    Record<string, TaskProgress>
-  >({});
+  // Progress and task-status toasts, and the taskId → progress map the Tasks
+  // screen renders from. Both hooks subscribe to the live client's events and
+  // own their own toast-id bookkeeping.
+  useProgressToasts(inspectorClient);
+  const { progressByTaskId, resetTaskProgress, activeToolCallTaskIdRef } =
+    useTaskToasts(inspectorClient);
 
   // Hook layer. Each hook subscribes to its respective event source and
   // re-renders the App on change. When `inspectorClient` / state managers
@@ -762,58 +648,6 @@ function App() {
     malformedListItems,
     lastError,
   } = useInspectorClient(inspectorClient);
-  const {
-    tools: managedTools,
-    error: toolsLoadError,
-    listChanged: toolsListChanged,
-    refresh: refreshTools,
-    clearListChanged: clearToolsListChanged,
-  } = useManagedTools(inspectorClient, managedToolsState);
-  const {
-    prompts: managedPrompts,
-    error: promptsLoadError,
-    listChanged: promptsListChanged,
-    refresh: refreshPrompts,
-    clearListChanged: clearPromptsListChanged,
-  } = useManagedPrompts(inspectorClient, managedPromptsState);
-  const {
-    resources: managedResources,
-    error: resourcesLoadError,
-    listChanged: resourcesListChanged,
-    refresh: refreshResources,
-    clearListChanged: clearResourcesListChanged,
-  } = useManagedResources(inspectorClient, managedResourcesState);
-  const {
-    resourceTemplates,
-    error: resourceTemplatesLoadError,
-    refresh: refreshResourceTemplates,
-  } = useManagedResourceTemplates(
-    inspectorClient,
-    managedResourceTemplatesState,
-  );
-  // Paged (paginated) list sources. When `paginatedLists` is on the managed
-  // states skip their all-page walk and these drive the sidebar instead (#1721).
-  const {
-    tools: pagedTools,
-    nextCursor: pagedToolsCursor,
-    pageCount: pagedToolsPageCount,
-    error: pagedToolsLoadError,
-    loadPage: loadToolsPage,
-  } = usePagedTools(inspectorClient, pagedToolsState);
-  const {
-    prompts: pagedPrompts,
-    nextCursor: pagedPromptsCursor,
-    pageCount: pagedPromptsPageCount,
-    error: pagedPromptsLoadError,
-    loadPage: loadPromptsPage,
-  } = usePagedPrompts(inspectorClient, pagedPromptsState);
-  const {
-    resources: pagedResources,
-    nextCursor: pagedResourcesCursor,
-    pageCount: pagedResourcesPageCount,
-    error: pagedResourcesLoadError,
-    loadPage: loadResourcesPage,
-  } = usePagedResources(inspectorClient, pagedResourcesState);
   // What every settings write that landed on disk actually wrote, so a later
   // failed write can be rolled back to that rather than to a `servers` entry
   // frozen at the last successful list read (#2089).
@@ -832,6 +666,44 @@ function App() {
   const paginatedListsOverride = usePaginatedListsOverride(servers);
   const paginatedLists =
     paginatedListsOverride.valueFor(activeServerId) ?? persistedPaginatedLists;
+  const connected = connectionStatus === "connected";
+
+  // The per-session state managers and the finished lists they feed. Owns the
+  // create / destroy lifecycle, so the connection code below sees two stable
+  // callbacks rather than twelve state slots.
+  const {
+    stores,
+    createStores,
+    destroyStores,
+    fetchLogRef,
+    refreshTools,
+    refreshPrompts,
+    refreshResources,
+    loadToolsPage,
+    loadPromptsPage,
+    loadResourcesPage,
+    toolsListChanged,
+    clearToolsListChanged,
+    promptsListChanged,
+    clearPromptsListChanged,
+    resourcesListChanged,
+    clearResourcesListChanged,
+    resourceTemplates,
+    resourceTemplatesLoadError,
+    refreshResourceTemplates,
+    toolsPagination,
+    promptsPagination,
+    resourcesPagination,
+    tasks,
+    refreshTasks,
+    clearCompletedTasks,
+    subscriptions,
+    subscriptionStreamState,
+    messages,
+    fetchRequests,
+    stderrLogs,
+  } = useInspectorStores({ inspectorClient, connected, paginatedLists });
+
   // The malformed-entry report is written by the aggregate walk's salvage. In
   // paginated mode the tools/prompts/resources panels render the paged stores
   // instead, which never write or clear it — so it would linger above a page it
@@ -840,43 +712,6 @@ function App() {
     () => visibleMalformedListItems(malformedListItems, paginatedLists),
     [malformedListItems, paginatedLists],
   );
-  const connected = connectionStatus === "connected";
-  const toolsPagination = usePaginatedList({
-    connected,
-    paginated: paginatedLists,
-    managedItems: managedTools,
-    managedRefresh: refreshTools,
-    managedError: toolsLoadError,
-    pagedItems: pagedTools,
-    pagedNextCursor: pagedToolsCursor,
-    pagedPageCount: pagedToolsPageCount,
-    pagedError: pagedToolsLoadError,
-    loadPage: loadToolsPage,
-  });
-  const promptsPagination = usePaginatedList({
-    connected,
-    paginated: paginatedLists,
-    managedItems: managedPrompts,
-    managedRefresh: refreshPrompts,
-    managedError: promptsLoadError,
-    pagedItems: pagedPrompts,
-    pagedNextCursor: pagedPromptsCursor,
-    pagedPageCount: pagedPromptsPageCount,
-    pagedError: pagedPromptsLoadError,
-    loadPage: loadPromptsPage,
-  });
-  const resourcesPagination = usePaginatedList({
-    connected,
-    paginated: paginatedLists,
-    managedItems: managedResources,
-    managedRefresh: refreshResources,
-    managedError: resourcesLoadError,
-    pagedItems: pagedResources,
-    pagedNextCursor: pagedResourcesCursor,
-    pagedPageCount: pagedResourcesPageCount,
-    pagedError: pagedResourcesLoadError,
-    loadPage: loadResourcesPage,
-  });
   const tools = toolsPagination.items;
   const prompts = promptsPagination.items;
   const resources = resourcesPagination.items;
@@ -888,16 +723,6 @@ function App() {
   // whole list to close that would issue the very requests the user opted out
   // of by turning pagination on, so the setting wins.
   listedResourcesRef.current = resources;
-  const {
-    tasks,
-    refresh: refreshTasks,
-    clearCompleted: clearCompletedTasks,
-  } = useManagedRequestorTasks(inspectorClient, managedRequestorTasksState);
-  const { subscriptions, streamState: subscriptionStreamState } =
-    useResourceSubscriptions(resourceSubscriptionsState);
-  const { messages } = useMessageLog(messageLogState);
-  const { fetchRequests } = useFetchRequestLog(fetchRequestLogState);
-  const { stderrLogs } = useStderrLog(stderrLogState);
 
   // Fold the transport errors the SDK throws rather than delivers (e.g. -32601
   // on HTTP 404) onto their still-pending Protocol requests, by correlating with
@@ -913,6 +738,7 @@ function App() {
   // setting. The state manager only emits this when the drop is genuinely due
   // to rotation (log at capacity), not for benign post-clear stragglers.
   useEffect(() => {
+    const fetchRequestLogState = stores?.fetchRequestLogState;
     if (!fetchRequestLogState || activeServerId === undefined) return;
     const onBodyDropped = (
       event: TypedEventGeneric<
@@ -949,7 +775,7 @@ function App() {
         onBodyDropped,
       );
     };
-  }, [fetchRequestLogState, activeServerId]);
+  }, [stores, activeServerId]);
 
   // Server-initiated sampling / elicitation requests. These arrive while a call
   // (e.g. a tool execution) is in flight and block it until the user responds.
@@ -1018,7 +844,7 @@ function App() {
   const finalizeExplicitDisconnect = useCallback(() => {
     clearOAuthResumeOnExplicitDisconnect();
     setActiveTab(INSPECTOR_SERVERS_TAB);
-  }, [clearOAuthResumeOnExplicitDisconnect]);
+  }, [clearOAuthResumeOnExplicitDisconnect, setActiveTab]);
 
   // Does not clear the OAuth resume snapshot — that is tied to an in-flight
   // full-page redirect and is cleared on explicit disconnect or consumed on callback.
@@ -1026,20 +852,8 @@ function App() {
     setToolCallState(undefined);
     setGetPromptState(undefined);
     setReadResourceState(undefined);
-    setToolsUi(EMPTY_TOOLS_UI);
-    setPromptsUi(EMPTY_PROMPTS_UI);
-    setResourcesUi(EMPTY_RESOURCES_UI);
-    setAppsUi(EMPTY_APPS_UI);
-    setTasksUi(EMPTY_TASKS_UI);
-    setLogsUi(EMPTY_LOGS_UI);
-    setProtocolUi(EMPTY_PROTOCOL_UI);
-    setPinnedProtocolIds(new Set());
-    setNetworkUi(EMPTY_NETWORK_UI);
-    // Only the search filter resets here; the stderr entries themselves live in
-    // StderrLogState, which deliberately survives connect/disconnect so a failed
-    // launch's output stays visible for diagnosis (#1621).
-    setConsoleUi(EMPTY_CONSOLE_UI);
-    setProgressByTaskId({});
+    resetTabUiState();
+    resetTaskProgress();
     setCurrentLogLevel("info");
     // Re-seed rather than blank: the client restores its own opt-in from the
     // server setting at connect (`resetSessionState`), so blanking here would
@@ -1068,7 +882,7 @@ function App() {
     // Remembered scroll offsets are session-scoped too — drop them so the next
     // session's screens start at the top (#1417).
     clearScrollMemory();
-  }, []);
+  }, [resetTabUiState, resetTaskProgress]);
 
   // Reset activeServerId whenever the live session ends. Without this the
   // other ServerCards stay `inert` after disconnect — ServerCard dims any
@@ -1094,229 +908,6 @@ function App() {
       inspectorClient.removeEventListener("disconnect", onDisconnect);
     };
   }, [inspectorClient, resetSessionScopedUiState]);
-
-  // Surface incoming `notifications/progress` as toasts so the user can watch a
-  // long-running tool's progress while staying on the tool view — the v2
-  // replacement for v1's always-visible "Server Notifications" shelf (#1414).
-  // The full notification history still lives in the Protocol tab; these toasts
-  // are the at-a-glance, in-context signal. Toasts are keyed by progress stream
-  // (see `progressToastId`) and replaced per tick so a chatty server updates one
-  // toast rather than stacking one per tick.
-  useEffect(() => {
-    if (!inspectorClient) return;
-    const liveToastIds = progressToastIdsRef.current;
-    const onProgress = (
-      event: TypedEventGeneric<InspectorClientEventMap, "progressNotification">,
-    ) => {
-      const detail = event.detail;
-      const id = progressToastId(detail.progressToken);
-      const message = formatProgressToastMessage(detail);
-      if (liveToastIds.has(id)) {
-        notifications.update({
-          id,
-          title: "Tool progress",
-          message,
-          color: "blue",
-          autoClose: PROGRESS_TOAST_AUTOCLOSE_MS,
-        });
-        return;
-      }
-      liveToastIds.add(id);
-      notifications.show({
-        id,
-        title: "Tool progress",
-        message,
-        color: "blue",
-        autoClose: PROGRESS_TOAST_AUTOCLOSE_MS,
-        onClose: () => liveToastIds.delete(id),
-      });
-    };
-    inspectorClient.addEventListener("progressNotification", onProgress);
-    return () => {
-      inspectorClient.removeEventListener("progressNotification", onProgress);
-      // Dismiss any still-visible progress toasts when the client is swapped
-      // out, then drop the stream bookkeeping. Hiding them (rather than letting
-      // them auto-close up to PROGRESS_TOAST_AUTOCLOSE_MS later) keeps a stale
-      // "Tool progress" toast from lingering into the next session, and avoids
-      // a race where the lingering toast's `onClose` would later delete an id
-      // from the *new* session's set and trigger a duplicate-id re-show.
-      liveToastIds.forEach((id) => notifications.hide(id));
-      liveToastIds.clear();
-    };
-  }, [inspectorClient]);
-
-  // Correlate task-call progress to the task it belongs to. `callToolStream`
-  // emits `requestorTaskProgress` tagged with the taskId it owns (the generic
-  // `progressNotification` above carries only the caller's progressToken), so we
-  // build a taskId → progress map the Tasks screen reads to render each active
-  // task's progress bar. Entries are pruned on terminal status (in the task-
-  // status effect below) and the whole map resets on disconnect.
-  useEffect(() => {
-    if (!inspectorClient) return;
-    const onTaskProgress = (
-      event: TypedEventGeneric<
-        InspectorClientEventMap,
-        "requestorTaskProgress"
-      >,
-    ) => {
-      const { taskId, progress } = event.detail;
-      setProgressByTaskId((prev) => ({
-        ...prev,
-        [taskId]: {
-          progress: progress.progress,
-          total: progress.total,
-          message: progress.message,
-        },
-      }));
-    };
-    inspectorClient.addEventListener("requestorTaskProgress", onTaskProgress);
-    return () => {
-      inspectorClient.removeEventListener(
-        "requestorTaskProgress",
-        onTaskProgress,
-      );
-    };
-  }, [inspectorClient]);
-
-  // Capture the in-flight task-augmented tool call's taskId so the detail
-  // panel's Cancel button can cancel the task on the server (#1455). The id
-  // only becomes known mid-call, when `callToolStream` dispatches
-  // `toolCallTaskUpdated`, so we stash the latest into the ref the cancel
-  // handler reads. `onCallTool` clears it at the start of each call.
-  useEffect(() => {
-    if (!inspectorClient) return;
-    const onToolCallTaskUpdated = (
-      event: TypedEventGeneric<InspectorClientEventMap, "toolCallTaskUpdated">,
-    ) => {
-      activeToolCallTaskIdRef.current = event.detail.taskId;
-    };
-    inspectorClient.addEventListener(
-      "toolCallTaskUpdated",
-      onToolCallTaskUpdated,
-    );
-    return () => {
-      inspectorClient.removeEventListener(
-        "toolCallTaskUpdated",
-        onToolCallTaskUpdated,
-      );
-    };
-  }, [inspectorClient]);
-
-  // Surface live task status as per-task toasts — the v2 replacement for v1/v1.5's
-  // inline "Task status: … Polling…" line under the Tool Result (#1422, consistent
-  // with #1414). Subscribes to `taskStatusChange` (server `notifications/tasks/status`)
-  // and `requestorTaskUpdated` (client-origin updates from `callToolStream`) — the
-  // same sources the managed task store consumes; `toolCallTaskUpdated` is redundant
-  // with `requestorTaskUpdated` so we skip it to avoid double-firing. One toast per
-  // taskId, replaced per tick, dismissed on terminal status (which also prunes the
-  // task's progress entry) and on client teardown. The full status history still
-  // lives in the Protocol view.
-  useEffect(() => {
-    if (!inspectorClient) return;
-    const liveToastIds = taskToastIdsRef.current;
-    const handleTaskUpdate = (taskId: string, task: TaskToastInput) => {
-      const id = taskToastId(taskId);
-      const terminal = isTerminalTaskStatus(task.status);
-      const title = `Task ${task.status}`;
-      const message = formatTaskToastMessage(task);
-      const color = taskToastColor(task.status);
-      if (terminal) {
-        // Drop the task's progress entry now that it can't change.
-        setProgressByTaskId((prev) => {
-          if (!(taskId in prev)) return prev;
-          const next = { ...prev };
-          delete next[taskId];
-          return next;
-        });
-      }
-      if (liveToastIds.has(id)) {
-        notifications.update({ id, title, message, color });
-        if (terminal) {
-          notifications.hide(id);
-          liveToastIds.delete(id);
-        }
-        return;
-      }
-      // A first sighting that's already terminal needs no toast at all.
-      if (terminal) return;
-      liveToastIds.add(id);
-      notifications.show({
-        id,
-        title,
-        message,
-        color,
-        autoClose: false,
-        onClose: () => liveToastIds.delete(id),
-      });
-    };
-    const onTaskStatusChange = (
-      event: TypedEventGeneric<InspectorClientEventMap, "taskStatusChange">,
-    ) => {
-      handleTaskUpdate(event.detail.taskId, event.detail.task);
-    };
-    const onRequestorTaskUpdated = (
-      event: TypedEventGeneric<InspectorClientEventMap, "requestorTaskUpdated">,
-    ) => {
-      handleTaskUpdate(event.detail.taskId, event.detail.task);
-    };
-    // A cancel goes out as `taskCancelled` (dispatched by cancelRequestorTask),
-    // not as a status notification, so it would otherwise leave the running
-    // task's live "Task <status>" toast hanging with no confirmation. Replace
-    // that toast (or show a fresh one) with a short "Task cancelled" toast, and
-    // prune the now-dead progress entry. Covers both cancel paths — the Tasks
-    // screen and the Tool detail panel — since both route through
-    // cancelRequestorTask (#1455).
-    const onTaskCancelled = (
-      event: TypedEventGeneric<InspectorClientEventMap, "taskCancelled">,
-    ) => {
-      const { taskId } = event.detail;
-      setProgressByTaskId((prev) => {
-        if (!(taskId in prev)) return prev;
-        const next = { ...prev };
-        delete next[taskId];
-        return next;
-      });
-      const id = taskToastId(taskId);
-      const toast = {
-        id,
-        title: "Task cancelled",
-        message: "The task was cancelled.",
-        color: taskToastColor("cancelled"),
-        autoClose: TASK_CANCELLED_TOAST_AUTOCLOSE_MS,
-      };
-      if (liveToastIds.has(id)) {
-        // Convert the open status toast into the auto-closing confirmation; drop
-        // it from the live set so a trailing "cancelled" status tick (if the
-        // server sends one) doesn't re-show it.
-        notifications.update(toast);
-        liveToastIds.delete(id);
-      } else {
-        notifications.show(toast);
-      }
-    };
-    inspectorClient.addEventListener("taskStatusChange", onTaskStatusChange);
-    inspectorClient.addEventListener(
-      "requestorTaskUpdated",
-      onRequestorTaskUpdated,
-    );
-    inspectorClient.addEventListener("taskCancelled", onTaskCancelled);
-    return () => {
-      inspectorClient.removeEventListener(
-        "taskStatusChange",
-        onTaskStatusChange,
-      );
-      inspectorClient.removeEventListener(
-        "requestorTaskUpdated",
-        onRequestorTaskUpdated,
-      );
-      inspectorClient.removeEventListener("taskCancelled", onTaskCancelled);
-      // Hide any still-visible task toasts on client swap so they don't linger
-      // into the next session, then drop the bookkeeping (mirrors the progress-
-      // toast teardown above).
-      liveToastIds.forEach((id) => notifications.hide(id));
-      liveToastIds.clear();
-    };
-  }, [inspectorClient]);
 
   // The Server Info modal needs the active server's transport and (optional)
   // OAuth details — both are co-located here so the modal opens against the
@@ -1575,11 +1166,6 @@ function App() {
     [],
   );
 
-  // Always points at the live `FetchRequestLogState` so the synchronous
-  // pre-redirect hook below can read the current Network log without being
-  // rebound every time the active server (and its log state) changes.
-  const fetchLogRef = useRef<FetchRequestLogState | null>(null);
-
   // Make the live client reflect one settings value, in full. Every path that
   // decides what the active server's settings *are* goes through this: the
   // settings modal's close (#1444), and each write's settled / rolled-back
@@ -1614,7 +1200,7 @@ function App() {
         });
       }
     },
-    [],
+    [fetchLogRef],
   );
 
   // Flush the pre-redirect Network log to backend storage, keyed by the OAuth
@@ -1645,7 +1231,7 @@ function App() {
           // Best-effort; losing the pre-redirect log is non-fatal.
         });
     },
-    [sessionStorageAdapter],
+    [sessionStorageAdapter, fetchLogRef],
   );
 
   const prepareOAuthRedirect = useCallback(
@@ -1691,35 +1277,14 @@ function App() {
         serverId,
         activeTab,
         authKind,
-        tabUi: buildTabUiSnapshot({
-          toolsUi,
-          promptsUi,
-          resourcesUi,
-          appsUi,
-          tasksUi,
-          logsUi,
-          protocolUi,
-          networkUi,
-        }),
+        tabUi: buildTabUiSnapshot(ui),
         ...(remoteSessionId && { remoteSessionId }),
         ...(authKind === "step_up" && authChallenge && { authChallenge }),
         ...(recoverySource && { recoverySource }),
       });
       void oauthClient?.beginInteractiveAuthorization(authorizationUrl);
     },
-    [
-      inspectorClient,
-      activeTab,
-      toolsUi,
-      promptsUi,
-      resourcesUi,
-      appsUi,
-      tasksUi,
-      logsUi,
-      protocolUi,
-      networkUi,
-      onBeforeOAuthRedirect,
-    ],
+    [inspectorClient, activeTab, ui, onBeforeOAuthRedirect],
   );
 
   const tryApplyStoredAuthRecovery = useCallback(
@@ -2149,21 +1714,13 @@ function App() {
   // can call `connect()` against it before React re-renders.
   const setupClientForServer = useCallback(
     (server: ServerEntry, sessionId?: string): InspectorClient => {
-      // Tear down the previous session's managers — each destroy()
-      // unsubscribes from the old client's events. Skipped on the first
-      // call (initial values are null).
-      managedToolsState?.destroy();
-      managedPromptsState?.destroy();
-      managedResourcesState?.destroy();
-      pagedToolsState?.destroy();
-      pagedPromptsState?.destroy();
-      pagedResourcesState?.destroy();
-      managedResourceTemplatesState?.destroy();
-      managedRequestorTasksState?.destroy();
-      resourceSubscriptionsState?.destroy();
-      messageLogState?.destroy();
-      fetchRequestLogState?.destroy();
-      stderrLogState?.destroy();
+      // Tear down the previous session's managers before building the new
+      // client — each destroy() unsubscribes from the old client's events, and
+      // doing it here (rather than leaving it to `createStores` below, which
+      // also tears down whatever is live) means a throw while constructing the
+      // client leaves nothing still listening to the outgoing one. A no-op on
+      // the first call.
+      destroyStores();
 
       const { environment, logger } = createWebEnvironment(
         getAuthToken(),
@@ -2312,57 +1869,25 @@ function App() {
       // default (the client was seeded the same way in its constructor). "off"
       // means not opted in (null). Only affects modern connections.
       setModernLogLevel(resolveModernLogLevel(savedSettings) ?? null);
-      setManagedToolsState(new ManagedToolsState(client));
-      setPagedToolsState(new PagedToolsState(client));
-      setPagedPromptsState(new PagedPromptsState(client));
-      setPagedResourcesState(new PagedResourcesState(client));
-      setManagedPromptsState(new ManagedPromptsState(client));
-      const nextResourcesState = new ManagedResourcesState(client);
-      setManagedResourcesState(nextResourcesState);
-      setManagedResourceTemplatesState(
-        new ManagedResourceTemplatesState(client),
-      );
-      setManagedRequestorTasksState(new ManagedRequestorTasksState(client));
-      // ResourceSubscriptionsState consults the managed resources list to
-      // resolve subscribed URIs to full Resource objects (so the subscription
-      // tile shows the server-supplied name/title). Pass the freshly created
-      // state to avoid the React update lag from setManagedResourcesState.
-      setResourceSubscriptionsState(
-        new ResourceSubscriptionsState(client, nextResourcesState),
-      );
-      setMessageLogState(new MessageLogState(client));
       // Wire session storage so the fetch log survives the OAuth redirect.
       // When `sessionId` is supplied (the `/oauth/callback` rebuild) the prior
       // page's `auth` entries are restored on construction; the actual save is
       // driven synchronously from `onBeforeOAuthRedirect` above (keyed by the
-      // same authId). Keep `fetchLogRef` pointed at this instance so that hook
-      // reads the current log.
-      const nextFetchLog = new FetchRequestLogState(client, {
+      // same authId). `createStores` points `fetchLogRef` at the new instance
+      // so that hook reads the current log.
+      createStores(client, {
         sessionStorage: sessionStorageAdapter,
         logger,
         maxFetchRequests:
           savedSettings?.maxFetchRequests ?? DEFAULT_MAX_FETCH_REQUESTS,
         ...(sessionId && { sessionId }),
       });
-      fetchLogRef.current = nextFetchLog;
-      setFetchRequestLogState(nextFetchLog);
-      setStderrLogState(new StderrLogState(client));
 
       return client;
     },
     [
-      managedToolsState,
-      managedPromptsState,
-      managedResourcesState,
-      pagedToolsState,
-      pagedPromptsState,
-      pagedResourcesState,
-      managedResourceTemplatesState,
-      managedRequestorTasksState,
-      resourceSubscriptionsState,
-      messageLogState,
-      fetchRequestLogState,
-      stderrLogState,
+      createStores,
+      destroyStores,
       sessionStorageAdapter,
       onBeforeOAuthRedirect,
       clientConfig,
@@ -2436,14 +1961,7 @@ function App() {
         return;
       }
       applyOAuthResumeUi(snapshot, {
-        setToolsUi,
-        setPromptsUi,
-        setResourcesUi,
-        setAppsUi,
-        setTasksUi,
-        setLogsUi,
-        setProtocolUi,
-        setNetworkUi,
+        ...setUi,
         setActiveTab,
         clearToolCallState: () => setToolCallState(undefined),
         clearGetPromptState: () => setGetPromptState(undefined),
@@ -2630,7 +2148,14 @@ function App() {
         });
       }
     })();
-  }, [servers, setupClientForServer, showReAuthBanner, webOAuthStorage]);
+  }, [
+    servers,
+    setupClientForServer,
+    showReAuthBanner,
+    webOAuthStorage,
+    setUi,
+    setActiveTab,
+  ]);
 
   const onToggleConnection = useCallback(
     async (id: string) => {
@@ -3148,6 +2673,7 @@ function App() {
       capabilities,
       activeServerId,
       handleCommandScopedAuthRecovery,
+      activeToolCallTaskIdRef,
     ],
   );
 
@@ -3164,12 +2690,12 @@ function App() {
   // keystroke doesn't churn the callback identity.
   const onToolsUiChange = useCallback(
     (next: ToolsUiState) => {
-      if (next.selectedToolKey !== toolsUi.selectedToolKey) {
+      if (next.selectedToolKey !== ui.toolsUi.selectedToolKey) {
         setToolCallState(undefined);
       }
-      setToolsUi(next);
+      setUi.setToolsUi(next);
     },
-    [toolsUi.selectedToolKey],
+    [ui.toolsUi.selectedToolKey, setUi],
   );
 
   // --- MCP Apps handlers. Unlike onCallTool (which feeds the Tools panel),
@@ -3454,7 +2980,7 @@ function App() {
       return;
     }
     inspectorClient.cancelToolCall();
-  }, [inspectorClient, onCancelTask]);
+  }, [inspectorClient, onCancelTask, activeToolCallTaskIdRef]);
 
   const onClearCompletedTasks = useCallback(() => {
     clearCompletedTasks();
@@ -3743,147 +3269,34 @@ function App() {
     );
   }, [refreshTasks, runCommandInBackground]);
 
-  const onClearLogs = useCallback(() => {
-    if (!messageLogState) return;
-    // Clear only the log notifications, not the entire request/response
-    // history (which the Protocol screen renders from the same source).
-    messageLogState.clearMessages(
-      (m) =>
-        m.direction === "notification" &&
-        "method" in m.message &&
-        m.message.method === "notifications/message",
-    );
-  }, [messageLogState]);
-
-  // Panel-level Clear clears the (unpinned) history and keeps pinned entries —
-  // pinning is the way to protect an entry from Clear. This matches the button's
-  // `disabled={unpinnedEntries.length === 0}` gating and the per-section model,
-  // and leaves pinnedProtocolIds valid (the pins it references still exist).
-  const onClearProtocol = useCallback(() => {
-    messageLogState?.clearMessages((m) => !pinnedProtocolIds.has(m.id));
-  }, [messageLogState, pinnedProtocolIds]);
-
-  const onClearNetwork = useCallback(() => {
-    fetchRequestLogState?.clearFetchRequests();
-  }, [fetchRequestLogState]);
-
-  const onExportNetwork = useCallback(() => {
-    if (fetchRequests.length === 0) return;
-    downloadJsonFile(
-      buildExportFilename("network", activeServerId),
-      JSON.stringify(fetchRequests, null, 2),
-    );
-  }, [fetchRequests, activeServerId]);
-
-  const onExportProtocol = useCallback(() => {
-    if (messages.length === 0) return;
-    downloadJsonFile(
-      buildExportFilename("protocol", activeServerId),
-      JSON.stringify(messages, null, 2),
-    );
-  }, [messages, activeServerId]);
-
-  // Clear just one section: remove its entries from the log by pin membership.
-  // Clearing the pinned section also drops the (now-stale) pinned id set.
-  const onClearProtocolSection = useCallback(
-    (section: "pinned" | "history") => {
-      const isPinned = section === "pinned";
-      messageLogState?.clearMessages((m) =>
-        isPinned ? pinnedProtocolIds.has(m.id) : !pinnedProtocolIds.has(m.id),
-      );
-      if (isPinned) setPinnedProtocolIds(new Set());
-    },
-    [messageLogState, pinnedProtocolIds],
-  );
-
-  // Export just one section's entries (by pin membership) to a JSON file.
-  const onExportProtocolSection = useCallback(
-    (section: "pinned" | "history") => {
-      const isPinned = section === "pinned";
-      const subset = messages.filter((m) =>
-        isPinned ? pinnedProtocolIds.has(m.id) : !pinnedProtocolIds.has(m.id),
-      );
-      if (subset.length === 0) return;
-      downloadJsonFile(
-        buildExportFilename(
-          isPinned ? "protocol-pinned" : "protocol-unpinned",
-          activeServerId,
-        ),
-        JSON.stringify(subset, null, 2),
-      );
-    },
-    [messages, pinnedProtocolIds, activeServerId],
-  );
-
-  // Pin/unpin a Protocol entry by id. ProtocolListPanel sorts pinned entries to
-  // the top; the set is session-scoped (see resetSessionScopedUiState).
-  const onTogglePinProtocol = useCallback((id: string) => {
-    setPinnedProtocolIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-  }, []);
-
-  // Replay a Protocol entry: re-issue its original request so the fresh
-  // request+response appear as a new Protocol entry (protocol-local). A reason
-  // string (unsupported method / missing tool) surfaces as a toast; a genuine
-  // call error already shows up as the replayed entry's Error status, so only a
-  // pre-flight failure (nothing logged) needs the fallback toast.
-  const onReplayProtocol = useCallback(
-    (id: string) => {
-      if (!inspectorClient) return;
-      const entry = messages.find((m) => m.id === id);
-      if (!entry || !("method" in entry.message)) return;
-      const { method } = entry.message;
-      const params =
-        "params" in entry.message
-          ? (entry.message.params as Record<string, unknown> | undefined)
-          : undefined;
-      void replayProtocolRequest(inspectorClient, method, params, tools)
-        .then((reason) => {
-          if (reason) {
-            notifications.show({
-              title: "Can't replay",
-              message: reason,
-              color: "yellow",
-            });
-          }
-        })
-        .catch((err: unknown) => {
-          notifications.show({
-            title: "Replay failed",
-            message: err instanceof Error ? err.message : String(err),
-            color: "red",
-          });
-        });
-    },
-    [inspectorClient, messages, tools],
-  );
-
-  const onExportLogs = useCallback(() => {
-    if (logs.length === 0) return;
-    downloadJsonFile(
-      buildExportFilename("logs", activeServerId),
-      JSON.stringify(logs, null, 2),
-    );
-  }, [logs, activeServerId]);
-
-  const onClearConsole = useCallback(() => {
-    stderrLogState?.clearStderrLogs();
-  }, [stderrLogState]);
-
-  const onExportConsole = useCallback(() => {
-    if (stderrLogs.length === 0) return;
-    downloadJsonFile(
-      buildExportFilename("console", activeServerId),
-      JSON.stringify(stderrLogs, null, 2),
-    );
-  }, [stderrLogs, activeServerId]);
+  // Clear / Export / Replay for the four log-ish views (Logs, Protocol,
+  // Network, Console), plus the Protocol per-section variants.
+  const {
+    onClearLogs,
+    onClearProtocol,
+    onClearNetwork,
+    onClearConsole,
+    onExportLogs,
+    onExportProtocol,
+    onExportNetwork,
+    onExportConsole,
+    onClearProtocolSection,
+    onExportProtocolSection,
+    onReplayProtocol,
+  } = useExportActions({
+    activeServerId,
+    messageLogState: stores?.messageLogState ?? null,
+    fetchRequestLogState: stores?.fetchRequestLogState ?? null,
+    stderrLogState: stores?.stderrLogState ?? null,
+    messages,
+    fetchRequests,
+    logs,
+    stderrLogs,
+    pinnedProtocolIds,
+    setPinnedProtocolIds,
+    inspectorClient,
+    tools,
+  });
 
   // Download the current server list as a canonical mcp.json file. Uses the
   // in-memory `servers` list (kept in sync with disk by useServers' refresh-
@@ -3909,31 +3322,8 @@ function App() {
       if (inspectorClient) {
         await inspectorClient.disconnect();
       }
-      managedToolsState?.destroy();
-      managedPromptsState?.destroy();
-      managedResourcesState?.destroy();
-      pagedToolsState?.destroy();
-      pagedPromptsState?.destroy();
-      pagedResourcesState?.destroy();
-      managedResourceTemplatesState?.destroy();
-      managedRequestorTasksState?.destroy();
-      resourceSubscriptionsState?.destroy();
-      messageLogState?.destroy();
-      fetchRequestLogState?.destroy();
-      stderrLogState?.destroy();
+      destroyStores();
       setInspectorClient(null);
-      setManagedToolsState(null);
-      setManagedPromptsState(null);
-      setManagedResourcesState(null);
-      setPagedToolsState(null);
-      setPagedPromptsState(null);
-      setPagedResourcesState(null);
-      setManagedResourceTemplatesState(null);
-      setManagedRequestorTasksState(null);
-      setResourceSubscriptionsState(null);
-      setMessageLogState(null);
-      setFetchRequestLogState(null);
-      setStderrLogState(null);
       setActiveServerId(undefined);
     }
     // Deleting sweeps the server's secrets from the store, which for a
@@ -3945,18 +3335,7 @@ function App() {
     removeTarget,
     activeServerId,
     inspectorClient,
-    managedToolsState,
-    managedPromptsState,
-    managedResourcesState,
-    pagedToolsState,
-    pagedPromptsState,
-    pagedResourcesState,
-    managedResourceTemplatesState,
-    managedRequestorTasksState,
-    resourceSubscriptionsState,
-    messageLogState,
-    fetchRequestLogState,
-    stderrLogState,
+    destroyStores,
     removeServer,
     refreshInitialConfig,
   ]);
@@ -4617,15 +3996,15 @@ function App() {
           toolCallState={toolCallState}
           getPromptState={getPromptState}
           readResourceState={effectiveReadResourceState}
-          toolsUi={toolsUi}
-          promptsUi={promptsUi}
-          resourcesUi={resourcesUi}
-          appsUi={appsUi}
-          tasksUi={tasksUi}
-          logsUi={logsUi}
-          protocolUi={protocolUi}
-          networkUi={networkUi}
-          consoleUi={consoleUi}
+          toolsUi={ui.toolsUi}
+          promptsUi={ui.promptsUi}
+          resourcesUi={ui.resourcesUi}
+          appsUi={ui.appsUi}
+          tasksUi={ui.tasksUi}
+          logsUi={ui.logsUi}
+          protocolUi={ui.protocolUi}
+          networkUi={ui.networkUi}
+          consoleUi={ui.consoleUi}
           activeTab={activeTab}
           onActiveTabChange={setActiveTab}
           currentLogLevel={currentLogLevel}
@@ -4695,12 +4074,12 @@ function App() {
           toolsPagination={toolsPaginationControls}
           promptsPagination={promptsPaginationControls}
           resourcesPagination={resourcesPaginationControls}
-          onPromptsUiChange={setPromptsUi}
+          onPromptsUiChange={setUi.setPromptsUi}
           onGetPrompt={(name, args) => {
             void onGetPrompt(name, args);
           }}
           onRefreshPrompts={onRefreshPrompts}
-          onResourcesUiChange={setResourcesUi}
+          onResourcesUiChange={setUi.setResourcesUi}
           onReadResource={(uri) => {
             void onReadResource(uri);
           }}
@@ -4710,7 +4089,7 @@ function App() {
           onCompleteArgument={onCompleteArgument}
           completionsSupported={capabilities?.completions !== undefined}
           subscriptionsSupported={capabilities?.resources?.subscribe === true}
-          onTasksUiChange={setTasksUi}
+          onTasksUiChange={setUi.setTasksUi}
           onCancelTask={(taskId) => {
             void onCancelTask(taskId);
           }}
@@ -4719,24 +4098,24 @@ function App() {
           onSetLogLevel={onSetLogLevel}
           modernLogLevel={modernLogLevel}
           onSetModernLogLevel={onSetModernLogLevel}
-          onLogsUiChange={setLogsUi}
+          onLogsUiChange={setUi.setLogsUi}
           onClearLogs={onClearLogs}
           onExportLogs={onExportLogs}
-          onProtocolUiChange={setProtocolUi}
+          onProtocolUiChange={setUi.setProtocolUi}
           onClearProtocol={onClearProtocol}
           onExportProtocol={onExportProtocol}
           onClearProtocolSection={onClearProtocolSection}
           onExportProtocolSection={onExportProtocolSection}
           onReplayProtocol={onReplayProtocol}
-          onTogglePinProtocol={onTogglePinProtocol}
+          onTogglePinProtocol={togglePinProtocol}
           pinnedProtocolIds={pinnedProtocolIds}
-          onNetworkUiChange={setNetworkUi}
+          onNetworkUiChange={setUi.setNetworkUi}
           onClearNetwork={onClearNetwork}
           onExportNetwork={onExportNetwork}
-          onConsoleUiChange={setConsoleUi}
+          onConsoleUiChange={setUi.setConsoleUi}
           onClearConsole={onClearConsole}
           onExportConsole={onExportConsole}
-          onAppsUiChange={setAppsUi}
+          onAppsUiChange={setUi.setAppsUi}
           onSelectApp={onSelectApp}
           onOpenApp={(name, args) => {
             void onOpenApp(name, args);
