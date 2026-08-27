@@ -2,8 +2,6 @@ import { describe, it, expect } from "vitest";
 import { InspectorClient } from "@inspector/core/mcp/index.js";
 import type { ServerEntry } from "@inspector/core/mcp/types.js";
 import { renderWithMantine } from "../test/renderWithMantine";
-import type { PendingReauth } from "../utils/pendingReauth";
-import type { PendingStepUp } from "../utils/stepUp";
 import {
   useSessionRef,
   type SessionRef,
@@ -27,27 +25,10 @@ const entry = (id: string, name = id): ServerEntry => ({
 const client = (): InspectorClient =>
   Object.create(InspectorClient.prototype) as InspectorClient;
 
-const stepUp = (serverId: string): PendingStepUp => ({
-  serverId,
-  challenge: { reason: "unauthorized" },
-  authorizationUrl: new URL("https://as.example/authorize"),
-  source: "tool",
-});
-
-const reauth = (serverId: string): PendingReauth => ({
-  serverId,
-  challenge: { reason: "unauthorized" },
-  authorizationUrl: new URL("https://as.example/authorize"),
-  authKind: "reauth",
-  source: "tool",
-});
-
 const values = (over: Partial<SessionValues> = {}): SessionValues => ({
   activeServerId: undefined,
   servers: [],
   inspectorClient: null,
-  pendingStepUp: null,
-  pendingReauth: null,
   ...over,
 });
 
@@ -84,6 +65,8 @@ describe("useSessionRef", () => {
     expect(snapshot.activeServerId).toBe("a");
     expect(snapshot.servers).toBe(servers);
     expect(snapshot.inspectorClient).toBe(c);
+    // Seeded null and left alone: the two pending-OAuth slots are written by
+    // their owner, `useOAuthRecovery`, not supplied to this hook (#2153).
     expect(snapshot.pendingStepUp).toBeNull();
     expect(snapshot.pendingReauth).toBeNull();
   });
@@ -99,24 +82,31 @@ describe("useSessionRef", () => {
     const h = harness(values());
     const servers = [entry("a"), entry("b")];
     const c = client();
-    const up = stepUp("a");
-    const re = reauth("b");
     h.update(
       values({
         activeServerId: "b",
         servers,
         inspectorClient: c,
-        pendingStepUp: up,
-        pendingReauth: re,
       }),
     );
     expect(h.ref().current).toMatchObject({
       activeServerId: "b",
       servers,
       inspectorClient: c,
-      pendingStepUp: up,
-      pendingReauth: re,
     });
+  });
+
+  it("leaves the owner-written pending slots alone across renders", () => {
+    const h = harness(values({ activeServerId: "a", servers: [entry("a")] }));
+    // Stands in for `useOAuthRecovery`'s own mirror effect.
+    h.ref().current.pendingStepUp = {
+      serverId: "a",
+      challenge: { reason: "unauthorized" },
+      authorizationUrl: new URL("https://as.example/authorize"),
+      source: "tool",
+    };
+    h.update(values({ activeServerId: "a", servers: [entry("a")] }));
+    expect(h.ref().current.pendingStepUp?.serverId).toBe("a");
   });
 
   it("clears a value that becomes null or undefined", () => {
@@ -125,8 +115,6 @@ describe("useSessionRef", () => {
         activeServerId: "a",
         servers: [entry("a")],
         inspectorClient: client(),
-        pendingStepUp: stepUp("a"),
-        pendingReauth: reauth("a"),
       }),
     );
     h.update(values());
@@ -134,8 +122,6 @@ describe("useSessionRef", () => {
       activeServerId: undefined,
       servers: [],
       inspectorClient: null,
-      pendingStepUp: null,
-      pendingReauth: null,
     });
   });
 
