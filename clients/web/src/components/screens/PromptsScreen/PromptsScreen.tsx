@@ -274,7 +274,13 @@ export function PromptsScreen({
   }
 
   return (
-    <ScreenLayout>
+    // `data-*` readiness contract for the headless tab smoke (#2148); see
+    // clients/web/README.md#core-tab-automation-contract.
+    <ScreenLayout
+      data-testid="prompts-screen"
+      data-prompt-count={prompts.length}
+      data-get-status={getPromptState?.status ?? "idle"}
+    >
       <Sidebar>
         <SidebarCard>
           <PromptControls
