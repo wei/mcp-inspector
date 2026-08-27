@@ -88,6 +88,16 @@ describe("EditReplayModal", () => {
     expect(screen.getByText(/must be a JSON object/i)).toBeInTheDocument();
   });
 
+  // `JSON.parse("1e400")` yields `Infinity`, which `JSON.stringify` writes back
+  // as `null` — so Send would dispatch a number the user never typed while the
+  // editor still showed what they wrote.
+  it("disables Send for a number that cannot survive being sent", async () => {
+    renderWithMantine(<EditReplayModal {...baseProps} />);
+    await setAceText('{"limit":1e400}');
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(screen.getByText(/Numbers must be finite/)).toBeInTheDocument();
+  });
+
   it("closes without sending when cancelled", async () => {
     const user = userEvent.setup();
     const onSend = vi.fn();

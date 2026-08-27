@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Button, Group, Modal, Stack, Text } from "@mantine/core";
 import { JsonEditor } from "../../elements/JsonEditor/JsonEditor";
 import { isJsonObject } from "../../../utils/jsonObjectDraft";
+import { isSerializableJson } from "@inspector/core/json/jsonUtils.js";
 
 export interface EditReplayModalProps {
   opened: boolean;
@@ -34,7 +35,8 @@ const Footer = Group.withProps({ justify: "flex-end", gap: "sm" });
  * genuinely carries none, and an empty editor wearing a red error would read as
  * broken. A non-object is reported separately from text that is not JSON at
  * all: JSON-RPC `params` must be a structured value, so `42` is a shape that
- * cannot be sent however finished it is.
+ * cannot be sent however finished it is. A number that overflows is a third
+ * case, and the subtlest — see the note on that branch.
  */
 function parseParamsDraft(
   text: string,
@@ -50,6 +52,17 @@ function parseParamsDraft(
   }
   if (!isJsonObject(parsed)) {
     return { ok: false, error: "Params must be a JSON object (`{ … }`)" };
+  }
+  // `JSON.parse` accepts numeric literals it cannot represent: `1e400` parses to
+  // `Infinity`, which `JSON.stringify` then writes as `null`. Accepting it here
+  // would show the user one value and send another — the one thing an inspector
+  // must not do. Same guard, same reason, as `parseJsonObjectDraft`.
+  if (!isSerializableJson(parsed)) {
+    return {
+      ok: false,
+      error:
+        "Numbers must be finite — a value like `1e400` overflows and would be sent as null",
+    };
   }
   return { ok: true, value: parsed };
 }

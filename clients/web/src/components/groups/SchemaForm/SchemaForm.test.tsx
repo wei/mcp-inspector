@@ -1899,6 +1899,143 @@ describe("SchemaForm raw JSON (#2151)", () => {
     expect(screen.queryByText(/Not valid JSON/)).toBeNull();
   });
 
+  // `JSON.parse("1e400")` yields `Infinity`, which `JSON.stringify` writes back
+  // as `null`. Submitting it would send a number the user never typed while the
+  // editor still showed what they wrote.
+  it("blocks submission for a number that cannot survive being sent", async () => {
+    const user = userEvent.setup();
+    const onValidityChange = vi.fn();
+    renderWithMantine(<RawHarness onValidityChange={onValidityChange} />);
+    await enableRawJson(user);
+
+    await setAceTextByLabel(/Arguments JSON/, '{"count":1e400}');
+    expect(onValidityChange).toHaveBeenLastCalledWith(true);
+    expect(screen.getByText(/Numbers must be finite/)).toBeInTheDocument();
+  });
+
+  // Nothing in `values` names a branch, so the picker's index is held by the
+  // form. Editing the discriminator in the raw document is a change to which
+  // branch is in effect, and it carries no other signal — without the re-derive
+  // the picker keeps showing the outgoing branch over the incoming values.
+  it("moves the branch picker when the raw document changes the discriminator", async () => {
+    const user = userEvent.setup();
+    const union: InspectorFormSchema = {
+      type: "object",
+      anyOf: [
+        {
+          type: "object",
+          title: "Email",
+          properties: {
+            kind: { type: "string", const: "email" },
+            address: { type: "string", title: "Address" },
+          },
+          required: ["kind"],
+        },
+        {
+          type: "object",
+          title: "SMS",
+          properties: {
+            kind: { type: "string", const: "sms" },
+            phone: { type: "string", title: "Phone" },
+          },
+          required: ["kind"],
+        },
+      ],
+    };
+    renderWithMantine(
+      <RawHarness schema={union} initial={{ kind: "email" }} />,
+    );
+    expect(
+      (screen.getByRole("textbox", { name: /Variant/ }) as HTMLInputElement)
+        .value,
+    ).toBe("Email");
+
+    await enableRawJson(user);
+    await setAceTextByLabel(
+      /Arguments JSON/,
+      '{"kind":"sms","phone":"555-0100"}',
+    );
+
+    expect(
+      (screen.getByRole("textbox", { name: /Variant/ }) as HTMLInputElement)
+        .value,
+    ).toBe("SMS");
+
+    // And the widgets agree with it on the way back.
+    await user.click(screen.getByLabelText("Edit as JSON"));
+    // Anchored: the branch picker's own options carry these words too.
+    expect(screen.getByLabelText(/^Phone$/)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Address$/)).toBeNull();
+  });
+
+  // The editor holds the whole arguments object, not a per-branch slice, so a
+  // branch move must not remount it — that would reformat the text being typed
+  // and drop the caret to the top. Pinned by the text surviving verbatim: a
+  // remount reseeds from `values`, which is pretty-printed.
+  it("does not reformat the draft when the branch moves under it", async () => {
+    const user = userEvent.setup();
+    const union: InspectorFormSchema = {
+      type: "object",
+      anyOf: [
+        {
+          type: "object",
+          title: "Email",
+          properties: { kind: { type: "string", const: "email" } },
+          required: ["kind"],
+        },
+        {
+          type: "object",
+          title: "SMS",
+          properties: { kind: { type: "string", const: "sms" } },
+          required: ["kind"],
+        },
+      ],
+    };
+    renderWithMantine(
+      <RawHarness schema={union} initial={{ kind: "email" }} />,
+    );
+    await enableRawJson(user);
+
+    await setAceTextByLabel(/Arguments JSON/, '{"kind":"sms"}');
+    expect(getAceTextByLabel(/Arguments JSON/)).toBe('{"kind":"sms"}');
+  });
+
+  // The discriminator is cleared and retyped on the way between branches, so
+  // snapping to the first branch the moment it stops matching would move the
+  // picker under the user mid-edit.
+  it("keeps the current branch while the discriminator is absent", async () => {
+    const user = userEvent.setup();
+    const union: InspectorFormSchema = {
+      type: "object",
+      anyOf: [
+        {
+          type: "object",
+          title: "Email",
+          properties: { kind: { type: "string", const: "email" } },
+          required: ["kind"],
+        },
+        {
+          type: "object",
+          title: "SMS",
+          properties: { kind: { type: "string", const: "sms" } },
+          required: ["kind"],
+        },
+      ],
+    };
+    renderWithMantine(<RawHarness schema={union} initial={{ kind: "sms" }} />);
+    await enableRawJson(user);
+    expect(
+      (screen.getByRole("textbox", { name: /Variant/ }) as HTMLInputElement)
+        .value,
+    ).toBe("SMS");
+
+    await setAceTextByLabel(/Arguments JSON/, '{"note":"mid-edit"}');
+    expect(
+      (screen.getByRole("textbox", { name: /Variant/ }) as HTMLInputElement)
+        .value,
+    ).toBe("SMS");
+  });
+
   // #2123: switching a root union drops the outgoing branch's values. The raw
   // editor is seeded from what the form holds, so a round trip through it must
   // not resurrect them.

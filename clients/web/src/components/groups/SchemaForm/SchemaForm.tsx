@@ -25,6 +25,7 @@ import { ClearButton } from "../../elements/ClearButton/ClearButton";
 import { EnlargeButton } from "../../elements/EnlargeButton/EnlargeButton";
 import { JsonEditor } from "../../elements/JsonEditor/JsonEditor";
 import { isJsonObject } from "../../../utils/jsonObjectDraft";
+import { isSerializableJson } from "@inspector/core/json/jsonUtils.js";
 import { useValueChange } from "../../../hooks/useValueChange";
 import type {
   InspectorFormSchema,
@@ -272,16 +273,29 @@ function toNumericValue(raw: string | number): number | undefined {
   return Number.isSafeInteger(Math.trunc(parsed)) ? parsed : undefined;
 }
 
-/** Parse editor text, reporting `undefined` for anything that is not JSON yet. */
+/**
+ * Parse editor text, reporting `undefined` for anything this client cannot
+ * send.
+ *
+ * That covers text that is not JSON *yet* — the mid-edit state this field's
+ * whole draft/value split exists for — and text that parses but does not
+ * survive being written back out: `JSON.parse("1e400")` yields `Infinity`,
+ * which `JSON.stringify` writes as `null`. Both report no value, so the field
+ * shows its error and `onValidityChange` blocks submission, rather than sending
+ * a number the user never typed. Same guard, same reason, as
+ * `parseJsonObjectDraft` and the raw-arguments editor above.
+ */
 function parseJsonDraft(text: string): unknown {
   if (text.trim() === "") {
     return undefined;
   }
+  let parsed: unknown;
   try {
-    return JSON.parse(text);
+    parsed = JSON.parse(text);
   } catch {
     return undefined;
   }
+  return isSerializableJson(parsed) ? parsed : undefined;
 }
 
 /** Structural equality for the draft/value re-sync, via canonical JSON. */
@@ -582,6 +596,17 @@ function parseRawArgumentsDraft(
     return {
       ok: false,
       error: "Arguments must be a JSON object (`{ … }`)",
+    };
+  }
+  // `JSON.parse` accepts numeric literals it cannot represent: `1e400` parses to
+  // `Infinity`, which `JSON.stringify` then writes as `null`. Accepting it here
+  // would show the user one value and send another — the one thing an inspector
+  // must not do. Same guard, same reason, as `parseJsonObjectDraft`.
+  if (!isSerializableJson(parsed)) {
+    return {
+      ok: false,
+      error:
+        "Numbers must be finite — a value like `1e400` overflows and would be sent as null",
     };
   }
   return { ok: true, value: parsed };
@@ -940,6 +965,27 @@ export function SchemaForm({
 
   function handleFieldChange(fieldName: string, fieldValue: unknown) {
     onChange({ ...values, [fieldName]: fieldValue });
+  }
+
+  /**
+   * Take the raw editor's object, and move the branch picker with it.
+   *
+   * Nothing in `values` names a branch, so the picker's index is held here and
+   * is only ever re-derived when something says the values changed underneath
+   * (`resetKey`, a rewritten union). Editing the discriminator in the raw
+   * document is exactly that, and it has no other signal: without this, turning
+   * `{"kind":"email"}` into `{"kind":"sms",…}` leaves the picker on Email, and
+   * switching back to the widgets renders the Email branch over SMS values —
+   * showing one shape while submitting another.
+   *
+   * The current branch is kept when the values identify none, rather than
+   * snapping to the first: the user passes through that state every time they
+   * clear the discriminator to retype it.
+   */
+  function handleRawArgumentsChange(next: Record<string, unknown>) {
+    onChange(next);
+    if (branches.length === 0) return;
+    setBranchIndex(selectBranchIndex(branches, next) ?? branchIndex);
   }
 
   /**
@@ -1413,13 +1459,17 @@ export function SchemaForm({
         />
       )}
       {rawJsonMode ? (
-        // Keyed by the entity and branch, like every draft-holding field: text
-        // typed for one tool must not be left in the box for the next, and
-        // switching a root union prunes values the stale draft would restore.
+        // Keyed by the *entity* only, unlike the per-field editors, which are
+        // keyed by entity and branch. This editor holds the whole arguments
+        // object, which is not a per-branch thing: switching branches rewrites
+        // `values`, and the re-sync below picks that up without a remount.
+        // Keying it by branch too would remount it the moment an edit to the
+        // discriminator moved the picker — reformatting the text the user was
+        // typing and dropping their caret to the top.
         <RawArgumentsField
-          key={draftKey ?? "raw-json"}
+          key={resetKey ?? "raw-json"}
           values={values}
-          onChange={onChange}
+          onChange={handleRawArgumentsChange}
           disabled={disabled}
           onInvalidChange={reportRawJsonValidity}
         />
