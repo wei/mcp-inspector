@@ -789,7 +789,7 @@ describe("SchemaForm", () => {
 
     await setAceTextByLabel(/Config/, "[9007199254740993]");
     expect(
-      screen.getByText(/^This whole number cannot be represented exactly/),
+      screen.getByText(/^`9007199254740993` would not arrive as written/),
     ).toBeInTheDocument();
 
     await setAceTextByLabel(/Config/, '[{"a":1,"a":2}]');
@@ -1976,9 +1976,7 @@ describe("SchemaForm raw JSON (#2151)", () => {
 
     await setAceTextByLabel(/Arguments JSON/, '{"id":9007199254740993}');
     expect(onValidityChange).toHaveBeenLastCalledWith(true);
-    expect(
-      screen.getByText(/cannot be represented exactly/),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/would not arrive as written/)).toBeInTheDocument();
   });
 
   // `JSON.parse` keeps only the last occurrence, so the editor would show a

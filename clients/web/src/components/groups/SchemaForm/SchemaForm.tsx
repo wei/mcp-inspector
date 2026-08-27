@@ -27,9 +27,9 @@ import { JsonEditor } from "../../elements/JsonEditor/JsonEditor";
 import {
   duplicateKeyError,
   findDuplicateObjectKey,
-  hasImpreciseIntegerLiteral,
+  findUnsendableNumberLiteral,
   isJsonObject,
-  IMPRECISE_INTEGER_ERROR,
+  unsendableNumberError,
 } from "../../../utils/jsonObjectDraft";
 import { isSerializableJson } from "@inspector/core/json/jsonUtils.js";
 import { useValueChange } from "../../../hooks/useValueChange";
@@ -331,8 +331,9 @@ function describeJsonDraftProblem(text: string): string | null {
   if (!isSerializableJson(parsed)) {
     return "Numbers must be finite — this field will be omitted";
   }
-  if (hasImpreciseIntegerLiteral(text)) {
-    return `${IMPRECISE_INTEGER_ERROR} — this field will be omitted`;
+  const unsendable = findUnsendableNumberLiteral(text);
+  if (unsendable !== null) {
+    return `${unsendableNumberError(unsendable)} — this field will be omitted`;
   }
   const duplicate = findDuplicateObjectKey(text);
   if (duplicate !== null) {
@@ -652,8 +653,9 @@ function parseRawArgumentsDraft(
   }
   // The quieter half of the same defect: a whole number past 2^53−1 parses to
   // the nearest double, so the draft shows digits the wire will not carry.
-  if (hasImpreciseIntegerLiteral(text)) {
-    return { ok: false, error: IMPRECISE_INTEGER_ERROR };
+  const unsendable = findUnsendableNumberLiteral(text);
+  if (unsendable !== null) {
+    return { ok: false, error: unsendableNumberError(unsendable) };
   }
   const duplicate = findDuplicateObjectKey(text);
   if (duplicate !== null) {

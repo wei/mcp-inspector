@@ -21,8 +21,8 @@ export function isJsonObject(value: unknown): value is StrictJsonObject {
 }
 
 /**
- * Whether the draft text writes a whole number out in full that `JSON.parse`
- * cannot represent exactly.
+ * The first numeric literal in the draft that would not arrive as written, or
+ * `null` when every number survives the trip.
  *
  * `isSerializableJson` catches a literal too large to represent at all —
  * `1e400` parses to `Infinity` and writes back as `null`. This catches the
@@ -38,19 +38,25 @@ export function isJsonObject(value: unknown): value is StrictJsonObject {
  * refused `2^54` (written in full and exactly representable) and accepted every
  * full-form literal at or above 1e21, where JS switches to exponent form.
  *
- * Only integer literals written out in full are checked. An exponent or a
- * fraction is a double by nature and is sent as the double it parsed to, so
- * nothing is lost between typing and sending — and `{"n":1e308}` stays
- * acceptable, which `parseJsonObjectDraft`'s own tests pin.
+ * Only integer literals written out in full are checked for lost digits. An
+ * exponent or a fraction is a double by nature and is sent as the double it
+ * parsed to, so nothing is lost between typing and sending — and `{"n":1e308}`
+ * stays acceptable, which `parseJsonObjectDraft`'s own tests pin. Negative zero
+ * is the exception, and is checked in every spelling: there the loss happens on
+ * the way *out*, not on the way in.
  */
-export function hasImpreciseIntegerLiteral(text: string): boolean {
+export function findUnsendableNumberLiteral(text: string): string | null {
   for (const literal of jsonNumberLiterals(text)) {
+    // Negative zero, in any spelling — `-0`, `-0.0`, `-0e1`. It is represented
+    // exactly, so the digit comparison below has nothing to say about it, but
+    // `JSON.stringify` writes it as `0`: the sign is lost on the way out.
+    if (Object.is(Number(literal), -0)) return literal;
     if (!/^-?\d+$/.test(literal)) continue;
     // BigInt on both sides, so the comparison is exact: `Number(literal)` is an
     // integer-valued double, and converting it back shows what survived.
-    if (BigInt(literal) !== BigInt(Number(literal))) return true;
+    if (BigInt(literal) !== BigInt(Number(literal))) return literal;
   }
-  return false;
+  return null;
 }
 
 /** Matches one JSON number token, anchored where the scan currently stands. */
@@ -179,14 +185,17 @@ export function duplicateKeyError(key: string): string {
 }
 
 /**
- * The message every draft parser uses for {@link hasImpreciseIntegerLiteral}.
+ * The message every draft parser uses for
+ * {@link findUnsendableNumberLiteral}.
  *
- * Phrased as "cannot be represented exactly" rather than naming the safe-integer
- * range, because the range is not the rule: a whole number past ±(2^53 − 1) that
- * *is* exactly representable — 2^54, say — round-trips and is accepted.
+ * Names the literal rather than the rule, because the rule is two rules: a
+ * whole number can lose digits on the way in, and a negative zero loses its
+ * sign on the way out. Naming what is wrong with *this* document is more use
+ * than either explanation, and it is how the duplicate-key message reads too.
  */
-export const IMPRECISE_INTEGER_ERROR =
-  "This whole number cannot be represented exactly — it is rounded when parsed, so a different value would be sent";
+export function unsendableNumberError(literal: string): string {
+  return `\`${literal}\` would not arrive as written — it changes when serialized, so a different value would be sent`;
+}
 
 /**
  * Read a JSON-object editor's draft text.
@@ -228,8 +237,9 @@ export function parseJsonObjectDraft(text: string): JsonObjectDraft {
         "Numbers must be finite — a value like `1e400` overflows and would be sent as null",
     };
   }
-  if (hasImpreciseIntegerLiteral(text)) {
-    return { ok: false, error: IMPRECISE_INTEGER_ERROR };
+  const unsendable = findUnsendableNumberLiteral(text);
+  if (unsendable !== null) {
+    return { ok: false, error: unsendableNumberError(unsendable) };
   }
   const duplicate = findDuplicateObjectKey(text);
   if (duplicate !== null) {

@@ -5,9 +5,9 @@ import { JsonEditor } from "../../elements/JsonEditor/JsonEditor";
 import {
   duplicateKeyError,
   findDuplicateObjectKey,
-  hasImpreciseIntegerLiteral,
+  findUnsendableNumberLiteral,
   isJsonObject,
-  IMPRECISE_INTEGER_ERROR,
+  unsendableNumberError,
 } from "../../../utils/jsonObjectDraft";
 import {
   replayableParams,
@@ -113,8 +113,9 @@ function parseParamsDraft(
         "Numbers must be finite — a value like `1e400` overflows and would be sent as null",
     };
   }
-  if (hasImpreciseIntegerLiteral(text)) {
-    return { ok: false, error: IMPRECISE_INTEGER_ERROR };
+  const unsendable = findUnsendableNumberLiteral(text);
+  if (unsendable !== null) {
+    return { ok: false, error: unsendableNumberError(unsendable) };
   }
   const duplicate = findDuplicateObjectKey(text);
   if (duplicate !== null) {

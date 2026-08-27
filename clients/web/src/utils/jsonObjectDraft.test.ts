@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   findDuplicateObjectKey,
-  hasImpreciseIntegerLiteral,
+  findUnsendableNumberLiteral,
   parseJsonObjectDraft,
 } from "./jsonObjectDraft";
 
@@ -9,65 +9,83 @@ import {
 // `Infinity` → `null` on the wire). This is the quieter one: a whole number
 // past 2^53−1 parses to the nearest double, so the draft shows digits the wire
 // will not carry.
-describe("hasImpreciseIntegerLiteral", () => {
+describe("findUnsendableNumberLiteral", () => {
   it("accepts whole numbers inside the safe range", () => {
-    expect(hasImpreciseIntegerLiteral('{"id":9007199254740991}')).toBe(false);
-    expect(hasImpreciseIntegerLiteral('{"id":-9007199254740991}')).toBe(false);
-    expect(hasImpreciseIntegerLiteral('{"id":0}')).toBe(false);
+    expect(findUnsendableNumberLiteral('{"id":9007199254740991}')).toBeNull();
+    expect(findUnsendableNumberLiteral('{"id":-9007199254740991}')).toBeNull();
+    expect(findUnsendableNumberLiteral('{"id":0}')).toBeNull();
   });
 
   it("rejects a whole number that loses digits when parsed", () => {
     // Typed as …93, parsed as …92.
-    expect(hasImpreciseIntegerLiteral('{"id":9007199254740993}')).toBe(true);
+    expect(findUnsendableNumberLiteral('{"id":9007199254740993}')).toBe(
+      "9007199254740993",
+    );
   });
 
   // The case the previous, value-based check could not see: at or above 1e21
   // JS stringifies in exponent form, so inferring the literal from the parsed
   // number said "exponent form, nothing lost" about digits that were lost.
   it("rejects a full-form literal at or above 1e21", () => {
-    expect(hasImpreciseIntegerLiteral('{"id":1000000000000000000001}')).toBe(
-      true,
+    expect(findUnsendableNumberLiteral('{"id":1000000000000000000001}')).toBe(
+      "1000000000000000000001",
     );
   });
 
   // …and the false positive it also had. Written out in full, past the safe
   // range, and exactly representable, so it is sent as written.
   it("accepts a full-form literal that is exactly representable", () => {
-    expect(hasImpreciseIntegerLiteral('{"id":18014398509481984}')).toBe(false);
+    expect(findUnsendableNumberLiteral('{"id":18014398509481984}')).toBeNull();
   });
 
   // A fractional or exponent-form value is a double by nature and is sent as
   // the double it parsed to, so nothing is lost between typing and sending.
   it("accepts fractional and exponent-form values", () => {
-    expect(hasImpreciseIntegerLiteral('{"n":1.5}')).toBe(false);
-    expect(hasImpreciseIntegerLiteral('{"n":1e308}')).toBe(false);
-    expect(hasImpreciseIntegerLiteral('{"n":1e21}')).toBe(false);
-    expect(hasImpreciseIntegerLiteral('{"n":-2.5e-7}')).toBe(false);
+    expect(findUnsendableNumberLiteral('{"n":1.5}')).toBeNull();
+    expect(findUnsendableNumberLiteral('{"n":1e308}')).toBeNull();
+    expect(findUnsendableNumberLiteral('{"n":1e21}')).toBeNull();
+    expect(findUnsendableNumberLiteral('{"n":-2.5e-7}')).toBeNull();
   });
 
   // The reason this scans rather than running a regex over the text: those
   // digits are a *string*, sent back exactly as written.
   it("ignores digits inside a string", () => {
-    expect(hasImpreciseIntegerLiteral('{"id":"9007199254740993"}')).toBe(false);
+    expect(findUnsendableNumberLiteral('{"id":"9007199254740993"}')).toBeNull();
   });
 
   it("ignores digits inside a key, and an escaped quote inside a string", () => {
-    expect(hasImpreciseIntegerLiteral('{"9007199254740993":1}')).toBe(false);
+    expect(findUnsendableNumberLiteral('{"9007199254740993":1}')).toBeNull();
     expect(
-      hasImpreciseIntegerLiteral('{"a":"say \\"9007199254740993\\"","b":1}'),
-    ).toBe(false);
+      findUnsendableNumberLiteral('{"a":"say \\"9007199254740993\\"","b":1}'),
+    ).toBeNull();
   });
 
   it("looks through arrays and nesting", () => {
-    expect(hasImpreciseIntegerLiteral('[{"a":[9007199254740993]}]')).toBe(true);
-    expect(hasImpreciseIntegerLiteral('{"a":{"b":[1,2,"x",null,true]}}')).toBe(
-      false,
+    expect(findUnsendableNumberLiteral('[{"a":[9007199254740993]}]')).toBe(
+      "9007199254740993",
     );
+    expect(
+      findUnsendableNumberLiteral('{"a":{"b":[1,2,"x",null,true]}}'),
+    ).toBeNull();
+  });
+
+  // Represented exactly, so the digit comparison has nothing to say — but
+  // `JSON.stringify` writes it as `0`, losing the sign on the way *out*.
+  it.each(["-0", "-0.0", "-0e1", "-0.0e-5"])(
+    "rejects negative zero written as %s",
+    (literal) => {
+      expect(findUnsendableNumberLiteral(`{"n":${literal}}`)).toBe(literal);
+    },
+  );
+
+  it("accepts a positive zero", () => {
+    expect(findUnsendableNumberLiteral('{"n":0}')).toBeNull();
+    expect(findUnsendableNumberLiteral('{"n":0.0}')).toBeNull();
   });
 
   it("says nothing about text that is not JSON", () => {
-    expect(hasImpreciseIntegerLiteral("")).toBe(false);
-    expect(hasImpreciseIntegerLiteral("{")).toBe(false);
+    expect(findUnsendableNumberLiteral("")).toBeNull();
+    expect(findUnsendableNumberLiteral("{")).toBeNull();
   });
 });
 

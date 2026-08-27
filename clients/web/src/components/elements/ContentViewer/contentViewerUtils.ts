@@ -9,7 +9,7 @@
 import { isSerializableJson } from "@inspector/core/json/jsonUtils.js";
 import {
   findDuplicateObjectKey,
-  hasImpreciseIntegerLiteral,
+  findUnsendableNumberLiteral,
 } from "../../../utils/jsonObjectDraft";
 
 /**
@@ -169,7 +169,7 @@ export function formatJson(content: string): string {
 function reformatsFaithfully(text: string, parsed: unknown): boolean {
   return (
     isSerializableJson(parsed) &&
-    !hasImpreciseIntegerLiteral(text) &&
+    findUnsendableNumberLiteral(text) === null &&
     // A duplicate member name is the same class and the starkest instance:
     // `{"role":"user","role":"admin"}` would be *shown* as only the second,
     // which is the viewer hiding what the server sent.

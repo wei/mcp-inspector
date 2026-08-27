@@ -218,9 +218,7 @@ describe("EditReplayModal", () => {
     renderWithMantine(<EditReplayModal {...baseProps} method="tools/call" />);
     await setAceText('{"name":"echo","arguments":{"id":9007199254740993}}');
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
-    expect(
-      screen.getByText(/cannot be represented exactly/),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/would not arrive as written/)).toBeInTheDocument();
   });
 
   it("disables Send for a non-string prompt argument", async () => {
