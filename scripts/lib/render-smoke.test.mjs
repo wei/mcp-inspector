@@ -15,8 +15,17 @@ function stub(body) {
   return { command: process.execPath, args: ["-e", body] };
 }
 
+// `process.exitCode`, never `process.exit()`. Writing to a *pipe* is
+// asynchronous, and `process.exit()` tears the process down without draining —
+// so `console.log(MARKER); process.exit(1)` can lose the marker outright. That
+// is not hypothetical: probing the drain race for this PR, a 4MB write followed
+// by `process.exit()` arrived at the parent with the marker missing entirely.
+// A stub that intermittently never paints would fail the very assertion meant
+// to pin the paint-then-die path, and would fail it as "exited before
+// rendering" — the neighbouring branch. Setting `exitCode` and letting the loop
+// drain still exits immediately after the write; nothing holds it open.
 const paintThenExit = (code) =>
-  stub(`console.log(${JSON.stringify(MARKER)}); process.exit(${code});`);
+  stub(`console.log(${JSON.stringify(MARKER)}); process.exitCode = ${code};`);
 const paintThenLive = stub(
   `console.log(${JSON.stringify(MARKER)}); setInterval(() => {}, 1000);`,
 );
@@ -96,7 +105,9 @@ test("a paint landing just under the deadline is not failed by the render timer"
 test("fails when the child exits before painting", async () => {
   const r = await runRenderSmoke({
     ...opts,
-    ...stub(`console.error("boom"); process.exit(3);`),
+    // `exitCode`, not `exit()` — see `paintThenExit`. A forced exit can
+    // truncate the stderr write, making the `boom` assertion below flaky.
+    ...stub(`console.error("boom"); process.exitCode = 3;`),
   });
   assert.equal(r.code, 1);
   assert.match(r.message, /before rendering/);
@@ -179,6 +190,61 @@ test("a zero survival window falls back rather than passing instantly", async ()
     new RegExp(`${DEFAULTS.surviveMs}ms survival window`),
   );
   assert.doesNotMatch(r.message, /\b0ms survival window/);
+});
+
+// `forbidOutput` is `smoke:tui`'s guard for the acceptance criterion that the
+// raw-mode error must not appear in a passing run. It lives here rather than at
+// the call site precisely so it can be driven both ways: the real PTY happy
+// path only ever exercises the pattern NOT matching, so a regression that broke
+// this check would stay green forever.
+test("forbidOutput fails a run that would otherwise have passed", async () => {
+  const r = await runRenderSmoke({
+    ...opts,
+    ...stub(
+      `console.log(${JSON.stringify(MARKER)}); ` +
+        `console.error("Raw mode is not supported on the current process.stdin"); ` +
+        `setInterval(() => {}, 1000);`,
+    ),
+    forbidOutput: {
+      pattern: /Raw mode is not supported/,
+      reason: "survived but logged the raw-mode error",
+    },
+  });
+  assert.equal(r.code, 1, `expected failure, got: ${r.message}`);
+  assert.match(r.message, /survived but logged the raw-mode error/);
+  // The offending output is quoted, so the reader sees the evidence.
+  assert.match(r.message, /Raw mode is not supported/);
+});
+
+test("forbidOutput leaves a passing run alone when it does not match", async () => {
+  const r = await runRenderSmoke({
+    ...opts,
+    ...paintThenLive,
+    forbidOutput: {
+      pattern: /Raw mode is not supported/,
+      reason: "should not be reached",
+    },
+  });
+  assert.equal(r.code, 0, `expected pass, got: ${r.message}`);
+  assert.doesNotMatch(r.message, /should not be reached/);
+});
+
+// A crash reason is more useful than "and it also printed X", which is usually
+// a symptom of the same crash rather than a separate finding.
+test("forbidOutput does not overwrite an existing failure's diagnostic", async () => {
+  const r = await runRenderSmoke({
+    ...opts,
+    ...stub(
+      `console.error("Raw mode is not supported"); process.exitCode = 1;`,
+    ),
+    forbidOutput: {
+      pattern: /Raw mode is not supported/,
+      reason: "should not replace the crash reason",
+    },
+  });
+  assert.equal(r.code, 1);
+  assert.match(r.message, /before rendering/);
+  assert.doesNotMatch(r.message, /should not replace the crash reason/);
 });
 
 test("outputTail drops a leading partial line but keeps short output whole", () => {

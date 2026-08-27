@@ -152,6 +152,16 @@ try {
         USERPROFILE: work,
       },
     },
+    // Belt and braces for the acceptance criterion this fix is measured
+    // against. Survival already implies it today, since the raw-mode throw is
+    // fatal — but if Ink ever degrades it to a warning, a TUI with no keyboard
+    // input would survive happily, and this smoke is the only thing watching.
+    forbidOutput: {
+      pattern: RAW_MODE_ERROR,
+      reason:
+        `TUI rendered and survived, but still logged the raw-mode error — ` +
+        `the pseudoterminal did not take effect (flavor: ${pty.flavor})`,
+    },
     warn: (m) => console.warn(m.replace(/^render-smoke/, "smoke:tui")),
   });
 } finally {
@@ -161,17 +171,6 @@ try {
   // and a warning here should not fire — its give-up branches resolve without
   // that guarantee, so it is expected rather than anomalous on those.
   removeSafe(work, { label: "smoke:tui" });
-}
-
-// Belt and braces for the acceptance criterion this fix is measured against.
-// Survival already implies it today, since the raw-mode throw is fatal — but
-// if Ink ever degrades to a warning instead, a TUI with no keyboard input would
-// otherwise pass silently, and this smoke is the only thing watching.
-if (result.code === 0 && RAW_MODE_ERROR.test(result.output)) {
-  fail(
-    `TUI rendered and survived, but still logged the raw-mode error — the ` +
-      `pseudoterminal did not take effect (flavor: ${pty.flavor})`,
-  );
 }
 
 if (result.code === 0) {

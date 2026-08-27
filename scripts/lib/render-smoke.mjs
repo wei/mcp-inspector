@@ -23,7 +23,11 @@
 
 import { spawn } from "node:child_process";
 
-/** Durations, in ms. Every one is a hard floor as well as a default. */
+/**
+ * Fallback durations, in ms. These are defaults, NOT minimums: `normalizeMs`
+ * accepts any finite positive value, and the tests deliberately pass shorter
+ * ones. What it rejects is the shape a bad env var produces, not smallness.
+ */
 export const DEFAULTS = Object.freeze({
   timeoutMs: 15_000,
   surviveMs: 2_000,
@@ -93,6 +97,14 @@ export function outputTail(output, limit = 800) {
  * @param {(child: import("node:child_process").ChildProcess) => void} [opts.onSpawn]
  *   Called synchronously with the child, before any waiting — the caller's
  *   teardown handle on every failure path.
+ * @param {{ pattern: RegExp, reason: string }} [opts.forbidOutput]
+ *   Text that must NOT appear in an otherwise-passing run. `smoke:tui` uses it
+ *   for Ink's raw-mode error: survival already implies its absence *today*,
+ *   because that throw is fatal — but if Ink ever degraded it to a warning, a
+ *   TUI with no keyboard input would survive happily and pass. Checked here
+ *   rather than at the call site so it runs against the fully drained output
+ *   and is reachable from a test. Use a non-global RegExp: `test()` on a `/g`
+ *   pattern advances `lastIndex` and alternates.
  * @param {(message: string) => void} [opts.warn]
  * @returns {Promise<{ code: 0 | 1, message: string, output: string }>}
  *   On the normal path, resolves only after the child's streams have `close`d —
@@ -115,6 +127,7 @@ export function runRenderSmoke({
   surviveMs: requestedSurviveMs,
   exitGraceMs: requestedExitGraceMs,
   drainMs: requestedDrainMs,
+  forbidOutput,
   onSpawn = () => {},
   warn = (m) => console.warn(m),
 }) {
@@ -162,11 +175,17 @@ export function runRenderSmoke({
     const finish = (code, message) => {
       if (finished) return;
       finished = true;
-      resolve({
-        code,
-        message: typeof message === "function" ? message() : message,
-        output,
-      });
+      let verdict = code;
+      let text = typeof message === "function" ? message() : message;
+      // Only ever turns a pass into a failure. A run that already failed keeps
+      // its own diagnostic: the crash reason is the more useful of the two, and
+      // forbidden output is usually a *symptom* of it rather than a separate
+      // finding.
+      if (verdict === 0 && forbidOutput?.pattern.test(output)) {
+        verdict = 1;
+        text = `${forbidOutput.reason}\n${outputTail(output)}`;
+      }
+      resolve({ code: verdict, message: text, output });
     };
 
     // Settle the verdict, then wait for the child to actually close before
