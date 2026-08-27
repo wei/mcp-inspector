@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -636,11 +637,9 @@ function App() {
   );
 
   /**
-   * Filled in below, once the connect path's `setupClientForServer` exists —
+   * Published below, once the connect path's `setupClientForServer` exists —
    * it reads `onBeforeOAuthRedirect` and `sessionStorageAdapter` out of the
-   * hook we are about to call, so it cannot be declared before it. The
-   * `/oauth/callback` effect only ever reads this from an effect, well after
-   * the render that writes it.
+   * hook we are about to call, so it cannot be declared before it.
    */
   const setupClientForServerRef = useRef<SetupClientForServer | null>(null);
 
@@ -1228,11 +1227,16 @@ function App() {
   );
   // Publish it to the `/oauth/callback` effect, which needs to rebuild the
   // client for the server that started the flow and cannot reach a callback
-  // declared this far down. Written during render — the same latest-ref shape
-  // `sandboxUrlRef` above uses — because the only reader is an effect, which
-  // React runs strictly after the render that writes this.
-  // eslint-disable-next-line react-hooks/refs -- pre-existing latest-ref pattern, unmasked when this component dropped below the React Compiler's bail-out (#2161)
-  setupClientForServerRef.current = setupClientForServer;
+  // declared this far down.
+  //
+  // A *layout* effect, not a render-phase write and not a passive one. React
+  // runs every layout effect before any passive effect of the same commit, and
+  // the callback effect inside `useOAuthRecovery` is passive — so this is
+  // always published before its first read, without the render-phase ref
+  // mutation the compiler rule (rightly) rejects.
+  useLayoutEffect(() => {
+    setupClientForServerRef.current = setupClientForServer;
+  }, [setupClientForServer]);
 
   const onToggleConnection = useCallback(
     async (id: string) => {

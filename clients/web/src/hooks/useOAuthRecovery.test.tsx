@@ -3,11 +3,13 @@ import { AuthorizationServerMismatchError } from "@modelcontextprotocol/client";
 import { InspectorClient } from "@inspector/core/mcp/index.js";
 import type {
   ConnectionStatus,
+  FetchRequestEntry,
   ServerEntry,
 } from "@inspector/core/mcp/types.js";
 import type { AuthChallenge } from "@inspector/core/auth/challenge.js";
 import { AuthRecoveryRequiredError } from "@inspector/core/auth/challenge.js";
 import { EmaClientNotConfiguredError } from "@inspector/core/auth/ema/clientConfigError.js";
+import { useLayoutEffect, useRef } from "react";
 import { renderWithMantine, act, waitFor } from "../test/renderWithMantine";
 import {
   OAUTH_RESUME_KEY,
@@ -18,7 +20,12 @@ import type { StepUpSource } from "../utils/stepUp";
 import { EMPTY_SETTINGS } from "../utils/serverSettingsDefaults";
 import { useSessionRef } from "./useSessionRef";
 import { useTabUiState } from "./useTabUiState";
-import { useOAuthRecovery, type OAuthRecovery } from "./useOAuthRecovery";
+import {
+  useOAuthRecovery,
+  type FetchRequestSource,
+  type OAuthRecovery,
+  type SetupClientForServer,
+} from "./useOAuthRecovery";
 
 // --- Module doubles ---------------------------------------------------------
 // Everything the hook reaches outside React: the toast layer, the two storage
@@ -100,6 +107,16 @@ const challenge = (
   reason: AuthChallenge["reason"] = "unauthorized",
 ): AuthChallenge => ({ reason });
 
+/** One Network-log row, as the pre-redirect flush would find it. */
+const fetchEntry = (id: string): FetchRequestEntry => ({
+  id,
+  timestamp: new Date(0),
+  method: "POST",
+  url: "https://as.example/token",
+  requestHeaders: {},
+  category: "auth",
+});
+
 /**
  * A stand-in `InspectorClient`.
  *
@@ -138,7 +155,7 @@ interface HarnessProps {
   connectionStatus?: ConnectionStatus;
   /** Left null to exercise the "connect path not wired yet" callback arm. */
   setupClient?: (server: ServerEntry) => InspectorClient;
-  fetchRequests?: unknown[];
+  fetchRequests?: FetchRequestEntry[];
   /** Set to drop the Network log entirely, as before the first connect. */
   noFetchLog?: boolean;
 }
@@ -173,19 +190,24 @@ function harness(initial: HarnessProps = {}): Harness {
       inspectorClient: client,
     });
     const { ui, setUi, activeTab, setActiveTab } = useTabUiState();
-    const fetchLogRef = {
-      current: p.noFetchLog
+    const fetchLogRef = useRef<FetchRequestSource | null>(null);
+    // Both refs are held across renders and published from a layout effect,
+    // exactly as App.tsx does — a fresh object per render would give the
+    // callback effect a changing dependency the real one never has, and the
+    // deferred-publication test below would then be passing for the wrong
+    // reason.
+    const setupClientForServerRef = useRef<SetupClientForServer | null>(null);
+    useLayoutEffect(() => {
+      fetchLogRef.current = p.noFetchLog
         ? null
-        : { getFetchRequests: () => p.fetchRequests ?? [] },
-    } as unknown as Parameters<typeof useOAuthRecovery>[0]["fetchLogRef"];
-    const setupRef = {
-      current: p.setupClient
+        : { getFetchRequests: () => p.fetchRequests ?? [] };
+      setupClientForServerRef.current = p.setupClient
         ? (server: ServerEntry) => {
             spies.setupClient(server);
             return p.setupClient!(server);
           }
-        : null,
-    };
+        : null;
+    });
     latest = useOAuthRecovery({
       sessionRef,
       servers: p.servers ?? [],
@@ -199,7 +221,7 @@ function harness(initial: HarnessProps = {}): Harness {
       fetchLogRef,
       connectStartRef: { current: undefined },
       initialConfigSettledRef: { current: { promise: Promise.resolve() } },
-      setupClientForServerRef: setupRef,
+      setupClientForServerRef,
       setActiveServerId: spies.setActiveServerId,
       setFailedServerId: spies.setFailedServerId,
       clearResultPanels: spies.clearResultPanels,
@@ -423,17 +445,18 @@ describe("useOAuthRecovery", () => {
 
   describe("onBeforeOAuthRedirect", () => {
     it("saves the pre-redirect fetch log under the authorization state's authId", () => {
-      const h = harness({ fetchRequests: [{ id: 1 }] });
+      const entries = [fetchEntry("f1")];
+      const h = harness({ fetchRequests: entries });
       const url = new URL(`https://as.example/authorize?state=${AUTH_ID}`);
       act(() => h.api().onBeforeOAuthRedirect(url));
       expect(saveSessionMock).toHaveBeenCalledWith(
         AUTH_ID,
-        expect.objectContaining({ fetchRequests: [{ id: 1 }] }),
+        expect.objectContaining({ fetchRequests: entries }),
       );
     });
 
     it("does nothing without a parseable state parameter", () => {
-      const h = harness({ fetchRequests: [{ id: 1 }] });
+      const h = harness({ fetchRequests: [fetchEntry("f1")] });
       act(() => h.api().onBeforeOAuthRedirect(new URL(AUTH_URL)));
       act(() =>
         h
@@ -471,7 +494,7 @@ describe("useOAuthRecovery", () => {
 
     it("swallows a failed save", async () => {
       saveSessionMock.mockRejectedValue(new Error("offline"));
-      const h = harness({ fetchRequests: [{ id: 1 }] });
+      const h = harness({ fetchRequests: [fetchEntry("f1")] });
       act(() =>
         h
           .api()
@@ -1068,16 +1091,26 @@ describe("useOAuthRecovery", () => {
       });
     };
 
-    it("does nothing until the connect path has published its client builder", async () => {
+    it("keeps the code unspent when no client builder has been published", async () => {
       onCallbackUrl(`?code=abc&state=${AUTH_ID}`);
       snapshot();
       const client = fakeClient();
+      // App.tsx publishes the builder from a layout effect, so this arm is
+      // defensive rather than reachable there. What it has to guarantee is
+      // that the guard returns *before* the one-shot latch: a run that cannot
+      // exchange must not spend the single-use authorization code.
       const h = harness({ servers: [entry("a")] });
       await waitFor(() =>
         expect(window.location.pathname).toBe("/oauth/callback"),
       );
-      // Publishing it on a later render is what lets the exchange run at all.
-      h.rerender({ servers: [entry("a")], setupClient: () => client });
+      expect(client.resumeAfterOAuth).not.toHaveBeenCalled();
+
+      // The next `servers` change — the same dependency the hydration wait
+      // rides in production — still finds the latch open.
+      h.rerender({
+        servers: [entry("a"), entry("b")],
+        setupClient: () => client,
+      });
       await waitFor(() => expect(client.resumeAfterOAuth).toHaveBeenCalled());
     });
 

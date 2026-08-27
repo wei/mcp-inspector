@@ -101,6 +101,15 @@ export interface PrepareOAuthRedirectArgs {
   client?: InspectorClient;
 }
 
+/**
+ * The only part of the Network log this hook touches: reading the entries to
+ * flush before a redirect. Naming that rather than the whole
+ * `FetchRequestLogState` states the real dependency, and lets a test supply a
+ * plain object instead of casting a partial one through `unknown` — the same
+ * shape `useProgressToasts` uses for its slice of `InspectorClient`.
+ */
+export type FetchRequestSource = Pick<FetchRequestLogState, "getFetchRequests">;
+
 /** The one thing the `/oauth/callback` rebuild needs from the connect path. */
 export type SetupClientForServer = (
   server: ServerEntry,
@@ -127,7 +136,7 @@ export interface UseOAuthRecoveryOptions {
   setUi: TabUiStateSetters;
   setActiveTab: (next: string) => void;
   /** The live Network log, flushed to session storage before a redirect. */
-  fetchLogRef: RefObject<FetchRequestLogState | null>;
+  fetchLogRef: RefObject<FetchRequestSource | null>;
   /** Handshake telemetry, cleared/started around the callback's reconnect. */
   connectStartRef: RefObject<number | undefined>;
   /**
