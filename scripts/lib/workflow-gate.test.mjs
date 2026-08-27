@@ -27,78 +27,182 @@ import {
 const repoRoot = join(import.meta.dirname, "..", "..");
 const workflowDir = join(repoRoot, ".github", "workflows");
 
+/**
+ * A minimal but SCHEMA-VALID workflow around some step YAML.
+ *
+ * The fixtures have to be real workflows now that the walk is structural
+ * rather than key-name based: a bare `- run: …` fragment sits in no job and no
+ * step, so it is correctly invisible, and a table built out of fragments would
+ * pass while asserting nothing.
+ */
+const workflow = (steps) =>
+  [
+    "on: push",
+    "jobs:",
+    "  build:",
+    "    runs-on: ubuntu-latest",
+    "    steps:",
+    steps,
+  ].join("\n");
+
 describe("findWorkflowViolations", () => {
   const cases = [
     {
       name: "flags the pre-push gate itself",
-      text: "      - run: npm run local:gate\n",
+      text: workflow("      - run: npm run local:gate"),
       rules: [VIOLATION.LOCAL_SCRIPT],
     },
     {
       name: "flags any other local: script, without being edited for it",
-      text: "      - run: npm run local:storybook\n",
+      text: workflow("      - run: npm run local:storybook"),
       rules: [VIOLATION.LOCAL_SCRIPT],
     },
     {
       name: "flags the Firefox engine pass",
-      text: "      - run: npm run smoke:web:firefox\n",
+      text: workflow("      - run: npm run smoke:web:firefox"),
       rules: [VIOLATION.ENGINE_SCRIPT],
     },
     {
       name: "flags the WebKit engine pass",
-      text: "      - run: npm run smoke:web:webkit\n",
+      text: workflow("      - run: npm run smoke:web:webkit"),
       rules: [VIOLATION.ENGINE_SCRIPT],
     },
     {
       name: "flags the env-driven runner, whose engine cannot be read statically",
-      text: "      - run: npm run smoke:web:engine\n",
+      text: workflow("      - run: npm run smoke:web:engine"),
       rules: [VIOLATION.ENGINE_SCRIPT],
     },
     {
       // Copilot, first review: the matrix form is exactly how a forbidden
       // engine reaches CI without anyone typing its name.
       name: "flags an engine pass whose name is built from an expression",
-      text: "      - run: npm run smoke:web:${{ matrix.browser }}\n",
+      text: workflow("      - run: npm run smoke:web:${{ matrix.browser }}"),
       rules: [VIOLATION.ENGINE_SCRIPT],
     },
     {
       name: "flags a local: script whose name is built from an expression",
-      text: "      - run: npm run local:${{ matrix.task }}\n",
+      text: workflow("      - run: npm run local:${{ matrix.task }}"),
+      rules: [VIOLATION.LOCAL_SCRIPT],
+    },
+    {
+      // Copilot, second review: an expression body can itself contain braces,
+      // so a brace-balanced regex stops at the first `}` and misses the one
+      // case worth catching. The rule keys off the `${{` prefix instead.
+      name: "flags an expression whose own body contains braces",
+      text: workflow(
+        "      - run: npm run smoke:web:${{ format('{0}', matrix.browser) }}",
+      ),
+      rules: [VIOLATION.ENGINE_SCRIPT],
+    },
+    {
+      name: "flags a command inside a block scalar",
+      text: workflow("      - run: |\n          npm run local:gate"),
+      rules: [VIOLATION.LOCAL_SCRIPT],
+    },
+    {
+      // Copilot, third review: a hand-rolled opener could not see either of
+      // these, and each is a forbidden invocation that would have passed.
+      name: "flags a block scalar opened with a trailing comment",
+      text: workflow(
+        "      - run: | # why this step exists\n          npm run local:gate",
+      ),
+      rules: [VIOLATION.LOCAL_SCRIPT],
+    },
+    {
+      // Copilot, fourth review: an alias carries no `.value`, so reading one as
+      // a scalar sees an empty string — with the command anchored somewhere the
+      // walk never visits, this invoked the gate while the guard saw nothing.
+      name: "flags a command reached through a YAML alias",
+      text: workflow(
+        [
+          "      - name: &cmd npm run local:gate",
+          "        run: echo documenting the gate",
+          "      - run: *cmd",
+        ].join("\n"),
+      ),
+      rules: [VIOLATION.LOCAL_SCRIPT],
+    },
+    {
+      name: "flags a command passed as an action input",
+      text: workflow("      - with:\n          args: npm run local:gate"),
       rules: [VIOLATION.LOCAL_SCRIPT],
     },
     {
       name: "flags SMOKE_BROWSER pointed at another engine",
-      text: "        env:\n          SMOKE_BROWSER: firefox\n",
+      text: workflow(
+        "      - env:\n          SMOKE_BROWSER: firefox\n        run: npm run smoke",
+      ),
       rules: [VIOLATION.BROWSER_ENV],
     },
     {
       name: "flags a quoted SMOKE_BROWSER value",
-      text: '        env:\n          SMOKE_BROWSER: "webkit"\n',
+      text: workflow(
+        '      - env:\n          SMOKE_BROWSER: "webkit"\n        run: npm run smoke',
+      ),
       rules: [VIOLATION.BROWSER_ENV],
     },
     {
       name: "flags a shell-assigned SMOKE_BROWSER",
-      text: "      - run: SMOKE_BROWSER=firefox npm run smoke\n",
+      text: workflow("      - run: SMOKE_BROWSER=firefox npm run smoke"),
       rules: [VIOLATION.BROWSER_ENV],
     },
     {
       name: "flags an expression, which cannot be checked statically",
-      text: "        env:\n          SMOKE_BROWSER: ${{ matrix.browser }}\n",
+      text: workflow(
+        "      - env:\n          SMOKE_BROWSER: ${{ matrix.browser }}\n        run: npm run smoke",
+      ),
+      rules: [VIOLATION.BROWSER_ENV],
+    },
+    {
+      // Copilot, third review: the flow spelling of the same mapping.
+      name: "flags an env override written as a flow mapping",
+      text: workflow(
+        "      - env: { SMOKE_BROWSER: firefox }\n        run: npm run smoke",
+      ),
+      rules: [VIOLATION.BROWSER_ENV],
+    },
+    {
+      // Present-but-empty is not unset: `resolveBrowserName` rejects it rather
+      // than falling back to chromium, so a workflow must not write it either.
+      name: "flags SMOKE_BROWSER set to nothing at all",
+      text: workflow(
+        "      - env:\n          SMOKE_BROWSER:\n        run: npm run smoke",
+      ),
+      rules: [VIOLATION.BROWSER_ENV],
+    },
+    {
+      name: "flags an empty shell assignment too",
+      text: workflow("      - run: SMOKE_BROWSER= npm run smoke"),
+      rules: [VIOLATION.BROWSER_ENV],
+    },
+    {
+      name: "flags a workflow-level env override",
+      text: [
+        "on: push",
+        "env:",
+        "  SMOKE_BROWSER: firefox",
+        "jobs:",
+        "  build:",
+        "    steps:",
+        "      - run: npm run smoke",
+      ].join("\n"),
       rules: [VIOLATION.BROWSER_ENV],
     },
     {
       name: "allows SMOKE_BROWSER set explicitly to chromium",
-      text: "        env:\n          SMOKE_BROWSER: chromium\n",
+      text: workflow(
+        "      - env:\n          SMOKE_BROWSER: chromium\n        run: npm run smoke",
+      ),
       rules: [],
     },
     {
       name: "allows the smoke suite, which belongs in CI",
-      text: "      - run: npm run smoke\n",
+      text: workflow("      - run: npm run smoke"),
       rules: [],
     },
     {
       name: "allows the Chromium engine pass, which belongs in CI",
-      text: "      - run: npm run smoke:web:chromium\n",
+      text: workflow("      - run: npm run smoke:web:chromium"),
       rules: [],
     },
     {
@@ -106,116 +210,117 @@ describe("findWorkflowViolations", () => {
       // deliberately outside ENGINE_SMOKES — it is not an engine pass, and the
       // guard must not read `smoke:web:` as forbidden by itself.
       name: "allows the Chromium-only tab smoke",
-      text: "      - run: npm run smoke:web:tabs\n",
+      text: workflow("      - run: npm run smoke:web:tabs"),
       rules: [],
     },
     {
       name: "allows smoke:tui, which self-skips under CI on its own",
-      text: "      - run: npm run smoke:tui\n",
+      text: workflow("      - run: npm run smoke:tui"),
       rules: [],
     },
     {
       name: "allows the rest of the CI chain",
-      text: [
-        "      - run: npm run validate",
-        "      - run: npm run coverage",
-        "      - run: npm run verify:build-gate",
-        "      - run: npm run verify:bundle-externals",
-        "      - run: npm run test:storybook",
-        "",
-      ].join("\n"),
+      text: workflow(
+        [
+          "      - run: npm run validate",
+          "      - run: npm run coverage",
+          "      - run: npm run verify:build-gate",
+          "      - run: npm run verify:bundle-externals",
+          "      - run: npm run test:storybook",
+        ].join("\n"),
+      ),
       rules: [],
-    },
-    {
-      // Copilot, second review: an expression body can itself contain braces,
-      // so a brace-balanced regex stops at the first `}` and misses the one
-      // case worth catching. The rule keys off the `${{` prefix instead.
-      name: "flags an expression whose own body contains braces",
-      text: "      - run: npm run smoke:web:${{ format('{0}', matrix.browser) }}\n",
-      rules: [VIOLATION.ENGINE_SCRIPT],
-    },
-    {
-      name: "flags a command inside a block scalar, not just an inline run",
-      text: "      - run: |\n          npm run local:gate\n",
-      rules: [VIOLATION.LOCAL_SCRIPT],
-    },
-    {
-      name: "flags a command passed as an action input",
-      text: "        with:\n          args: npm run local:gate\n",
-      rules: [VIOLATION.LOCAL_SCRIPT],
-    },
-    {
-      // Copilot, third review: a hand-rolled opener could not see either of
-      // these, and each is a forbidden invocation that would have passed.
-      name: "flags a block scalar opened with a trailing comment",
-      text: "      - run: | # why this step exists\n          npm run local:gate\n",
-      rules: [VIOLATION.LOCAL_SCRIPT],
-    },
-    {
-      name: "flags an env override written as a flow mapping",
-      text: "      - env: { SMOKE_BROWSER: firefox }\n        run: npm run smoke\n",
-      rules: [VIOLATION.BROWSER_ENV],
-    },
-    {
-      // Present-but-empty is not unset: `resolveBrowserName` rejects it rather
-      // than falling back to chromium, so a workflow must not write it either.
-      name: "flags SMOKE_BROWSER set to nothing at all",
-      text: "        env:\n          SMOKE_BROWSER:\n",
-      rules: [VIOLATION.BROWSER_ENV],
-    },
-    {
-      name: "flags an empty shell assignment too",
-      text: "      - run: SMOKE_BROWSER= npm run smoke\n",
-      rules: [VIOLATION.BROWSER_ENV],
     },
     {
       // Copilot, second review: metadata executes nothing, so a finding there
       // is simply false — and the fastest way to get a guard deleted.
       name: "does not read a step name as an invocation",
-      text: "      - name: Explain why smoke:web:firefox stays local\n",
+      text: workflow(
+        "      - name: Explain why smoke:web:firefox stays local\n        run: npm run smoke",
+      ),
       rules: [],
     },
     {
       name: "does not read an `if:` condition as one either",
-      text: "        if: github.event_name == 'push'\n",
+      text: workflow(
+        "      - if: github.event_name == 'push'\n        run: npm run smoke",
+      ),
+      rules: [],
+    },
+    {
+      // Copilot, fourth review: workflow input ids are user-defined, so an
+      // input legitimately named `env` would have its own docs scanned by a
+      // key-name match — failing the gate on documentation of the gate.
+      name: "does not scan a workflow input that happens to be named env",
+      text: [
+        "on:",
+        "  workflow_dispatch:",
+        "    inputs:",
+        "      env:",
+        "        description: why smoke:web:firefox stays local",
+        "        default: npm run local:gate",
+        "jobs:",
+        "  build:",
+        "    steps:",
+        "      - run: npm run smoke",
+      ].join("\n"),
       rules: [],
     },
     {
       name: "does not read a similarly-named key as the override",
-      text: "        env:\n          SMOKE_BROWSER_DOC: firefox\n",
+      text: workflow(
+        "      - env:\n          SMOKE_BROWSER_DOC: firefox\n        run: npm run smoke",
+      ),
       rules: [],
     },
     {
-      name: "does not read a comment as an invocation",
-      text: "      # smoke:web:firefox runs in npm run local:gate, never here\n",
+      name: "does not read a YAML comment as an invocation",
+      text: workflow(
+        "      # smoke:web:firefox runs in npm run local:gate, never here\n      - run: npm run smoke",
+      ),
       rules: [],
     },
     {
+      // Copilot, third review: this fixture used to be a YAML comment, which
+      // the parser strips — so it asserted nothing. Inside a `run:` block the
+      // comment text really does survive into the scalar, which is where the
+      // "a comment invokes nothing" rule has to be applied.
       name: "does not read a shell comment inside a run block as one either",
-      text: "          # SMOKE_BROWSER=webkit is local-only\n",
+      text: workflow(
+        "      - run: |\n          # SMOKE_BROWSER=webkit is local-only\n          npm run smoke",
+      ),
       rules: [],
     },
   ];
 
   for (const { name, text, rules } of cases) {
     it(name, () => {
-      const found = findWorkflowViolations(text, "case.yml").map((f) => f.rule);
+      const found = findWorkflowViolations(text, "case.yml");
       assert.deepEqual(
-        found,
+        found.map((f) => f.rule),
         rules,
-        formatWorkflowViolations(findWorkflowViolations(text, "case.yml")),
+        formatWorkflowViolations(found),
       );
     });
   }
 
   it("reports the line a finding came from", () => {
     const [finding] = findWorkflowViolations(
-      "jobs:\n  build:\n    steps:\n      - run: npm run local:gate\n",
+      workflow("      - run: npm run local:gate"),
       "main.yml",
     );
-    assert.equal(finding.line, 4);
+    assert.equal(finding.line, 6);
     assert.equal(finding.file, "main.yml");
     assert.equal(finding.match, "local:gate");
+  });
+
+  it("names the file in a parse error, rather than a placeholder", () => {
+    // The filename is passed in for diagnostics; forgetting to forward it left
+    // a malformed real workflow reported as `<workflow>` (Copilot).
+    assert.throws(
+      () => findWorkflowViolations("jobs:\n  - a\n  b: c\n", "main.yml"),
+      /could not parse main\.yml/,
+    );
   });
 
   it("derives the forbidden engines rather than listing them by hand", () => {
@@ -230,26 +335,26 @@ describe("findWorkflowViolations", () => {
 });
 
 describe("extractExecutableRegions", () => {
-  it("ends a block when the next line dedents, and re-reads that line", () => {
-    // The table cases cannot isolate this: a block that never closed would
-    // still produce the right findings for them, and would then read the whole
-    // rest of the file as executable.
+  it("descends the executable paths and skips the metadata beside them", () => {
     const regions = extractExecutableRegions(
       [
-        "steps:",
-        "  - name: smoke:web:firefox is local-only",
-        "    env:",
-        "      SMOKE_BROWSER: chromium",
-        "    run: npm run smoke",
-        "",
+        "on: push",
+        "jobs:",
+        "  build:",
+        "    steps:",
+        "      - name: smoke:web:firefox is local-only",
+        "        env:",
+        "          SMOKE_BROWSER: chromium",
+        "        run: npm run smoke",
       ].join("\n"),
     );
     // The step `name:` is absent, and the two executable values are not.
+    // Order follows the walk (a step's `run` before its `env`), not the file.
     assert.deepEqual(
       regions.map((r) => [r.kind, r.text.trim()]),
       [
-        ["env", "SMOKE_BROWSER: chromium"],
         ["run", "npm run smoke"],
+        ["env", "SMOKE_BROWSER: chromium"],
       ],
     );
   });

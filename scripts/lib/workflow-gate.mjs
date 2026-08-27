@@ -66,7 +66,14 @@
  * ordinary step names, which is the faster way to get a guard deleted.
  */
 
-import { LineCounter, parseAllDocuments, visit } from "yaml";
+import {
+  LineCounter,
+  isAlias,
+  isMap,
+  isScalar,
+  isSeq,
+  parseAllDocuments,
+} from "yaml";
 import { SUPPORTED_BROWSERS, DEFAULT_BROWSER } from "./headless-browser.mjs";
 
 /** Scripts whose `local:` prefix declares them local-only. */
@@ -126,9 +133,6 @@ function stripQuotes(value) {
   return quoted ? quoted[2] : trimmed;
 }
 
-/** The mapping keys whose values a workflow actually executes. */
-export const EXECUTABLE_KEYS = ["run", "env", "with"];
-
 /**
  * The executable scalars of a workflow, with the line each came from.
  *
@@ -146,6 +150,22 @@ export const EXECUTABLE_KEYS = ["run", "env", "with"];
  * about refusing what the repo has. This file is not in the published `files`
  * allowlist, so it changes nothing about the tarball.
  *
+ * The walk is STRUCTURAL — it descends the schema's executable paths
+ * (workflow `env`, job `env`/`with`, step `run`/`env`/`with`) rather than
+ * matching pairs by key name anywhere in the tree. Key-name matching looks
+ * equivalent and is not: workflow input ids are user-defined, so an input
+ * legitimately named `env` puts its own `description` and `default` in front of
+ * the rules, and a doc string mentioning `SMOKE_BROWSER: firefox` fails the
+ * gate (Copilot). A guard that fails on documentation of itself does not
+ * survive contact with a contributor.
+ *
+ * ALIASES ARE RESOLVED. An alias node carries no `.value`, so reading one as a
+ * scalar yields the empty string — and `run: *command`, with the command
+ * anchored in a metadata scalar the walk never visits, would invoke anything at
+ * all while the guard saw nothing (Copilot). Findings are reported at the line
+ * where the alias is USED, not where its anchor was defined, since that is the
+ * line to change.
+ *
  * A parse error THROWS rather than yielding no regions: a workflow the guard
  * cannot read must not pass as a workflow with nothing in it.
  *
@@ -161,8 +181,6 @@ export function extractExecutableRegions(text, file = "<workflow>") {
   const lineCounter = new LineCounter();
   const docs = parseAllDocuments(text, { lineCounter });
   const regions = [];
-  const lineOf = (node) => lineCounter.linePos(node.range[0]).line;
-  const isScalar = (node) => node?.range != null && !("items" in node);
 
   for (const doc of docs) {
     if (doc.errors.length > 0) {
@@ -171,40 +189,68 @@ export function extractExecutableRegions(text, file = "<workflow>") {
       );
     }
 
-    visit(doc, {
-      Pair(_key, pair) {
-        const key = isScalar(pair.key) ? String(pair.key.value) : null;
-        if (key === null || !EXECUTABLE_KEYS.includes(key)) return;
+    const lineOf = (node) => lineCounter.linePos(node.range[0]).line;
+    const deref = (node) => (isAlias(node) ? node.resolve(doc) : node);
 
-        // `run:` — one scalar holding the command (inline or block).
-        if (isScalar(pair.value)) {
-          regions.push({
-            line: lineOf(pair.value),
-            kind: key,
-            text: String(pair.value.value ?? ""),
-          });
-          return;
-        }
+    /** A `run:` command — one scalar, reported where it is written or aliased. */
+    const addCommand = (node) => {
+      if (node == null) return;
+      const resolved = deref(node);
+      if (!isScalar(resolved)) return;
+      regions.push({
+        line: lineOf(node),
+        kind: "run",
+        text: String(resolved.value ?? ""),
+      });
+    };
 
-        // `env:` / `with:` — a mapping, in either block or flow form. Each
-        // entry is rebuilt as `NAME: value` so the rules below read it the way
-        // they read a shell assignment, and so an entry with NO value (valid
-        // YAML, and an empty-string override) still reaches them.
-        visit(pair.value, {
-          Pair(_k, entry) {
-            if (!isScalar(entry.key)) return;
-            const value = isScalar(entry.value)
-              ? String(entry.value.value ?? "")
-              : "";
-            regions.push({
-              line: lineOf(entry.key),
-              kind: key,
-              text: `${String(entry.key.value)}: ${value}`,
-            });
-          },
+    /**
+     * An `env:` or `with:` mapping. Each entry is rebuilt as `NAME: value` so
+     * the rules read it the way they read a shell assignment — and so an entry
+     * with NO value (valid YAML, and an empty-string override) still reaches
+     * them.
+     */
+    const addMapping = (kind, node) => {
+      if (node == null) return;
+      const map = deref(node);
+      if (!isMap(map)) return;
+      for (const entry of map.items) {
+        if (!isScalar(entry.key)) continue;
+        const value = deref(entry.value);
+        const text = isScalar(value) ? String(value.value ?? "") : "";
+        regions.push({
+          line: lineOf(entry.key),
+          kind,
+          text: `${String(entry.key.value)}: ${text}`,
         });
-      },
-    });
+      }
+    };
+
+    const at = (node, key) => (isMap(node) ? node.get(key, true) : undefined);
+
+    const root = deref(doc.contents);
+    if (!isMap(root)) continue;
+    addMapping("env", at(root, "env"));
+
+    const jobs = deref(at(root, "jobs"));
+    if (!isMap(jobs)) continue;
+    for (const jobEntry of jobs.items) {
+      const job = deref(jobEntry.value);
+      if (!isMap(job)) continue;
+      addMapping("env", at(job, "env"));
+      // A job-level `with:` is the input block of a reusable-workflow call.
+      addMapping("with", at(job, "with"));
+
+      const steps = deref(at(job, "steps"));
+      if (!isSeq(steps)) continue;
+      for (const stepNode of steps.items) {
+        const step = deref(stepNode);
+        if (!isMap(step)) continue;
+        addCommand(at(step, "run"));
+        addMapping("env", at(step, "env"));
+        addMapping("with", at(step, "with"));
+      }
+    }
   }
 
   return regions;
@@ -223,9 +269,17 @@ export function extractExecutableRegions(text, file = "<workflow>") {
 export function findWorkflowViolations(text, file = "<workflow>") {
   const findings = [];
 
-  for (const { line: lineNumber, text: line } of extractExecutableRegions(
+  for (const { line: lineNumber, text: region } of extractExecutableRegions(
     text,
+    file,
   )) {
+    // Inside a `run:` block the parser hands back the shell comments too, so
+    // the "a comment invokes nothing" rule has to be applied here now that it
+    // no longer falls out of skipping YAML comment lines (Copilot).
+    const line = region
+      .split("\n")
+      .filter((l) => !l.trimStart().startsWith("#"))
+      .join("\n");
     for (const match of line.matchAll(LOCAL_SCRIPT_RE)) {
       findings.push({
         file,
