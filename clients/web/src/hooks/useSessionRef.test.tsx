@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import type { InspectorClient } from "@inspector/core/mcp/index.js";
+import { InspectorClient } from "@inspector/core/mcp/index.js";
 import type { ServerEntry } from "@inspector/core/mcp/types.js";
 import { renderWithMantine } from "../test/renderWithMantine";
 import type { PendingReauth } from "../utils/pendingReauth";
@@ -17,8 +17,15 @@ const entry = (id: string, name = id): ServerEntry => ({
   connection: { status: "disconnected" },
 });
 
-/** A stand-in for the live client — the hook only ever stores the reference. */
-const client = (tag: string) => ({ tag }) as unknown as InspectorClient;
+/**
+ * A distinct client identity per call. `Object.create` does not run the
+ * constructor, so this is a real `InspectorClient` prototype chain with no
+ * transport or environment behind it — which is all that is needed here: the
+ * hook only stores the reference, and every assertion compares identity rather
+ * than reading a property off it.
+ */
+const client = (): InspectorClient =>
+  Object.create(InspectorClient.prototype) as InspectorClient;
 
 const stepUp = (serverId: string): PendingStepUp => ({
   serverId,
@@ -69,7 +76,7 @@ function harness(initial: SessionValues): Harness {
 describe("useSessionRef", () => {
   it("seeds the snapshot from the first render's values", () => {
     const servers = [entry("a")];
-    const c = client("first");
+    const c = client();
     const h = harness(
       values({ activeServerId: "a", servers, inspectorClient: c }),
     );
@@ -91,7 +98,7 @@ describe("useSessionRef", () => {
   it("mirrors every field on a later render", () => {
     const h = harness(values());
     const servers = [entry("a"), entry("b")];
-    const c = client("later");
+    const c = client();
     const up = stepUp("a");
     const re = reauth("b");
     h.update(
@@ -117,7 +124,7 @@ describe("useSessionRef", () => {
       values({
         activeServerId: "a",
         servers: [entry("a")],
-        inspectorClient: client("x"),
+        inspectorClient: client(),
         pendingStepUp: stepUp("a"),
         pendingReauth: reauth("a"),
       }),
