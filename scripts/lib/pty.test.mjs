@@ -40,18 +40,26 @@ test("scriptFlavorFor falls back to the platform when the probe says nothing", (
   // BSD `script` has no --version, so failing the probe is itself the signal.
   assert.equal(scriptFlavorFor({ platform: "darwin" }), "bsd");
   assert.equal(scriptFlavorFor({ platform: "freebsd" }), "bsd");
+  // NOT every BSD: NetBSD takes the command through `-c`, and nobody has run
+  // either it or OpenBSD here. Guessing builds an invocation that fails at
+  // `script` startup, which this smoke would then report as a TUI crash.
+  assert.equal(scriptFlavorFor({ platform: "netbsd" }), null);
+  assert.equal(scriptFlavorFor({ platform: "openbsd" }), null);
   // An unidentifiable `script` on linux is overwhelmingly util-linux. Guess it:
   // a wrong guess fails loudly with `script`'s own usage error in the captured
   // output, whereas skipping is the silence this issue exists to stop.
   assert.equal(scriptFlavorFor({ platform: "linux" }), "util-linux");
 });
 
-test("scriptFlavorFor returns null where there is no script(1)", () => {
+test("scriptFlavorFor returns null where there is no verified invocation", () => {
   assert.equal(scriptFlavorFor({ platform: "win32" }), null);
   assert.equal(
     scriptFlavorFor({ platform: "win32", versionOutput: "not a thing" }),
     null,
   );
+  // Unsupported is the default, not a win32 special case.
+  assert.equal(scriptFlavorFor({ platform: "aix" }), null);
+  assert.equal(scriptFlavorFor({ platform: "sunos" }), null);
 });
 
 test("ptyCommand builds the BSD argv form", () => {
@@ -146,15 +154,25 @@ test("resolvePtyWrapper wraps with the resolved flavor, or reports none", () => 
   assert.equal(resolvePtyWrapper({ platform: "win32", probe: () => "" }), null);
 });
 
-test("resolvePtyWrapper resolves on this machine unless it is Windows", () => {
-  // Not a tautology: it runs the real probe, so a `script` that has vanished
-  // from PATH, or a platform nobody has tried, surfaces here rather than as an
-  // opaque smoke failure.
+// The platforms this repo claims a verified `script(1)` invocation for. Any
+// other — win32, aix, sunos, netbsd, openbsd — resolves to null BY DESIGN and
+// makes `smoke:tui` skip, so asserting "supported unless Windows" would fail
+// `test:scripts` on a machine where the smoke is behaving exactly as intended.
+const SUPPORTED_PLATFORMS = new Set(["darwin", "freebsd", "linux"]);
+
+test("resolvePtyWrapper resolves on the platforms we claim to support", () => {
+  // Not a tautology: it runs the real probe against the real machine, so a
+  // `script` that has vanished from PATH surfaces here rather than as an opaque
+  // smoke failure.
   const wrapper = resolvePtyWrapper();
-  if (process.platform === "win32") {
-    assert.equal(wrapper, null);
-  } else {
+  if (SUPPORTED_PLATFORMS.has(process.platform)) {
     assert.ok(wrapper, `no PTY wrapper resolved on ${process.platform}`);
     assert.equal(wrapper.wrap({ command: "node" }).command, "script");
+  } else {
+    assert.equal(
+      wrapper,
+      null,
+      `${process.platform} is not in SUPPORTED_PLATFORMS but resolved a wrapper`,
+    );
   }
 });

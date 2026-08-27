@@ -31,8 +31,19 @@
 
 import { spawnSync } from "node:child_process";
 
-/** Platforms whose `script` takes the BSD argv form. */
-const BSD_PLATFORMS = new Set(["darwin", "freebsd", "openbsd", "netbsd"]);
+/**
+ * Platforms whose `script` takes the BSD argv form (`script -q FILE cmd args…`).
+ *
+ * Deliberately just these two. darwin is verified empirically here; freebsd is
+ * where darwin's implementation comes from and shares its usage. **netbsd and
+ * openbsd are excluded on purpose** — the BSDs do not agree on this, NetBSD's
+ * `script` takes the command through `-c` — and nobody has run either here. A
+ * guessed invocation is worse than none: it fails at `script` startup, which
+ * this smoke would then report as a TUI crash. They fall through to `null` and
+ * the smoke skips, saying so. Adding a `-c` flavor for them is a small change
+ * for whoever can actually verify it on the box.
+ */
+const BSD_PLATFORMS = new Set(["darwin", "freebsd"]);
 
 /**
  * Quote one argument for a POSIX shell command string.
@@ -70,8 +81,9 @@ export function scriptFlavorFor({ platform, versionOutput = "" }) {
   // own usage error in the captured output, which is diagnosable — silently
   // skipping is the outcome this issue exists to stop rewarding.
   if (platform === "linux") return "util-linux";
-  // win32 and anything else: no `script(1)`. `node-pty` is the portable answer
-  // if this smoke ever has to run there.
+  // win32 (no `script(1)` at all), and any platform whose invocation nobody has
+  // verified — aix, sunos, netbsd, openbsd. The caller skips loudly rather than
+  // guessing. `node-pty` is the portable answer if this ever has to run there.
   return null;
 }
 

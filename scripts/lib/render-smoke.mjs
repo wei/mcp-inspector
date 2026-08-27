@@ -56,8 +56,16 @@ export function outputTail(output, limit = 800) {
  *   teardown handle on every failure path.
  * @param {(message: string) => void} [opts.warn]
  * @returns {Promise<{ code: 0 | 1, message: string, output: string }>}
- *   Resolves only after the child's streams have closed, so `output` is
- *   complete and the caller may safely remove a directory the child was using.
+ *   On the normal path, resolves only after the child's streams have `close`d —
+ *   so `output` is complete and the caller may remove a directory the child was
+ *   using without re-entering the #1801 ENOTEMPTY race.
+ *
+ *   That is **bounded, not guaranteed**. Both drain deadlines below resolve
+ *   *without* having observed `close`, after warning: the child may still hold
+ *   the dir, and `output` may be truncated mid-line. Cleanup at the call site
+ *   must therefore be best-effort (`removeSafe`, not `rmSync`) — the worst case
+ *   is a warning and a leaked temp dir, never a red smoke. Do not write a
+ *   caller that depends on the close having happened.
  */
 export function runRenderSmoke({
   command,

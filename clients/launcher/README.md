@@ -99,7 +99,9 @@ through the built launcher artifact (beyond the `--help` checks in
   local-only (self-skips under `CI`), which is precisely where a false green
   goes unnoticed.
 
-Both build `test-servers/build` on demand if it is missing.
+Both rebuild `test-servers/build` on **every run** — once per process, whether
+or not it already exists (#2111). Presence is not freshness: a smoke driving a
+stale fixture reports a product failure rather than a staleness one.
 
 ## Development
 
