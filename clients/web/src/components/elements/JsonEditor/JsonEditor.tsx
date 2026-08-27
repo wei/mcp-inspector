@@ -176,7 +176,28 @@ export function JsonEditor({
     } else {
       element.removeAttribute("aria-invalid");
     }
-  }, [wrapperId, hasError, description]);
+
+    // `disabled` and `readOnly` are different states here, and only one of them
+    // leaves the tab order.
+    //
+    // A **read-only** editor is a rendering of a payload the user may need to
+    // read past the bottom of, so it stays focusable — the same reason the
+    // preformatted block it replaced carries `tabIndex={0}` (WCAG SC 2.1.1).
+    //
+    // A **disabled** one is a control the rest of the form has switched off. Ace
+    // has no disabled state, so without this its hidden textarea keeps
+    // `tabindex="0"` and a keyboard user tabs into a field every other control
+    // beside it has dropped out of the order — landing somewhere that looks
+    // editable and silently swallows what they type. Assistive tech is told
+    // nothing either, since dimming is a purely visual signal.
+    if (disabled) {
+      element.setAttribute("aria-disabled", "true");
+      element.tabIndex = -1;
+    } else {
+      element.removeAttribute("aria-disabled");
+      element.tabIndex = 0;
+    }
+  }, [wrapperId, hasError, description, disabled]);
 
   return (
     <Input.Wrapper

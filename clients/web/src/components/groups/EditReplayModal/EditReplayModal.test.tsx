@@ -100,8 +100,9 @@ describe("EditReplayModal", () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 
-  // The draft belongs to the sitting the user opened it in. Reopening must show
-  // the entry's params again, not whatever they typed and abandoned last time.
+  // The draft belongs to the one opening of the modal it was typed in.
+  // Reopening must show the entry's params again, not whatever was typed and
+  // abandoned last time.
   it("reseeds from the entry when reopened", async () => {
     const { rerender } = renderWithMantine(
       <EditReplayModal {...baseProps} params={{ name: "echo" }} />,

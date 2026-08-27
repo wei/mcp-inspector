@@ -62,6 +62,12 @@ export interface ContentViewerProps {
   wrap?: boolean;
 }
 
+/**
+ * Rows a read-only JSON payload renders before the editor scrolls internally
+ * instead of growing. See the note at the `JsonEditor` that uses it.
+ */
+const JSON_DISPLAY_MAX_LINES = 200;
+
 function buildDataUri(mimeType: string, data: string): string {
   return `data:${mimeType};base64,${data}`;
 }
@@ -186,18 +192,26 @@ function JsonContent({ text, copyable }: { text: string; copyable: boolean }) {
         ariaLabel="JSON content"
         value={formatJson(text)}
         readOnly
-        // Sized to the payload, both ways. A two-line result must not open six
-        // rows of blank editor — and an uncapped `maxLines` is what keeps a
-        // large one from growing its *own* scroller inside the host's: every
-        // consumer here already provides the scroll container it wants (the
-        // structured-output section caps at `mah` and scrolls; a result panel
-        // scrolls whole), and a second scrollbar nested in the first is both
-        // worse to use and a change to layout this swap has no business making.
-        // It also keeps every line in the DOM, as the preformatted block it
-        // replaces did — Ace renders only what its own viewport covers, so a
-        // capped editor would silently drop the rest from find-in-page.
+        // Sized to the payload, and capped.
+        //
+        // `minLines={1}` so a two-line result does not open six rows of blank
+        // editor. The cap is the more interesting number, and it is a trade:
+        //
+        // - Below it the editor grows to fit, so the *host's* scroll container
+        //   is the only one — every consumer already provides the one it wants
+        //   (the structured-output section caps at `mah` and scrolls; a result
+        //   panel scrolls whole), and nesting a second scrollbar inside it is
+        //   worse to use.
+        // - Above it Ace scrolls internally and renders only the rows its own
+        //   viewport covers. That is the point of having a cap at all: the
+        //   Protocol and Network lists are not virtualized and keep every
+        //   entry's payload mounted inside its `Collapse`, so an uncapped
+        //   editor would put a whole 10k-line response in the DOM per entry.
+        //
+        // 200 is chosen so essentially no real payload nests a scrollbar while
+        // the pathological one stays bounded.
         minLines={1}
-        maxLines={Infinity}
+        maxLines={JSON_DISPLAY_MAX_LINES}
       />
     </CopyableWrapper>
   );

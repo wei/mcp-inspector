@@ -136,6 +136,46 @@ describe("JsonEditor", () => {
       expect(document.querySelector(".json-editor-readonly")).not.toBeNull();
     });
 
+    // Ace has no disabled state, so its hidden textarea keeps `tabindex="0"`
+    // unless something takes it out — leaving a keyboard user able to tab into
+    // a field the rest of the form has switched off, with nothing announced.
+    it("leaves the tab order and says so when disabled", () => {
+      const { rerender } = renderWithMantine(
+        <JsonEditor ariaLabel={LABEL} value='{"a":1}' onChange={vi.fn()} />,
+      );
+      const input = screen.getByLabelText(aceLabel(LABEL));
+      expect(input).toHaveAttribute("tabindex", "0");
+      expect(input).not.toHaveAttribute("aria-disabled");
+
+      rerender(
+        <JsonEditor
+          ariaLabel={LABEL}
+          value='{"a":1}'
+          onChange={vi.fn()}
+          disabled
+        />,
+      );
+      expect(input).toHaveAttribute("tabindex", "-1");
+      expect(input).toHaveAttribute("aria-disabled", "true");
+
+      // …and both are restored when the form re-enables.
+      rerender(
+        <JsonEditor ariaLabel={LABEL} value='{"a":1}' onChange={vi.fn()} />,
+      );
+      expect(input).toHaveAttribute("tabindex", "0");
+      expect(input).not.toHaveAttribute("aria-disabled");
+    });
+
+    // Read-only is not disabled: a payload the user may need to scroll past the
+    // bottom of has to be reachable by keyboard (WCAG SC 2.1.1), which is why
+    // the preformatted block this replaced carried `tabIndex={0}`.
+    it("stays focusable when merely read-only", () => {
+      renderWithMantine(<JsonEditor ariaLabel={LABEL} value='{"a":1}' />);
+      const input = screen.getByLabelText(aceLabel(LABEL));
+      expect(input).toHaveAttribute("tabindex", "0");
+      expect(input).not.toHaveAttribute("aria-disabled");
+    });
+
     it("is read-only and dimmed when disabled", () => {
       const { container } = renderWithMantine(
         <JsonEditor
