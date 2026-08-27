@@ -36,10 +36,24 @@ test("fails when the child paints the marker and then exits non-zero", async () 
   const r = await runRenderSmoke({ ...opts, ...paintThenExit(1) });
   assert.equal(r.code, 1, `expected failure, got: ${r.message}`);
   assert.match(r.message, /code 1/);
-  assert.match(r.message, /survival window/);
+  assert.match(r.message, /it painted one frame, it did not run/);
   // The diagnostic must not read as a crash *before* first paint — that was a
   // different defect, and conflating them sends the reader to the wrong place.
   assert.doesNotMatch(r.message, /before rendering/);
+});
+
+// `exit` races the child's last `data` event, so this stub can be observed
+// either way round on the same machine. Both orders must produce the same
+// verdict AND the same wording — a message phrased off observation order would
+// flip run to run, which is how a stable failure gets written off as flake.
+// Repeated because one pass proves nothing about a race.
+test("the verdict does not depend on whether exit beats the final output", async () => {
+  for (let i = 0; i < 12; i++) {
+    const r = await runRenderSmoke({ ...opts, ...paintThenExit(1) });
+    assert.equal(r.code, 1, `run ${i}: expected failure, got: ${r.message}`);
+    assert.match(r.message, /it painted one frame, it did not run/, `run ${i}`);
+    assert.doesNotMatch(r.message, /before rendering/, `run ${i}`);
+  }
 });
 
 // Exiting 0 right after painting is the same failure: the app did not run. It
@@ -159,10 +173,12 @@ test("a zero survival window falls back rather than passing instantly", async ()
     surviveMs: Number(""),
   });
   assert.equal(r.code, 1, `expected failure, got: ${r.message}`);
+  // The window named in the message is the normalized one, not the 0 passed in.
   assert.match(
     r.message,
     new RegExp(`${DEFAULTS.surviveMs}ms survival window`),
   );
+  assert.doesNotMatch(r.message, /\b0ms survival window/);
 });
 
 test("outputTail drops a leading partial line but keeps short output whole", () => {

@@ -246,6 +246,15 @@ export function runRenderSmoke({
       // <marker>" — quoting an output tail that visibly contains the marker.
       // First paint has happened; its deadline no longer has a question to ask.
       clearTimeout(renderTimer);
+      // `exit` can beat the last of the child's buffered output, and `done`
+      // then keeps reading until `close` — so this can run *after* the verdict
+      // is settled. Recording `markerAt` is still right (the deferred message
+      // below reads it, and a marker that only surfaced in the drain was still
+      // painted). Arming a timer is not: `done` is a no-op once settled, so it
+      // could not change the result, but it holds the event loop open for the
+      // whole survival window — which under `node --test` is a suite that
+      // hangs on for two seconds per case for no reason.
+      if (settled) return;
       // First paint is not the verdict — it only starts the clock on the
       // question this smoke actually asks.
       surviveTimer = setTimeout(() => {
@@ -267,14 +276,25 @@ export function runRenderSmoke({
 
     child.on("exit", (code, signal) => {
       childExited = true;
+      const exitAt = since();
       if (settled) return;
       const how = signal ? `signal ${signal}` : `code ${code}`;
+      // Thunked: rendered at `finish()`, i.e. after `close`, so `markerAt` is
+      // whatever the FULL output showed — a marker still sitting in the pipe
+      // when `exit` fired is accounted for by the time this is read.
+      //
+      // Deliberately makes no claim about the order in which this process
+      // *observed* the two. `exit` and the last `data` event race, so a
+      // "N ms later" phrased off observation times would flip wording (and
+      // sign) run to run on the same child. The times are reported as the
+      // observations they are and the verdict does not rest on them.
       done(1, () =>
         markerAt === null
           ? `child exited (${how}) before rendering "${marker}"\n${outputTail(output)}`
-          : `child rendered "${marker}" at ${markerAt}ms and then exited (${how}) ` +
-            `${since() - markerAt}ms later, inside the ${surviveMs}ms survival window — ` +
-            `it painted one frame, it did not run\n${outputTail(output)}`,
+          : `child rendered "${marker}" and then exited (${how}) inside the ` +
+            `${surviveMs}ms survival window — it painted one frame, it did not run ` +
+            `(first paint seen at ${markerAt}ms, exit at ${exitAt}ms)` +
+            `\n${outputTail(output)}`,
       );
     });
 
