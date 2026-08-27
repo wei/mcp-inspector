@@ -189,6 +189,52 @@ describe("findWorkflowViolations", () => {
       rules: [VIOLATION.BROWSER_ENV],
     },
     {
+      // Copilot, fifth review: `container.env` is job-wide too — every step in
+      // the container sees it, so it redirects `npm run smoke` exactly as a
+      // job-level `env` would.
+      name: "flags a SMOKE_BROWSER override under container.env",
+      text: [
+        "on: push",
+        "jobs:",
+        "  build:",
+        "    container:",
+        "      image: node:22",
+        "      env:",
+        "        SMOKE_BROWSER: firefox",
+        "    steps:",
+        "      - run: npm run smoke",
+      ].join("\n"),
+      rules: [VIOLATION.BROWSER_ENV],
+    },
+    {
+      name: "does not trip over a container given as a bare image string",
+      text: [
+        "on: push",
+        "jobs:",
+        "  build:",
+        "    container: node:22",
+        "    steps:",
+        "      - run: npm run smoke",
+      ].join("\n"),
+      rules: [],
+    },
+    {
+      // Copilot, fifth review: a blanket text match rejected a script that
+      // merely PRINTS the variable name, which sets nothing.
+      name: "does not read a script printing the variable as setting it",
+      text: workflow(
+        '      - run: |\n          echo "SMOKE_BROWSER: firefox"\n          npm run smoke',
+      ),
+      rules: [],
+    },
+    {
+      name: "does not read an action input mentioning it as setting it",
+      text: workflow(
+        '      - with:\n          message: "SMOKE_BROWSER: firefox"',
+      ),
+      rules: [],
+    },
+    {
       name: "allows SMOKE_BROWSER set explicitly to chromium",
       text: workflow(
         "      - env:\n          SMOKE_BROWSER: chromium\n        run: npm run smoke",
@@ -331,6 +377,32 @@ describe("findWorkflowViolations", () => {
       "smoke:web:webkit",
       "smoke:web:engine",
     ]);
+  });
+});
+
+describe("the gate's name", () => {
+  const scripts = JSON.parse(
+    readFileSync(join(repoRoot, "package.json"), "utf8"),
+  ).scripts;
+
+  it("is `local:gate`, and runs the local-only Storybook step", () => {
+    assert.ok(scripts["local:gate"], "the pre-push gate must exist");
+    assert.match(scripts["local:gate"], /local:storybook/);
+  });
+
+  it("has no `ci` alias, not even a deprecated one", () => {
+    // The rename is only worth anything if the old name is GONE (#2146): an
+    // alias preserves exactly the association being scrubbed, and leaves
+    // something copy-pasteable for a workflow author. Nothing else notices a
+    // reintroduced `ci`, so assert it here (Copilot).
+    const revived = Object.keys(scripts).filter(
+      (name) => name === "ci" || name.startsWith("ci:"),
+    );
+    assert.deepEqual(
+      revived,
+      [],
+      `no root script may be named \`ci\` or \`ci:*\` — found ${revived.join(", ")}`,
+    );
   });
 });
 

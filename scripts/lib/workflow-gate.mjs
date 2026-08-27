@@ -33,7 +33,14 @@
  *   3. Invoking `smoke:web:engine`, whose engine comes from the environment and
  *      therefore cannot be read off the workflow at all.
  *   4. Setting `SMOKE_BROWSER` to anything but a literal `chromium` — the back
- *      door that would redirect an otherwise innocent `npm run smoke`.
+ *      door that would redirect an otherwise innocent `npm run smoke`. This one
+ *      is KIND-AWARE: an `env:` entry counts only when `SMOKE_BROWSER` is
+ *      literally its key, and a `run:` script only on a shell assignment
+ *      (`SMOKE_BROWSER=…`). A blanket text match rejected `echo
+ *      "SMOKE_BROWSER: firefox"`, which sets nothing (Copilot). A shell
+ *      assignment inside an `echo` is indistinguishable without parsing the
+ *      shell, and inside a `run:` block erring toward the finding is the safe
+ *      direction.
  *   5. Naming either family through a workflow **expression** —
  *      `npm run smoke:web:${{ matrix.browser }}`, `npm run local:${{ … }}`, or
  *      `SMOKE_BROWSER: ${{ matrix.browser }}`. This is rule 3's reason applied
@@ -74,7 +81,11 @@ import {
   isSeq,
   parseAllDocuments,
 } from "yaml";
-import { SUPPORTED_BROWSERS, DEFAULT_BROWSER } from "./headless-browser.mjs";
+import {
+  BROWSER_ENV_VAR,
+  SUPPORTED_BROWSERS,
+  DEFAULT_BROWSER,
+} from "./headless-browser.mjs";
 
 /** Scripts whose `local:` prefix declares them local-only. */
 export const LOCAL_SCRIPT_PREFIX = "local:";
@@ -118,12 +129,13 @@ const DYNAMIC_ENGINE_RE = new RegExp(
   String.raw`\bsmoke:web:${EXPRESSION}`,
   "gi",
 );
-// The value may be quoted (`SMOKE_BROWSER: "firefox"`), assigned
-// (`SMOKE_BROWSER=firefox`), an expression, or ABSENT — `SMOKE_BROWSER:` with
-// no value is valid YAML that sets the variable to the empty string, which
-// `resolveBrowserName` rejects as present-but-empty rather than treating as
-// unset (Copilot). So the value is `\S*`, and an empty capture is a finding.
-const BROWSER_ENV_RE = /\bSMOKE_BROWSER\s*[:=]\s*(\S*)/gi;
+// A shell assignment inside a `run:` script. The YAML `env:` spelling is not
+// matched by text at all — it is recognized structurally, by key, so that a
+// script merely PRINTING `SMOKE_BROWSER: firefox` is not read as setting it
+// (Copilot). `\S*` rather than `\S+` because `SMOKE_BROWSER=` sets the empty
+// string, which `resolveBrowserName` rejects as present-but-empty rather than
+// treating as unset.
+const BROWSER_SHELL_RE = new RegExp(`\\b${BROWSER_ENV_VAR}=(\\S*)`, "g");
 
 // A shell assignment inside a `run:` script can still be quoted; a YAML value
 // arrives already unquoted from the parser, so this is a no-op there.
@@ -151,7 +163,8 @@ function stripQuotes(value) {
  * allowlist, so it changes nothing about the tarball.
  *
  * The walk is STRUCTURAL — it descends the schema's executable paths
- * (workflow `env`, job `env`/`with`, step `run`/`env`/`with`) rather than
+ * (workflow `env`, job `env`/`container.env`/`with`, step `run`/`env`/`with`)
+ * rather than
  * matching pairs by key name anywhere in the tree. Key-name matching looks
  * equivalent and is not: workflow input ids are user-defined, so an input
  * legitimately named `env` puts its own `description` and `default` in front of
@@ -221,6 +234,8 @@ export function extractExecutableRegions(text, file = "<workflow>") {
         regions.push({
           line: lineOf(entry.key),
           kind,
+          name: String(entry.key.value),
+          value: text,
           text: `${String(entry.key.value)}: ${text}`,
         });
       }
@@ -240,6 +255,11 @@ export function extractExecutableRegions(text, file = "<workflow>") {
       addMapping("env", at(job, "env"));
       // A job-level `with:` is the input block of a reusable-workflow call.
       addMapping("with", at(job, "with"));
+      // `container.env` is job-wide too: every step running in the container
+      // sees it, so an override there redirects `npm run smoke` exactly as a
+      // job-level `env` would (Copilot). `container:` may also be a bare image
+      // string, which `addMapping` ignores.
+      addMapping("env", at(deref(at(job, "container")), "env"));
 
       const steps = deref(at(job, "steps"));
       if (!isSeq(steps)) continue;
@@ -269,14 +289,12 @@ export function extractExecutableRegions(text, file = "<workflow>") {
 export function findWorkflowViolations(text, file = "<workflow>") {
   const findings = [];
 
-  for (const { line: lineNumber, text: region } of extractExecutableRegions(
-    text,
-    file,
-  )) {
+  for (const region of extractExecutableRegions(text, file)) {
+    const { line: lineNumber, kind } = region;
     // Inside a `run:` block the parser hands back the shell comments too, so
     // the "a comment invokes nothing" rule has to be applied here now that it
     // no longer falls out of skipping YAML comment lines (Copilot).
-    const line = region
+    const line = region.text
       .split("\n")
       .filter((l) => !l.trimStart().startsWith("#"))
       .join("\n");
@@ -323,8 +341,23 @@ export function findWorkflowViolations(text, file = "<workflow>") {
       });
     }
 
-    for (const match of line.matchAll(BROWSER_ENV_RE)) {
-      const value = stripQuotes(match[1]);
+    // The browser rule is the one that must respect WHICH position it is in.
+    const overrides =
+      kind === "env"
+        ? region.name === BROWSER_ENV_VAR
+          ? [{ value: region.value, match: region.text.trim() }]
+          : []
+        : kind === "run"
+          ? [...line.matchAll(BROWSER_SHELL_RE)].map((m) => ({
+              value: m[1],
+              match: m[0].trim(),
+            }))
+          : // A `with:` value is an action input, not an environment. Whatever
+            // it names is covered by the script rules above.
+            [];
+
+    for (const override of overrides) {
+      const value = stripQuotes(override.value);
       if (value === DEFAULT_BROWSER) continue;
       // Setting it to nothing is not the same as leaving it out: the variable
       // is then present and empty, which `resolveBrowserName` rejects outright
@@ -334,9 +367,9 @@ export function findWorkflowViolations(text, file = "<workflow>") {
         file,
         line: lineNumber,
         rule: VIOLATION.BROWSER_ENV,
-        match: match[0].trim(),
+        match: override.match,
         message:
-          `SMOKE_BROWSER must not be set to ${described} in a workflow — only ` +
+          `${BROWSER_ENV_VAR} must not be set to ${described} in a workflow — only ` +
           `\`${DEFAULT_BROWSER}\` runs in GitHub CI, an expression cannot be ` +
           `checked statically, and an empty value is rejected rather than ` +
           `defaulted. Leave it unset; the default is \`${DEFAULT_BROWSER}\`.`,
