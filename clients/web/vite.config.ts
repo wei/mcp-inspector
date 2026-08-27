@@ -189,7 +189,7 @@ export default defineConfig(({ command }) => {
         reporter: ["text", "html", "json-summary"],
         // Whitelist of gated directories. Deliberate top-level-file omissions
         // (every src *directory* below is gated):
-        //   • `src/App.tsx` — a ~4.3k-line composition root at ~42% branch
+        //   • `src/App.tsx` — a ~3.2k-line composition root at ~42% branch
         //     coverage; gating it is a dedicated testing/decomposition effort,
         //     not a whitelist tweak.
         //   • `src/main.tsx` / `src/index.ts` — the browser and bin bootstraps
