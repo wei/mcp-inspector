@@ -547,7 +547,7 @@ The `smoke:*` scripts run against the in-repo build tree, which is **not** the p
 
 ### Cutting a release
 
-Publishing is automated by two release-gated jobs in [`.github/workflows/main.yml`](.github/workflows/main.yml) (`github.event_name == 'release'`, both `needs: build`):
+Publishing is automated by two release-gated jobs in [`.github/workflows/main.yml`](.github/workflows/main.yml) (`github.event_name == 'release'`, both `needs: [build, coverage]` — so a release cannot publish with either the build job or the coverage gate red):
 
 - **`publish`** — the npm package. Runs `npm run pack:verify` as the pre-publish gate, asserts the release tag matches the root `package.json` version, then `npm publish --access public --provenance` — a single `npm publish` (v2 is not an npm workspace, so there is no v1-style `publish-all`/`--workspaces`), with a signed provenance attestation via GitHub OIDC (`id-token: write`, `environment: release`, `NPM_TOKEN`).
 - **`publish-github-container-registry`** — the container image (see [Docker](#docker)).
