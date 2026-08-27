@@ -5,6 +5,7 @@ import {
   messagesToLogEntries,
   replayProtocolRequest,
   replayableParams,
+  reshapedReplayParam,
   type ReplayClient,
 } from "./protocolReplay";
 
@@ -132,6 +133,44 @@ describe("replayableParams", () => {
       params: { name: "echo" },
       dropped: [],
     });
+  });
+});
+
+// `replayableParams` answers which keys survive; this answers whether the
+// surviving ones survive intact.
+describe("reshapedReplayParam", () => {
+  it("accepts an object arguments", () => {
+    expect(
+      reshapedReplayParam("tools/call", { name: "x", arguments: { a: 1 } }),
+    ).toBeNull();
+  });
+
+  it("accepts an absent arguments", () => {
+    expect(reshapedReplayParam("tools/call", { name: "x" })).toBeNull();
+  });
+
+  // The sharp case: `?? {}` replaces a null, so the editor shows `null` and the
+  // wire carries `{}`.
+  it("rejects a null arguments, which is sent as an empty object", () => {
+    expect(
+      reshapedReplayParam("tools/call", { name: "x", arguments: null }),
+    ).toMatch(/sent as `\{\}` when null/);
+  });
+
+  it.each([
+    ["an array", [1, 2]],
+    ["a number", 4],
+    ["a string", "a"],
+  ])("rejects %s arguments", (_label, args) => {
+    expect(
+      reshapedReplayParam("prompts/get", { name: "x", arguments: args }),
+    ).toMatch(/must be a JSON object/);
+  });
+
+  it("has nothing to say about methods that take no arguments", () => {
+    expect(reshapedReplayParam("tools/list", { cursor: "a" })).toBeNull();
+    expect(reshapedReplayParam("resources/read", { uri: "x://y" })).toBeNull();
+    expect(reshapedReplayParam("ping", undefined)).toBeNull();
   });
 });
 

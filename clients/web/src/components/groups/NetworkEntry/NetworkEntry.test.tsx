@@ -7,7 +7,7 @@ import {
   screen,
   waitFor,
 } from "../../../test/renderWithMantine";
-import { getAceText } from "../../../test/aceEditor";
+import { getAceText, getAceTextByLabel } from "../../../test/aceEditor";
 import { NetworkEntry } from "./NetworkEntry";
 
 const baseEntry: FetchRequestEntry = {
@@ -207,6 +207,35 @@ describe("NetworkEntry", () => {
     renderWithMantine(<NetworkEntry entry={pending} isListExpanded={false} />);
     await user.click(screen.getByRole("button", { name: "Expand" }));
     expect(screen.queryByText("Response Body")).not.toBeInTheDocument();
+  });
+
+  // The declared content type reaches `ContentViewer`, so a body the server
+  // *said* was JSON renders as JSON even when it does not parse. Without it
+  // the Network tab could only ever reach the parse-it-first heuristic, and a
+  // malformed JSON response read as plain text with no sign it was meant to be
+  // JSON.
+  it("renders a malformed but declared JSON body as JSON", () => {
+    const malformed: FetchRequestEntry = {
+      ...baseEntry,
+      responseHeaders: { "content-type": "application/json" },
+      responseBody: '{"ok":',
+    };
+    renderWithMantine(<NetworkEntry entry={malformed} isListExpanded={true} />);
+    expect(getAceTextByLabel(/Response body JSON/)).toBe('{"ok":');
+  });
+
+  // Narrowed to JSON on purpose: forwarding the content type wholesale would
+  // route an HTML body into the sandboxed frame and a CSV one into a table,
+  // which is a change to what the Network tab is.
+  it("does not route a non-JSON declared body to another renderer", () => {
+    const html: FetchRequestEntry = {
+      ...baseEntry,
+      responseHeaders: { "content-type": "text/html" },
+      responseBody: "<p>hi</p>",
+    };
+    renderWithMantine(<NetworkEntry entry={html} isListExpanded={true} />);
+    expect(screen.getByText("<p>hi</p>")).toBeInTheDocument();
+    expect(document.querySelector("iframe")).toBeNull();
   });
 
   it("shows a 'too large' notice when a body exceeds the inline preview limit", async () => {

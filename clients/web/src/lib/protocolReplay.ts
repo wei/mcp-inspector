@@ -133,6 +133,41 @@ export function replayableParams(
   };
 }
 
+/**
+ * A param the dispatch below would *reshape* on the way out, or null when every
+ * kept param is sent as written.
+ *
+ * {@link replayableParams} answers which keys survive; this answers whether the
+ * surviving ones survive *intact*. Only `arguments` can fail that today, and it
+ * fails two ways, both of which the Edit-and-replay editor has to catch before
+ * Send:
+ *
+ * - `arguments: null` is nullish, so `?? {}` replaces it — the editor shows
+ *   `null` and the wire carries `{}`.
+ * - `arguments: [1,2]` or `arguments: 4` is not nullish, so the cast carries it
+ *   through unchanged into a call whose type says it is a named-argument
+ *   record. Nothing reshapes it, but nothing can send it either.
+ *
+ * `name` and `uri` are deliberately not checked here: the dispatch already
+ * refuses a missing or non-string one with a reason the caller surfaces as a
+ * toast, so those fail visibly rather than silently.
+ */
+export function reshapedReplayParam(
+  method: string,
+  params: Record<string, unknown> | undefined,
+): string | null {
+  if (!params) return null;
+  if (method !== "tools/call" && method !== "prompts/get") return null;
+  if (!Object.hasOwn(params, "arguments")) return null;
+  const args = params.arguments;
+  const isRecord =
+    args !== null && typeof args === "object" && !Array.isArray(args);
+  if (isRecord) return null;
+  return args === null
+    ? "`arguments` is sent as `{}` when null — remove it, or give it an object"
+    : "`arguments` must be a JSON object (`{ … }`)";
+}
+
 export async function replayProtocolRequest(
   client: ReplayClient,
   method: string,

@@ -2,7 +2,10 @@ import { useState } from "react";
 import { Alert, Button, Group, Modal, Stack, Text } from "@mantine/core";
 import { JsonEditor } from "../../elements/JsonEditor/JsonEditor";
 import { isJsonObject } from "../../../utils/jsonObjectDraft";
-import { replayableParams } from "../../../lib/protocolReplay";
+import {
+  replayableParams,
+  reshapedReplayParam,
+} from "../../../lib/protocolReplay";
 import { isSerializableJson } from "@inspector/core/json/jsonUtils.js";
 
 export interface EditReplayModalProps {
@@ -105,6 +108,12 @@ function parseParamsDraft(
         dropped.length === 1 ? "it" : "them"
       } so this matches what is sent`,
     };
+  }
+  // Surviving the key check is not the same as being sent as written: see
+  // `reshapedReplayParam` for the two ways `arguments` does not.
+  const reshaped = reshapedReplayParam(method, parsed);
+  if (reshaped !== null) {
+    return { ok: false, error: reshaped };
   }
   return { ok: true, value: parsed };
 }

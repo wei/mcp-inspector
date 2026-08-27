@@ -17,6 +17,7 @@ import { RiErrorWarningLine } from "react-icons/ri";
 import type { FetchRequestEntry } from "@inspector/core/mcp/types.js";
 import { isLongLivedStreamResponse } from "@inspector/core/mcp/fetchTracking.js";
 import { ContentViewer } from "../../elements/ContentViewer/ContentViewer";
+import { getMimeKind } from "../../elements/ContentViewer/contentViewerUtils";
 import { CopyButton } from "../../elements/CopyButton/CopyButton";
 import { ExpandToggle } from "../../elements/ExpandToggle/ExpandToggle";
 import { MethodBadge } from "../../elements/MethodBadge/MethodBadge";
@@ -391,6 +392,23 @@ function BodyPreview({
 
   const tooLarge = body.length > MAX_INLINE_BODY_CHARS;
 
+  // Forward the declared MIME, but only when it is JSON.
+  //
+  // `ContentViewer` renders a *declared* `application/json` as JSON even when
+  // it does not parse — the server said what it sent — while an undeclared
+  // body only gets that treatment if it parses. Without this the Network tab
+  // could never reach the declared branch, so a malformed JSON response read
+  // as plain text with no indication that it was meant to be JSON.
+  //
+  // Narrowed to JSON on purpose: forwarding the content type wholesale would
+  // also route a `text/html` body into the sandboxed HTML frame and a
+  // `text/csv` one into a table. Turning wire bodies into rendered documents
+  // is a real change to what the Network tab is, and not one this makes.
+  const jsonMimeType =
+    contentType && getMimeKind(contentType) === "json"
+      ? contentType
+      : undefined;
+
   // OAuth responses (token exchange, DCR) and the token request carry
   // bearer-grade secrets. Mask them by default and gate the raw values behind
   // an explicit reveal so they aren't exposed at a glance during a
@@ -424,6 +442,7 @@ function BodyPreview({
       <ContentViewer
         block={{ type: "text", text: body }}
         copyable
+        mimeType={jsonMimeType}
         jsonLabel={`${label} JSON`}
       />
     );
@@ -448,6 +467,9 @@ function BodyPreview({
       <ContentViewer
         block={{ type: "text", text: shown }}
         copyable
+        // The masked form is what is rendered, and masking can leave a
+        // still-valid JSON document — so the declared type still applies.
+        mimeType={jsonMimeType}
         jsonLabel={`${label} JSON`}
       />
     </Stack>

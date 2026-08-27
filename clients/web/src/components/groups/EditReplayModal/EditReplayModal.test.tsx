@@ -178,6 +178,25 @@ describe("EditReplayModal", () => {
     ).toBeInTheDocument();
   });
 
+  // Surviving the key check is not the same as being sent as written:
+  // `replayProtocolRequest` applies `arguments ?? {}`, so a null shown in the
+  // editor reaches the wire as `{}`.
+  it("disables Send for a null arguments, which would be sent as {}", async () => {
+    renderWithMantine(<EditReplayModal {...baseProps} method="tools/call" />);
+    await setAceText('{"name":"echo","arguments":null}');
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(screen.getByText(/sent as `\{\}` when null/)).toBeInTheDocument();
+  });
+
+  it("disables Send for a non-object arguments", async () => {
+    renderWithMantine(<EditReplayModal {...baseProps} method="tools/call" />);
+    await setAceText('{"name":"echo","arguments":[1,2]}');
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(
+      screen.getByText(/`arguments` must be a JSON object/),
+    ).toBeInTheDocument();
+  });
+
   it("closes without sending when cancelled", async () => {
     const user = userEvent.setup();
     const onSend = vi.fn();
