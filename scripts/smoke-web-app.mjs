@@ -31,7 +31,7 @@
  * file in the tarball packlist and on disk after a real install — and, since
  * #2003, drives phase 1's flow against the **installed** bin. Keep both:
  * pack:verify covers the published artifact, this covers the repo tree on every
- * `npm run ci`, where pack:verify (network-bound, local/release-only) does not
+ * `npm run local:gate`, where pack:verify (network-bound, local/release-only) does not
  * run — and this is the only one of the two that drives phase 2. Neither
  * subsumes the other.
  *
@@ -47,7 +47,7 @@
  * `webkit`). Three tiers, deliberately (#2086):
  *
  *   - **GitHub CI** runs this smoke in **Chromium** only.
- *   - **`npm run ci`**, the local pre-push gate, runs it in **Chromium and
+ *   - **`npm run local:gate`**, the local pre-push gate, runs it in **Chromium and
  *     Firefox** — the Firefox pass is `smoke:web:firefox`, and it is the one
  *     gate step with no GitHub CI counterpart.
  *   - **WebKit is on demand only**: `SMOKE_BROWSER=webkit npm run smoke:web:app`

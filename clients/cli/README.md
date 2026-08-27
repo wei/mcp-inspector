@@ -371,7 +371,7 @@ The CLI's `test` / `test:coverage` **build the binary first** (out-of-process
 `e2e.test.ts` spawns it). `validate` is `format:check && lint && typecheck && test`
 with no separate `build` step (`pretest` builds). Repo-root `validate:cli`
 delegates here; the coverage gate is `npm run coverage` / `coverage:cli` (also in
-`npm run ci`), matching AGENTS.md.
+`npm run local:gate`), matching AGENTS.md.
 
 Tests run the CLI **in-process** (importing `runCli()`) so `src/` is measured
 under coverage, with a thin out-of-process spawn layer for the real binary. See

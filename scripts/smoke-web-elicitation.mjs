@@ -28,7 +28,7 @@
  * `webkit`). Three tiers, deliberately (#2086):
  *
  *   - **GitHub CI** runs this smoke in **Chromium** only.
- *   - **`npm run ci`**, the local pre-push gate, runs it in **Chromium and
+ *   - **`npm run local:gate`**, the local pre-push gate, runs it in **Chromium and
  *     Firefox** — the Firefox pass is `smoke:web:firefox`, and it is the one
  *     gate step with no GitHub CI counterpart.
  *   - **WebKit is on demand only**: `SMOKE_BROWSER=webkit npm run smoke:web:elicit`

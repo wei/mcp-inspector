@@ -4,7 +4,7 @@
  * The invariant under test is the one a smoke script can never check itself:
  * a child that stays alive *through* the readiness timeout must still be
  * reachable by the caller's teardown. `smoke:web:app`'s happy path always gets
- * the announcement, so a regression here would be silent in `npm run ci` and
+ * the announcement, so a regression here would be silent in `npm run local:gate` and
  * would surface only as a stray process holding a port on a later run.
  *
  * Every case drives a real `node -e` child rather than a spy, so the assertion

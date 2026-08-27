@@ -108,7 +108,7 @@ async function getTool(client: InspectorClient, name: string): Promise<Tool> {
  * legitimate thing to exercise, but `disconnect()` closes the SDK client, which
  * rejects every pending request with "Connection closed" — and a floating
  * promise makes that an *unhandled* rejection, which vitest counts as a run
- * error and fails `npm run ci` even though every test passes (#1947).
+ * error and fails `npm run local:gate` even though every test passes (#1947).
  *
  * Attach the handler at call time (not after the assertions) so there is no
  * window in which the rejection can escape, then finish through

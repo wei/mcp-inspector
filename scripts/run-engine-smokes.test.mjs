@@ -73,7 +73,7 @@ describe("every engine tier consumes ENGINE_SMOKES", () => {
 
   it("the Firefox tier goes through the runner and is in the pre-push gate", () => {
     assert.match(scripts["smoke:web:firefox"], /run-engine-smokes\.mjs/);
-    assert.match(scripts.ci, /smoke:web:firefox/);
+    assert.match(scripts["local:gate"], /smoke:web:firefox/);
   });
 
   it("every supported engine has a `smoke:web:<engine>` script", () => {
@@ -94,7 +94,7 @@ describe("every engine tier consumes ENGINE_SMOKES", () => {
     // `smoke:web:tabs` is not engine-sensitive and deliberately stays out of
     // ENGINE_SMOKES — but "Chromium-only" is a claim the script has to keep.
     // Without the literal engine it followed ambient `SMOKE_BROWSER`, so
-    // `SMOKE_BROWSER=firefox npm run ci` would have run it under Firefox
+    // `SMOKE_BROWSER=firefox npm run local:gate` would have run it under Firefox
     // (Copilot, #2148). Both halves are pinned because they must AGREE: an
     // install of one engine and a launch of another surfaces as a confusing
     // "Executable doesn't exist" rather than as the wiring error it is.
@@ -109,7 +109,7 @@ describe("every engine tier consumes ENGINE_SMOKES", () => {
 
   it("each gated tier names its engine explicitly rather than reading the env", () => {
     // An ambient SMOKE_BROWSER must not be able to redirect a gate: without the
-    // literal engine, `SMOKE_BROWSER=firefox npm run ci` would run Firefox twice
+    // literal engine, `SMOKE_BROWSER=firefox npm run local:gate` would run Firefox twice
     // and never exercise Chromium at all.
     assert.match(
       scripts["smoke:web:chromium"],
