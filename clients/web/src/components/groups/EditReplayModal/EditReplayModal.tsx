@@ -5,7 +5,7 @@ import { JsonEditor } from "../../elements/JsonEditor/JsonEditor";
 import {
   hasImpreciseIntegerLiteral,
   isJsonObject,
-  ROUNDED_INTEGER_ERROR,
+  IMPRECISE_INTEGER_ERROR,
 } from "../../../utils/jsonObjectDraft";
 import {
   replayableParams,
@@ -34,11 +34,15 @@ export interface EditReplayModalProps {
    */
   droppedParamKeys?: string[];
   /**
-   * The tool a `tools/call` replay would invoke, when it is known. Only used to
-   * detect an argument the client would coerce to the type the schema declares
-   * — see {@link reshapedReplayParam}.
+   * The connected server's tools, used only to detect an argument the client
+   * would coerce to the type the schema declares — see
+   * {@link reshapedReplayParam}.
+   *
+   * The whole list rather than the one the entry called, because `name` is
+   * itself editable: retargeting an `echo` replay at `add` has to be validated
+   * against `add`'s schema, not the one the entry happened to use.
    */
-  tool?: Tool;
+  tools?: Tool[];
   /**
    * Re-issue the request with these params. `null` means "send no params",
    * which is a request an empty editor can legitimately express — see
@@ -82,7 +86,7 @@ function formatDroppedKeys(keys: string[]): string {
 function parseParamsDraft(
   method: string,
   text: string,
-  tool: Tool | undefined,
+  tools: Tool[] | undefined,
 ):
   | { ok: true; value: Record<string, unknown> | null }
   | { ok: false; error: string } {
@@ -108,7 +112,7 @@ function parseParamsDraft(
     };
   }
   if (hasImpreciseIntegerLiteral(text)) {
-    return { ok: false, error: ROUNDED_INTEGER_ERROR };
+    return { ok: false, error: IMPRECISE_INTEGER_ERROR };
   }
   // Seeding from the projection is only half of it: a key the dispatcher does
   // not read can also be *added* to the draft, and Send would then discard an
@@ -126,7 +130,14 @@ function parseParamsDraft(
   }
   // Surviving the key check is not the same as being sent as written: see
   // `reshapedReplayParam` for the two ways `arguments` does not.
-  const reshaped = reshapedReplayParam(method, parsed, tool);
+  // Resolved from the *draft's* name, so retargeting the call re-validates
+  // against the tool it would actually reach.
+  const named = typeof parsed.name === "string" ? parsed.name : undefined;
+  const reshaped = reshapedReplayParam(
+    method,
+    parsed,
+    tools?.find((candidate) => candidate.name === named),
+  );
   if (reshaped !== null) {
     return { ok: false, error: reshaped };
   }
@@ -142,14 +153,14 @@ function EditReplayForm({
   method,
   params,
   droppedParamKeys,
-  tool,
+  tools,
   onSend,
   onClose,
 }: Omit<EditReplayModalProps, "opened">) {
   const [draft, setDraft] = useState(() =>
     params === undefined ? "" : JSON.stringify(params, null, 2),
   );
-  const parsed = parseParamsDraft(method, draft, tool);
+  const parsed = parseParamsDraft(method, draft, tools);
 
   return (
     <Stack gap="sm">
@@ -208,7 +219,7 @@ export function EditReplayModal({
   method,
   params,
   droppedParamKeys,
-  tool,
+  tools,
   onSend,
   onClose,
 }: EditReplayModalProps) {
@@ -218,7 +229,7 @@ export function EditReplayModal({
         method={method}
         params={params}
         droppedParamKeys={droppedParamKeys}
-        tool={tool}
+        tools={tools}
         onSend={onSend}
         onClose={onClose}
       />

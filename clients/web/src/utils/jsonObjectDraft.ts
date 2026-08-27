@@ -95,9 +95,15 @@ function* jsonNumberLiterals(text: string): Generator<string> {
   }
 }
 
-/** The message every draft parser uses for {@link hasRoundedInteger}. */
-export const ROUNDED_INTEGER_ERROR =
-  "A whole number written out in full must be within ±(2^53 − 1) — a longer one loses digits when parsed, so a different value would be sent";
+/**
+ * The message every draft parser uses for {@link hasImpreciseIntegerLiteral}.
+ *
+ * Phrased as "cannot be represented exactly" rather than naming the safe-integer
+ * range, because the range is not the rule: a whole number past ±(2^53 − 1) that
+ * *is* exactly representable — 2^54, say — round-trips and is accepted.
+ */
+export const IMPRECISE_INTEGER_ERROR =
+  "This whole number cannot be represented exactly — it is rounded when parsed, so a different value would be sent";
 
 /**
  * Read a JSON-object editor's draft text.
@@ -140,7 +146,7 @@ export function parseJsonObjectDraft(text: string): JsonObjectDraft {
     };
   }
   if (hasImpreciseIntegerLiteral(text)) {
-    return { ok: false, error: ROUNDED_INTEGER_ERROR };
+    return { ok: false, error: IMPRECISE_INTEGER_ERROR };
   }
   return { ok: true, value: parsed };
 }

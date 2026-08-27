@@ -767,6 +767,55 @@ describe("SchemaForm", () => {
     expect(screen.queryByText(/Not valid JSON/)).not.toBeInTheDocument();
   });
 
+  // "Not valid JSON" would misdiagnose a document that parses perfectly well
+  // and holds a number this client cannot put on the wire — leaving the user
+  // reading about syntax while looking at syntactically fine JSON.
+  it("says why the draft cannot be sent, not just that it cannot", async () => {
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        config: { type: "array", title: "Config" },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={vi.fn()} />,
+    );
+
+    await setAceTextByLabel(/Config/, "[1,");
+    expect(screen.getByText(/^Not valid JSON/)).toBeInTheDocument();
+
+    await setAceTextByLabel(/Config/, "[1e400]");
+    expect(screen.getByText(/^Numbers must be finite/)).toBeInTheDocument();
+
+    await setAceTextByLabel(/Config/, "[9007199254740993]");
+    expect(
+      screen.getByText(/^This whole number cannot be represented exactly/),
+    ).toBeInTheDocument();
+
+    await setAceTextByLabel(/Config/, "[1,2]");
+    expect(screen.queryByText(/this field will be omitted/)).toBeNull();
+  });
+
+  // An untouched optional field is not a problem, but it is not a value either
+  // — excluding it before the reason check rather than by it is what keeps
+  // `JSON.parse("")` from throwing out of the change handler.
+  it("reports no value and no error for an emptied JSON field", async () => {
+    const onChange = vi.fn();
+    const schema: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        config: { type: "array", title: "Config", default: [1] },
+      },
+    };
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={onChange} />,
+    );
+
+    await setAceTextByLabel(/Config/, "");
+    expect(onChange).toHaveBeenLastCalledWith({ config: undefined });
+    expect(screen.queryByText(/this field will be omitted/)).toBeNull();
+  });
+
   it("shows no error for an empty optional field", () => {
     const schema: InspectorFormSchema = {
       type: "object",
@@ -1925,7 +1974,7 @@ describe("SchemaForm raw JSON (#2151)", () => {
     await setAceTextByLabel(/Arguments JSON/, '{"id":9007199254740993}');
     expect(onValidityChange).toHaveBeenLastCalledWith(true);
     expect(
-      screen.getByText(/A whole number written out in full must be within/),
+      screen.getByText(/cannot be represented exactly/),
     ).toBeInTheDocument();
   });
 

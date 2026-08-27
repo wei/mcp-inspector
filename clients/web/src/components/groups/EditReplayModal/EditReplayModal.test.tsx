@@ -2,7 +2,22 @@ import { describe, it, expect, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import { renderWithMantine, screen } from "../../../test/renderWithMantine";
 import { getAceText, setAceText } from "../../../test/aceEditor";
+import type { Tool } from "@modelcontextprotocol/client";
 import { EditReplayModal } from "./EditReplayModal";
+
+const TOOLS: Tool[] = [
+  {
+    name: "echo",
+    inputSchema: {
+      type: "object",
+      properties: { message: { type: "string" } },
+    },
+  },
+  {
+    name: "add",
+    inputSchema: { type: "object", properties: { count: { type: "number" } } },
+  },
+];
 
 const baseProps = {
   opened: true,
@@ -204,7 +219,7 @@ describe("EditReplayModal", () => {
     await setAceText('{"name":"echo","arguments":{"id":9007199254740993}}');
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
     expect(
-      screen.getByText(/A whole number written out in full must be within/),
+      screen.getByText(/cannot be represented exactly/),
     ).toBeInTheDocument();
   });
 
@@ -215,6 +230,39 @@ describe("EditReplayModal", () => {
     expect(
       screen.getByText(/`count` would be sent as JSON text/),
     ).toBeInTheDocument();
+  });
+
+  // `callTool` coerces string arguments to the type the schema declares, so
+  // `"2"` against a numeric field is sent as `2`.
+  it("disables Send for a tool argument the schema would coerce", async () => {
+    renderWithMantine(
+      <EditReplayModal {...baseProps} method="tools/call" tools={TOOLS} />,
+    );
+    await setAceText('{"name":"add","arguments":{"count":"2"}}');
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(screen.getByText(/`count` would be converted/)).toBeInTheDocument();
+  });
+
+  // `name` is editable, so the schema to validate against is whichever tool the
+  // draft *now* names — not the one the entry happened to call.
+  it("re-validates against the tool the draft retargets to", async () => {
+    renderWithMantine(
+      <EditReplayModal
+        {...baseProps}
+        method="tools/call"
+        params={{ name: "echo", arguments: { message: "hi" } }}
+        tools={TOOLS}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Send" })).not.toBeDisabled();
+
+    // Retargeted at `add`, whose `count` is a number — the string would coerce.
+    await setAceText('{"name":"add","arguments":{"count":"2"}}');
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+
+    // And back: `echo`'s `message` is a string, so nothing is converted.
+    await setAceText('{"name":"echo","arguments":{"message":"2"}}');
+    expect(screen.getByRole("button", { name: "Send" })).not.toBeDisabled();
   });
 
   it("closes without sending when cancelled", async () => {

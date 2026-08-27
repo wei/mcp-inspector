@@ -27,7 +27,7 @@ import { JsonEditor } from "../../elements/JsonEditor/JsonEditor";
 import {
   hasImpreciseIntegerLiteral,
   isJsonObject,
-  ROUNDED_INTEGER_ERROR,
+  IMPRECISE_INTEGER_ERROR,
 } from "../../../utils/jsonObjectDraft";
 import { isSerializableJson } from "@inspector/core/json/jsonUtils.js";
 import { useValueChange } from "../../../hooks/useValueChange";
@@ -284,26 +284,55 @@ function toNumericValue(raw: string | number): number | undefined {
  * That covers text that is not JSON *yet* — the mid-edit state this field's
  * whole draft/value split exists for — and text that parses but does not
  * survive being written back out: `JSON.parse("1e400")` yields `Infinity`,
- * which `JSON.stringify` writes as `null`, and a whole number past 2^53−1 is
- * rounded to the nearest double. All three report no value, so the field shows
- * its error and `onValidityChange` blocks submission, rather than sending a
- * number the user never typed. Same guards, same reason, as
- * `parseJsonObjectDraft` and the raw-arguments editor above.
+ * which `JSON.stringify` writes as `null`, and a whole number written out in
+ * full that cannot be represented exactly is rounded. All three report no
+ * value, so the field shows its error and `onValidityChange` blocks submission,
+ * rather than sending a number the user never typed. Same guards, same reason,
+ * as `parseJsonObjectDraft` and the raw-arguments editor above.
+ *
+ * The *reason* is `describeJsonDraftProblem`'s to give — this only answers
+ * whether there is a value.
  */
 function parseJsonDraft(text: string): unknown {
-  if (text.trim() === "") {
+  // Empty text is not a *problem* — an untouched optional field is fine — but
+  // it is not a value either, so it is excluded before the reason check rather
+  // than by it. Missing that let `JSON.parse("")` throw.
+  if (text.trim() === "" || describeJsonDraftProblem(text) !== null) {
     return undefined;
   }
+  // Cannot throw: a reason of `null` means the text already parsed. Re-reading
+  // it here rather than having the reason function return the value keeps one
+  // set of rules, which is what stops the two from disagreeing.
+  return JSON.parse(text);
+}
+
+/**
+ * Why this draft cannot be sent, phrased for the field, or `null` when it can.
+ *
+ * Three different mistakes, and the field says which. Flattening them to "Not
+ * valid JSON" misdiagnoses a document that parses perfectly well and happens to
+ * hold a number this client cannot put on the wire — leaving the user reading a
+ * message about syntax while looking at syntactically fine JSON, with no clue
+ * what to change.
+ *
+ * Each ends with the same consequence, because it is the same one: an
+ * unsendable draft reports no value, so the argument is omitted.
+ */
+function describeJsonDraftProblem(text: string): string | null {
+  if (text.trim() === "") return null;
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    return undefined;
+    return "Not valid JSON — this field will be omitted";
   }
-  if (!isSerializableJson(parsed) || hasImpreciseIntegerLiteral(text)) {
-    return undefined;
+  if (!isSerializableJson(parsed)) {
+    return "Numbers must be finite — this field will be omitted";
   }
-  return parsed;
+  if (hasImpreciseIntegerLiteral(text)) {
+    return `${IMPRECISE_INTEGER_ERROR} — this field will be omitted`;
+  }
+  return null;
 }
 
 /** Structural equality for the draft/value re-sync, via canonical JSON. */
@@ -435,24 +464,22 @@ function SchemaJsonField({
     }
   });
 
-  // Text that is present but does not parse yields no value, so the field would
-  // otherwise submit as absent while the user is still looking at what they
-  // typed. Saying so on the field keeps that from being silent; reporting it
-  // upward is what keeps it from being submittable.
-  const hasInvalidDraft =
-    draft.trim() !== "" && parseJsonDraft(draft) === undefined;
-  useDraftValidity(fieldName, !hasInvalidDraft, onValidityChange);
+  // Text that is present but yields no value would otherwise submit as absent
+  // while the user is still looking at what they typed. Saying so on the field
+  // keeps that from being silent; reporting it upward is what keeps it from
+  // being submittable. The *reason* is carried through rather than flattened —
+  // "not valid JSON" is a misdiagnosis of a document that parses fine and holds
+  // a number this client cannot send.
+  const draftProblem =
+    draft.trim() === "" ? null : describeJsonDraftProblem(draft);
+  useDraftValidity(fieldName, draftProblem === null, onValidityChange);
 
   return (
     <JsonEditor
       {...inputProps}
       ariaLabel={inputProps.label}
       value={draft}
-      error={
-        hasInvalidDraft
-          ? "Not valid JSON — this field will be omitted"
-          : undefined
-      }
+      error={draftProblem ?? undefined}
       minLines={4}
       maxLines={16}
       onChange={(text) => {
@@ -620,7 +647,7 @@ function parseRawArgumentsDraft(
   // The quieter half of the same defect: a whole number past 2^53−1 parses to
   // the nearest double, so the draft shows digits the wire will not carry.
   if (hasImpreciseIntegerLiteral(text)) {
-    return { ok: false, error: ROUNDED_INTEGER_ERROR };
+    return { ok: false, error: IMPRECISE_INTEGER_ERROR };
   }
   return { ok: true, value: parsed };
 }

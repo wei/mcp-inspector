@@ -346,12 +346,6 @@ export function ProtocolEntry({
   const requestParams = extractParams(entry);
   const canReplay = isReplayableProtocolMethod(method);
   const editableParams = replayableParams(method, requestParams);
-  // The tool this entry called, when it called one — the schema an edited
-  // argument would be coerced against.
-  const replayedTool =
-    method === "tools/call" && typeof requestParams?.name === "string"
-      ? tools?.find((candidate) => candidate.name === requestParams.name)
-      : undefined;
   const resultType = extractResultType(entry);
   const subscriptionId = extractSubscriptionId(entry);
 
@@ -503,7 +497,9 @@ export function ProtocolEntry({
             // the editor must not offer a field that Send would drop.
             params={editableParams.params}
             droppedParamKeys={editableParams.dropped}
-            tool={replayedTool}
+            // The whole list, not this entry's tool: `name` is editable, so the
+            // schema to validate against is whichever the draft now names.
+            tools={tools}
             onSend={onReplay}
             onClose={() => setIsEditingReplay(false)}
           />
