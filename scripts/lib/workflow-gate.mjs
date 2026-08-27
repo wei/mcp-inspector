@@ -48,11 +48,21 @@
  * Those belong in CI and are there today — `smoke:tui` self-skips under
  * `process.env.CI` on its own, so it needs no guarding.
  *
- * COMMENTS ARE NOT SCANNED. A line whose first non-whitespace character is `#`
- * is skipped, whether it is a YAML comment or a shell comment inside a `run:`
- * block. A comment cannot invoke anything, and the workflow's value is largely
- * in its prose — a guard that made the two tiers undocumentable in the file
- * that implements one of them would be traded for the wrong thing.
+ * ONLY EXECUTABLE POSITIONS ARE SCANNED — `run:` scalars (inline and block),
+ * and the values of an `env:` or `with:` mapping. Everything else in a workflow
+ * is metadata that runs nothing, so scanning it produces findings that are
+ * simply false: `name: Explain why smoke:web:firefox stays local` executes
+ * nothing, and failing the suite on it would contradict the "what it forbids,
+ * and nothing more" contract above (Copilot). Comments are skipped for the same
+ * reason and one more: the workflow's value is largely in its prose, and a
+ * guard that made the two tiers undocumentable in the file implementing one of
+ * them would be traded for the wrong thing.
+ *
+ * That is a real limit, stated rather than hidden: an execution vector outside
+ * those three positions — a custom action that reads a script name from
+ * somewhere else, say — is not seen. The alternative, scanning everything, was
+ * measured against this repo's own workflow and produces false positives on
+ * ordinary step names, which is the faster way to get a guard deleted.
  */
 
 import { SUPPORTED_BROWSERS, DEFAULT_BROWSER } from "./headless-browser.mjs";
@@ -81,16 +91,85 @@ export const VIOLATION = {
 // The name may be spelled out (`local:gate`) or built from an expression
 // (`local:${{ matrix.task }}`) — both are `local:` scripts, and neither may be
 // invoked from a workflow.
-const LOCAL_SCRIPT_RE = /\blocal:(?:[a-z0-9][a-z0-9:-]*|\$\{\{[^}]*\}\})/gi;
+//
+// The expression arm keys off the `${{` PREFIX and then runs to the end of the
+// line, rather than trying to find the matching `}}`. An expression body can
+// itself contain braces — `${{ format('{0}', matrix.browser) }}` — so a
+// `[^}]*\}\}` body stops at the first `}` and misses exactly the case worth
+// catching (Copilot). Matching the prefix cannot be defeated by nesting, and
+// since these are display strings the greedy tail costs nothing.
+const EXPRESSION = String.raw`\$\{\{[^\n]*`;
+const LOCAL_SCRIPT_RE = new RegExp(
+  String.raw`\blocal:(?:[a-z0-9][a-z0-9:-]*|${EXPRESSION})`,
+  "gi",
+);
 // Same reasoning one level down: `smoke:web:` followed by an expression could
 // resolve to any engine, so it is read as a forbidden one.
-const DYNAMIC_ENGINE_RE = /\bsmoke:web:\$\{\{[^}]*\}\}/gi;
+const DYNAMIC_ENGINE_RE = new RegExp(
+  String.raw`\bsmoke:web:${EXPRESSION}`,
+  "gi",
+);
 // The value may be quoted (`SMOKE_BROWSER: "firefox"`), assigned
 // (`SMOKE_BROWSER=firefox`), or an expression — capture whatever follows.
 const BROWSER_ENV_RE = /\bSMOKE_BROWSER\s*[:=]\s*(\S+)/gi;
 
 function isComment(line) {
   return line.trimStart().startsWith("#");
+}
+
+function indentOf(line) {
+  return line.length - line.trimStart().length;
+}
+
+/** `run:` with an inline command, optionally as the first key of a `- ` item. */
+const RUN_INLINE_RE = /^\s*(?:-\s+)?run:\s*(.*)$/;
+/** A key that opens a block whose nested lines are executable: `run: |`, `env:`, `with:`. */
+const BLOCK_OPEN_RE = /^\s*(?:-\s+)?(run|env|with):\s*(?:[|>][-+]?\d*)?\s*$/;
+
+/**
+ * The executable scalars of a workflow, with the line each came from.
+ *
+ * Deliberately hand-rolled rather than YAML-parsed: the guard runs in
+ * `test:scripts`, which is `node --test` with no dependencies by design, and
+ * the three shapes it needs are simple enough to recognize by indentation.
+ *
+ * @param {string} text
+ * @returns {Array<{line: number, kind: string, text: string}>}
+ */
+export function extractExecutableRegions(text) {
+  const regions = [];
+  let blockKind = null;
+  let blockIndent = 0;
+
+  text.split(/\r?\n/).forEach((line, index) => {
+    if (isComment(line)) return;
+    const lineNumber = index + 1;
+
+    if (blockKind !== null) {
+      // A blank line neither ends a block scalar nor carries anything.
+      if (line.trim() === "") return;
+      if (indentOf(line) > blockIndent) {
+        regions.push({ line: lineNumber, kind: blockKind, text: line });
+        return;
+      }
+      // Dedented out of the block — fall through and re-read this line as a key.
+      blockKind = null;
+    }
+
+    const block = BLOCK_OPEN_RE.exec(line);
+    if (block) {
+      blockKind = block[1];
+      blockIndent = indentOf(line);
+      return;
+    }
+
+    const run = RUN_INLINE_RE.exec(line);
+    if (run && run[1].trim() !== "") {
+      regions.push({ line: lineNumber, kind: "run", text: run[1] });
+    }
+  });
+
+  return regions;
 }
 
 function stripQuotes(value) {
@@ -111,12 +190,10 @@ function stripQuotes(value) {
  */
 export function findWorkflowViolations(text, file = "<workflow>") {
   const findings = [];
-  const lines = text.split(/\r?\n/);
 
-  lines.forEach((line, index) => {
-    if (isComment(line)) return;
-    const lineNumber = index + 1;
-
+  for (const { line: lineNumber, text: line } of extractExecutableRegions(
+    text,
+  )) {
     for (const match of line.matchAll(LOCAL_SCRIPT_RE)) {
       findings.push({
         file,
@@ -174,7 +251,7 @@ export function findWorkflowViolations(text, file = "<workflow>") {
           `checked statically. Leave it unset; the default is \`${DEFAULT_BROWSER}\`.`,
       });
     }
-  });
+  }
 
   return findings;
 }

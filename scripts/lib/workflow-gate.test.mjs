@@ -19,6 +19,7 @@ import { describe, it } from "node:test";
 import {
   FORBIDDEN_ENGINE_SCRIPTS,
   VIOLATION,
+  extractExecutableRegions,
   findWorkflowViolations,
   formatWorkflowViolations,
 } from "./workflow-gate.mjs";
@@ -72,7 +73,7 @@ describe("findWorkflowViolations", () => {
     },
     {
       name: "flags a quoted SMOKE_BROWSER value",
-      text: '          SMOKE_BROWSER: "webkit"\n',
+      text: '        env:\n          SMOKE_BROWSER: "webkit"\n',
       rules: [VIOLATION.BROWSER_ENV],
     },
     {
@@ -82,12 +83,12 @@ describe("findWorkflowViolations", () => {
     },
     {
       name: "flags an expression, which cannot be checked statically",
-      text: "          SMOKE_BROWSER: ${{ matrix.browser }}\n",
+      text: "        env:\n          SMOKE_BROWSER: ${{ matrix.browser }}\n",
       rules: [VIOLATION.BROWSER_ENV],
     },
     {
       name: "allows SMOKE_BROWSER set explicitly to chromium",
-      text: "          SMOKE_BROWSER: chromium\n",
+      text: "        env:\n          SMOKE_BROWSER: chromium\n",
       rules: [],
     },
     {
@@ -123,6 +124,41 @@ describe("findWorkflowViolations", () => {
         "      - run: npm run test:storybook",
         "",
       ].join("\n"),
+      rules: [],
+    },
+    {
+      // Copilot, second review: an expression body can itself contain braces,
+      // so a brace-balanced regex stops at the first `}` and misses the one
+      // case worth catching. The rule keys off the `${{` prefix instead.
+      name: "flags an expression whose own body contains braces",
+      text: "      - run: npm run smoke:web:${{ format('{0}', matrix.browser) }}\n",
+      rules: [VIOLATION.ENGINE_SCRIPT],
+    },
+    {
+      name: "flags a command inside a block scalar, not just an inline run",
+      text: "      - run: |\n          npm run local:gate\n",
+      rules: [VIOLATION.LOCAL_SCRIPT],
+    },
+    {
+      name: "flags a command passed as an action input",
+      text: "        with:\n          args: npm run local:gate\n",
+      rules: [VIOLATION.LOCAL_SCRIPT],
+    },
+    {
+      // Copilot, second review: metadata executes nothing, so a finding there
+      // is simply false — and the fastest way to get a guard deleted.
+      name: "does not read a step name as an invocation",
+      text: "      - name: Explain why smoke:web:firefox stays local\n",
+      rules: [],
+    },
+    {
+      name: "does not read an `if:` condition as one either",
+      text: "        if: github.event_name == 'push'\n",
+      rules: [],
+    },
+    {
+      name: "does not read a bare mapping line outside env/with/run",
+      text: "          SMOKE_BROWSER-ish-doc: firefox\n",
       rules: [],
     },
     {
@@ -166,6 +202,30 @@ describe("findWorkflowViolations", () => {
       "smoke:web:webkit",
       "smoke:web:engine",
     ]);
+  });
+});
+
+describe("extractExecutableRegions", () => {
+  it("ends a block when the next line dedents, and re-reads that line", () => {
+    // The table cases cannot isolate this: a block that never closed would
+    // still produce the right findings for them, and would then read the whole
+    // rest of the file as executable.
+    const regions = extractExecutableRegions(
+      [
+        "        env:",
+        "          SMOKE_BROWSER: chromium",
+        "      - name: smoke:web:firefox is local-only",
+        "      - run: npm run smoke",
+        "",
+      ].join("\n"),
+    );
+    assert.deepEqual(
+      regions.map((r) => [r.kind, r.text.trim()]),
+      [
+        ["env", "SMOKE_BROWSER: chromium"],
+        ["run", "npm run smoke"],
+      ],
+    );
   });
 });
 
