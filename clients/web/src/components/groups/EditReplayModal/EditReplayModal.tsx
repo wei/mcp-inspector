@@ -1,7 +1,11 @@
 import { useState } from "react";
 import { Alert, Button, Group, Modal, Stack, Text } from "@mantine/core";
 import { JsonEditor } from "../../elements/JsonEditor/JsonEditor";
-import { isJsonObject } from "../../../utils/jsonObjectDraft";
+import {
+  hasRoundedInteger,
+  isJsonObject,
+  ROUNDED_INTEGER_ERROR,
+} from "../../../utils/jsonObjectDraft";
 import {
   replayableParams,
   reshapedReplayParam,
@@ -94,6 +98,9 @@ function parseParamsDraft(
       error:
         "Numbers must be finite — a value like `1e400` overflows and would be sent as null",
     };
+  }
+  if (hasRoundedInteger(parsed)) {
+    return { ok: false, error: ROUNDED_INTEGER_ERROR };
   }
   // Seeding from the projection is only half of it: a key the dispatcher does
   // not read can also be *added* to the draft, and Send would then discard an

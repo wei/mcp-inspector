@@ -167,6 +167,38 @@ describe("reshapedReplayParam", () => {
     ).toMatch(/must be a JSON object/);
   });
 
+  // `getPrompt` runs `convertPromptArguments`, which JSON-stringifies anything
+  // that is not already a string — so `{count: 2}` goes out as `{count: "2"}`
+  // while the editor still shows the number. The spec types a prompt argument
+  // as a string, so this is the protocol, not a quirk to route around.
+  it("rejects a non-string prompt argument, which is stringified on the way out", () => {
+    expect(
+      reshapedReplayParam("prompts/get", {
+        name: "greet",
+        arguments: { count: 2, who: "ada" },
+      }),
+    ).toMatch(/`count` would be sent as JSON text/);
+  });
+
+  it("accepts string prompt arguments", () => {
+    expect(
+      reshapedReplayParam("prompts/get", {
+        name: "greet",
+        arguments: { count: "2", who: "ada" },
+      }),
+    ).toBeNull();
+  });
+
+  // `callTool` sends its arguments as given, so the same shape is fine there.
+  it("leaves a tool call's non-string arguments alone", () => {
+    expect(
+      reshapedReplayParam("tools/call", {
+        name: "add",
+        arguments: { a: 1, b: 2 },
+      }),
+    ).toBeNull();
+  });
+
   it("has nothing to say about methods that take no arguments", () => {
     expect(reshapedReplayParam("tools/list", { cursor: "a" })).toBeNull();
     expect(reshapedReplayParam("resources/read", { uri: "x://y" })).toBeNull();

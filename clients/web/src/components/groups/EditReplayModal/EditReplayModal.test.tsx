@@ -197,6 +197,26 @@ describe("EditReplayModal", () => {
     ).toBeInTheDocument();
   });
 
+  // `JSON.parse` rounds a whole number past 2^53−1 to the nearest double, so
+  // the draft shows digits the wire will not carry.
+  it("disables Send for a whole number that loses digits when parsed", async () => {
+    renderWithMantine(<EditReplayModal {...baseProps} method="tools/call" />);
+    await setAceText('{"name":"echo","arguments":{"id":9007199254740993}}');
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(
+      screen.getByText(/Whole numbers must be within/),
+    ).toBeInTheDocument();
+  });
+
+  it("disables Send for a non-string prompt argument", async () => {
+    renderWithMantine(<EditReplayModal {...baseProps} method="prompts/get" />);
+    await setAceText('{"name":"greet","arguments":{"count":2}}');
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(
+      screen.getByText(/`count` would be sent as JSON text/),
+    ).toBeInTheDocument();
+  });
+
   it("closes without sending when cancelled", async () => {
     const user = userEvent.setup();
     const onSend = vi.fn();

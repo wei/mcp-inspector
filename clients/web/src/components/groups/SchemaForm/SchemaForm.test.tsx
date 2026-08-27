@@ -1913,6 +1913,22 @@ describe("SchemaForm raw JSON (#2151)", () => {
     expect(screen.getByText(/Numbers must be finite/)).toBeInTheDocument();
   });
 
+  // The quieter half of the same defect the `1e400` case covers: a whole number
+  // past 2^53−1 is rounded by `JSON.parse`, so the editor would show digits the
+  // wire will not carry.
+  it("blocks submission for a whole number that loses digits when parsed", async () => {
+    const user = userEvent.setup();
+    const onValidityChange = vi.fn();
+    renderWithMantine(<RawHarness onValidityChange={onValidityChange} />);
+    await enableRawJson(user);
+
+    await setAceTextByLabel(/Arguments JSON/, '{"id":9007199254740993}');
+    expect(onValidityChange).toHaveBeenLastCalledWith(true);
+    expect(
+      screen.getByText(/Whole numbers must be within/),
+    ).toBeInTheDocument();
+  });
+
   // Nothing in `values` names a branch, so the picker's index is held by the
   // form. Editing the discriminator in the raw document is a change to which
   // branch is in effect, and it carries no other signal — without the re-derive

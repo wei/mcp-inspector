@@ -138,8 +138,8 @@ export function replayableParams(
  * kept param is sent as written.
  *
  * {@link replayableParams} answers which keys survive; this answers whether the
- * surviving ones survive *intact*. Only `arguments` can fail that today, and it
- * fails two ways, both of which the Edit-and-replay editor has to catch before
+ * surviving ones survive *intact*. Only `arguments` can fail that, and it fails
+ * three ways, each of which the Edit-and-replay editor has to catch before
  * Send:
  *
  * - `arguments: null` is nullish, so `?? {}` replaces it — the editor shows
@@ -147,6 +147,13 @@ export function replayableParams(
  * - `arguments: [1,2]` or `arguments: 4` is not nullish, so the cast carries it
  *   through unchanged into a call whose type says it is a named-argument
  *   record. Nothing reshapes it, but nothing can send it either.
+ * - For **`prompts/get` only**, a non-string *value*. `getPrompt` runs
+ *   `convertPromptArguments`, which `JSON.stringify`s anything that is not
+ *   already a string — so `{"count": 2}` is sent as `{"count": "2"}` while the
+ *   editor still shows the number. This is not a quirk to route around: the
+ *   spec types `GetPromptRequest.params.arguments` as `Record<string, string>`,
+ *   so a string is the only thing a prompt argument can be. `tools/call` is
+ *   unaffected — `callTool` sends its arguments as given.
  *
  * `name` and `uri` are deliberately not checked here: the dispatch already
  * refuses a missing or non-string one with a reason the caller surfaces as a
@@ -162,10 +169,20 @@ export function reshapedReplayParam(
   const args = params.arguments;
   const isRecord =
     args !== null && typeof args === "object" && !Array.isArray(args);
-  if (isRecord) return null;
-  return args === null
-    ? "`arguments` is sent as `{}` when null — remove it, or give it an object"
-    : "`arguments` must be a JSON object (`{ … }`)";
+  if (!isRecord) {
+    return args === null
+      ? "`arguments` is sent as `{}` when null — remove it, or give it an object"
+      : "`arguments` must be a JSON object (`{ … }`)";
+  }
+  if (method === "prompts/get") {
+    const coerced = Object.entries(args as Record<string, unknown>)
+      .filter(([, value]) => typeof value !== "string")
+      .map(([key]) => `\`${key}\``);
+    if (coerced.length > 0) {
+      return `A prompt argument is always a string — ${coerced.join(", ")} would be sent as JSON text`;
+    }
+  }
+  return null;
 }
 
 export async function replayProtocolRequest(

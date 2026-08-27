@@ -24,7 +24,11 @@ import {
 import { ClearButton } from "../../elements/ClearButton/ClearButton";
 import { EnlargeButton } from "../../elements/EnlargeButton/EnlargeButton";
 import { JsonEditor } from "../../elements/JsonEditor/JsonEditor";
-import { isJsonObject } from "../../../utils/jsonObjectDraft";
+import {
+  hasRoundedInteger,
+  isJsonObject,
+  ROUNDED_INTEGER_ERROR,
+} from "../../../utils/jsonObjectDraft";
 import { isSerializableJson } from "@inspector/core/json/jsonUtils.js";
 import { useValueChange } from "../../../hooks/useValueChange";
 import type {
@@ -280,9 +284,10 @@ function toNumericValue(raw: string | number): number | undefined {
  * That covers text that is not JSON *yet* — the mid-edit state this field's
  * whole draft/value split exists for — and text that parses but does not
  * survive being written back out: `JSON.parse("1e400")` yields `Infinity`,
- * which `JSON.stringify` writes as `null`. Both report no value, so the field
- * shows its error and `onValidityChange` blocks submission, rather than sending
- * a number the user never typed. Same guard, same reason, as
+ * which `JSON.stringify` writes as `null`, and a whole number past 2^53−1 is
+ * rounded to the nearest double. All three report no value, so the field shows
+ * its error and `onValidityChange` blocks submission, rather than sending a
+ * number the user never typed. Same guards, same reason, as
  * `parseJsonObjectDraft` and the raw-arguments editor above.
  */
 function parseJsonDraft(text: string): unknown {
@@ -295,7 +300,10 @@ function parseJsonDraft(text: string): unknown {
   } catch {
     return undefined;
   }
-  return isSerializableJson(parsed) ? parsed : undefined;
+  if (!isSerializableJson(parsed) || hasRoundedInteger(parsed)) {
+    return undefined;
+  }
+  return parsed;
 }
 
 /** Structural equality for the draft/value re-sync, via canonical JSON. */
@@ -608,6 +616,11 @@ function parseRawArgumentsDraft(
       error:
         "Numbers must be finite — a value like `1e400` overflows and would be sent as null",
     };
+  }
+  // The quieter half of the same defect: a whole number past 2^53−1 parses to
+  // the nearest double, so the draft shows digits the wire will not carry.
+  if (hasRoundedInteger(parsed)) {
+    return { ok: false, error: ROUNDED_INTEGER_ERROR };
   }
   return { ok: true, value: parsed };
 }

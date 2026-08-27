@@ -1,5 +1,51 @@
 import { describe, it, expect } from "vitest";
-import { parseJsonObjectDraft } from "./jsonObjectDraft";
+import { hasRoundedInteger, parseJsonObjectDraft } from "./jsonObjectDraft";
+
+// `isSerializableJson` catches a literal too large to represent (`1e400` →
+// `Infinity` → `null` on the wire). This is the quieter one: a whole number
+// past 2^53−1 parses to the nearest double, so the draft shows digits the wire
+// will not carry.
+describe("hasRoundedInteger", () => {
+  it("accepts whole numbers inside the safe range", () => {
+    expect(hasRoundedInteger({ id: Number.MAX_SAFE_INTEGER })).toBe(false);
+    expect(hasRoundedInteger({ id: -Number.MAX_SAFE_INTEGER })).toBe(false);
+    expect(hasRoundedInteger({ id: 0 })).toBe(false);
+  });
+
+  it("rejects a whole number past the safe range", () => {
+    // Typed as …93, parsed as …92.
+    expect(hasRoundedInteger(JSON.parse('{"id":9007199254740993}'))).toBe(true);
+  });
+
+  // A fractional or exponent-form value is a double by nature and is sent as
+  // the double it parsed to, so nothing is lost between typing and sending.
+  it("accepts a fractional value however large", () => {
+    expect(hasRoundedInteger({ ratio: 1.5 })).toBe(false);
+    expect(hasRoundedInteger({ ratio: 0.1 + 0.2 })).toBe(false);
+  });
+
+  // JS stringifies from 1e21 upward in exponent form, so such a value was typed
+  // that way and the parsed double is what was asked for. `parseJsonObjectDraft`
+  // has always accepted these.
+  it("accepts a value whose shortest form carries an exponent", () => {
+    expect(hasRoundedInteger({ n: 1e308 })).toBe(false);
+    expect(hasRoundedInteger({ n: 1e21 })).toBe(false);
+  });
+
+  it("looks inside arrays and nested objects", () => {
+    expect(hasRoundedInteger(JSON.parse('[{"a":[9007199254740993]}]'))).toBe(
+      true,
+    );
+    expect(hasRoundedInteger({ a: { b: [1, 2, "x", null, true] } })).toBe(
+      false,
+    );
+  });
+
+  it("has nothing to say about non-numeric values", () => {
+    expect(hasRoundedInteger("9007199254740993")).toBe(false);
+    expect(hasRoundedInteger(null)).toBe(false);
+  });
+});
 
 describe("parseJsonObjectDraft", () => {
   it("reads empty text as the empty object rather than an error", () => {
