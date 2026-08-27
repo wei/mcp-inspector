@@ -1255,6 +1255,9 @@ export function InspectorView({
     onExportSection: onExportProtocolSection,
     onReplay: onReplayProtocol,
     onTogglePin: onTogglePinProtocol,
+    // Only so an edited `tools/call` replay can tell whether an argument would
+    // be coerced by the schema on the way out (#2151).
+    tools,
     sortDirection: protocolSort,
     onSortChange: setProtocolSort,
     compact: protocolCompact,

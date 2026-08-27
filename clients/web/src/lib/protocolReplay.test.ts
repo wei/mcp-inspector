@@ -103,6 +103,45 @@ describe("replayableParams", () => {
     ).toEqual({ params: { cursor: "abc" }, dropped: ["_meta"] });
   });
 
+  // `listTools` builds its params with `cursor !== undefined`, carrying `""`
+  // deliberately — its own comment says dropping it asks for page one again.
+  it("keeps an empty cursor on tools/list, which preserves it", () => {
+    expect(replayableParams("tools/list", { cursor: "" })).toEqual({
+      params: { cursor: "" },
+      dropped: [],
+    });
+  });
+
+  // The other four adapters build theirs with a truthiness check, so `""` never
+  // reaches the wire. Reporting it as kept would show `{"cursor":""}` in the
+  // editor while `{}` was sent.
+  it.each([
+    "prompts/list",
+    "resources/list",
+    "resources/templates/list",
+    "tasks/list",
+  ])("drops an empty cursor on %s, which does not preserve it", (method) => {
+    expect(replayableParams(method, { cursor: "" })).toEqual({
+      params: undefined,
+      dropped: ["cursor"],
+    });
+  });
+
+  it("keeps a non-empty cursor on every list method", () => {
+    for (const method of [
+      "tools/list",
+      "prompts/list",
+      "resources/list",
+      "resources/templates/list",
+      "tasks/list",
+    ]) {
+      expect(replayableParams(method, { cursor: "abc" })).toEqual({
+        params: { cursor: "abc" },
+        dropped: [],
+      });
+    }
+  });
+
   // The dispatcher ignores a non-string cursor, so keeping it would put a value
   // in the editor that changes nothing about what is sent.
   it("drops a cursor that is not a string", () => {
@@ -195,6 +234,71 @@ describe("reshapedReplayParam", () => {
       reshapedReplayParam("tools/call", {
         name: "add",
         arguments: { a: 1, b: 2 },
+      }),
+    ).toBeNull();
+  });
+
+  // `callTool` runs every *string* entry through `convertToolParameters`,
+  // because the Tools form hands everything over as text — so a string typed
+  // against a numeric schema is sent as a number.
+  it("rejects a tool argument the schema would coerce", () => {
+    const tool: Tool = {
+      name: "add",
+      inputSchema: {
+        type: "object",
+        properties: { count: { type: "number" } },
+      },
+    };
+    expect(
+      reshapedReplayParam(
+        "tools/call",
+        { name: "add", arguments: { count: "2" } },
+        tool,
+      ),
+    ).toMatch(/`count` would be converted/);
+  });
+
+  it("accepts a tool argument already written with the declared type", () => {
+    const tool: Tool = {
+      name: "add",
+      inputSchema: {
+        type: "object",
+        properties: { count: { type: "number" } },
+      },
+    };
+    expect(
+      reshapedReplayParam(
+        "tools/call",
+        { name: "add", arguments: { count: 2 } },
+        tool,
+      ),
+    ).toBeNull();
+  });
+
+  it("accepts a string argument the schema declares as a string", () => {
+    const tool: Tool = {
+      name: "echo",
+      inputSchema: {
+        type: "object",
+        properties: { message: { type: "string" } },
+      },
+    };
+    expect(
+      reshapedReplayParam(
+        "tools/call",
+        { name: "echo", arguments: { message: "hi" } },
+        tool,
+      ),
+    ).toBeNull();
+  });
+
+  // Nothing can be said about a coercion whose schema is unknown, and refusing
+  // on that basis would block a replay that is very likely fine.
+  it("skips the coercion check when the tool is not known", () => {
+    expect(
+      reshapedReplayParam("tools/call", {
+        name: "add",
+        arguments: { count: "2" },
       }),
     ).toBeNull();
   });

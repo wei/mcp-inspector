@@ -25,7 +25,7 @@ import { ClearButton } from "../../elements/ClearButton/ClearButton";
 import { EnlargeButton } from "../../elements/EnlargeButton/EnlargeButton";
 import { JsonEditor } from "../../elements/JsonEditor/JsonEditor";
 import {
-  hasRoundedInteger,
+  hasImpreciseIntegerLiteral,
   isJsonObject,
   ROUNDED_INTEGER_ERROR,
 } from "../../../utils/jsonObjectDraft";
@@ -300,7 +300,7 @@ function parseJsonDraft(text: string): unknown {
   } catch {
     return undefined;
   }
-  if (!isSerializableJson(parsed) || hasRoundedInteger(parsed)) {
+  if (!isSerializableJson(parsed) || hasImpreciseIntegerLiteral(text)) {
     return undefined;
   }
   return parsed;
@@ -619,7 +619,7 @@ function parseRawArgumentsDraft(
   }
   // The quieter half of the same defect: a whole number past 2^53−1 parses to
   // the nearest double, so the draft shows digits the wire will not carry.
-  if (hasRoundedInteger(parsed)) {
+  if (hasImpreciseIntegerLiteral(text)) {
     return { ok: false, error: ROUNDED_INTEGER_ERROR };
   }
   return { ok: true, value: parsed };

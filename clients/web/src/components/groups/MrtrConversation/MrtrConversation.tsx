@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { Tool } from "@modelcontextprotocol/client";
 import {
   Badge,
   Collapse,
@@ -28,6 +29,12 @@ export interface MrtrConversationProps {
   /** Compact per-round layout for the narrow monitoring column. */
   embedded?: boolean;
   onReplay: (id: string, overrideParams?: ReplayParamsOverride) => void;
+  /**
+   * The connected server's tools. Forwarded to each entry only so an edited
+   * `tools/call` replay can tell whether an argument would be coerced by the
+   * schema on the way out (#2151).
+   */
+  tools?: Tool[];
   onTogglePin: (id: string) => void;
 }
 
@@ -123,6 +130,7 @@ function formatRoundLabel(index: number): string {
 }
 
 export function MrtrConversation({
+  tools,
   requestState,
   rounds,
   pinnedIds,
@@ -187,6 +195,7 @@ export function MrtrConversation({
                     onReplay(round.id, overrideParams)
                   }
                   onTogglePin={() => onTogglePin(round.id)}
+                  tools={tools}
                 />
               </Stack>
             ))}

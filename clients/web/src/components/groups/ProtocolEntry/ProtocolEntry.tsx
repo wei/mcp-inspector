@@ -12,6 +12,7 @@ import {
   Text,
 } from "@mantine/core";
 import { RiErrorWarningLine } from "react-icons/ri";
+import type { Tool } from "@modelcontextprotocol/client";
 import type { MessageEntry } from "@inspector/core/mcp/types.js";
 import { ContentViewer } from "../../elements/ContentViewer/ContentViewer";
 import { CopyButton } from "../../elements/CopyButton/CopyButton";
@@ -70,6 +71,13 @@ export interface ProtocolEntryProps {
    * correlated HTTP record.
    */
   correlatedHttpStatus?: number;
+  /**
+   * The connected server's tools, used only to tell whether an edited
+   * `tools/call` argument would be coerced by the schema on the way out
+   * (#2151). Optional: without it that one check is skipped, which is the right
+   * answer when the tool list is not known rather than a reason to block.
+   */
+  tools?: Tool[];
 }
 
 const EntryContainer = Card.withProps({
@@ -327,6 +335,7 @@ export function ProtocolEntry({
   embedded = false,
   onRevealInNetwork,
   correlatedHttpStatus,
+  tools,
 }: ProtocolEntryProps) {
   const [isExpanded, setIsExpanded] = useState(isListExpanded);
   const [isEditingReplay, setIsEditingReplay] = useState(false);
@@ -337,6 +346,12 @@ export function ProtocolEntry({
   const requestParams = extractParams(entry);
   const canReplay = isReplayableProtocolMethod(method);
   const editableParams = replayableParams(method, requestParams);
+  // The tool this entry called, when it called one — the schema an edited
+  // argument would be coerced against.
+  const replayedTool =
+    method === "tools/call" && typeof requestParams?.name === "string"
+      ? tools?.find((candidate) => candidate.name === requestParams.name)
+      : undefined;
   const resultType = extractResultType(entry);
   const subscriptionId = extractSubscriptionId(entry);
 
@@ -488,6 +503,7 @@ export function ProtocolEntry({
             // the editor must not offer a field that Send would drop.
             params={editableParams.params}
             droppedParamKeys={editableParams.dropped}
+            tool={replayedTool}
             onSend={onReplay}
             onClose={() => setIsEditingReplay(false)}
           />

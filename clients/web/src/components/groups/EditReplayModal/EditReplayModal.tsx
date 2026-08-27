@@ -1,8 +1,9 @@
 import { useState } from "react";
+import type { Tool } from "@modelcontextprotocol/client";
 import { Alert, Button, Group, Modal, Stack, Text } from "@mantine/core";
 import { JsonEditor } from "../../elements/JsonEditor/JsonEditor";
 import {
-  hasRoundedInteger,
+  hasImpreciseIntegerLiteral,
   isJsonObject,
   ROUNDED_INTEGER_ERROR,
 } from "../../../utils/jsonObjectDraft";
@@ -32,6 +33,12 @@ export interface EditReplayModalProps {
    * the one thing an inspector must not do.
    */
   droppedParamKeys?: string[];
+  /**
+   * The tool a `tools/call` replay would invoke, when it is known. Only used to
+   * detect an argument the client would coerce to the type the schema declares
+   * — see {@link reshapedReplayParam}.
+   */
+  tool?: Tool;
   /**
    * Re-issue the request with these params. `null` means "send no params",
    * which is a request an empty editor can legitimately express — see
@@ -75,6 +82,7 @@ function formatDroppedKeys(keys: string[]): string {
 function parseParamsDraft(
   method: string,
   text: string,
+  tool: Tool | undefined,
 ):
   | { ok: true; value: Record<string, unknown> | null }
   | { ok: false; error: string } {
@@ -99,7 +107,7 @@ function parseParamsDraft(
         "Numbers must be finite — a value like `1e400` overflows and would be sent as null",
     };
   }
-  if (hasRoundedInteger(parsed)) {
+  if (hasImpreciseIntegerLiteral(text)) {
     return { ok: false, error: ROUNDED_INTEGER_ERROR };
   }
   // Seeding from the projection is only half of it: a key the dispatcher does
@@ -118,7 +126,7 @@ function parseParamsDraft(
   }
   // Surviving the key check is not the same as being sent as written: see
   // `reshapedReplayParam` for the two ways `arguments` does not.
-  const reshaped = reshapedReplayParam(method, parsed);
+  const reshaped = reshapedReplayParam(method, parsed, tool);
   if (reshaped !== null) {
     return { ok: false, error: reshaped };
   }
@@ -134,13 +142,14 @@ function EditReplayForm({
   method,
   params,
   droppedParamKeys,
+  tool,
   onSend,
   onClose,
 }: Omit<EditReplayModalProps, "opened">) {
   const [draft, setDraft] = useState(() =>
     params === undefined ? "" : JSON.stringify(params, null, 2),
   );
-  const parsed = parseParamsDraft(method, draft);
+  const parsed = parseParamsDraft(method, draft, tool);
 
   return (
     <Stack gap="sm">
@@ -199,6 +208,7 @@ export function EditReplayModal({
   method,
   params,
   droppedParamKeys,
+  tool,
   onSend,
   onClose,
 }: EditReplayModalProps) {
@@ -208,6 +218,7 @@ export function EditReplayModal({
         method={method}
         params={params}
         droppedParamKeys={droppedParamKeys}
+        tool={tool}
         onSend={onSend}
         onClose={onClose}
       />

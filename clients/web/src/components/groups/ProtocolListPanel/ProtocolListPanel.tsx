@@ -1,4 +1,5 @@
 import { useMemo, useState, type ReactNode } from "react";
+import type { Tool } from "@modelcontextprotocol/client";
 import {
   Button,
   Collapse,
@@ -49,6 +50,12 @@ export interface ProtocolListPanelProps {
   /** Export just one section's entries. */
   onExportSection: (section: ProtocolSectionName) => void;
   onReplay: (id: string, overrideParams?: ReplayParamsOverride) => void;
+  /**
+   * The connected server's tools. Forwarded to each entry only so an edited
+   * `tools/call` replay can tell whether an argument would be coerced by the
+   * schema on the way out (#2151).
+   */
+  tools?: Tool[];
   onTogglePin: (id: string) => void;
   sortDirection: SortDirection;
   onSortChange: (next: SortDirection) => void;
@@ -236,6 +243,7 @@ function matchesFilters(
 }
 
 export function ProtocolListPanel({
+  tools,
   entries,
   pinnedIds,
   searchText,
@@ -319,6 +327,7 @@ export function ProtocolListPanel({
           embedded={embedded}
           onReplay={onReplay}
           onTogglePin={onTogglePin}
+          tools={tools}
         />
       ) : (
         <ProtocolEntry
@@ -335,6 +344,7 @@ export function ProtocolListPanel({
               : undefined
           }
           correlatedHttpStatus={correlatedStatusById?.get(row.entry.id)}
+          tools={tools}
         />
       ),
     );

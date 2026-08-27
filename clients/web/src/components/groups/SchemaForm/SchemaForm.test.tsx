@@ -1925,7 +1925,7 @@ describe("SchemaForm raw JSON (#2151)", () => {
     await setAceTextByLabel(/Arguments JSON/, '{"id":9007199254740993}');
     expect(onValidityChange).toHaveBeenLastCalledWith(true);
     expect(
-      screen.getByText(/Whole numbers must be within/),
+      screen.getByText(/A whole number written out in full must be within/),
     ).toBeInTheDocument();
   });
 

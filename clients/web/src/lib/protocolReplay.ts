@@ -9,6 +9,7 @@ import type { MessageEntry } from "@inspector/core/mcp/types.js";
 // `components → lib → utils` direction still holds: `LogEntryData` is the shape
 // the Logs screen renders, and this module exists to produce exactly that.
 import type { LogEntryData } from "../components/elements/LogEntry/LogEntry";
+import { convertToolParameters } from "@inspector/core/json/jsonUtils.js";
 import { isReplayableProtocolMethod } from "../utils/replayableProtocolMethods";
 
 // Derive `LogEntryData[]` from the MessageLog by filtering for the
@@ -113,7 +114,19 @@ export function replayableParams(
     case "tasks/list":
       // Only a *string* cursor survives: the dispatcher ignores any other type,
       // so keeping it would put a value in the editor that changes nothing.
-      kept = typeof params.cursor === "string" ? ["cursor"] : [];
+      //
+      // And an **empty** one survives on `tools/list` alone. `listTools` builds
+      // its params with `cursor !== undefined`, carrying `""` deliberately —
+      // its own comment explains that dropping it asks for page one again. The
+      // other four adapters use a truthiness check and drop it. That asymmetry
+      // looks like a latent bug in those four rather than an intention, but
+      // this function's job is to describe what the dispatch *does*, so it
+      // reports the empty cursor as dropped where it would be dropped.
+      kept =
+        typeof params.cursor === "string" &&
+        (method === "tools/list" || params.cursor !== "")
+          ? ["cursor"]
+          : [];
       break;
     default:
       // `ping` takes nothing, and an unreplayable method never reaches here.
@@ -147,13 +160,19 @@ export function replayableParams(
  * - `arguments: [1,2]` or `arguments: 4` is not nullish, so the cast carries it
  *   through unchanged into a call whose type says it is a named-argument
  *   record. Nothing reshapes it, but nothing can send it either.
- * - For **`prompts/get` only**, a non-string *value*. `getPrompt` runs
+ * - For **`prompts/get`**, a non-string *value*. `getPrompt` runs
  *   `convertPromptArguments`, which `JSON.stringify`s anything that is not
  *   already a string — so `{"count": 2}` is sent as `{"count": "2"}` while the
  *   editor still shows the number. This is not a quirk to route around: the
  *   spec types `GetPromptRequest.params.arguments` as `Record<string, string>`,
- *   so a string is the only thing a prompt argument can be. `tools/call` is
- *   unaffected — `callTool` sends its arguments as given.
+ *   so a string is the only thing a prompt argument can be.
+ * - For **`tools/call`**, the mirror image. `callTool` runs every *string*
+ *   entry through `convertToolParameters`, because the Tools form hands
+ *   everything over as text — so `{"count": "2"}` against a schema declaring a
+ *   number is sent as `{"count": 2}`. Detected by running that same conversion
+ *   and comparing, rather than by reimplementing its rules, so the two cannot
+ *   drift. Needs the `tool`; without one this check is skipped, since nothing
+ *   can be said about a coercion whose schema is unknown.
  *
  * `name` and `uri` are deliberately not checked here: the dispatch already
  * refuses a missing or non-string one with a reason the caller surfaces as a
@@ -162,6 +181,7 @@ export function replayableParams(
 export function reshapedReplayParam(
   method: string,
   params: Record<string, unknown> | undefined,
+  tool?: Tool,
 ): string | null {
   if (!params) return null;
   if (method !== "tools/call" && method !== "prompts/get") return null;
@@ -182,7 +202,33 @@ export function reshapedReplayParam(
       return `A prompt argument is always a string — ${coerced.join(", ")} would be sent as JSON text`;
     }
   }
+  if (method === "tools/call" && tool) {
+    const coerced = coercedToolArgs(tool, args as Record<string, unknown>);
+    if (coerced.length > 0) {
+      return `${coerced.join(", ")} would be converted to the type ${tool.name}'s schema declares — write the value with that type instead`;
+    }
+  }
   return null;
+}
+
+/**
+ * The string-valued argument names `callTool` would convert, per the tool's
+ * schema.
+ *
+ * Runs the conversion the client runs and compares, rather than restating its
+ * rules: `convertToolParameters` is the function on the other side, so asking
+ * it is the only way this cannot drift from what is actually sent.
+ */
+function coercedToolArgs(tool: Tool, args: Record<string, unknown>): string[] {
+  const stringArgs: Record<string, string> = {};
+  for (const [key, value] of Object.entries(args)) {
+    if (typeof value === "string") stringArgs[key] = value;
+  }
+  if (Object.keys(stringArgs).length === 0) return [];
+  const converted = convertToolParameters(tool, stringArgs);
+  return Object.keys(stringArgs)
+    .filter((key) => converted[key] !== stringArgs[key])
+    .map((key) => `\`${key}\``);
 }
 
 export async function replayProtocolRequest(

@@ -21,53 +21,83 @@ export function isJsonObject(value: unknown): value is StrictJsonObject {
 }
 
 /**
- * Whether `JSON.parse` dropped digits from a whole number written out in full.
+ * Whether the draft text writes a whole number out in full that `JSON.parse`
+ * cannot represent exactly.
  *
- * `isSerializableJson` catches a literal too large to *represent* — `1e400`
- * parses to `Infinity` and writes back as `null`. This catches the quieter one:
- * a whole number past 2^53−1 parses to the nearest double, so
- * `{"id":9007199254740993}` becomes `…992` with no error anywhere. The draft
- * still shows what was typed, which is what makes it a misreport rather than a
- * formatting difference — the editor displays one value and the wire carries
- * another. Snowflake-style ids are the realistic case.
+ * `isSerializableJson` catches a literal too large to represent at all —
+ * `1e400` parses to `Infinity` and writes back as `null`. This catches the
+ * quieter one: `{"id":9007199254740993}` parses to `…992`, and
+ * `{"id":1000000000000000000001}` parses to `1e21` and is written back as
+ * `1e+21`. Either way the editor shows digits the wire will not carry.
+ * Snowflake-style ids are the realistic case.
  *
- * Two conditions, and the second is what keeps this from over-reaching:
+ * It reads the **source text**, which is the only place the answer exists: the
+ * parsed number has already lost whatever it lost, so nothing about its value
+ * distinguishes `1000000000000000000001` from `1e21`. An earlier attempt
+ * inferred it from `String(value)` and was wrong in both directions — it
+ * refused `2^54` (written in full and exactly representable) and accepted every
+ * full-form literal at or above 1e21, where JS switches to exponent form.
  *
- * - **An unsafe whole number.** A fractional value is a double by nature and is
- *   sent as the double it parsed to, so nothing is lost between typing and
- *   sending.
- * - **Whose shortest representation is written out in full.** JS switches to
- *   exponent form at 1e21, so a value that stringifies as `1e+308` was typed in
- *   exponent form, where the parsed double *is* the value the user asked for.
- *   Without this, `{"n":1e308}` — a legitimate `_meta` value — would be
- *   refused, which `parseJsonObjectDraft`'s own tests pin against.
- *
- * It still refuses the rare full-form integer past 2^53−1 that happens to be
- * exactly representable (2^54, say), because nothing here can tell it apart
- * from one that lost digits without the original literal. That errs toward
- * refusing a sendable value rather than misreporting an unsendable one, which
- * is the same trade `toNumericValue` makes for the schema form's number input.
+ * Only integer literals written out in full are checked. An exponent or a
+ * fraction is a double by nature and is sent as the double it parsed to, so
+ * nothing is lost between typing and sending — and `{"n":1e308}` stays
+ * acceptable, which `parseJsonObjectDraft`'s own tests pin.
  */
-export function hasRoundedInteger(value: unknown): boolean {
-  if (typeof value === "number") {
-    return (
-      Number.isInteger(value) &&
-      !Number.isSafeInteger(value) &&
-      !String(value).includes("e")
-    );
-  }
-  if (Array.isArray(value)) return value.some(hasRoundedInteger);
-  if (value !== null && typeof value === "object") {
-    return Object.values(value as Record<string, unknown>).some(
-      hasRoundedInteger,
-    );
+export function hasImpreciseIntegerLiteral(text: string): boolean {
+  for (const literal of jsonNumberLiterals(text)) {
+    if (!/^-?\d+$/.test(literal)) continue;
+    // BigInt on both sides, so the comparison is exact: `Number(literal)` is an
+    // integer-valued double, and converting it back shows what survived.
+    if (BigInt(literal) !== BigInt(Number(literal))) return true;
   }
   return false;
 }
 
+/** Matches one JSON number token, anchored where the scan currently stands. */
+const JSON_NUMBER = /-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
+
+/**
+ * The numeric literals of a JSON document, in source order, skipping anything
+ * inside a string.
+ *
+ * The string-skipping is the whole reason this is a scanner rather than a
+ * regex over the text: `{"id":"9007199254740993"}` carries those digits as a
+ * *string*, which is sent back exactly as written and must not be refused.
+ * Object keys are strings too, so they are skipped by the same rule.
+ */
+function* jsonNumberLiterals(text: string): Generator<string> {
+  let index = 0;
+  let inString = false;
+  while (index < text.length) {
+    const char = text[index];
+    if (inString) {
+      // A backslash escapes the next character, including a closing quote.
+      index += char === "\\" ? 2 : 1;
+      if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      index += 1;
+      continue;
+    }
+    if (char === "-" || (char >= "0" && char <= "9")) {
+      JSON_NUMBER.lastIndex = index;
+      const match = JSON_NUMBER.exec(text);
+      /* v8 ignore next -- the sticky pattern always matches from a digit or a
+         `-`, which is the only way this branch is entered. */
+      if (!match) break;
+      yield match[0];
+      index = JSON_NUMBER.lastIndex;
+      continue;
+    }
+    index += 1;
+  }
+}
+
 /** The message every draft parser uses for {@link hasRoundedInteger}. */
 export const ROUNDED_INTEGER_ERROR =
-  "Whole numbers must be within ±(2^53 − 1) — a longer one is rounded when parsed, so a different value would be sent";
+  "A whole number written out in full must be within ±(2^53 − 1) — a longer one loses digits when parsed, so a different value would be sent";
 
 /**
  * Read a JSON-object editor's draft text.
@@ -109,7 +139,7 @@ export function parseJsonObjectDraft(text: string): JsonObjectDraft {
         "Numbers must be finite — a value like `1e400` overflows and would be sent as null",
     };
   }
-  if (hasRoundedInteger(parsed)) {
+  if (hasImpreciseIntegerLiteral(text)) {
     return { ok: false, error: ROUNDED_INTEGER_ERROR };
   }
   return { ok: true, value: parsed };

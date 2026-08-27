@@ -204,7 +204,7 @@ describe("EditReplayModal", () => {
     await setAceText('{"name":"echo","arguments":{"id":9007199254740993}}');
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
     expect(
-      screen.getByText(/Whole numbers must be within/),
+      screen.getByText(/A whole number written out in full must be within/),
     ).toBeInTheDocument();
   });
 
