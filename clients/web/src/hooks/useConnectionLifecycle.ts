@@ -862,6 +862,30 @@ export function useConnectionLifecycle({
     recordConnectError,
   ]);
 
+  /**
+   * The banner's connect, terminated. `onToggleConnection` handles every
+   * failure the *handshake* can produce, but client construction runs ahead of
+   * its try/catch — so a throw there (a wedged store teardown, a config the
+   * `InspectorClient` constructor rejects) escapes it. Both banner call sites
+   * discard the promise, which would make that an unhandled rejection with the
+   * banner already dismissed and nothing left to explain it.
+   *
+   * Recorded on `connectErrorMessage` rather than toasted, matching the
+   * deep-link phases' own catch: the toggle already toasts everything it
+   * handles, so a toast here would be new user-visible behavior in what is
+   * otherwise an inert move.
+   */
+  const retryConnect = useCallback(
+    async (serverId: string) => {
+      try {
+        await onToggleConnection(serverId);
+      } catch (err) {
+        recordConnectError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [onToggleConnection, recordConnectError],
+  );
+
   const onReauthenticateFromBanner = useCallback(() => {
     if (!reAuthBanner) return;
     const serverId = reAuthBanner.serverId;
@@ -901,7 +925,7 @@ export function useConnectionLifecycle({
             return;
           }
         }
-        await onToggleConnection(serverId);
+        await retryConnect(serverId);
       })();
       return;
     }
@@ -944,16 +968,16 @@ export function useConnectionLifecycle({
       return;
     }
 
-    void onToggleConnection(serverId);
+    void retryConnect(serverId);
   }, [
     sessionRef,
     reAuthBanner,
+    retryConnect,
     activeServerId,
     connectionStatus,
     inspectorClient,
     servers,
     prepareOAuthRedirect,
-    onToggleConnection,
     webOAuthStorage,
     setReAuthBanner,
   ]);

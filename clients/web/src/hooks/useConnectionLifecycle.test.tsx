@@ -101,13 +101,20 @@ interface HarnessProps {
   activeServerId?: string;
   connectionStatus?: ConnectionStatus;
   /**
-   * The live client. `undefined` means "whatever the last
-   * `setupClientForServer` built", which is what App.tsx's `inspectorClient`
-   * state settles to a render later.
+   * The live client, i.e. what App.tsx holds in `inspectorClient`. There is no
+   * implicit "whatever was last constructed" fallback — the hook publishes
+   * through `setInspectorClient`, which is a spy here, so a test that wants a
+   * live session rerenders with the client it read back out of that spy (see
+   * `lastClient`), the same render-later settle App.tsx has.
    */
   client?: InspectorClient | null;
   clientConfig?: ClientConfig;
   sandboxUrl?: string;
+  /**
+   * The `/api/config` gate a connect awaits. Defaults to already-settled;
+   * supply a pending promise to hold a connect at that gate.
+   */
+  configSettled?: Promise<void>;
   deepLink?: DeepLink;
   reAuthBanner?: {
     serverId: string;
@@ -177,7 +184,9 @@ function harness(initial: HarnessProps = {}): Harness {
     // dependency the real one never has.
     const setupClientForServerRef = useRef<SetupClientForServer | null>(null);
     const initialConfigSettledRef = useRef<{ promise: Promise<void> }>(null);
-    initialConfigSettledRef.current ??= { promise: Promise.resolve() };
+    initialConfigSettledRef.current ??= {
+      promise: p.configSettled ?? Promise.resolve(),
+    };
     const sessionReset: SessionResetSurface = {
       clearResultPanels: s.clearResultPanels,
       resetTabUiState: s.resetTabUiState,
@@ -402,6 +411,43 @@ describe("useConnectionLifecycle", () => {
       );
       // No sandbox URL — the client must not claim app-rendered elicitation.
       expect(h.spies.newAppElicitationSession).not.toHaveBeenCalled();
+    });
+
+    it("waits for the config gate, then reads the sandbox URL as of then", async () => {
+      // The whole reason `onToggleConnection` awaits the gate and
+      // `setupClientForServer` reads `sandboxUrlRef` rather than a captured
+      // value: on the load this matters for, the connect starts before
+      // `/api/config` has answered. Guessing "no sandbox" there would strand
+      // the session on the native elicitation form despite having one.
+      let settle!: () => void;
+      const gate = new Promise<void>((resolve) => (settle = resolve));
+      const props: HarnessProps = {
+        servers: [entry("a")],
+        configSettled: gate,
+        sandboxUrl: undefined,
+      };
+      const h = harness(props);
+
+      let toggled: Promise<void>;
+      act(() => {
+        toggled = h.api().onToggleConnection("a");
+      });
+      // Held at the gate — nothing constructed, nothing connected.
+      expect(h.spies.setInspectorClient).not.toHaveBeenCalled();
+      expect(connectSpy).not.toHaveBeenCalled();
+
+      // `/api/config` answers: there IS a sandbox after all.
+      h.rerender({ ...props, sandboxUrl: "http://localhost:6275/sandbox" });
+
+      await act(async () => {
+        settle();
+        await toggled;
+      });
+
+      expect(connectSpy).toHaveBeenCalledTimes(1);
+      // Built from the URL as of the release, not the `undefined` in scope when
+      // the toggle was called.
+      expect(h.spies.newAppElicitationSession).toHaveBeenCalled();
     });
 
     it("carries the OAuth session id onto both the client and its stores", () => {
@@ -1187,6 +1233,52 @@ describe("useConnectionLifecycle", () => {
 
       await waitFor(() =>
         expect(toastTitles()).toContain("OAuth authorization failed"),
+      );
+    });
+
+    it("records a construction throw instead of leaving it unhandled", async () => {
+      // Client construction runs ahead of the toggle's try/catch, so a throw
+      // there escapes `onToggleConnection`. Both banner call sites discard the
+      // promise, so without `retryConnect` this is an unhandled rejection with
+      // the banner already dismissed and nothing left to explain it.
+      const h = harness({
+        servers: [entry("a"), entry("b")],
+        activeServerId: "a",
+        connectionStatus: "connected",
+        reAuthBanner: { serverId: "b", message: "lapsed" },
+      });
+      h.spies.destroyStores.mockImplementationOnce(() => {
+        throw new Error("teardown wedged");
+      });
+
+      await act(async () => {
+        h.api().onReauthenticateFromBanner();
+      });
+
+      await waitFor(() =>
+        expect(h.api().connectErrorMessage).toBe("teardown wedged"),
+      );
+    });
+
+    it("records a construction throw on the lost-state retry too", async () => {
+      const h = harness({
+        servers: [entry("a")],
+        reAuthBanner: {
+          serverId: "a",
+          message: "lost",
+          kind: "lost_authorization_state",
+        },
+      });
+      h.spies.destroyStores.mockImplementationOnce(() => {
+        throw "teardown wedged";
+      });
+
+      await act(async () => {
+        h.api().onReauthenticateFromBanner();
+      });
+
+      await waitFor(() =>
+        expect(h.api().connectErrorMessage).toBe("teardown wedged"),
       );
     });
 
