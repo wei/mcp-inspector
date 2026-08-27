@@ -32,6 +32,13 @@ export type InspectorClientEventSource = Pick<
  * are the at-a-glance, in-context signal. Toasts are keyed by progress stream
  * (see `progressToastId`) and replaced per tick, so a chatty server updates one
  * toast rather than stacking one per tick.
+ *
+ * Returns nothing — the recorded exception to #2128's "each hook returns one
+ * object" criterion, which exists to stop a hook handing back a long list of
+ * loose values (`useTabUiState`'s twenty-two is the case it was written
+ * against). This hook subscribes, shows toasts and unsubscribes; the only
+ * state it owns is toast-id bookkeeping the caller must not see. An empty
+ * object would advertise an API that is not there.
  */
 export function useProgressToasts(
   inspectorClient: InspectorClientEventSource | null,
