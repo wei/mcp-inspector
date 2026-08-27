@@ -552,7 +552,7 @@ describe("AppRenderer", () => {
       // pending here. Observed failing exactly once that way, with 0 calls.
       //
       // The default 1000ms then turned out not to be enough either — it failed
-      // twice in a row in `npm run ci` (at ~1021ms, still 0 calls) while
+      // twice in a row in `npm run local:gate` (at ~1021ms, still 0 calls) while
       // passing every time this file runs alone, which is the signature of a
       // budget that is too tight rather than of a broken observer. Raised
       // rather than retried: a `waitFor` that is generous costs nothing on the

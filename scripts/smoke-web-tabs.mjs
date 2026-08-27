@@ -44,7 +44,7 @@
  *
  * Deliberately **one script over one browser launch** rather than one per tab:
  * launching the browser and booting the server dominate the cost, and
- * `npm run ci` is already several minutes. Measured added wall-clock is ~5s
+ * `npm run local:gate` is already several minutes. Measured added wall-clock is ~5s
  * on a warm checkout (macOS, Chromium), the test-server build included.
  *
  * ── What it asserts on ──────────────────────────────────────────────────────
@@ -97,7 +97,7 @@ const repoRoot = resolve(import.meta.dirname, "..");
 // The engine comes from an explicit ARGUMENT first, and only then from
 // `SMOKE_BROWSER`. That precedence is the load-bearing part: `smoke:web:tabs`
 // passes `chromium` to both this and the installer, so an ambient
-// `SMOKE_BROWSER=firefox npm run ci` cannot silently redirect a gated tier that
+// `SMOKE_BROWSER=firefox npm run local:gate` cannot silently redirect a gated tier that
 // claims to be Chromium-only — the same invariant `run-engine-smokes.test.mjs`
 // pins for the engine tiers (Copilot, #2148). Running another engine by hand is
 // still one argument away: `node scripts/smoke-web-tabs.mjs firefox`.

@@ -47,7 +47,7 @@
  * its own gotcha — see `lib/headless-browser.mjs`) is delegated to that module,
  * which is also where `SMOKE_BROWSER` picks the engine: `chromium` (the
  * default), `firefox`, or `webkit` (#2086). GitHub CI runs this in **Chromium**
- * only; `npm run ci`, the local pre-push gate, also runs it in **Firefox** via
+ * only; `npm run local:gate`, the local pre-push gate, also runs it in **Firefox** via
  * `smoke:web:firefox`; **WebKit is on demand only**. This smoke passes in all
  * three — it is the two App smokes that fail under WebKit (see their headers).
  *

@@ -514,7 +514,7 @@ _The items whose shape we cannot yet commit to, plus the multiplier._
 
 ### Standing commitments across all phases
 
-- **Weekly milestone cadence** and the `npm run ci` gate are unchanged.
+- **Weekly milestone cadence** and the pre-push gate (`npm run local:gate`, renamed off `ci` in #2146) are unchanged.
 - **Bug and triage capacity is reserved, not scheduled.** The board's Incoming queue keeps
   flowing regardless of phase.
 - **WG liaison**: attend Transports, Agents, Triggers, Interceptors, and Server Card sessions
