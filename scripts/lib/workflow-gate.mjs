@@ -185,9 +185,14 @@ const BROWSER_ASSIGNMENTS = [
     value: 1,
   },
   // .NET, reachable from PowerShell: SetEnvironmentVariable("NAME", "value").
+  // The value arm accepts an UNQUOTED second argument as well — `$engine`, or a
+  // `${{ }}` expression — because that spelling sets the environment just the
+  // same, and an engine the guard cannot read is forbidden for the reason
+  // `smoke:web:engine` is (Copilot). Bare values stop at `,` or `)` so a third
+  // argument (`"Process"`) is not swallowed.
   {
     re: new RegExp(
-      String.raw`SetEnvironmentVariable\s*\(\s*["']${BROWSER_ENV_VAR}["']\s*,\s*["']([^"']*)["']`,
+      String.raw`SetEnvironmentVariable\s*\(\s*["']${BROWSER_ENV_VAR}["']\s*,\s*("[^"]*"|'[^']*'|[^,)]*)`,
       "gi",
     ),
     value: 1,

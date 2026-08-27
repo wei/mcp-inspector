@@ -231,6 +231,23 @@ describe("findWorkflowViolations", () => {
       rules: [VIOLATION.BROWSER_ENV],
     },
     {
+      // Copilot, ninth review: an unquoted second argument sets the environment
+      // just the same, and an engine the guard cannot read is forbidden for the
+      // reason `smoke:web:engine` is.
+      name: "flags a SetEnvironmentVariable call with a dynamic value",
+      text: workflow(
+        '      - run: |\n          [Environment]::SetEnvironmentVariable("SMOKE_BROWSER", $engine)\n          npm run smoke',
+      ),
+      rules: [VIOLATION.BROWSER_ENV],
+    },
+    {
+      name: "allows a SetEnvironmentVariable call pinning chromium",
+      text: workflow(
+        '      - run: |\n          [Environment]::SetEnvironmentVariable("SMOKE_BROWSER", "chromium", "Process")\n          npm run smoke',
+      ),
+      rules: [],
+    },
+    {
       name: "flags a .NET SetEnvironmentVariable call",
       text: workflow(
         '      - run: |\n          [Environment]::SetEnvironmentVariable("SMOKE_BROWSER", "firefox")\n          npm run smoke',
