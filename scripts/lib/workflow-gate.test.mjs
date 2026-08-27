@@ -176,6 +176,44 @@ describe("findWorkflowViolations", () => {
       rules: [VIOLATION.BROWSER_ENV],
     },
     {
+      // Copilot, seventh review: a shell resolves the name itself, so the
+      // engine is just as unreadable as it is behind a `${{ }}` expression.
+      name: "flags an engine pass named through a shell variable",
+      text: workflow(
+        "      - env:\n          ENGINE: firefox\n        run: npm run smoke:web:$ENGINE",
+      ),
+      rules: [VIOLATION.ENGINE_SCRIPT],
+    },
+    {
+      name: "flags the braced and cmd spellings of that too",
+      text: workflow(
+        "      - run: npm run smoke:web:${ENGINE}\n      - run: npm run smoke:web:%ENGINE%",
+      ),
+      rules: [VIOLATION.ENGINE_SCRIPT, VIOLATION.ENGINE_SCRIPT],
+    },
+    {
+      name: "flags a local: script named through a shell variable",
+      text: workflow("      - run: npm run local:$TASK"),
+      rules: [VIOLATION.LOCAL_SCRIPT],
+    },
+    {
+      // Copilot, seventh review: Windows environment variables are
+      // case-insensitive, so this sets the very variable Node reads as
+      // SMOKE_BROWSER.
+      name: "flags a lower-cased env key, which Windows treats as the same var",
+      text: workflow(
+        "      - env: { smoke_browser: firefox }\n        run: npm run smoke",
+      ),
+      rules: [VIOLATION.BROWSER_ENV],
+    },
+    {
+      name: "allows a lower-cased key set to chromium",
+      text: workflow(
+        "      - env: { smoke_browser: chromium }\n        run: npm run smoke",
+      ),
+      rules: [],
+    },
+    {
       // Copilot, sixth review: PowerShell is the DEFAULT shell on a Windows
       // runner, so a POSIX-only pattern is silent on exactly the workflow least
       // likely to be read closely.

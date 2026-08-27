@@ -112,21 +112,27 @@ export const VIOLATION = {
 // (`local:${{ matrix.task }}`) — both are `local:` scripts, and neither may be
 // invoked from a workflow.
 //
-// The expression arm keys off the `${{` PREFIX and then runs to the end of the
-// line, rather than trying to find the matching `}}`. An expression body can
-// itself contain braces — `${{ format('{0}', matrix.browser) }}` — so a
-// `[^}]*\}\}` body stops at the first `}` and misses exactly the case worth
-// catching (Copilot). Matching the prefix cannot be defeated by nesting, and
-// since these are display strings the greedy tail costs nothing.
-const EXPRESSION = String.raw`\$\{\{[^\n]*`;
+// A name the guard cannot read: a GitHub expression (`${{ … }}`) or a shell
+// variable the script expands itself — `$ENGINE`, `${ENGINE}`, `$env:ENGINE`,
+// or cmd's `%ENGINE%` (Copilot). All of them resolve to *some* engine at run
+// time, and the guard has no way to know which, so all of them are read as a
+// forbidden one for the same reason `smoke:web:engine` is.
+//
+// It keys off the leading `$`/`%` and then runs to the end of the line, rather
+// than trying to find a matching `}}`. An expression body can itself contain
+// braces — `${{ format('{0}', matrix.browser) }}` — so a `[^}]*\}\}` body stops
+// at the first `}` and misses exactly the case worth catching (Copilot). A
+// prefix cannot be defeated by nesting, and since these are display strings the
+// greedy tail costs nothing.
+const UNREADABLE = String.raw`[$%][^\n]*`;
 const LOCAL_SCRIPT_RE = new RegExp(
-  String.raw`\blocal:(?:[a-z0-9][a-z0-9:-]*|${EXPRESSION})`,
+  String.raw`\blocal:(?:[a-z0-9][a-z0-9:-]*|${UNREADABLE})`,
   "gi",
 );
 // Same reasoning one level down: `smoke:web:` followed by an expression could
 // resolve to any engine, so it is read as a forbidden one.
 const DYNAMIC_ENGINE_RE = new RegExp(
-  String.raw`\bsmoke:web:${EXPRESSION}`,
+  String.raw`\bsmoke:web:${UNREADABLE}`,
   "gi",
 );
 /**
@@ -147,7 +153,8 @@ const BROWSER_ASSIGNMENTS = [
   // POSIX `SMOKE_BROWSER=firefox`. Also covers cmd's `set SMOKE_BROWSER=…` and
   // the GitHub-native `echo "SMOKE_BROWSER=…" >> $GITHUB_ENV`, since both carry
   // the same `NAME=value` substring.
-  { re: new RegExp(String.raw`\b${BROWSER_ENV_VAR}=(\S*)`, "g"), value: 1 },
+  // Case-insensitive for the same Windows reason as the `env:` key above.
+  { re: new RegExp(String.raw`\b${BROWSER_ENV_VAR}=(\S*)`, "gi"), value: 1 },
   // PowerShell `$env:SMOKE_BROWSER = "firefox"`, and its `${env:NAME}` form.
   {
     re: new RegExp(
@@ -364,16 +371,24 @@ export function findWorkflowViolations(text, file = "<workflow>") {
         rule: VIOLATION.ENGINE_SCRIPT,
         match: match[0],
         message:
-          `\`${match[0]}\` builds an engine-pass name from an expression, so the guard cannot ` +
-          `tell which engine it runs — and a matrix that a workflow can vary may well contain ` +
-          `\`firefox\`. Name \`smoke:web:${DEFAULT_BROWSER}\` outright, or just run \`npm run smoke\`.`,
+          `\`${match[0]}\` builds an engine-pass name from an expression or a shell variable, ` +
+          `so the guard cannot tell which engine it runs — and a value a workflow can vary may ` +
+          `well be \`firefox\`. Name \`smoke:web:${DEFAULT_BROWSER}\` outright, or just run ` +
+          `\`npm run smoke\`.`,
       });
     }
 
     // The browser rule is the one that must respect WHICH position it is in.
     const overrides =
       kind === "env"
-        ? region.name === BROWSER_ENV_VAR
+        ? // Compared case-INSENSITIVELY: Windows environment variables are, so
+          // `smoke_browser: firefox` on a windows-latest job sets the very
+          // variable Node then reads as SMOKE_BROWSER (Copilot). On a POSIX
+          // runner that spelling would be a different variable and harmless, so
+          // this is stricter there than it strictly needs to be — the right
+          // direction for a guard, and the alternative is a rule whose verdict
+          // depends on a `runs-on` that may itself be an expression.
+          region.name.toUpperCase() === BROWSER_ENV_VAR.toUpperCase()
           ? [{ value: region.value, match: region.text.trim() }]
           : []
         : kind === "run"
