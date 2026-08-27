@@ -198,7 +198,15 @@ export function ToolsScreen({
   };
 
   return (
-    <ScreenLayout>
+    // `data-*` readiness contract for the headless tab smoke (#2148); see
+    // clients/web/README.md#core-tab-automation-contract. Attributes are not
+    // part of a component's typed props, so they are passed here rather than
+    // baked into the `ScreenLayout` constant.
+    <ScreenLayout
+      data-testid="tools-screen"
+      data-tool-count={tools.length}
+      data-call-status={callState?.status ?? "idle"}
+    >
       <Sidebar>
         <SidebarCard>
           <ToolControls

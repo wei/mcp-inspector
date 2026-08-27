@@ -91,6 +91,34 @@ The top-level `src/types/` is a separate sibling — ambient `.d.ts` module stub
 
 Nothing _enforces_ the boundary — no path alias keys off it, and the coverage `include` in `vite.config.ts` lists both directories, so a move between them is coverage-neutral. It's a human-legible import-time signal. See [`AGENTS.md`](../../AGENTS.md) for the full rule (including the whitelist caveat — a module placed outside `components`/`lib`/`utils`/`server` falls out of the ≥90 gate).
 
+## Core tab automation contract
+
+The Tools, Resources, and Prompts screens each expose a `data-testid` plus a
+small set of `data-*` attributes, so a headless driver can `waitForSelector` on
+a deterministic signal rather than on visible copy. `scripts/smoke-web-tabs.mjs`
+drives all three against `test-servers/configs/web-tabs-http.json` ([#2148](https://github.com/modelcontextprotocol/inspector/issues/2148)).
+Treat them as a public contract, for the same reason as the Apps ones below:
+
+| Attribute                            | Where              | Meaning                                                                                                                                                     |
+| ------------------------------------ | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `data-testid="tools-screen"`         | Tools screen root  | The element carrying the two attributes below.                                                                                                              |
+| `data-tool-count`                    | on `tools-screen`  | How many tools the list holds. `0` is a *populated screen with an empty list* — distinct from the screen being absent, which is what a driver waits out.     |
+| `data-call-status`                   | on `tools-screen`  | `idle` → `pending` → `ok` / `error` for the current `tools/call`. Always a value; an absent call state reads `idle`, never empty.                            |
+| `data-testid="structured-output"`    | result panel       | The `structuredContent` section of a tool result ([#1908](https://github.com/modelcontextprotocol/inspector/issues/1908)). Absent when a result carries none. |
+| `data-testid="resources-screen"`     | Resources root     | The element carrying the three attributes below.                                                                                                            |
+| `data-resource-count`                | on `resources-screen` | Entries from `resources/list`.                                                                                                                           |
+| `data-template-count`                | on `resources-screen` | Entries from `resources/templates/list` — a **separate** call that can fail on its own, so it is reported separately.                                     |
+| `data-read-status`                   | on `resources-screen` | `idle` → `pending` → `ok` / `error` for the current `resources/read`.                                                                                     |
+| `data-testid="prompts-screen"`       | Prompts root       | The element carrying the two attributes below.                                                                                                              |
+| `data-prompt-count`                  | on `prompts-screen`| Entries from `prompts/list`.                                                                                                                                |
+| `data-get-status`                    | on `prompts-screen`| `idle` → `pending` → `ok` / `error` for the current `prompts/get`.                                                                                          |
+
+Why attributes rather than text: a smoke that waited on a label fails the next
+time the label is reworded, which is noise rather than signal — and it fails as
+an opaque timeout, because there is nothing to compare against. The screen tests
+pin each attribute name for the same reason: a rename should fail loudly in a
+unit test, not silently in a five-minute gate.
+
 ## MCP Apps screen automation contract
 
 The Apps screen exposes a small, stable set of `data-testid` / `data-*` attributes so an automated driver (deep-link auto-open, CI review harness) can `waitForSelector` on a deterministic signal instead of sleeping. Treat these as a public contract — drivers depend on them staying stable:
