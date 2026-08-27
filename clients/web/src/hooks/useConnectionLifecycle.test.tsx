@@ -917,6 +917,15 @@ describe("useConnectionLifecycle", () => {
 
       await waitFor(() => expect(addServerImpl).toHaveBeenCalled());
       expect(h.api().connectErrorMessage).toBeUndefined();
+
+      // A 409 means the row is already on disk, so hydration surfaces it on a
+      // later render and the connect phase must still run. Asserting only that
+      // nothing was recorded would stay green for a deep link that swallows the
+      // error and then stops forever.
+      const fresh = entry(DEEP_LINK_SERVER_ID, { config: deepLinkConfig });
+      h.rerender({ servers: [fresh], deepLink: link, addServerImpl });
+      await waitFor(() => expect(connectSpy).toHaveBeenCalled());
+      expect(h.api().connectErrorMessage).toBeUndefined();
     });
 
     it("records any other add failure on the machine-readable surface", async () => {
