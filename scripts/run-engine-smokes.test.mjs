@@ -73,7 +73,7 @@ describe("every engine tier consumes ENGINE_SMOKES", () => {
 
   it("the Firefox tier goes through the runner and is in the pre-push gate", () => {
     assert.match(scripts["smoke:web:firefox"], /run-engine-smokes\.mjs/);
-    assert.match(scripts.ci, /smoke:web:firefox/);
+    assert.match(scripts["local:gate"], /smoke:web:firefox/);
   });
 
   it("every supported engine has a `smoke:web:<engine>` script", () => {
@@ -92,7 +92,7 @@ describe("every engine tier consumes ENGINE_SMOKES", () => {
 
   it("each gated tier names its engine explicitly rather than reading the env", () => {
     // An ambient SMOKE_BROWSER must not be able to redirect a gate: without the
-    // literal engine, `SMOKE_BROWSER=firefox npm run ci` would run Firefox twice
+    // literal engine, `SMOKE_BROWSER=firefox npm run local:gate` would run Firefox twice
     // and never exercise Chromium at all.
     assert.match(
       scripts["smoke:web:chromium"],

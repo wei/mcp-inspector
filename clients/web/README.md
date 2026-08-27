@@ -2,7 +2,7 @@
 
 The browser incarnation of the Inspector: a **Vite + React + [Mantine](https://mantine.dev)** single-page app backed by a small **Node (Hono)** server. The SPA is presentational — it renders data and fires callbacks; all MCP state comes from the shared `@inspector/core` hooks. The backend proxies MCP connections, serves the built SPA, and exposes `/api/*`.
 
-This README covers what's specific to the web client. For the repo-wide picture (the `@inspector/core` shared package, the "dumb components" philosophy, the top-level `validate`/`coverage`/`ci` scripts, and publishing), see the [root README](../../README.md).
+This README covers what's specific to the web client. For the repo-wide picture (the `@inspector/core` shared package, the "dumb components" philosophy, the top-level `validate`/`coverage`/`local:gate` scripts, and publishing), see the [root README](../../README.md).
 
 ## Two halves: `src/` (browser) and `server/` (Node)
 
@@ -289,7 +289,7 @@ npm run build:storybook  # static build
 npm run test:storybook   # run every story's play function in headless Chromium
 ```
 
-Storybook is first-class here because the components are presentational — each renders against fixture props. **Play functions double as interaction tests** and run headless in real Chromium via `@vitest/browser-playwright` + `@storybook/addon-vitest` (the `storybook` Vitest project). They're part of `npm run ci` (which installs the Chromium binary first) but kept out of the fast `validate` loop since they need the browser.
+Storybook is first-class here because the components are presentational — each renders against fixture props. **Play functions double as interaction tests** and run headless in real Chromium via `@vitest/browser-playwright` + `@storybook/addon-vitest` (the `storybook` Vitest project). GitHub CI runs them directly (`npm run test:storybook`); the local pre-push gate runs them through `npm run local:storybook`, which installs the Chromium binary first. Either way they are kept out of the fast `validate` loop, since they need the browser.
 
 ## Auth token
 

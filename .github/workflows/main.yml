@@ -88,6 +88,14 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Run cross-client smokes
+        # NOTE: this workflow runs GitHub CI's tier only. The LOCAL pre-push
+        # gate is `npm run local:gate`, and it is a strict superset — do not add
+        # it, a `local:*` script, `smoke:web:firefox`/`smoke:web:webkit`,
+        # `smoke:web:engine`, or a non-Chromium `SMOKE_BROWSER` to any workflow.
+        # `npm run test:scripts` fails if you do (scripts/lib/workflow-gate.mjs,
+        # #2146). `npm run smoke` and `smoke:web:chromium` belong here and are
+        # not affected. The canonical CI-vs-local table is in the root README.
+        #
         # End-to-end smokes through the built launcher (--help dispatch + prod
         # CLI/web). Not part of any client's `validate`: it needs the
         # cli/tui/launcher bundles, which `validate` above already built

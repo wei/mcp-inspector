@@ -3,7 +3,7 @@
  *
  * Extracted from `scripts/smoke-web-app.mjs` so the failure path can be tested
  * (#2000). A smoke script only ever exercises its own happy path: the real MCP
- * test server always announces, so nothing in `npm run ci` proved that a child
+ * test server always announces, so nothing in `npm run local:gate` proved that a child
  * which stays alive *through* the readiness timeout is still reachable by the
  * caller's teardown. That is precisely the case that used to orphan a live
  * server holding its port, and it is invisible to the smoke itself.
