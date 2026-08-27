@@ -29,3 +29,17 @@ export function isStepUpConfirmation(
 
 /** Which in-flight action opened the step-up modal (for scoped cancel UX). */
 export type StepUpSource = "tool" | "prompt" | "resource" | "ambient" | "app";
+
+/**
+ * The in-flight step-up prompt App.tsx holds while the user completes (or
+ * cancels) an interactive step-up authorization. Named here beside
+ * `StepUpSource` rather than inline in App.tsx so `useSessionRef`'s snapshot
+ * can name it without importing from the component that owns the state.
+ */
+export interface PendingStepUp {
+  challenge: AuthChallenge;
+  authorizationUrl: URL;
+  serverId: string;
+  source: StepUpSource;
+  enterpriseManaged?: boolean;
+}
