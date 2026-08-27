@@ -87,11 +87,21 @@ through the built launcher artifact (beyond the `--help` checks in
   resolution paths (default-catalog seed-on-missing, read-only `--config`
   error-without-seed, `--catalog`/`--config` conflict).
 - `npm run smoke:tui` (`scripts/smoke-tui.mjs`) — launches
-  `mcp-inspector --tui --catalog <temp>` and asserts the Ink app renders its
-  first frame within a timeout, then shuts it down (a shallow boot/render
+  `mcp-inspector --tui --catalog <temp>` **under a pseudoterminal**, asserts the
+  Ink app renders its first frame within a timeout, then waits and asserts it is
+  **still running** before shutting it down (a shallow boot/render/survival
   check, not full interaction).
 
-Both build `test-servers/build` on demand if it is missing.
+  The second half is the assertion (#2147). Spawned with its stdin on
+  `/dev/null`, Ink cannot enter raw mode for `useInput`, so the TUI painted one
+  frame and exited 1 about 40ms later — and this smoke, which settled OK on the
+  first frame, won that race and reported success on every machine. It is
+  local-only (self-skips under `CI`), which is precisely where a false green
+  goes unnoticed.
+
+Both rebuild `test-servers/build` on **every run** — once per process, whether
+or not it already exists (#2111). Presence is not freshness: a smoke driving a
+stale fixture reports a product failure rather than a staleness one.
 
 ## Development
 
