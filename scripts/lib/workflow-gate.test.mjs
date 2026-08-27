@@ -238,6 +238,30 @@ describe("findWorkflowViolations", () => {
       rules: [VIOLATION.BROWSER_ENV],
     },
     {
+      // Copilot, eighth review: the bare-value pattern used to run to
+      // whitespace, so a QUOTED assignment captured the closing quote —
+      // rejecting a permitted `chromium`. A false positive on the allowed value
+      // fails a workflow that is doing the right thing, which is the worse
+      // direction to be wrong in.
+      name: "allows a quoted chromium appended to $GITHUB_ENV",
+      text: workflow(
+        '      - run: echo "SMOKE_BROWSER=chromium" >> $GITHUB_ENV',
+      ),
+      rules: [],
+    },
+    {
+      name: "allows a quoted chromium in a cmd-style set",
+      text: workflow('      - run: set "SMOKE_BROWSER=chromium"'),
+      rules: [],
+    },
+    {
+      name: "allows a single-quoted chromium in PowerShell",
+      text: workflow(
+        "      - run: $env:SMOKE_BROWSER = 'chromium'; npm run smoke",
+      ),
+      rules: [],
+    },
+    {
       // cmd's `set NAME=value` and the GitHub-native `>> $GITHUB_ENV` append
       // both carry the POSIX `NAME=value` substring, so one pattern covers all
       // three — worth pinning, since that is not obvious from reading it.

@@ -145,20 +145,41 @@ const DYNAMIC_ENGINE_RE = new RegExp(
  * More than one dialect is needed because `shell:` and the runner's OS decide
  * which one a step is written in, and **PowerShell is the default on a Windows
  * runner** — so a POSIX-only pattern is silent on exactly the workflow least
- * likely to be reviewed closely (Copilot). `\S*` rather than `\S+` throughout,
- * because assigning nothing sets the empty string, which `resolveBrowserName`
- * rejects as present-but-empty rather than treating as unset.
+ * likely to be reviewed closely (Copilot). Every one of them may match an EMPTY
+ * value, because assigning nothing sets the empty string, which
+ * `resolveBrowserName` rejects as present-but-empty rather than treating as
+ * unset.
  */
+/**
+ * The value half of an assignment: a quoted string, or a bare run of
+ * non-delimiter characters.
+ *
+ * `\S*` was wrong in the direction that matters least often and hurts most:
+ * for `echo "SMOKE_BROWSER=chromium" >> $GITHUB_ENV` it captured `chromium"`,
+ * which is not `chromium`, so the guard rejected a **permitted** assignment
+ * (Copilot). A false positive on the allowed value is worse than one on a
+ * forbidden one — it fails a workflow that is doing the right thing.
+ *
+ * The bare arm therefore stops at a quote or a `;` (PowerShell's separator)
+ * rather than running to whitespace, and the quoted arms keep a value that
+ * really is quoted intact for `stripQuotes` to unwrap. Empty stays matchable —
+ * `SMOKE_BROWSER=` sets the empty string, which is its own finding.
+ */
+const ASSIGNED_VALUE = String.raw`("[^"]*"|'[^']*'|[^\s"';]*)`;
+
 const BROWSER_ASSIGNMENTS = [
   // POSIX `SMOKE_BROWSER=firefox`. Also covers cmd's `set SMOKE_BROWSER=…` and
   // the GitHub-native `echo "SMOKE_BROWSER=…" >> $GITHUB_ENV`, since both carry
   // the same `NAME=value` substring.
   // Case-insensitive for the same Windows reason as the `env:` key above.
-  { re: new RegExp(String.raw`\b${BROWSER_ENV_VAR}=(\S*)`, "gi"), value: 1 },
+  {
+    re: new RegExp(String.raw`\b${BROWSER_ENV_VAR}=${ASSIGNED_VALUE}`, "gi"),
+    value: 1,
+  },
   // PowerShell `$env:SMOKE_BROWSER = "firefox"`, and its `${env:NAME}` form.
   {
     re: new RegExp(
-      String.raw`\$\{?env:${BROWSER_ENV_VAR}\}?\s*=\s*(\S*)`,
+      String.raw`\$\{?env:${BROWSER_ENV_VAR}\}?\s*=\s*${ASSIGNED_VALUE}`,
       "gi",
     ),
     value: 1,
