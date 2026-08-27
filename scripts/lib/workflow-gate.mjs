@@ -35,8 +35,8 @@
  *   4. Setting `SMOKE_BROWSER` to anything but a literal `chromium` — the back
  *      door that would redirect an otherwise innocent `npm run smoke`. This one
  *      is KIND-AWARE: an `env:` entry counts only when `SMOKE_BROWSER` is
- *      literally its key, and a `run:` script only on a shell assignment
- *      (`SMOKE_BROWSER=…`). A blanket text match rejected `echo
+ *      literally its key, and a `run:` script only on an assignment — in any of
+ *      the dialects a step can be written in, POSIX and PowerShell alike. A blanket text match rejected `echo
  *      "SMOKE_BROWSER: firefox"`, which sets nothing (Copilot). A shell
  *      assignment inside an `echo` is indistinguishable without parsing the
  *      shell, and inside a `run:` block erring toward the finding is the safe
@@ -129,13 +129,42 @@ const DYNAMIC_ENGINE_RE = new RegExp(
   String.raw`\bsmoke:web:${EXPRESSION}`,
   "gi",
 );
-// A shell assignment inside a `run:` script. The YAML `env:` spelling is not
-// matched by text at all — it is recognized structurally, by key, so that a
-// script merely PRINTING `SMOKE_BROWSER: firefox` is not read as setting it
-// (Copilot). `\S*` rather than `\S+` because `SMOKE_BROWSER=` sets the empty
-// string, which `resolveBrowserName` rejects as present-but-empty rather than
-// treating as unset.
-const BROWSER_SHELL_RE = new RegExp(`\\b${BROWSER_ENV_VAR}=(\\S*)`, "g");
+/**
+ * The ways a `run:` script can set the variable, one entry per shell dialect.
+ *
+ * The YAML `env:` spelling is deliberately absent — it is recognized
+ * structurally, by key, so that a script merely PRINTING `SMOKE_BROWSER:
+ * firefox` is not read as setting it (Copilot).
+ *
+ * More than one dialect is needed because `shell:` and the runner's OS decide
+ * which one a step is written in, and **PowerShell is the default on a Windows
+ * runner** — so a POSIX-only pattern is silent on exactly the workflow least
+ * likely to be reviewed closely (Copilot). `\S*` rather than `\S+` throughout,
+ * because assigning nothing sets the empty string, which `resolveBrowserName`
+ * rejects as present-but-empty rather than treating as unset.
+ */
+const BROWSER_ASSIGNMENTS = [
+  // POSIX `SMOKE_BROWSER=firefox`. Also covers cmd's `set SMOKE_BROWSER=…` and
+  // the GitHub-native `echo "SMOKE_BROWSER=…" >> $GITHUB_ENV`, since both carry
+  // the same `NAME=value` substring.
+  { re: new RegExp(String.raw`\b${BROWSER_ENV_VAR}=(\S*)`, "g"), value: 1 },
+  // PowerShell `$env:SMOKE_BROWSER = "firefox"`, and its `${env:NAME}` form.
+  {
+    re: new RegExp(
+      String.raw`\$\{?env:${BROWSER_ENV_VAR}\}?\s*=\s*(\S*)`,
+      "gi",
+    ),
+    value: 1,
+  },
+  // .NET, reachable from PowerShell: SetEnvironmentVariable("NAME", "value").
+  {
+    re: new RegExp(
+      String.raw`SetEnvironmentVariable\s*\(\s*["']${BROWSER_ENV_VAR}["']\s*,\s*["']([^"']*)["']`,
+      "gi",
+    ),
+    value: 1,
+  },
+];
 
 // A shell assignment inside a `run:` script can still be quoted; a YAML value
 // arrives already unquoted from the parser, so this is a no-op there.
@@ -348,10 +377,12 @@ export function findWorkflowViolations(text, file = "<workflow>") {
           ? [{ value: region.value, match: region.text.trim() }]
           : []
         : kind === "run"
-          ? [...line.matchAll(BROWSER_SHELL_RE)].map((m) => ({
-              value: m[1],
-              match: m[0].trim(),
-            }))
+          ? BROWSER_ASSIGNMENTS.flatMap(({ re, value }) =>
+              [...line.matchAll(re)].map((m) => ({
+                value: m[value],
+                match: m[0].trim(),
+              })),
+            )
           : // A `with:` value is an action input, not an environment. Whatever
             // it names is covered by the script rules above.
             [];

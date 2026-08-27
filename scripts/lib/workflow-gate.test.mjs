@@ -176,6 +176,52 @@ describe("findWorkflowViolations", () => {
       rules: [VIOLATION.BROWSER_ENV],
     },
     {
+      // Copilot, sixth review: PowerShell is the DEFAULT shell on a Windows
+      // runner, so a POSIX-only pattern is silent on exactly the workflow least
+      // likely to be read closely.
+      name: "flags a PowerShell assignment",
+      text: workflow(
+        '      - run: |\n          $env:SMOKE_BROWSER = "firefox"\n          npm run smoke',
+      ),
+      rules: [VIOLATION.BROWSER_ENV],
+    },
+    {
+      name: "flags the PowerShell ${env:NAME} spelling too",
+      text: workflow(
+        '      - run: ${env:SMOKE_BROWSER}="webkit"; npm run smoke',
+      ),
+      rules: [VIOLATION.BROWSER_ENV],
+    },
+    {
+      name: "flags a .NET SetEnvironmentVariable call",
+      text: workflow(
+        '      - run: |\n          [Environment]::SetEnvironmentVariable("SMOKE_BROWSER", "firefox")\n          npm run smoke',
+      ),
+      rules: [VIOLATION.BROWSER_ENV],
+    },
+    {
+      // cmd's `set NAME=value` and the GitHub-native `>> $GITHUB_ENV` append
+      // both carry the POSIX `NAME=value` substring, so one pattern covers all
+      // three — worth pinning, since that is not obvious from reading it.
+      name: "flags a cmd-style set",
+      text: workflow("      - run: set SMOKE_BROWSER=firefox && npm run smoke"),
+      rules: [VIOLATION.BROWSER_ENV],
+    },
+    {
+      name: "flags an append to $GITHUB_ENV",
+      text: workflow(
+        '      - run: echo "SMOKE_BROWSER=firefox" >> $GITHUB_ENV',
+      ),
+      rules: [VIOLATION.BROWSER_ENV],
+    },
+    {
+      name: "allows a PowerShell assignment of chromium",
+      text: workflow(
+        '      - run: |\n          $env:SMOKE_BROWSER = "chromium"\n          npm run smoke',
+      ),
+      rules: [],
+    },
+    {
       name: "flags a workflow-level env override",
       text: [
         "on: push",
