@@ -31,6 +31,10 @@
 import { join } from "node:path";
 import { startAnnouncedChild } from "./announced-child.mjs";
 import {
+  buildConnectDeepLink,
+  connectViaDeepLink,
+} from "./deep-link-connect.mjs";
+import {
   ensureTestServers,
   testServerEntryPath,
 } from "./ensure-test-servers.mjs";
@@ -116,6 +120,9 @@ export function encodeAppArgs(args) {
  * The deep link that connects, switches to the Apps tab, pre-selects the app
  * tool, and fires "Open App". `autoConnect`/`autoOpen` must equal the session
  * token (CSRF gate). Shape owned by clients/web/README.md#deep-link-auto-connect.
+ *
+ * The connect half comes from `deep-link-connect.mjs`, shared with every other
+ * browser smoke; only the three App params (#1859) are added here.
  */
 export function buildAppDeepLink({
   baseUrl,
@@ -125,8 +132,8 @@ export function buildAppDeepLink({
   appArgs = {},
 }) {
   return (
-    `${baseUrl}/?serverUrl=${encodeURIComponent(mcpUrl)}` +
-    `&transport=http&autoConnect=${token}&openApp=${appTool}` +
+    `${buildConnectDeepLink({ baseUrl, mcpUrl, token })}` +
+    `&openApp=${appTool}` +
     `&appArgs=${encodeAppArgs(appArgs)}&autoOpen=${token}`
   );
 }
@@ -171,32 +178,14 @@ export async function driveAppFlow({
   connectTimeoutMs = 45_000,
   readyTimeoutMs = 45_000,
 }) {
-  const response = await page.goto(url, {
-    waitUntil: "domcontentloaded",
-    timeout: gotoTimeoutMs,
+  // 1-2. Navigated, the deep link accepted by the token gate, and connected.
+  await connectViaDeepLink({
+    page,
+    url,
+    expectDeepLink,
+    gotoTimeoutMs,
+    connectTimeoutMs,
   });
-  if (!response || !response.ok()) {
-    throw new Error(
-      `GET / returned HTTP ${response ? response.status() : "no response"}`,
-    );
-  }
-
-  // 1. The deep link must be accepted (not rejected by the token gate).
-  if (expectDeepLink) {
-    const status = page.locator('[data-testid="connection-status"]');
-    await status.waitFor({ state: "attached", timeout: gotoTimeoutMs });
-    const deeplink = await status.getAttribute("data-deeplink");
-    if (deeplink !== "parsed") {
-      throw new Error(
-        `deep link was not accepted (data-deeplink="${deeplink}") — expected "parsed"`,
-      );
-    }
-  }
-
-  // 2. Connected to the test server.
-  await page
-    .locator('[data-testid="connection-status"][data-status="connected"]')
-    .waitFor({ state: "attached", timeout: connectTimeoutMs });
 
   // 3. The widget rendered inside the sandbox and completed its handshake.
   try {

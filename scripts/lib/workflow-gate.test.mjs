@@ -101,6 +101,14 @@ describe("findWorkflowViolations", () => {
       rules: [],
     },
     {
+      // #2148's tab smoke pins Chromium on both halves of its npm script and is
+      // deliberately outside ENGINE_SMOKES — it is not an engine pass, and the
+      // guard must not read `smoke:web:` as forbidden by itself.
+      name: "allows the Chromium-only tab smoke",
+      text: "      - run: npm run smoke:web:tabs\n",
+      rules: [],
+    },
+    {
       name: "allows smoke:tui, which self-skips under CI on its own",
       text: "      - run: npm run smoke:tui\n",
       rules: [],

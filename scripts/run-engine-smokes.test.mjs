@@ -90,6 +90,23 @@ describe("every engine tier consumes ENGINE_SMOKES", () => {
     }
   });
 
+  it("the Chromium-only tab smoke pins its engine on BOTH halves", () => {
+    // `smoke:web:tabs` is not engine-sensitive and deliberately stays out of
+    // ENGINE_SMOKES — but "Chromium-only" is a claim the script has to keep.
+    // Without the literal engine it followed ambient `SMOKE_BROWSER`, so
+    // `SMOKE_BROWSER=firefox npm run local:gate` would have run it under Firefox
+    // (Copilot, #2148). Both halves are pinned because they must AGREE: an
+    // install of one engine and a launch of another surfaces as a confusing
+    // "Executable doesn't exist" rather than as the wiring error it is.
+    assert.match(
+      scripts["smoke:web:tabs"],
+      /install-smoke-browser\.mjs chromium .*smoke-web-tabs\.mjs chromium$/,
+    );
+    // And it must not be in ENGINE_SMOKES, or the Firefox tier would pick it
+    // up regardless of what its own script pins.
+    assert.ok(!ENGINE_SMOKES.includes("smoke-web-tabs.mjs"));
+  });
+
   it("each gated tier names its engine explicitly rather than reading the env", () => {
     // An ambient SMOKE_BROWSER must not be able to redirect a gate: without the
     // literal engine, `SMOKE_BROWSER=firefox npm run local:gate` would run Firefox twice

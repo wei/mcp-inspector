@@ -66,6 +66,10 @@ import {
   ensureTestServers,
   testServerEntryPath,
 } from "./lib/ensure-test-servers.mjs";
+import {
+  buildConnectDeepLink,
+  connectViaDeepLink,
+} from "./lib/deep-link-connect.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 
@@ -176,31 +180,22 @@ async function shot(page, name) {
   console.log(`${LABEL} — captured ${name}.png`);
 }
 
-/** Connect to `mcpUrl` through the deep link and wait for the Tools list. */
+/**
+ * Connect to `mcpUrl` through the deep link.
+ *
+ * Shared with every other browser smoke (#2148) rather than hand-rolled here:
+ * a link `parseDeepLink` cannot validate is *ignored* rather than reported, so
+ * a drifted copy surfaces as an opaque connect timeout instead of a mismatch.
+ */
 async function connect(page, mcpUrl) {
-  const url =
-    `${web.baseUrl}/?serverUrl=${encodeURIComponent(mcpUrl)}` +
-    `&transport=http&autoConnect=${TOKEN}`;
-  const response = await page.goto(url, {
-    waitUntil: "domcontentloaded",
-    timeout: 30_000,
+  await connectViaDeepLink({
+    page,
+    url: buildConnectDeepLink({
+      baseUrl: web.baseUrl,
+      mcpUrl,
+      token: TOKEN,
+    }),
   });
-  if (!response || !response.ok()) {
-    throw new Error(
-      `GET / returned HTTP ${response ? response.status() : "no response"}`,
-    );
-  }
-  const status = page.locator('[data-testid="connection-status"]');
-  await status.waitFor({ state: "attached", timeout: 30_000 });
-  const deeplink = await status.getAttribute("data-deeplink");
-  if (deeplink !== "parsed") {
-    throw new Error(
-      `deep link was not accepted (data-deeplink="${deeplink}") — expected "parsed"`,
-    );
-  }
-  await page
-    .locator('[data-testid="connection-status"][data-status="connected"]')
-    .waitFor({ state: "attached", timeout: 45_000 });
 }
 
 /** Select the elicitation tool in the Tools tab and run it. */
