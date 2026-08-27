@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Alert, Button, Group, Modal, Stack, Text } from "@mantine/core";
 import { JsonEditor } from "../../elements/JsonEditor/JsonEditor";
 import { isJsonObject } from "../../../utils/jsonObjectDraft";
+import { replayableParams } from "../../../lib/protocolReplay";
 import { isSerializableJson } from "@inspector/core/json/jsonUtils.js";
 
 export interface EditReplayModalProps {
@@ -60,10 +61,12 @@ function formatDroppedKeys(keys: string[]): string {
  * genuinely carries none, and an empty editor wearing a red error would read as
  * broken. A non-object is reported separately from text that is not JSON at
  * all: JSON-RPC `params` must be a structured value, so `42` is a shape that
- * cannot be sent however finished it is. A number that overflows is a third
- * case, and the subtlest — see the note on that branch.
+ * cannot be sent however finished it is. A number that overflows, and a key
+ * this method's dispatch does not read, are the two subtle cases — see the
+ * notes on those branches.
  */
 function parseParamsDraft(
+  method: string,
   text: string,
 ):
   | { ok: true; value: Record<string, unknown> | null }
@@ -89,6 +92,20 @@ function parseParamsDraft(
         "Numbers must be finite — a value like `1e400` overflows and would be sent as null",
     };
   }
+  // Seeding from the projection is only half of it: a key the dispatcher does
+  // not read can also be *added* to the draft, and Send would then discard an
+  // edit the user was looking at. Checked with the same function the seed is
+  // built from, so the editor and the dispatcher cannot disagree about which
+  // keys survive.
+  const { dropped } = replayableParams(method, parsed);
+  if (dropped.length > 0) {
+    return {
+      ok: false,
+      error: `${formatDroppedKeys(dropped)} not carried by ${method} — remove ${
+        dropped.length === 1 ? "it" : "them"
+      } so this matches what is sent`,
+    };
+  }
   return { ok: true, value: parsed };
 }
 
@@ -107,7 +124,7 @@ function EditReplayForm({
   const [draft, setDraft] = useState(() =>
     params === undefined ? "" : JSON.stringify(params, null, 2),
   );
-  const parsed = parseParamsDraft(draft);
+  const parsed = parseParamsDraft(method, draft);
 
   return (
     <Stack gap="sm">

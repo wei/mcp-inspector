@@ -136,6 +136,48 @@ describe("EditReplayModal", () => {
     ).toBeInTheDocument();
   });
 
+  // Seeding from the projection is only half of it: a key the dispatcher does
+  // not read can be *added* to the draft, and Send would then discard an edit
+  // the user was looking at.
+  it("disables Send for a key this method's dispatch would not read", async () => {
+    renderWithMantine(
+      <EditReplayModal {...baseProps} method="tools/list" params={undefined} />,
+    );
+    await setAceText('{"cursor":"abc","_meta":{"progressToken":1}}');
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(
+      screen.getByText(/`_meta` is not carried by tools\/list/),
+    ).toBeInTheDocument();
+  });
+
+  it("re-enables Send once the unsupported key is removed", async () => {
+    renderWithMantine(
+      <EditReplayModal {...baseProps} method="tools/list" params={undefined} />,
+    );
+    await setAceText('{"cursor":"abc","_meta":{}}');
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+
+    await setAceText('{"cursor":"abc"}');
+    expect(screen.getByRole("button", { name: "Send" })).not.toBeDisabled();
+    expect(screen.queryByText(/not carried by/)).toBeNull();
+  });
+
+  // The check is per method, not a fixed key list: `arguments` is read by a
+  // tool call and by nothing on a list request.
+  it("judges a key against the method it would be sent to", async () => {
+    const { rerender } = renderWithMantine(
+      <EditReplayModal {...baseProps} method="tools/call" />,
+    );
+    await setAceText('{"name":"echo","arguments":{"a":1}}');
+    expect(screen.getByRole("button", { name: "Send" })).not.toBeDisabled();
+
+    rerender(<EditReplayModal {...baseProps} method="tools/list" />);
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(
+      screen.getByText(/`name`, `arguments` are not carried by tools\/list/),
+    ).toBeInTheDocument();
+  });
+
   it("closes without sending when cancelled", async () => {
     const user = userEvent.setup();
     const onSend = vi.fn();
