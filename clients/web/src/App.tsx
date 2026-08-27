@@ -79,6 +79,7 @@ import { usePaginatedListsOverride } from "./hooks/usePaginatedListsOverride";
 import { useValueChange } from "./hooks/useValueChange";
 import { useThemeToggle } from "./hooks/useThemeToggle";
 import { useTabUiState } from "./hooks/useTabUiState";
+import { useSessionRef } from "./hooks/useSessionRef";
 import { useInspectorStores } from "./hooks/useInspectorStores";
 import { useExportActions } from "./hooks/useExportActions";
 import { useProgressToasts } from "./hooks/useProgressToasts";
@@ -191,6 +192,7 @@ import { EMPTY_SETTINGS } from "./utils/serverSettingsDefaults";
 import {
   isEmaStepUp,
   isStepUpConfirmation,
+  type PendingStepUp,
   type StepUpSource,
 } from "./utils/stepUp";
 import {
@@ -542,18 +544,10 @@ function App() {
     togglePinProtocol,
     resetTabUiState,
   } = useTabUiState();
-  const [pendingStepUp, setPendingStepUp] = useState<{
-    challenge: AuthChallenge;
-    authorizationUrl: URL;
-    serverId: string;
-    source: StepUpSource;
-    enterpriseManaged?: boolean;
-  } | null>(null);
-  const pendingStepUpRef = useRef(pendingStepUp);
+  const [pendingStepUp, setPendingStepUp] = useState<PendingStepUp | null>(
+    null,
+  );
   const pendingStepUpRetryRef = useRef<(() => Promise<unknown>) | null>(null);
-  useEffect(() => {
-    pendingStepUpRef.current = pendingStepUp;
-  }, [pendingStepUp]);
   const [reAuthBanner, setReAuthBanner] = useState<{
     serverId: string;
     message: string;
@@ -575,27 +569,35 @@ function App() {
   const [pendingReauth, setPendingReauth] = useState<PendingReauth | null>(
     null,
   );
-  const pendingReauthRef = useRef(pendingReauth);
-  useEffect(() => {
-    pendingReauthRef.current = pendingReauth;
-  }, [pendingReauth]);
+  // One stable ref mirroring every session value a long-lived callback needs
+  // to read *currently* rather than as of the render that created it. Declared
+  // here — ahead of its first reader — because a hook return is not provably
+  // stable to `react-hooks/exhaustive-deps`, so consumers list it and would hit
+  // the temporal dead zone if it came later.
+  const sessionRef = useSessionRef({
+    activeServerId,
+    servers,
+    inspectorClient,
+    pendingStepUp,
+    pendingReauth,
+  });
   const reauthResumeInProgressRef = useRef(false);
   const stepUpAuthorizeInProgressRef = useRef(false);
 
   useEffect(() => {
-    const pending = pendingReauthRef.current;
+    const pending = sessionRef.current.pendingReauth;
     if (pending && pending.serverId !== activeServerId) {
       setPendingReauth(null);
     }
-    const stepUp = pendingStepUpRef.current;
+    const stepUp = sessionRef.current.pendingStepUp;
     if (stepUp && stepUp.serverId !== activeServerId) {
       setPendingStepUp(null);
     }
-  }, [activeServerId]);
+  }, [sessionRef, activeServerId]);
 
   const trySetPendingStepUp = useCallback(
     (next: NonNullable<typeof pendingStepUp>): boolean => {
-      if (pendingStepUpRef.current !== null) {
+      if (sessionRef.current.pendingStepUp !== null) {
         notifications.show({
           title: "Step-up authorization in progress",
           message:
@@ -608,7 +610,7 @@ function App() {
       setPendingStepUp(next);
       return true;
     },
-    [],
+    [sessionRef],
   );
 
   // Handshake telemetry. `connectStartRef` is set at the "connecting" edge
@@ -860,7 +862,7 @@ function App() {
     // leave the control reading Off while every modern request still carries
     // the level — visible on the auth-recovery path, which reconnects the same
     // client instance rather than rebuilding it (#1629, #1797).
-    // `activeServerIdRef` is synced in a passive effect, so it still holds the
+    // The session ref is synced in a passive effect, so it still holds the
     // outgoing server's id when this runs from `onDisconnect` — which is what
     // lets the re-seed find its settings. Clearing that ref eagerly would take
     // the no-server branch below and silently drop this to Off.
@@ -868,8 +870,8 @@ function App() {
     // is the common case (`mcp.json` written by hand, never opened in Server
     // Settings), and there the default is right — it is what the seed and the
     // client both use. Only "no server at all" means Off.
-    const activeServer = serversRef.current.find(
-      (s) => s.id === activeServerIdRef.current,
+    const activeServer = sessionRef.current.servers.find(
+      (s) => s.id === sessionRef.current.activeServerId,
     );
     setModernLogLevel(
       activeServer
@@ -882,7 +884,7 @@ function App() {
     // Remembered scroll offsets are session-scoped too — drop them so the next
     // session's screens start at the top (#1417).
     clearScrollMemory();
-  }, [resetTabUiState, resetTaskProgress]);
+  }, [sessionRef, resetTabUiState, resetTaskProgress]);
 
   // Reset activeServerId whenever the live session ends. Without this the
   // other ServerCards stay `inert` after disconnect — ServerCard dims any
@@ -966,26 +968,6 @@ function App() {
     activeServer,
   ]);
 
-  // Mirror the active server's name into a ref so a mid-session failure toast
-  // can still name the server: a transport crash dispatches `disconnect`,
-  // which clears `activeServerId` (and thus `activeServer`) before the
-  // `lastError` effect below runs, so the ref is the only surviving handle.
-  const activeServerNameRef = useRef<string | undefined>(undefined);
-  const activeServerIdRef = useRef<string | undefined>(activeServerId);
-  const serversRef = useRef(servers);
-  // The live client, mirrored for the same reason: a settings write that
-  // outlives a disconnect/reconnect to the *same* server would otherwise push
-  // its value into the instance captured when it was issued — which has since
-  // been destroyed — while the replacement client, built from the stale list
-  // entry, keeps the value the write replaced (#2089).
-  const inspectorClientRef = useRef<InspectorClient | null>(inspectorClient);
-  useEffect(() => {
-    if (activeServer) activeServerNameRef.current = activeServer.name;
-    activeServerIdRef.current = activeServerId;
-    serversRef.current = servers;
-    inspectorClientRef.current = inspectorClient;
-  }, [activeServer, activeServerId, servers, inspectorClient]);
-
   // Last connection-level error message, surfaced as `data-error-message` on
   // the InspectorView header so an automated driver can read *why* a connect
   // failed without scraping a transient toast. Cleared on the next connect
@@ -1023,7 +1005,7 @@ function App() {
       detail?: unknown,
       options?: { reason?: AuthChallengeReason },
     ) => {
-      const server = serversRef.current.find((s) => s.id === serverId);
+      const server = sessionRef.current.servers.find((s) => s.id === serverId);
       const message = reAuthBannerMessage({
         serverName: server?.name,
         detail:
@@ -1044,7 +1026,7 @@ function App() {
         message,
       });
     },
-    [],
+    [sessionRef],
   );
 
   // Surface a mid-session transport failure (stdio crash, SSE drop, HTTP 5xx)
@@ -1054,13 +1036,13 @@ function App() {
   // `lastError` clears at the next connecting edge, so each failure toasts once.
   useEffect(() => {
     if (!lastError) return;
-    const name = activeServerNameRef.current;
+    const name = sessionRef.current.activeServerName;
     notifications.show({
       title: name ? `Connection to "${name}" lost` : "Connection lost",
       message: lastError,
       color: "red",
     });
-  }, [lastError]);
+  }, [sessionRef, lastError]);
 
   // `config.type` is optional in the schema (a bare `command: ...`
   // entry implies stdio), so we materialize the default here rather
@@ -1098,7 +1080,7 @@ function App() {
     };
 
     const onAmbientAuthChallenge = (): void => {
-      const name = activeServerNameRef.current;
+      const name = sessionRef.current.activeServerName;
       notifications.show({
         title: name
           ? `Refreshing authorization for "${name}"`
@@ -1123,7 +1105,7 @@ function App() {
         onAmbientAuthChallenge,
       );
     };
-  }, [connectionStatus, inspectorClient]);
+  }, [sessionRef, connectionStatus, inspectorClient]);
 
   const connectionInfoCanClearOAuth =
     connectionStatus === "connected" &&
@@ -1176,7 +1158,7 @@ function App() {
   // applies to the instance that exists now.
   const applyLiveServerSettings = useCallback(
     (settings: InspectorServerSettings) => {
-      const client = inspectorClientRef.current;
+      const client = sessionRef.current.inspectorClient;
       if (!client) return;
       // Settings the managed state reads at notification time
       // (auto-refresh-on-list-changed) take effect without a reconnect (#1444).
@@ -1200,7 +1182,7 @@ function App() {
         });
       }
     },
-    [fetchLogRef],
+    [sessionRef, fetchLogRef],
   );
 
   // Flush the pre-redirect Network log to backend storage, keyed by the OAuth
@@ -1253,7 +1235,7 @@ function App() {
       client?: InspectorClient;
     }) => {
       setReAuthBanner(null);
-      const server = serversRef.current.find((s) => s.id === serverId);
+      const server = sessionRef.current.servers.find((s) => s.id === serverId);
       const preRedirectToast = oauthPreRedirectToastCopy(authKind, {
         serverName: server?.name,
         enterpriseManaged: server?.settings?.enterpriseManaged,
@@ -1284,7 +1266,7 @@ function App() {
       });
       void oauthClient?.beginInteractiveAuthorization(authorizationUrl);
     },
-    [inspectorClient, activeTab, ui, onBeforeOAuthRedirect],
+    [sessionRef, inspectorClient, activeTab, ui, onBeforeOAuthRedirect],
   );
 
   const tryApplyStoredAuthRecovery = useCallback(
@@ -1320,7 +1302,7 @@ function App() {
       authorizationUrl: URL;
       source?: StepUpSource;
     }) => {
-      const server = serversRef.current.find((s) => s.id === serverId);
+      const server = sessionRef.current.servers.find((s) => s.id === serverId);
       if (isStepUpConfirmation(challenge, server)) {
         trySetPendingStepUp({
           challenge,
@@ -1338,28 +1320,31 @@ function App() {
         recoverySource: source,
       });
     },
-    [prepareOAuthRedirect, trySetPendingStepUp],
+    [sessionRef, prepareOAuthRedirect, trySetPendingStepUp],
   );
 
-  const deferAmbientReauth = useCallback((pending: PendingReauth) => {
-    if (pendingReauthRef.current) {
-      notifications.show({
-        title: "Authorization update pending",
-        message:
-          "A new authorization request replaced the previous deferred recovery.",
-        color: "yellow",
-        autoClose: 5000,
-      });
-    } else {
-      notifications.show({
-        title: "Authorization pending",
-        message: "Return to this tab to continue authorization.",
-        color: "blue",
-        autoClose: 5000,
-      });
-    }
-    setPendingReauth(pending);
-  }, []);
+  const deferAmbientReauth = useCallback(
+    (pending: PendingReauth) => {
+      if (sessionRef.current.pendingReauth) {
+        notifications.show({
+          title: "Authorization update pending",
+          message:
+            "A new authorization request replaced the previous deferred recovery.",
+          color: "yellow",
+          autoClose: 5000,
+        });
+      } else {
+        notifications.show({
+          title: "Authorization pending",
+          message: "Return to this tab to continue authorization.",
+          color: "blue",
+          autoClose: 5000,
+        });
+      }
+      setPendingReauth(pending);
+    },
+    [sessionRef],
+  );
 
   const handleCommandScopedAuthRecovery = useCallback(
     async (
@@ -1373,7 +1358,9 @@ function App() {
       if (!inspectorClient) {
         return false;
       }
-      const server = serversRef.current.find((s) => s.id === options.serverId);
+      const server = sessionRef.current.servers.find(
+        (s) => s.id === options.serverId,
+      );
       const stepUp =
         error.emaStepUpConfirm ||
         isStepUpConfirmation(error.authChallenge, server);
@@ -1418,6 +1405,7 @@ function App() {
       return false;
     },
     [
+      sessionRef,
       inspectorClient,
       prepareOAuthRedirect,
       tryApplyStoredAuthRecovery,
@@ -1505,7 +1493,7 @@ function App() {
       if (connectionStatus !== "connected") {
         return;
       }
-      if (pending.serverId !== activeServerIdRef.current) {
+      if (pending.serverId !== sessionRef.current.activeServerId) {
         return;
       }
 
@@ -1564,6 +1552,7 @@ function App() {
       }
     },
     [
+      sessionRef,
       inspectorClient,
       connectionStatus,
       tryApplyStoredAuthRecovery,
@@ -1582,11 +1571,13 @@ function App() {
     ): void => {
       void (async () => {
         const { challenge, authorizationUrl } = event.detail;
-        const serverId = activeServerIdRef.current;
+        const serverId = sessionRef.current.activeServerId;
         if (!serverId) {
           return;
         }
-        const server = serversRef.current.find((s) => s.id === serverId);
+        const server = sessionRef.current.servers.find(
+          (s) => s.id === serverId,
+        );
         const authKind: OAuthResumeAuthKind = isStepUpConfirmation(
           challenge,
           server,
@@ -1629,6 +1620,7 @@ function App() {
       );
     };
   }, [
+    sessionRef,
     connectionStatus,
     inspectorClient,
     tryApplyStoredAuthRecovery,
@@ -1638,12 +1630,12 @@ function App() {
 
   useEffect(() => {
     return onBrowserTabVisible(() => {
-      const pending = pendingReauthRef.current;
+      const pending = sessionRef.current.pendingReauth;
       if (pending) {
         void resumePendingReauth(pending);
       }
     });
-  }, [resumePendingReauth]);
+  }, [sessionRef, resumePendingReauth]);
 
   // Resume deferred background-tab recovery once the session reconnects.
   useEffect(() => {
@@ -1653,11 +1645,11 @@ function App() {
     if (!isBrowserTabVisible()) {
       return;
     }
-    const pending = pendingReauthRef.current;
+    const pending = sessionRef.current.pendingReauth;
     if (pending) {
       void resumePendingReauth(pending);
     }
-  }, [connectionStatus, inspectorClient, resumePendingReauth]);
+  }, [sessionRef, connectionStatus, inspectorClient, resumePendingReauth]);
 
   useEffect(() => {
     if (connectionStatus !== "connected" || !inspectorClient) {
@@ -1665,7 +1657,7 @@ function App() {
     }
 
     const onOAuthError = (event: TypedEvent<"oauthError">): void => {
-      const serverId = activeServerIdRef.current;
+      const serverId = sessionRef.current.activeServerId;
       if (!serverId) {
         return;
       }
@@ -1676,7 +1668,7 @@ function App() {
     return () => {
       inspectorClient.removeEventListener("oauthError", onOAuthError);
     };
-  }, [connectionStatus, inspectorClient, showReAuthBanner]);
+  }, [sessionRef, connectionStatus, inspectorClient, showReAuthBanner]);
 
   // Detect an abandoned full-page OAuth redirect (snapshot left, no callback).
   useEffect(() => {
@@ -2183,7 +2175,7 @@ function App() {
       // addServer/updateServer in the same async tick (e.g. the deep-link
       // auto-connect IIFE) sees the freshly-mutated list, not the stale array
       // captured by this callback's closure.
-      const target = serversRef.current.find((s) => s.id === id);
+      const target = sessionRef.current.servers.find((s) => s.id === id);
       if (!target) return;
 
       // Always rebuild the InspectorClient on a (re)connect so the latest
@@ -2344,6 +2336,7 @@ function App() {
       }
     },
     [
+      sessionRef,
       activeServerId,
       connectionStatus,
       inspectorClient,
@@ -2372,7 +2365,7 @@ function App() {
   //   3. connect — row present AND its config already matches: connect.
   // Splitting update and connect across renders (rather than awaiting both in
   // one closure) is what makes the connect correct: `onToggleConnection` reads
-  // the target from `serversRef`, which an earlier passive effect syncs from
+  // the target from the session ref, which an earlier passive effect syncs from
   // `servers` — so connecting only once `servers` reflects the updated config
   // guarantees the client is built from the fresh transport, not the stale one.
   // The OAuth callback path takes precedence; a deep link on `/oauth/callback`
@@ -2456,7 +2449,9 @@ function App() {
     // toggle direction here.
     if (bannerKind === "lost_authorization_state") {
       void (async () => {
-        const server = serversRef.current.find((s) => s.id === serverId);
+        const server = sessionRef.current.servers.find(
+          (s) => s.id === serverId,
+        );
         if (server) {
           try {
             await clearServerOAuthState({
@@ -2523,6 +2518,7 @@ function App() {
 
     void onToggleConnection(serverId);
   }, [
+    sessionRef,
     reAuthBanner,
     activeServerId,
     connectionStatus,
@@ -3136,7 +3132,7 @@ function App() {
           activeServerId,
           next.paginatedLists ?? false,
         );
-        if (activeServerIdRef.current === activeServerId) {
+        if (sessionRef.current.activeServerId === activeServerId) {
           applyLiveServerSettings(next);
         }
       };
@@ -3195,7 +3191,7 @@ function App() {
             activeServerId,
             baseline.paginatedLists ?? false,
           );
-          if (activeServerIdRef.current === activeServerId) {
+          if (sessionRef.current.activeServerId === activeServerId) {
             applyLiveServerSettings(baseline);
           }
           notifications.show({
@@ -3206,6 +3202,7 @@ function App() {
         });
     },
     [
+      sessionRef,
       servers,
       activeServerId,
       lastPersistedSettings,
@@ -3493,7 +3490,7 @@ function App() {
         const settled = write.landed(value);
         if (!settled) return;
         paginatedListsOverride.record(id, value.paginatedLists ?? false);
-        if (activeServerIdRef.current === id) {
+        if (sessionRef.current.activeServerId === id) {
           applyLiveServerSettings(value);
         }
       };
@@ -3522,7 +3519,7 @@ function App() {
         const baseline = lastPersistedSettings.resolve(id);
         if (baseline) {
           paginatedListsOverride.record(id, baseline.paginatedLists ?? false);
-          if (activeServerIdRef.current === id) {
+          if (sessionRef.current.activeServerId === id) {
             applyLiveServerSettings(baseline);
           }
         }
@@ -3909,7 +3906,7 @@ function App() {
   };
 
   const handleStepUpCancel = () => {
-    const stepUp = pendingStepUpRef.current;
+    const stepUp = sessionRef.current.pendingStepUp;
     setPendingStepUp(null);
     pendingStepUpRetryRef.current = null;
     if (!stepUp) {
