@@ -30,12 +30,17 @@
  *      only summarize it, so a result panel that renders text alone looks
  *      correct while dropping the data.
  *   2. **Resources** — the list renders, a resource is read, and the preview
- *      populates. Templates are asserted present (the RFC 6570 fixture, #1919),
- *      which is what proves `resources/templates/list` reached the screen —
- *      that list is fetched by a *different* call than `resources/list` and can
- *      fail on its own.
- *   3. **Prompts** — the list renders and `simple_prompt` is fetched (selecting
- *      an argument-less prompt auto-fetches), and the messages render.
+ *      panel renders its contents. Templates are asserted present (the RFC 6570
+ *      fixture, #1919), which is what proves `resources/templates/list` reached
+ *      the screen — that list is fetched by a *different* call than
+ *      `resources/list` and can fail on its own.
+ *   3. **Prompts** — the list renders, `simple_prompt` is fetched (selecting an
+ *      argument-less prompt auto-fetches), and the messages panel renders.
+ *
+ * The read/get stages assert the RPC status **and** the rendered panel, not the
+ * status alone. Each `data-*-status` flips the moment its call resolves, so a
+ * smoke stopping there would stay green with the panel deleted — which is the
+ * opposite of what a connected-flow smoke is for.
  *
  * Deliberately **one script over one browser launch** rather than one per tab:
  * launching the browser and booting the server dominate the cost, and
@@ -79,11 +84,8 @@
 import { resolve } from "node:path";
 import { startProdWebServer } from "./lib/prod-web-server.mjs";
 import { stopChild } from "./lib/child-cleanup.mjs";
-import {
-  attachPageDiagnostics,
-  loadBrowser,
-  resolveBrowserName,
-} from "./lib/headless-browser.mjs";
+import { attachPageDiagnostics, loadBrowser } from "./lib/headless-browser.mjs";
+import { resolveRequestedBrowser } from "./install-smoke-browser.mjs";
 import {
   buildConnectDeepLink,
   connectViaDeepLink,
@@ -92,14 +94,20 @@ import { startMcpAppServer } from "./lib/mcp-app-flow.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 
-// Resolved before anything starts, so an unsupported SMOKE_BROWSER fails
-// immediately rather than after a web server and an MCP server are up. Every
-// message carries the engine so a failure names which run it came from — even
-// though this smoke is Chromium-only in every gate, it can still be pointed
-// elsewhere by hand.
+// The engine comes from an explicit ARGUMENT first, and only then from
+// `SMOKE_BROWSER`. That precedence is the load-bearing part: `smoke:web:tabs`
+// passes `chromium` to both this and the installer, so an ambient
+// `SMOKE_BROWSER=firefox npm run ci` cannot silently redirect a gated tier that
+// claims to be Chromium-only — the same invariant `run-engine-smokes.test.mjs`
+// pins for the engine tiers (Copilot, #2148). Running another engine by hand is
+// still one argument away: `node scripts/smoke-web-tabs.mjs firefox`.
+//
+// Resolved before anything starts, so an unsupported value fails immediately
+// rather than after a web server and an MCP server are up. Every message
+// carries the engine, so a failure names which run it came from.
 let BROWSER;
 try {
-  BROWSER = resolveBrowserName();
+  BROWSER = resolveRequestedBrowser(process.argv.slice(2), process.env);
 } catch (err) {
   console.error(
     `smoke:web:tabs FAILED — ${err instanceof Error ? err.message : String(err)}`,
@@ -279,10 +287,16 @@ try {
       .getByRole("button", { name: RESOURCE, exact: true })
       .click({ timeout: 30_000 });
     await waitForStage(page, {
-      selector: '[data-testid="resources-screen"][data-read-status="ok"]',
+      // Both the RPC status AND the rendered preview. The status flips the
+      // moment `resources/read` resolves, so stopping there would stay green
+      // with the preview panel removed entirely (Copilot, #2148) — and #2148
+      // asks for the content to *render*, not merely for the call to return.
+      selector:
+        '[data-testid="resources-screen"][data-read-status="ok"]' +
+        ' [data-testid="resource-preview"]',
       screen: '[data-testid="resources-screen"]',
       attrs: ["data-read-status"],
-      what: `reading \`${RESOURCE}\` did not succeed`,
+      what: `reading \`${RESOURCE}\` did not render a preview`,
     });
 
     // ── Prompts ────────────────────────────────────────────────────────────
@@ -299,10 +313,14 @@ try {
       .getByRole("button", { name: new RegExp(`^${PROMPT}`) })
       .click({ timeout: 30_000 });
     await waitForStage(page, {
-      selector: '[data-testid="prompts-screen"][data-get-status="ok"]',
+      // As with the resource preview: the messages panel must have rendered,
+      // not merely `prompts/get` returned (Copilot, #2148).
+      selector:
+        '[data-testid="prompts-screen"][data-get-status="ok"]' +
+        ' [data-testid="prompt-messages"]',
       screen: '[data-testid="prompts-screen"]',
       attrs: ["data-get-status"],
-      what: `getting \`${PROMPT}\` did not succeed`,
+      what: `getting \`${PROMPT}\` did not render its messages`,
     });
   };
 

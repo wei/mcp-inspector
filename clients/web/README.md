@@ -109,9 +109,11 @@ Treat them as a public contract, for the same reason as the Apps ones below:
 | `data-resource-count`                | on `resources-screen` | Entries from `resources/list`.                                                                                                                           |
 | `data-template-count`                | on `resources-screen` | Entries from `resources/templates/list` — a **separate** call that can fail on its own, so it is reported separately.                                     |
 | `data-read-status`                   | on `resources-screen` | `idle` → `pending` → `ok` / `error` for the current `resources/read`.                                                                                     |
+| `data-testid="resource-preview"`     | preview panel      | The read resource's **rendered** contents. Assert this *and* `data-read-status`: the status flips as soon as the RPC resolves, so it alone stays true with the panel removed. |
 | `data-testid="prompts-screen"`       | Prompts root       | The element carrying the two attributes below.                                                                                                              |
 | `data-prompt-count`                  | on `prompts-screen`| Entries from `prompts/list`.                                                                                                                                |
 | `data-get-status`                    | on `prompts-screen`| `idle` → `pending` → `ok` / `error` for the current `prompts/get`.                                                                                          |
+| `data-testid="prompt-messages"`      | messages panel     | The fetched prompt's **rendered** messages — the `prompts/get` counterpart of `resource-preview`, and asserted alongside `data-get-status` for the same reason. |
 
 Why attributes rather than text: a smoke that waited on a label fails the next
 time the label is reworded, which is noise rather than signal — and it fails as
