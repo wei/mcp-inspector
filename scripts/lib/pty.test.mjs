@@ -121,28 +121,76 @@ test("shellQuote survives an embedded single quote", () => {
 });
 
 test("probeScriptVersion combines both streams and never throws", () => {
-  assert.equal(
+  assert.deepEqual(
     probeScriptVersion(() => ({ stdout: "out ", stderr: "err" })),
-    "out err",
+    { available: true, output: "out err" },
   );
-  // BSD `script --version` errors; spawnSync can also return a bare object.
-  assert.equal(
+  // A non-zero exit is NOT unavailability. BSD `script` has no `--version` and
+  // answers with `illegal option -- -` plus its usage on stderr — which is the
+  // very evidence the flavor fallback reads, so it must survive the probe.
+  assert.deepEqual(
+    probeScriptVersion(() => ({
+      status: 1,
+      stdout: "",
+      stderr: "script: illegal option -- -\nusage: script [-aeFkpqr] ...",
+    })),
+    {
+      available: true,
+      output: "script: illegal option -- -\nusage: script [-aeFkpqr] ...",
+    },
+  );
+  // A runner that throws outright (injected, or a future spawn shape).
+  assert.deepEqual(
     probeScriptVersion(() => {
       throw new Error("ENOENT");
     }),
-    "",
+    { available: false, output: "" },
   );
-  assert.equal(
-    probeScriptVersion(() => ({})),
-    "",
+  // Told nothing at all is not evidence of a working `script`.
+  assert.deepEqual(
+    probeScriptVersion(() => undefined),
+    {
+      available: false,
+      output: "",
+    },
   );
 });
 
-test("resolvePtyWrapper wraps with the resolved flavor, or reports none", () => {
+// `spawnSync` REPORTS ENOENT in `result.error` — it does not throw — so a
+// try/catch alone reads a missing binary as "ran, printed nothing". On linux
+// that empty output falls through to the util-linux guess, and `smoke:tui`
+// hard-fails spawning a binary that does not exist instead of skipping.
+test("probeScriptVersion treats result.error as unavailable, not as empty output", () => {
+  const enoent = Object.assign(new Error("spawnSync script ENOENT"), {
+    code: "ENOENT",
+  });
+  assert.deepEqual(
+    probeScriptVersion(() => ({ error: enoent, stdout: "", stderr: "" })),
+    { available: false, output: "" },
+  );
+  // The timeout shape reports the same way.
+  assert.equal(
+    probeScriptVersion(() => ({ error: new Error("ETIMEDOUT") })).available,
+    false,
+  );
+});
+
+test("resolvePtyWrapper reports a missing script(1) rather than guessing", () => {
+  // linux would otherwise be classified util-linux off the empty output.
+  const r = resolvePtyWrapper({
+    platform: "linux",
+    probe: () => ({ available: false, output: "" }),
+  });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /on PATH/);
+});
+
+test("resolvePtyWrapper wraps with the resolved flavor, or reports why not", () => {
   const wrapper = resolvePtyWrapper({
     platform: "linux",
-    probe: () => "script from util-linux 2.39.3",
+    probe: () => ({ available: true, output: "script from util-linux 2.39.3" }),
   });
+  assert.equal(wrapper.ok, true);
   assert.equal(wrapper.flavor, "util-linux");
   assert.deepEqual(wrapper.wrap({ command: "node", args: ["a.js"] }), {
     command: "script",
@@ -151,7 +199,14 @@ test("resolvePtyWrapper wraps with the resolved flavor, or reports none", () => 
   // `args` is optional at the call site.
   assert.deepEqual(wrapper.wrap({ command: "node" }).args[1], "'node'");
 
-  assert.equal(resolvePtyWrapper({ platform: "win32", probe: () => "" }), null);
+  // A present `script` on a platform whose invocation nobody verified is a
+  // DIFFERENT failure from a missing one, and the reason must say which.
+  const unsupported = resolvePtyWrapper({
+    platform: "win32",
+    probe: () => ({ available: true, output: "" }),
+  });
+  assert.equal(unsupported.ok, false);
+  assert.match(unsupported.reason, /no verified .* invocation for win32/);
 });
 
 // The platforms this repo claims a verified `script(1)` invocation for. Any
@@ -166,12 +221,16 @@ test("resolvePtyWrapper resolves on the platforms we claim to support", () => {
   // smoke failure.
   const wrapper = resolvePtyWrapper();
   if (SUPPORTED_PLATFORMS.has(process.platform)) {
-    assert.ok(wrapper, `no PTY wrapper resolved on ${process.platform}`);
+    assert.equal(
+      wrapper.ok,
+      true,
+      `no PTY wrapper on ${process.platform}: ${wrapper.reason ?? ""}`,
+    );
     assert.equal(wrapper.wrap({ command: "node" }).command, "script");
   } else {
     assert.equal(
-      wrapper,
-      null,
+      wrapper.ok,
+      false,
       `${process.platform} is not in SUPPORTED_PLATFORMS but resolved a wrapper`,
     );
   }

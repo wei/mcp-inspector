@@ -109,39 +109,71 @@ export function ptyCommand({ command, args = [], flavor }) {
 }
 
 /**
- * Probe the local `script(1)` for its flavor.
+ * Probe the local `script(1)`: is it there, and what does it say about itself?
  *
- * @param {(cmd: string, args: string[]) => { stdout?: string, stderr?: string }} [runner]
+ * **`spawnSync` does not throw on ENOENT** — it *returns* `{ error }` with
+ * empty output. So a `try`/`catch` alone cannot tell "no `script` on this box"
+ * from "a `script` that printed nothing", and collapsing both to `""` is
+ * actively harmful: on linux the empty output falls through to the
+ * `util-linux` guess, and `smoke:tui` then hard-fails spawning a binary that
+ * does not exist, instead of taking the documented skip. Hence the `available`
+ * flag rather than a bare string. The `catch` stays for a runner that really
+ * does throw (an injected one, or a future spawn shape).
+ *
+ * A non-zero exit is NOT unavailability: BSD `script` has no `--version` and
+ * answers `illegal option -- -` plus its usage on stderr — which is exactly the
+ * evidence `scriptFlavorFor` reads. Only `error` means "could not run it".
+ *
+ * @param {(cmd: string, args: string[]) => { stdout?: string, stderr?: string, error?: Error }} [runner]
  *   Injected for tests; defaults to a real `spawnSync`.
- * @returns {string} Combined output, or "" if `script` could not be run at all.
+ * @returns {{ available: boolean, output: string }}
  */
 export function probeScriptVersion(
   runner = (cmd, args) =>
     spawnSync(cmd, args, { encoding: "utf8", timeout: 5000 }),
 ) {
   try {
-    const r = runner("script", ["--version"]) ?? {};
-    return `${r.stdout ?? ""}${r.stderr ?? ""}`;
+    const r = runner("script", ["--version"]);
+    // `error` covers ENOENT, EACCES and the timeout; a missing result at all
+    // means the runner told us nothing, which is not evidence of a working one.
+    if (!r || r.error) return { available: false, output: "" };
+    return { available: true, output: `${r.stdout ?? ""}${r.stderr ?? ""}` };
   } catch {
-    return "";
+    return { available: false, output: "" };
   }
 }
 
 /**
- * Resolve a PTY wrapper for this machine, or null if none is available.
+ * Resolve a PTY wrapper for this machine, or say why there isn't one.
+ *
+ * The two ways it can be unavailable are worth telling apart in the skip
+ * message — "you have no `script(1)`" and "nobody has verified this platform's
+ * invocation" send the reader somewhere different — so the failure carries a
+ * `reason` rather than being a bare `null` the caller has to narrate.
  *
  * @param {object} [opts]
  * @param {string} [opts.platform]
- * @param {() => string} [opts.probe]
- * @returns {{ flavor: string, wrap: (spec: { command: string, args?: string[] }) => { command: string, args: string[] } } | null}
+ * @param {() => { available: boolean, output: string }} [opts.probe]
+ * @returns {{ ok: true, flavor: string, wrap: (spec: { command: string, args?: string[] }) => { command: string, args: string[] } }
+ *          | { ok: false, reason: string }}
  */
 export function resolvePtyWrapper({
   platform = process.platform,
   probe = probeScriptVersion,
 } = {}) {
-  const flavor = scriptFlavorFor({ platform, versionOutput: probe() });
-  if (!flavor) return null;
+  const { available, output } = probe();
+  if (!available) {
+    return { ok: false, reason: "no `script(1)` on PATH" };
+  }
+  const flavor = scriptFlavorFor({ platform, versionOutput: output });
+  if (!flavor) {
+    return {
+      ok: false,
+      reason: `no verified \`script(1)\` invocation for ${platform}`,
+    };
+  }
   return {
+    ok: true,
     flavor,
     wrap: ({ command, args = [] }) => ptyCommand({ command, args, flavor }),
   };

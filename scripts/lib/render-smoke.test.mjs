@@ -1,7 +1,12 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
 
-import { outputTail, runRenderSmoke } from "./render-smoke.mjs";
+import {
+  DEFAULTS,
+  normalizeMs,
+  outputTail,
+  runRenderSmoke,
+} from "./render-smoke.mjs";
 
 const MARKER = "MCP Servers";
 
@@ -103,6 +108,39 @@ test("scans stderr as well as stdout for the marker", async () => {
     ),
   });
   assert.equal(r.code, 0, `expected pass, got: ${r.message}`);
+});
+
+// `Number("")` is 0 and `Number("typo")` is NaN, and `??` catches neither
+// because both are non-nullish. `setTimeout` fires immediately on either, so an
+// un-normalized `surviveMs` resolves the survival check before the child could
+// possibly have died — restoring the exact first-paint false green, on a run
+// that still prints OK. This is the guard on the guard.
+test("normalizeMs rejects the values a bad env var actually produces", () => {
+  assert.equal(normalizeMs(Number(""), 2000), 2000);
+  assert.equal(normalizeMs(Number("typo"), 2000), 2000);
+  assert.equal(normalizeMs(undefined, 2000), 2000);
+  assert.equal(normalizeMs(-1, 2000), 2000);
+  assert.equal(normalizeMs(Infinity, 2000), 2000);
+  assert.equal(normalizeMs("3000", 2000), 2000, "a string is not a duration");
+  // 0 is a typo, never "skip the check" — there is no caller who wants that.
+  assert.equal(normalizeMs(0, 2000), 2000);
+  // A real value passes through untouched.
+  assert.equal(normalizeMs(1234, 2000), 1234);
+});
+
+test("a zero survival window falls back rather than passing instantly", async () => {
+  // End to end through the real state machine: with surviveMs honored as 0 the
+  // paint-then-exit stub would settle OK before the child's exit was seen.
+  const r = await runRenderSmoke({
+    ...opts,
+    ...paintThenExit(1),
+    surviveMs: Number(""),
+  });
+  assert.equal(r.code, 1, `expected failure, got: ${r.message}`);
+  assert.match(
+    r.message,
+    new RegExp(`${DEFAULTS.surviveMs}ms survival window`),
+  );
 });
 
 test("outputTail drops a leading partial line but keeps short output whole", () => {

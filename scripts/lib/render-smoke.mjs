@@ -23,6 +23,40 @@
 
 import { spawn } from "node:child_process";
 
+/** Durations, in ms. Every one is a hard floor as well as a default. */
+export const DEFAULTS = Object.freeze({
+  timeoutMs: 15_000,
+  surviveMs: 2_000,
+  exitGraceMs: 5_000,
+  drainMs: 500,
+});
+
+/**
+ * Coerce a caller-supplied duration to a usable one, mirroring
+ * `child-cleanup.mjs`'s `normalizeGraceMs`.
+ *
+ * Call sites read these from the environment, and `Number()` there has two
+ * holes that `??` does not cover: `Number("")` is `0` and `Number("typo")` is
+ * `NaN`. `setTimeout` treats both as "fire immediately" — which for `surviveMs`
+ * means the survival check resolves before the child could possibly have died,
+ * silently restoring the exact first-paint false green this module exists to
+ * prevent, on a run that still prints OK. Falling back is therefore not
+ * defensive tidiness; it is the difference between a gate and a decoration.
+ *
+ * A consequence worth stating: `surviveMs: 0` is NOT honored as "skip the
+ * survival wait". There is no legitimate caller for that here, and reading it
+ * literally is indistinguishable from the typo.
+ *
+ * @param {unknown} value
+ * @param {number} fallback
+ * @returns {number}
+ */
+export function normalizeMs(value, fallback) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : fallback;
+}
+
 /**
  * Tail of a child's output, for quoting in a diagnostic. Slicing a terminal
  * stream can land mid-CSI-sequence, so drop through the first newline rather
@@ -46,11 +80,16 @@ export function outputTail(output, limit = 800) {
  *                                          (`stdio` is fixed — see below).
  * @param {string} opts.marker              Substring whose appearance in the
  *                                          child's output counts as first paint.
- * @param {number} [opts.timeoutMs]         Budget for first paint (default 15s).
+ * @param {number} [opts.timeoutMs]         Budget for first paint (default 15s;
+ *                                          non-finite/non-positive falls back).
  * @param {number} [opts.surviveMs]         How long after first paint the child
- *                                          must stay alive (default 2s).
- * @param {number} [opts.exitGraceMs]       SIGTERM → SIGKILL grace (default 5s).
- * @param {number} [opts.drainMs]           Post-exit pipe-drain cap (default 500ms).
+ *                                          must stay alive (default 2s;
+ *                                          non-finite/non-positive falls back —
+ *                                          0 is a typo, never "skip the check").
+ * @param {number} [opts.exitGraceMs]       SIGTERM → SIGKILL grace (default 5s;
+ *                                          non-finite/non-positive falls back).
+ * @param {number} [opts.drainMs]           Post-exit pipe-drain cap (default 500ms;
+ *                                          non-finite/non-positive falls back).
  * @param {(child: import("node:child_process").ChildProcess) => void} [opts.onSpawn]
  *   Called synchronously with the child, before any waiting — the caller's
  *   teardown handle on every failure path.
@@ -72,13 +111,21 @@ export function runRenderSmoke({
   args = [],
   spawnOptions = {},
   marker,
-  timeoutMs = 15_000,
-  surviveMs = 2_000,
-  exitGraceMs = 5_000,
-  drainMs = 500,
+  timeoutMs: requestedTimeoutMs,
+  surviveMs: requestedSurviveMs,
+  exitGraceMs: requestedExitGraceMs,
+  drainMs: requestedDrainMs,
   onSpawn = () => {},
   warn = (m) => console.warn(m),
 }) {
+  // Normalized rather than defaulted, so an env-derived 0/NaN cannot reach a
+  // `setTimeout` — see `normalizeMs`. Done once, before anything reads them,
+  // so the interpolated durations in the messages below can't read `NaNms`.
+  const timeoutMs = normalizeMs(requestedTimeoutMs, DEFAULTS.timeoutMs);
+  const surviveMs = normalizeMs(requestedSurviveMs, DEFAULTS.surviveMs);
+  const exitGraceMs = normalizeMs(requestedExitGraceMs, DEFAULTS.exitGraceMs);
+  const drainMs = normalizeMs(requestedDrainMs, DEFAULTS.drainMs);
+
   return new Promise((resolve) => {
     const child = spawn(command, args, {
       ...spawnOptions,

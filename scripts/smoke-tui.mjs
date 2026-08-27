@@ -41,17 +41,26 @@ import { join, resolve } from "node:path";
 import { removeSafe } from "./lib/child-cleanup.mjs";
 import { ensureTestServers } from "./lib/ensure-test-servers.mjs";
 import { resolvePtyWrapper } from "./lib/pty.mjs";
-import { runRenderSmoke } from "./lib/render-smoke.mjs";
+import { DEFAULTS, normalizeMs, runRenderSmoke } from "./lib/render-smoke.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const launcher = join(repoRoot, "clients", "launcher", "build", "index.js");
 const RENDER_MARKER = "MCP Servers";
-const TIMEOUT_MS = Number(process.env.SMOKE_TUI_TIMEOUT_MS ?? 15000);
+// `??` does not cover the two holes that matter here: an env var set to the
+// empty string parses as 0, and a typo as NaN, and `setTimeout` fires
+// immediately on both. For SURVIVE_MS that would silently restore the
+// first-paint false green on a run that still prints OK, so every duration goes
+// through `normalizeMs` — which is also where the defaults live, so this file
+// and the module cannot drift on what they are.
+const envMs = (name, fallback) =>
+  normalizeMs(Number(process.env[name]), fallback);
+
+const TIMEOUT_MS = envMs("SMOKE_TUI_TIMEOUT_MS", DEFAULTS.timeoutMs);
 // How long past first paint the TUI must still be running. Generous relative to
 // the failure it catches (the raw-mode crash landed ~40ms after the marker) —
 // the cost of a longer window is only wall-clock on a passing run.
-const SURVIVE_MS = Number(process.env.SMOKE_TUI_SURVIVE_MS ?? 2000);
-const EXIT_GRACE_MS = Number(process.env.SMOKE_TUI_EXIT_GRACE_MS ?? 5000);
+const SURVIVE_MS = envMs("SMOKE_TUI_SURVIVE_MS", DEFAULTS.surviveMs);
+const EXIT_GRACE_MS = envMs("SMOKE_TUI_EXIT_GRACE_MS", DEFAULTS.exitGraceMs);
 // Ink's own error text when it is asked for raw mode on a non-terminal fd.
 const RAW_MODE_ERROR = /Raw mode is not supported/;
 
@@ -85,10 +94,10 @@ if (!existsSync(launcher)) {
 // a guaranteed failure — so say why rather than report a crash as a defect.
 // `node-pty` is the portable answer if this ever needs to run there.
 const pty = resolvePtyWrapper();
-if (!pty) {
+if (!pty.ok) {
   skip(
-    `no pseudoterminal available on ${process.platform} — the Ink TUI needs raw mode, ` +
-      `which requires a real terminal fd (see scripts/lib/pty.mjs)`,
+    `${pty.reason} — the Ink TUI needs raw mode, which requires a real ` +
+      `terminal fd (see scripts/lib/pty.mjs)`,
   );
 }
 
