@@ -36,6 +36,25 @@ describe("JsonEditor", () => {
     expect(screen.getByLabelText(aceLabel(LABEL))).toBeInTheDocument();
   });
 
+  // Ace recomputes the textarea's `aria-label` from its option only when the
+  // cursor moves, so a name that changes while the editor stays mounted — a
+  // tool refreshed in place under a new field title — would leave the visible
+  // label and the accessible name disagreeing until the user clicked into it.
+  it("re-applies the accessible name when it changes in place", () => {
+    const { rerender } = renderWithMantine(
+      <JsonEditor ariaLabel="Series JSON" value="" onChange={vi.fn()} />,
+    );
+    expect(screen.getByLabelText(aceLabel("Series JSON"))).toBeInTheDocument();
+
+    rerender(
+      <JsonEditor ariaLabel="Data points JSON" value="" onChange={vi.fn()} />,
+    );
+    expect(
+      screen.getByLabelText(aceLabel("Data points JSON")),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText(aceLabel("Series JSON"))).toBeNull();
+  });
+
   it("shows the text it is given, verbatim", () => {
     // Braces, not a bare JSX string: a JSX string attribute does not process
     // escapes, so `'…\n…'` written inline would be a literal backslash-n.

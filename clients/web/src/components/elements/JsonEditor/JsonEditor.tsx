@@ -149,11 +149,27 @@ export function JsonEditor({
   // wrapper's own id is what makes the `<label for>` focus the editor; the
   // error wiring follows Mantine's `${id}-error` naming.
   useEffect(() => {
-    const element = editorRef.current?.textInput.getElement();
+    const editor = editorRef.current;
+    const element = editor?.textInput.getElement();
     /* v8 ignore next -- the ref is set in `onLoad`, which react-ace calls
        synchronously on mount, so this effect always sees an element. */
-    if (!element) return;
+    if (!editor || !element) return;
     element.id = wrapperId;
+
+    // Re-apply the accessible name, not just set it once at mount.
+    //
+    // `setOptions` does update Ace's *option* when `ariaLabel` changes, but Ace
+    // only recomputes the textarea's `aria-label` from it inside
+    // `TextInput.setAriaLabel()`, which it calls when the cursor moves. So a
+    // name that changes while the editor stays mounted — a tool refreshed in
+    // place under a new field title, which `SchemaJsonField` passes straight
+    // through — leaves the visible label and the accessible name disagreeing
+    // until the user happens to click into the box.
+    //
+    // `onLoad` still does this too: an effect runs after paint, and this is the
+    // control's only name, so mount should not present a frame without it.
+    editor.setOption("textInputAriaLabel", ariaLabel);
+    editor.textInput.setAriaLabel();
 
     // Both the description and the error are rendered by the wrapper and both
     // describe this control, so both ids belong here — a supplied description
@@ -197,7 +213,7 @@ export function JsonEditor({
       element.removeAttribute("aria-disabled");
       element.tabIndex = 0;
     }
-  }, [wrapperId, hasError, description, disabled]);
+  }, [wrapperId, hasError, description, disabled, ariaLabel]);
 
   return (
     <Input.Wrapper
