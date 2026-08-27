@@ -24,12 +24,26 @@ export interface SessionSnapshot {
    * keeps the value the write replaced (#2089).
    */
   inspectorClient: InspectorClient | null;
+  /**
+   * The two OAuth-recovery slots. Unlike the fields above they are **not**
+   * supplied to this hook: they are owned by `useOAuthRecovery`, which mirrors
+   * them in an effect of its own (#2153). Keeping them off `SessionValues`
+   * is what lets that hook both own the state and read the ref — App.tsx
+   * would otherwise have to hold the state purely to hand it back.
+   */
   pendingStepUp: PendingStepUp | null;
   pendingReauth: PendingReauth | null;
 }
 
-/** What the caller supplies each render; `activeServerName` is derived. */
-export type SessionValues = Omit<SessionSnapshot, "activeServerName">;
+/**
+ * What the caller supplies each render. `activeServerName` is derived, and the
+ * two pending-OAuth slots are written by their owner — see
+ * {@link SessionSnapshot}.
+ */
+export type SessionValues = Omit<
+  SessionSnapshot,
+  "activeServerName" | "pendingStepUp" | "pendingReauth"
+>;
 
 /** A stable handle onto the latest {@link SessionSnapshot}. */
 export type SessionRef = RefObject<SessionSnapshot>;
@@ -60,6 +74,8 @@ export type SessionRef = RefObject<SessionSnapshot>;
 export function useSessionRef(values: SessionValues): SessionRef {
   const ref = useRef<SessionSnapshot>({
     activeServerName: undefined,
+    pendingStepUp: null,
+    pendingReauth: null,
     ...values,
   });
   // Deliberately un-gated: this is a passive mirror, so re-assigning the same
@@ -73,8 +89,6 @@ export function useSessionRef(values: SessionValues): SessionRef {
     ref.current.activeServerId = values.activeServerId;
     ref.current.servers = values.servers;
     ref.current.inspectorClient = values.inspectorClient;
-    ref.current.pendingStepUp = values.pendingStepUp;
-    ref.current.pendingReauth = values.pendingReauth;
   });
   return ref;
 }

@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -20,7 +21,6 @@ import { InspectorClient } from "@inspector/core/mcp/index.js";
 import { getServerType } from "@inspector/core/mcp/config.js";
 import type { JsonValue } from "@inspector/core/mcp/index.js";
 
-import type { TypedEvent } from "@inspector/core/mcp/inspectorClientEventTarget.js";
 import {
   getUrlElicitationsFromError,
   UrlElicitationLoopError,
@@ -58,13 +58,6 @@ import {
 } from "@inspector/core/client/remote.js";
 import { formatClientConfigLoadError } from "@inspector/core/client/config-parse.js";
 import type { FetchRequestLogStateEventMap } from "@inspector/core/mcp/state/fetchRequestLogState.js";
-import {
-  parseOAuthCallbackParams,
-  parseOAuthState,
-  generateOAuthErrorDescription,
-  formatOAuthFailureDetail,
-} from "@inspector/core/auth/index.js";
-import { RemoteInspectorClientStorage } from "@inspector/core/mcp/remote/index.js";
 import { useInspectorClient } from "@inspector/core/react/useInspectorClient.js";
 import {
   ServerListReloadError,
@@ -73,13 +66,16 @@ import {
 import { useSettingsDraft } from "@inspector/core/react/useSettingsDraft.js";
 import { useClientSettingsDraft } from "@inspector/core/react/useClientSettingsDraft.js";
 import { useEmaIdpLoginState } from "@inspector/core/react/useEmaIdpLoginState.js";
-import { getWebRemoteOAuthStorage } from "./lib/remoteOAuthStorage";
 import { useLastPersistedSettings } from "./hooks/useLastPersistedSettings";
 import { usePaginatedListsOverride } from "./hooks/usePaginatedListsOverride";
 import { useValueChange } from "./hooks/useValueChange";
 import { useThemeToggle } from "./hooks/useThemeToggle";
 import { useTabUiState } from "./hooks/useTabUiState";
 import { useSessionRef } from "./hooks/useSessionRef";
+import {
+  useOAuthRecovery,
+  type SetupClientForServer,
+} from "./hooks/useOAuthRecovery";
 import { useInspectorStores } from "./hooks/useInspectorStores";
 import { useExportActions } from "./hooks/useExportActions";
 import { useProgressToasts } from "./hooks/useProgressToasts";
@@ -120,10 +116,8 @@ import {
 import { ServerImportConfigModal } from "./components/groups/ServerImportConfigModal/ServerImportConfigModal";
 import { ServerImportJsonModal } from "./components/groups/ServerImportJsonModal/ServerImportJsonModal";
 import { ConnectionInfoModal } from "./components/groups/ConnectionInfoModal/ConnectionInfoModal";
-import { oauthDetailsFromConnectionState } from "./components/groups/ConnectionInfoContent/oauthDetailsFromConnectionState";
 import { OutputValidationModal } from "./components/groups/OutputValidationModal/OutputValidationModal";
 import { UrlElicitationErrorModal } from "./components/groups/UrlElicitationErrorModal/UrlElicitationErrorModal";
-import type { OAuthDetails } from "./components/groups/ConnectionInfoContent/ConnectionInfoContent";
 import { ServerRemoveConfirmModal } from "./components/groups/ServerRemoveConfirmModal/ServerRemoveConfirmModal";
 import { StepUpAuthModal } from "./components/groups/StepUpAuthModal/StepUpAuthModal";
 import { ReAuthBanner } from "./components/groups/ReAuthBanner/ReAuthBanner";
@@ -132,7 +126,6 @@ import {
   type PendingClientRequestContent,
 } from "./components/groups/PendingClientRequestModal/PendingClientRequestModal";
 import { downloadJsonFile } from "./lib/downloadFile";
-import { INSPECTOR_SERVERS_TAB } from "./utils/inspectorTabs";
 import { enrichProtocolEntries } from "./utils/correlateTransportErrors";
 import { visibleMalformedListItems } from "./utils/malformedListReport";
 import {
@@ -141,46 +134,12 @@ import {
   deepLinkParseStatus,
 } from "./utils/deepLink";
 import type { DeepLink, DeepLinkParseStatus } from "./utils/deepLink";
-import {
-  applyOAuthResumeUi,
-  buildTabUiSnapshot,
-  clearOAuthResumeSnapshot,
-  consumeOAuthResumeSnapshot,
-  oauthResumeInsufficientScopeMessage,
-  oauthResumeToastMessage,
-  writeOAuthResumeSnapshot,
-  type OAuthResumeAuthKind,
-} from "./lib/oauthResume";
+import { clearOAuthResumeSnapshot } from "./lib/oauthResume";
 import { createWebEnvironment } from "./lib/environmentFactory";
 import { OAUTH_CALLBACK_PATH, isUnauthorizedError } from "./utils/oauthFlow";
 import { AuthRecoveryRequiredError } from "@inspector/core/auth/challenge.js";
-import type {
-  AuthChallenge,
-  AuthChallengeReason,
-} from "@inspector/core/auth/challenge.js";
-import {
-  emaStepUpFailureMessage,
-  emaStepUpInProgressMessage,
-  emaStepUpSuccessMessage,
-} from "@inspector/core/auth/oauthUx.js";
 import { clearServerOAuthState } from "./lib/clearServerOAuthState";
-import {
-  authRecoveryRestoredMessage,
-  isReAuthBannerReason,
-  issuerBindingFailureCopy,
-  lostAuthorizationStateActionLabel,
-  oauthPreRedirectToastCopy,
-  oauthResumeAbandonedMessage,
-  reAuthBannerMessage,
-  type OAuthPreRedirectContext,
-  type OAuthRecoverySource,
-} from "./utils/oauthUx";
-import { findIssuerBindingFailure } from "@inspector/core/auth/issuerBinding.js";
-import {
-  isBrowserTabVisible,
-  onBrowserTabVisible,
-} from "./lib/browserTabVisibility";
-import type { PendingReauth } from "./utils/pendingReauth";
+import { authRecoveryRestoredMessage } from "./utils/oauthUx";
 import { getAuthToken, redirectUrlProvider } from "./lib/authToken";
 import { messagesToLogEntries } from "./lib/protocolReplay";
 import {
@@ -189,12 +148,7 @@ import {
   formatErrorDetails,
 } from "./utils/errorFormat";
 import { EMPTY_SETTINGS } from "./utils/serverSettingsDefaults";
-import {
-  isEmaStepUp,
-  isStepUpConfirmation,
-  type PendingStepUp,
-  type StepUpSource,
-} from "./utils/stepUp";
+import type { StepUpSource } from "./utils/stepUp";
 import {
   bodyDroppedToastId,
   CLIENT_CONFIG_LOAD_ERROR_NOTIFICATION_ID,
@@ -377,6 +331,7 @@ function App() {
 
   const sandboxBridgeFactory = useMemo(
     () =>
+      // eslint-disable-next-line react-hooks/refs -- pre-existing latest-ref pattern, unmasked when this component dropped below the React Compiler's bail-out (#2161)
       createAppBridgeFactory({
         publishAppDocument: publishDocument,
         getClient: () => inspectorClient?.getAppRendererClient() ?? null,
@@ -422,6 +377,7 @@ function App() {
   // ref is written every render, so client construction reads the current value
   // whichever entry point (connect, deep link, OAuth callback) reached it.
   const sandboxUrlRef = useRef<string | undefined>(undefined);
+  // eslint-disable-next-line react-hooks/refs -- pre-existing latest-ref pattern, unmasked when this component dropped below the React Compiler's bail-out (#2161)
   sandboxUrlRef.current = sandboxUrl;
   // Whether the sandbox exists is only known once `/api/config` resolves, and
   // the answer is baked into the client at construction (it decides whether the
@@ -443,7 +399,9 @@ function App() {
     if (!initialConfigLoading) initialConfigSettledRef.current?.resolve();
   }, [initialConfigLoading]);
   const appElicitations = useSyncExternalStore(
+    // eslint-disable-next-line react-hooks/refs -- pre-existing latest-ref pattern, unmasked when this component dropped below the React Compiler's bail-out (#2161)
     appElicitationController.subscribe,
+    // eslint-disable-next-line react-hooks/refs -- pre-existing latest-ref pattern, unmasked when this component dropped below the React Compiler's bail-out (#2161)
     appElicitationController.getEntries,
   );
   // A SECOND factory, differing from `sandboxBridgeFactory` only in that it
@@ -451,6 +409,7 @@ function App() {
   // an elicitation, so telling those apps otherwise would be a false claim.
   const elicitationBridgeFactory = useMemo(
     () =>
+      // eslint-disable-next-line react-hooks/refs -- pre-existing latest-ref pattern, unmasked when this component dropped below the React Compiler's bail-out (#2161)
       createAppBridgeFactory({
         advertiseElicitation: true,
         publishAppDocument: publishDocument,
@@ -544,88 +503,23 @@ function App() {
     togglePinProtocol,
     resetTabUiState,
   } = useTabUiState();
-  const [pendingStepUp, setPendingStepUp] = useState<PendingStepUp | null>(
-    null,
-  );
-  const pendingStepUpRetryRef = useRef<(() => Promise<unknown>) | null>(null);
-  const [reAuthBanner, setReAuthBanner] = useState<{
-    serverId: string;
-    message: string;
-    /**
-     * `lost_authorization_state` marks the SEP-2352 recovery case (#1808): the
-     * callback arrived with no recorded discovery state, so the banner offers
-     * "Authorize again", which drops the stale/partial OAuth state before
-     * starting a fresh authorization.
-     */
-    kind?: "lost_authorization_state";
-    /**
-     * Resolved at the point the banner is raised so `issuerBindingFailureCopy`
-     * stays the single source of the `kind → copy` mapping; both fall back to
-     * `ReAuthBanner`'s own defaults when absent.
-     */
-    title?: string;
-    actionLabel?: string;
-  } | null>(null);
-  const [pendingReauth, setPendingReauth] = useState<PendingReauth | null>(
-    null,
-  );
   // One stable ref mirroring every session value a long-lived callback needs
   // to read *currently* rather than as of the render that created it. Declared
   // here — ahead of its first reader — because a hook return is not provably
   // stable to `react-hooks/exhaustive-deps`, so consumers list it and would hit
-  // the temporal dead zone if it came later.
+  // the temporal dead zone if it came later. The two pending-OAuth slots are
+  // written into it by `useOAuthRecovery`, which owns them (#2153).
   const sessionRef = useSessionRef({
     activeServerId,
     servers,
     inspectorClient,
-    pendingStepUp,
-    pendingReauth,
   });
-  const reauthResumeInProgressRef = useRef(false);
-  const stepUpAuthorizeInProgressRef = useRef(false);
-
-  useEffect(() => {
-    const pending = sessionRef.current.pendingReauth;
-    if (pending && pending.serverId !== activeServerId) {
-      setPendingReauth(null);
-    }
-    const stepUp = sessionRef.current.pendingStepUp;
-    if (stepUp && stepUp.serverId !== activeServerId) {
-      setPendingStepUp(null);
-    }
-  }, [sessionRef, activeServerId]);
-
-  const trySetPendingStepUp = useCallback(
-    (next: NonNullable<typeof pendingStepUp>): boolean => {
-      if (sessionRef.current.pendingStepUp !== null) {
-        notifications.show({
-          title: "Step-up authorization in progress",
-          message:
-            "Complete or cancel the current step-up prompt before starting another.",
-          color: "yellow",
-          autoClose: 5000,
-        });
-        return false;
-      }
-      setPendingStepUp(next);
-      return true;
-    },
-    [sessionRef],
-  );
 
   // Handshake telemetry. `connectStartRef` is set at the "connecting" edge
   // and consumed at the "connected" edge — a ref (not state) so the
   // intervening rerenders don't reset it.
   const connectStartRef = useRef<number | undefined>(undefined);
   const [latencyMs, setLatencyMs] = useState<number | undefined>(undefined);
-
-  // One-shot guard for the `/oauth/callback` handler below. The effect waits
-  // for the async `servers` list to hydrate, so it can run on more than one
-  // render; this ref ensures the token exchange fires exactly once per load.
-  const oauthCallbackHandledRef = useRef(false);
-  const staleOAuthCheckedRef = useRef(false);
-  /** Guards against applying the same OAuth resume snapshot more than once per load. */
-  const oauthResumeUiAppliedRef = useRef(false);
 
   // Progress and task-status toasts, and the taskId → progress map the Tasks
   // screen renders from. Both hooks subscribe to the live client's events and
@@ -706,6 +600,90 @@ function App() {
     stderrLogs,
   } = useInspectorStores({ inspectorClient, connected, paginatedLists });
 
+  /** Drops every in-flight result panel; see `clearResultPanels` below. */
+  const clearResultPanels = useCallback(() => {
+    setToolCallState(undefined);
+    setGetPromptState(undefined);
+    setReadResourceState(undefined);
+  }, []);
+
+  /**
+   * Routes a step-up failure or cancellation to the panel that issued the
+   * command. `app` and `ambient` have no panel of their own — the App bridge
+   * surfaces its own message and an ambient challenge was never user-initiated
+   * — so they fall through to the no-op arm.
+   */
+  const setSourceScopedError = useCallback(
+    (source: StepUpSource, message: string) => {
+      switch (source) {
+        case "tool":
+          setToolCallState({ status: "error", error: message });
+          break;
+        case "prompt":
+          setGetPromptState((prev) =>
+            prev ? { ...prev, status: "error", error: message } : prev,
+          );
+          break;
+        case "resource":
+          setReadResourceState((prev) =>
+            prev ? { ...prev, status: "error", error: message } : prev,
+          );
+          break;
+        default:
+          break;
+      }
+    },
+    [],
+  );
+
+  /**
+   * Published below, once the connect path's `setupClientForServer` exists —
+   * it reads `onBeforeOAuthRedirect` and `sessionStorageAdapter` out of the
+   * hook we are about to call, so it cannot be declared before it.
+   */
+  const setupClientForServerRef = useRef<SetupClientForServer | null>(null);
+
+  // Every path by which a lapsed authorization is noticed and recovered: the
+  // re-auth banner, step-up, deferred background-tab recovery, the
+  // `/oauth/callback` completion, and the redirect plumbing the connect path
+  // below consumes (#2153).
+  const {
+    webOAuthStorage,
+    sessionStorageAdapter,
+    onBeforeOAuthRedirect,
+    prepareOAuthRedirect,
+    reAuthBanner,
+    setReAuthBanner,
+    resetOAuthRecoveryState,
+    pendingStepUp,
+    handleStepUpAuthorize,
+    handleStepUpCancel,
+    handleCommandScopedAuthRecovery,
+    runWithCommandAuthRecovery,
+    runCommandInBackground,
+    connectionInfoOAuth,
+    clearServerOAuthAndDisconnect,
+    finalizeExplicitDisconnect,
+  } = useOAuthRecovery({
+    sessionRef,
+    servers,
+    activeServerId,
+    inspectorClient,
+    connectionStatus,
+    activeTab,
+    ui,
+    setUi,
+    setActiveTab,
+    fetchLogRef,
+    connectStartRef,
+    initialConfigSettledRef,
+    setupClientForServerRef,
+    setActiveServerId,
+    setFailedServerId,
+    clearResultPanels,
+    setSourceScopedError,
+  });
+
   // The malformed-entry report is written by the aggregate walk's salvage. In
   // paginated mode the tools/prompts/resources panels render the paged stores
   // instead, which never write or clear it — so it would linger above a page it
@@ -724,6 +702,7 @@ function App() {
   // (`connect-src 'none'`), exactly as before this wiring existed. Walking the
   // whole list to close that would issue the very requests the user opted out
   // of by turning pagination on, so the setting wins.
+  // eslint-disable-next-line react-hooks/refs -- pre-existing latest-ref pattern, unmasked when this component dropped below the React Compiler's bail-out (#2161)
   listedResourcesRef.current = resources;
 
   // Fold the transport errors the SDK throws rather than delivers (e.g. -32601
@@ -806,6 +785,7 @@ function App() {
   // whenever the session isn't connected (disconnect, a new attempt's
   // "connecting", or an error).
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- pre-existing status-driven effect, unmasked when this component dropped below the React Compiler's bail-out (#2161)
     setConnectedServerId(
       connectionStatus === "connected" ? activeServerId : undefined,
     );
@@ -836,18 +816,6 @@ function App() {
   // `connectionStatus` effect above, which has its own connecting-edge ref to
   // coordinate with. Colocated with the setters it touches so this is the
   // single place to extend as App.tsx accrues more per-session state (#1394).
-  /** Clears pending OAuth resume state — explicit user disconnect only. */
-  const clearOAuthResumeOnExplicitDisconnect = useCallback(() => {
-    clearOAuthResumeSnapshot();
-    oauthResumeUiAppliedRef.current = false;
-  }, []);
-
-  /** Snapshot cleanup plus shell reset when the user explicitly ends a session. */
-  const finalizeExplicitDisconnect = useCallback(() => {
-    clearOAuthResumeOnExplicitDisconnect();
-    setActiveTab(INSPECTOR_SERVERS_TAB);
-  }, [clearOAuthResumeOnExplicitDisconnect, setActiveTab]);
-
   // Does not clear the OAuth resume snapshot — that is tied to an in-flight
   // full-page redirect and is cleared on explicit disconnect or consumed on callback.
   const resetSessionScopedUiState = useCallback(() => {
@@ -878,13 +846,11 @@ function App() {
         ? (resolveModernLogLevel(activeServer.settings) ?? null)
         : null,
     );
-    setPendingStepUp(null);
-    setPendingReauth(null);
-    setReAuthBanner(null);
+    resetOAuthRecoveryState();
     // Remembered scroll offsets are session-scoped too — drop them so the next
     // session's screens start at the top (#1417).
     clearScrollMemory();
-  }, [sessionRef, resetTabUiState, resetTaskProgress]);
+  }, [sessionRef, resetTabUiState, resetTaskProgress, resetOAuthRecoveryState]);
 
   // Reset activeServerId whenever the live session ends. Without this the
   // other ServerCards stay `inert` after disconnect — ServerCard dims any
@@ -999,36 +965,6 @@ function App() {
   const deepLinkUpdateRef = useRef(false);
   const deepLinkConnectRef = useRef(false);
 
-  const showReAuthBanner = useCallback(
-    (
-      serverId: string,
-      detail?: unknown,
-      options?: { reason?: AuthChallengeReason },
-    ) => {
-      const server = sessionRef.current.servers.find((s) => s.id === serverId);
-      const message = reAuthBannerMessage({
-        serverName: server?.name,
-        detail:
-          detail !== undefined ? formatOAuthFailureDetail(detail) : undefined,
-      });
-      const reason = options?.reason;
-      if (reason !== undefined && !isReAuthBannerReason(reason)) {
-        notifications.show({
-          title: "Authorization required",
-          message,
-          color: "yellow",
-          autoClose: false,
-        });
-        return;
-      }
-      setReAuthBanner({
-        serverId,
-        message,
-      });
-    },
-    [sessionRef],
-  );
-
   // Surface a mid-session transport failure (stdio crash, SSE drop, HTTP 5xx)
   // as a toast. The handshake case is handled in `onToggleConnection`'s catch;
   // this covers the `status: connected → error` transition that fires the
@@ -1053,60 +989,6 @@ function App() {
   const connectionInfoTransport: ServerType =
     activeServer?.config.type ?? "stdio";
 
-  const [
-    connectionInfoOAuthWhenConnected,
-    setConnectionInfoOAuthWhenConnected,
-  ] = useState<OAuthDetails | undefined>(undefined);
-
-  const connectionInfoOAuth =
-    connectionStatus === "connected" && inspectorClient
-      ? connectionInfoOAuthWhenConnected
-      : undefined;
-
-  useEffect(() => {
-    if (connectionStatus !== "connected" || !inspectorClient) {
-      return;
-    }
-
-    let cancelled = false;
-
-    const refresh = (): void => {
-      void inspectorClient.getOAuthState().then((state) => {
-        if (cancelled) return;
-        setConnectionInfoOAuthWhenConnected(
-          state ? oauthDetailsFromConnectionState(state) : undefined,
-        );
-      });
-    };
-
-    const onAmbientAuthChallenge = (): void => {
-      const name = sessionRef.current.activeServerName;
-      notifications.show({
-        title: name
-          ? `Refreshing authorization for "${name}"`
-          : "Refreshing authorization",
-        message: "Refreshing authorization…",
-        color: "blue",
-        autoClose: 4000,
-      });
-    };
-
-    refresh();
-    inspectorClient.addEventListener("oauthComplete", refresh);
-    inspectorClient.addEventListener(
-      "authChallengeAmbient",
-      onAmbientAuthChallenge,
-    );
-    return () => {
-      cancelled = true;
-      inspectorClient.removeEventListener("oauthComplete", refresh);
-      inspectorClient.removeEventListener(
-        "authChallengeAmbient",
-        onAmbientAuthChallenge,
-      );
-    };
-  }, [sessionRef, connectionStatus, inspectorClient]);
-
   const connectionInfoCanClearOAuth =
     connectionStatus === "connected" &&
     !!inspectorClient &&
@@ -1118,34 +1000,6 @@ function App() {
   const logs = useMemo<LogEntryData[]>(
     () => messagesToLogEntries(messages),
     [messages],
-  );
-
-  // Shared OAuth runtime store (oauth.json via /api/storage/oauth). Memoized so
-  // connect, EMA IdP session, and per-server clear share one in-memory view.
-  const webOAuthStorage = useMemo(
-    () => getWebRemoteOAuthStorage(getAuthToken()),
-    [],
-  );
-
-  // Backend-backed session storage used to carry the fetch (Network) log
-  // across the OAuth full-page redirect. The auth handshake's first half —
-  // protected-resource + auth-server discovery and Dynamic Client
-  // Registration — happens on the pre-redirect page; without persisting it
-  // those `auth` entries would vanish when the browser navigates to the
-  // authorization server. `FetchRequestLogState` saves to this on the
-  // client's `saveSession` event (fired in `onBeforeOAuthRedirect`) keyed by
-  // the OAuth authId, and restores from it when rebuilt on `/oauth/callback`.
-  // Created once; `getAuthToken()` is stable for the page's lifetime.
-  const sessionStorageAdapter = useMemo(
-    () =>
-      new RemoteInspectorClientStorage({
-        baseUrl:
-          typeof window !== "undefined"
-            ? window.location.origin
-            : "http://localhost",
-        authToken: getAuthToken(),
-      }),
-    [],
   );
 
   // Make the live client reflect one settings value, in full. Every path that
@@ -1184,522 +1038,6 @@ function App() {
     },
     [sessionRef, fetchLogRef],
   );
-
-  // Flush the pre-redirect Network log to backend storage, keyed by the OAuth
-  // authId carried in the authorization URL's `state`. Runs synchronously from
-  // `BrowserNavigation` right before `window.location.href`, so the keepalive
-  // POST it kicks off outlives the unloading page. The `/oauth/callback`
-  // rebuild restores these entries via `FetchRequestLogState`'s `sessionId`.
-  // Stable identity: it reads mutable refs, so it never needs to be rebuilt.
-  const onBeforeOAuthRedirect = useCallback(
-    (authorizationUrl: URL) => {
-      const stateParam = authorizationUrl.searchParams.get("state");
-      const authId = stateParam
-        ? (parseOAuthState(stateParam)?.authId ?? undefined)
-        : undefined;
-      if (!authId) return;
-      const fetchRequests = fetchLogRef.current?.getFetchRequests() ?? [];
-      if (fetchRequests.length === 0) return;
-      const now = Date.now();
-      // Fire-and-forget: the keepalive request inside `saveSession` is
-      // dispatched synchronously here, before navigation commits.
-      void sessionStorageAdapter
-        .saveSession(authId, {
-          fetchRequests,
-          createdAt: now,
-          updatedAt: now,
-        })
-        .catch(() => {
-          // Best-effort; losing the pre-redirect log is non-fatal.
-        });
-    },
-    [sessionStorageAdapter, fetchLogRef],
-  );
-
-  const prepareOAuthRedirect = useCallback(
-    ({
-      serverId,
-      authKind,
-      authorizationUrl,
-      authChallenge,
-      recoverySource,
-      preRedirectContext,
-      client,
-    }: {
-      serverId: string;
-      authKind: OAuthResumeAuthKind;
-      authorizationUrl: URL;
-      authChallenge?: AuthChallenge;
-      recoverySource?: OAuthRecoverySource;
-      preRedirectContext?: OAuthPreRedirectContext;
-      client?: InspectorClient;
-    }) => {
-      setReAuthBanner(null);
-      const server = sessionRef.current.servers.find((s) => s.id === serverId);
-      const preRedirectToast = oauthPreRedirectToastCopy(authKind, {
-        serverName: server?.name,
-        enterpriseManaged: server?.settings?.enterpriseManaged,
-        context: preRedirectContext,
-      });
-      if (preRedirectToast) {
-        notifications.show({
-          title: preRedirectToast.title,
-          message: preRedirectToast.message,
-          color: "blue",
-          autoClose: 4000,
-        });
-      }
-      const oauthClient = client ?? inspectorClient;
-      const remoteSessionId = oauthClient?.getRemoteBackendSessionId();
-      onBeforeOAuthRedirect(authorizationUrl);
-      // Write immediately before navigation so implicit client teardown (during
-      // connect setup) cannot clear the snapshot after we persist it.
-      writeOAuthResumeSnapshot({
-        version: 1,
-        serverId,
-        activeTab,
-        authKind,
-        tabUi: buildTabUiSnapshot(ui),
-        ...(remoteSessionId && { remoteSessionId }),
-        ...(authKind === "step_up" && authChallenge && { authChallenge }),
-        ...(recoverySource && { recoverySource }),
-      });
-      void oauthClient?.beginInteractiveAuthorization(authorizationUrl);
-    },
-    [sessionRef, inspectorClient, activeTab, ui, onBeforeOAuthRedirect],
-  );
-
-  const tryApplyStoredAuthRecovery = useCallback(
-    async (
-      client: InspectorClient,
-      challenge: AuthChallenge,
-      recoverySource?: OAuthRecoverySource,
-    ): Promise<boolean> => {
-      if (!(await client.checkAuthChallengeSatisfied(challenge))) {
-        return false;
-      }
-      await client.pushRemoteAuthState();
-      notifications.show({
-        title: "Authorization restored",
-        message: authRecoveryRestoredMessage({ recoverySource }),
-        color: "green",
-        autoClose: 4000,
-      });
-      return true;
-    },
-    [],
-  );
-
-  const runVisibleInteractiveAuth = useCallback(
-    ({
-      serverId,
-      challenge,
-      authorizationUrl,
-      source = "ambient",
-    }: {
-      serverId: string;
-      challenge: AuthChallenge;
-      authorizationUrl: URL;
-      source?: StepUpSource;
-    }) => {
-      const server = sessionRef.current.servers.find((s) => s.id === serverId);
-      if (isStepUpConfirmation(challenge, server)) {
-        trySetPendingStepUp({
-          challenge,
-          authorizationUrl,
-          serverId,
-          source,
-          enterpriseManaged: isEmaStepUp(challenge, server),
-        });
-        return;
-      }
-      prepareOAuthRedirect({
-        serverId,
-        authKind: "reauth",
-        authorizationUrl,
-        recoverySource: source,
-      });
-    },
-    [sessionRef, prepareOAuthRedirect, trySetPendingStepUp],
-  );
-
-  const deferAmbientReauth = useCallback(
-    (pending: PendingReauth) => {
-      if (sessionRef.current.pendingReauth) {
-        notifications.show({
-          title: "Authorization update pending",
-          message:
-            "A new authorization request replaced the previous deferred recovery.",
-          color: "yellow",
-          autoClose: 5000,
-        });
-      } else {
-        notifications.show({
-          title: "Authorization pending",
-          message: "Return to this tab to continue authorization.",
-          color: "blue",
-          autoClose: 5000,
-        });
-      }
-      setPendingReauth(pending);
-    },
-    [sessionRef],
-  );
-
-  const handleCommandScopedAuthRecovery = useCallback(
-    async (
-      error: AuthRecoveryRequiredError,
-      options: {
-        serverId: string;
-        source: StepUpSource;
-        retryOperation?: () => Promise<unknown>;
-      },
-    ): Promise<boolean> => {
-      if (!inspectorClient) {
-        return false;
-      }
-      const server = sessionRef.current.servers.find(
-        (s) => s.id === options.serverId,
-      );
-      const stepUp =
-        error.emaStepUpConfirm ||
-        isStepUpConfirmation(error.authChallenge, server);
-
-      if (stepUp) {
-        if (
-          await tryApplyStoredAuthRecovery(
-            inspectorClient,
-            error.authChallenge,
-            options.source,
-          )
-        ) {
-          return true;
-        }
-        pendingStepUpRetryRef.current = options.retryOperation ?? null;
-        trySetPendingStepUp({
-          challenge: error.authChallenge,
-          authorizationUrl: error.authorizationUrl,
-          serverId: options.serverId,
-          source: options.source,
-          enterpriseManaged: isEmaStepUp(error.authChallenge, server),
-        });
-        return false;
-      }
-
-      if (
-        await tryApplyStoredAuthRecovery(
-          inspectorClient,
-          error.authChallenge,
-          options.source,
-        )
-      ) {
-        return true;
-      }
-
-      prepareOAuthRedirect({
-        serverId: options.serverId,
-        authKind: "reauth",
-        authorizationUrl: error.authorizationUrl,
-        recoverySource: options.source,
-      });
-      return false;
-    },
-    [
-      sessionRef,
-      inspectorClient,
-      prepareOAuthRedirect,
-      tryApplyStoredAuthRecovery,
-      trySetPendingStepUp,
-    ],
-  );
-
-  const runWithCommandAuthRecovery = useCallback(
-    async <T,>(
-      operation: () => Promise<T>,
-      source: StepUpSource,
-    ): Promise<T | undefined> => {
-      if (!inspectorClient || !activeServerId) {
-        return operation();
-      }
-      try {
-        return await operation();
-      } catch (err) {
-        if (err instanceof AuthRecoveryRequiredError) {
-          const satisfied = await handleCommandScopedAuthRecovery(err, {
-            serverId: activeServerId,
-            source,
-            retryOperation: operation,
-          });
-          if (satisfied) {
-            return operation();
-          }
-          return undefined;
-        }
-        throw err;
-      }
-    },
-    [inspectorClient, activeServerId, handleCommandScopedAuthRecovery],
-  );
-
-  /**
-   * Fire-and-forget form of {@link runWithCommandAuthRecovery}, for a command
-   * whose caller has nothing to await (a click handler, a mode toggle).
-   *
-   * The wrapper rethrows anything that is not an `AuthRecoveryRequiredError`,
-   * so a bare `void runWithCommandAuthRecovery(...)` turns every non-auth
-   * failure — a transport error, a rejected `tools/list` — into an unhandled
-   * rejection in the browser (#2049). Routing every background command through
-   * here is what keeps a new call site from reintroducing that gap by
-   * omission: there is no `void` to forget.
-   *
-   * `errorTitle` picks the reporting, and the choice is per call site:
-   *
-   * - **Omit it** when the operation's own state already renders the failure —
-   *   the list loads, whose managed/paged stores record the error and whose
-   *   panel shows it with a Retry. A toast there would only duplicate what the
-   *   user is already looking at, so the rejection is swallowed deliberately.
-   * - **Pass one** when nothing else records the failure, and the user would
-   *   otherwise see the command silently do nothing.
-   */
-  const runCommandInBackground = useCallback(
-    (
-      operation: () => Promise<unknown>,
-      source: StepUpSource,
-      errorTitle?: string,
-    ): void => {
-      void runWithCommandAuthRecovery(operation, source).catch(
-        (err: unknown) => {
-          if (!errorTitle) return;
-          notifications.show({
-            title: errorTitle,
-            message: err instanceof Error ? err.message : String(err),
-            color: "red",
-          });
-        },
-      );
-    },
-    [runWithCommandAuthRecovery],
-  );
-
-  const resumePendingReauth = useCallback(
-    async (pending: PendingReauth) => {
-      if (reauthResumeInProgressRef.current) {
-        return;
-      }
-      const client = inspectorClient;
-      if (!client) {
-        return;
-      }
-      if (connectionStatus !== "connected") {
-        return;
-      }
-      if (pending.serverId !== sessionRef.current.activeServerId) {
-        return;
-      }
-
-      reauthResumeInProgressRef.current = true;
-      setPendingReauth(null);
-      try {
-        if (
-          await tryApplyStoredAuthRecovery(
-            client,
-            pending.challenge,
-            pending.source,
-          )
-        ) {
-          return;
-        }
-
-        if (pending.authKind === "step_up") {
-          runVisibleInteractiveAuth({
-            serverId: pending.serverId,
-            challenge: pending.challenge,
-            authorizationUrl: pending.authorizationUrl,
-            source: pending.source,
-          });
-          return;
-        }
-
-        const outcome = await client.handleAuthChallenge(pending.challenge);
-        if (outcome.kind === "satisfied") {
-          await client.pushRemoteAuthState();
-          notifications.show({
-            title: "Authorization restored",
-            message: authRecoveryRestoredMessage({
-              recoverySource: pending.source,
-            }),
-            color: "green",
-            autoClose: 4000,
-          });
-          return;
-        }
-        if (outcome.kind === "interactive") {
-          runVisibleInteractiveAuth({
-            serverId: pending.serverId,
-            challenge: outcome.challenge,
-            authorizationUrl: outcome.authorizationUrl,
-            source: pending.source,
-          });
-          return;
-        }
-        if (outcome.kind === "failed") {
-          showReAuthBanner(pending.serverId, outcome.error, {
-            reason: pending.challenge.reason,
-          });
-        }
-      } finally {
-        reauthResumeInProgressRef.current = false;
-      }
-    },
-    [
-      sessionRef,
-      inspectorClient,
-      connectionStatus,
-      tryApplyStoredAuthRecovery,
-      runVisibleInteractiveAuth,
-      showReAuthBanner,
-    ],
-  );
-
-  useEffect(() => {
-    if (connectionStatus !== "connected" || !inspectorClient) {
-      return;
-    }
-
-    const onAuthChallengeInteractive = (
-      event: TypedEvent<"authChallengeInteractive">,
-    ): void => {
-      void (async () => {
-        const { challenge, authorizationUrl } = event.detail;
-        const serverId = sessionRef.current.activeServerId;
-        if (!serverId) {
-          return;
-        }
-        const server = sessionRef.current.servers.find(
-          (s) => s.id === serverId,
-        );
-        const authKind: OAuthResumeAuthKind = isStepUpConfirmation(
-          challenge,
-          server,
-        )
-          ? "step_up"
-          : "reauth";
-
-        if (!isBrowserTabVisible()) {
-          deferAmbientReauth({
-            serverId,
-            challenge,
-            authorizationUrl,
-            authKind,
-            source: "ambient",
-          });
-          return;
-        }
-
-        if (await tryApplyStoredAuthRecovery(inspectorClient, challenge)) {
-          return;
-        }
-
-        runVisibleInteractiveAuth({
-          serverId,
-          challenge,
-          authorizationUrl,
-          source: "ambient",
-        });
-      })();
-    };
-
-    inspectorClient.addEventListener(
-      "authChallengeInteractive",
-      onAuthChallengeInteractive,
-    );
-    return () => {
-      inspectorClient.removeEventListener(
-        "authChallengeInteractive",
-        onAuthChallengeInteractive,
-      );
-    };
-  }, [
-    sessionRef,
-    connectionStatus,
-    inspectorClient,
-    tryApplyStoredAuthRecovery,
-    runVisibleInteractiveAuth,
-    deferAmbientReauth,
-  ]);
-
-  useEffect(() => {
-    return onBrowserTabVisible(() => {
-      const pending = sessionRef.current.pendingReauth;
-      if (pending) {
-        void resumePendingReauth(pending);
-      }
-    });
-  }, [sessionRef, resumePendingReauth]);
-
-  // Resume deferred background-tab recovery once the session reconnects.
-  useEffect(() => {
-    if (connectionStatus !== "connected" || !inspectorClient) {
-      return;
-    }
-    if (!isBrowserTabVisible()) {
-      return;
-    }
-    const pending = sessionRef.current.pendingReauth;
-    if (pending) {
-      void resumePendingReauth(pending);
-    }
-  }, [sessionRef, connectionStatus, inspectorClient, resumePendingReauth]);
-
-  useEffect(() => {
-    if (connectionStatus !== "connected" || !inspectorClient) {
-      return;
-    }
-
-    const onOAuthError = (event: TypedEvent<"oauthError">): void => {
-      const serverId = sessionRef.current.activeServerId;
-      if (!serverId) {
-        return;
-      }
-      showReAuthBanner(serverId, event.detail.error);
-    };
-
-    inspectorClient.addEventListener("oauthError", onOAuthError);
-    return () => {
-      inspectorClient.removeEventListener("oauthError", onOAuthError);
-    };
-  }, [sessionRef, connectionStatus, inspectorClient, showReAuthBanner]);
-
-  // Detect an abandoned full-page OAuth redirect (snapshot left, no callback).
-  useEffect(() => {
-    if (staleOAuthCheckedRef.current) return;
-    if (typeof window === "undefined") return;
-    if (window.location.pathname === OAUTH_CALLBACK_PATH) return;
-    if (servers.length === 0) return;
-    staleOAuthCheckedRef.current = true;
-
-    const snapshot = consumeOAuthResumeSnapshot();
-    if (!snapshot) {
-      return;
-    }
-    queueMicrotask(() => {
-      if (snapshot.authKind === "reauth") {
-        showReAuthBanner(
-          snapshot.serverId,
-          oauthResumeAbandonedMessage(snapshot.authKind),
-        );
-        return;
-      }
-      if (snapshot.authKind === "step_up") {
-        showReAuthBanner(
-          snapshot.serverId,
-          oauthResumeAbandonedMessage(snapshot.authKind, {
-            recoverySource: snapshot.recoverySource,
-          }),
-        );
-      }
-    });
-  }, [servers, showReAuthBanner]);
 
   // Wire up + tear down per active server. Called by `onToggleConnection`
   // when the user switches targets. Returns the new client so the toggle
@@ -1887,267 +1225,18 @@ function App() {
       lastPersistedSettings,
     ],
   );
-
-  // Finish the OAuth authorization-code flow when the auth server redirects
-  // back to `/oauth/callback`. This runs on a fresh page load (the redirect in
-  // `onToggleConnection` unloaded the previous one), so all React state is
-  // reset and we recover the initiating server from sessionStorage. We wait for
-  // `servers` to hydrate before acting; the ref guard keeps the exchange to a
-  // single run. The persisted PKCE verifier + DCR client info live in shared
-  // `RemoteOAuthStorage` (`oauth.json`) and survive the redirect, so
-  // `completeOAuthFlow` exchanges the code without needing the original
-  // in-memory state machine.
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (window.location.pathname !== OAUTH_CALLBACK_PATH) return;
-    if (oauthCallbackHandledRef.current) return;
-    // `useServers` returns [] until the first fetch resolves; defer until the
-    // list is populated so `find` can resolve the pending server.
-    if (servers.length === 0) return;
-    oauthCallbackHandledRef.current = true;
-
-    const params = parseOAuthCallbackParams(window.location.search);
-    // The OAuth `state` round-trips the auth session id; the authId is the
-    // session key the pre-redirect page saved the fetch log under, so the
-    // rebuilt client can restore those `auth` entries. Read it before the
-    // URL is cleared below.
-    //
-    // Defense-in-depth: a `state` that is present but does not parse to our
-    // expected 64-char-hex authId shape did not originate from
-    // `generateOAuthState`, so reject the callback instead of silently
-    // proceeding with an undefined sessionId. This is a shape check, not full
-    // state-matching — the primary CSRF protection remains PKCE
-    // (`code_verifier`); this layer catches malformed/forged `state` early.
-    //
-    // Intentional asymmetry: a present-but-malformed `state` (including the
-    // empty string `?state=`) is rejected, but a wholly absent `state`
-    // (`stateParam === null`) is *not* — it falls through with
-    // `sessionId = undefined` and is matched via the OAuth resume snapshot
-    // (`resumeSnapshot.serverId`) instead. Rejecting the null case would turn any provider error redirect
-    // that omits `state` into a misleading "rejected" toast, hiding the real
-    // OAuth error surfaced by the `!params.successful` branch below.
-    const stateParam = new URLSearchParams(window.location.search).get("state");
-    const parsedState = stateParam ? parseOAuthState(stateParam) : null;
-    const stateRejected = stateParam !== null && parsedState === null;
-    const sessionId = parsedState?.authId ?? undefined;
-    const resumeSnapshot = consumeOAuthResumeSnapshot();
-
-    // Strip the code/state off the URL immediately so a reload can't replay
-    // the (now single-use) authorization code through the exchange again.
-    window.history.replaceState({}, "", "/");
-
-    if (stateRejected) {
-      notifications.show({
-        title: "OAuth callback rejected",
-        message:
-          "OAuth callback carried an unrecognized state parameter that did not originate from this session. Please try connecting again.",
-        color: "red",
-      });
-      return;
-    }
-
-    const applyResumeUiOnce = (
-      snapshot: NonNullable<typeof resumeSnapshot>,
-    ) => {
-      if (oauthResumeUiAppliedRef.current) {
-        return;
-      }
-      applyOAuthResumeUi(snapshot, {
-        ...setUi,
-        setActiveTab,
-        clearToolCallState: () => setToolCallState(undefined),
-        clearGetPromptState: () => setGetPromptState(undefined),
-        clearReadResourceState: () => setReadResourceState(undefined),
-      });
-      oauthResumeUiAppliedRef.current = true;
-    };
-
-    if (resumeSnapshot && params.successful) {
-      applyResumeUiOnce(resumeSnapshot);
-    }
-
-    if (!params.successful) {
-      const pendingId = resumeSnapshot?.serverId;
-      if (pendingId) {
-        // Red border only (#1621), not a sidebar. This arm returns before a
-        // client is rebuilt, so the persisted `auth` entries are never
-        // restored and the content-gated column stays shut — correctly: the
-        // provider's own `error` param is the whole diagnostic, and the
-        // re-auth banner below is already showing it. The flag is still right,
-        // because the attempt did fail.
-        setFailedServerId(pendingId);
-        queueMicrotask(() => {
-          showReAuthBanner(pendingId, generateOAuthErrorDescription(params));
-        });
-      } else {
-        notifications.show({
-          title: "OAuth authorization failed",
-          message: generateOAuthErrorDescription(params),
-          color: "red",
-        });
-      }
-      return;
-    }
-
-    const pendingId = resumeSnapshot?.serverId;
-    const server = pendingId
-      ? servers.find((s) => s.id === pendingId)
-      : undefined;
-    if (!server) {
-      notifications.show({
-        title: "OAuth callback could not be matched",
-        message:
-          "Could not determine which server started the OAuth flow. Please try connecting again.",
-        color: "red",
-      });
-      return;
-    }
-
-    void (async () => {
-      // Same reason as the connect path: whether this client may advertise
-      // app-rendered elicitation is fixed at construction.
-      await initialConfigSettledRef.current?.promise;
-      try {
-        await webOAuthStorage.load();
-      } catch (err) {
-        connectStartRef.current = undefined;
-        // Red border only, for the same reason as the provider-error arm above
-        // — and here the network log would not help anyway: this is a failure
-        // to read local OAuth storage, not a request that went out.
-        setFailedServerId(server.id);
-        queueMicrotask(() => {
-          showReAuthBanner(server.id, err instanceof Error ? err : String(err));
-        });
-        return;
-      }
-      const client = setupClientForServer(server, sessionId);
-      setActiveServerId(server.id);
-      try {
-        connectStartRef.current = Date.now();
-        await client.resumeAfterOAuth(params.code, {
-          remoteSessionId: resumeSnapshot?.remoteSessionId,
-          iss: params.iss,
-        });
-      } catch (err) {
-        connectStartRef.current = undefined;
-        // `resumeAfterOAuth` carries the reconnect, and that reconnect can
-        // reject with an auth-recovery error — which holds the status at
-        // `"connecting"` instead of moving it to `"error"`. Nothing downstream
-        // of here ends the attempt, so without this the toggle is stuck and the
-        // active-server lock is never released. Before the EMA guard, since a
-        // stuck session is worth clearing whichever way the error classifies.
-        await client.disconnect().catch(() => {});
-        // `activeServerId` is deliberately NOT cleared here, even though the
-        // disconnect above often cannot announce itself: it emits only on a
-        // status *change*, and the commonest failure — a rejected token
-        // exchange — throws inside `completeOAuthFlow` before the reconnect
-        // runs, so this freshly built client is still at its initial
-        // `"disconnected"` and the listener that would clear it never fires.
-        //
-        // That looks like a leak and is not. The next step after a callback
-        // failure is the re-auth banner below, and its "Authorize again" hands
-        // `clearServerOAuthState` the live client only when the banner's server
-        // *is* the active one. Releasing it here would pass `null` instead, and
-        // the stale tokens would never be cleared from the client that holds
-        // them — the one thing that recovery exists to do.
-        if (isEmaClientNotConfiguredError(err)) {
-          notifications.show({
-            title: `Cannot connect to "${server.name}"`,
-            message: err.message,
-            color: "red",
-            autoClose: false,
-          });
-          return;
-        }
-        // The token exchange (or the re-handshake behind it) failed. Flag the
-        // server (#1621) so the monitoring sidebar opens onto the OAuth
-        // requests that explain it (#2108) — the rebuilt client restored the
-        // pre-redirect `auth` fetch entries from the session, so discovery,
-        // DCR and the token exchange are all there.
-        //
-        // Below the EMA guard, not above it: an unconfigured enterprise client
-        // is a *configuration* error rather than a failed attempt, and both
-        // connect-path arms already return on it without flagging. Flagging it
-        // only here would make the three disagree about what the red border
-        // means. Above every other arm, so the classification fan-out that
-        // follows carries it whichever way it goes.
-        setFailedServerId(server.id);
-        // SEP-2352 issuer binding (#1808). Two very different failures share
-        // one SDK error class, so classify before falling through to the
-        // generic re-auth banner (whose detail line would otherwise be the raw
-        // "AuthorizationServerMismatchError" text):
-        //  - no discovery state was recorded → recoverable bookkeeping loss,
-        //    surface the "Authorize again" affordance;
-        //  - a *different* issuer answered the callback → security signal, so
-        //    no one-click recovery is offered.
-        const issuerBindingFailure = findIssuerBindingFailure(err);
-        if (issuerBindingFailure) {
-          const copy = issuerBindingFailureCopy(issuerBindingFailure, {
-            serverName: server.name,
-          });
-          if (issuerBindingFailure.kind === "lost_authorization_state") {
-            setReAuthBanner({
-              serverId: server.id,
-              message: copy.message,
-              kind: "lost_authorization_state",
-              title: copy.title,
-              actionLabel: lostAuthorizationStateActionLabel(),
-            });
-          } else {
-            notifications.show({
-              title: copy.title,
-              message: copy.message,
-              color: "red",
-              autoClose: false,
-            });
-          }
-          return;
-        }
-        queueMicrotask(() => {
-          showReAuthBanner(server.id, err instanceof Error ? err : String(err));
-        });
-        return;
-      }
-
-      setReAuthBanner(null);
-
-      if (resumeSnapshot) {
-        const stepUpChallenge =
-          resumeSnapshot.authKind === "step_up"
-            ? resumeSnapshot.authChallenge
-            : undefined;
-        const stepUpScopesGranted =
-          !stepUpChallenge ||
-          (await client.checkAuthChallengeSatisfied(stepUpChallenge));
-
-        if (stepUpChallenge && !stepUpScopesGranted) {
-          notifications.show({
-            title: "Additional permissions not granted",
-            message: oauthResumeInsufficientScopeMessage(stepUpChallenge),
-            color: "yellow",
-            autoClose: false,
-          });
-          return;
-        }
-
-        notifications.show({
-          title: "Authorization complete",
-          message: oauthResumeToastMessage(resumeSnapshot.authKind, {
-            recoverySource: resumeSnapshot.recoverySource,
-          }),
-          color: "green",
-          autoClose: 6000,
-        });
-      }
-    })();
-  }, [
-    servers,
-    setupClientForServer,
-    showReAuthBanner,
-    webOAuthStorage,
-    setUi,
-    setActiveTab,
-  ]);
+  // Publish it to the `/oauth/callback` effect, which needs to rebuild the
+  // client for the server that started the flow and cannot reach a callback
+  // declared this far down.
+  //
+  // A *layout* effect, not a render-phase write and not a passive one. React
+  // runs every layout effect before any passive effect of the same commit, and
+  // the callback effect inside `useOAuthRecovery` is passive — so this is
+  // always published before its first read, without the render-phase ref
+  // mutation the compiler rule (rightly) rejects.
+  useLayoutEffect(() => {
+    setupClientForServerRef.current = setupClientForServer;
+  }, [setupClientForServer]);
 
   const onToggleConnection = useCallback(
     async (id: string) => {
@@ -2416,6 +1505,7 @@ function App() {
     const alreadyConnected =
       activeServerId === deepLink.serverId && connectionStatus === "connected";
     if (!alreadyConnected) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- pre-existing status-driven effect, unmasked when this component dropped below the React Compiler's bail-out (#2161)
       void onToggleConnection(deepLink.serverId).catch((err) => {
         // The toast fires from inside `onToggleConnection` for the common
         // cases; this catch covers the rest (surfaced on `data-error-message`).
@@ -2527,6 +1617,7 @@ function App() {
     prepareOAuthRedirect,
     onToggleConnection,
     webOAuthStorage,
+    setReAuthBanner,
   ]);
 
   // --- Action handlers that route directly to the InspectorClient. ---
@@ -3614,45 +2705,6 @@ function App() {
   // target isn't resolvable.
   const settingsModalIsStdio = settingsModalServerType === "stdio";
 
-  const clearServerOAuthAndDisconnect = useCallback(
-    async (server: { id: string; name: string; config: MCPServerConfig }) => {
-      const isActive = server.id === activeServerId;
-      const cleared = await clearServerOAuthState({
-        config: server.config,
-        inspectorClient: isActive ? inspectorClient : null,
-        isActiveConnection: isActive,
-        oauthStorage: webOAuthStorage,
-      });
-      if (!cleared) return;
-
-      if (isActive && inspectorClient) {
-        try {
-          await inspectorClient.disconnect();
-        } finally {
-          setConnectionInfoOAuthWhenConnected(undefined);
-          finalizeExplicitDisconnect();
-        }
-      } else {
-        clearOAuthResumeOnExplicitDisconnect();
-      }
-
-      notifications.show({
-        title: "OAuth state cleared",
-        message: isActive
-          ? "Stored tokens and client registration were removed. Reconnect to run a fresh authorization flow."
-          : `Stored OAuth state was removed for "${server.name}". Connect to authorize again.`,
-        color: "blue",
-      });
-    },
-    [
-      activeServerId,
-      inspectorClient,
-      webOAuthStorage,
-      finalizeExplicitDisconnect,
-      clearOAuthResumeOnExplicitDisconnect,
-    ],
-  );
-
   const handleClearConnectionOAuth = useCallback(() => {
     if (!activeServer) return;
     void clearServerOAuthAndDisconnect(activeServer);
@@ -3802,143 +2854,6 @@ function App() {
     },
     [pendingElicitations, inspectorClient],
   );
-
-  const handleStepUpAuthorize = async () => {
-    if (!pendingStepUp || stepUpAuthorizeInProgressRef.current) {
-      return;
-    }
-    const stepUp = pendingStepUp;
-    const client = inspectorClient;
-    if (!client) {
-      return;
-    }
-
-    if (stepUp.enterpriseManaged) {
-      stepUpAuthorizeInProgressRef.current = true;
-      setPendingStepUp(null);
-      notifications.show({
-        title: "Organization permissions",
-        message: emaStepUpInProgressMessage(),
-        color: "blue",
-        autoClose: 4000,
-      });
-      try {
-        const outcome = await client.handleAuthChallenge(stepUp.challenge, {
-          confirmedStepUp: true,
-        });
-        if (outcome.kind === "satisfied") {
-          await client.pushRemoteAuthState();
-          notifications.show({
-            title: "Permissions updated",
-            message: emaStepUpSuccessMessage({
-              recoverySource: stepUp.source,
-            }),
-            color: "green",
-            autoClose: 5000,
-          });
-          const retry = pendingStepUpRetryRef.current;
-          pendingStepUpRetryRef.current = null;
-          if (retry) {
-            await retry();
-          }
-          return;
-        }
-        if (outcome.kind === "interactive") {
-          prepareOAuthRedirect({
-            serverId: stepUp.serverId,
-            authKind: "step_up",
-            authorizationUrl: outcome.authorizationUrl,
-            authChallenge: outcome.challenge,
-            recoverySource: stepUp.source,
-          });
-          return;
-        }
-        if (outcome.kind === "failed") {
-          const failureMessage = emaStepUpFailureMessage(outcome.error.message);
-          notifications.show({
-            title: "Organization permissions",
-            message: failureMessage,
-            color: "red",
-            autoClose: 6000,
-          });
-          switch (stepUp.source) {
-            case "tool":
-              setToolCallState({
-                status: "error",
-                error: failureMessage,
-              });
-              break;
-            case "prompt":
-              setGetPromptState((prev) =>
-                prev
-                  ? { ...prev, status: "error", error: failureMessage }
-                  : prev,
-              );
-              break;
-            case "resource":
-              setReadResourceState((prev) =>
-                prev
-                  ? { ...prev, status: "error", error: failureMessage }
-                  : prev,
-              );
-              break;
-            default:
-              break;
-          }
-        }
-      } finally {
-        stepUpAuthorizeInProgressRef.current = false;
-      }
-      return;
-    }
-
-    stepUpAuthorizeInProgressRef.current = true;
-    prepareOAuthRedirect({
-      serverId: stepUp.serverId,
-      authKind: "step_up",
-      authorizationUrl: stepUp.authorizationUrl,
-      authChallenge: stepUp.challenge,
-      recoverySource: stepUp.source,
-    });
-    setPendingStepUp(null);
-    pendingStepUpRetryRef.current = null;
-    stepUpAuthorizeInProgressRef.current = false;
-  };
-
-  const handleStepUpCancel = () => {
-    const stepUp = sessionRef.current.pendingStepUp;
-    setPendingStepUp(null);
-    pendingStepUpRetryRef.current = null;
-    if (!stepUp) {
-      return;
-    }
-    const cancelled = "Authorization cancelled.";
-    switch (stepUp.source) {
-      case "tool":
-        setToolCallState({ status: "error", error: cancelled });
-        break;
-      case "prompt":
-        setGetPromptState((prev) =>
-          prev ? { ...prev, status: "error", error: cancelled } : prev,
-        );
-        break;
-      case "resource":
-        setReadResourceState((prev) =>
-          prev ? { ...prev, status: "error", error: cancelled } : prev,
-        );
-        break;
-      case "app":
-        notifications.show({
-          title: "Authorization cancelled",
-          message: cancelled,
-          color: "gray",
-          autoClose: 4000,
-        });
-        break;
-      case "ambient":
-        break;
-    }
-  };
 
   return (
     <>
