@@ -9,6 +9,7 @@ import {
   Title,
   UnstyledButton,
 } from "@mantine/core";
+import type { ReplayParamsOverride } from "../../../lib/protocolReplay";
 import type { ProtocolEra } from "@modelcontextprotocol/client";
 import type {
   MessageEntry,
@@ -47,7 +48,7 @@ export interface ProtocolListPanelProps {
   onClearSection: (section: ProtocolSectionName) => void;
   /** Export just one section's entries. */
   onExportSection: (section: ProtocolSectionName) => void;
-  onReplay: (id: string) => void;
+  onReplay: (id: string, overrideParams?: ReplayParamsOverride) => void;
   onTogglePin: (id: string) => void;
   sortDirection: SortDirection;
   onSortChange: (next: SortDirection) => void;
@@ -326,7 +327,7 @@ export function ProtocolListPanel({
           isPinned={sectionPinned}
           isListExpanded={!compact}
           embedded={embedded}
-          onReplay={() => onReplay(row.entry.id)}
+          onReplay={(overrideParams) => onReplay(row.entry.id, overrideParams)}
           onTogglePin={() => onTogglePin(row.entry.id)}
           onRevealInNetwork={
             onRevealInNetwork && revealableIds?.has(row.entry.id)

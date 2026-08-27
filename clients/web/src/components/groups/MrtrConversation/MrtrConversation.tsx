@@ -8,6 +8,7 @@ import {
   Stack,
   Text,
 } from "@mantine/core";
+import type { ReplayParamsOverride } from "../../../lib/protocolReplay";
 import type { MessageEntry } from "@inspector/core/mcp/types.js";
 import { ProtocolEntry } from "../ProtocolEntry/ProtocolEntry";
 import { ExpandToggle } from "../../elements/ExpandToggle/ExpandToggle";
@@ -26,7 +27,7 @@ export interface MrtrConversationProps {
   isListExpanded: boolean;
   /** Compact per-round layout for the narrow monitoring column. */
   embedded?: boolean;
-  onReplay: (id: string) => void;
+  onReplay: (id: string, overrideParams?: ReplayParamsOverride) => void;
   onTogglePin: (id: string) => void;
 }
 
@@ -182,7 +183,9 @@ export function MrtrConversation({
                   isPinned={pinnedIds.has(round.id)}
                   isListExpanded={isListExpanded}
                   embedded={embedded}
-                  onReplay={() => onReplay(round.id)}
+                  onReplay={(overrideParams) =>
+                    onReplay(round.id, overrideParams)
+                  }
                   onTogglePin={() => onTogglePin(round.id)}
                 />
               </Stack>

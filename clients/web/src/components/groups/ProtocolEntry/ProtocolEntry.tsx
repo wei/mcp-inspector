@@ -21,6 +21,8 @@ import { McpErrorBadge } from "../../elements/McpErrorBadge/McpErrorBadge";
 import { ExpandToggle } from "../../elements/ExpandToggle/ExpandToggle";
 import { PinToggle } from "../../elements/PinToggle/PinToggle";
 import { ReplayButton } from "../../elements/ReplayButton/ReplayButton";
+import { EditReplayButton } from "../../elements/EditReplayButton/EditReplayButton";
+import { EditReplayModal } from "../EditReplayModal/EditReplayModal";
 import { useValueChange } from "../../../hooks/useValueChange";
 import {
   classifyProtocolSpecError,
@@ -32,12 +34,19 @@ import {
   extractSubscriptionId,
 } from "../protocolUtils.js";
 import { isReplayableProtocolMethod } from "../../../utils/replayableProtocolMethods";
+import type { ReplayParamsOverride } from "../../../lib/protocolReplay";
 
 export interface ProtocolEntryProps {
   entry: MessageEntry;
   isPinned: boolean;
   isListExpanded: boolean;
-  onReplay: () => void;
+  /**
+   * Re-issue this entry's request. Called with no argument by the Replay
+   * button (the entry's own params, verbatim), and with an edited params object
+   * by the Edit-and-replay modal — one dispatch path, two ways to supply the
+   * params (#2151).
+   */
+  onReplay: (overrideParams?: ReplayParamsOverride) => void;
   onTogglePin: () => void;
   /**
    * Compact two-line header for the narrow monitoring sidebar (#1616): line 1 is
@@ -194,6 +203,17 @@ function formatTimestampCompact(date: Date): string {
   return date.toISOString().slice(11, 19);
 }
 
+// The request's `params` object, which the Edit-and-replay editor is seeded
+// from and the expanded detail renders. `undefined` for a frame that carries
+// none — a bare `tools/list`, or a response.
+function extractParams(
+  entry: MessageEntry,
+): Record<string, unknown> | undefined {
+  const msg = entry.message;
+  if (!("params" in msg) || !msg.params) return undefined;
+  return msg.params as Record<string, unknown>;
+}
+
 function extractTarget(entry: MessageEntry): string | undefined {
   const msg = entry.message;
   if (!("params" in msg) || !msg.params) return undefined;
@@ -306,10 +326,12 @@ export function ProtocolEntry({
   correlatedHttpStatus,
 }: ProtocolEntryProps) {
   const [isExpanded, setIsExpanded] = useState(isListExpanded);
+  const [isEditingReplay, setIsEditingReplay] = useState(false);
   const method = extractMethod(entry);
   const target = extractTarget(entry);
   const resourceUri = extractResourceUri(entry);
   const status = extractStatus(entry);
+  const requestParams = extractParams(entry);
   const canReplay = isReplayableProtocolMethod(method);
   const resultType = extractResultType(entry);
   const subscriptionId = extractSubscriptionId(entry);
@@ -363,6 +385,14 @@ export function ProtocolEntry({
   const durationText = entry.duration != null && (
     <DurationText>{formatDuration(entry.duration)}</DurationText>
   );
+  // Both replay affordances are gated on the same predicate, so a method that
+  // cannot be replayed does not offer an editor that would fail on Send.
+  const replayControls = canReplay && (
+    <>
+      <ReplayButton onReplay={() => onReplay()} />
+      <EditReplayButton onClick={() => setIsEditingReplay(true)} />
+    </>
+  );
 
   return (
     <EntryContainer>
@@ -401,7 +431,7 @@ export function ProtocolEntry({
                 )}
               </HeaderCluster>
               <ControlsCluster>
-                {canReplay && <ReplayButton onReplay={onReplay} />}
+                {replayControls}
                 <PinToggle pinned={isPinned} onToggle={onTogglePin} />
                 <ExpandToggle
                   expanded={isExpanded}
@@ -436,7 +466,7 @@ export function ProtocolEntry({
             </HeaderRow>
 
             <ToggleRow>
-              {canReplay && <ReplayButton onReplay={onReplay} />}
+              {replayControls}
               <PinToggle pinned={isPinned} onToggle={onTogglePin} />
               <ExpandToggle
                 expanded={isExpanded}
@@ -444,6 +474,16 @@ export function ProtocolEntry({
               />
             </ToggleRow>
           </>
+        )}
+
+        {canReplay && (
+          <EditReplayModal
+            opened={isEditingReplay}
+            method={method}
+            params={requestParams}
+            onSend={onReplay}
+            onClose={() => setIsEditingReplay(false)}
+          />
         )}
 
         <Collapse in={isExpanded}>
@@ -464,13 +504,13 @@ export function ProtocolEntry({
                 }
               />
             )}
-            {"params" in entry.message && entry.message.params && (
+            {requestParams && (
               <Stack gap="xs">
                 <Text size="sm">Parameters:</Text>
                 <ContentViewer
                   block={{
                     type: "text",
-                    text: serializeMessage(entry.message.params),
+                    text: serializeMessage(requestParams),
                   }}
                   copyable
                 />

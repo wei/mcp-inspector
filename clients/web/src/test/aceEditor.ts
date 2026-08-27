@@ -1,4 +1,4 @@
-import { act } from "@testing-library/react";
+import { act, screen } from "@testing-library/react";
 import type { Ace } from "ace-builds";
 
 /**
@@ -55,4 +55,41 @@ export async function setAceText(
  */
 export function aceLabel(label: string): RegExp {
   return new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+}
+
+/**
+ * The editor whose accessible name matches `label`, for a screen holding more
+ * than one — a form with two JSON fields, or a JSON field beside the
+ * raw-arguments editor.
+ *
+ * Goes via the labelled text input rather than indexing `.ace_editor` nodes,
+ * because document order is not something a test should depend on: adding a
+ * field above the one under test would silently retarget every assertion.
+ */
+export function getAceEditorByLabel(label: string | RegExp): Ace.Editor {
+  const input = screen.getByLabelText(
+    typeof label === "string" ? aceLabel(label) : label,
+  );
+  const container = input.closest(".ace_editor");
+  const editor = (
+    container as (HTMLElement & { env?: { editor?: Ace.Editor } }) | null
+  )?.env?.editor;
+  if (!editor) throw new Error(`No Ace editor labelled ${String(label)}`);
+  return editor;
+}
+
+/** {@link getAceText} for one of several editors. */
+export function getAceTextByLabel(label: string | RegExp): string {
+  return getAceEditorByLabel(label).getValue();
+}
+
+/** {@link setAceText} for one of several editors. */
+export async function setAceTextByLabel(
+  label: string | RegExp,
+  text: string,
+): Promise<void> {
+  const editor = getAceEditorByLabel(label);
+  await act(async () => {
+    editor.setValue(text, 1);
+  });
 }

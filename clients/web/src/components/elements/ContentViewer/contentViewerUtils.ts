@@ -143,6 +143,27 @@ export function looksLikeJson(text: string): boolean {
 }
 
 /**
+ * Whether untyped text really is a JSON document, not merely shaped like one.
+ *
+ * {@link looksLikeJson} only tests the first character, which is enough to
+ * decide whether to *try* pretty-printing — a failed parse falls back to the
+ * original text and nothing is lost. It is not enough to decide to hand the
+ * text to the JSON editor: a note beginning `{` would then be presented as a
+ * JSON document, in a JSON gutter, with the server's plain text framed as
+ * malformed. A declared `application/json` is different — there the server said
+ * what it sent, so its own broken payload is shown as JSON on purpose.
+ */
+export function isJsonDocument(text: string): boolean {
+  if (!looksLikeJson(text)) return false;
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Indent a single-line or minified XML/HTML-ish document for readability before
  * syntax highlighting. Hand-rolled: split on `>\s*<` boundaries, then track a
  * nesting depth, decrementing on closing tags and incrementing after opening

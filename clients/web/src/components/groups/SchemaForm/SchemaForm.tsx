@@ -1,11 +1,11 @@
 import {
   Checkbox,
   Group,
-  JsonInput,
   MultiSelect,
   NumberInput,
   Select,
   Stack,
+  Switch,
   Text,
   rem,
   Textarea,
@@ -23,6 +23,8 @@ import {
 } from "react";
 import { ClearButton } from "../../elements/ClearButton/ClearButton";
 import { EnlargeButton } from "../../elements/EnlargeButton/EnlargeButton";
+import { JsonEditor } from "../../elements/JsonEditor/JsonEditor";
+import { isJsonObject } from "../../../utils/jsonObjectDraft";
 import { useValueChange } from "../../../hooks/useValueChange";
 import type {
   InspectorFormSchema,
@@ -62,9 +64,13 @@ const BranchSelect = Select.withProps({
   allowDeselect: false,
 });
 
-const SchemaJsonInput = JsonInput.withProps({
-  formatOnBlur: true,
-  autosize: true,
+// The "Edit as JSON" flip for the whole arguments object (#2151). Right-aligned
+// on its own row so it reads as a mode for the form rather than as its first
+// field.
+const RawJsonSwitch = Switch.withProps({
+  label: "Edit as JSON",
+  size: "sm",
+  labelPosition: "left",
 });
 
 // A string field after its enlarge button has been used (#2042). `autosize`
@@ -416,14 +422,17 @@ function SchemaJsonField({
   useDraftValidity(fieldName, !hasInvalidDraft, onValidityChange);
 
   return (
-    <SchemaJsonInput
+    <JsonEditor
       {...inputProps}
+      ariaLabel={inputProps.label}
       value={draft}
       error={
         hasInvalidDraft
           ? "Not valid JSON — this field will be omitted"
           : undefined
       }
+      minLines={4}
+      maxLines={16}
       onChange={(text) => {
         setDraft(text);
         onChange(parseJsonDraft(text));
@@ -548,6 +557,113 @@ function SchemaNumberInput({
   );
 }
 
+/**
+ * What the raw-JSON editor's draft text currently means: the arguments object
+ * to emit, or why it cannot be emitted.
+ *
+ * Empty text is `{}` rather than an error — clearing the box is how "send no
+ * arguments" is spelled, and an empty editor wearing a red error would read as
+ * broken. A non-object (`[1,2]`, `"a"`, `42`) is reported separately from text
+ * that is not JSON at all, because they are different mistakes: the second is
+ * usually mid-edit, the first is a shape the form cannot use however finished
+ * it is.
+ */
+function parseRawArgumentsDraft(
+  text: string,
+): { ok: true; value: Record<string, unknown> } | { ok: false; error: string } {
+  if (text.trim() === "") return { ok: true, value: {} };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { ok: false, error: "Not valid JSON — this cannot be submitted" };
+  }
+  if (!isJsonObject(parsed)) {
+    return {
+      ok: false,
+      error: "Arguments must be a JSON object (`{ … }`)",
+    };
+  }
+  return { ok: true, value: parsed };
+}
+
+interface RawArgumentsFieldProps {
+  values: Record<string, unknown>;
+  onChange: (values: Record<string, unknown>) => void;
+  disabled: boolean;
+  /** Mirrors {@link SchemaFormProps.onValidityChange} for this one editor. */
+  onInvalidChange: (hasInvalidDraft: boolean) => void;
+}
+
+/**
+ * The whole arguments object as one JSON document (#2151).
+ *
+ * v1 let a rendered form be flipped over to editing its arguments as JSON, and
+ * v2 shipped without the escape hatch — so a value the widgets cannot express,
+ * or a payload the user wants to paste in whole, had no route in.
+ *
+ * Same draft/value split as {@link SchemaJsonField}, and for the same reason:
+ * the text is the source of truth for what is displayed, the parent only ever
+ * sees a parsed object. Unlike `JsonObjectInput`, invalid text is **reported
+ * upward** rather than quietly dropped — this editor sits in front of a commit
+ * gesture (Execute / Open App / Submit), and #2020 says a draft that cannot be
+ * sent must disable it rather than silently submitting the last value that
+ * parsed.
+ *
+ * Note what this deliberately does *not* do: it never re-imposes the form's
+ * defaults or a branch's fields on the text. Switching a root union prunes the
+ * outgoing branch's values (#2123), and the pruned object is what arrives here
+ * — so a round trip through JSON cannot resurrect them.
+ */
+function RawArgumentsField({
+  values,
+  onChange,
+  disabled,
+  onInvalidChange,
+}: RawArgumentsFieldProps) {
+  const [draft, setDraft] = useState(() => serializeJson(values));
+  // Canonical JSON of the last object this editor emitted, so the re-sync below
+  // can tell an external change from the parent echoing back our own — the
+  // draft alone cannot, since invalid text parses to nothing and every parent
+  // change would then look external. See `JsonObjectInput` for the long form.
+  const [echoed, setEchoed] = useState(() => serializeJson(values));
+
+  const parsed = parseRawArgumentsDraft(draft);
+
+  useValueChange(serializeJson(values), (next) => {
+    if (next === echoed) return;
+    setDraft(next);
+    setEchoed(next);
+  });
+
+  // An effect, not a render-time call: validity also moves when the *parent*
+  // replaces the values, and reporting during that render would update another
+  // component mid-render. The cleanup clears the block, so toggling back to the
+  // widgets cannot leave submission disabled on text no longer on screen.
+  useEffect(() => {
+    onInvalidChange(!parsed.ok);
+    return () => onInvalidChange(false);
+  }, [parsed.ok, onInvalidChange]);
+
+  return (
+    <JsonEditor
+      ariaLabel="Arguments JSON"
+      value={draft}
+      disabled={disabled}
+      error={parsed.ok ? undefined : parsed.error}
+      minLines={8}
+      maxLines={24}
+      onChange={(text) => {
+        setDraft(text);
+        const next = parseRawArgumentsDraft(text);
+        if (!next.ok) return;
+        setEchoed(serializeJson(next.value));
+        onChange(next.value);
+      }}
+    />
+  );
+}
+
 export interface SchemaFormProps {
   schema: InspectorFormSchema;
   values: Record<string, unknown>;
@@ -587,6 +703,16 @@ export interface SchemaFormProps {
    * called when the answer changes, not on every render.
    */
   onValidityChange?: (hasInvalidDraft: boolean) => void;
+  /**
+   * Whether to offer the "Edit as JSON" switch that flips the whole arguments
+   * object over to a raw editor (#2151).
+   *
+   * Defaults to on. Passed `false` for a **nested** object field's form, where
+   * a per-field switch would offer to edit a fragment of the payload the outer
+   * switch already covers whole — and would put a second, narrower JSON editor
+   * inside the first the moment both were on.
+   */
+  allowRawJson?: boolean;
 }
 
 function getDefaultValue(fieldSchema: InspectorFormSchema): unknown {
@@ -613,6 +739,7 @@ export function SchemaForm({
   disabled = false,
   resetKey,
   onValidityChange,
+  allowRawJson = true,
 }: SchemaFormProps) {
   // Composition at the root of the schema, flattened before anything is
   // rendered (#2123). `allOf` is folded into `base`; a top-level `oneOf`/`anyOf`
@@ -669,6 +796,20 @@ export function SchemaForm({
   const [invalidFields, setInvalidFields] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+
+  // Whether the whole arguments object is being edited as JSON (#2151), and
+  // whether that editor's text can be sent. Kept apart from `invalidFields`
+  // rather than reported under a reserved name: field names come straight out
+  // of a server's schema, so any sentinel this form invented could collide with
+  // a real argument and clear a block the user cannot see.
+  const [rawJsonMode, setRawJsonMode] = useState(false);
+  const [rawJsonInvalid, setRawJsonInvalid] = useState(false);
+
+  // Stable so `RawArgumentsField`'s reporting effect subscribes once rather
+  // than per render — the same reason `reportFieldValidity` below is memoized.
+  const reportRawJsonValidity = useCallback((invalid: boolean) => {
+    setRawJsonInvalid(invalid);
+  }, []);
 
   // The names of string fields the user has enlarged into a multiline text area
   // (#2042). One-way by design — see EnlargeButton — so a name only ever enters
@@ -791,7 +932,7 @@ export function SchemaForm({
   // rendered holds no drafts, so an unmounted nested form must not leave the
   // outer one blocked. It runs in the same commit as the re-report, so the
   // transient `false` is never rendered.
-  const hasInvalidDraft = invalidFields.size > 0;
+  const hasInvalidDraft = invalidFields.size > 0 || rawJsonInvalid;
   useEffect(() => {
     notifyValidity.current?.(hasInvalidDraft);
     return () => notifyValidity.current?.(false);
@@ -1217,6 +1358,9 @@ export function SchemaForm({
               onValidityChange={(nestedInvalid) =>
                 reportFieldValidity(fieldName, !nestedInvalid)
               }
+              // The outer switch already edits this object as part of the whole
+              // payload; a second one here would nest a JSON editor inside it.
+              allowRawJson={false}
             />
           </IndentedStack>
         </Stack>
@@ -1245,6 +1389,15 @@ export function SchemaForm({
 
   return (
     <Stack gap="sm">
+      {allowRawJson && (
+        <Group justify="flex-end">
+          <RawJsonSwitch
+            checked={rawJsonMode}
+            disabled={disabled}
+            onChange={(event) => setRawJsonMode(event.currentTarget.checked)}
+          />
+        </Group>
+      )}
       {activeBranch && branches.length > 1 && (
         <BranchSelect
           data={branches.map((branch, index) => ({
@@ -1259,8 +1412,21 @@ export function SchemaForm({
           }
         />
       )}
-      {Object.entries(properties).map(([fieldName, fieldSchema]) =>
-        renderField(fieldName, fieldSchema),
+      {rawJsonMode ? (
+        // Keyed by the entity and branch, like every draft-holding field: text
+        // typed for one tool must not be left in the box for the next, and
+        // switching a root union prunes values the stale draft would restore.
+        <RawArgumentsField
+          key={draftKey ?? "raw-json"}
+          values={values}
+          onChange={onChange}
+          disabled={disabled}
+          onInvalidChange={reportRawJsonValidity}
+        />
+      ) : (
+        Object.entries(properties).map(([fieldName, fieldSchema]) =>
+          renderField(fieldName, fieldSchema),
+        )
       )}
     </Stack>
   );

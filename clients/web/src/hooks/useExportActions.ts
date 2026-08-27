@@ -12,7 +12,10 @@ import type {
 } from "@inspector/core/mcp/types.js";
 import type { LogEntryData } from "../components/elements/LogEntry/LogEntry";
 import { buildExportFilename, downloadJsonFile } from "../lib/downloadFile";
-import { replayProtocolRequest } from "../lib/protocolReplay";
+import {
+  replayProtocolRequest,
+  type ReplayParamsOverride,
+} from "../lib/protocolReplay";
 
 /** One Protocol panel section, split by pin membership. */
 export type ProtocolSection = "pinned" | "history";
@@ -56,7 +59,12 @@ export interface ExportActions {
   onExportConsole: () => void;
   onClearProtocolSection: (section: ProtocolSection) => void;
   onExportProtocolSection: (section: ProtocolSection) => void;
-  onReplayProtocol: (id: string) => void;
+  /**
+   * Replay a Protocol entry. `overrideParams` replaces the entry's own params,
+   * which is how the Edit-and-replay editor dispatches (#2151) — same code
+   * path, same method gate, same failure toast.
+   */
+  onReplayProtocol: (id: string, overrideParams?: ReplayParamsOverride) => void;
 }
 
 /**
@@ -179,15 +187,19 @@ export function useExportActions({
   // call error already shows up as the replayed entry's Error status, so only a
   // pre-flight failure (nothing logged) needs the fallback toast.
   const onReplayProtocol = useCallback(
-    (id: string) => {
+    (id: string, overrideParams?: ReplayParamsOverride) => {
       if (!inspectorClient) return;
       const entry = messages.find((m) => m.id === id);
       if (!entry || !("method" in entry.message)) return;
       const { method } = entry.message;
+      // See `ReplayParamsOverride`: `null` is an edit to no params at all,
+      // `undefined` is no edit — so only the latter falls back to the entry's.
       const params =
-        "params" in entry.message
-          ? (entry.message.params as Record<string, unknown> | undefined)
-          : undefined;
+        overrideParams === undefined
+          ? "params" in entry.message
+            ? (entry.message.params as Record<string, unknown> | undefined)
+            : undefined
+          : (overrideParams ?? undefined);
       void replayProtocolRequest(inspectorClient, method, params, tools)
         .then((reason) => {
           if (reason) {

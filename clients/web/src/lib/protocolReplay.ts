@@ -58,6 +58,18 @@ export type ReplayClient = Pick<
   | "ping"
 >;
 
+/**
+ * Params supplied by the Edit-and-replay editor, in place of the entry's own
+ * (#2151).
+ *
+ * `undefined` and `null` are **not** interchangeable, which is why this is not
+ * just an optional object: `undefined` means the user did not edit anything —
+ * replay the entry verbatim — while `null` means they cleared the editor, which
+ * is a legitimate replay of a params-less request. Collapsing the two would
+ * make an emptied editor silently re-send the original params.
+ */
+export type ReplayParamsOverride = Record<string, unknown> | null | undefined;
+
 export async function replayProtocolRequest(
   client: ReplayClient,
   method: string,

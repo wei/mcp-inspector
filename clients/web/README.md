@@ -49,8 +49,8 @@ Components live under `src/components/` in four layers, smallest to largest:
 
 | Layer       | Count | What it is                                                                     |
 | ----------- | ----- | ------------------------------------------------------------------------------ |
-| `elements/` | ~31   | Leaf presentational pieces (badges, buttons, toggles) over Mantine primitives. |
-| `groups/`   | ~63   | Composite pieces (cards, panels, modals, control bars).                        |
+| `elements/` | ~48   | Leaf presentational pieces (badges, buttons, toggles) over Mantine primitives. |
+| `groups/`   | ~64   | Composite pieces (cards, panels, modals, control bars).                        |
 | `screens/`  | ~11   | Full tab screens (Tools, Resources, Servers, monitoring screens…).             |
 | `views/`    | 1     | `InspectorView` — the top-level layout that composes the screens.              |
 
@@ -283,17 +283,32 @@ Each customized Mantine component has a `Theme<Name>.ts` file (`Button.ts`, `Tex
 
 **`cssVariables.ts` is the third piece, beside the component files and `App.css`.** It holds overrides for the CSS variables `MantineProvider` injects at runtime, which `App.css` cannot reach: the provider appends its generated `<style>` after the stylesheet imports, so a `:root` rule there loses on source order at equal specificity. `cssVariablesResolver` is the supported seam. It is passed at **all three** `MantineProvider` sites — the app (`main.tsx`), the Storybook preview, and `renderWithMantine` — so the running app, the stories, and the tests cannot disagree about a token's value. It currently corrects `--mantine-color-error`, whose Mantine defaults fail WCAG AA in both schemes at the size input error text renders.
 
-## Code editing (`JsonObjectInput`)
+## JSON editing and display (`JsonEditor`)
 
-Payloads whose _values_ may be arbitrary JSON — `_meta` is the case that forced it ([#1910](https://github.com/modelcontextprotocol/inspector/issues/1910)) — are edited with **Ace** (`react-ace` + `ace-builds`, declared in this client because they render React) rather than the key/value rows used for headers and env, which cannot express an object value. Ace brings code folding, brace auto-closing, and per-line error annotation from its JSON worker.
+Every surface in this client where JSON is typed or displayed renders one element: **`elements/JsonEditor`**, an **Ace** editor (`react-ace` + `ace-builds`, declared in this client because they render React). Ace brings code folding, line numbers, brace auto-closing, and per-line error annotation from its JSON worker — the last three are why hand-writing a nested payload in a bare textarea was the actual pain ([#2151](https://github.com/modelcontextprotocol/inspector/issues/2151)).
 
-Three integration details are load-bearing:
+`JsonEditor` is deliberately **text in, text out**: it never parses. The editing contracts above it disagree about what an unparseable draft means, and neither can be expressed by a component that decides for them:
 
-- **The worker is imported as `?url`** so Vite emits it as an asset. Without it Ace fetches `worker-json.js` from a path that does not exist in a bundled app and silently loses its annotations.
-- **The gutter's colors are overridden in `App.css`**, keyed off Ace's cssClass (`ace-github` / `ace-github-dark` — _not_ the `theme-github_dark` module name). Ace's own themes are 1.89:1 and 4.13:1 there, both under AA, and folding needs the gutter so it cannot simply be hidden.
+| Consumer | While the draft is invalid |
+| --- | --- |
+| `elements/JsonObjectInput` (Server Settings → Request Metadata) | Parent is **not** told; the last valid object stands. There is no Save button to gate — `onChange` writes straight through — so emitting `{}` would discard configured metadata on a stray keystroke ([#1910](https://github.com/modelcontextprotocol/inspector/issues/1910)). |
+| `SchemaJsonField` (the object/array/union fallback in `groups/SchemaForm`) | Parent is told `undefined`, **and** invalidity is reported up through `onValidityChange` so Execute / Open App / Submit are disabled ([#2020](https://github.com/modelcontextprotocol/inspector/issues/2020)). |
+| `SchemaForm`'s **Edit as JSON** switch | Same as above, for the whole arguments object — the v1 escape hatch, restored. Seeded from what the form holds, so a root-union switch's pruning ([#2123](https://github.com/modelcontextprotocol/inspector/issues/2123)) is not undone by a round trip. |
+| `groups/EditReplayModal` (Protocol → Edit and replay) | Send is disabled. Unlike the metadata editor this modal *has* a commit gesture to gate. |
+| `groups/ImportServerJsonPanel`, `groups/ExperimentalFeaturesPanel` | The panel owns the text and validates it itself. |
+| `elements/ContentViewer`'s JSON branch | Read-only — see below. |
+
+**Read-only mode is what `ContentViewer` renders JSON as**, and through it every JSON payload in the app: Protocol and Network entries, tool results, structured output, resource previews, server cards. Highlighting is *not* what that buys — JSON already highlighted, via the lazily-imported Prism grammar `CodeHighlight` loads. What Ace adds is **folding**, line numbers and a gutter on a large payload. The Prism `json` grammar was dropped in the same change rather than kept beside it: two highlighters for one language drift, and nothing else asks for `json`. Two cases stay on the plain renderer — a `wrap={false}` caller (the server card's fixed-height, single-line box) and untyped text that only *looks* like JSON but does not parse, which in an editor would frame a server's prose as a malformed document.
+
+Five integration details are load-bearing:
+
+- **The worker is imported as `?url`** so Vite emits it as an asset. Without it Ace fetches `worker-json.js` from a path that does not exist in a bundled app and silently loses its annotations. It is registered at **module scope** — the registration is global to Ace and idempotent, so it must not move into a per-mount effect.
+- **Ace fires two change events for a replace** (a remove, then an insert), so a select-all-and-retype passes through a momentarily *empty* document. `JsonEditor` coalesces the pair in a microtask and reports only the settled text; acting on the first event reports the empty document as the user's answer.
+- **The gutter's colors are overridden in `App.css`**, keyed off Ace's cssClass (`ace-github` / `ace-github-dark` — _not_ the `theme-github_dark` module name). Ace's own themes are 1.89:1 and 4.13:1 there, both under AA, and folding needs the gutter so it cannot simply be hidden. The read-only caret is hidden the same way (`.json-editor-readonly`), since `readOnly` has no option that removes it.
 - **The label and error are wired to Ace's hidden textarea by hand.** `Input.Wrapper` associates a _Mantine_ input through context; Ace renders its own DOM, so the id, `aria-invalid` and `aria-describedby` are set on the textarea in an effect.
+- **`ariaLabel` is required.** Ace names its hidden textarea "Cursor at row N", which is a position readout rather than a name — and it only recomputes that label when the cursor moves, so the option has to be applied *and* recomputed in `onLoad` to reach the DOM before the user clicks in.
 
-**Testing it is split by necessity.** Ace's input path does not work under happy-dom — `userEvent.type` reaches the textarea and produces no edit — so a keyboard test in the unit project passes while asserting nothing. Unit tests drive the editor instance through `src/test/aceEditor.ts`; real keyboard behaviour lives in the Storybook play functions, which run in Chromium.
+**Testing it is split by necessity.** Ace's input path does not work under happy-dom — `userEvent.type` reaches the textarea and produces no edit — so a keyboard test in the unit project passes while asserting nothing. Unit tests drive the editor instance through `src/test/aceEditor.ts` (`setAceText` / `getAceText`, plus the `*ByLabel` variants for a screen holding more than one editor); real keyboard behaviour lives in the Storybook play functions, which run in Chromium. The same split applies to *reading* a payload back: Ace virtualizes its lines, so a read-only editor's text is not fully in the DOM and assertions go through the editor rather than `getByText`.
 
 ## Testing
 

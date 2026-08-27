@@ -9,6 +9,7 @@ import {
   screen,
   waitFor,
 } from "../../../test/renderWithMantine";
+import { getAceTextByLabel, setAceTextByLabel } from "../../../test/aceEditor";
 import { SchemaForm } from "./SchemaForm";
 
 describe("SchemaForm", () => {
@@ -719,8 +720,7 @@ describe("SchemaForm", () => {
     expect(screen.getByText("Config")).toBeInTheDocument();
   });
 
-  it("invokes onChange via JsonInput when valid JSON is pasted", async () => {
-    const user = userEvent.setup();
+  it("invokes onChange via the JSON editor when valid JSON is pasted", async () => {
     const onChange = vi.fn();
     const schema: InspectorFormSchema = {
       type: "object",
@@ -731,9 +731,7 @@ describe("SchemaForm", () => {
     renderWithMantine(
       <SchemaForm schema={schema} values={{}} onChange={onChange} />,
     );
-    const jsonInput = screen.getByLabelText(/Config/) as HTMLTextAreaElement;
-    jsonInput.focus();
-    await user.paste("[1,2]");
+    await setAceTextByLabel(/Config/, "[1,2]");
     expect(onChange).toHaveBeenCalled();
     const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1][0];
     expect(lastCall.config).toEqual([1, 2]);
@@ -746,7 +744,6 @@ describe("SchemaForm", () => {
   // more since #2007, whose fix deliberately routes object unions to this
   // editor: a fallback nobody can type into is not a fallback.
   it("shows an error while the JSON draft does not parse", async () => {
-    const user = userEvent.setup();
     const schema: InspectorFormSchema = {
       type: "object",
       properties: {
@@ -761,13 +758,12 @@ describe("SchemaForm", () => {
     }
     renderWithMantine(<Harness />);
 
-    const jsonInput = screen.getByLabelText(/Config/) as HTMLTextAreaElement;
-    await user.type(jsonInput, "[[1,");
+    await setAceTextByLabel(/Config/, "[1,");
     // Invalid text yields no value, so without this the field would submit as
     // absent while the user is still looking at what they typed.
     expect(screen.getByText(/Not valid JSON/)).toBeInTheDocument();
 
-    await user.type(jsonInput, "2]");
+    await setAceTextByLabel(/Config/, "[1,2]");
     expect(screen.queryByText(/Not valid JSON/)).not.toBeInTheDocument();
   });
 
@@ -785,7 +781,6 @@ describe("SchemaForm", () => {
   });
 
   it("reports no value, not raw text, while the JSON is mid-edit", async () => {
-    const user = userEvent.setup();
     const onChange = vi.fn();
     const schema: InspectorFormSchema = {
       type: "object",
@@ -796,13 +791,17 @@ describe("SchemaForm", () => {
     renderWithMantine(
       <SchemaForm schema={schema} values={{}} onChange={onChange} />,
     );
-    const jsonInput = screen.getByLabelText(/Config/) as HTMLTextAreaElement;
-    await user.type(jsonInput, "x");
+    await setAceTextByLabel(/Config/, "x");
     expect(onChange).toHaveBeenLastCalledWith({ config: undefined });
   });
 
-  it("lets an array literal be typed one character at a time", async () => {
-    const user = userEvent.setup();
+  // Ace is not typed into here — it reads keystrokes through an offscreen
+  // textarea plus selection state happy-dom does not implement, so a simulated
+  // keypress produces no edit at all (see `test/aceEditor.ts`). What this can
+  // still pin is the mechanism that broke: each settled draft is displayed
+  // verbatim rather than re-serialized. Real character-by-character typing is
+  // covered by the `SchemaForm` play function, which runs in Chromium.
+  it("shows each JSON draft verbatim as it is built up", async () => {
     const schema: InspectorFormSchema = {
       type: "object",
       properties: {
@@ -820,16 +819,15 @@ describe("SchemaForm", () => {
     }
     renderWithMantine(<Harness />);
 
-    const jsonInput = screen.getByLabelText(/Config/) as HTMLTextAreaElement;
-    // `[` is a userEvent keyboard descriptor, so it is escaped as `[[`.
-    await user.type(jsonInput, '[[1,"a"]');
-
-    // The box shows exactly what was typed — no injected quotes or backslashes.
-    expect(jsonInput.value).toBe('[1,"a"]');
+    for (const step of ["[", "[1", '[1,"', '[1,"a', '[1,"a"]']) {
+      await setAceTextByLabel(/Config/, step);
+      // The box shows exactly what was typed — no injected quotes, no
+      // backslashes, at any point along the way.
+      expect(getAceTextByLabel(/Config/)).toBe(step);
+    }
   });
 
   it("keeps an in-progress draft visible instead of rewriting it", async () => {
-    const user = userEvent.setup();
     const schema: InspectorFormSchema = {
       type: "object",
       properties: {
@@ -844,13 +842,12 @@ describe("SchemaForm", () => {
     }
     renderWithMantine(<Harness />);
 
-    const jsonInput = screen.getByLabelText(/Config/) as HTMLTextAreaElement;
-    await user.type(jsonInput, "[[1,");
+    await setAceTextByLabel(/Config/, "[1,");
     // Unparseable so far, and it must survive the re-render untouched.
-    expect(jsonInput.value).toBe("[1,");
+    expect(getAceTextByLabel(/Config/)).toBe("[1,");
 
-    await user.type(jsonInput, "2]");
-    expect(jsonInput.value).toBe("[1,2]");
+    await setAceTextByLabel(/Config/, "[1,2]");
+    expect(getAceTextByLabel(/Config/)).toBe("[1,2]");
   });
 
   it("uses default values when value is undefined", () => {
@@ -1334,7 +1331,6 @@ describe("SchemaForm draft validity (#2020)", () => {
   });
 
   it("reports an unparseable JSON draft, then clears it once the text parses", async () => {
-    const user = userEvent.setup();
     const onValidityChange = vi.fn();
     renderWithMantine(
       <ValidityHarness
@@ -1343,11 +1339,10 @@ describe("SchemaForm draft validity (#2020)", () => {
       />,
     );
 
-    const jsonInput = screen.getByLabelText(/Config/) as HTMLTextAreaElement;
-    await user.type(jsonInput, "[[1,");
+    await setAceTextByLabel(/Config/, "[1,");
     expect(onValidityChange).toHaveBeenLastCalledWith(true);
 
-    await user.type(jsonInput, "2]");
+    await setAceTextByLabel(/Config/, "[1,2]");
     expect(onValidityChange).toHaveBeenLastCalledWith(false);
   });
 
@@ -1380,7 +1375,6 @@ describe("SchemaForm draft validity (#2020)", () => {
   });
 
   it("stays invalid while any one field is invalid", async () => {
-    const user = userEvent.setup();
     const onValidityChange = vi.fn();
     const schema: InspectorFormSchema = {
       type: "object",
@@ -1393,20 +1387,19 @@ describe("SchemaForm draft validity (#2020)", () => {
       <ValidityHarness schema={schema} onValidityChange={onValidityChange} />,
     );
 
-    await user.type(screen.getByLabelText(/First/), "x");
-    await user.type(screen.getByLabelText(/Second/), "y");
+    await setAceTextByLabel(/First/, "x");
+    await setAceTextByLabel(/Second/, "y");
     expect(onValidityChange).toHaveBeenLastCalledWith(true);
 
     // One of the two recovering is not enough.
-    await user.clear(screen.getByLabelText(/First/));
+    await setAceTextByLabel(/First/, "");
     expect(onValidityChange).toHaveBeenLastCalledWith(true);
 
-    await user.clear(screen.getByLabelText(/Second/));
+    await setAceTextByLabel(/Second/, "");
     expect(onValidityChange).toHaveBeenLastCalledWith(false);
   });
 
   it("surfaces a nested object's invalid draft through the outer form", async () => {
-    const user = userEvent.setup();
     const onValidityChange = vi.fn();
     const schema: InspectorFormSchema = {
       type: "object",
@@ -1424,12 +1417,11 @@ describe("SchemaForm draft validity (#2020)", () => {
       <ValidityHarness schema={schema} onValidityChange={onValidityChange} />,
     );
 
-    await user.type(screen.getByLabelText(/Config/), "x");
+    await setAceTextByLabel(/Config/, "x");
     expect(onValidityChange).toHaveBeenLastCalledWith(true);
   });
 
   it("clears a stale invalid draft when the form moves to another entity", async () => {
-    const user = userEvent.setup();
     const onValidityChange = vi.fn();
     const { rerender } = renderWithMantine(
       <ValidityHarness
@@ -1439,7 +1431,7 @@ describe("SchemaForm draft validity (#2020)", () => {
       />,
     );
 
-    await user.type(screen.getByLabelText(/Config/), "x");
+    await setAceTextByLabel(/Config/, "x");
     expect(onValidityChange).toHaveBeenLastCalledWith(true);
 
     // Switching entities remounts the field, discarding its draft — so text
@@ -1455,7 +1447,6 @@ describe("SchemaForm draft validity (#2020)", () => {
   });
 
   it("reports valid when the form unmounts holding an invalid draft", async () => {
-    const user = userEvent.setup();
     const onValidityChange = vi.fn();
     const { unmount } = renderWithMantine(
       <ValidityHarness
@@ -1464,7 +1455,7 @@ describe("SchemaForm draft validity (#2020)", () => {
       />,
     );
 
-    await user.type(screen.getByLabelText(/Config/), "x");
+    await setAceTextByLabel(/Config/, "x");
     expect(onValidityChange).toHaveBeenLastCalledWith(true);
 
     unmount();
@@ -1472,11 +1463,10 @@ describe("SchemaForm draft validity (#2020)", () => {
   });
 
   it("renders without a validity callback", async () => {
-    const user = userEvent.setup();
     renderWithMantine(
       <SchemaForm schema={jsonSchema} values={{}} onChange={vi.fn()} />,
     );
-    await user.type(screen.getByLabelText(/Config/), "x");
+    await setAceTextByLabel(/Config/, "x");
     expect(screen.getByText(/Not valid JSON/)).toBeInTheDocument();
   });
 });
@@ -1508,7 +1498,6 @@ describe("JSON editor escaping (#1853, #1856, #1885)", () => {
 
   // #1853: `batch_process_items`, typed character by character.
   it("types a string array through without escaping it (#1853)", async () => {
-    const user = userEvent.setup();
     const schema: InspectorFormSchema = {
       type: "object",
       properties: {
@@ -1522,19 +1511,16 @@ describe("JSON editor escaping (#1853, #1856, #1885)", () => {
     };
     renderWithMantine(<EscapingHarness schema={schema} />);
 
-    const jsonInput = screen.getByLabelText(/Item Ids/) as HTMLTextAreaElement;
-    // `[` opens a userEvent keyboard descriptor, so it is escaped as `[[`.
-    await user.type(jsonInput, '[["item-1","item-2"]');
+    await setAceTextByLabel(/Item Ids/, '["item-1","item-2"]');
 
-    expect(jsonInput.value).toBe('["item-1","item-2"]');
-    expect(jsonInput.value).not.toContain("\\");
+    expect(getAceTextByLabel(/Item Ids/)).toBe('["item-1","item-2"]');
+    expect(getAceTextByLabel(/Item Ids/)).not.toContain("\\");
   });
 
   // #1853 again, from the comment thread: the caret sitting *outside* the
   // quotes of a `""` value. One keystroke there made the draft invalid, which
   // is all it took — `""` + `a` rendered as `"\"\"a"`.
   it("keeps a keystroke typed outside a string's quotes literal (#1853)", async () => {
-    const user = userEvent.setup();
     const schema: InspectorFormSchema = {
       type: "object",
       // No `type`, so the field lands on the JSON editor holding a string.
@@ -1544,18 +1530,14 @@ describe("JSON editor escaping (#1853, #1856, #1885)", () => {
       <EscapingHarness schema={schema} initial={{ note: "" }} />,
     );
 
-    const jsonInput = screen.getByRole("textbox", {
-      name: /Note/,
-    }) as HTMLTextAreaElement;
-    await user.click(jsonInput);
-    await user.keyboard("{End}a");
+    expect(getAceTextByLabel(/Note/)).toBe('""');
+    await setAceTextByLabel(/Note/, '""a');
 
-    expect(jsonInput.value).toBe('""a');
+    expect(getAceTextByLabel(/Note/)).toBe('""a');
   });
 
   // #1856: `sum_numbers`, Backspace with the caret after the closing `]`.
   it("keeps the draft raw when Backspace invalidates an array (#1856)", async () => {
-    const user = userEvent.setup();
     const schema: InspectorFormSchema = {
       type: "object",
       properties: {
@@ -1571,22 +1553,21 @@ describe("JSON editor escaping (#1853, #1856, #1885)", () => {
       <EscapingHarness schema={schema} initial={{ numbers: [1, 2] }} />,
     );
 
-    const jsonInput = screen.getByLabelText(/Numbers/) as HTMLTextAreaElement;
-    await user.click(jsonInput);
-    await user.keyboard("{End}{Backspace}");
+    expect(getAceTextByLabel(/Numbers/)).toBe("[\n  1,\n  2\n]");
 
     // Exactly the seeded text minus its last character — the draft the reporter
     // expected, where the field instead showed a quoted, escaped string.
-    expect(jsonInput.value).toBe("[\n  1,\n  2\n");
+    await setAceTextByLabel(/Numbers/, "[\n  1,\n  2\n");
+    expect(getAceTextByLabel(/Numbers/)).toBe("[\n  1,\n  2\n");
 
     // Each further edit compounded the escaping, so keep going.
-    await user.keyboard("{Backspace}{Backspace}");
-    expect(jsonInput.value).not.toContain("\\");
-    expect(jsonInput.value.startsWith('"')).toBe(false);
+    await setAceTextByLabel(/Numbers/, "[\n  1,\n  ");
+    expect(getAceTextByLabel(/Numbers/)).not.toContain("\\");
+    expect(getAceTextByLabel(/Numbers/).startsWith('"')).toBe(false);
 
     // And the draft is still live: closing it back up produces a real array.
-    await user.keyboard("2]");
-    expect(jsonInput.value).toBe("[\n  1,\n  2]");
+    await setAceTextByLabel(/Numbers/, "[\n  1,\n  2]");
+    expect(getAceTextByLabel(/Numbers/)).toBe("[\n  1,\n  2]");
   });
 
   // #1885: FastMCP's `b: int | None = None`, which compiles to an `anyOf` with
@@ -1626,7 +1607,6 @@ describe("JSON editor escaping (#1853, #1856, #1885)", () => {
   // sends to the JSON editor (an array union). Backspacing the `null` token
   // there is the exact keystroke sequence from #1885's recording.
   it("backspaces a null default in the JSON editor without escaping (#1885)", async () => {
-    const user = userEvent.setup();
     const schema: InspectorFormSchema = {
       type: "object",
       properties: {
@@ -1641,16 +1621,14 @@ describe("JSON editor escaping (#1853, #1856, #1885)", () => {
     // being resolved — the state the reporter's recording starts from.
     renderWithMantine(<EscapingHarness schema={schema} />);
 
-    const jsonInput = screen.getByLabelText(/Cfg/) as HTMLTextAreaElement;
-    expect(jsonInput.value).toBe("null");
+    expect(getAceTextByLabel(/Cfg/)).toBe("null");
 
-    await user.click(jsonInput);
-    await user.keyboard("{End}{Backspace}");
-    expect(jsonInput.value).toBe("nul");
+    await setAceTextByLabel(/Cfg/, "nul");
+    expect(getAceTextByLabel(/Cfg/)).toBe("nul");
 
-    await user.keyboard("{Backspace}{Backspace}{Backspace}");
-    expect(jsonInput.value).toBe("");
-    expect(jsonInput.value).not.toContain("\\");
+    await setAceTextByLabel(/Cfg/, "");
+    expect(getAceTextByLabel(/Cfg/)).toBe("");
+    expect(getAceTextByLabel(/Cfg/)).not.toContain("\\");
   });
 });
 
@@ -1691,13 +1669,10 @@ describe("SchemaForm defaulted fields (#2026)", () => {
 
   it("opens the JSON editor on the schema default", () => {
     renderWithMantine(<DefaultHarness schema={arrayWithDefault} />);
-    expect((screen.getByLabelText(/Tags/) as HTMLTextAreaElement).value).toBe(
-      '[\n  "a"\n]',
-    );
+    expect(getAceTextByLabel(/Tags/)).toBe('[\n  "a"\n]');
   });
 
   it("keeps a keystroke typed into a defaulted JSON field", async () => {
-    const user = userEvent.setup();
     // Seeded with a value that is equal to the schema default but is not the
     // same object — how values parsed off the wire or out of a deep link
     // arrive. Sharing the reference (what `collectSchemaDefaults` produces) is
@@ -1706,26 +1681,21 @@ describe("SchemaForm defaulted fields (#2026)", () => {
       <DefaultHarness schema={arrayWithDefault} initial={{ tags: ["a"] }} />,
     );
 
-    const jsonInput = screen.getByLabelText(/Tags/) as HTMLTextAreaElement;
-    await user.click(jsonInput);
-    await user.keyboard("{End}x");
+    await setAceTextByLabel(/Tags/, '[\n  "a"\n]x');
 
     // The invalid draft is the user's, not the default reasserting itself.
-    expect(jsonInput.value).toBe('[\n  "a"\n]x');
+    expect(getAceTextByLabel(/Tags/)).toBe('[\n  "a"\n]x');
   });
 
   it("lets a defaulted JSON field be edited to a new value", async () => {
-    const user = userEvent.setup();
     // Distinct-object seed again, for the reason above.
     renderWithMantine(
       <DefaultHarness schema={arrayWithDefault} initial={{ tags: ["a"] }} />,
     );
 
-    const jsonInput = screen.getByLabelText(/Tags/) as HTMLTextAreaElement;
-    await user.clear(jsonInput);
-    await user.type(jsonInput, '[["b"]');
+    await setAceTextByLabel(/Tags/, '["b"]');
 
-    expect(jsonInput.value).toBe('["b"]');
+    expect(getAceTextByLabel(/Tags/)).toBe('["b"]');
     expect(screen.queryByText(/Not valid JSON/)).not.toBeInTheDocument();
   });
 
@@ -1737,7 +1707,9 @@ describe("SchemaForm defaulted fields (#2026)", () => {
     };
     renderWithMantine(<DefaultHarness schema={schema} initial={{ n: 30 }} />);
 
-    const n = screen.getByLabelText(/N/) as HTMLInputElement;
+    // Anchored: the form now also renders an "Edit as JSON" switch, which a
+    // bare /N/ matches too.
+    const n = screen.getByLabelText(/^N$/) as HTMLInputElement;
     expect(n.value).toBe("30");
 
     await user.click(n);
@@ -1790,9 +1762,224 @@ describe("SchemaForm defaulted fields (#2026)", () => {
     const user = userEvent.setup();
     renderWithMantine(<ExternalHarness />);
 
-    const jsonInput = screen.getByLabelText(/Tags/) as HTMLTextAreaElement;
     await user.click(screen.getByRole("button", { name: "load example" }));
-    expect(jsonInput.value).toBe('[\n  "z"\n]');
+    expect(getAceTextByLabel(/Tags/)).toBe('[\n  "z"\n]');
+  });
+});
+
+// The v1 escape hatch, restored (#2151): a rendered form can be flipped over to
+// editing its whole arguments object as JSON, so a value the widgets cannot
+// express — or a payload the user wants to paste in whole — has a route in.
+describe("SchemaForm raw JSON (#2151)", () => {
+  const schema: InspectorFormSchema = {
+    type: "object",
+    properties: {
+      name: { type: "string", title: "Name" },
+      count: { type: "integer", title: "Count" },
+    },
+  };
+
+  function RawHarness({
+    initial = {},
+    onValidityChange,
+    resetKey,
+    schema: override,
+  }: {
+    initial?: Record<string, unknown>;
+    onValidityChange?: (hasInvalidDraft: boolean) => void;
+    resetKey?: string;
+    schema?: InspectorFormSchema;
+  }) {
+    const [values, setValues] = useState<Record<string, unknown>>(initial);
+    return (
+      <SchemaForm
+        schema={override ?? schema}
+        values={values}
+        onChange={setValues}
+        resetKey={resetKey}
+        onValidityChange={onValidityChange}
+      />
+    );
+  }
+
+  async function enableRawJson(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByLabelText("Edit as JSON"));
+  }
+
+  it("replaces the widgets with one editor holding the current values", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<RawHarness initial={{ name: "a", count: 2 }} />);
+    expect(screen.getByLabelText(/^Name$/)).toBeInTheDocument();
+
+    await enableRawJson(user);
+
+    expect(screen.queryByLabelText(/^Name$/)).toBeNull();
+    expect(getAceTextByLabel(/Arguments JSON/)).toBe(
+      '{\n  "name": "a",\n  "count": 2\n}',
+    );
+  });
+
+  it("emits the edited object, and the widgets show it on the way back", async () => {
+    const user = userEvent.setup();
+    renderWithMantine(<RawHarness initial={{ name: "a", count: 2 }} />);
+    await enableRawJson(user);
+
+    await setAceTextByLabel(/Arguments JSON/, '{"name":"b","count":9}');
+    await user.click(screen.getByLabelText("Edit as JSON"));
+
+    expect((screen.getByLabelText(/^Name$/) as HTMLInputElement).value).toBe(
+      "b",
+    );
+    expect((screen.getByLabelText(/^Count$/) as HTMLInputElement).value).toBe(
+      "9",
+    );
+  });
+
+  // A field the schema does not declare has no widget, which is the case the
+  // escape hatch exists for — so it must survive the round trip.
+  it("carries a value no widget can express", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{}} onChange={onChange} />,
+    );
+    await enableRawJson(user);
+    await setAceTextByLabel(/Arguments JSON/, '{"extra":{"deep":[1,2]}}');
+    expect(onChange).toHaveBeenLastCalledWith({ extra: { deep: [1, 2] } });
+  });
+
+  it("blocks submission while the draft does not parse, and clears it after", async () => {
+    const user = userEvent.setup();
+    const onValidityChange = vi.fn();
+    renderWithMantine(<RawHarness onValidityChange={onValidityChange} />);
+    await enableRawJson(user);
+
+    await setAceTextByLabel(/Arguments JSON/, '{"a":');
+    expect(onValidityChange).toHaveBeenLastCalledWith(true);
+    expect(screen.getByText(/Not valid JSON/)).toBeInTheDocument();
+
+    await setAceTextByLabel(/Arguments JSON/, '{"a":1}');
+    expect(onValidityChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("blocks submission for JSON that is not an object", async () => {
+    const user = userEvent.setup();
+    const onValidityChange = vi.fn();
+    renderWithMantine(<RawHarness onValidityChange={onValidityChange} />);
+    await enableRawJson(user);
+
+    await setAceTextByLabel(/Arguments JSON/, "[1,2]");
+    expect(onValidityChange).toHaveBeenLastCalledWith(true);
+    expect(screen.getByText(/must be a JSON object/i)).toBeInTheDocument();
+  });
+
+  // Turning the switch back off unmounts the editor, so text that can no longer
+  // be seen must not keep the submit button disabled.
+  it("clears the block when switched back to the widgets", async () => {
+    const user = userEvent.setup();
+    const onValidityChange = vi.fn();
+    renderWithMantine(<RawHarness onValidityChange={onValidityChange} />);
+    await enableRawJson(user);
+    await setAceTextByLabel(/Arguments JSON/, '{"a":');
+    expect(onValidityChange).toHaveBeenLastCalledWith(true);
+
+    await user.click(screen.getByLabelText("Edit as JSON"));
+    expect(onValidityChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("clears an empty editor to no arguments rather than erroring", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    renderWithMantine(
+      <SchemaForm schema={schema} values={{ name: "a" }} onChange={onChange} />,
+    );
+    await enableRawJson(user);
+    await setAceTextByLabel(/Arguments JSON/, "");
+    expect(onChange).toHaveBeenLastCalledWith({});
+    expect(screen.queryByText(/Not valid JSON/)).toBeNull();
+  });
+
+  // #2123: switching a root union drops the outgoing branch's values. The raw
+  // editor is seeded from what the form holds, so a round trip through it must
+  // not resurrect them.
+  it("does not resurrect a pruned branch's values", async () => {
+    const user = userEvent.setup();
+    const union: InspectorFormSchema = {
+      type: "object",
+      anyOf: [
+        {
+          type: "object",
+          title: "Email",
+          properties: { address: { type: "string", title: "Address" } },
+        },
+        {
+          type: "object",
+          title: "SMS",
+          properties: { phone: { type: "string", title: "Phone" } },
+        },
+      ],
+    };
+    renderWithMantine(
+      <RawHarness schema={union} initial={{ address: "a@b.c" }} />,
+    );
+
+    // Switch branches — `address` belongs to the outgoing shape and is dropped.
+    await user.click(screen.getByRole("textbox", { name: /Variant/ }));
+    await user.click(screen.getByRole("option", { name: "SMS" }));
+
+    await enableRawJson(user);
+    expect(getAceTextByLabel(/Arguments JSON/)).not.toContain("address");
+  });
+
+  // A draft is typed for one entity. Left in the box, it would be submitted for
+  // the next — the same reasoning `resetKey` documents for every other
+  // draft-holding field.
+  it("discards the draft when the form moves to another entity", async () => {
+    const user = userEvent.setup();
+    // Uncontrolled on purpose: the values must stay put so the only thing that
+    // could carry the text across is the editor's own draft.
+    const { rerender } = renderWithMantine(
+      <SchemaForm
+        schema={schema}
+        values={{}}
+        onChange={vi.fn()}
+        resetKey="first_tool"
+      />,
+    );
+    await enableRawJson(user);
+    await setAceTextByLabel(/Arguments JSON/, '{"name":"typed for the first"}');
+
+    rerender(
+      <SchemaForm
+        schema={schema}
+        values={{}}
+        onChange={vi.fn()}
+        resetKey="second_tool"
+      />,
+    );
+    expect(getAceTextByLabel(/Arguments JSON/)).toBe("{}");
+  });
+
+  // A per-field switch would offer to edit a fragment of the payload the outer
+  // switch already covers whole — and would nest one JSON editor inside another
+  // the moment both were on.
+  it("offers no switch on a nested object's form", async () => {
+    const user = userEvent.setup();
+    const nested: InspectorFormSchema = {
+      type: "object",
+      properties: {
+        outer: {
+          type: "object",
+          title: "Outer",
+          properties: { inner: { type: "string", title: "Inner" } },
+        },
+      },
+    };
+    renderWithMantine(<RawHarness schema={nested} />);
+    expect(screen.getAllByLabelText("Edit as JSON")).toHaveLength(1);
+
+    await enableRawJson(user);
+    expect(screen.getAllByLabelText("Edit as JSON")).toHaveLength(1);
   });
 });
 

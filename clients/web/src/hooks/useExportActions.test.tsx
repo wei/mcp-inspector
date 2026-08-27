@@ -232,6 +232,38 @@ describe("useExportActions", () => {
       expect(notificationsMock.show).not.toHaveBeenCalled();
     });
 
+    // Edit-and-replay dispatches through this same call, so the only thing that
+    // distinguishes it is the params (#2151).
+    it("re-issues with edited params when given an override", async () => {
+      replayProtocolRequest.mockResolvedValue(null);
+      const h = harness({ messages: [request("r1", "tools/list")] });
+      h.run((api) => api.onReplayProtocol("r1", { a: 2, b: "x" }));
+      await vi.waitFor(() => {
+        expect(replayProtocolRequest).toHaveBeenCalledWith(
+          expect.anything(),
+          "tools/list",
+          { a: 2, b: "x" },
+          [],
+        );
+      });
+    });
+
+    // `null` is an edit to no params at all — an emptied editor — and must not
+    // be read as "no edit", which would silently re-send the original params.
+    it("re-issues with no params when the override is null", async () => {
+      replayProtocolRequest.mockResolvedValue(null);
+      const h = harness({ messages: [request("r1", "tools/list")] });
+      h.run((api) => api.onReplayProtocol("r1", null));
+      await vi.waitFor(() => {
+        expect(replayProtocolRequest).toHaveBeenCalledWith(
+          expect.anything(),
+          "tools/list",
+          undefined,
+          [],
+        );
+      });
+    });
+
     it("surfaces a pre-flight refusal as a toast", async () => {
       replayProtocolRequest.mockResolvedValue("Nope.");
       const h = harness({ messages: [request("r1", "tools/list")] });

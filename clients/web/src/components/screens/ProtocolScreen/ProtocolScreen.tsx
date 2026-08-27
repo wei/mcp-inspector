@@ -1,5 +1,6 @@
 import { useCallback, useMemo } from "react";
 import { Card, Flex, Stack } from "@mantine/core";
+import type { ReplayParamsOverride } from "../../../lib/protocolReplay";
 import type { ProtocolEra } from "@modelcontextprotocol/client";
 import type {
   MessageEntry,
@@ -22,7 +23,7 @@ export interface ProtocolScreenProps {
   onExport: () => void;
   onClearSection: (section: "pinned" | "history") => void;
   onExportSection: (section: "pinned" | "history") => void;
-  onReplay: (id: string) => void;
+  onReplay: (id: string, overrideParams?: ReplayParamsOverride) => void;
   onTogglePin: (id: string) => void;
   sortDirection: SortDirection;
   onSortChange: (next: SortDirection) => void;

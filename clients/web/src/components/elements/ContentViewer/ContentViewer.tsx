@@ -10,11 +10,13 @@ import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { CodeHighlight } from "../CodeHighlight/CodeHighlight";
 import { CopyButton } from "../CopyButton/CopyButton";
+import { JsonEditor } from "../JsonEditor/JsonEditor";
 import { ResourceLinkInfo } from "../ResourceLinkInfo/ResourceLinkInfo";
 import {
   formatJson,
   formatXml,
   getMimeKind,
+  isJsonDocument,
   isSafeHref,
   isTextualKind,
   looksLikeJson,
@@ -161,6 +163,46 @@ function HighlightedContent({
   );
 }
 
+/**
+ * A read-only JSON payload, rendered in the same Ace editor the JSON *input*
+ * surfaces use (#2151).
+ *
+ * Highlighting is not what this buys — JSON already highlighted here, through
+ * the lazily-imported Prism grammar `CodeHighlight` loads. What Ace adds is
+ * **folding**, line numbers and a gutter, which is the difference between
+ * reading a large `tools/call` result and scrolling past it. Prism's `json`
+ * grammar was dropped in the same change rather than kept beside this: two
+ * highlighters for one language drift, and nothing else asks for `json`.
+ *
+ * The copy affordance is unchanged — `CopyableWrapper` overlays it above
+ * whichever renderer was picked, so `copyable` keeps working across the swap.
+ * It copies the *original* text, not the pretty-printed form, matching every
+ * other branch here.
+ */
+function JsonContent({ text, copyable }: { text: string; copyable: boolean }) {
+  return (
+    <CopyableWrapper copyable={copyable} copyValue={text}>
+      <JsonEditor
+        ariaLabel="JSON content"
+        value={formatJson(text)}
+        readOnly
+        // Sized to the payload, both ways. A two-line result must not open six
+        // rows of blank editor — and an uncapped `maxLines` is what keeps a
+        // large one from growing its *own* scroller inside the host's: every
+        // consumer here already provides the scroll container it wants (the
+        // structured-output section caps at `mah` and scrolls; a result panel
+        // scrolls whole), and a second scrollbar nested in the first is both
+        // worse to use and a change to layout this swap has no business making.
+        // It also keeps every line in the DOM, as the preformatted block it
+        // replaces did — Ace renders only what its own viewport covers, so a
+        // capped editor would silently drop the rest from find-in-page.
+        minLines={1}
+        maxLines={Infinity}
+      />
+    </CopyableWrapper>
+  );
+}
+
 function PlainTextContent({
   text,
   copyable,
@@ -170,6 +212,13 @@ function PlainTextContent({
   copyable: boolean;
   wrap: boolean;
 }) {
+  // Untyped text that really parses as JSON gets the JSON renderer too — the
+  // heuristic is how a server that sent no MIME type still reads well. Not when
+  // `wrap` is false, though: that caller wants one clipped line at a fixed
+  // height, which a multi-line editor is not.
+  if (wrap && isJsonDocument(text)) {
+    return <JsonContent text={text} copyable={copyable} />;
+  }
   const displayText = looksLikeJson(text) ? formatJson(text) : text;
   return (
     <CopyableWrapper copyable={copyable} copyValue={text}>
@@ -210,13 +259,14 @@ function TextualContent({
     case "markdown":
       return <MarkdownContent text={text} copyable={copyable} />;
     case "json":
-      return (
-        <HighlightedContent
-          code={formatJson(text)}
-          language="json"
-          copyValue={text}
-          copyable={copyable}
-        />
+      // `wrap={false}` is a fixed-height, single-line, ellipsis-clipped box
+      // (the server card's command/URL). Pretty-printed JSON collapsed onto one
+      // line is exactly what that prop is documented not to be used for, so
+      // that caller keeps the plain renderer.
+      return wrap ? (
+        <JsonContent text={text} copyable={copyable} />
+      ) : (
+        <PlainTextContent text={text} copyable={copyable} wrap={wrap} />
       );
     case "xml":
       return (
