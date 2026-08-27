@@ -103,6 +103,26 @@ describe("formatJson", () => {
   it("returns the input unchanged when invalid", () => {
     expect(formatJson("{ broken")).toBe("{ broken");
   });
+
+  // Pretty-printing is a round trip through JS's number type, which is not
+  // lossless. Reformatting these would show the reader something other than
+  // what the sender put on the wire — the worst kind of bug in an inspector.
+  it("leaves a payload alone when reindenting would change a value", () => {
+    // Would render as …992.
+    expect(formatJson('{"id":9007199254740993}')).toBe(
+      '{"id":9007199254740993}',
+    );
+    // `JSON.parse` yields Infinity, which `JSON.stringify` writes as null.
+    expect(formatJson('{"limit":1e400}')).toBe('{"limit":1e400}');
+  });
+
+  // The spelling of a number changes on a round trip and its *value* does not,
+  // so these still get indented: `0.10000000000000001` and `0.1` are the same
+  // double, and `1e2` and `100` are the same number.
+  it("still formats a payload whose numbers only change spelling", () => {
+    expect(formatJson('{"n":0.10000000000000001}')).toBe('{\n  "n": 0.1\n}');
+    expect(formatJson('{"n":1e2}')).toBe('{\n  "n": 100\n}');
+  });
 });
 
 describe("looksLikeJson", () => {
@@ -122,6 +142,15 @@ describe("formatJsonDocument", () => {
   // The stricter half of the heuristic (#2151). Text that merely *starts* like
   // JSON must not be handed to the JSON editor: a note beginning `{` would then
   // be presented as a document, in a JSON gutter, framed as malformed.
+  // Still a JSON document — it just does not get reindented when reindenting
+  // would change what it says.
+  it("returns the source unindented when reindenting would change a value", () => {
+    expect(formatJsonDocument('{"id":9007199254740993}')).toBe(
+      '{"id":9007199254740993}',
+    );
+    expect(formatJsonDocument('{"limit":1e400}')).toBe('{"limit":1e400}');
+  });
+
   it("reports text that only looks like JSON as not JSON", () => {
     expect(formatJsonDocument("{ broken")).toBeNull();
     expect(formatJsonDocument("[unclosed")).toBeNull();
