@@ -482,18 +482,40 @@ function BlockContent({
       return <ImageContent data={block.data} mimeType={block.mimeType} />;
     case "audio":
       return <AudioContent data={block.data} mimeType={block.mimeType} />;
-    case "resource":
+    case "resource": {
+      // An embedded *text* resource that declares JSON goes through the same
+      // dispatch a text block does, so this branch inherits the JSON renderer
+      // rather than staying on a plain code block (#2151).
+      //
+      // Narrowed to JSON on purpose, the same way the Network tab's bodies are:
+      // routing every declared type through would also put an embedded
+      // `text/html` resource into the sandboxed frame and a `text/csv` one into
+      // a table. The Resources screen already renders resource contents that
+      // way, so doing it here too is defensible — but it is a change to what a
+      // tool result *is*, and belongs to whoever decides that rather than to
+      // this swap.
+      const embedded = "text" in block.resource ? block.resource : null;
+      if (embedded && getMimeKind(embedded.mimeType ?? "") === "json") {
+        return (
+          <TextualContent
+            text={embedded.text}
+            mimeType={embedded.mimeType}
+            copyable={copyable}
+            wrap={wrap}
+            jsonLabel={jsonLabel}
+          />
+        );
+      }
       return (
         <Stack gap="xs">
           <ContentWrapper>
             <CodeBlock>
-              {"text" in block.resource
-                ? block.resource.text
-                : `[blob: ${block.resource.uri}]`}
+              {embedded ? embedded.text : `[blob: ${block.resource.uri}]`}
             </CodeBlock>
           </ContentWrapper>
         </Stack>
       );
+    }
     case "resource_link":
       // Static metadata only. The interactive, read-on-demand presentation
       // lives in the `groups/ResourceLink` group, rendered by content-block

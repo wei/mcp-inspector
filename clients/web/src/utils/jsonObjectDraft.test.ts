@@ -78,9 +78,26 @@ describe("findUnsendableNumberLiteral", () => {
     },
   );
 
+  // A nonzero literal that parses to zero anyway: the digit comparison skips it
+  // for being exponent-form, and it is not negative zero, so nothing else here
+  // would see a document that says one number and sends none of it.
+  it.each(["1e-400", "-1e-400", "0.00001e-400", "9e-999"])(
+    "rejects a literal that underflows to zero: %s",
+    (literal) => {
+      expect(findUnsendableNumberLiteral(`{"n":${literal}}`)).toBe(literal);
+    },
+  );
+
+  // Subnormal but representable — a real value, not an underflow to nothing.
+  it("accepts a subnormal that still parses to something", () => {
+    expect(findUnsendableNumberLiteral('{"n":1e-320}')).toBeNull();
+  });
+
   it("accepts a positive zero", () => {
     expect(findUnsendableNumberLiteral('{"n":0}')).toBeNull();
     expect(findUnsendableNumberLiteral('{"n":0.0}')).toBeNull();
+    // Written as zero, so it is zero — not an underflow.
+    expect(findUnsendableNumberLiteral('{"n":0e-400}')).toBeNull();
   });
 
   it("says nothing about text that is not JSON", () => {

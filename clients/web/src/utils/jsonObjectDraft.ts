@@ -41,9 +41,10 @@ export function isJsonObject(value: unknown): value is StrictJsonObject {
  * Only integer literals written out in full are checked for lost digits. An
  * exponent or a fraction is a double by nature and is sent as the double it
  * parsed to, so nothing is lost between typing and sending — and `{"n":1e308}`
- * stays acceptable, which `parseJsonObjectDraft`'s own tests pin. Negative zero
- * is the exception, and is checked in every spelling: there the loss happens on
- * the way *out*, not on the way in.
+ * stays acceptable, which `parseJsonObjectDraft`'s own tests pin. The two
+ * exceptions are checked in every spelling: negative zero, where the loss
+ * happens on the way *out*, and underflow, where a nonzero literal parses to
+ * zero on the way in.
  */
 export function findUnsendableNumberLiteral(text: string): string | null {
   for (const literal of jsonNumberLiterals(text)) {
@@ -51,12 +52,28 @@ export function findUnsendableNumberLiteral(text: string): string | null {
     // exactly, so the digit comparison below has nothing to say about it, but
     // `JSON.stringify` writes it as `0`: the sign is lost on the way out.
     if (Object.is(Number(literal), -0)) return literal;
+    // Underflow: a literal with a nonzero mantissa that parses to zero anyway,
+    // `1e-400` being the shape of it. The digit comparison skips it for being
+    // exponent-form, and it is not negative zero, so nothing else here sees a
+    // document that says one number and sends none of it.
+    if (Number(literal) === 0 && /[1-9]/.test(mantissaOf(literal))) {
+      return literal;
+    }
     if (!/^-?\d+$/.test(literal)) continue;
     // BigInt on both sides, so the comparison is exact: `Number(literal)` is an
     // integer-valued double, and converting it back shows what survived.
     if (BigInt(literal) !== BigInt(Number(literal))) return literal;
   }
   return null;
+}
+
+/**
+ * The part of a numeric literal before its exponent — `1` of `1e-400`, `-0.0`
+ * of `-0.0e5`. Whether it holds a nonzero digit is what separates a literal
+ * that underflowed to zero from one that was written as zero.
+ */
+function mantissaOf(literal: string): string {
+  return literal.split(/[eE]/)[0];
 }
 
 /** Matches one JSON number token, anchored where the scan currently stands. */

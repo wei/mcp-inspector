@@ -263,6 +263,39 @@ describe("ContentViewer", () => {
     expect(screen.getByRole("button", { name: "Copy" })).toBeInTheDocument();
   });
 
+  // The `resource` block branch used to render every embedded resource in a
+  // plain code block, so a prompt message carrying JSON did not inherit this
+  // migration even though the text-block branch did.
+  it("renders an embedded JSON resource in the JSON editor", () => {
+    const block: ContentBlock = {
+      type: "resource",
+      resource: {
+        uri: "file:///a.json",
+        mimeType: "application/json",
+        text: '{"a":1}',
+      },
+    };
+    renderWithMantine(<ContentViewer block={block} />);
+    expect(getAceText()).toBe('{\n  "a": 1\n}');
+  });
+
+  // Narrowed to JSON on purpose: routing every declared type through would put
+  // an embedded `text/html` resource into the sandboxed frame, which is a
+  // change to what a tool result is.
+  it("leaves a non-JSON embedded resource on the plain renderer", () => {
+    const block: ContentBlock = {
+      type: "resource",
+      resource: {
+        uri: "file:///a.html",
+        mimeType: "text/html",
+        text: "<p>hi</p>",
+      },
+    };
+    renderWithMantine(<ContentViewer block={block} />);
+    expect(screen.getByText("<p>hi</p>")).toBeInTheDocument();
+    expect(document.querySelector("iframe")).toBeNull();
+  });
+
   it("renders nothing when neither block nor contents is provided", () => {
     const { container } = renderWithMantine(<ContentViewer />);
     // MantineProvider injects a <style> node; assert no actual content renders.
