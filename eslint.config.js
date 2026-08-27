@@ -30,7 +30,7 @@ const typeAware = {
     // an awaited one minus four characters, and the unhandled rejection it
     // produces surfaces in a different test, in a different file, as a stack
     // pointing at SDK internals — which is how #1947 came to fail the whole
-    // `npm run ci` chain from two un-held `callTool` promises.
+    // `npm run local:gate` chain from two un-held `callTool` promises.
     "@typescript-eslint/no-floating-promises": "error",
   },
 };

@@ -76,7 +76,7 @@ const preview: Preview = {
       },
     },
     a11y: {
-      // `'error'` fails the Storybook play-function tests (part of `npm run ci`)
+      // `'error'` fails the Storybook play-function tests (part of `npm run local:gate`)
       // on any axe violation, so the zero-violation state this PR reached is
       // enforced going forward rather than being a point-in-time result.
       test: "error",
