@@ -265,6 +265,15 @@ describe("EditReplayModal", () => {
     expect(screen.getByRole("button", { name: "Send" })).not.toBeDisabled();
   });
 
+  // `JSON.parse` keeps only the last occurrence, so the draft would show two
+  // cursors and Send would dispatch one.
+  it("disables Send for a document that names the same member twice", async () => {
+    renderWithMantine(<EditReplayModal {...baseProps} method="tools/list" />);
+    await setAceText('{"cursor":"first","cursor":"second"}');
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(screen.getByText(/`cursor` appears twice/)).toBeInTheDocument();
+  });
+
   it("closes without sending when cancelled", async () => {
     const user = userEvent.setup();
     const onSend = vi.fn();

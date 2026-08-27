@@ -67,18 +67,10 @@ const JSON_NUMBER = /-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
  */
 function* jsonNumberLiterals(text: string): Generator<string> {
   let index = 0;
-  let inString = false;
   while (index < text.length) {
     const char = text[index];
-    if (inString) {
-      // A backslash escapes the next character, including a closing quote.
-      index += char === "\\" ? 2 : 1;
-      if (char === '"') inString = false;
-      continue;
-    }
     if (char === '"') {
-      inString = true;
-      index += 1;
+      index = readStringToken(text, index).next;
       continue;
     }
     if (char === "-" || (char >= "0" && char <= "9")) {
@@ -93,6 +85,97 @@ function* jsonNumberLiterals(text: string): Generator<string> {
     }
     index += 1;
   }
+}
+
+/**
+ * Read one JSON string token starting at the opening quote.
+ *
+ * Returns where the token ends and its raw source, escapes intact — the caller
+ * decodes only when it needs the *value*, which for a key it does: `"a"` and
+ * `"\u0061"` name the same member, so comparing the raw forms would miss a
+ * duplicate written the second way.
+ *
+ * Shared by both scanners here so the escape handling — a backslash consumes
+ * the next character, including a closing quote — is written once.
+ */
+function readStringToken(
+  text: string,
+  start: number,
+): { raw: string; next: number } {
+  let index = start + 1;
+  while (index < text.length) {
+    const char = text[index];
+    if (char === "\\") {
+      index += 2;
+      continue;
+    }
+    index += 1;
+    if (char === '"') break;
+  }
+  return { raw: text.slice(start, index), next: index };
+}
+
+/**
+ * The first object member name this document declares twice, or `null`.
+ *
+ * `JSON.parse` accepts duplicate names and keeps the last silently, so
+ * `{"role":"user","role":"admin"}` becomes `{"role":"admin"}` — a document that
+ * renders, and submits, as *less* than it says. In a read-only view that is the
+ * Inspector hiding what the server sent; in a draft it is the editor showing
+ * more than the wire will carry. Neither is acceptable, and nothing else here
+ * detects it, because by the time `JSON.parse` returns the evidence is gone.
+ *
+ * Scoped per object, so `{"a":{"a":1}}` and `[{"a":1},{"a":2}]` are fine — the
+ * repeat has to be within one set of braces.
+ */
+export function findDuplicateObjectKey(text: string): string | null {
+  // One frame per open brace or bracket; `null` marks an array, whose members
+  // are not named and so cannot collide.
+  const stack: (Set<string> | null)[] = [];
+  let expectKey = false;
+  let index = 0;
+  while (index < text.length) {
+    const char = text[index];
+    if (char === '"') {
+      const { raw, next } = readStringToken(text, index);
+      const frame = stack[stack.length - 1];
+      if (expectKey && frame) {
+        let name: string;
+        try {
+          name = JSON.parse(raw) as string;
+        } catch {
+          // An unterminated string at the end of a half-typed draft. There is
+          // no key here to compare, and the parse will report the real problem.
+          return null;
+        }
+        if (frame.has(name)) return name;
+        frame.add(name);
+        expectKey = false;
+      }
+      index = next;
+      continue;
+    }
+    if (char === "{") {
+      stack.push(new Set());
+      expectKey = true;
+    } else if (char === "[") {
+      stack.push(null);
+      expectKey = false;
+    } else if (char === "}" || char === "]") {
+      stack.pop();
+      expectKey = false;
+    } else if (char === ",") {
+      // Only an object's separator introduces a name; an array's does not.
+      expectKey = stack[stack.length - 1] != null;
+    }
+    index += 1;
+  }
+  return null;
+}
+
+/** The message every draft parser uses for {@link findDuplicateObjectKey}. */
+export function duplicateKeyError(key: string): string {
+  return `\`${key}\` appears twice in the same object — JSON keeps only the last, so part of this would not be sent`;
 }
 
 /**
@@ -147,6 +230,10 @@ export function parseJsonObjectDraft(text: string): JsonObjectDraft {
   }
   if (hasImpreciseIntegerLiteral(text)) {
     return { ok: false, error: IMPRECISE_INTEGER_ERROR };
+  }
+  const duplicate = findDuplicateObjectKey(text);
+  if (duplicate !== null) {
+    return { ok: false, error: duplicateKeyError(duplicate) };
   }
   return { ok: true, value: parsed };
 }

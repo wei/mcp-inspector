@@ -116,6 +116,15 @@ describe("formatJson", () => {
     expect(formatJson('{"limit":1e400}')).toBe('{"limit":1e400}');
   });
 
+  // The starkest instance of the same class: only the *second* `role` survives
+  // `JSON.parse`, so reindenting would show the reader less than the server
+  // sent.
+  it("leaves a payload alone when it names the same member twice", () => {
+    expect(formatJson('{"role":"user","role":"admin"}')).toBe(
+      '{"role":"user","role":"admin"}',
+    );
+  });
+
   // The spelling of a number changes on a round trip and its *value* does not,
   // so these still get indented: `0.10000000000000001` and `0.1` are the same
   // double, and `1e2` and `100` are the same number.

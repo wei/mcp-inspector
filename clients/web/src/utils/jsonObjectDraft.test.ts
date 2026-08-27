@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  findDuplicateObjectKey,
   hasImpreciseIntegerLiteral,
   parseJsonObjectDraft,
 } from "./jsonObjectDraft";
@@ -70,6 +71,51 @@ describe("hasImpreciseIntegerLiteral", () => {
   });
 });
 
+// `JSON.parse` accepts duplicate member names and keeps the last silently, so
+// the evidence is gone by the time it returns — nothing downstream can see that
+// the document said more than the value carries.
+describe("findDuplicateObjectKey", () => {
+  it("names the repeated member", () => {
+    expect(findDuplicateObjectKey('{"role":"user","role":"admin"}')).toBe(
+      "role",
+    );
+  });
+
+  it("accepts a document whose names are all distinct", () => {
+    expect(findDuplicateObjectKey('{"a":1,"b":2}')).toBeNull();
+  });
+
+  // The repeat has to be within one set of braces.
+  it("scopes the check per object", () => {
+    expect(findDuplicateObjectKey('{"a":{"a":1}}')).toBeNull();
+    expect(findDuplicateObjectKey('[{"a":1},{"a":2}]')).toBeNull();
+  });
+
+  it("finds a repeat nested inside another object or an array", () => {
+    expect(findDuplicateObjectKey('{"outer":{"a":1,"a":2}}')).toBe("a");
+    expect(findDuplicateObjectKey('[{"a":1,"a":2}]')).toBe("a");
+  });
+
+  // Compared by decoded value: `"a"` and `"\u0061"` name the same member, so
+  // comparing the raw source would miss a duplicate written the second way.
+  it("compares names by value, not by spelling", () => {
+    expect(findDuplicateObjectKey('{"a":1,"\\u0061":2}')).toBe("a");
+  });
+
+  // A string *value* that repeats is not a duplicate name, and a name that
+  // merely appears inside one is not either.
+  it("does not confuse values with names", () => {
+    expect(findDuplicateObjectKey('{"a":"x","b":"x"}')).toBeNull();
+    expect(findDuplicateObjectKey('{"a":"b","c":1}')).toBeNull();
+    expect(findDuplicateObjectKey('{"a":"}\\"a\\":1{","b":2}')).toBeNull();
+  });
+
+  it("says nothing about a half-typed draft", () => {
+    expect(findDuplicateObjectKey('{"a":1,"a')).toBeNull();
+    expect(findDuplicateObjectKey("")).toBeNull();
+  });
+});
+
 describe("parseJsonObjectDraft", () => {
   it("reads empty text as the empty object rather than an error", () => {
     expect(parseJsonObjectDraft("")).toEqual({ ok: true, value: {} });
@@ -110,6 +156,12 @@ describe("parseJsonObjectDraft", () => {
       ok: true,
       value: { n: 1e308 },
     });
+  });
+
+  it("rejects a document that names the same member twice", () => {
+    const result = parseJsonObjectDraft('{"role":"user","role":"admin"}');
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toMatch(/`role` appears twice/);
   });
 
   it("rejects text that is not JSON", () => {

@@ -2,12 +2,15 @@
  * Pure helpers backing the per-MIME dispatch in {@link ContentViewer}. Kept
  * free of component dependencies so they can be unit-tested in isolation and
  * reused by the blob renderers (PDF / CSV / HTML) without dragging in React.
- * The two pure predicates imported below are the exception that proves it:
- * plain functions over a string, shared so the viewer and the JSON editors
- * cannot disagree about which payloads survive a round trip.
+ * The predicates imported below are the exception that proves it: plain
+ * functions over a string, shared so the viewer and the JSON editors cannot
+ * disagree about which payloads survive a round trip.
  */
 import { isSerializableJson } from "@inspector/core/json/jsonUtils.js";
-import { hasImpreciseIntegerLiteral } from "../../../utils/jsonObjectDraft";
+import {
+  findDuplicateObjectKey,
+  hasImpreciseIntegerLiteral,
+} from "../../../utils/jsonObjectDraft";
 
 /**
  * The renderer family a MIME type maps to. `ContentViewer` switches on this to
@@ -160,11 +163,18 @@ export function formatJson(content: string): string {
  * as it arrived — unindented, but honest. The copy button already copied the
  * original text either way; this makes what is on screen agree with it.
  *
- * The same two checks the draft parsers use, which is why they live in
+ * The same checks the draft parsers use, which is why they live in
  * `utils/jsonObjectDraft` rather than beside either caller.
  */
 function reformatsFaithfully(text: string, parsed: unknown): boolean {
-  return isSerializableJson(parsed) && !hasImpreciseIntegerLiteral(text);
+  return (
+    isSerializableJson(parsed) &&
+    !hasImpreciseIntegerLiteral(text) &&
+    // A duplicate member name is the same class and the starkest instance:
+    // `{"role":"user","role":"admin"}` would be *shown* as only the second,
+    // which is the viewer hiding what the server sent.
+    findDuplicateObjectKey(text) === null
+  );
 }
 
 /** Heuristic: does this plain text (no MIME) look like a JSON document? */

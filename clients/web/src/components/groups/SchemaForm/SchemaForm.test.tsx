@@ -792,6 +792,9 @@ describe("SchemaForm", () => {
       screen.getByText(/^This whole number cannot be represented exactly/),
     ).toBeInTheDocument();
 
+    await setAceTextByLabel(/Config/, '[{"a":1,"a":2}]');
+    expect(screen.getByText(/^`a` appears twice/)).toBeInTheDocument();
+
     await setAceTextByLabel(/Config/, "[1,2]");
     expect(screen.queryByText(/this field will be omitted/)).toBeNull();
   });
@@ -1976,6 +1979,22 @@ describe("SchemaForm raw JSON (#2151)", () => {
     expect(
       screen.getByText(/cannot be represented exactly/),
     ).toBeInTheDocument();
+  });
+
+  // `JSON.parse` keeps only the last occurrence, so the editor would show a
+  // document that submits as less than it says.
+  it("blocks submission for a document that names the same member twice", async () => {
+    const user = userEvent.setup();
+    const onValidityChange = vi.fn();
+    renderWithMantine(<RawHarness onValidityChange={onValidityChange} />);
+    await enableRawJson(user);
+
+    await setAceTextByLabel(
+      /Arguments JSON/,
+      '{"mode":"safe","mode":"unsafe"}',
+    );
+    expect(onValidityChange).toHaveBeenLastCalledWith(true);
+    expect(screen.getByText(/`mode` appears twice/)).toBeInTheDocument();
   });
 
   // Nothing in `values` names a branch, so the picker's index is held by the

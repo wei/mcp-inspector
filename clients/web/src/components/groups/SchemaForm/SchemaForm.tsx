@@ -25,6 +25,8 @@ import { ClearButton } from "../../elements/ClearButton/ClearButton";
 import { EnlargeButton } from "../../elements/EnlargeButton/EnlargeButton";
 import { JsonEditor } from "../../elements/JsonEditor/JsonEditor";
 import {
+  duplicateKeyError,
+  findDuplicateObjectKey,
   hasImpreciseIntegerLiteral,
   isJsonObject,
   IMPRECISE_INTEGER_ERROR,
@@ -331,6 +333,10 @@ function describeJsonDraftProblem(text: string): string | null {
   }
   if (hasImpreciseIntegerLiteral(text)) {
     return `${IMPRECISE_INTEGER_ERROR} — this field will be omitted`;
+  }
+  const duplicate = findDuplicateObjectKey(text);
+  if (duplicate !== null) {
+    return `${duplicateKeyError(duplicate)} — this field will be omitted`;
   }
   return null;
 }
@@ -648,6 +654,10 @@ function parseRawArgumentsDraft(
   // the nearest double, so the draft shows digits the wire will not carry.
   if (hasImpreciseIntegerLiteral(text)) {
     return { ok: false, error: IMPRECISE_INTEGER_ERROR };
+  }
+  const duplicate = findDuplicateObjectKey(text);
+  if (duplicate !== null) {
+    return { ok: false, error: duplicateKeyError(duplicate) };
   }
   return { ok: true, value: parsed };
 }

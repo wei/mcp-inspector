@@ -3,6 +3,8 @@ import type { Tool } from "@modelcontextprotocol/client";
 import { Alert, Button, Group, Modal, Stack, Text } from "@mantine/core";
 import { JsonEditor } from "../../elements/JsonEditor/JsonEditor";
 import {
+  duplicateKeyError,
+  findDuplicateObjectKey,
   hasImpreciseIntegerLiteral,
   isJsonObject,
   IMPRECISE_INTEGER_ERROR,
@@ -113,6 +115,10 @@ function parseParamsDraft(
   }
   if (hasImpreciseIntegerLiteral(text)) {
     return { ok: false, error: IMPRECISE_INTEGER_ERROR };
+  }
+  const duplicate = findDuplicateObjectKey(text);
+  if (duplicate !== null) {
+    return { ok: false, error: duplicateKeyError(duplicate) };
   }
   // Seeding from the projection is only half of it: a key the dispatcher does
   // not read can also be *added* to the draft, and Send would then discard an
