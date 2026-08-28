@@ -424,6 +424,12 @@ export class OAuthStorageBase implements OAuthStorage {
     await this.persist();
   }
 
+  async listIssuers(serverUrl: string): Promise<string[]> {
+    await this.ensureLoaded();
+    const state = this.memory.getState().getServerState(serverUrl);
+    return Object.keys(state.byIssuer ?? {});
+  }
+
   async clear(serverUrl: string): Promise<void> {
     await this.ensureLoaded();
     this.memory.getState().clearServerState(serverUrl);

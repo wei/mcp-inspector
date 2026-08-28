@@ -161,6 +161,13 @@ function App({
     "idle" | "authenticating" | "error"
   >("idle");
   const [oauthMessage, setOauthMessage] = useState<string | null>(null);
+  // #2144: a revocation failure is a partial success — the local state really
+  // was cleared — so it is not an `error` status, but it must not read as an
+  // ordinary note either: the grant may still be live at the authorization
+  // server.
+  const [oauthMessageTone, setOauthMessageTone] = useState<"info" | "warning">(
+    "info",
+  );
   const [oauthRevision, setOauthRevision] = useState(0);
   const [pendingStepUp, setPendingStepUp] = useState<{
     serverName: string;
@@ -949,9 +956,10 @@ function App({
       revoke: selectedServerEntry?.settings?.oauthRevokeOnClear !== false,
     });
     setOauthStatus("idle");
+    setOauthMessageTone(revocation.status === "failed" ? "warning" : "info");
     setOauthMessage(
       revocation.status === "failed"
-        ? `Cleared locally, but revoking the grant at the authorization server failed: ${revocation.detail}`
+        ? `Cleared locally, but revoking the grant at the authorization server failed: ${revocation.detail}. It may still be valid there.`
         : null,
     );
     setConnectError(null);
@@ -1756,6 +1764,7 @@ function App({
                 inspectorClient={selectedInspectorClient}
                 oauthStatus={oauthStatus}
                 oauthMessage={oauthMessage}
+                oauthMessageTone={oauthMessageTone}
                 oauthRevision={oauthRevision}
                 pendingStepUp={
                   pendingStepUp?.serverName === selectedServer

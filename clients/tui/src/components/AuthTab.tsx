@@ -28,6 +28,14 @@ interface AuthTabProps {
   inspectorClient: InspectorClient | null;
   oauthStatus: "idle" | "authenticating" | "error";
   oauthMessage: string | null;
+  /**
+   * How to colour {@link oauthMessage} on the `idle` status. Defaults to
+   * `"info"` (cyan). `"warning"` exists for the one message that reports a
+   * *partial* success: the OAuth state really was cleared, so this is not an
+   * error, but the grant may still be live at the authorization server and
+   * cyan would understate that (#2144).
+   */
+  oauthMessageTone?: "info" | "warning";
   oauthRevision: number;
   pendingStepUp?: {
     challenge: AuthChallenge;
@@ -57,6 +65,7 @@ export function AuthTab({
   inspectorClient,
   oauthStatus,
   oauthMessage,
+  oauthMessageTone = "info",
   oauthRevision,
   pendingStepUp,
   onAuthorizeStepUp,
@@ -190,7 +199,9 @@ export function AuthTab({
             <Text color="red">{oauthMessage}</Text>
           )}
           {oauthStatus === "idle" && oauthMessage && (
-            <Text color="cyan">{oauthMessage}</Text>
+            <Text color={oauthMessageTone === "warning" ? "yellow" : "cyan"}>
+              {oauthMessage}
+            </Text>
           )}
 
           {pendingStepUp ? (

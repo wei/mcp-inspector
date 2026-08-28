@@ -24,6 +24,9 @@ import type { OAuthMetadata } from "@modelcontextprotocol/client";
 const CLIENT_ID = "test-2144-revocation";
 const CLIENT_SECRET = "test-2144-secret";
 const REDIRECT_URL = "http://localhost:3000/oauth/callback";
+/** A second registered client, used to prove tokens are not cross-revocable. */
+const OTHER_CLIENT_ID = "test-2144-other";
+const OTHER_CLIENT_SECRET = "test-2144-other-secret";
 
 function base64Url(buffer: Buffer): string {
   return buffer
@@ -48,6 +51,11 @@ describe("OAuth token revocation (RFC 7009)", () => {
           {
             clientId: CLIENT_ID,
             clientSecret: CLIENT_SECRET,
+            redirectUris: [REDIRECT_URL],
+          },
+          {
+            clientId: OTHER_CLIENT_ID,
+            clientSecret: OTHER_CLIENT_SECRET,
             redirectUris: [REDIRECT_URL],
           },
         ],
@@ -161,6 +169,27 @@ describe("OAuth token revocation (RFC 7009)", () => {
       body: new URLSearchParams({ token: "anything" }),
     });
     expect(response.status).toBe(401);
+  });
+
+  // RFC 7009 §2.1: only the client a token was issued to may revoke it. The
+  // response stays 200 (§2.2 — it must not tell one client whether another's
+  // token exists), so the assertion is that the token still works.
+  it("does not revoke a token belonging to a different client", async () => {
+    const tokens = await authorize();
+    const response = await fetch(`${serverUrl}/oauth/revoke`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Authorization: `Basic ${Buffer.from(`${OTHER_CLIENT_ID}:${OTHER_CLIENT_SECRET}`).toString("base64")}`,
+      },
+      body: new URLSearchParams({
+        token: tokens.refresh_token,
+        token_type_hint: "refresh_token",
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await tokenAccepted(tokens.access_token)).toBe(true);
   });
 
   it("advertises a revocation endpoint", () => {

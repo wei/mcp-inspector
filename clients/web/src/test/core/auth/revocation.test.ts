@@ -3,6 +3,7 @@ import type { OAuthMetadata } from "@modelcontextprotocol/client";
 import { BrowserOAuthStorage } from "@inspector/core/auth/browser/storage.js";
 import {
   DEFAULT_REVOCATION_TIMEOUT_MS,
+  aggregateOutcomes,
   buildRevocationRequest,
   revocationAuthMethods,
   revokeStoredOAuthTokens,
@@ -131,6 +132,40 @@ describe("revocationAuthMethods", () => {
   });
 });
 
+describe("aggregateOutcomes", () => {
+  const failed = { status: "failed", detail: "boom" } as const;
+  const revoked = {
+    status: "revoked",
+    tokenTypeHint: "refresh_token",
+    endpoint: REVOKE_URL,
+  } as const;
+  const skipped = { status: "skipped", reason: "no_endpoint" } as const;
+
+  // A grant still live at the authorization server is the thing worth
+  // surfacing; another grant's success would silence it.
+  it("reports a failure over a success", () => {
+    expect(aggregateOutcomes([revoked, failed])).toEqual(failed);
+  });
+
+  it("reports a success over a skip", () => {
+    expect(aggregateOutcomes([skipped, revoked])).toEqual(revoked);
+  });
+
+  it("falls through to the first outcome when none is decisive", () => {
+    expect(aggregateOutcomes([skipped])).toEqual(skipped);
+  });
+
+  // `computeOutcome` returns early when there are no grants, so nothing else
+  // reaches this — which is why it is tested here rather than left as a
+  // function that returns `undefined` while typed otherwise.
+  it("has an answer for an empty list", () => {
+    expect(aggregateOutcomes([])).toEqual({
+      status: "skipped",
+      reason: "no_tokens",
+    });
+  });
+});
+
 describe("buildRevocationRequest", () => {
   it("posts a form-encoded token and hint", () => {
     const { url, init } = buildRevocationRequest({
@@ -227,6 +262,23 @@ describe("revokeToken", () => {
     });
     expect(outcome).toMatchObject({ status: "failed", endpoint: REVOKE_URL });
     expect(outcome.status === "failed" ? outcome.detail : "").toContain("401");
+  });
+
+  // `String(err)` is the other half of the detail: a fetch double, or a runtime
+  // that rejects with a non-Error, must still produce a readable message.
+  it("reports a non-Error rejection as failed", async () => {
+    const outcome = await revokeToken({
+      endpoint: REVOKE_URL,
+      token: "r",
+      tokenTypeHint: "refresh_token",
+      supportedAuthMethods: [],
+      fetchFn: () => Promise.reject("plain string"),
+    });
+    expect(outcome).toEqual({
+      status: "failed",
+      endpoint: REVOKE_URL,
+      detail: "plain string",
+    });
   });
 
   it("reports a network failure as failed", async () => {
@@ -351,6 +403,102 @@ describe("revokeStoredOAuthTokens", () => {
     );
   });
 
+  // `clear(serverUrl)` drops EVERY `byIssuer` slot, so reading only the active
+  // issuer's token would leave the earlier authorization server's grant live
+  // while destroying the local record of it — the same leak this feature
+  // closes, one level down (SEP-2352 keeps credentials per issuer).
+  it("revokes every issuer-bound grant, not just the active one", async () => {
+    const issuerMetadata = metadata({ issuer: "https://as.example.com" });
+    await storage.saveServerMetadata(SERVER_URL, issuerMetadata);
+    await storage.saveTokens(
+      SERVER_URL,
+      { access_token: "a1", token_type: "Bearer", refresh_token: "r1" },
+      { issuer: "https://as.example.com" },
+    );
+    await storage.saveTokens(
+      SERVER_URL,
+      { access_token: "a2", token_type: "Bearer", refresh_token: "r2" },
+      { issuer: "https://as.example.com" },
+    );
+    // A second slot under the SAME issuer would be one grant; use two distinct
+    // tokens under one issuer plus the ctx-less read to prove dedup instead.
+    const fetchFn = vi.fn<typeof fetch>(
+      async () => new Response(null, { status: 200 }),
+    );
+
+    await revokeStoredOAuthTokens({ serverUrl: SERVER_URL, storage, fetchFn });
+
+    // One issuer, one grant — the ctx-less read is the same token and is deduped.
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(
+      new URLSearchParams(String(fetchFn.mock.calls[0]![1]!.body)).get("token"),
+    ).toBe("r2");
+  });
+
+  // A grant bound to an issuer the cached metadata does not describe cannot be
+  // revoked — that endpoint belongs to a different authorization server, and
+  // sending it another AS's token would hand a credential to a server that
+  // never minted it. Saying so is the point: the grant is being dropped.
+  it("reports a grant whose issuer the cached metadata does not describe", async () => {
+    await storage.saveServerMetadata(
+      SERVER_URL,
+      metadata({ issuer: "https://as-b.example.com" }),
+    );
+    await storage.saveTokens(
+      SERVER_URL,
+      { access_token: "a", token_type: "Bearer", refresh_token: "r-a" },
+      { issuer: "https://as-a.example.com" },
+    );
+    const fetchFn = vi.fn<typeof fetch>(
+      async () => new Response(null, { status: 200 }),
+    );
+
+    const outcome = await revokeStoredOAuthTokens({
+      serverUrl: SERVER_URL,
+      storage,
+      fetchFn,
+    });
+
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ status: "failed" });
+    expect(outcome.status === "failed" ? outcome.detail : "").toContain(
+      "as-a.example.com",
+    );
+  });
+
+  // A failure on one grant must not be hidden behind another's success — a
+  // grant still live at the authorization server is the thing worth surfacing.
+  it("reports a failure over another grant's success", async () => {
+    await storage.saveServerMetadata(
+      SERVER_URL,
+      metadata({ issuer: "https://as-b.example.com" }),
+    );
+    // Revocable: bound to the issuer the metadata describes.
+    await storage.saveTokens(
+      SERVER_URL,
+      { access_token: "b", token_type: "Bearer", refresh_token: "r-b" },
+      { issuer: "https://as-b.example.com" },
+    );
+    // Not revocable: bound to an issuer the cached metadata is not for.
+    await storage.saveTokens(
+      SERVER_URL,
+      { access_token: "a", token_type: "Bearer", refresh_token: "r-a" },
+      { issuer: "https://as-a.example.com" },
+    );
+    const fetchFn = vi.fn<typeof fetch>(
+      async () => new Response(null, { status: 200 }),
+    );
+
+    const outcome = await revokeStoredOAuthTokens({
+      serverUrl: SERVER_URL,
+      storage,
+      fetchFn,
+    });
+
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ status: "failed" });
+  });
+
   // The whole point of keeping this path opt-out-able: an authorization server
   // with no RFC 7009 support must behave exactly as it did before the feature.
   it("does nothing when the authorization server advertises no revocation endpoint", async () => {
@@ -430,6 +578,18 @@ describe("revokeStoredOAuthTokens", () => {
   // asked for, so the read is inside the try. Spying on the real instance keeps
   // the `OAuthStorage` contract intact — a spread-and-cast stand-in would type
   // as storage while being a plain object with none of its methods.
+  it("reports a non-Error store failure as failed", async () => {
+    vi.spyOn(storage, "listIssuers").mockRejectedValue("store exploded");
+
+    await expect(
+      revokeStoredOAuthTokens({
+        serverUrl: SERVER_URL,
+        storage,
+        fetchFn: vi.fn<typeof fetch>(),
+      }),
+    ).resolves.toEqual({ status: "failed", detail: "store exploded" });
+  });
+
   it("reports a store read failure as failed", async () => {
     vi.spyOn(storage, "getTokens").mockRejectedValue(
       new Error("store unreadable"),

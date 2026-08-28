@@ -256,6 +256,9 @@ async function withDeadline<T>(
   try {
     return await Promise.race([promise, deadline]);
   } finally {
+    /* v8 ignore next -- the Promise executor runs synchronously, so `timer` is
+       always assigned by the time this runs; the guard exists only because
+       TypeScript cannot see that. */
     if (timer !== undefined) clearTimeout(timer);
   }
 }
@@ -279,8 +282,10 @@ export interface RevokeStoredOAuthTokensParams {
  * needs out of the OAuth store.
  *
  * Called immediately **before** the local clear, since the store is where the
- * token, the client credentials, and the discovered `revocation_endpoint` all
- * live — after the clear there is nothing left to revoke with.
+ * tokens, the client credentials, and the discovered `revocation_endpoint` all
+ * live — after the clear there is nothing left to revoke with. Every grant the
+ * clear will delete is covered, not just the active issuer's: see
+ * {@link collectGrants}.
  *
  * The metadata comes from the cache the OAuth flow already populated rather
  * than from a fresh discovery round-trip: the tokens being revoked were minted
@@ -316,19 +321,96 @@ export async function revokeStoredOAuthTokens(
  * The client credentials to authenticate the revocation request with.
  *
  * Mirrors `BaseOAuthClientProvider.clientInformation`: the preregistered
- * (static, issuer-independent) entry wins, then the per-issuer dynamic
- * registration. Reading only the second would silently drop client
- * authentication for every server configured with an `oauth.clientId` — the
- * confidential case, where an authorization server is most likely to *require*
- * it and answer 401.
+ * (static, issuer-independent) entry wins, then the registration bound to
+ * `issuer`. Reading only the second would silently drop client authentication
+ * for every server configured with an `oauth.clientId` — the confidential case,
+ * where an authorization server is most likely to *require* it and answer 401.
  */
 async function resolveClientInformation(
   storage: OAuthStorage,
   serverUrl: string,
+  issuer?: string,
 ): Promise<OAuthClientInformation | undefined> {
   return (
     (await storage.getClientInformation(serverUrl, true)) ??
-    (await storage.getClientInformation(serverUrl, false))
+    (await storage.getClientInformation(serverUrl, false, issuer))
+  );
+}
+
+/** One revocable grant held for a server, and which AS minted it. */
+interface StoredGrant {
+  /** Undefined for the legacy unkeyed slot, which predates issuer binding. */
+  issuer?: string;
+  token: string;
+  tokenTypeHint: "refresh_token" | "access_token";
+  clientInformation?: OAuthClientInformation;
+}
+
+/**
+ * Every grant `clear(serverUrl)` is about to delete, deduplicated by token.
+ *
+ * `clear` drops **every** `byIssuer` slot, so reading only the context-free
+ * (active-issuer) token would leave an earlier authorization server's grant
+ * live while destroying the local record of it — the exact leak this feature
+ * exists to close, just moved one level down. A server that authorized against
+ * issuers A and B has two grants here, not one.
+ *
+ * The ctx-less read is included last and deduped: on an issuer-bound entry it
+ * returns the active issuer's token, which the loop above has already seen; on
+ * a legacy entry it is the only thing that returns anything at all.
+ */
+async function collectGrants(
+  storage: OAuthStorage,
+  serverUrl: string,
+): Promise<StoredGrant[]> {
+  const grants: StoredGrant[] = [];
+  const seen = new Set<string>();
+
+  const add = async (issuer?: string): Promise<void> => {
+    const revocable = selectRevocableToken(
+      await storage.getTokens(serverUrl, issuer),
+    );
+    if (!revocable || seen.has(revocable.token)) return;
+    seen.add(revocable.token);
+    grants.push({
+      issuer,
+      ...revocable,
+      clientInformation: await resolveClientInformation(
+        storage,
+        serverUrl,
+        issuer,
+      ),
+    });
+  };
+
+  for (const issuer of await storage.listIssuers(serverUrl)) {
+    await add(issuer);
+  }
+  await add();
+  return grants;
+}
+
+/**
+ * Combine per-grant outcomes into the one this function reports.
+ *
+ * A **failure outranks a success**: a grant still live at the authorization
+ * server is what the caller needs to surface, and reporting another grant's
+ * success would leave that silent. A success outranks a skip for the same
+ * reason in the other direction — "revoked" is the more specific truth.
+ *
+ * Exported for its own test. `computeOutcome` returns early when there are no
+ * grants, so the empty case cannot arise from there — which is exactly why the
+ * fallback needs testing somewhere: nothing else would ever exercise it, and a
+ * function that returns `undefined` while typed otherwise is a trap for the
+ * next caller.
+ */
+export function aggregateOutcomes(
+  outcomes: TokenRevocationOutcome[],
+): TokenRevocationOutcome {
+  return (
+    outcomes.find((o) => o.status === "failed") ??
+    outcomes.find((o) => o.status === "revoked") ??
+    outcomes[0] ?? { status: "skipped", reason: "no_tokens" }
   );
 }
 
@@ -337,32 +419,49 @@ async function computeOutcome(
 ): Promise<TokenRevocationOutcome> {
   const { serverUrl, storage, fetchFn } = params;
 
-  // Read the token first. It is the cheapest disqualifier, and a server with no
-  // stored grant should not provoke a metadata read at all.
-  let tokens: OAuthTokens | undefined;
-  let metadata: OAuthMetadata | null;
-  let clientInformation: OAuthClientInformation | undefined;
   try {
-    tokens = await storage.getTokens(serverUrl);
-    const revocable = selectRevocableToken(tokens);
-    if (!revocable) return { status: "skipped", reason: "no_tokens" };
+    // Grants first. They are the cheapest disqualifier, and a server with no
+    // stored grant should not provoke a metadata read at all.
+    const grants = await collectGrants(storage, serverUrl);
+    if (grants.length === 0) return { status: "skipped", reason: "no_tokens" };
 
-    metadata = await storage.getServerMetadata(serverUrl);
+    const metadata = await storage.getServerMetadata(serverUrl);
     if (!metadata) return { status: "skipped", reason: "no_metadata" };
-    if (!metadata.revocation_endpoint) {
-      return { status: "skipped", reason: "no_endpoint" };
-    }
+    const endpoint = metadata.revocation_endpoint;
+    if (!endpoint) return { status: "skipped", reason: "no_endpoint" };
 
-    clientInformation = await resolveClientInformation(storage, serverUrl);
-    return await revokeToken({
-      endpoint: metadata.revocation_endpoint,
-      token: revocable.token,
-      tokenTypeHint: revocable.tokenTypeHint,
-      clientInformation,
-      supportedAuthMethods: revocationAuthMethods(metadata),
-      fetchFn,
-      timeoutMs: params.timeoutMs,
-    });
+    const supportedAuthMethods = revocationAuthMethods(metadata);
+    const outcomes: TokenRevocationOutcome[] = [];
+    for (const grant of grants) {
+      // Metadata is cached once per server, not per issuer, so it describes
+      // whichever authorization server was discovered last. Sending another
+      // issuer's token to *this* endpoint would hand a credential to a server
+      // that never minted it — worse than not revoking. So say plainly that the
+      // grant is being dropped unrevoked rather than doing either silently.
+      if (
+        grant.issuer !== undefined &&
+        metadata.issuer !== undefined &&
+        grant.issuer !== metadata.issuer
+      ) {
+        outcomes.push({
+          status: "failed",
+          detail: `the cached authorization-server metadata is for ${metadata.issuer}, so the grant bound to ${grant.issuer} was cleared without revocation`,
+        });
+        continue;
+      }
+      outcomes.push(
+        await revokeToken({
+          endpoint,
+          token: grant.token,
+          tokenTypeHint: grant.tokenTypeHint,
+          clientInformation: grant.clientInformation,
+          supportedAuthMethods,
+          fetchFn,
+          timeoutMs: params.timeoutMs,
+        }),
+      );
+    }
+    return aggregateOutcomes(outcomes);
   } catch (err) {
     // A store that cannot be read (a corrupt blob, a remote backend that 500s)
     // is not a reason to abandon the clear the user asked for.

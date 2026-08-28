@@ -183,6 +183,18 @@ export interface OAuthStorage {
   clearDiscoveryState(serverUrl: string): Promise<void>;
 
   /**
+   * The authorization-server `issuer` keys holding credentials for this server
+   * (SEP-2352). Empty when the entry predates issuer binding — its credentials
+   * live in the legacy unkeyed slot, which the ctx-less reads above answer.
+   *
+   * Exists because {@link clear} deletes **every** issuer slot: anything that
+   * must act on the credentials before they are dropped (RFC 7009 revocation,
+   * #2144) would otherwise see only the active issuer's and silently discard
+   * the rest.
+   */
+  listIssuers(serverUrl: string): Promise<string[]>;
+
+  /**
    * Clear all OAuth data for a server
    */
   clear(serverUrl: string): Promise<void>;

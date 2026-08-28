@@ -100,6 +100,35 @@ describe("AuthTab", () => {
     );
   });
 
+  // #2144 — a revocation failure is a *partial* success: the local state really
+  // was cleared, so it is not an `error` status, but the grant may still be
+  // live at the authorization server and the informational tone understates
+  // that. Both tones are exercised so neither branch can rot.
+  it("renders an idle message in the warning tone when asked", () => {
+    const { lastFrame } = render(
+      <AuthTab
+        {...baseProps}
+        inspectorClient={null}
+        oauthStatus="idle"
+        oauthMessage="Cleared locally, but revoking failed."
+        oauthMessageTone="warning"
+      />,
+    );
+    expect(lastFrame() ?? "").toContain("Cleared locally");
+  });
+
+  it("renders an idle message in the default informational tone", () => {
+    const { lastFrame } = render(
+      <AuthTab
+        {...baseProps}
+        inspectorClient={null}
+        oauthStatus="idle"
+        oauthMessage="Stored OAuth state cleared."
+      />,
+    );
+    expect(lastFrame() ?? "").toContain("Stored OAuth state cleared.");
+  });
+
   it("renders OAuth details from getOAuthState", async () => {
     const { client } = makeClient(sampleOAuthState);
     const { lastFrame } = render(

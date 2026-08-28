@@ -1407,7 +1407,16 @@ describe("App (mid-session auth lifecycle events)", () => {
     });
     const r = await mount(oneHttp());
     await press(r, ["a", "s"]);
+    // The detail is what identifies the failure; the tone the message renders
+    // in is asserted against `AuthTab` directly, where the branch lives.
     await expectFrame(r, "unreachable");
+  });
+
+  it("says nothing when there was nothing to revoke", async () => {
+    const r = await mount(oneHttp());
+    await press(r, ["a", "s"]);
+    await waitUntil(() => h.clientSpies.clearOAuthTokens.mock.calls.length > 0);
+    expect(r.lastFrame() ?? "").not.toContain("authorization server failed");
   });
 
   const stepUpChallenge = {

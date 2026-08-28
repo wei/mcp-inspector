@@ -636,7 +636,7 @@ function setupTokenEndpoint(
         // Generate access token
         const tokenScope =
           authCodeData.scope || config.scopesSupported?.[0] || "mcp";
-        const accessToken = generateAccessToken(tokenScope);
+        const accessToken = generateAccessToken(tokenScope, client_id);
         const tokenExpiration = config.tokenExpirationSeconds || 3600;
 
         const response: {
@@ -679,7 +679,7 @@ function setupTokenEndpoint(
 
         const tokenScope =
           refreshTokenData.scope || config.scopesSupported?.[0] || "mcp";
-        const accessToken = generateAccessToken(tokenScope);
+        const accessToken = generateAccessToken(tokenScope, client_id);
         // Keep the grant linkage current so a later revocation of this refresh
         // token also kills the access token it just minted.
         refreshTokenData.accessTokens.add(accessToken);
@@ -732,8 +732,8 @@ function setupRevocationEndpoint(
         return;
       }
 
-      const authenticated = await authenticateRevocationClient(req, config);
-      if (!authenticated) {
+      const clientId = await authenticateRevocationClient(req, config);
+      if (clientId === null) {
         res
           .status(401)
           .set("WWW-Authenticate", 'Basic realm="revoke"')
@@ -741,16 +741,20 @@ function setupRevocationEndpoint(
         return;
       }
 
+      // §2.1: only the client the token was issued to may revoke it. A token
+      // belonging to someone else is left alone — and still answered 200, per
+      // §2.2, since the response must not tell one client whether another's
+      // token exists.
       const refreshTokenData = refreshTokens.get(token);
       if (refreshTokenData) {
-        for (const accessToken of refreshTokenData.accessTokens) {
-          accessTokens.delete(accessToken);
-          accessTokenScopes.delete(accessToken);
+        if (refreshTokenData.clientId === clientId) {
+          for (const accessToken of refreshTokenData.accessTokens) {
+            forgetAccessToken(accessToken);
+          }
+          refreshTokens.delete(token);
         }
-        refreshTokens.delete(token);
-      } else {
-        accessTokens.delete(token);
-        accessTokenScopes.delete(token);
+      } else if (accessTokenClients.get(token) === clientId) {
+        forgetAccessToken(token);
       }
 
       // §2.2: 200 whether or not the token was known to us.
@@ -759,8 +763,16 @@ function setupRevocationEndpoint(
   );
 }
 
+/** Drop an access token and everything recorded about it. */
+function forgetAccessToken(token: string): void {
+  accessTokens.delete(token);
+  accessTokenScopes.delete(token);
+  accessTokenClients.delete(token);
+}
+
 /**
- * Authenticate the caller of `/oauth/revoke` (RFC 7009 §2.1).
+ * Authenticate the caller of `/oauth/revoke` (RFC 7009 §2.1) and return the
+ * `client_id` it authenticated as, or `null` when it did not authenticate.
  *
  * Credentials may arrive either way RFC 6749 §2.3.1 allows — an `Authorization:
  * Basic` header or `client_id`/`client_secret` in the form body — because the
@@ -774,7 +786,7 @@ function setupRevocationEndpoint(
 async function authenticateRevocationClient(
   req: Request,
   config: OAuthConfig,
-): Promise<boolean> {
+): Promise<string | null> {
   let clientId: string | undefined;
   let clientSecret: string | undefined;
 
@@ -785,7 +797,7 @@ async function authenticateRevocationClient(
       "base64",
     ).toString("utf8");
     const separator = decoded.indexOf(":");
-    if (separator === -1) return false;
+    if (separator === -1) return null;
     clientId = decoded.slice(0, separator);
     clientSecret = decoded.slice(separator + 1);
   } else {
@@ -795,14 +807,14 @@ async function authenticateRevocationClient(
     if (typeof bodySecret === "string") clientSecret = bodySecret;
   }
 
-  if (!clientId) return false;
+  if (!clientId) return null;
   const client = await findClient(clientId, config);
-  if (!client) return false;
+  if (!client) return null;
   // A client registered with a secret must present it; a public one must not be
   // asked for one it never had.
-  return client.clientSecret === undefined
-    ? true
-    : clientSecret === client.clientSecret;
+  const ok =
+    client.clientSecret === undefined || clientSecret === client.clientSecret;
+  return ok ? clientId : null;
 }
 
 /**
@@ -879,6 +891,13 @@ const authorizationCodes = new Map<string, AuthorizationCodeData>();
 const accessTokens = new Set<string>();
 /** Granted OAuth scope string per access token (space-separated). */
 const accessTokenScopes = new Map<string, string>();
+/**
+ * Owning `client_id` per access token. RFC 7009 §2.1 requires an authorization
+ * server to verify that a token being revoked was issued to the requesting
+ * client, and without this the fixture had no way to tell — so any registered
+ * client could revoke another's access token. (#2144)
+ */
+const accessTokenClients = new Map<string, string>();
 const refreshTokens = new Map<string, RefreshTokenData>();
 const registeredClients = new Map<string, RegisteredClient>();
 
@@ -1005,10 +1024,11 @@ function getAuthorizationCode(code: string): AuthorizationCodeData | null {
   return data;
 }
 
-function generateAccessToken(scope?: string): string {
+function generateAccessToken(scope?: string, clientId?: string): string {
   const token = `test_access_token_${Date.now()}_${Math.random().toString(36).substring(7)}`;
   accessTokens.add(token);
   accessTokenScopes.set(token, scope?.trim() || "mcp");
+  if (clientId !== undefined) accessTokenClients.set(token, clientId);
   return token;
 }
 

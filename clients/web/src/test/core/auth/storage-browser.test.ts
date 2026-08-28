@@ -358,6 +358,44 @@ describe("BrowserOAuthStorage", () => {
     });
   });
 
+  // #2144 — `clear` deletes every issuer slot, so anything that must act on the
+  // credentials first (RFC 7009 revocation) needs to see them all.
+  describe("listIssuers", () => {
+    it("returns every issuer holding credentials for the server", async () => {
+      await storage.saveTokens(
+        testServerUrl,
+        { access_token: "a", token_type: "Bearer" },
+        { issuer: "https://as-a.example.com" },
+      );
+      await storage.saveTokens(
+        testServerUrl,
+        { access_token: "b", token_type: "Bearer" },
+        { issuer: "https://as-b.example.com" },
+      );
+
+      expect((await storage.listIssuers(testServerUrl)).sort()).toEqual([
+        "https://as-a.example.com",
+        "https://as-b.example.com",
+      ]);
+    });
+
+    // A pre-SEP-2352 entry has its credentials in the legacy unkeyed slot,
+    // which the context-free reads answer — there is no issuer to list.
+    it("is empty for an entry with no issuer-bound credentials", async () => {
+      await storage.saveTokens(testServerUrl, {
+        access_token: "a",
+        token_type: "Bearer",
+      });
+      expect(await storage.listIssuers(testServerUrl)).toEqual([]);
+    });
+
+    it("is empty for a server with no state at all", async () => {
+      expect(await storage.listIssuers("https://unknown.example/mcp")).toEqual(
+        [],
+      );
+    });
+  });
+
   describe("clearServerState", () => {
     it("should clear all state for a server", async () => {
       const clientInfo: OAuthClientInformation = {
