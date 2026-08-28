@@ -183,6 +183,8 @@ function App({
   const [connectError, setConnectError] = useState<string | null>(null);
   // Monotonic token for in-flight disconnects — see handleDisconnect.
   const disconnectAttemptRef = useRef(0);
+  /** Retires a superseded "clear OAuth state" the way disconnects are (#2144). */
+  const clearOAuthAttemptRef = useRef(0);
   // A failed disconnect is deliberately NOT folded into `connectError`. That
   // one is only rendered by InfoTab when the status is "error", which a
   // rejected disconnect leaves untouched (the status stays "connected"), so
@@ -949,13 +951,27 @@ function App({
 
   const handleClearOAuth = useCallback(async () => {
     if (!selectedInspectorClient) return;
-    // RFC 7009 (#2144). Best-effort: the outcome is reported in the status
-    // line, never thrown, so clearing always completes. The per-server
-    // `oauthRevokeOnClear` opt-out is honored here the same way the web client
-    // honors it.
+    // Claim this attempt before awaiting, exactly as `handleDisconnect` does.
+    // The RFC 7009 leg is a bounded network request, so this callback can now
+    // stay suspended for seconds — long enough for the user to switch servers,
+    // at which point publishing this result would put server A's outcome on
+    // server B (and would race a second clear over the same state). (#2144)
+    const attempt = ++clearOAuthAttemptRef.current;
+    const attemptServer = selectedServer;
+    // RFC 7009. Best-effort: the outcome is reported in the status line, never
+    // thrown, so clearing always completes. The per-server `oauthRevokeOnClear`
+    // opt-out is honored here the same way the web client honors it.
     const revocation = await selectedInspectorClient.clearOAuthTokens({
       revoke: selectedServerEntry?.settings?.oauthRevokeOnClear !== false,
     });
+    // The local clear has happened either way — only the *reporting* is
+    // retired, so a superseded attempt leaves no trace on the new selection.
+    if (
+      clearOAuthAttemptRef.current !== attempt ||
+      selectedServerRef.current !== attemptServer
+    ) {
+      return;
+    }
     setOauthStatus("idle");
     if (revocation.status === "failed") {
       const warning = `Cleared locally, but revoking the grant at the authorization server failed: ${revocation.detail}. It may still be valid there.`;
@@ -971,6 +987,7 @@ function App({
     setOauthRevision((n) => n + 1);
   }, [
     selectedInspectorClient,
+    selectedServer,
     selectedServerEntry,
     inspectorStatus,
     disconnectInspector,

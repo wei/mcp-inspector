@@ -47,7 +47,15 @@ interface AuthTabProps {
   width: number;
   height: number;
   focused?: boolean;
-  onClearOAuth: () => void;
+  /**
+   * Clears (and, unless opted out, revokes) this server's OAuth state.
+   *
+   * Returns a promise so the confirmation below can wait for it. The RFC 7009
+   * revocation leg is a network request with a five-second bound (#2144), so
+   * this is no longer instantaneous, and announcing "cleared" on the keypress
+   * would say it while the work was still in flight.
+   */
+  onClearOAuth: () => void | Promise<void>;
   connectionStatus: ConnectionStatus;
 }
 
@@ -82,7 +90,16 @@ export function AuthTab({
   const [oauthState, setOauthState] = useState<
     OAuthConnectionState | undefined
   >(undefined);
-  const [clearedConfirmation, setClearedConfirmation] = useState(false);
+  const [clearState, setClearState] = useState<"idle" | "clearing" | "cleared">(
+    "idle",
+  );
+  /**
+   * Set synchronously when a clear starts, and consumed by the reset effect
+   * below. The clear itself bumps `oauthRevision` on its way out, so without
+   * this the reset would race the confirmation it is meant to outlive — and
+   * which of the two lands first is not something the ordering guarantees.
+   */
+  const ownClearRef = useRef(false);
   const [lastClearDisconnected, setLastClearDisconnected] = useState(false);
   const [stepUpChoiceIndex, setStepUpChoiceIndex] = useState(0);
 
@@ -100,7 +117,12 @@ export function AuthTab({
   }, [refreshOAuthState, oauthRevision, connectionStatus]);
 
   useEffect(() => {
-    setClearedConfirmation(false);
+    // Skip exactly the revision bump our own clear caused; reset on the next.
+    if (ownClearRef.current) {
+      ownClearRef.current = false;
+      return;
+    }
+    setClearState("idle");
     setLastClearDisconnected(false);
   }, [oauthRevision]);
 
@@ -163,9 +185,17 @@ export function AuthTab({
         const h = scrollViewRef.current.getViewportHeight() || 1;
         scrollViewRef.current.scrollBy(h);
       } else if (input.toLowerCase() === "s") {
+        // Ignore repeats while one is in flight: the second would race the
+        // first over the same store entry, and the user cannot see that the
+        // first is still running except by this state.
+        if (clearState === "clearing") return;
         setLastClearDisconnected(isLiveConnection);
-        onClearOAuth();
-        setClearedConfirmation(true);
+        ownClearRef.current = true;
+        setClearState("clearing");
+        const settle = () => setClearState("cleared");
+        // Settled either way: a failed revocation still cleared local state,
+        // and `handleClearOAuth` reports the failure through the message line.
+        void Promise.resolve(onClearOAuth()).then(settle, settle);
       }
     },
     { isActive: focused },
@@ -331,7 +361,10 @@ export function AuthTab({
               Clear OAuth <Text underline>S</Text>tate
               {isLiveConnection && " and disconnect"}
             </SelectableItem>
-            {clearedConfirmation && (
+            {clearState === "clearing" && (
+              <Text color="yellow">Clearing OAuth state…</Text>
+            )}
+            {clearState === "cleared" && (
               <Text color="green">
                 {lastClearDisconnected
                   ? "OAuth state cleared. Disconnected."

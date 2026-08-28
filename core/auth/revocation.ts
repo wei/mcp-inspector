@@ -140,15 +140,17 @@ export function buildRevocationRequest(params: RevocationRequestParams): {
   if (client) {
     const method = selectClientAuthMethod(client, params.supportedAuthMethods);
     if (method === "client_secret_basic" && client.client_secret) {
-      // Deliberately byte-identical to what the SDK's `applyBasicAuth` sends at
-      // the token endpoint: the raw `id:secret`, *not* the form-urlencoded pair
-      // RFC 6749 §2.3.1 asks for. Matching the RFC here instead would mean this
-      // request and the token request present the same credential differently,
-      // so an authorization server holding a secret with a reserved character
-      // could accept one and reject the other — a failure that would look like
-      // "revocation is broken" rather than like an encoding disagreement.
-      // Whatever the AS accepted to mint these tokens is what ends them.
-      headers.Authorization = `Basic ${base64Encode(`${client.client_id}:${client.client_secret}`)}`;
+      // RFC 6749 §2.3.1: each half is form-urlencoded *before* the colon joins
+      // them. This deliberately differs from the SDK's `applyBasicAuth`, which
+      // base64s the raw pair — matching that was the first instinct, on the
+      // theory that a credential should be presented the same way here as at
+      // the token endpoint. It does not hold up: a client authenticated with
+      // `client_secret_post` never exercised the SDK's Basic path at all, so
+      // there is no precedent to match, and the raw form is ambiguous for a
+      // client id containing `:` and makes `btoa` throw outright on a
+      // non-Latin-1 secret. Encoding is what the server decodes.
+      const credentials = `${encodeURIComponent(client.client_id)}:${encodeURIComponent(client.client_secret)}`;
+      headers.Authorization = `Basic ${base64Encode(credentials)}`;
     } else if (method === "client_secret_post" && client.client_secret) {
       body.set("client_id", client.client_id);
       body.set("client_secret", client.client_secret);
@@ -374,11 +376,13 @@ interface CollectedGrants {
  *
  * The ctx-less read is included last and is the one exception: it resolves to
  * the *active* issuer's slot (already collected above) or, on a pre-SEP-2352
- * entry, to the legacy unkeyed token — which nothing else returns. So it is
- * suppressed when its token was already taken from any slot, which is exactly
- * the first case and never the second. It is also the only read here allowed
- * to fall back; an enumerated issuer is read exactly, so a legacy token is
- * never mislabelled as belonging to one.
+ * entry, to the legacy unkeyed token — which nothing else returns. It is
+ * suppressed on the issuer *stamp* the store puts on a slot-sourced value
+ * rather than on the token's value, because the active slot may hold client
+ * information without a token: the read then falls back to the legacy grant,
+ * and a value collision with any other issuer would drop a real grant. It is
+ * also the only read here allowed to fall back; an enumerated issuer is read
+ * exactly, so a legacy token is never mislabelled as belonging to one.
  */
 async function collectGrants(
   storage: OAuthStorage,
@@ -387,7 +391,6 @@ async function collectGrants(
   const grants: StoredGrant[] = [];
   const failures: TokenRevocationOutcome[] = [];
   const seenKeys = new Set<string>();
-  const slotTokens = new Set<string>();
 
   const add = async (issuer?: string): Promise<void> => {
     const tokens =
@@ -398,13 +401,20 @@ async function collectGrants(
     if (!revocable) return;
 
     if (issuer === undefined) {
-      // Same grant as the active issuer's slot, already collected.
-      if (slotTokens.has(revocable.token)) return;
+      // `getTokens` stamps the resolved issuer onto a value it took from a
+      // byIssuer slot and leaves an unkeyed one unstamped (see `withIssuer` in
+      // oauth-storage.ts — the stamp is the key it came from). That, not the
+      // token's *value*, is what says this read duplicates a slot already
+      // collected: the active slot can hold client information without a token,
+      // in which case this falls back to the legacy grant, and a coincidental
+      // value collision with some other issuer would otherwise drop it
+      // unrevoked and unreported.
+      const fromSlot = (tokens as { issuer?: string } | undefined)?.issuer;
+      if (fromSlot !== undefined) return;
     } else {
       const key = `${issuer}\u0000${revocable.token}`;
       if (seenKeys.has(key)) return;
       seenKeys.add(key);
-      slotTokens.add(revocable.token);
     }
 
     grants.push({

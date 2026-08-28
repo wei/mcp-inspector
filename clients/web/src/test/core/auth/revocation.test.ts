@@ -191,12 +191,11 @@ describe("buildRevocationRequest", () => {
       clientInformation: { client_id: "id one", client_secret: "s/ecret" },
       supportedAuthMethods: ["client_secret_basic"],
     });
-    // Byte-identical to the SDK's `applyBasicAuth`: the raw `id:secret`, not the
-    // form-urlencoded pair RFC 6749 §2.3.1 asks for. Presenting the credential
-    // differently here than at the token endpoint is what would let an
-    // authorization server accept one request and reject the other.
+    // RFC 6749 §2.3.1 form-urlencodes each half before the colon. That is what
+    // keeps an id containing `:` unambiguous, and what stops `btoa` throwing on
+    // a non-Latin-1 secret.
     expect(headerOf(init, "Authorization")).toBe(
-      `Basic ${btoa("id one:s/ecret")}`,
+      `Basic ${btoa("id%20one:s%2Fecret")}`,
     );
     expect(body(init).has("client_secret")).toBe(false);
   });
@@ -469,6 +468,43 @@ describe("revokeStoredOAuthTokens", () => {
     expect(
       new URLSearchParams(String(fetchFn.mock.calls[0]![1]!.body)).get("token"),
     ).toBe("legacy-r");
+  });
+
+  // The active issuer slot can hold client information without a token, in
+  // which case the ctx-less read falls back to the LEGACY grant — a distinct
+  // grant, even if some other issuer happens to hold the same opaque value.
+  // Suppressing on the value would drop it unrevoked and unreported, which is
+  // why the suppression keys off the store's issuer stamp instead.
+  it("keeps the legacy grant when another issuer holds the same token value", async () => {
+    await storage.saveServerMetadata(
+      SERVER_URL,
+      metadata({ issuer: undefined }),
+    );
+    // A legacy unkeyed grant...
+    await storage.saveTokens(SERVER_URL, {
+      access_token: "shared",
+      token_type: "Bearer",
+      refresh_token: "shared-r",
+    });
+    // ...and an issuer slot that coincidentally holds the same token value.
+    // Saved via the client-information path so it does not clear the legacy
+    // slot, then given tokens through a stubbed exact read.
+    vi.spyOn(storage, "listIssuers").mockResolvedValue([
+      "https://as-a.example.com",
+    ]);
+    vi.spyOn(storage, "getIssuerTokens").mockResolvedValue({
+      access_token: "shared",
+      token_type: "Bearer",
+      refresh_token: "shared-r",
+    });
+    const fetchFn = vi.fn<typeof fetch>(
+      async () => new Response(null, { status: 200 }),
+    );
+
+    await revokeStoredOAuthTokens({ serverUrl: SERVER_URL, storage, fetchFn });
+
+    // Two grants, two requests — the issuer-bound one and the legacy one.
+    expect(fetchFn).toHaveBeenCalledTimes(2);
   });
 
   // A grant bound to an issuer the cached metadata does not describe cannot be

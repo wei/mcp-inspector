@@ -798,8 +798,12 @@ async function authenticateRevocationClient(
     ).toString("utf8");
     const separator = decoded.indexOf(":");
     if (separator === -1) return null;
-    clientId = decoded.slice(0, separator);
-    clientSecret = decoded.slice(separator + 1);
+    // RFC 6749 §2.3.1: each half is form-urlencoded before the colon, so the
+    // server decodes each half after splitting on it. Decoding is what makes a
+    // credential containing a reserved character (`:` in the id, `%` or `/` in
+    // the secret) survive the round trip.
+    clientId = decodeURIComponent(decoded.slice(0, separator));
+    clientSecret = decodeURIComponent(decoded.slice(separator + 1));
   } else {
     const bodyId: unknown = req.body?.client_id;
     const bodySecret: unknown = req.body?.client_secret;

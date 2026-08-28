@@ -100,6 +100,64 @@ describe("AuthTab", () => {
     );
   });
 
+  // #2144 — the clear is now a bounded network request, so announcing "cleared"
+  // on the keypress would say it while the work was still in flight.
+  it("shows a pending state until the clear settles, and ignores repeats", async () => {
+    let settle: () => void = () => {};
+    const onClearOAuth = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          settle = resolve;
+        }),
+    );
+    const { lastFrame, stdin } = render(
+      <AuthTab
+        {...baseProps}
+        onClearOAuth={onClearOAuth}
+        inspectorClient={null}
+        oauthStatus="idle"
+        oauthMessage={null}
+        focused
+      />,
+    );
+    await tick();
+
+    stdin.write("s");
+    await tick();
+    expect(lastFrame() ?? "").toContain("Clearing OAuth state");
+    expect(lastFrame() ?? "").not.toContain("OAuth state cleared");
+
+    // A second press while one is in flight would race the first over the same
+    // store entry, and nothing on screen tells the user the first is running.
+    stdin.write("s");
+    await tick();
+    expect(onClearOAuth).toHaveBeenCalledTimes(1);
+
+    settle();
+    await tick();
+    expect(lastFrame() ?? "").toContain("OAuth state cleared");
+  });
+
+  // A failed revocation still cleared local state, and the failure is reported
+  // through the message line — so the confirmation must not hang forever.
+  it("settles the confirmation even when the clear rejects", async () => {
+    const onClearOAuth = vi.fn(() => Promise.reject(new Error("nope")));
+    const { lastFrame, stdin } = render(
+      <AuthTab
+        {...baseProps}
+        onClearOAuth={onClearOAuth}
+        inspectorClient={null}
+        oauthStatus="idle"
+        oauthMessage={null}
+        focused
+      />,
+    );
+    await tick();
+    stdin.write("s");
+    await tick();
+    expect(lastFrame() ?? "").toContain("OAuth state cleared");
+  });
+
   // #2144 — a revocation failure is a *partial* success: the local state really
   // was cleared, so it is not an `error` status, but the grant may still be
   // live at the authorization server and the informational tone understates
