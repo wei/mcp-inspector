@@ -246,6 +246,30 @@ describe("ToolDetailPanel", () => {
     expect(onExecute).toHaveBeenCalledTimes(1);
   });
 
+  // #2171: the panel opts its form into tool-argument type enforcement, so a
+  // raw-JSON draft the client would retype is refused here rather than sent as
+  // something other than what the editor showed.
+  it("refuses a raw-JSON argument the schema would retype", async () => {
+    const user = userEvent.setup();
+    const numericTool: Tool = {
+      name: "add",
+      inputSchema: {
+        type: "object",
+        properties: { count: { type: "number" } },
+      },
+    };
+    renderWithMantine(
+      <ToolDetailPanel {...baseProps} tool={numericTool} formValues={{}} />,
+    );
+    await user.click(screen.getByLabelText("Edit as JSON"));
+    await setAceTextByLabel(/Arguments JSON/, '{"count":"01"}');
+
+    expect(
+      screen.getByText(/`count` would be converted to the type/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Execute Tool" })).toBeDisabled();
+  });
+
   it("disables the Execute Tool button while executing and renders Cancel", () => {
     renderWithMantine(
       <ToolDetailPanel {...baseProps} tool={simpleTool} isExecuting={true} />,

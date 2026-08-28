@@ -298,6 +298,29 @@ Every surface in this client where JSON is **typed**, plus `ContentViewer`'s rea
 | `groups/ImportServerJsonPanel`, `groups/ExperimentalFeaturesPanel` | The panel owns the text and validates it itself. |
 | `elements/ContentViewer`'s JSON branch | Read-only — see below. |
 
+**A raw-JSON draft is refused when the client would retype it.** `callTool`
+converts every *string-valued* argument to the type the tool's `inputSchema`
+declares, because the widget form hands everything over as text — so `"2"`
+against a numeric field has to become `2`. A JSON draft already carries its own
+types, so a value that conversion would touch is one whose visible text is not
+what the wire would carry, and showing one payload while sending another is the
+one thing an inspector must not do. Both JSON-authoring surfaces therefore
+refuse such a draft and name the value to rewrite
+([#2171](https://github.com/modelcontextprotocol/inspector/issues/2171)):
+**Edit as JSON** in the Tools and Apps tabs (which had been sending it, coerced
+and silently), and **Edit and replay**, which already did.
+
+One helper decides it for both — `coercedArgumentNames` in
+[`core/json/jsonUtils.ts`](../../core/json/jsonUtils.ts), which runs the real
+conversion and compares rather than restating its rules, so a surface cannot
+drift from what would actually be sent. `coercedArgumentsError` is the sentence
+they share, so the same refusal cannot be worded two ways.
+
+The check is **opt-in** (`SchemaFormProps.enforceToolArgumentTypes`), not
+inferred from the schema: an elicitation renders through the same `SchemaForm`
+and its values are never converted, so enforcing there would refuse a draft for
+a reason that is not true of it. Only the Tools and Apps panels pass it.
+
 **Read-only mode is what `ContentViewer` renders JSON as**, and through it every payload that reaches the app that way: Protocol and Network entries, tool results, structured output, resource previews, server cards. Highlighting is *not* what that buys — JSON already highlighted, via the lazily-imported Prism grammar `CodeHighlight` loads. What Ace adds is **folding**, line numbers and a gutter on a large payload. The Prism `json` grammar was dropped in the same change rather than kept beside it: two highlighters for one language drift, and nothing else asks for `json`. Two cases stay on the plain renderer — a `wrap={false}` caller (the server card's fixed-height, single-line box) and untyped text that only *looks* like JSON but does not parse, which in an editor would frame a server's prose as a malformed document.
 
 Two read-only JSON displays deliberately do **not** go through `ContentViewer`, and so are not on this editor — worth knowing before assuming it is the route for all of them. `ExperimentalFeaturesPanel` renders its JSON-RPC **response** in a read-only `Textarea` (its *request* box is on the editor), and `ConnectionInfoContent/OAuthTokenField` renders a decoded JWT in a `Code` block beside the raw token, where the decoded/raw toggle and the copy affordance belong to the field rather than to a viewer. Both are candidates for the same treatment; neither is in [#2151](https://github.com/modelcontextprotocol/inspector/issues/2151)'s scope.

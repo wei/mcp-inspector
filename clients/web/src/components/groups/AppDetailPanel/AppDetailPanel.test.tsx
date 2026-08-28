@@ -136,6 +136,29 @@ describe("AppDetailPanel", () => {
     expect(screen.getByRole("button", { name: /open app/i })).toBeDisabled();
   });
 
+  // #2171: an App's arguments are a `tools/call` like any other, so its form
+  // opts into the same enforcement the Tools tab uses.
+  it("refuses a raw-JSON argument the schema would retype", async () => {
+    const user = userEvent.setup();
+    const numericTool: Tool = {
+      name: "chart",
+      inputSchema: {
+        type: "object",
+        properties: { count: { type: "number" } },
+      },
+    };
+    renderWithMantine(
+      <AppDetailPanel {...baseProps} tool={numericTool} formValues={{}} />,
+    );
+    await user.click(screen.getByLabelText("Edit as JSON"));
+    await setAceTextByLabel(/Arguments JSON/, '{"count":"01"}');
+
+    expect(
+      screen.getByText(/`count` would be converted to the type/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /open app/i })).toBeDisabled();
+  });
+
   it("invokes onOpenApp when the button is clicked", async () => {
     const user = userEvent.setup();
     const onOpenApp = vi.fn();
