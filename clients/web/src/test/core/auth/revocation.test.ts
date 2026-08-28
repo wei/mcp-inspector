@@ -932,6 +932,54 @@ describe("revokeStoredOAuthTokens (plan + execute)", () => {
     expect(outcome).toMatchObject({ status: "failed" });
   });
 
+  // The preconfigured registration is only a *fallback*, so a malformed one
+  // must not abort grants that carry their own valid credentials.
+  it("still revokes when the preconfigured client registration is malformed", async () => {
+    stubSnapshot(storage, {
+      byIssuer: {
+        "https://as.example.com": {
+          tokens: {
+            access_token: "a",
+            token_type: "Bearer",
+            refresh_token: "r-good",
+          },
+          clientInformation: { client_id: "dcr-cid" },
+        },
+      },
+      // Not a valid `OAuthClientInformation` — no `client_id`.
+      preregisteredClientInformation: { client_secret: "orphan" },
+      serverMetadata: {
+        issuer: "https://as.example.com",
+        authorization_endpoint: "https://as.example.com/authorize",
+        token_endpoint: "https://as.example.com/token",
+        revocation_endpoint: REVOKE_URL,
+        response_types_supported: ["code"],
+      },
+    });
+    const fetchFn = vi.fn<typeof fetch>(
+      async () => new Response(null, { status: 200 }),
+    );
+
+    const outcome = await revokeStoredOAuthTokens({
+      serverUrl: SERVER_URL,
+      storage,
+      fetchFn,
+    });
+
+    // The grant was still revoked, with its OWN registration...
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(
+      new URLSearchParams(String(fetchFn.mock.calls[0]![1]!.body)).get(
+        "client_id",
+      ),
+    ).toBe("dcr-cid");
+    // ...and the malformed fallback is reported rather than swallowed.
+    expect(outcome).toMatchObject({ status: "failed" });
+    expect(outcome.status === "failed" ? outcome.detail : "").toContain(
+      "preconfigured client registration",
+    );
+  });
+
   // A corrupt slot must not abandon the grants that are still revocable — the
   // state is gone either way, so the failure has to be reported BESIDE the
   // successes rather than instead of them.

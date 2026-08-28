@@ -438,7 +438,7 @@ interface CachedMetadata {
 }
 
 /**
- * Send the requests a {@link planOAuthRevocation} snapshot describes.
+ * Send the requests a {@link clearAndPlanRevocation} snapshot describes.
  *
  * Safe to run **after** `storage.clear(serverUrl)` — that is the point: the
  * plan already holds the tokens, the credentials and the endpoint, so nothing
@@ -539,9 +539,20 @@ async function collectGrants(
   const failures: TokenRevocationOutcome[] = [];
   const seenKeys = new Set<string>();
 
-  const preregistered = await parseClient(
-    snapshot.preregisteredClientInformation,
-  );
+  // Parsed defensively: it is only a *fallback*, so a malformed preconfigured
+  // registration must not abort grants that carry their own valid credentials.
+  // Recorded and skipped, matching the per-slot salvage below.
+  let preregistered: OAuthClientInformation | undefined;
+  try {
+    preregistered = await parseClient(snapshot.preregisteredClientInformation);
+  } catch (err) {
+    failures.push({
+      status: "failed",
+      detail: `could not read the preconfigured client registration: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    });
+  }
 
   const add = async (
     issuer: string | undefined,
@@ -643,7 +654,7 @@ async function runPlan(
 ): Promise<TokenRevocationOutcome> {
   if (plan.outcome) return plan.outcome;
   const endpoint = plan.endpoint;
-  /* v8 ignore next -- `planOAuthRevocation` always sets `outcome` when it sets
+  /* v8 ignore next -- `clearAndPlanRevocation` always sets `outcome` when it sets
      no endpoint, so this is unreachable; the guard exists to narrow the type. */
   if (!endpoint) return { status: "skipped", reason: "no_endpoint" };
 

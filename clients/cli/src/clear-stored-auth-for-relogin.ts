@@ -32,7 +32,15 @@ function normalizeServerUrl(serverUrl: string): string {
  */
 export async function clearStoredAuthForRelogin(
   serverUrl: string | undefined,
-  options?: { revoke?: boolean },
+  options?: {
+    revoke?: boolean;
+    /**
+     * Total wall-clock budget for the revocation requests across both key
+     * spellings. Defaults to {@link DEFAULT_REVOCATION_TIMEOUT_MS}; injectable
+     * so the exhaustion path can be exercised without a five-second test.
+     */
+    budgetMs?: number;
+  },
 ): Promise<TokenRevocationOutcome | undefined> {
   if (!serverUrl?.trim()) return undefined;
   const raw = serverUrl.trim();
@@ -68,7 +76,9 @@ export async function clearStoredAuthForRelogin(
   // entry from the NodeOAuthStorage cache.
   resetNodeOAuthStorageCache();
 
-  return options?.revoke === false ? undefined : sendPlans(plans);
+  return options?.revoke === false
+    ? undefined
+    : sendPlans(plans, options?.budgetMs ?? DEFAULT_REVOCATION_TIMEOUT_MS);
 }
 
 /**
@@ -100,9 +110,10 @@ export async function clearStoredAuthForRelogin(
  */
 async function sendPlans(
   plans: OAuthRevocationPlan[],
+  budgetMs: number,
 ): Promise<TokenRevocationOutcome | undefined> {
   const fetchFn = createProxyFetch() ?? fetch;
-  const deadlineAt = Date.now() + DEFAULT_REVOCATION_TIMEOUT_MS;
+  const deadlineAt = Date.now() + budgetMs;
   let reported: TokenRevocationOutcome | undefined;
   let lastSkip: TokenRevocationOutcome | undefined;
   for (const plan of plans) {
@@ -112,11 +123,19 @@ async function sendPlans(
     // may still be live when the key held no grant at all — a false alarm, and
     // one that outranks the real outcome under the failure-first rule below.
     const needsNetwork = plan.outcome === undefined;
+    /* v8 ignore next 10 -- A bound, not a path: `withDeadline` fails any plan
+       that reaches the deadline, so a preceding plan cannot both succeed and
+       leave zero budget. This exists so a plan reached with nothing left is
+       reported rather than firing a request it would immediately abandon. */
     if (needsNetwork && remainingMs <= 0) {
-      reported ??= {
+      // Overrides an earlier success rather than deferring to it: this key's
+      // grant may still be live at the authorization server, and that is the
+      // thing the user needs to hear about. Same failure-first rule as below.
+      const exhausted: TokenRevocationOutcome = {
         status: "failed",
-        detail: `the ${DEFAULT_REVOCATION_TIMEOUT_MS}ms revocation budget was exhausted before "${plan.serverUrl}" was attempted`,
+        detail: `the ${budgetMs}ms revocation budget was exhausted before "${plan.serverUrl}" was attempted`,
       };
+      if (reported?.status !== "failed") reported = exhausted;
       continue;
     }
     const outcome = await executeOAuthRevocation(plan, {
