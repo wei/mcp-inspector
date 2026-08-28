@@ -98,20 +98,26 @@ test("a paint landing just under the deadline is not failed by the render timer"
     //   actual paint  <  timeoutMs  <  actual paint + surviveMs
     //
     // i.e. the render deadline expires while the survival window is still
-    // open. Both margins are deliberately wide, because `paintAt` is measured
-    // from the child's first JS tick while `renderTimer` is armed in the
-    // parent at spawn — so the left margin has to absorb `script(1)` PTY
-    // allocation plus Node boot, which measured 66-114ms on an *idle* machine
-    // and goes past 150ms under the load of a full `local:gate` run. These
-    // constants used to be `paintAt + 150` / `400`, which left ~36ms of slack
-    // at best and failed deterministically inside the gate (#2177) — with the
-    // "did not render" diagnostic that is exactly the misreport this test
-    // exists to catch.
+    // open. Both margins are deliberately wide, because the two clocks start
+    // at different moments: `paintAt` is measured from the child's first JS
+    // tick, while `renderTimer` is armed in the parent at spawn. The left
+    // margin therefore has to absorb everything in between — child process
+    // startup, plus whatever scheduling delay the machine is under.
+    //
+    // `stub()` spawns `process.execPath` directly, so there is no `script(1)`
+    // in this path: the PTY wrapper lives in `smoke-tui.mjs`, the caller. Node
+    // boot alone measured 46-59ms idle here. That fits the old `paintAt + 150`
+    // budget with room to spare, which is exactly why this read as a flake
+    // rather than a bug — but under the load of a full `local:gate` run the
+    // remaining ~90ms of slack is not enough to cover scheduling delay on both
+    // the child's boot and the parent's timer, and it failed three gate runs
+    // in a row while passing every time standalone (#2177). The diagnostic it
+    // failed with, "did not render", is the misreport this test exists to
+    // catch.
     //
     // Do not tighten these back up to make the test faster: the overlap is the
-    // point, not the tightness. Worst-case paint lands near 365ms, well under
-    // the 1200ms deadline, and 1200ms still falls inside a survival window
-    // that closes no earlier than ~1750ms.
+    // point, not the tightness. 1200ms clears any plausible paint time, and
+    // still falls inside a survival window that cannot close before ~1750ms.
     timeoutMs: 1200,
     surviveMs: 1500,
   });
