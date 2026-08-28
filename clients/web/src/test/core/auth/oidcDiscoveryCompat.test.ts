@@ -75,6 +75,16 @@ describe("oidcDiscoveryCandidates", () => {
   it("returns nothing for an unparseable URL", () => {
     expect(oidcDiscoveryCandidates("not a url")).toEqual([]);
   });
+
+  it("does not claim a path that merely shares the well-known prefix", () => {
+    // A bare prefix match would treat this as a discovery request and replace
+    // its failed response with a document from a derived URL (Copilot).
+    expect(
+      oidcDiscoveryCandidates(
+        "https://as.example.com/.well-known/oauth-authorization-server-backup",
+      ),
+    ).toEqual([]);
+  });
 });
 
 describe("isRfc8414OnlyMetadata", () => {

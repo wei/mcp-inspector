@@ -115,6 +115,13 @@ export function oidcDiscoveryCandidates(rfc8414Url: string): string[] {
   }
   if (!url.pathname.startsWith(RFC8414_WELL_KNOWN)) return [];
   const path = url.pathname.slice(RFC8414_WELL_KNOWN.length);
+  // A bare prefix match would also claim `/.well-known/oauth-authorization-server-backup`
+  // — a path this wrapper has no business rewriting, and one whose failed
+  // response it would replace with a document fetched from somewhere else
+  // entirely (Copilot). The SDK appends the authorization server's pathname,
+  // which always begins with `/`, so requiring the exact path or a `/`
+  // boundary is precisely the set it can emit.
+  if (path !== "" && !path.startsWith("/")) return [];
   // The authorization server had no path, so the SDK emitted a single OIDC
   // candidate at the origin.
   if (path === "") return [new URL(OIDC_WELL_KNOWN, url.origin).href];

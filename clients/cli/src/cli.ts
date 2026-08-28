@@ -52,6 +52,7 @@ import {
   getAuthorizationServerUrl,
   getAuthorizationServerUrlCandidates,
 } from "@inspector/core/auth/discovery.js";
+import { withRfc8414OidcCompat } from "@inspector/core/auth/oidcDiscoveryCompat.js";
 import { writeStoreFile } from "@inspector/core/storage/store-io.js";
 import {
   refreshAuthorization,
@@ -329,7 +330,21 @@ export async function refreshStoredAuthToken(
   deps: RefreshStoredAuthDeps = {},
 ): Promise<string> {
   const refresh = deps.refresh ?? refreshAuthorization;
-  const discover = deps.discover ?? discoverAuthorizationServerMetadata;
+  // #2172: this path calls SDK discovery directly rather than through
+  // `InspectorClient.effectiveAuthFetch`, so it needs the same compatibility
+  // wrapper — otherwise a stored refresh token with no persisted
+  // `serverMetadata` still cannot refresh against an authorization server that
+  // publishes RFC 8414 metadata at the OIDC well-known path (Copilot).
+  const compatFetch = withRfc8414OidcCompat(fetch);
+  const discover: typeof discoverAuthorizationServerMetadata =
+    deps.discover ??
+    ((authorizationServerUrl, options) =>
+      discoverAuthorizationServerMetadata(authorizationServerUrl, {
+        ...options,
+        // A caller-supplied fetch is left alone — it is theirs to compose. The
+        // walker below passes no options, so in practice this wraps the global.
+        fetchFn: options?.fetchFn ?? compatFetch,
+      }));
 
   const snapshot = await readOAuthSnapshot(statePath);
   const servers = snapshot.servers as StoredServers;
