@@ -110,16 +110,19 @@ const authError = () =>
     reason: "unauthorized",
   });
 
-function pagination<T>(over: Partial<PaginatedListModel<T>> = {}) {
+function pagination<T>(
+  over: Partial<PaginatedListModel<T>> = {},
+): PaginatedListModel<T> {
   return {
-    items: [] as T[],
+    items: [],
     paginated: false,
     canLoadMore: false,
     loadedPages: 1,
+    error: null,
     onRefresh: vi.fn().mockResolvedValue(undefined),
     onLoadMore: vi.fn().mockResolvedValue(undefined),
     ...over,
-  } as unknown as PaginatedListModel<T>;
+  };
 }
 
 interface HarnessProps {
