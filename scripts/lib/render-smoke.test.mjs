@@ -86,43 +86,71 @@ test("passes when the child paints the marker and keeps running", async () => {
 // visibly contains the marker. A slow-but-fine TUI would fail, intermittently,
 // with a diagnostic pointing at the wrong thing entirely.
 test("a paint landing just under the deadline is not failed by the render timer", async () => {
-  const paintAt = 250;
+  // The two clocks start at different moments: the child's `setTimeout` runs
+  // from its own first JS tick, while `renderTimer` is armed in the parent at
+  // spawn. A delay written as a plain `setTimeout(paint, N)` therefore lands at
+  // `N + startup`, so the deadline has to carry a startup allowance — and the
+  // case fails, as "did not render", whenever the machine is loaded enough to
+  // exceed it. It failed three `local:gate` runs in a row that way while
+  // passing every time standalone (#2177), and widening the allowance only
+  // moved the threshold (#2180).
+  //
+  // So the paint is anchored to the PARENT's clock instead: the child is told
+  // the wall-clock instant to paint at, and sleeps for whatever is left of it
+  // when it gets there. Startup is then *absorbed* by the sleep rather than
+  // added to it, and the paint lands at ~`PAINT_AT` measured from spawn no
+  // matter how slow the boot was.
+  const spawnedAt = Date.now();
+  const PAINT_AT = 300;
+  const timeoutMs = 600;
+  const surviveMs = 900;
+
   const r = await runRenderSmoke({
     ...opts,
     ...stub(
-      `setTimeout(() => { console.log(${JSON.stringify(MARKER)}); ` +
-        `setInterval(() => {}, 1000); }, ${paintAt});`,
+      `const at = ${spawnedAt + PAINT_AT};` +
+        `setTimeout(() => { console.log(${JSON.stringify(MARKER)}); ` +
+        `setInterval(() => {}, 1000); }, Math.max(0, at - Date.now()));`,
     ),
     // The shape being reproduced is an overlap, and only an overlap:
     //
     //   actual paint  <  timeoutMs  <  actual paint + surviveMs
     //
     // i.e. the render deadline expires while the survival window is still
-    // open. Both margins are deliberately wide, because the two clocks start
-    // at different moments: `paintAt` is measured from the child's first JS
-    // tick, while `renderTimer` is armed in the parent at spawn. The left
-    // margin therefore has to absorb everything in between — child process
-    // startup, plus whatever scheduling delay the machine is under.
+    // open. `done` is first-caller-wins, so an armed render timer firing in
+    // that gap settles the run as "did not render <marker>" while quoting an
+    // output tail that visibly contains the marker.
     //
-    // `stub()` spawns `process.execPath` directly, so there is no `script(1)`
-    // in this path: the PTY wrapper lives in `smoke-tui.mjs`, the caller. Node
-    // boot alone measured 46-59ms idle here. That fits the old `paintAt + 150`
-    // budget with room to spare, which is exactly why this read as a flake
-    // rather than a bug — but under the load of a full `local:gate` run the
-    // remaining ~90ms of slack is not enough to cover scheduling delay on both
-    // the child's boot and the parent's timer, and it failed three gate runs
-    // in a row while passing every time standalone (#2177). The diagnostic it
-    // failed with, "did not render", is the misreport this test exists to
-    // catch.
+    // `timeoutMs < surviveMs` is what makes the right-hand side hold for ANY
+    // paint time, including 0 — so a boot slow enough to swallow the anchor
+    // still reproduces the overlap rather than degrading into a different
+    // case. The only startup assumption left is that boot finishes before the
+    // deadline at all, and 600ms is an order of magnitude over the 46-59ms
+    // measured here idle.
     //
-    // Do not tighten these back up to make the test faster: the overlap is the
-    // point, not the tightness. 1200ms clears any plausible paint time, and
-    // still falls inside a survival window that cannot close before ~1750ms.
-    timeoutMs: 1200,
-    surviveMs: 1500,
+    // Do not tighten these to make the test faster, and do not reorder them so
+    // that `surviveMs <= timeoutMs`: the overlap is the point.
+    timeoutMs,
+    surviveMs,
   });
   assert.equal(r.code, 0, `expected pass, got: ${r.message}`);
   assert.doesNotMatch(r.message, /did not render/);
+
+  // Passing is not on its own evidence that the overlap was reproduced — a
+  // paint late enough to land past `timeoutMs` fails, but one landing so early
+  // that the deadline falls outside the survival window would pass while
+  // testing nothing. Read the paint time back out of the verdict and assert
+  // the shape actually held, so the case cannot go vacuous.
+  const paintedAt = Number(/ at (\d+)ms/.exec(r.message)?.[1]);
+  assert.ok(
+    Number.isFinite(paintedAt),
+    `no first-paint time in verdict: ${r.message}`,
+  );
+  assert.ok(
+    paintedAt < timeoutMs && timeoutMs < paintedAt + surviveMs,
+    `deadline did not fall inside the survival window: painted at ${paintedAt}ms, ` +
+      `timeoutMs ${timeoutMs}, surviveMs ${surviveMs}`,
+  );
 });
 
 test("fails when the child exits before painting", async () => {
