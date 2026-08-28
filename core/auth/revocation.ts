@@ -631,10 +631,30 @@ async function runPlan(
     // server that never minted it — worse than not revoking. So an issuer-bound
     // grant must be able to PROVE the endpoint is its own, which means a
     // metadata document carrying no `issuer` is a mismatch rather than a free
-    // pass: absence establishes nothing. Only a legacy unkeyed grant proceeds
-    // without the comparison, since nothing binds it to a different
-    // authorization server in the first place.
-    if (grant.issuer !== undefined && plan.metadataIssuer !== grant.issuer) {
+    // pass: absence establishes nothing. The same reasoning rules out the
+    // unkeyed legacy grant just below — see there.
+    if (grant.issuer === undefined) {
+      // An unkeyed (pre-SEP-2352) grant records no authorization server at all,
+      // and "unknown" is not "whatever the cache currently holds": server-level
+      // metadata is a single slot that a later discovery overwrites, while the
+      // legacy token survives until the first issuer-stamped save. So the
+      // endpoint on hand may belong to an authorization server that never
+      // minted this token, and sending it there would disclose a bearer
+      // credential to a stranger.
+      //
+      // Refusing costs such an entry its revocation — which is exactly the
+      // behavior it had before this feature existed, so nothing regresses — and
+      // it earns revocation back the moment it is re-authorized, since that
+      // save is issuer-stamped. Not sending is the only answer that cannot be
+      // wrong.
+      outcomes.push({
+        status: "failed",
+        detail:
+          "the stored grant is not bound to an authorization server (it predates issuer binding), so it could not be matched to this revocation endpoint and was cleared without revocation — re-authorize to make future clears revocable",
+      });
+      continue;
+    }
+    if (plan.metadataIssuer !== grant.issuer) {
       outcomes.push({
         status: "failed",
         detail:

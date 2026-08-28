@@ -207,7 +207,12 @@ describe("OAuthManager", () => {
     it("clears local state before waiting on the revocation request", async () => {
       const params = createMockParams();
       const storage = params.initialConfig.storage!;
-      vi.mocked(storage.getTokens).mockResolvedValue({
+      // Issuer-bound and matching the metadata: an unkeyed grant records no
+      // authorization server and is deliberately refused.
+      vi.mocked(storage.listIssuers).mockResolvedValue([
+        "https://as.example.com",
+      ]);
+      vi.mocked(storage.getIssuerTokens).mockResolvedValue({
         access_token: "a",
         token_type: "Bearer",
         refresh_token: "r",
@@ -242,7 +247,10 @@ describe("OAuthManager", () => {
     it("clears local state even when the revocation request fails", async () => {
       const params = createMockParams();
       const storage = params.initialConfig.storage!;
-      vi.mocked(storage.getTokens).mockResolvedValue({
+      vi.mocked(storage.listIssuers).mockResolvedValue([
+        "https://as.example.com",
+      ]);
+      vi.mocked(storage.getIssuerTokens).mockResolvedValue({
         access_token: "a",
         token_type: "Bearer",
       });

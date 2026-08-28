@@ -395,12 +395,20 @@ describe("revokeStoredOAuthTokens (plan + execute)", () => {
     await storage.clear(SERVER_URL);
   });
 
+  const ISSUER = "https://as.example.com";
+
+  /**
+   * A revocable grant: issuer-bound, and matching the cached metadata. Unkeyed
+   * grants are deliberately NOT revocable (their authorization server is
+   * unknown), so seeding one here would make every case below assert the
+   * refusal instead of the behavior it is about.
+   */
   async function seed(over: Partial<OAuthMetadata> = {}): Promise<void> {
-    await storage.saveTokens(SERVER_URL, {
-      access_token: "a",
-      token_type: "Bearer",
-      refresh_token: "r",
-    });
+    await storage.saveTokens(
+      SERVER_URL,
+      { access_token: "a", token_type: "Bearer", refresh_token: "r" },
+      { issuer: ISSUER },
+    );
     await storage.saveServerMetadata(SERVER_URL, metadata(over));
   }
 
@@ -508,14 +516,21 @@ describe("revokeStoredOAuthTokens (plan + execute)", () => {
     const fetchFn = vi.fn<typeof fetch>(
       async () => new Response(null, { status: 200 }),
     );
-    await revokeStoredOAuthTokens({ serverUrl: SERVER_URL, storage, fetchFn });
+    const outcome = await revokeStoredOAuthTokens({
+      serverUrl: SERVER_URL,
+      storage,
+      fetchFn,
+    });
 
-    // Exactly one request — the legacy grant, read ctx-lessly and unlabelled.
-    // Never two, and never the legacy token presented as that issuer's.
-    expect(fetchFn).toHaveBeenCalledTimes(1);
-    expect(
-      new URLSearchParams(String(fetchFn.mock.calls[0]![1]!.body)).get("token"),
-    ).toBe("legacy-r");
+    // Nothing is sent: the only grant here is the legacy one, whose
+    // authorization server is unknown. The point is that it is never presented
+    // as the enumerated issuer's — one request with `legacy-r` would be exactly
+    // that mistake.
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ status: "failed" });
+    expect(outcome.status === "failed" ? outcome.detail : "").toContain(
+      "predates issuer binding",
+    );
   });
 
   // The active issuer slot can hold client information without a token, in
@@ -551,10 +566,21 @@ describe("revokeStoredOAuthTokens (plan + execute)", () => {
       async () => new Response(null, { status: 200 }),
     );
 
-    await revokeStoredOAuthTokens({ serverUrl: SERVER_URL, storage, fetchFn });
+    const outcome = await revokeStoredOAuthTokens({
+      serverUrl: SERVER_URL,
+      storage,
+      fetchFn,
+    });
 
-    // Two grants, two requests — the issuer-bound one and the legacy one.
-    expect(fetchFn).toHaveBeenCalledTimes(2);
+    // Still two GRANTS — that is what this is about. The issuer-bound one is
+    // revoked; the legacy one is refused (unknown authorization server) and
+    // reported, rather than being silently collapsed into the other by a
+    // token-value dedup.
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ status: "failed" });
+    expect(outcome.status === "failed" ? outcome.detail : "").toContain(
+      "predates issuer binding",
+    );
   });
 
   // Absence establishes nothing: a metadata document with no `issuer` cannot
@@ -586,26 +612,35 @@ describe("revokeStoredOAuthTokens (plan + execute)", () => {
     );
   });
 
-  // A legacy unkeyed grant is not bound to any authorization server, so there
-  // is nothing to contradict — it proceeds without the comparison.
-  it("still revokes a legacy grant when the metadata names no issuer", async () => {
+  // "Unkeyed" means the authorization server is UNKNOWN, not that the cached
+  // endpoint is proven to own the grant — server metadata is a single slot a
+  // later discovery overwrites, while a legacy token survives until the first
+  // issuer-stamped save. Refusing costs such an entry its revocation, which is
+  // the behavior it had before this feature existed, and it earns it back on
+  // the next authorization.
+  it("refuses a legacy grant, whose authorization server is unknown", async () => {
     await storage.saveServerMetadata(
       SERVER_URL,
-      metadata({ issuer: undefined }),
+      metadata({ issuer: "https://as.example.com" }),
     );
     await storage.saveTokens(SERVER_URL, {
       access_token: "a",
       token_type: "Bearer",
       refresh_token: "r",
     });
-    const fetchFn = vi.fn<typeof fetch>(
-      async () => new Response(null, { status: 200 }),
-    );
+    const fetchFn = vi.fn<typeof fetch>();
 
-    await expect(
-      revokeStoredOAuthTokens({ serverUrl: SERVER_URL, storage, fetchFn }),
-    ).resolves.toMatchObject({ status: "revoked" });
-    expect(fetchFn).toHaveBeenCalledTimes(1);
+    const outcome = await revokeStoredOAuthTokens({
+      serverUrl: SERVER_URL,
+      storage,
+      fetchFn,
+    });
+
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ status: "failed" });
+    expect(outcome.status === "failed" ? outcome.detail : "").toContain(
+      "re-authorize",
+    );
   });
 
   // If `listIssuers` fails there is no enumerated slot behind the stamp, so

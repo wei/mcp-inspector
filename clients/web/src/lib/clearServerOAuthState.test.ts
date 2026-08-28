@@ -85,11 +85,17 @@ describe("clearServerOAuthState", () => {
   // metadata to build a request from), but the clear itself runs before the
   // network — so by the time the request goes out the store is already empty.
   it("clears before sending, using the snapshot it took first", async () => {
-    await storage.saveTokens(SERVER_URL, {
-      access_token: "tok",
-      token_type: "Bearer",
-      refresh_token: "refresh-tok",
-    });
+    await storage.saveTokens(
+      SERVER_URL,
+      {
+        access_token: "tok",
+        token_type: "Bearer",
+        refresh_token: "refresh-tok",
+      },
+      // Issuer-bound and matching the metadata below: an unkeyed grant records
+      // no authorization server and is deliberately refused.
+      { issuer: "https://as.example.com" },
+    );
     await storage.saveServerMetadata(SERVER_URL, {
       issuer: "https://as.example.com",
       authorization_endpoint: "https://as.example.com/authorize",

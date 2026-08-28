@@ -21,7 +21,8 @@ import { resetNodeOAuthStorageCache } from "@inspector/core/auth/node/storage-no
 import { runCli } from "./helpers/cli-runner.js";
 
 const SERVER_URL = "https://example.com/mcp";
-const REVOKE_URL = "https://as.example.com/revoke";
+const AS_ISSUER = "https://as.example.com";
+const REVOKE_URL = `${AS_ISSUER}/revoke`;
 
 let dir: string | undefined;
 let prevPath: string | undefined;
@@ -46,16 +47,23 @@ function seedStore(): void {
     file,
     JSON.stringify({
       servers: {
+        // Issuer-bound (SEP-2352) and matching the cached metadata: an unkeyed
+        // grant records no authorization server and is deliberately refused.
         [SERVER_URL]: {
-          tokens: {
-            access_token: "a",
-            token_type: "Bearer",
-            refresh_token: "r",
+          activeIssuer: AS_ISSUER,
+          byIssuer: {
+            [AS_ISSUER]: {
+              tokens: {
+                access_token: "a",
+                token_type: "Bearer",
+                refresh_token: "r",
+              },
+            },
           },
           serverMetadata: {
-            issuer: "https://as.example.com",
-            authorization_endpoint: "https://as.example.com/authorize",
-            token_endpoint: "https://as.example.com/token",
+            issuer: AS_ISSUER,
+            authorization_endpoint: `${AS_ISSUER}/authorize`,
+            token_endpoint: `${AS_ISSUER}/token`,
             revocation_endpoint: REVOKE_URL,
             response_types_supported: ["code"],
           },

@@ -8,6 +8,8 @@ import {
 } from "@inspector/core/auth/node/storage-node.js";
 import { clearStoredAuthForRelogin } from "../src/clear-stored-auth-for-relogin.js";
 
+const AS_ISSUER = "https://as.example.com";
+
 describe("clearStoredAuthForRelogin", () => {
   let dir: string | undefined;
   let prevPath: string | undefined;
@@ -77,17 +79,25 @@ describe("clearStoredAuthForRelogin", () => {
         file,
         JSON.stringify({
           servers: {
+            // Issuer-bound (SEP-2352), matching the cached metadata below: an
+            // unkeyed grant records no authorization server and is refused, so
+            // seeding one would make these cases assert that instead.
             "https://example.com/mcp": {
-              tokens: {
-                access_token: "a",
-                token_type: "Bearer",
-                refresh_token: "r",
+              activeIssuer: AS_ISSUER,
+              byIssuer: {
+                [AS_ISSUER]: {
+                  tokens: {
+                    access_token: "a",
+                    token_type: "Bearer",
+                    refresh_token: "r",
+                  },
+                },
               },
               serverMetadata: {
-                issuer: "https://as.example.com",
-                authorization_endpoint: "https://as.example.com/authorize",
-                token_endpoint: "https://as.example.com/token",
-                revocation_endpoint: "https://as.example.com/revoke",
+                issuer: AS_ISSUER,
+                authorization_endpoint: `${AS_ISSUER}/authorize`,
+                token_endpoint: `${AS_ISSUER}/token`,
+                revocation_endpoint: `${AS_ISSUER}/revoke`,
                 response_types_supported: ["code"],
               },
               ...over,
@@ -111,17 +121,22 @@ describe("clearStoredAuthForRelogin", () => {
       dir = fs.mkdtempSync(path.join(os.tmpdir(), "cli-relogin-two-"));
       const file = path.join(dir, "oauth.json");
       const metadata = {
-        issuer: "https://as.example.com",
-        authorization_endpoint: "https://as.example.com/authorize",
-        token_endpoint: "https://as.example.com/token",
-        revocation_endpoint: "https://as.example.com/revoke",
+        issuer: AS_ISSUER,
+        authorization_endpoint: `${AS_ISSUER}/authorize`,
+        token_endpoint: `${AS_ISSUER}/token`,
+        revocation_endpoint: `${AS_ISSUER}/revoke`,
         response_types_supported: ["code"],
       };
       const entry = (refresh: string) => ({
-        tokens: {
-          access_token: `a-${refresh}`,
-          token_type: "Bearer",
-          refresh_token: refresh,
+        activeIssuer: AS_ISSUER,
+        byIssuer: {
+          [AS_ISSUER]: {
+            tokens: {
+              access_token: `a-${refresh}`,
+              token_type: "Bearer",
+              refresh_token: refresh,
+            },
+          },
         },
         serverMetadata: metadata,
       });
@@ -141,7 +156,7 @@ describe("clearStoredAuthForRelogin", () => {
       resetNodeOAuthStorageCache();
     }
 
-    it("revokes the stored grant before deleting it", async () => {
+    it("revokes the stored grant, having snapshotted it before the delete", async () => {
       const file = seed();
       const fetchSpy = vi
         .spyOn(globalThis, "fetch")
@@ -194,10 +209,10 @@ describe("clearStoredAuthForRelogin", () => {
       dir = fs.mkdtempSync(path.join(os.tmpdir(), "cli-relogin-both-"));
       const file = path.join(dir, "oauth.json");
       const metadata = {
-        issuer: "https://as.example.com",
-        authorization_endpoint: "https://as.example.com/authorize",
-        token_endpoint: "https://as.example.com/token",
-        revocation_endpoint: "https://as.example.com/revoke",
+        issuer: AS_ISSUER,
+        authorization_endpoint: `${AS_ISSUER}/authorize`,
+        token_endpoint: `${AS_ISSUER}/token`,
+        revocation_endpoint: `${AS_ISSUER}/revoke`,
         response_types_supported: ["code"],
       };
       fs.writeFileSync(
@@ -206,19 +221,29 @@ describe("clearStoredAuthForRelogin", () => {
           servers: {
             // The raw spelling the transport keyed by, holding a STALE grant.
             "https://example.com": {
-              tokens: {
-                access_token: "stale-a",
-                token_type: "Bearer",
-                refresh_token: "stale-r",
+              activeIssuer: AS_ISSUER,
+              byIssuer: {
+                [AS_ISSUER]: {
+                  tokens: {
+                    access_token: "stale-a",
+                    token_type: "Bearer",
+                    refresh_token: "stale-r",
+                  },
+                },
               },
               serverMetadata: metadata,
             },
             // The normalised spelling, holding the CURRENT grant.
             "https://example.com/": {
-              tokens: {
-                access_token: "live-a",
-                token_type: "Bearer",
-                refresh_token: "live-r",
+              activeIssuer: AS_ISSUER,
+              byIssuer: {
+                [AS_ISSUER]: {
+                  tokens: {
+                    access_token: "live-a",
+                    token_type: "Bearer",
+                    refresh_token: "live-r",
+                  },
+                },
               },
               serverMetadata: metadata,
             },
@@ -334,8 +359,11 @@ describe("clearStoredAuthForRelogin", () => {
         JSON.stringify({
           servers: {
             "https://example.com/mcp": {
-              // No `token_type` — fails OAuthTokensSchema.
-              tokens: { access_token: 42 },
+              activeIssuer: AS_ISSUER,
+              byIssuer: {
+                // No `token_type` — fails OAuthTokensSchema.
+                [AS_ISSUER]: { tokens: { access_token: 42 } },
+              },
             },
           },
           idpSessions: {},

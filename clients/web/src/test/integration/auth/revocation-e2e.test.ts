@@ -138,7 +138,13 @@ describe("OAuth token revocation (RFC 7009)", () => {
   }): Promise<BrowserOAuthStorage> {
     const storage = new BrowserOAuthStorage();
     await storage.clear(serverUrl);
-    await storage.saveTokens(serverUrl, { token_type: "Bearer", ...tokens });
+    // Issuer-bound and matching the discovered metadata: an unkeyed grant
+    // records no authorization server and is deliberately refused.
+    await storage.saveTokens(
+      serverUrl,
+      { token_type: "Bearer", ...tokens },
+      { issuer: metadata.issuer },
+    );
     await storage.saveServerMetadata(serverUrl, metadata);
     // Preconfigured, so it goes in the preregistered slot — the same one a
     // server with `oauth.clientId` uses. That is the slot the revocation path
