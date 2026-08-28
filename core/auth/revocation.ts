@@ -357,7 +357,9 @@ interface StoredGrant {
  *
  * The ctx-less read is included last and deduped: on an issuer-bound entry it
  * returns the active issuer's token, which the loop above has already seen; on
- * a legacy entry it is the only thing that returns anything at all.
+ * a legacy entry it is the only thing that returns anything at all. It is also
+ * the only read here allowed to fall back — an *enumerated* issuer is read
+ * exactly, so a legacy token is never mislabelled as belonging to it.
  */
 async function collectGrants(
   storage: OAuthStorage,
@@ -367,9 +369,15 @@ async function collectGrants(
   const seen = new Set<string>();
 
   const add = async (issuer?: string): Promise<void> => {
-    const revocable = selectRevocableToken(
-      await storage.getTokens(serverUrl, issuer),
-    );
+    // Exact read for an enumerated issuer. `getTokens(serverUrl, issuer)` falls
+    // back to the legacy unkeyed slot when that issuer holds none, and treating
+    // the fallback as the issuer's would label an old, unbound token with a
+    // newly discovered authorization server and send it there.
+    const tokens =
+      issuer === undefined
+        ? await storage.getTokens(serverUrl)
+        : await storage.getIssuerTokens(serverUrl, issuer);
+    const revocable = selectRevocableToken(tokens);
     if (!revocable || seen.has(revocable.token)) return;
     seen.add(revocable.token);
     grants.push({

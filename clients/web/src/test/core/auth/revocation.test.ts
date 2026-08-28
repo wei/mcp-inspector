@@ -435,6 +435,42 @@ describe("revokeStoredOAuthTokens", () => {
     ).toBe("r2");
   });
 
+  // `getTokens(url, issuer)` falls back to the legacy unkeyed slot when that
+  // issuer holds none. Treating the fallback as the issuer's would label an
+  // old, unbound token with a newly discovered authorization server and send it
+  // there — so an enumerated issuer is read EXACTLY.
+  it("does not attribute the legacy unkeyed token to an enumerated issuer", async () => {
+    await storage.saveServerMetadata(
+      SERVER_URL,
+      metadata({ issuer: "https://as.example.com" }),
+    );
+    // A legacy, unbound grant...
+    await storage.saveTokens(SERVER_URL, {
+      access_token: "legacy-a",
+      token_type: "Bearer",
+      refresh_token: "legacy-r",
+    });
+    // ...and an issuer slot carrying only client information, which is the
+    // shape a partially-migrated flow leaves behind.
+    await storage.saveClientInformation(
+      SERVER_URL,
+      { client_id: "cid" },
+      { registrationKind: "dcr", issuer: "https://as.example.com" },
+    );
+
+    const fetchFn = vi.fn<typeof fetch>(
+      async () => new Response(null, { status: 200 }),
+    );
+    await revokeStoredOAuthTokens({ serverUrl: SERVER_URL, storage, fetchFn });
+
+    // Exactly one request — the legacy grant, read ctx-lessly and unlabelled.
+    // Never two, and never the legacy token presented as that issuer's.
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(
+      new URLSearchParams(String(fetchFn.mock.calls[0]![1]!.body)).get("token"),
+    ).toBe("legacy-r");
+  });
+
   // A grant bound to an issuer the cached metadata does not describe cannot be
   // revoked — that endpoint belongs to a different authorization server, and
   // sending it another AS's token would hand a credential to a server that

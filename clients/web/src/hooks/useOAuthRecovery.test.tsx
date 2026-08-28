@@ -1342,6 +1342,32 @@ describe("useOAuthRecovery", () => {
       ).toBeDefined();
     });
 
+    // #2144 — this is the web client's production wiring for revocation.
+    // Without asserting the arguments, removing the per-server opt-out or
+    // handing it the page-origin fetch would leave every test green.
+    it("passes the per-server revoke setting and the proxied fetch", async () => {
+      const h = harness({ servers: [entry("a")], activeServerId: "a" });
+      await act(async () => {
+        await h.api().clearServerOAuthAndDisconnect({
+          ...entry("a"),
+          settings: { ...EMPTY_SETTINGS, oauthRevokeOnClear: false },
+        });
+      });
+      expect(clearServerOAuthStateMock).toHaveBeenCalledWith(
+        expect.objectContaining({ revoke: false, fetchFn: remoteFetchMock }),
+      );
+    });
+
+    it("defaults to revoking when the server did not opt out", async () => {
+      const h = harness({ servers: [entry("a")], activeServerId: "a" });
+      await act(async () => {
+        await h.api().clearServerOAuthAndDisconnect(entry("a"));
+      });
+      expect(clearServerOAuthStateMock).toHaveBeenCalledWith(
+        expect.objectContaining({ revoke: true }),
+      );
+    });
+
     it("clears the resume snapshot on an explicit disconnect", () => {
       writeOAuthResumeSnapshot({
         version: 1,

@@ -58,6 +58,7 @@ function createStorage(
     clearIdpSession: vi.fn(),
     clearEnterpriseManagedResourceServers: vi.fn(),
     listIssuers: vi.fn().mockResolvedValue([]),
+    getIssuerTokens: vi.fn().mockResolvedValue(undefined),
     getCodeVerifier: vi.fn(),
     getDiscoveryState: vi.fn().mockResolvedValue(undefined),
     saveDiscoveryState: vi.fn(),

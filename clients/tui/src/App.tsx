@@ -65,6 +65,7 @@ import {
   NodeOAuthStorage,
   runRunnerInteractiveOAuth,
 } from "@inspector/core/auth/node/index.js";
+import { oauthMessageToneFor } from "./oauthMessageTone.js";
 import { getTuiLogger } from "./logger.js";
 import { openUrl } from "./utils/openUrl.js";
 import {
@@ -161,13 +162,13 @@ function App({
     "idle" | "authenticating" | "error"
   >("idle");
   const [oauthMessage, setOauthMessage] = useState<string | null>(null);
-  // #2144: a revocation failure is a partial success — the local state really
-  // was cleared — so it is not an `error` status, but it must not read as an
-  // ordinary note either: the grant may still be live at the authorization
-  // server.
-  const [oauthMessageTone, setOauthMessageTone] = useState<"info" | "warning">(
-    "info",
-  );
+  // The tone is derived from the message rather than stored beside it, so it
+  // cannot go stale — see `oauthMessageToneFor` for why that matters here.
+  // Both stay plain `useState` setters on purpose: wrapping `setOauthMessage`
+  // in a `useCallback` would make it a value `react-hooks/exhaustive-deps`
+  // demands in seven dependency arrays, for an identity that never changes.
+  const [oauthWarningText, setOauthWarningText] = useState<string | null>(null);
+  const oauthMessageTone = oauthMessageToneFor(oauthMessage, oauthWarningText);
   const [oauthRevision, setOauthRevision] = useState(0);
   const [pendingStepUp, setPendingStepUp] = useState<{
     serverName: string;
@@ -956,12 +957,13 @@ function App({
       revoke: selectedServerEntry?.settings?.oauthRevokeOnClear !== false,
     });
     setOauthStatus("idle");
-    setOauthMessageTone(revocation.status === "failed" ? "warning" : "info");
-    setOauthMessage(
-      revocation.status === "failed"
-        ? `Cleared locally, but revoking the grant at the authorization server failed: ${revocation.detail}. It may still be valid there.`
-        : null,
-    );
+    if (revocation.status === "failed") {
+      const warning = `Cleared locally, but revoking the grant at the authorization server failed: ${revocation.detail}. It may still be valid there.`;
+      setOauthWarningText(warning);
+      setOauthMessage(warning);
+    } else {
+      setOauthMessage(null);
+    }
     setConnectError(null);
     if (inspectorStatus === "connected" || inspectorStatus === "connecting") {
       await disconnectInspector();

@@ -68,6 +68,7 @@ function createMockParams(
     clearIdpSession: vi.fn(),
     clearEnterpriseManagedResourceServers: vi.fn(),
     listIssuers: vi.fn().mockResolvedValue([]),
+    getIssuerTokens: vi.fn().mockResolvedValue(undefined),
     getDiscoveryState: vi.fn().mockResolvedValue(undefined),
     saveDiscoveryState: vi.fn().mockResolvedValue(undefined),
     clearDiscoveryState: vi.fn().mockResolvedValue(undefined),

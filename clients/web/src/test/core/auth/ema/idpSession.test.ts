@@ -26,6 +26,7 @@ describe("idpSession", () => {
       clear: vi.fn(),
       clearEnterpriseManagedResourceServers: vi.fn(),
       listIssuers: vi.fn().mockResolvedValue([]),
+      getIssuerTokens: vi.fn().mockResolvedValue(undefined),
     } as unknown as OAuthStorage;
   });
 

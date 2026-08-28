@@ -396,6 +396,41 @@ describe("BrowserOAuthStorage", () => {
     });
   });
 
+  // The no-fallback read #2144 needs: `getTokens(url, issuer)` deliberately
+  // falls back to the legacy unkeyed slot, which is right for a connect and
+  // wrong for anything enumerating issuers.
+  describe("getIssuerTokens", () => {
+    it("returns only the tokens bound to that issuer", async () => {
+      await storage.saveTokens(
+        testServerUrl,
+        { access_token: "a", token_type: "Bearer" },
+        { issuer: "https://as-a.example.com" },
+      );
+      const tokens = await storage.getIssuerTokens(
+        testServerUrl,
+        "https://as-a.example.com",
+      );
+      expect(tokens?.access_token).toBe("a");
+    });
+
+    it("does not fall back to the legacy unkeyed token", async () => {
+      await storage.saveTokens(testServerUrl, {
+        access_token: "legacy",
+        token_type: "Bearer",
+      });
+      // `getTokens` DOES fall back — that contrast is the point of the method.
+      expect((await storage.getTokens(testServerUrl))?.access_token).toBe(
+        "legacy",
+      );
+      expect(
+        await storage.getIssuerTokens(
+          testServerUrl,
+          "https://as-a.example.com",
+        ),
+      ).toBeUndefined();
+    });
+  });
+
   describe("clearServerState", () => {
     it("should clear all state for a server", async () => {
       const clientInfo: OAuthClientInformation = {
