@@ -42,6 +42,14 @@ describe("getWebProxiedFetch", () => {
     expect(createRemoteFetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("throws when window is unavailable", () => {
+    vi.stubGlobal("window", undefined);
+    expect(() => getWebProxiedFetch()).toThrow(
+      "getWebProxiedFetch requires a browser environment",
+    );
+    vi.unstubAllGlobals();
+  });
+
   it("forwards a fetch that reaches the injected base fetch", async () => {
     const inner = vi.fn<typeof fetch>(async () => new Response(null));
     createRemoteFetchMock.mockImplementation(
