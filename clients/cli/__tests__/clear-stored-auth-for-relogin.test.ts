@@ -68,9 +68,9 @@ describe("clearStoredAuthForRelogin", () => {
     expect(blob.servers["not a url"]).toBeUndefined();
   });
 
-  // #2144 — RFC 7009. The request has to go out *before* the delete, since it
-  // is built from the token, the client id and the cached metadata the delete
-  // removes.
+  // #2144 — RFC 7009. The request is *built* before the delete (from the token,
+  // the client id and the cached metadata it removes) and *sent* after it, so
+  // the local delete never waits on the network.
   describe("token revocation", () => {
     function seed(over: Record<string, unknown> = {}): string {
       dir = fs.mkdtempSync(path.join(os.tmpdir(), "cli-relogin-revoke-"));

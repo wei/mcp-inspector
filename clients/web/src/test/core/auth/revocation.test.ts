@@ -435,12 +435,41 @@ describe("revokeStoredOAuthTokens (plan + execute)", () => {
     expect(body(init!).get("token")).toBe("r");
   });
 
-  // A server configured with `oauth.clientId` stores its credentials in the
-  // preregistered slot, which is issuer-independent and is *not* what a plain
-  // `getClientInformation(serverUrl)` returns. Reading only the dynamic slot
-  // would send no client authentication at all for exactly the confidential
-  // clients most likely to require it.
-  it("authenticates with a preconfigured client, not just a dynamically registered one", async () => {
+  // A grant minted under DCR must be revoked with the registration that minted
+  // it, even after the server has since been switched to a configured
+  // `oauth.clientId`. RFC 7009 §2.2 answers 200 for a token the server does not
+  // recognise as the caller's, so using the wrong client reports `revoked`
+  // while the grant stays live — and the local record is already gone.
+  it("authenticates with the registration bound to the grant's issuer", async () => {
+    await seed();
+    await storage.saveClientInformation(
+      SERVER_URL,
+      { client_id: "dcr-cid", client_secret: "dcr-sec" },
+      { registrationKind: "dcr", issuer: ISSUER },
+    );
+    // A configured client id was added later; it must NOT win here.
+    await storage.savePreregisteredClientInformation(SERVER_URL, {
+      client_id: "static-cid",
+      client_secret: "static-sec",
+    });
+    const fetchFn = vi.fn<typeof fetch>(
+      async () => new Response(null, { status: 200 }),
+    );
+
+    await revokeStoredOAuthTokens({ serverUrl: SERVER_URL, storage, fetchFn });
+
+    const [, init] = fetchFn.mock.calls[0]!;
+    expect(headerOf(init!, "Authorization")).toBe(
+      `Basic ${btoa("dcr-cid:dcr-sec")}`,
+    );
+  });
+
+  // The other direction: a token minted with the configured client leaves the
+  // issuer slot empty (the SDK writes it only after DCR), so the preregistered
+  // entry is the right fallback — and dropping it would send no client
+  // authentication at all for exactly the confidential clients most likely to
+  // require it.
+  it("falls back to a preconfigured client when the issuer slot has none", async () => {
     await seed();
     await storage.savePreregisteredClientInformation(SERVER_URL, {
       client_id: "static-cid",

@@ -437,11 +437,28 @@ export async function executeOAuthRevocation(
 /**
  * The client credentials to authenticate the revocation request with.
  *
- * Mirrors `BaseOAuthClientProvider.clientInformation`: the preregistered
- * (static, issuer-independent) entry wins, then the registration bound to
- * `issuer`. Reading only the second would silently drop client authentication
- * for every server configured with an `oauth.clientId` — the confidential case,
- * where an authorization server is most likely to *require* it and answer 401.
+ * Deliberately the **reverse** of `BaseOAuthClientProvider.clientInformation`,
+ * which prefers the preregistered (static) entry. That order answers "who
+ * should I authenticate as *now*"; revocation asks a different question — "who
+ * minted *this* token" — and the two diverge. The store lets a preregistered
+ * client and an issuer-bound dynamic registration coexist
+ * (`savePreregisteredClientInformation` does not clear the issuer slot), so
+ * after a server is switched from DCR to a configured `oauth.clientId`, an
+ * older DCR grant would be revoked with the configured client's credentials.
+ * RFC 7009 §2.2 makes a 200 the answer for a token the server does not
+ * recognise as the caller's, so that reports `revoked` while the grant stays
+ * live — the worst possible outcome, since the local record is gone.
+ *
+ * So the registration bound to this grant's `issuer` wins where the store has
+ * one, and the preregistered entry is the fallback. That covers both
+ * directions: a token minted with the configured client leaves the issuer slot
+ * empty (the SDK only writes it after DCR) and falls through correctly.
+ *
+ * This is best available evidence, not proof: the store records client
+ * information per issuer, not per token, so a server that re-registered
+ * dynamically under one issuer still cannot distinguish which registration
+ * minted which grant. Binding the client identity to the token at save time is
+ * the real fix and is a storage-shape change beyond this PR.
  */
 async function resolveClientInformation(
   storage: OAuthStorage,
@@ -449,8 +466,9 @@ async function resolveClientInformation(
   issuer?: string,
 ): Promise<OAuthClientInformation | undefined> {
   return (
-    (await storage.getClientInformation(serverUrl, true)) ??
-    (await storage.getClientInformation(serverUrl, false, issuer))
+    (issuer !== undefined
+      ? await storage.getClientInformation(serverUrl, false, issuer)
+      : undefined) ?? (await storage.getClientInformation(serverUrl, true))
   );
 }
 
