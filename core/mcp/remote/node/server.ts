@@ -1022,6 +1022,36 @@ export function createRemoteApp(
       // Auth errors may reject the wait via onerror while send() also throws.
       void responseWait.catch(() => {});
     }
+
+    // #2140: this route is held open for the whole call, so the browser
+    // aborting its `POST /api/mcp/send` mid-flight *is* the client's
+    // cancellation signal on a per-request-stream upstream. Forward it as
+    // `requestSignal` so the upstream StreamableHTTP transport closes that
+    // request's SSE response stream, which is what the 2026-07-28 spec makes
+    // the cancellation signal. A transport with no per-request stream (stdio,
+    // SSE) ignores the option, and a *cancel* never reaches it as an abort
+    // anyway: `RemoteClientTransport` withholds `hasPerRequestStream` there, so
+    // the SDK keeps sending `notifications/cancelled`. Forwarding the
+    // disconnect unconditionally is still right — a browser that went away
+    // mid-call is not waiting for the answer whatever the transport is.
+    const upstreamAbort = new AbortController();
+    const clientSignal = c.req.raw.signal;
+    const onClientDisconnect = () => {
+      upstreamAbort.abort(clientSignal.reason);
+      // The response will never arrive now; release the wait so this handler
+      // unwinds instead of sitting on a promise nothing can settle.
+      if (requestId !== undefined) {
+        session.cancelRequestWait(requestId);
+      }
+    };
+    if (clientSignal.aborted) {
+      onClientDisconnect();
+    } else {
+      clientSignal.addEventListener("abort", onClientDisconnect, {
+        once: true,
+      });
+    }
+
     try {
       // SEP-2243: apply the client's mirrored headers to the upstream request,
       // restricted to the `Mcp-Param-` prefix so a client can't inject other
@@ -1031,6 +1061,7 @@ export function createRemoteApp(
       await session.transport.send(message, {
         relatedRequestId: relatedRequestId as string | number | undefined,
         ...(paramHeaders && { headers: paramHeaders }),
+        requestSignal: upstreamAbort.signal,
       });
       if (responseWait) {
         await responseWait;
@@ -1051,6 +1082,7 @@ export function createRemoteApp(
       const msg = err instanceof Error ? err.message : String(err);
       return c.json({ ok: false, kind: "transport_error", error: msg });
     } finally {
+      clientSignal.removeEventListener("abort", onClientDisconnect);
       session.endSend();
     }
   });
