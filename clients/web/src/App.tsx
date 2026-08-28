@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Box, Text } from "@mantine/core";
+import { Box } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import type {
   CreateMessageResult,
@@ -12,11 +12,6 @@ import { InspectorClient } from "@inspector/core/mcp/index.js";
 import { getServerType } from "@inspector/core/mcp/config.js";
 import type { JsonValue } from "@inspector/core/mcp/index.js";
 
-import {
-  getUrlElicitationsFromError,
-  UrlElicitationLoopError,
-} from "@inspector/core/mcp/urlElicitation.js";
-import { ToolCallCancelledError } from "@inspector/core/mcp/toolCallCancelledError.js";
 import type { TypedEventGeneric } from "@inspector/core/mcp/typedEventTarget.js";
 import type {
   InspectorServerSettings,
@@ -24,10 +19,7 @@ import type {
   ServerEntry,
   ServerType,
 } from "@inspector/core/mcp/types.js";
-import {
-  DEFAULT_TASK_TTL_MS,
-  resolveModernLogLevel,
-} from "@inspector/core/mcp/types.js";
+import { resolveModernLogLevel } from "@inspector/core/mcp/types.js";
 import {
   cleanRoots,
   serializeMcpConfig,
@@ -63,6 +55,7 @@ import {
   useHandshakeTelemetry,
 } from "./hooks/useConnectionLifecycle";
 import { useMcpApps } from "./hooks/useMcpApps";
+import { useResultPanels, useServerCommands } from "./hooks/useServerCommands";
 import { useExportActions } from "./hooks/useExportActions";
 import { useProgressToasts } from "./hooks/useProgressToasts";
 import { useTaskToasts } from "./hooks/useTaskToasts";
@@ -71,11 +64,6 @@ import { useInitialConfig } from "@inspector/core/react/useInitialConfig.js";
 import { refreshingPersist } from "./lib/refreshingPersist";
 import { usePendingClientRequests } from "@inspector/core/react/usePendingClientRequests.js";
 import { InspectorView } from "./components/views/InspectorView/InspectorView";
-import type {
-  ToolCallState,
-  ToolsUiState,
-} from "./components/screens/ToolsScreen/ToolsScreen";
-import type { GetPromptState } from "./components/screens/PromptsScreen/PromptsScreen";
 import type { ReadResourceState } from "./components/screens/ResourcesScreen/ResourcesScreen";
 import { AppElicitationHost } from "./components/elements/AppElicitation/AppElicitationHost";
 import type { LogEntryData } from "./components/elements/LogEntry/LogEntry";
@@ -111,20 +99,13 @@ import type { DeepLink, DeepLinkParseStatus } from "./utils/deepLink";
 import { AuthRecoveryRequiredError } from "@inspector/core/auth/challenge.js";
 import { getAuthToken } from "./lib/authToken";
 import { messagesToLogEntries } from "./lib/protocolReplay";
-import {
-  errorCodeOf,
-  errorMessage,
-  formatErrorDetails,
-} from "./utils/errorFormat";
 import { EMPTY_SETTINGS } from "./utils/serverSettingsDefaults";
-import type { StepUpSource } from "./utils/stepUp";
 import {
   bodyDroppedToastId,
   CLIENT_CONFIG_LOAD_ERROR_NOTIFICATION_ID,
 } from "./utils/toasts/toastIds";
 import { FetchBodyDroppedToastMessage } from "./components/elements/Toasts/FetchBodyDroppedToastMessage";
 import { OutputValidationToastMessage } from "./components/elements/Toasts/OutputValidationToastMessage";
-import { UrlElicitationErrorToastMessage } from "./components/elements/Toasts/UrlElicitationErrorToastMessage";
 import { ReAuthBannerBar } from "./components/groups/ReAuthBanner/ReAuthBannerBar";
 
 function App() {
@@ -286,19 +267,18 @@ function App() {
     null,
   );
 
-  // In-flight call panel state. Tracked here (rather than inside the
-  // respective screens) so the panels can reflect pending → ok/error
-  // transitions and so `onClear*` handlers can reset the panel without
-  // remounting the screen.
-  const [toolCallState, setToolCallState] = useState<ToolCallState | undefined>(
-    undefined,
-  );
-  const [getPromptState, setGetPromptState] = useState<
-    GetPromptState | undefined
-  >(undefined);
-  const [readResourceState, setReadResourceState] = useState<
-    ReadResourceState | undefined
-  >(undefined);
+  // The three in-flight result panels, plus the `clearResultPanels` /
+  // `setSourceScopedError` writers `useOAuthRecovery` needs. Owned by the
+  // commands hook's file but called here, ahead of the OAuth hook that reads
+  // those two (#2155).
+  const panels = useResultPanels();
+  const {
+    toolCallState,
+    getPromptState,
+    readResourceState,
+    clearResultPanels,
+    setSourceScopedError,
+  } = panels;
 
   // Per-screen selection / search / filter state, one object per screen. Lifted
   // here (out of the individual screens) so it persists across tab navigation
@@ -453,42 +433,6 @@ function App() {
     fetchRequests,
     stderrLogs,
   } = useInspectorStores({ inspectorClient, connected, paginatedLists });
-
-  /** Drops every in-flight result panel; see `clearResultPanels` below. */
-  const clearResultPanels = useCallback(() => {
-    setToolCallState(undefined);
-    setGetPromptState(undefined);
-    setReadResourceState(undefined);
-  }, []);
-
-  /**
-   * Routes a step-up failure or cancellation to the panel that issued the
-   * command. `app` and `ambient` have no panel of their own — the App bridge
-   * surfaces its own message and an ambient challenge was never user-initiated
-   * — so they fall through to the no-op arm.
-   */
-  const setSourceScopedError = useCallback(
-    (source: StepUpSource, message: string) => {
-      switch (source) {
-        case "tool":
-          setToolCallState({ status: "error", error: message });
-          break;
-        case "prompt":
-          setGetPromptState((prev) =>
-            prev ? { ...prev, status: "error", error: message } : prev,
-          );
-          break;
-        case "resource":
-          setReadResourceState((prev) =>
-            prev ? { ...prev, status: "error", error: message } : prev,
-          );
-          break;
-        default:
-          break;
-      }
-    },
-    [],
-  );
 
   /**
    * Published below, once the connect path's `setupClientForServer` exists —
@@ -832,170 +776,73 @@ function App() {
     [sessionRef, fetchLogRef],
   );
 
-  // --- Action handlers that route directly to the InspectorClient. ---
-
-  const onCallTool = useCallback(
-    async (
-      name: string,
-      args: Record<string, unknown>,
-      runAsTask?: boolean,
-    ) => {
-      if (!inspectorClient) return;
-      const tool = tools.find((t: Tool) => t.name === name);
-      if (!tool) return;
-      // Route through the task pipeline when the caller asked to (or the tool
-      // requires it) — but only if the server advertises task tool calls. Per
-      // spec a tool's `taskSupport` is considered only when the server declares
-      // `tasks.requests.tools.call`, so without it we never task-augment (even a
-      // "required" tool, which then surfaces callTool's "requires task support"
-      // error). The created task shows up on the Tasks screen via the
-      // `requestorTaskUpdated` events callToolStream dispatches, and its live
-      // status/progress surface as toasts + progress bar.
-      // Legacy servers advertise task tool calls via
-      // `tasks.requests.tools.call`. Modern servers (SEP-2663) instead negotiate
-      // the `io.modelcontextprotocol/tasks` extension and are server-directed:
-      // task creation is decided per-request by the server, so declaring the
-      // extension on the call (which the task path does) is what makes a returned
-      // task handle legal ("unsolicited handles"). Either era routes the flagged
-      // call through the streaming task pipeline.
-      const serverSupportsTaskToolCalls =
-        !!capabilities?.tasks?.requests?.tools?.call ||
-        inspectorClient.isTasksExtensionNegotiated();
-      const asTask =
-        serverSupportsTaskToolCalls &&
-        (runAsTask || tool.execution?.taskSupport === "required");
-      // Drop any prior call's task id before starting; a task-augmented call
-      // repopulates it via the `toolCallTaskUpdated` listener below, an ordinary
-      // call leaves it cleared (#1455).
-      activeToolCallTaskIdRef.current = undefined;
-      setToolCallState({ status: "pending" });
-      try {
-        // ToolsScreen types the args as `Record<string, unknown>` (it accepts
-        // anything the user types into the schema form). `callTool` requires
-        // `Record<string, JsonValue>` — narrow at the boundary instead of
-        // claiming the object is empty (which the previous `as Record<string,
-        // never>` cast did, misleadingly).
-        const invocation = asTask
-          ? await inspectorClient.callToolStream(
-              tool,
-              args as Record<string, JsonValue>,
-              undefined,
-              undefined,
-              { ttl: activeServer?.settings?.taskTtl || DEFAULT_TASK_TTL_MS },
-            )
-          : await inspectorClient.callTool(
-              tool,
-              args as Record<string, JsonValue>,
-            );
-        setToolCallState({
-          status: invocation.success ? "ok" : "error",
-          result: invocation.result ?? undefined,
-          error: invocation.error,
-        });
-      } catch (err) {
-        if (err instanceof AuthRecoveryRequiredError) {
-          setToolCallState(undefined);
-          if (activeServerId) {
-            await handleCommandScopedAuthRecovery(err, {
-              serverId: activeServerId,
-              source: "tool",
-            });
-          }
-          return;
-        }
-        // The user cancelled the in-flight call (Cancel button → cancelToolCall).
-        // The cancellation notification was already sent to the server, so just
-        // clear the executing state — surfacing it as an error would read as a
-        // failure rather than the deliberate cancel it was (#1458).
-        if (err instanceof ToolCallCancelledError) {
-          setToolCallState(undefined);
-          notifications.show({
-            title: "Tool call cancelled",
-            message: "A cancellation request was sent to the server.",
-            color: "gray",
-            autoClose: 3000,
-          });
-          return;
-        }
-        // The server kept asking for a URL the user already completed this call,
-        // so callTool aborted to avoid an endless re-prompt loop. Surface that
-        // explicitly rather than as a generic failure.
-        if (err instanceof UrlElicitationLoopError) {
-          setToolCallState({ status: "error", error: err.message });
-          notifications.show({
-            autoClose: false,
-            title: "URL elicitation loop",
-            color: "yellow",
-            message: (
-              <Text size="sm">
-                The server requested the same URL again after you completed it (
-                {err.url}), so the call was cancelled to avoid an endless loop.
-              </Text>
-            ),
-          });
-          return;
-        }
-        // A URLElicitationRequired (-32042) error that reaches here carried no
-        // elicitations (a non-spec response — the with-list case is handled and
-        // retried inside callTool). There's no URL to open, so surface a short
-        // toast that links to the raw error rather than a bare error panel.
-        const urlElicitations = getUrlElicitationsFromError(err);
-        if (urlElicitations !== null && urlElicitations.length === 0) {
-          const details = {
-            toolName: name,
-            details: formatErrorDetails(err),
-          };
-          setToolCallState({ status: "error", error: errorMessage(err) });
-          notifications.show({
-            autoClose: false,
-            title: "URL elicitation required",
-            color: "yellow",
-            message: (
-              <UrlElicitationErrorToastMessage
-                onViewDetails={() => setUrlElicitationErrorDetails(details)}
-              />
-            ),
-          });
-          return;
-        }
-        setToolCallState({
-          status: "error",
-          error: errorMessage(err),
-          errorCode: errorCodeOf(err),
-        });
-      }
-    },
-    [
-      inspectorClient,
-      tools,
-      activeServer,
-      capabilities,
-      activeServerId,
-      handleCommandScopedAuthRecovery,
-      activeToolCallTaskIdRef,
-    ],
-  );
-
-  const onClearToolResult = useCallback(() => {
-    setToolCallState(undefined);
-  }, []);
-
-  // Tools UI changes flow through here so selecting a *different* tool also
-  // drops the previous tool's result — the result panel renders `toolCallState`
-  // regardless of selection, so without this a stale result would linger under
-  // the newly-selected tool (which has no result of its own yet). Search and
-  // form edits keep `selectedToolKey` unchanged, so they leave the result be.
-  // Depends on `selectedToolKey` only (not the whole `toolsUi`), so a search
-  // keystroke doesn't churn the callback identity.
-  const onToolsUiChange = useCallback(
-    (next: ToolsUiState) => {
-      if (next.selectedToolKey !== ui.toolsUi.selectedToolKey) {
-        setToolCallState(undefined);
-      }
-      setUi.setToolsUi(next);
-    },
-    [ui.toolsUi.selectedToolKey, setUi],
-  );
+  // --- Action handlers that route directly to the InspectorClient. Every one
+  // of them routes through the command-scoped auth recovery above, which is
+  // why they sit after it (#2155). ---
+  const {
+    onCallTool,
+    onClearToolResult,
+    onToolsUiChange,
+    onGetPrompt,
+    onReadResource,
+    onReadResourceContents,
+    onSubscribeResource,
+    onUnsubscribeResource,
+    onCompleteArgument,
+    onCancelTask,
+    onCancelToolCall,
+    onClearCompletedTasks,
+    onSetLogLevel,
+    onSetModernLogLevel,
+    onRefreshTools,
+    onRefreshPrompts,
+    onRefreshResources,
+    onRefreshTasks,
+    onTogglePaginatedLists,
+    onLoadMoreTools,
+    onLoadMorePrompts,
+    onLoadMoreResources,
+  } = useServerCommands({
+    sessionRef,
+    servers,
+    activeServerId,
+    activeServer,
+    inspectorClient,
+    connected,
+    capabilities,
+    tools,
+    panels,
+    selectedToolKey: ui.toolsUi.selectedToolKey,
+    setToolsUi: setUi.setToolsUi,
+    setUrlElicitationErrorDetails,
+    setCurrentLogLevel,
+    setModernLogLevel,
+    activeToolCallTaskIdRef,
+    clearCompletedTasks,
+    refreshTasks,
+    paginatedLists,
+    paginatedListsOverride,
+    toolsPagination,
+    promptsPagination,
+    resourcesPagination,
+    refreshTools,
+    refreshPrompts,
+    refreshResources,
+    refreshResourceTemplates,
+    clearToolsListChanged,
+    clearPromptsListChanged,
+    clearResourcesListChanged,
+    loadToolsPage,
+    loadPromptsPage,
+    loadResourcesPage,
+    lastPersistedSettings,
+    applyLiveServerSettings,
+    updateServerSettings,
+    refreshInitialConfig,
+    handleCommandScopedAuthRecovery,
+    runWithCommandAuthRecovery,
+    runCommandInBackground,
+  });
 
   // --- MCP Apps handlers. Unlike onCallTool (which feeds the Tools panel),
   // these route the tool input/result into the running app via the renderer's
@@ -1102,445 +949,6 @@ function App() {
     void appRendererRef.current?.teardown();
   }, [appRendererRef]);
 
-  const onGetPrompt = useCallback(
-    async (name: string, args: Record<string, string>) => {
-      if (!inspectorClient) return;
-      // Tag the in-flight + final state with the prompt name so the
-      // PromptsScreen can guard against showing a stale result for a
-      // prompt the user has already navigated away from.
-      setGetPromptState({ status: "pending", promptName: name });
-      try {
-        const invocation = await inspectorClient.getPrompt(name, args);
-        setGetPromptState({
-          status: "ok",
-          promptName: name,
-          result: invocation.result,
-        });
-      } catch (err) {
-        if (err instanceof AuthRecoveryRequiredError) {
-          setGetPromptState(undefined);
-          if (activeServerId) {
-            await handleCommandScopedAuthRecovery(err, {
-              serverId: activeServerId,
-              source: "prompt",
-            });
-          }
-          return;
-        }
-        setGetPromptState({
-          status: "error",
-          promptName: name,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    },
-    [inspectorClient, activeServerId, handleCommandScopedAuthRecovery],
-  );
-
-  const onReadResource = useCallback(
-    async (uri: string) => {
-      if (!inspectorClient) return;
-      setReadResourceState({ status: "pending", uri });
-      try {
-        const invocation = await inspectorClient.readResource(uri);
-        setReadResourceState({
-          status: "ok",
-          uri,
-          result: invocation.result,
-          lastUpdated: invocation.timestamp,
-        });
-      } catch (err) {
-        if (err instanceof AuthRecoveryRequiredError) {
-          setReadResourceState(undefined);
-          if (activeServerId) {
-            await handleCommandScopedAuthRecovery(err, {
-              serverId: activeServerId,
-              source: "resource",
-            });
-          }
-          return;
-        }
-        setReadResourceState({
-          status: "error",
-          uri,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    },
-    [inspectorClient, activeServerId, handleCommandScopedAuthRecovery],
-  );
-
-  // Read-on-demand handler for `resource_link` blocks in a tool result. Unlike
-  // `onReadResource` (which drives the Resources screen's preview panel via
-  // shared state), this returns the contents directly so each ResourceLink can
-  // own and inline its own fetched content.
-  const onReadResourceContents = useCallback(
-    async (uri: string) => {
-      if (!inspectorClient) throw new Error("Client is not connected");
-      const read = () => inspectorClient.readResource(uri);
-      try {
-        const invocation = await read();
-        return invocation.result;
-      } catch (err) {
-        if (err instanceof AuthRecoveryRequiredError && activeServerId) {
-          const satisfied = await handleCommandScopedAuthRecovery(err, {
-            serverId: activeServerId,
-            source: "resource",
-          });
-          if (satisfied) {
-            const retry = await read();
-            return retry.result;
-          }
-        }
-        throw err;
-      }
-    },
-    [inspectorClient, activeServerId, handleCommandScopedAuthRecovery],
-  );
-
-  const onSubscribeResource = useCallback(
-    (uri: string) => {
-      if (!inspectorClient) return;
-      void inspectorClient.subscribeToResource(uri);
-    },
-    [inspectorClient],
-  );
-
-  const onUnsubscribeResource = useCallback(
-    (uri: string) => {
-      if (!inspectorClient) return;
-      void inspectorClient.unsubscribeFromResource(uri);
-    },
-    [inspectorClient],
-  );
-
-  const onCompleteArgument = useCallback(
-    async (
-      ref:
-        | { type: "ref/resource"; uri: string }
-        | { type: "ref/prompt"; name: string },
-      argumentName: string,
-      argumentValue: string,
-      context: Record<string, string>,
-    ): Promise<string[]> => {
-      if (!inspectorClient) return [];
-      const result = await runWithCommandAuthRecovery(
-        () =>
-          inspectorClient.getCompletions(
-            ref,
-            argumentName,
-            argumentValue,
-            context,
-          ),
-        "tool",
-      );
-      return result?.values ?? [];
-    },
-    [inspectorClient, runWithCommandAuthRecovery],
-  );
-
-  const onCancelTask = useCallback(
-    async (taskId: string) => {
-      if (!inspectorClient) return;
-      try {
-        await runWithCommandAuthRecovery(
-          () => inspectorClient.cancelRequestorTask(taskId),
-          "tool",
-        );
-      } catch (err) {
-        if (err instanceof AuthRecoveryRequiredError) {
-          return;
-        }
-        notifications.show({
-          title: "Failed to cancel task",
-          message: err instanceof Error ? err.message : String(err),
-          color: "red",
-        });
-      }
-    },
-    [inspectorClient, runWithCommandAuthRecovery],
-  );
-
-  // Cancel the in-flight tool call. A task-augmented call (run-as-task) has a
-  // server-side task, so cancel that via the tasks API (#1455) — the cancelled
-  // status then flows back through the managed task store and toasts, the same
-  // as cancelling from the Tasks screen. An ordinary call has no task, so abort
-  // its request: the SDK sends a `notifications/cancelled` to the server (the
-  // MCP cancellation flow) and the pending call rejects with a
-  // ToolCallCancelledError that `onCallTool` clears as a cancellation (#1458).
-  const onCancelToolCall = useCallback(() => {
-    if (!inspectorClient) return;
-    const taskId = activeToolCallTaskIdRef.current;
-    if (taskId) {
-      // Clear the ref before the call resolves so a rapid second Cancel click
-      // doesn't re-cancel the now-terminating task (which would surface a
-      // spurious "Failed to cancel task" toast).
-      activeToolCallTaskIdRef.current = undefined;
-      void onCancelTask(taskId);
-      return;
-    }
-    inspectorClient.cancelToolCall();
-  }, [inspectorClient, onCancelTask, activeToolCallTaskIdRef]);
-
-  const onClearCompletedTasks = useCallback(() => {
-    clearCompletedTasks();
-  }, [clearCompletedTasks]);
-
-  const onSetLogLevel = useCallback(
-    (level: LoggingLevel) => {
-      setCurrentLogLevel(level);
-      if (!inspectorClient) return;
-      // Nothing else records a `logging/setLevel` failure, and the optimistic
-      // level above already moved — so report it, or the selector would sit on
-      // a level the server never accepted with no explanation.
-      runCommandInBackground(
-        () => inspectorClient.setLoggingLevel(level),
-        "ambient",
-        "Failed to set log level",
-      );
-    },
-    [inspectorClient, runCommandInBackground],
-  );
-
-  // Modern era (#1629): no request is sent — the client stores the level and
-  // stamps it on every subsequent request's `_meta`. `null` opts back out.
-  const onSetModernLogLevel = useCallback(
-    (level: LoggingLevel | null) => {
-      setModernLogLevel(level);
-      inspectorClient?.setModernLogLevel(level ?? undefined);
-    },
-    [inspectorClient],
-  );
-
-  // Refresh acts per pagination mode: in paginated mode reload page 1 (the
-  // paged state); in all-pages mode re-fetch the whole aggregate with auth
-  // recovery (the pre-existing path). See usePaginatedList / #1721.
-  const onRefreshTools = useCallback(() => {
-    if (paginatedLists) {
-      // Paginated refresh reloads page 1 of the paged store, bypassing the
-      // managed hook's refresh — so acknowledge the list-changed indicator here
-      // (the managed state lit it on `list_changed`; nothing else clears it in
-      // paginated mode) (#1721).
-      clearToolsListChanged();
-      runCommandInBackground(() => toolsPagination.onRefresh(), "ambient");
-    } else {
-      runCommandInBackground(() => refreshTools(), "ambient");
-    }
-  }, [
-    paginatedLists,
-    toolsPagination,
-    refreshTools,
-    clearToolsListChanged,
-    runCommandInBackground,
-  ]);
-  const onRefreshPrompts = useCallback(() => {
-    if (paginatedLists) {
-      clearPromptsListChanged();
-      runCommandInBackground(() => promptsPagination.onRefresh(), "ambient");
-    } else {
-      runCommandInBackground(() => refreshPrompts(), "ambient");
-    }
-  }, [
-    paginatedLists,
-    promptsPagination,
-    refreshPrompts,
-    clearPromptsListChanged,
-    runCommandInBackground,
-  ]);
-  const onRefreshResources = useCallback(() => {
-    if (paginatedLists) {
-      clearResourcesListChanged();
-      runCommandInBackground(() => resourcesPagination.onRefresh(), "ambient");
-      // Resource templates always use the managed (aggregate) path.
-      runCommandInBackground(() => refreshResourceTemplates(), "ambient");
-    } else {
-      runCommandInBackground(async () => {
-        await refreshResources();
-        await refreshResourceTemplates();
-      }, "ambient");
-    }
-  }, [
-    paginatedLists,
-    resourcesPagination,
-    refreshResources,
-    refreshResourceTemplates,
-    clearResourcesListChanged,
-    runCommandInBackground,
-  ]);
-  // The per-list sidebar toggle edits the server-wide `paginatedLists` setting:
-  // optimistic override for an instant flip, live push so the managed state's
-  // gating reads it now, and a persisted PUT so it survives reconnects (#1721).
-  const onTogglePaginatedLists = useCallback(
-    (value: boolean) => {
-      const current = servers.find((s) => s.id === activeServerId);
-      if (!current || activeServerId === undefined) return;
-      // Recorded against this server rather than app-wide, so it survives a
-      // switch away and back (#2095). Ordered after the id guard because the
-      // record is keyed by that id; with no active server there is nothing the
-      // toggle could have been flipped for.
-      paginatedListsOverride.record(activeServerId, value);
-      // Not `current.settings` directly: that entry only advances on a
-      // successful list read, so once one has failed it describes disk as it
-      // was *before* the writes made since. Build on the last write known to
-      // have landed while that is the fresher account (#2089).
-      const next: InspectorServerSettings = {
-        ...(lastPersistedSettings.resolve(activeServerId) ?? EMPTY_SETTINGS),
-        paginatedLists: value,
-      };
-      inspectorClient?.setServerSettings(next);
-      // Drive the load that the mode change implies (data-loading stays out of
-      // React effects; the paged stores own only the connect-time load). To
-      // paginated: pull page 1 into each paged store. To all-pages: refetch
-      // each managed aggregate that was gated off. Only when connected.
-      if (connected) {
-        // Wrap in ambient auth recovery so a mid-session 401 triggers re-auth
-        // rather than surfacing raw, matching the all-pages refresh path.
-        if (value) {
-          runCommandInBackground(() => loadToolsPage(undefined), "ambient");
-          runCommandInBackground(() => loadPromptsPage(undefined), "ambient");
-          runCommandInBackground(() => loadResourcesPage(undefined), "ambient");
-        } else {
-          runCommandInBackground(() => refreshTools(), "ambient");
-          runCommandInBackground(() => refreshPrompts(), "ambient");
-          runCommandInBackground(() => refreshResources(), "ambient");
-        }
-      }
-      // Refreshed like every other secret-store mutation: this resends the
-      // server's rehydrated secrets, so it can trigger the pending
-      // plaintext-to-encrypted upgrade even though the user only toggled
-      // pagination (#1950 review r22).
-      // Announced before the request goes out, so two toggles in flight at once
-      // are ordered by when they were issued rather than by which one's list
-      // reload finished first (#2089).
-      const write = lastPersistedSettings.begin(activeServerId);
-      // This value is on disk now. Remember it as the rollback baseline for
-      // whatever is written next, since the `servers` entry it was derived
-      // from will keep describing the old value if the reload behind this
-      // write — or any later one — fails (#2089).
-      //
-      // Re-apply it when this write is the settled one: an overlapping toggle
-      // that failed *first* rolled the UI and the live client back to a
-      // baseline this write has since replaced, and if the list read behind
-      // this write failed too, nothing else would ever correct them. Through
-      // the *current* client, not this continuation's closure: a reconnect to
-      // the same server passes the id check while the captured instance is
-      // already destroyed.
-      const settlePaginationWrite = () => {
-        const settled = write.landed(next);
-        if (!settled) return;
-        // The override is keyed by server, so it is re-applied whatever is
-        // active now — it is this server's value and is only ever displayed
-        // while this server is the active one. The live client is not: it
-        // belongs to whichever server is connected (#2095).
-        paginatedListsOverride.record(
-          activeServerId,
-          next.paginatedLists ?? false,
-        );
-        if (sessionRef.current.activeServerId === activeServerId) {
-          applyLiveServerSettings(next);
-        }
-      };
-      void refreshingPersist(updateServerSettings, refreshInitialConfig)(
-        activeServerId,
-        next,
-      )
-        .then(settlePaginationWrite)
-        .catch((err: unknown) => {
-          // A `ServerListReloadError` means the PUT landed and only reading the
-          // list back failed, so the new setting IS on disk (#1914). That is a
-          // landed write, not a failed one: rolling back would put the UI and
-          // the live client on the *old* value and contradict disk. Settle it
-          // exactly as the success path does and report only the failed reload.
-          if (err instanceof ServerListReloadError) {
-            settlePaginationWrite();
-            notifications.show({
-              title:
-                "Pagination setting saved, but the server list did not reload",
-              message: err.message,
-              color: "red",
-            });
-            return;
-          }
-          // This write is over and never reached disk, so it stops counting as
-          // in flight: an earlier write still running is the settled state once
-          // it lands, and is what re-applies the UI this rollback is about to
-          // set (#2089).
-          write.failed();
-          // Persist failed: revert the optimistic override and roll the live
-          // client setting back, so the UI and client reflect the value that's
-          // actually on disk rather than the failed edit (#1721).
-          //
-          // The baseline is resolved *here*, not captured when this write was
-          // issued: another toggle can land in between, and its value is what
-          // disk holds by the time this one fails. The override is set to that
-          // baseline rather than cleared, because clearing it falls back to
-          // `persistedPaginatedLists` — read from a `servers` entry that may be
-          // stale, showing the same wrong value from the other side (#2089).
-          //
-          // The override is recorded whatever is active by the time this
-          // rejection arrives: it is keyed by this write's server and is only
-          // ever displayed while that server is the active one, so a switch in
-          // between costs nothing and dropping it would leave the stale entry
-          // to answer for A the next time it comes back (#2095).
-          //
-          // The live client is the half that stays gated — it belongs to
-          // whichever server is connected now, so pushing this server's value
-          // into it after a switch would apply it to another one. It is taken
-          // from the ref for the same reason the success path does: a reconnect
-          // to the same server passes the id check while this continuation's
-          // captured instance is already destroyed.
-          const baseline =
-            lastPersistedSettings.resolve(activeServerId) ?? EMPTY_SETTINGS;
-          paginatedListsOverride.record(
-            activeServerId,
-            baseline.paginatedLists ?? false,
-          );
-          if (sessionRef.current.activeServerId === activeServerId) {
-            applyLiveServerSettings(baseline);
-          }
-          notifications.show({
-            title: "Failed to save pagination setting",
-            message: err instanceof Error ? err.message : String(err),
-            color: "red",
-          });
-        });
-    },
-    [
-      sessionRef,
-      servers,
-      activeServerId,
-      lastPersistedSettings,
-      paginatedListsOverride,
-      applyLiveServerSettings,
-      inspectorClient,
-      updateServerSettings,
-      refreshInitialConfig,
-      connected,
-      loadToolsPage,
-      loadPromptsPage,
-      loadResourcesPage,
-      refreshTools,
-      refreshPrompts,
-      refreshResources,
-      runCommandInBackground,
-    ],
-  );
-  // Wrap Load-next-page in ambient auth recovery too, so a paginated
-  // paginated fetch that hits a 401 recovers like the all-pages path (#1721).
-  const onLoadMoreTools = useCallback(
-    () => runCommandInBackground(() => toolsPagination.onLoadMore(), "ambient"),
-    [toolsPagination, runCommandInBackground],
-  );
-  const onLoadMorePrompts = useCallback(
-    () =>
-      runCommandInBackground(() => promptsPagination.onLoadMore(), "ambient"),
-    [promptsPagination, runCommandInBackground],
-  );
-  const onLoadMoreResources = useCallback(
-    () =>
-      runCommandInBackground(() => resourcesPagination.onLoadMore(), "ambient"),
-    [resourcesPagination, runCommandInBackground],
-  );
   const toolsPaginationControls: ListPaginationControlsProps = {
     paginated: toolsPagination.paginated,
     onPaginatedChange: onTogglePaginatedLists,
@@ -1562,13 +970,6 @@ function App() {
     loadedPages: resourcesPagination.loadedPages,
     onLoadMore: onLoadMoreResources,
   };
-  const onRefreshTasks = useCallback(() => {
-    runCommandInBackground(
-      () => refreshTasks(),
-      "ambient",
-      "Failed to refresh tasks",
-    );
-  }, [refreshTasks, runCommandInBackground]);
 
   // Clear / Export / Replay for the four log-ish views (Logs, Protocol,
   // Network, Console), plus the Protocol per-section variants.
