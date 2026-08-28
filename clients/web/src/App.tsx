@@ -106,6 +106,7 @@ import {
   type PendingClientRequestContent,
 } from "./components/groups/PendingClientRequestModal/PendingClientRequestModal";
 import { downloadJsonFile } from "./lib/downloadFile";
+import { serverWithDraftSettings } from "./utils/serverWithDraftSettings";
 import { enrichProtocolEntries } from "./utils/correlateTransportErrors";
 import { visibleMalformedListItems } from "./utils/malformedListReport";
 import { parseDeepLink, deepLinkParseStatus } from "./utils/deepLink";
@@ -1348,15 +1349,63 @@ function App() {
   // target isn't resolvable.
   const settingsModalIsStdio = settingsModalServerType === "stdio";
 
+  /**
+   * Servers whose clear is in flight (#2144). Keyed by id, not a single flag:
+   * the callback explicitly supports clearing a server other than the active
+   * one, so a global lock would silently drop B's click while A's revocation
+   * was still out. See `runClear`.
+   */
+  const clearOAuthInFlightRef = useRef<Set<string>>(new Set());
+
+  /**
+   * Run a clear from a key/click handler, which cannot await.
+   *
+   * `clearServerOAuthAndDisconnect` does **not** own its failures — the store
+   * write or the disconnect can reject — so a bare `void` would produce an
+   * unhandled rejection and leave the user with a control that silently did
+   * nothing. (An RFC 7009 failure is not this: those come back as an outcome
+   * and are already reported in the success toast.)
+   */
+  const runClear = useCallback(
+    (server: Parameters<typeof clearServerOAuthAndDisconnect>[0]) => {
+      // Shared by BOTH clear controls (Connection Info and Server Settings),
+      // because for one server they drive the same client and the same store
+      // entry. A ref rather than state: a double click delivers both events
+      // before React re-renders, so a state-based guard would let both through
+      // — and with revocation taking up to five seconds, that means concurrent
+      // RFC 7009 requests, concurrent store writes, and two contradictory
+      // toasts. Keyed by server so a *different* server's clear is unaffected.
+      if (clearOAuthInFlightRef.current.has(server.id)) return;
+      clearOAuthInFlightRef.current.add(server.id);
+      clearServerOAuthAndDisconnect(server)
+        .finally(() => {
+          clearOAuthInFlightRef.current.delete(server.id);
+        })
+        .catch((err: unknown) => {
+          notifications.show({
+            title: "Could not clear the stored OAuth state",
+            message: err instanceof Error ? err.message : String(err),
+            color: "red",
+            // The tokens may still be on disk and the session may still be up,
+            // so this is not a notice to let time out.
+            autoClose: false,
+          });
+        });
+    },
+    [clearServerOAuthAndDisconnect],
+  );
+
   const handleClearConnectionOAuth = useCallback(() => {
     if (!activeServer) return;
-    void clearServerOAuthAndDisconnect(activeServer);
-  }, [activeServer, clearServerOAuthAndDisconnect]);
+    runClear(activeServer);
+  }, [activeServer, runClear]);
 
   const handleClearStoredOAuthFromSettings = useCallback(() => {
     if (!settingsModalTarget) return;
-    void clearServerOAuthAndDisconnect(settingsModalTarget);
-  }, [settingsModalTarget, clearServerOAuthAndDisconnect]);
+    // Clear from *inside* the settings modal, so the draft is what the user is
+    // looking at rather than what the debounced save has persisted (#2144).
+    runClear(serverWithDraftSettings(settingsModalTarget, settingsDraft));
+  }, [settingsModalTarget, settingsDraft, runClear]);
 
   const onSettingsModalClose = useCallback(() => {
     flushSettingsDraft();

@@ -1424,6 +1424,7 @@ export function createRemoteApp(
     tokenUrl?: string;
     enterpriseManaged?: boolean;
     requestRefreshToken?: boolean;
+    revokeOnClear?: boolean;
   } => {
     if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
     const o = v as Record<string, unknown>;
@@ -1457,6 +1458,11 @@ export function createRemoteApp(
       o.requestRefreshToken !== undefined &&
       typeof o.requestRefreshToken !== "boolean"
     ) {
+      return false;
+    }
+    // #2144 — shape only, same as the flag above: the read side keeps just an
+    // explicit `false`, so a stray `true` reads back as the default anyway.
+    if (o.revokeOnClear !== undefined && typeof o.revokeOnClear !== "boolean") {
       return false;
     }
     return true;
@@ -1572,7 +1578,7 @@ export function createRemoteApp(
       if ("oauth" in valObj && !isOauthObject(valObj.oauth)) {
         logWarn(
           { route: "/api/servers", id, droppedKey: "oauth" },
-          "Dropping malformed `oauth` field — expected `{ clientId?, clientSecret?, scopes?, authorizationParams?, authorizationUrl?, tokenUrl?, enterpriseManaged?, onInsufficientScope?, requestRefreshToken? }`.",
+          "Dropping malformed `oauth` field — expected `{ clientId?, clientSecret?, scopes?, authorizationParams?, authorizationUrl?, tokenUrl?, enterpriseManaged?, onInsufficientScope?, requestRefreshToken?, revokeOnClear? }`.",
         );
         delete valObj.oauth;
       }
@@ -1885,6 +1891,15 @@ export function createRemoteApp(
       };
     }
     if (
+      obj.oauthRevokeOnClear !== undefined &&
+      typeof obj.oauthRevokeOnClear !== "boolean"
+    ) {
+      return {
+        ok: false,
+        error: "settings.oauthRevokeOnClear must be a boolean",
+      };
+    }
+    if (
       obj.oauthOnInsufficientScope !== undefined &&
       obj.oauthOnInsufficientScope !== "reauthorize" &&
       obj.oauthOnInsufficientScope !== "throw"
@@ -2015,6 +2030,10 @@ export function createRemoteApp(
     // `true` on the wire reads back as unset, which means the same thing.
     if (obj.oauthRequestRefreshToken === false) {
       value.oauthRequestRefreshToken = false;
+    }
+    // #2144: same shape — the default is on, so only the opt-out travels.
+    if (obj.oauthRevokeOnClear === false) {
+      value.oauthRevokeOnClear = false;
     }
     if (
       obj.oauthOnInsufficientScope === "reauthorize" ||

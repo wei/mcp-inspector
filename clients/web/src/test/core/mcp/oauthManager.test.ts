@@ -67,6 +67,7 @@ function createMockParams(
     saveIdpSession: vi.fn().mockResolvedValue(undefined),
     clearIdpSession: vi.fn(),
     clearEnterpriseManagedResourceServers: vi.fn(),
+    takeRevocationSnapshot: vi.fn().mockResolvedValue({ byIssuer: {} }),
     getDiscoveryState: vi.fn().mockResolvedValue(undefined),
     saveDiscoveryState: vi.fn().mockResolvedValue(undefined),
     clearDiscoveryState: vi.fn().mockResolvedValue(undefined),
@@ -186,15 +187,126 @@ describe("OAuthManager", () => {
   });
 
   describe("clearOAuthTokens", () => {
-    it("calls storage.clear(serverUrl) when storage is configured", async () => {
+    /**
+     * The take-and-clear is ONE atomic storage step now, so `clear` is no
+     * longer called separately — these assert on `takeRevocationSnapshot`.
+     */
+    function stubSnapshot(
+      storage: OAuthManagerConfig["storage"],
+      revocable = true,
+    ): void {
+      vi.mocked(storage!.takeRevocationSnapshot).mockResolvedValue({
+        byIssuer: revocable
+          ? {
+              "https://as.example.com": {
+                tokens: {
+                  access_token: "a",
+                  token_type: "Bearer",
+                  refresh_token: "r",
+                },
+              },
+            }
+          : {},
+        serverMetadata: {
+          issuer: "https://as.example.com",
+          authorization_endpoint: "https://as.example.com/authorize",
+          token_endpoint: "https://as.example.com/token",
+          revocation_endpoint: "https://as.example.com/revoke",
+          response_types_supported: ["code"],
+        },
+      });
+    }
+
+    it("takes and clears the server's state when storage is configured", async () => {
       const params = createMockParams();
       const manager = new OAuthManager(params);
       await manager.clearOAuthTokens();
-      expect(params.initialConfig.storage!.clear).toHaveBeenCalledWith(
-        SERVER_URL,
-      );
+      expect(
+        params.initialConfig.storage!.takeRevocationSnapshot,
+      ).toHaveBeenCalledWith(SERVER_URL);
       expect(manager.getOAuthFlowState()).toBeUndefined();
       expect(manager.getOAuthFlowStep()).toBeUndefined();
+    });
+
+    // #2144 — the ordering is the contract. The request is built from state the
+    // clear destroys, so the take must come first; but the two are ONE step, so
+    // nothing can save a fresh grant between them, and the network wait happens
+    // after the state is already gone.
+    it("clears local state before waiting on the revocation request", async () => {
+      const params = createMockParams();
+      const storage = params.initialConfig.storage!;
+      const order: string[] = [];
+      vi.mocked(storage.takeRevocationSnapshot).mockImplementation(async () => {
+        order.push("clear");
+        return {
+          byIssuer: {
+            "https://as.example.com": {
+              tokens: {
+                access_token: "a",
+                token_type: "Bearer",
+                refresh_token: "r",
+              },
+            },
+          },
+          serverMetadata: {
+            issuer: "https://as.example.com",
+            authorization_endpoint: "https://as.example.com/authorize",
+            token_endpoint: "https://as.example.com/token",
+            revocation_endpoint: "https://as.example.com/revoke",
+            response_types_supported: ["code"],
+          },
+        };
+      });
+      const fetchFn = vi.fn<typeof fetch>(async () => {
+        order.push("revoke");
+        return new Response(null, { status: 200 });
+      });
+      const manager = new OAuthManager({
+        ...params,
+        effectiveAuthFetch: fetchFn,
+      });
+
+      await expect(manager.clearOAuthTokens()).resolves.toMatchObject({
+        status: "revoked",
+        tokenTypeHint: "refresh_token",
+      });
+      expect(order).toEqual(["clear", "revoke"]);
+    });
+
+    it("clears local state even when the revocation request fails", async () => {
+      const params = createMockParams();
+      const storage = params.initialConfig.storage!;
+      stubSnapshot(storage);
+      const manager = new OAuthManager({
+        ...params,
+        effectiveAuthFetch: vi.fn<typeof fetch>(async () => {
+          throw new Error("unreachable");
+        }),
+      });
+
+      await expect(manager.clearOAuthTokens()).resolves.toMatchObject({
+        status: "failed",
+      });
+      expect(storage.takeRevocationSnapshot).toHaveBeenCalledWith(SERVER_URL);
+    });
+
+    it("skips the request when revocation is turned off", async () => {
+      const params = createMockParams();
+      const storage = params.initialConfig.storage!;
+      stubSnapshot(storage);
+      const fetchFn = vi.fn<typeof fetch>();
+      const manager = new OAuthManager({
+        ...params,
+        effectiveAuthFetch: fetchFn,
+      });
+
+      await expect(
+        manager.clearOAuthTokens({ revoke: false }),
+      ).resolves.toEqual({ status: "skipped", reason: "disabled" });
+      expect(fetchFn).not.toHaveBeenCalled();
+      // Still cleared — that is what the caller asked for; the request is the
+      // optional part.
+      expect(storage.takeRevocationSnapshot).toHaveBeenCalledWith(SERVER_URL);
     });
 
     it("no-ops when storage is not configured", async () => {
@@ -207,7 +319,10 @@ describe("OAuthManager", () => {
         } as OAuthManagerConfig,
       });
       const manager = new OAuthManager(params);
-      await manager.clearOAuthTokens();
+      await expect(manager.clearOAuthTokens()).resolves.toEqual({
+        status: "skipped",
+        reason: "no_tokens",
+      });
       expect(params.getServerUrl).not.toHaveBeenCalled();
     });
   });

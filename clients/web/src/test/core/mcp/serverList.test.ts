@@ -1261,6 +1261,73 @@ describe("oauth.requestRefreshToken (#2068)", () => {
   });
 });
 
+// #2144 — same inverted-default shape as `requestRefreshToken` above: on by
+// default, and only the opt-out is written, so an entry that never touched the
+// switch keeps a byte-stable round-trip.
+describe("oauthRevokeOnClear (RFC 7009)", () => {
+  const baseSettings = {
+    headers: [],
+    env: [],
+    metadata: {},
+    connectionTimeout: 0,
+    requestTimeout: 0,
+    taskTtl: 60000,
+    maxFetchRequests: 1000,
+    roots: [],
+  };
+
+  it("lifts an explicit false to settings.oauthRevokeOnClear", () => {
+    expect(
+      storedFieldsToInspectorSettings({
+        oauth: { clientId: "cid", revokeOnClear: false },
+      })?.oauthRevokeOnClear,
+    ).toBe(false);
+  });
+
+  it("leaves the setting unset when the field is absent (default: on)", () => {
+    expect(
+      storedFieldsToInspectorSettings({ oauth: { clientId: "cid" } })
+        ?.oauthRevokeOnClear,
+    ).toBeUndefined();
+  });
+
+  it("leaves the setting unset for an explicit true, which means the default", () => {
+    expect(
+      storedFieldsToInspectorSettings({
+        oauth: { clientId: "cid", revokeOnClear: true },
+      })?.oauthRevokeOnClear,
+    ).toBeUndefined();
+  });
+
+  it("persists the opt-out under oauth on disk", () => {
+    expect(
+      inspectorSettingsToStoredFields({
+        ...baseSettings,
+        oauthRevokeOnClear: false,
+      }).oauth?.revokeOnClear,
+    ).toBe(false);
+  });
+
+  it("writes nothing when the setting is on", () => {
+    expect(
+      inspectorSettingsToStoredFields({
+        ...baseSettings,
+        oauthRevokeOnClear: true,
+      }).oauth,
+    ).toBeUndefined();
+  });
+
+  it("round-trips the opt-out", () => {
+    const stored = inspectorSettingsToStoredFields({
+      ...baseSettings,
+      oauthRevokeOnClear: false,
+    });
+    expect(storedFieldsToInspectorSettings(stored)?.oauthRevokeOnClear).toBe(
+      false,
+    );
+  });
+});
+
 describe("oauthOnInsufficientScope (SEP-2350)", () => {
   const baseSettings = {
     headers: [],

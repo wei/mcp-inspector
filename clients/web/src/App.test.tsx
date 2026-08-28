@@ -136,7 +136,10 @@ vi.mock("@inspector/core/mcp/index.js", async (importOriginal) => {
       }
       return Promise.resolve(true);
     });
-    clearOAuthTokens = vi.fn().mockResolvedValue(undefined);
+    // #2144: the clear path reads the returned RFC 7009 outcome.
+    clearOAuthTokens = vi
+      .fn()
+      .mockResolvedValue({ status: "skipped", reason: "no_endpoint" });
   }
   const instances: FakeInspectorClient[] = [];
   return {

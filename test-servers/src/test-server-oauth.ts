@@ -116,6 +116,9 @@ export function setupOAuthRoutes(
   if (getOAuthMode(config) === "combined") {
     setupAuthorizationEndpoint(app, config);
     setupTokenEndpoint(app, config);
+    if (config.supportRevocation !== false) {
+      setupRevocationEndpoint(app, config);
+    }
     if (config.supportDCR) {
       setupDCREndpoint(app);
     }
@@ -243,6 +246,17 @@ function setupMetadataEndpoints(
           // RFC 9207 / SEP-2468: advertise iss on authorization responses so
           // clients must validate (and our e2e can exercise reject paths).
           authorization_response_iss_parameter_supported: true,
+          ...(config.supportRevocation !== false && {
+            // RFC 7009 (#2144). Advertised by default so the in-repo servers
+            // exercise the Inspector's revocation leg; set
+            // `oauth.supportRevocation: false` to reproduce an authorization
+            // server that offers none, where the Inspector must do nothing.
+            revocation_endpoint: new URL("/oauth/revoke", actualIssuerUrl).href,
+            revocation_endpoint_auth_methods_supported: [
+              "client_secret_basic",
+              "none",
+            ],
+          }),
           ...(config.supportDCR && {
             registration_endpoint: new URL("/oauth/register", actualIssuerUrl)
               .href,
@@ -622,7 +636,7 @@ function setupTokenEndpoint(
         // Generate access token
         const tokenScope =
           authCodeData.scope || config.scopesSupported?.[0] || "mcp";
-        const accessToken = generateAccessToken(tokenScope);
+        const accessToken = generateAccessToken(tokenScope, client_id);
         const tokenExpiration = config.tokenExpirationSeconds || 3600;
 
         const response: {
@@ -645,6 +659,7 @@ function setupTokenEndpoint(
           storeRefreshToken(refreshToken, {
             clientId: client_id,
             scope: authCodeData.scope,
+            accessTokens: new Set([accessToken]),
           });
         }
 
@@ -664,7 +679,10 @@ function setupTokenEndpoint(
 
         const tokenScope =
           refreshTokenData.scope || config.scopesSupported?.[0] || "mcp";
-        const accessToken = generateAccessToken(tokenScope);
+        const accessToken = generateAccessToken(tokenScope, client_id);
+        // Keep the grant linkage current so a later revocation of this refresh
+        // token also kills the access token it just minted.
+        refreshTokenData.accessTokens.add(accessToken);
         const tokenExpiration = config.tokenExpirationSeconds || 3600;
 
         res.json({
@@ -678,6 +696,137 @@ function setupTokenEndpoint(
       }
     },
   );
+}
+
+/**
+ * RFC 7009 token revocation (#2144).
+ *
+ * Deliberately faithful on the two points the Inspector depends on, both of
+ * which are easy to get wrong in a fixture:
+ *
+ * - **§2.2 — an unknown token is a success.** A client revoking a token the
+ *   server has already expired must not be told it failed, so the only 400 here
+ *   is a structurally invalid request (no `token` at all).
+ * - **§2.1 — revoking a refresh token also invalidates its access tokens.**
+ *   That is why the Inspector sends one request naming the refresh token, and a
+ *   fixture that ignored the linkage would let a regression through silently.
+ *
+ * Client authentication is **enforced**, not merely accepted. RFC 7009 §2.1
+ * requires it of a confidential client, and a fixture that skipped the check
+ * would answer 200 to a request carrying no `Authorization` header at all — at
+ * which point the end-to-end test claiming to prove the Inspector authenticates
+ * correctly proves nothing. Both RFC 6749 §2.3.1 forms are accepted (Basic and
+ * the request body), as is a public client identifying itself by `client_id`.
+ */
+function setupRevocationEndpoint(
+  app: express.Application,
+  config: OAuthConfig,
+): void {
+  app.post(
+    "/oauth/revoke",
+    express.urlencoded({ extended: true }),
+    async (req: Request, res: Response) => {
+      const token: unknown = req.body?.token;
+      if (typeof token !== "string" || token === "") {
+        res.status(400).json({ error: "invalid_request" });
+        return;
+      }
+
+      const clientId = await authenticateRevocationClient(req, config);
+      if (clientId === null) {
+        res
+          .status(401)
+          .set("WWW-Authenticate", 'Basic realm="revoke"')
+          .json({ error: "invalid_client" });
+        return;
+      }
+
+      // §2.1: only the client the token was issued to may revoke it. A token
+      // belonging to someone else is left alone — and still answered 200, per
+      // §2.2, since the response must not tell one client whether another's
+      // token exists.
+      const refreshTokenData = refreshTokens.get(token);
+      if (refreshTokenData) {
+        if (refreshTokenData.clientId === clientId) {
+          for (const accessToken of refreshTokenData.accessTokens) {
+            forgetAccessToken(accessToken);
+          }
+          refreshTokens.delete(token);
+        }
+      } else if (accessTokenClients.get(token) === clientId) {
+        forgetAccessToken(token);
+      }
+
+      // §2.2: 200 whether or not the token was known to us.
+      res.status(200).end();
+    },
+  );
+}
+
+/** Drop an access token and everything recorded about it. */
+function forgetAccessToken(token: string): void {
+  accessTokens.delete(token);
+  accessTokenScopes.delete(token);
+  accessTokenClients.delete(token);
+}
+
+/**
+ * Authenticate the caller of `/oauth/revoke` (RFC 7009 §2.1) and return the
+ * `client_id` it authenticated as, or `null` when it did not authenticate.
+ *
+ * Credentials may arrive either way RFC 6749 §2.3.1 allows — an `Authorization:
+ * Basic` header or `client_id`/`client_secret` in the form body — because the
+ * Inspector picks between them from the metadata, and a fixture that only read
+ * one would silently pass a request whose credentials went to the other place.
+ *
+ * A request naming no client at all is rejected: the Inspector always sends at
+ * least `client_id` once it holds any client information, so an unidentified
+ * request means it lost track of its credentials.
+ */
+async function authenticateRevocationClient(
+  req: Request,
+  config: OAuthConfig,
+): Promise<string | null> {
+  let clientId: string | undefined;
+  let clientSecret: string | undefined;
+
+  const authorization = req.get("authorization");
+  if (authorization?.startsWith("Basic ")) {
+    const decoded = Buffer.from(
+      authorization.slice("Basic ".length),
+      "base64",
+    ).toString("utf8");
+    const separator = decoded.indexOf(":");
+    if (separator === -1) return null;
+    // RFC 6749 §2.3.1: each half is form-urlencoded before the colon, so the
+    // server decodes each half after splitting on it. Decoding is what makes a
+    // credential containing a reserved character (`:` in the id, `%` or `/` in
+    // the secret) survive the round trip.
+    //
+    // A malformed escape makes `decodeURIComponent` throw, which Express would
+    // turn into a 500 — so a bad credential would be reported as a server
+    // fault rather than as the `invalid_client` 401 this endpoint means.
+    try {
+      clientId = decodeURIComponent(decoded.slice(0, separator));
+      clientSecret = decodeURIComponent(decoded.slice(separator + 1));
+    } catch {
+      return null;
+    }
+  } else {
+    const bodyId: unknown = req.body?.client_id;
+    const bodySecret: unknown = req.body?.client_secret;
+    if (typeof bodyId === "string") clientId = bodyId;
+    if (typeof bodySecret === "string") clientSecret = bodySecret;
+  }
+
+  if (!clientId) return null;
+  const client = await findClient(clientId, config);
+  if (!client) return null;
+  // A client registered with a secret must present it; a public one must not be
+  // asked for one it never had.
+  const ok =
+    client.clientSecret === undefined || clientSecret === client.clientSecret;
+  return ok ? clientId : null;
 }
 
 /**
@@ -732,6 +881,15 @@ interface AuthorizationCodeData {
 interface RefreshTokenData {
   clientId: string;
   scope?: string;
+  /**
+   * Access tokens minted under the same grant. RFC 7009 §2.1 says an
+   * authorization server asked to revoke a refresh token SHOULD also invalidate
+   * the access tokens issued from it, and the Inspector relies on exactly that
+   * — it sends one request naming the refresh token and expects both halves to
+   * die. A fixture that dropped only the refresh token would let a client that
+   * leaves live access tokens behind pass. (#2144)
+   */
+  accessTokens: Set<string>;
 }
 
 interface RegisteredClient {
@@ -745,6 +903,13 @@ const authorizationCodes = new Map<string, AuthorizationCodeData>();
 const accessTokens = new Set<string>();
 /** Granted OAuth scope string per access token (space-separated). */
 const accessTokenScopes = new Map<string, string>();
+/**
+ * Owning `client_id` per access token. RFC 7009 §2.1 requires an authorization
+ * server to verify that a token being revoked was issued to the requesting
+ * client, and without this the fixture had no way to tell — so any registered
+ * client could revoke another's access token. (#2144)
+ */
+const accessTokenClients = new Map<string, string>();
 const refreshTokens = new Map<string, RefreshTokenData>();
 const registeredClients = new Map<string, RegisteredClient>();
 
@@ -871,10 +1036,11 @@ function getAuthorizationCode(code: string): AuthorizationCodeData | null {
   return data;
 }
 
-function generateAccessToken(scope?: string): string {
+function generateAccessToken(scope?: string, clientId?: string): string {
   const token = `test_access_token_${Date.now()}_${Math.random().toString(36).substring(7)}`;
   accessTokens.add(token);
   accessTokenScopes.set(token, scope?.trim() || "mcp");
+  if (clientId !== undefined) accessTokenClients.set(token, clientId);
   return token;
 }
 

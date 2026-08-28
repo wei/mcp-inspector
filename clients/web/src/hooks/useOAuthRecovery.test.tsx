@@ -21,6 +21,7 @@ import { EMPTY_SETTINGS } from "../utils/serverSettingsDefaults";
 import { useSessionRef } from "./useSessionRef";
 import { useTabUiState } from "./useTabUiState";
 import {
+  revocationSuffix,
   useOAuthRecovery,
   type FetchRequestSource,
   type OAuthRecovery,
@@ -58,6 +59,14 @@ vi.mock("@inspector/core/mcp/remote/index.js", () => ({
   RemoteInspectorClientStorage: class {
     saveSession = saveSessionMock;
   },
+  // #2144: `clearServerOAuthAndDisconnect` builds the backend-proxied fetch the
+  // revocation POST would travel on. Nothing here exercises a real request, so
+  // this only has to exist.
+  createRemoteFetch: () => remoteFetchMock,
+}));
+
+const { remoteFetchMock } = vi.hoisted(() => ({
+  remoteFetchMock: vi.fn<typeof fetch>(async () => new Response(null)),
 }));
 
 vi.mock("../lib/authToken", () => ({ getAuthToken: () => "test-token" }));
@@ -262,7 +271,7 @@ beforeEach(() => {
   window.sessionStorage.clear();
   window.history.replaceState({}, "", "/");
   oauthStorageMock.load.mockResolvedValue(undefined);
-  clearServerOAuthStateMock.mockResolvedValue(true);
+  clearServerOAuthStateMock.mockResolvedValue({ cleared: true });
   saveSessionMock.mockResolvedValue(undefined);
 });
 
@@ -1271,9 +1280,37 @@ describe("useOAuthRecovery", () => {
     });
   });
 
+  // #2144 — only the two outcomes a user can act on are surfaced. A skip
+  // describes the status quo, and reporting it would turn a confirmation into a
+  // notice about something that did not need to happen.
+  describe("revocationSuffix", () => {
+    it("announces a successful revocation", () => {
+      expect(
+        revocationSuffix({
+          status: "revoked",
+          tokenTypeHint: "refresh_token",
+          endpoint: "https://as.example/revoke",
+        }),
+      ).toContain("revoked at the authorization server");
+    });
+
+    it("warns that the grant may still be live after a failure", () => {
+      const text = revocationSuffix({ status: "failed", detail: "boom" });
+      expect(text).toContain("boom");
+      expect(text).toContain("may still be valid");
+    });
+
+    it("says nothing for a skip or an absent outcome", () => {
+      expect(
+        revocationSuffix({ status: "skipped", reason: "no_endpoint" }),
+      ).toBe("");
+      expect(revocationSuffix(undefined)).toBe("");
+    });
+  });
+
   describe("clearing stored OAuth state", () => {
     it("says nothing when there was nothing to clear", async () => {
-      clearServerOAuthStateMock.mockResolvedValue(false);
+      clearServerOAuthStateMock.mockResolvedValue({ cleared: false });
       const h = harness({ servers: [entry("a")], activeServerId: "a" });
       await act(async () => {
         await h.api().clearServerOAuthAndDisconnect(entry("a"));
@@ -1303,6 +1340,117 @@ describe("useOAuthRecovery", () => {
       expect(
         toastWith('Stored OAuth state was removed for "Server b"'),
       ).toBeDefined();
+    });
+
+    // #2144 — this is the web client's production wiring for revocation.
+    // Without asserting the arguments, removing the per-server opt-out or
+    // handing it the page-origin fetch would leave every test green.
+    it("passes the per-server revoke setting and the proxied fetch", async () => {
+      const h = harness({ servers: [entry("a")], activeServerId: "a" });
+      await act(async () => {
+        await h.api().clearServerOAuthAndDisconnect({
+          ...entry("a"),
+          settings: { ...EMPTY_SETTINGS, oauthRevokeOnClear: false },
+        });
+      });
+      expect(clearServerOAuthStateMock).toHaveBeenCalledWith(
+        expect.objectContaining({ revoke: false, fetchFn: remoteFetchMock }),
+      );
+    });
+
+    it("defaults to revoking when the server did not opt out", async () => {
+      const h = harness({ servers: [entry("a")], activeServerId: "a" });
+      await act(async () => {
+        await h.api().clearServerOAuthAndDisconnect(entry("a"));
+      });
+      expect(clearServerOAuthStateMock).toHaveBeenCalledWith(
+        expect.objectContaining({ revoke: true }),
+      );
+    });
+
+    // #2144 — the RFC 7009 leg is a bounded network request, so this callback
+    // can stay suspended for seconds. `isActive`/`inspectorClient` are captured
+    // before it, so without revalidating, a switch during the wait would
+    // disconnect the session the user just moved to and run the session-wide
+    // cleanup against it.
+    it("does not disconnect a session switched to while a clear is in flight", async () => {
+      let settle: (r: { cleared: boolean }) => void = () => {};
+      clearServerOAuthStateMock.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            settle = resolve as typeof settle;
+          }),
+      );
+      const client = fakeClient();
+      const h = harness({
+        servers: [entry("a"), entry("b")],
+        activeServerId: "a",
+        client,
+      });
+
+      let done: Promise<void>;
+      await act(async () => {
+        done = h.api().clearServerOAuthAndDisconnect(entry("a"));
+        await Promise.resolve();
+      });
+
+      // The user switches away while the clear is still running.
+      h.rerender({
+        servers: [entry("a"), entry("b")],
+        activeServerId: "b",
+        client,
+      });
+
+      await act(async () => {
+        settle({ cleared: true });
+        await done;
+      });
+
+      expect(client.disconnect).not.toHaveBeenCalled();
+    });
+
+    // A disconnect/reconnect to the SAME server builds a replacement client, so
+    // an id-only check passes again and the old clear would run its
+    // session-wide cleanup — including the disconnect — against the new session.
+    it("does not disconnect a replacement client for the same server", async () => {
+      let settle: (r: { cleared: boolean }) => void = () => {};
+      clearServerOAuthStateMock.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            settle = resolve as typeof settle;
+          }),
+      );
+      const original = fakeClient();
+      const h = harness({
+        servers: [entry("a")],
+        activeServerId: "a",
+        client: original,
+      });
+
+      let done: Promise<void>;
+      await act(async () => {
+        done = h.api().clearServerOAuthAndDisconnect(entry("a"));
+        await Promise.resolve();
+      });
+
+      // Same server, new client — a reconnect while the clear is pending.
+      const replacement = fakeClient();
+      h.rerender({
+        servers: [entry("a")],
+        activeServerId: "a",
+        client: replacement,
+      });
+
+      await act(async () => {
+        settle({ cleared: true });
+        await done;
+      });
+
+      // Neither client is torn down: the replacement is the live session and
+      // must not be touched, and the original is already gone — disconnecting
+      // it would only drag `finalizeExplicitDisconnect` across the new one.
+      expect(original.disconnect).not.toHaveBeenCalled();
+      expect(replacement.disconnect).not.toHaveBeenCalled();
     });
 
     it("clears the resume snapshot on an explicit disconnect", () => {

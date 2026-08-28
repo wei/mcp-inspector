@@ -57,6 +57,7 @@ function createStorage(
     clearServerMetadata: vi.fn(),
     clearIdpSession: vi.fn(),
     clearEnterpriseManagedResourceServers: vi.fn(),
+    takeRevocationSnapshot: vi.fn().mockResolvedValue({ byIssuer: {} }),
     getCodeVerifier: vi.fn(),
     getDiscoveryState: vi.fn().mockResolvedValue(undefined),
     saveDiscoveryState: vi.fn(),

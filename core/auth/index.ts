@@ -134,5 +134,26 @@ export {
 // Discovery
 export { discoverScopes } from "./discovery.js";
 
+// RFC 7009 token revocation (#2144)
+export {
+  DEFAULT_REVOCATION_TIMEOUT_MS,
+  aggregateOutcomes,
+  buildRevocationRequest,
+  revocationAuthMethods,
+  clearAndPlanRevocation,
+  executeOAuthRevocation,
+  revokeToken,
+  selectRevocableToken,
+} from "./revocation.js";
+export type {
+  ExecuteOAuthRevocationParams,
+  OAuthRevocationPlan,
+  PlanOAuthRevocationParams,
+  RevocationRequestParams,
+  RevokeTokenParams,
+  TokenRevocationOutcome,
+  TokenRevocationSkipReason,
+} from "./revocation.js";
+
 // Logging (re-exported from core/logging)
 export { silentLogger } from "../logging/index.js";

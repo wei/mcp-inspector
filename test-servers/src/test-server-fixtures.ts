@@ -3002,6 +3002,8 @@ export function createOAuthTestServerConfig(options: {
   supportCIMD?: boolean;
   tokenExpirationSeconds?: number;
   supportRefreshTokens?: boolean;
+  /** RFC 7009 revocation endpoint; default true (#2144). */
+  supportRevocation?: boolean;
   /**
    * Move the RFC 9728 metadata document off the well-known path and advertise
    * it via `WWW-Authenticate: Bearer resource_metadata="…"` (#2071).
@@ -3025,6 +3027,7 @@ export function createOAuthTestServerConfig(options: {
       supportCIMD: options.supportCIMD ?? false,
       tokenExpirationSeconds: options.tokenExpirationSeconds ?? 3600,
       supportRefreshTokens: options.supportRefreshTokens ?? true,
+      supportRevocation: options.supportRevocation ?? true,
     },
   };
 }

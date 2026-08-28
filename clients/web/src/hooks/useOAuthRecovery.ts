@@ -5,6 +5,7 @@ import type { InspectorClient } from "@inspector/core/mcp/index.js";
 import type { TypedEvent } from "@inspector/core/mcp/inspectorClientEventTarget.js";
 import type {
   ConnectionStatus,
+  InspectorServerSettings,
   MCPServerConfig,
   ServerEntry,
 } from "@inspector/core/mcp/types.js";
@@ -17,6 +18,7 @@ import {
 } from "@inspector/core/auth/index.js";
 import { RemoteInspectorClientStorage } from "@inspector/core/mcp/remote/index.js";
 import { AuthRecoveryRequiredError } from "@inspector/core/auth/challenge.js";
+import type { TokenRevocationOutcome } from "@inspector/core/auth/revocation.js";
 import type {
   AuthChallenge,
   AuthChallengeReason,
@@ -31,6 +33,7 @@ import { isEmaClientNotConfiguredError } from "@inspector/core/auth/ema/clientCo
 import type { OAuthDetails } from "../components/groups/ConnectionInfoContent/ConnectionInfoContent";
 import { oauthDetailsFromConnectionState } from "../components/groups/ConnectionInfoContent/oauthDetailsFromConnectionState";
 import { getWebRemoteOAuthStorage } from "../lib/remoteOAuthStorage";
+import { getWebProxiedFetch } from "../lib/webProxiedFetch";
 import { clearServerOAuthState } from "../lib/clearServerOAuthState";
 import { getAuthToken } from "../lib/authToken";
 import {
@@ -121,6 +124,36 @@ export interface ClearableServer {
   id: string;
   name: string;
   config: MCPServerConfig;
+  /**
+   * Read for `oauthRevokeOnClear` (#2144). Optional so a caller that only has
+   * the identity fields still type-checks; an absent value means the default,
+   * on.
+   */
+  settings?: InspectorServerSettings;
+}
+
+/**
+ * The sentence appended to the "OAuth state cleared" toast describing what the
+ * RFC 7009 leg did (#2144).
+ *
+ * Only the two outcomes a user can act on are surfaced. A success is worth
+ * saying because the whole point of the feature is invisible otherwise — the
+ * local clear looks identical either way. A failure is worth saying because the
+ * grant is still live at the authorization server and the user may want to
+ * revoke it by hand. The remaining skips ("this server advertises no revocation
+ * endpoint", "there were no tokens") describe the status quo and would turn a
+ * confirmation into a notice about something that did not need to happen.
+ */
+export function revocationSuffix(
+  outcome: TokenRevocationOutcome | undefined,
+): string {
+  if (outcome?.status === "revoked") {
+    return " The grant was also revoked at the authorization server.";
+  }
+  if (outcome?.status === "failed") {
+    return ` Revoking the grant at the authorization server failed (${outcome.detail}), so it may still be valid there.`;
+  }
+  return "";
 }
 
 export interface UseOAuthRecoveryOptions {
@@ -1221,36 +1254,78 @@ export function useOAuthRecovery({
   const clearServerOAuthAndDisconnect = useCallback(
     async (server: ClearableServer) => {
       const isActive = server.id === activeServerId;
-      const cleared = await clearServerOAuthState({
+      const client = isActive ? inspectorClient : null;
+      // The RFC 7009 leg is a bounded network request (#2144), so this callback
+      // can stay suspended for seconds — long enough for the user to close the
+      // modal and switch servers. `isActive` and `inspectorClient` were
+      // snapshotted before it, so everything below would otherwise apply to
+      // whatever session is active *now*: disconnecting a client the user just
+      // switched to, and running the session-wide UI cleanup against it.
+      //
+      // The session ref is the live answer. Only the parts that touch the
+      // *session* are gated on it; the store write already happened and the
+      // toast still belongs to the server the user asked about.
+      // The client identity is part of the check, not just the server id: a
+      // disconnect/reconnect to the SAME server builds a replacement
+      // `InspectorClient`, so an id-only check passes again and the old clear
+      // would run its session-wide cleanup against the new session.
+      const stillTargetsActiveSession = (): boolean =>
+        isActive &&
+        sessionRef.current.activeServerId === server.id &&
+        sessionRef.current.inspectorClient === client;
+
+      const { cleared, revocation } = await clearServerOAuthState({
         config: server.config,
-        inspectorClient: isActive ? inspectorClient : null,
+        inspectorClient: client,
         isActiveConnection: isActive,
         oauthStorage: webOAuthStorage,
+        revoke: server.settings?.oauthRevokeOnClear !== false,
+        fetchFn: getWebProxiedFetch(getAuthToken()),
       });
       if (!cleared) return;
 
-      if (isActive && inspectorClient) {
+      if (client && stillTargetsActiveSession()) {
         try {
-          await inspectorClient.disconnect();
+          await client.disconnect();
+        } catch (err) {
+          // The clear has already succeeded, so this must not propagate: the
+          // caller's catch would report "Could not clear the stored OAuth
+          // state", which is false. Reported as what it is, and the
+          // cleared-successfully toast below still goes out.
+          notifications.show({
+            title: "Cleared, but the session did not disconnect cleanly",
+            message: err instanceof Error ? err.message : String(err),
+            color: "yellow",
+          });
         } finally {
-          setConnectionInfoOAuthWhenConnected(undefined);
-          finalizeExplicitDisconnect();
+          // Revalidate after the second await for the same reason.
+          if (stillTargetsActiveSession()) {
+            setConnectionInfoOAuthWhenConnected(undefined);
+            finalizeExplicitDisconnect();
+          }
         }
-      } else {
+      } else if (!isActive || stillTargetsActiveSession()) {
+        // No client to disconnect — either this is a stored-only clear, or the
+        // active session has none yet (it is being built or torn down). Either
+        // way the resume snapshot is stale and must go; skipping it would leave
+        // OAuth recovery state pointing at credentials that no longer exist.
+        // Guarded so a clear whose session has moved on still publishes
+        // nothing.
         clearOAuthResumeOnExplicitDisconnect();
       }
 
       notifications.show({
         title: "OAuth state cleared",
         message: isActive
-          ? "Stored tokens and client registration were removed. Reconnect to run a fresh authorization flow."
-          : `Stored OAuth state was removed for "${server.name}". Connect to authorize again.`,
+          ? `Stored tokens and client registration were removed. Reconnect to run a fresh authorization flow.${revocationSuffix(revocation)}`
+          : `Stored OAuth state was removed for "${server.name}". Connect to authorize again.${revocationSuffix(revocation)}`,
         color: "blue",
       });
     },
     [
       activeServerId,
       inspectorClient,
+      sessionRef,
       webOAuthStorage,
       finalizeExplicitDisconnect,
       clearOAuthResumeOnExplicitDisconnect,
