@@ -569,4 +569,121 @@ describe("RemoteClientTransport", () => {
 
     await transport.close();
   });
+
+  // #2140: the Cancel button's wire signal is chosen by the SDK from the
+  // transport's `hasPerRequestStream`. The real upstream transport lives on the
+  // backend, so this transport answers for it — and must answer per server
+  // type, since only Streamable HTTP gives a request a stream of its own to
+  // close.
+  describe("per-request-stream cancellation (#2140)", () => {
+    it("advertises hasPerRequestStream only for streamable-http", () => {
+      const forType = (c: MCPServerConfig) =>
+        new RemoteClientTransport(
+          { baseUrl, fetchFn: vi.fn<typeof fetch>() },
+          c,
+        ).hasPerRequestStream;
+
+      expect(
+        forType({ type: "streamable-http", url: "http://server.example/mcp" }),
+      ).toBe(true);
+      // stdio and SSE multiplex every request over one shared channel, so
+      // aborting anything would cancel the whole session rather than the call.
+      // The SDK must keep sending `notifications/cancelled` for them.
+      expect(forType(config)).toBe(false);
+      expect(forType({ type: "sse", url: "http://server.example/sse" })).toBe(
+        false,
+      );
+    });
+
+    it("applies the SDK's requestSignal to the browser-to-backend send fetch", async () => {
+      const seenInits: (RequestInit | undefined)[] = [];
+      let sse = createPushableSseStream();
+      const fetchFn = vi
+        .fn<typeof fetch>()
+        .mockImplementation(async (input, init) => {
+          const url = String(input);
+          if (url.endsWith("/api/mcp/connect")) {
+            return new Response(JSON.stringify({ sessionId: "abc" }), {
+              status: 200,
+            });
+          }
+          if (url.includes("/api/mcp/events")) {
+            sse = createPushableSseStream();
+            return sse.response;
+          }
+          if (url.endsWith("/api/mcp/send")) {
+            seenInits.push(init);
+            return new Response(JSON.stringify({ ok: true }), { status: 200 });
+          }
+          return new Response("not found", { status: 404 });
+        });
+
+      const transport = new RemoteClientTransport({ baseUrl, fetchFn }, config);
+      await transport.start();
+
+      const controller = new AbortController();
+      await transport.send(
+        { jsonrpc: "2.0", method: "notifications/initialized" },
+        { requestSignal: controller.signal },
+      );
+      expect(seenInits[0]?.signal).toBe(controller.signal);
+
+      // No signal supplied (stdio/SSE, where the SDK never creates one) must
+      // leave the fetch unaborted rather than passing `undefined` through as a
+      // deliberate value.
+      await transport.send({
+        jsonrpc: "2.0",
+        method: "notifications/roots/list_changed",
+      });
+      expect(seenInits[1]).not.toHaveProperty("signal");
+
+      await transport.close();
+    });
+
+    it("aborting the requestSignal rejects the in-flight send", async () => {
+      let sse = createPushableSseStream();
+      const fetchFn = vi
+        .fn<typeof fetch>()
+        .mockImplementation(async (input, init) => {
+          const url = String(input);
+          if (url.endsWith("/api/mcp/connect")) {
+            return new Response(JSON.stringify({ sessionId: "abc" }), {
+              status: 200,
+            });
+          }
+          if (url.includes("/api/mcp/events")) {
+            sse = createPushableSseStream();
+            return sse.response;
+          }
+          if (url.endsWith("/api/mcp/send")) {
+            // The backend holds this route open for the whole call, so model it
+            // as a fetch that only settles when the caller aborts.
+            return new Promise<Response>((_resolve, reject) => {
+              init?.signal?.addEventListener("abort", () =>
+                reject(new DOMException("Aborted", "AbortError")),
+              );
+            });
+          }
+          return new Response("not found", { status: 404 });
+        });
+
+      const transport = new RemoteClientTransport({ baseUrl, fetchFn }, config);
+      await transport.start();
+
+      const controller = new AbortController();
+      const sent = transport.send(
+        { jsonrpc: "2.0", id: 7, method: "tools/call" },
+        { requestSignal: controller.signal },
+      );
+
+      controller.abort();
+      // The backend never answers an aborted send, so the rejection has to come
+      // from the fetch itself. `postSend` already cancels the SSE response wait
+      // it registered for this id on that path (its catch does, unchanged by
+      // #2140) — so the send surfaces the abort rather than the wait's timeout.
+      await expect(sent).rejects.toThrow(/Aborted/);
+
+      await transport.close();
+    });
+  });
 });

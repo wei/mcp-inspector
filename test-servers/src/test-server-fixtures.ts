@@ -1220,6 +1220,98 @@ export function createCollectUrlElicitationTool(): ToolDefinition {
 }
 
 /**
+ * Sleep `ms`, resolving `false` the moment `signal` aborts instead.
+ *
+ * Both listeners are removed on whichever outcome wins. A caller that sleeps in
+ * a loop would otherwise leave one attached per iteration — `{ once: true }`
+ * detaches a listener when the event *fires*, not when the waiter loses
+ * interest — and enough of them trip Node's `MaxListenersExceededWarning`.
+ */
+function sleepUnlessAborted(
+  ms: number,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    if (signal?.aborted) {
+      resolve(false);
+      return;
+    }
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve(true);
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/**
+ * Create a "slow_task" tool that runs until the client cancels it (#2140).
+ *
+ * It emits a progress notification every second up to `seconds` (default 60)
+ * and completes only if it is never cancelled, so there is a long, visible
+ * window in which to click Cancel.
+ *
+ * The point is what it does on the way out. On the 2026-07-28 era a client
+ * cancels a Streamable HTTP request by closing that request's response stream,
+ * and the SDK surfaces the disconnect to this handler as `extra.signal`. So the
+ * tool stops the moment the stream closes; cancelled by a
+ * `notifications/cancelled` the server is free to ignore, it keeps emitting
+ * progress until it completes on its own — the exact symptom reported.
+ *
+ * Both outcomes are written to **stderr**, because that is the only channel
+ * they can reach. A cancellation closes the very stream this handler's result
+ * would travel on, so its return value is undeliverable by construction: the
+ * server's terminal is where you watch this, not the Inspector's result panel.
+ */
+export function createSlowTaskTool(): ToolDefinition {
+  return {
+    name: "slow_task",
+    description:
+      "Run for up to `seconds`, reporting progress each second, until cancelled",
+    inputSchema: {
+      seconds: z
+        .number()
+        .int()
+        .min(1)
+        .max(600)
+        .optional()
+        .describe("How long to run before completing on its own (default 60)"),
+    },
+    handler: async (
+      params: Record<string, unknown>,
+      _context?: TestServerContext,
+      extra?: HandlerExtra,
+    ) => {
+      const total = typeof params.seconds === "number" ? params.seconds : 60;
+      const progressToken = extra?._meta?.progressToken;
+      const signal = extra?.signal;
+      for (let step = 1; step <= total; step++) {
+        if (!(await sleepUnlessAborted(1000, signal))) {
+          // Cancelled. Return rather than keep working — the whole point of
+          // the demo is that the work actually stops.
+          const message = `[slow_task] cancelled after ${step - 1}s`;
+          console.error(message);
+          return toToolResult(message);
+        }
+        if (progressToken !== undefined) {
+          await extra?.sendNotification?.({
+            method: "notifications/progress",
+            params: { progressToken, progress: step, total },
+          });
+        }
+      }
+      const message = `[slow_task] completed all ${total}s without being cancelled`;
+      console.error(message);
+      return toToolResult(message);
+    },
+  };
+}
+
+/**
  * Create a "send_notification" tool that sends a notification message from the server
  */
 export function createSendNotificationTool(): ToolDefinition {
@@ -2910,6 +3002,8 @@ export function createOAuthTestServerConfig(options: {
   supportCIMD?: boolean;
   tokenExpirationSeconds?: number;
   supportRefreshTokens?: boolean;
+  /** RFC 7009 revocation endpoint; default true (#2144). */
+  supportRevocation?: boolean;
   /**
    * Move the RFC 9728 metadata document off the well-known path and advertise
    * it via `WWW-Authenticate: Bearer resource_metadata="…"` (#2071).
@@ -2945,6 +3039,7 @@ export function createOAuthTestServerConfig(options: {
       supportCIMD: options.supportCIMD ?? false,
       tokenExpirationSeconds: options.tokenExpirationSeconds ?? 3600,
       supportRefreshTokens: options.supportRefreshTokens ?? true,
+      supportRevocation: options.supportRevocation ?? true,
     },
   };
 }

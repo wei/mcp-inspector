@@ -64,6 +64,20 @@ import { useInitialConfig } from "@inspector/core/react/useInitialConfig.js";
 import { refreshingPersist } from "./lib/refreshingPersist";
 import { usePendingClientRequests } from "@inspector/core/react/usePendingClientRequests.js";
 import { InspectorView } from "./components/views/InspectorView/InspectorView";
+import type {
+  AppsPanelProps,
+  ConnectionProps,
+  ConsolePanelProps,
+  LogsPanelProps,
+  NetworkPanelProps,
+  PromptsPanelProps,
+  ProtocolPanelProps,
+  ResourcesPanelProps,
+  ServerListProps,
+  ShellProps,
+  TasksPanelProps,
+  ToolsPanelProps,
+} from "./components/views/InspectorView/types";
 import type { ReadResourceState } from "./components/screens/ResourcesScreen/ResourcesScreen";
 import { AppElicitationHost } from "./components/elements/AppElicitation/AppElicitationHost";
 import type { LogEntryData } from "./components/elements/LogEntry/LogEntry";
@@ -92,6 +106,7 @@ import {
   type PendingClientRequestContent,
 } from "./components/groups/PendingClientRequestModal/PendingClientRequestModal";
 import { downloadJsonFile } from "./lib/downloadFile";
+import { serverWithDraftSettings } from "./utils/serverWithDraftSettings";
 import { enrichProtocolEntries } from "./utils/correlateTransportErrors";
 import { visibleMalformedListItems } from "./utils/malformedListReport";
 import { parseDeepLink, deepLinkParseStatus } from "./utils/deepLink";
@@ -107,6 +122,21 @@ import {
 import { FetchBodyDroppedToastMessage } from "./components/elements/Toasts/FetchBodyDroppedToastMessage";
 import { OutputValidationToastMessage } from "./components/elements/Toasts/OutputValidationToastMessage";
 import { ReAuthBannerBar } from "./components/groups/ReAuthBanner/ReAuthBannerBar";
+
+/**
+ * Terminates a dispatched handler's promise by reporting the failure, for the
+ * `InspectorView` action wrappers below. Module scope because it closes over
+ * nothing — the title is the only thing that varies per action.
+ */
+function reportDispatchFailure(title: string) {
+  return (err: unknown) => {
+    notifications.show({
+      title,
+      message: err instanceof Error ? err.message : String(err),
+      color: "red",
+    });
+  };
+}
 
 function App() {
   const { onToggleTheme } = useThemeToggle();
@@ -1319,15 +1349,63 @@ function App() {
   // target isn't resolvable.
   const settingsModalIsStdio = settingsModalServerType === "stdio";
 
+  /**
+   * Servers whose clear is in flight (#2144). Keyed by id, not a single flag:
+   * the callback explicitly supports clearing a server other than the active
+   * one, so a global lock would silently drop B's click while A's revocation
+   * was still out. See `runClear`.
+   */
+  const clearOAuthInFlightRef = useRef<Set<string>>(new Set());
+
+  /**
+   * Run a clear from a key/click handler, which cannot await.
+   *
+   * `clearServerOAuthAndDisconnect` does **not** own its failures — the store
+   * write or the disconnect can reject — so a bare `void` would produce an
+   * unhandled rejection and leave the user with a control that silently did
+   * nothing. (An RFC 7009 failure is not this: those come back as an outcome
+   * and are already reported in the success toast.)
+   */
+  const runClear = useCallback(
+    (server: Parameters<typeof clearServerOAuthAndDisconnect>[0]) => {
+      // Shared by BOTH clear controls (Connection Info and Server Settings),
+      // because for one server they drive the same client and the same store
+      // entry. A ref rather than state: a double click delivers both events
+      // before React re-renders, so a state-based guard would let both through
+      // — and with revocation taking up to five seconds, that means concurrent
+      // RFC 7009 requests, concurrent store writes, and two contradictory
+      // toasts. Keyed by server so a *different* server's clear is unaffected.
+      if (clearOAuthInFlightRef.current.has(server.id)) return;
+      clearOAuthInFlightRef.current.add(server.id);
+      clearServerOAuthAndDisconnect(server)
+        .finally(() => {
+          clearOAuthInFlightRef.current.delete(server.id);
+        })
+        .catch((err: unknown) => {
+          notifications.show({
+            title: "Could not clear the stored OAuth state",
+            message: err instanceof Error ? err.message : String(err),
+            color: "red",
+            // The tokens may still be on disk and the session may still be up,
+            // so this is not a notice to let time out.
+            autoClose: false,
+          });
+        });
+    },
+    [clearServerOAuthAndDisconnect],
+  );
+
   const handleClearConnectionOAuth = useCallback(() => {
     if (!activeServer) return;
-    void clearServerOAuthAndDisconnect(activeServer);
-  }, [activeServer, clearServerOAuthAndDisconnect]);
+    runClear(activeServer);
+  }, [activeServer, runClear]);
 
   const handleClearStoredOAuthFromSettings = useCallback(() => {
     if (!settingsModalTarget) return;
-    void clearServerOAuthAndDisconnect(settingsModalTarget);
-  }, [settingsModalTarget, clearServerOAuthAndDisconnect]);
+    // Clear from *inside* the settings modal, so the draft is what the user is
+    // looking at rather than what the debounced save has persisted (#2144).
+    runClear(serverWithDraftSettings(settingsModalTarget, settingsDraft));
+  }, [settingsModalTarget, settingsDraft, runClear]);
 
   const onSettingsModalClose = useCallback(() => {
     flushSettingsDraft();
@@ -1469,6 +1547,304 @@ function App() {
     [pendingElicitations, inspectorClient],
   );
 
+  // --- InspectorView prop bundles (#2130) -----------------------------------
+  //
+  // The view takes one prop per domain, so the JSX below reads as a component
+  // tree rather than a wall of ~130 props. Everything the bundles need is
+  // assembled here: the handlers that used to be multi-line closures declared
+  // inline in the JSX are named callbacks, and the `void`-discarding wrappers
+  // carry their justification once rather than at a call site.
+
+  const onServerAdd = useCallback(() => {
+    setHighlightedServerIds([]);
+    setConfigModal({ mode: "add" });
+  }, []);
+
+  const onServerImportConfig = useCallback(() => {
+    setHighlightedServerIds([]);
+    setImportConfigOpen(true);
+  }, []);
+
+  const onServerImportJson = useCallback(() => {
+    setHighlightedServerIds([]);
+    setImportJsonOpen(true);
+  }, []);
+
+  const onServerEdit = useCallback((id: string) => {
+    setConfigModal({ mode: "edit", targetId: id });
+  }, []);
+
+  const onServerClone = useCallback((id: string) => {
+    setHighlightedServerIds([]);
+    setConfigModal({ mode: "clone", targetId: id });
+  }, []);
+
+  const onServerRemove = useCallback(
+    (id: string) => {
+      const target = servers.find((s) => s.id === id);
+      if (target) setRemoveTarget(target);
+    },
+    [servers],
+  );
+
+  const onServerReorderFromList = useCallback(
+    (orderedIds: string[]) => {
+      // reorderServers reverts the optimistic order via an internal refresh()
+      // and re-throws on failure (409 from a racing external edit, or a network
+      // error). Surface that to the user so the drag doesn't silently bounce
+      // back — matching the toast pattern every other mutation here uses.
+      reorderServers(orderedIds).catch((err: unknown) => {
+        notifications.show({
+          title: "Failed to reorder servers",
+          message: err instanceof Error ? err.message : String(err),
+          color: "red",
+        });
+      });
+    },
+    [reorderServers],
+  );
+
+  const openClientSettings = useCallback(() => setClientSettingsOpen(true), []);
+  const openConnectionInfo = useCallback(
+    () => setConnectionInfoModalOpen(true),
+    [],
+  );
+  const openServerSettings = useCallback(
+    (id: string) => setSettingsModalTargetId(id),
+    [],
+  );
+
+  // Every `InspectorView` action prop is synchronous while the handler behind
+  // it is async, so each wrapper below has to terminate its promise somehow.
+  // They all do it the same way: a reporting `.catch`, never a bare `void`.
+  //
+  // The uniformity is the point. Deciding per handler whether it "owns its
+  // failures" is a judgement this PR got wrong twice (#2130 review) — the
+  // handlers really do catch their ordinary errors, but a rejection can still
+  // escape by a route the reading misses:
+  //
+  //   - `onToggleConnection` awaits `initialConfigSettledRef` and constructs
+  //     the client via `setupClientForServer` outside its own try/catch, and
+  //     its already-connected branch is a `try/finally` that lets a failed
+  //     transport close propagate. `onDisconnect` is that `try/finally` alone.
+  //   - `onCallTool` / `onGetPrompt` / `onReadResource` / `onOpenApp` await
+  //     `handleCommandScopedAuthRecovery` from *inside* their catch blocks, and
+  //     a rejection thrown from a catch is not caught by that same catch. That
+  //     helper awaits `checkAuthChallengeSatisfied` and `pushRemoteAuthState`,
+  //     both of which reach the backend and can reject.
+  //
+  // A handler that does surface its own failure resolves, so it never reaches
+  // this `.catch` and there is no double-toast; what lands here is only the
+  // escape, which would otherwise be a global unhandled rejection with nothing
+  // shown to the user.
+  const dispatchToggleConnection = useCallback(
+    (id: string) => {
+      onToggleConnection(id).catch(
+        reportDispatchFailure("Failed to change the connection"),
+      );
+    },
+    [onToggleConnection],
+  );
+  const dispatchDisconnect = useCallback(() => {
+    onDisconnect().catch(reportDispatchFailure("Failed to disconnect"));
+  }, [onDisconnect]);
+  const dispatchCallTool = useCallback(
+    (name: string, args: Record<string, unknown>, runAsTask?: boolean) => {
+      onCallTool(name, args, runAsTask).catch(
+        reportDispatchFailure("Tool call failed"),
+      );
+    },
+    [onCallTool],
+  );
+  const dispatchGetPrompt = useCallback(
+    (name: string, args: Record<string, string>) => {
+      onGetPrompt(name, args).catch(
+        reportDispatchFailure("Failed to get prompt"),
+      );
+    },
+    [onGetPrompt],
+  );
+  const dispatchReadResource = useCallback(
+    (uri: string) => {
+      onReadResource(uri).catch(
+        reportDispatchFailure("Failed to read resource"),
+      );
+    },
+    [onReadResource],
+  );
+  const dispatchCancelTask = useCallback(
+    (taskId: string) => {
+      onCancelTask(taskId).catch(
+        reportDispatchFailure("Failed to cancel task"),
+      );
+    },
+    [onCancelTask],
+  );
+  const dispatchOpenApp = useCallback(
+    (name: string, args: Record<string, unknown>) => {
+      onOpenApp(name, args).catch(reportDispatchFailure("Failed to open app"));
+    },
+    [onOpenApp],
+  );
+
+  const shellProps: ShellProps = {
+    deepLink,
+    deepLinkStatus,
+    version: inspectorVersion,
+    malformedListItems: shownMalformedListItems,
+    activeTab,
+    onActiveTabChange: setActiveTab,
+    onToggleTheme,
+    onOpenClientSettings: openClientSettings,
+  };
+
+  const connectionProps: ConnectionProps = {
+    activeServer: activeServerId,
+    erroredServerId: failedServerId,
+    connectedServerId,
+    connectionStatus,
+    connectErrorMessage,
+    initializeResult,
+    latencyMs,
+    protocolEra,
+    onCompleteArgument,
+    completionsSupported: capabilities?.completions !== undefined,
+    onToggleConnection: dispatchToggleConnection,
+    onDisconnect: dispatchDisconnect,
+  };
+
+  const serverListProps: ServerListProps = {
+    servers,
+    serverListWritable,
+    highlightedServerIds,
+    onClearHighlight: clearHighlight,
+    onServerAdd,
+    onServerImportConfig,
+    onServerImportJson,
+    onServerExport,
+    onConnectionInfo: openConnectionInfo,
+    onServerSettings: openServerSettings,
+    onServerEdit,
+    onServerClone,
+    onServerRemove,
+    onServerReorder: onServerReorderFromList,
+  };
+
+  const toolsPanelProps: ToolsPanelProps = {
+    tools,
+    excludedTools,
+    toolsListChanged,
+    toolsLoadError: toolsPagination.error,
+    toolsUi: ui.toolsUi,
+    toolCallState,
+    toolsPagination: toolsPaginationControls,
+    serverSupportsTaskToolCalls:
+      !!capabilities?.tasks?.requests?.tools?.call ||
+      (inspectorClient?.isTasksExtensionNegotiated() ?? false),
+    onToolsUiChange,
+    onCallTool: dispatchCallTool,
+    onCancelToolCall,
+    onClearToolResult,
+    onRefreshTools,
+    onReadResourceContents,
+  };
+
+  const promptsPanelProps: PromptsPanelProps = {
+    prompts,
+    promptsListChanged,
+    promptsLoadError: promptsPagination.error,
+    promptsUi: ui.promptsUi,
+    getPromptState,
+    promptsPagination: promptsPaginationControls,
+    onPromptsUiChange: setUi.setPromptsUi,
+    onGetPrompt: dispatchGetPrompt,
+    onRefreshPrompts,
+  };
+
+  const resourcesPanelProps: ResourcesPanelProps = {
+    resources,
+    resourceTemplates,
+    subscriptions,
+    subscriptionStreamState,
+    subscriptionsSupported: capabilities?.resources?.subscribe === true,
+    resourcesListChanged,
+    resourcesLoadError: resourcesPagination.error ?? resourceTemplatesLoadError,
+    resourcesUi: ui.resourcesUi,
+    readResourceState: effectiveReadResourceState,
+    resourcesPagination: resourcesPaginationControls,
+    onResourcesUiChange: setUi.setResourcesUi,
+    onReadResource: dispatchReadResource,
+    onSubscribeResource,
+    onUnsubscribeResource,
+    onRefreshResources,
+  };
+
+  const appsPanelProps: AppsPanelProps = {
+    appsUi: ui.appsUi,
+    sandboxPath: sandboxUrl,
+    bridgeFactory: sandboxBridgeFactory,
+    appRendererRef,
+    onAppsUiChange: setUi.setAppsUi,
+    onSelectApp,
+    onOpenApp: dispatchOpenApp,
+    onCloseApp,
+    onAppError,
+    // The Apps tab is a filtered view of the tools list, so refreshing it is
+    // refreshing tools.
+    onRefreshApps: onRefreshTools,
+  };
+
+  const tasksPanelProps: TasksPanelProps = {
+    tasks,
+    progressByTaskId,
+    tasksUi: ui.tasksUi,
+    onTasksUiChange: setUi.setTasksUi,
+    onCancelTask: dispatchCancelTask,
+    onClearCompletedTasks,
+    onRefreshTasks,
+  };
+
+  const logsPanelProps: LogsPanelProps = {
+    logs,
+    logsUi: ui.logsUi,
+    currentLogLevel,
+    modernLogLevel,
+    onSetLogLevel,
+    onSetModernLogLevel,
+    onLogsUiChange: setUi.setLogsUi,
+    onClearLogs,
+    onExportLogs,
+  };
+
+  const protocolPanelProps: ProtocolPanelProps = {
+    protocol: protocolEntries,
+    protocolUi: ui.protocolUi,
+    pinnedProtocolIds,
+    onProtocolUiChange: setUi.setProtocolUi,
+    onClearProtocol,
+    onExportProtocol,
+    onClearProtocolSection,
+    onExportProtocolSection,
+    onReplayProtocol,
+    onTogglePinProtocol: togglePinProtocol,
+  };
+
+  const networkPanelProps: NetworkPanelProps = {
+    network: fetchRequests,
+    networkUi: ui.networkUi,
+    onNetworkUiChange: setUi.setNetworkUi,
+    onClearNetwork,
+    onExportNetwork,
+  };
+
+  const consolePanelProps: ConsolePanelProps = {
+    stderrLogs,
+    consoleUi: ui.consoleUi,
+    onConsoleUiChange: setUi.setConsoleUi,
+    onClearConsole,
+    onExportConsole,
+  };
+
   return (
     <>
       <Box>
@@ -1484,171 +1860,18 @@ function App() {
           </ReAuthBannerBar>
         ) : null}
         <InspectorView
-          deepLink={deepLink}
-          deepLinkStatus={deepLinkStatus}
-          servers={servers}
-          serverListWritable={serverListWritable}
-          activeServer={activeServerId}
-          erroredServerId={failedServerId}
-          connectedServerId={connectedServerId}
-          version={inspectorVersion}
-          connectionStatus={connectionStatus}
-          connectErrorMessage={connectErrorMessage}
-          initializeResult={initializeResult}
-          latencyMs={latencyMs}
-          tools={tools}
-          excludedTools={excludedTools}
-          malformedListItems={shownMalformedListItems}
-          prompts={prompts}
-          resources={resources}
-          resourceTemplates={resourceTemplates}
-          toolsListChanged={toolsListChanged}
-          promptsListChanged={promptsListChanged}
-          resourcesListChanged={resourcesListChanged}
-          toolsLoadError={toolsPagination.error}
-          promptsLoadError={promptsPagination.error}
-          resourcesLoadError={
-            resourcesPagination.error ?? resourceTemplatesLoadError
-          }
-          subscriptions={subscriptions}
-          subscriptionStreamState={subscriptionStreamState}
-          logs={logs}
-          tasks={tasks}
-          progressByTaskId={progressByTaskId}
-          protocol={protocolEntries}
-          protocolEra={protocolEra}
-          network={fetchRequests}
-          stderrLogs={stderrLogs}
-          toolCallState={toolCallState}
-          getPromptState={getPromptState}
-          readResourceState={effectiveReadResourceState}
-          toolsUi={ui.toolsUi}
-          promptsUi={ui.promptsUi}
-          resourcesUi={ui.resourcesUi}
-          appsUi={ui.appsUi}
-          tasksUi={ui.tasksUi}
-          logsUi={ui.logsUi}
-          protocolUi={ui.protocolUi}
-          networkUi={ui.networkUi}
-          consoleUi={ui.consoleUi}
-          activeTab={activeTab}
-          onActiveTabChange={setActiveTab}
-          currentLogLevel={currentLogLevel}
-          sandboxPath={sandboxUrl}
-          bridgeFactory={sandboxBridgeFactory}
-          appRendererRef={appRendererRef}
-          onToggleTheme={onToggleTheme}
-          onOpenClientSettings={() => setClientSettingsOpen(true)}
-          onToggleConnection={(id) => {
-            void onToggleConnection(id);
-          }}
-          onDisconnect={() => {
-            void onDisconnect();
-          }}
-          onServerAdd={() => {
-            setHighlightedServerIds([]);
-            setConfigModal({ mode: "add" });
-          }}
-          onServerImportConfig={() => {
-            setHighlightedServerIds([]);
-            setImportConfigOpen(true);
-          }}
-          onServerImportJson={() => {
-            setHighlightedServerIds([]);
-            setImportJsonOpen(true);
-          }}
-          onServerExport={onServerExport}
-          onConnectionInfo={() => setConnectionInfoModalOpen(true)}
-          onServerSettings={(id) => setSettingsModalTargetId(id)}
-          onServerEdit={(id) => setConfigModal({ mode: "edit", targetId: id })}
-          onServerClone={(id) => {
-            setHighlightedServerIds([]);
-            setConfigModal({ mode: "clone", targetId: id });
-          }}
-          onServerRemove={(id) => {
-            const target = servers.find((s) => s.id === id);
-            if (target) setRemoveTarget(target);
-          }}
-          onServerReorder={(orderedIds) => {
-            // reorderServers reverts the optimistic order via an internal
-            // refresh() and re-throws on failure (409 from a racing external
-            // edit, or a network error). Surface that to the user so the drag
-            // doesn't silently bounce back — matching the toast pattern every
-            // other mutation here uses.
-            reorderServers(orderedIds).catch((err: unknown) => {
-              notifications.show({
-                title: "Failed to reorder servers",
-                message: err instanceof Error ? err.message : String(err),
-                color: "red",
-              });
-            });
-          }}
-          highlightedServerIds={highlightedServerIds}
-          onClearHighlight={clearHighlight}
-          serverSupportsTaskToolCalls={
-            !!capabilities?.tasks?.requests?.tools?.call ||
-            (inspectorClient?.isTasksExtensionNegotiated() ?? false)
-          }
-          onToolsUiChange={onToolsUiChange}
-          onCallTool={(name, args, runAsTask) => {
-            void onCallTool(name, args, runAsTask);
-          }}
-          onCancelToolCall={onCancelToolCall}
-          onClearToolResult={onClearToolResult}
-          onReadResourceContents={onReadResourceContents}
-          onRefreshTools={onRefreshTools}
-          toolsPagination={toolsPaginationControls}
-          promptsPagination={promptsPaginationControls}
-          resourcesPagination={resourcesPaginationControls}
-          onPromptsUiChange={setUi.setPromptsUi}
-          onGetPrompt={(name, args) => {
-            void onGetPrompt(name, args);
-          }}
-          onRefreshPrompts={onRefreshPrompts}
-          onResourcesUiChange={setUi.setResourcesUi}
-          onReadResource={(uri) => {
-            void onReadResource(uri);
-          }}
-          onSubscribeResource={onSubscribeResource}
-          onUnsubscribeResource={onUnsubscribeResource}
-          onRefreshResources={onRefreshResources}
-          onCompleteArgument={onCompleteArgument}
-          completionsSupported={capabilities?.completions !== undefined}
-          subscriptionsSupported={capabilities?.resources?.subscribe === true}
-          onTasksUiChange={setUi.setTasksUi}
-          onCancelTask={(taskId) => {
-            void onCancelTask(taskId);
-          }}
-          onClearCompletedTasks={onClearCompletedTasks}
-          onRefreshTasks={onRefreshTasks}
-          onSetLogLevel={onSetLogLevel}
-          modernLogLevel={modernLogLevel}
-          onSetModernLogLevel={onSetModernLogLevel}
-          onLogsUiChange={setUi.setLogsUi}
-          onClearLogs={onClearLogs}
-          onExportLogs={onExportLogs}
-          onProtocolUiChange={setUi.setProtocolUi}
-          onClearProtocol={onClearProtocol}
-          onExportProtocol={onExportProtocol}
-          onClearProtocolSection={onClearProtocolSection}
-          onExportProtocolSection={onExportProtocolSection}
-          onReplayProtocol={onReplayProtocol}
-          onTogglePinProtocol={togglePinProtocol}
-          pinnedProtocolIds={pinnedProtocolIds}
-          onNetworkUiChange={setUi.setNetworkUi}
-          onClearNetwork={onClearNetwork}
-          onExportNetwork={onExportNetwork}
-          onConsoleUiChange={setUi.setConsoleUi}
-          onClearConsole={onClearConsole}
-          onExportConsole={onExportConsole}
-          onAppsUiChange={setUi.setAppsUi}
-          onSelectApp={onSelectApp}
-          onOpenApp={(name, args) => {
-            void onOpenApp(name, args);
-          }}
-          onCloseApp={onCloseApp}
-          onAppError={onAppError}
-          onRefreshApps={onRefreshTools}
+          shell={shellProps}
+          connection={connectionProps}
+          servers={serverListProps}
+          tools={toolsPanelProps}
+          prompts={promptsPanelProps}
+          resources={resourcesPanelProps}
+          apps={appsPanelProps}
+          tasks={tasksPanelProps}
+          logs={logsPanelProps}
+          protocol={protocolPanelProps}
+          network={networkPanelProps}
+          console={consolePanelProps}
         />
       </Box>
       <AppElicitationHost

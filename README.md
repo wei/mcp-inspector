@@ -31,6 +31,7 @@ inspector/
 │   └── launcher/     # Shared launcher — provides the `mcp-inspector` bin, dispatches to web/cli/tui
 ├── core/             # Shared code consumed via the `@inspector/core` alias (no package.json)
 │   ├── auth/         # OAuth: providers, discovery, storage, endpoint overrides, mid-session recovery (browser/node/remote backends);
+│   │                 #   RFC 7009 token revocation on clear (revocation.ts);
 │   │                 #   plus per-server secret storage — the keychain/file/memory SecretStore
 │   │                 #   implementations, the selection policy, and the descriptor the banner and UI report
 │   ├── client/       # Install-level client config (`client.json`): browser-safe parse/validate + Node load/save, remote backend, secrets
@@ -159,11 +160,57 @@ Each config below is a ready-made server for exercising one feature by hand. Loa
 | `rfc6570-templates-http.json`             | Resources tab: RFC 6570 resource-template expansion | [#1919](https://github.com/modelcontextprotocol/inspector/issues/1919) |
 | `advertised-extensions-http.json`         | Tool registration gated on advertised extensions    | [#1739](https://github.com/modelcontextprotocol/inspector/issues/1739) |
 | `oauth-custom-resource-metadata-http.json` **(legacy era)** | OAuth discovery driven by the challenge's `resource_metadata` | [#2071](https://github.com/modelcontextprotocol/inspector/issues/2071) |
+| `oauth-revocation-http.json` / `oauth-no-revocation-http.json` **(legacy era)** | RFC 7009 token revocation on clear, with and without a `revocation_endpoint` | [#2144](https://github.com/modelcontextprotocol/inspector/issues/2144) |
 | `oauth-rfc8414-at-oidc-path-http.json` **(legacy era)** | Plain OAuth 2.0 AS metadata served at the OIDC well-known path | [#2172](https://github.com/modelcontextprotocol/inspector/issues/2172) |
 | `logging-{legacy,modern}-http.json`       | Logging, both eras                                  | [#1629](https://github.com/modelcontextprotocol/inspector/issues/1629) |
 | `subscriptions-{legacy,modern}-http.json` | Resource subscriptions, both eras                   | [#1630](https://github.com/modelcontextprotocol/inspector/issues/1630) |
 | `subscriptions-never-acknowledged-http.json` | A `subscriptions/listen` answered with a bare result  | [#2097](https://github.com/modelcontextprotocol/inspector/issues/2097) |
 | `tasks-{legacy,modern}-http.json`         | Tasks, both eras                                    | [#1631](https://github.com/modelcontextprotocol/inspector/issues/1631) |
+| `cancellation-modern-http.json`           | Cancelling a call by closing its response stream    | [#2140](https://github.com/modelcontextprotocol/inspector/issues/2140) |
+
+#### Cancelling a call
+
+`cancellation-modern-http.json` serves `slow_task`, which reports progress once
+a second for up to 60 seconds and stops early if it is cancelled, printing how
+far it got to **the server's terminal**. Connect with **Protocol Era = Modern**.
+
+Watch the terminal you started the server in, run `slow_task` from the Tools
+tab, and click **Cancel** after a few seconds. The progress must stop
+immediately, the Inspector must report the call cancelled, and the server must
+print `[slow_task] cancelled after Ns`. On the broken build the progress kept
+arriving until the tool completed all 60 seconds and the server printed
+`completed all 60s without being cancelled`, because the Inspector was sending
+the wrong cancellation signal
+([#2140](https://github.com/modelcontextprotocol/inspector/issues/2140)).
+
+The server's terminal is the place to watch, not the Inspector's result panel:
+cancellation closes the very stream the tool's result would travel on, so on a
+successful cancel the tool's return value is undeliverable by construction and
+the Inspector shows a cancelled call rather than a result. Which is the point —
+what has to stop is the *work*, and only the server can report that.
+
+The 2026-07-28 spec makes this
+[transport-specific](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation#transport-specific-cancellation):
+for Streamable HTTP, **closing the request's SSE response stream is the
+cancellation signal**, and a `notifications/cancelled` is "neither required nor
+expected"; stdio, which has no per-request stream to close, keeps the
+notification. A spec-compliant server therefore answers the notification `202
+Accepted` and drops it — which is precisely what the reporter observed, with the
+task running on to completion while the Inspector reported it cancelled.
+
+The SDK already implements that fork, off `transport.hasPerRequestStream`. Every
+Inspector connection is wrapped in `MessageTrackingTransport` (it feeds the
+Protocol and Network tabs), which did not forward the flag — so the SDK saw
+`undefined` and took the stdio branch on **every** client, CLI and TUI included.
+The web client needed two more links in the chain: its browser-side transport
+answers for the real upstream one that lives on the Node backend, and the abort
+has to survive the `POST /api/mcp/send` hop to reach it.
+
+Watch it on the wire in the **Protocol** tab: cancelling now emits no
+`notifications/cancelled` frame at all, and the `tools/call` entry ends as an
+aborted request rather than a completed one. Switch the same server to
+**Legacy** and the notification comes back — that era has no per-stream
+mechanism, so it is still the correct signal there.
 
 #### MCP Apps
 
@@ -438,6 +485,21 @@ Add the server, click **Connect**, and watch the Inspector's first protected-res
 The same server is worth running against `--cli` / `--tui`, which reach it by a different route: with no stored token in the legacy era the Inspector connects with no auth provider (so the SDK cannot open a browser before the callback server is listening), the 401 surfaces as the SDK's headerless `UnauthorizedError`, and the client calls `authenticate()` with no challenge in hand. The transport therefore *observes* every 401/403 passively, so the advertised URL is still available on that path.
 
 The value now rides the normalized `AuthChallenge` as a string — it has to be serializable, because the web client's challenge crosses the remote-backend boundary as JSON — and is converted to a `URL` at the OAuth boundary, where it is handed to `auth()` as `resourceMetadataUrl` and to the CIMD pre-registration probe, which runs *before* `auth()` and would otherwise do its own default-location discovery. A malformed value is ignored rather than surfaced, matching the SDK's own `WWW-Authenticate` parser: discovery falls back to the default locations instead of failing the whole authorization on a bad header. The callback leg needs nothing extra — SDK `auth()` persists the URL in its discovery state, so it survives both the web full-page redirect and the CLI/TUI loopback callback.
+
+#### Revoking tokens on clear (RFC 7009)
+
+`oauth-revocation-http.json` and `oauth-no-revocation-http.json` are the same OAuth-protected server (combined AS + resource, DCR, refresh tokens) differing in one thing: the first advertises a `revocation_endpoint`, the second advertises none. Plain streamable-HTTP — connect with the **default (legacy)** protocol era.
+
+Add either server, connect and complete authorization, then use **Clear OAuth state and disconnect** (Server Settings → Authorization) and watch the Network tab.
+
+- On `oauth-revocation-http.json` a `POST /oauth/revoke` goes out naming the **refresh token**. RFC 7009 §2.1 asks the authorization server to invalidate the access tokens issued under the same grant, so one request ends both halves — the fixture implements that linkage, so re-sending the old bearer token to `/mcp` afterwards gets a 401. The request is built from the stored state *before* the local clear and sent *after* it, so the clear never waits on the network; in the Network tab the POST therefore follows the local teardown rather than preceding it.
+- On `oauth-no-revocation-http.json` nothing is sent at all, and the clear behaves exactly as it did before the feature existed. That no-op path is what makes this safe against every authorization server with no RFC 7009 support ([#2144](https://github.com/modelcontextprotocol/inspector/issues/2144)).
+
+On the broken build both servers behaved like the second: the Inspector deleted its local copy and the grant stayed valid at the authorization server until it expired on its own — which for a refresh token is a long time, by design.
+
+Uncheck **Revoke tokens on clear** in the same panel (persisted as `oauth.revokeOnClear: false`) and the first server behaves like the second. That is not only an escape hatch: a client that disconnects still holding live tokens is a case worth reproducing when the server is the thing under test.
+
+The same behavior is reachable from the other clients — the TUI's **Clear OAuth State**, and the CLI's `--relogin` (with `--no-revoke` as the per-run opt-out).
 
 #### Plain OAuth 2.0 metadata at the OIDC well-known path
 

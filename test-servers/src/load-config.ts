@@ -39,6 +39,8 @@ export interface ConfigFileOAuth {
   supportCIMD?: boolean;
   tokenExpirationSeconds?: number;
   supportRefreshTokens?: boolean;
+  /** RFC 7009 revocation endpoint; default true (#2144). */
+  supportRevocation?: boolean;
 }
 
 export interface ConfigFile {

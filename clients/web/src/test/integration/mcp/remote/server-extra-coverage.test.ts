@@ -639,6 +639,11 @@ describe("server.ts supplemental coverage", () => {
       expect((await res.json()).error).toMatch(/oauthRequestRefreshToken/);
     });
 
+    it("rejects a non-boolean oauthRevokeOnClear (#2144)", async () => {
+      const res = await postSettings({ ...base, oauthRevokeOnClear: "no" });
+      expect((await res.json()).error).toMatch(/oauthRevokeOnClear/);
+    });
+
     it("rejects malformed roots", async () => {
       const res = await postSettings({ ...base, roots: [{ uri: 1 }] });
       expect((await res.json()).error).toMatch(/roots/);
@@ -708,6 +713,32 @@ describe("server.ts supplemental coverage", () => {
       expect(body.mcpServers.srv?.oauth?.requestRefreshToken).toBeUndefined();
     });
 
+    // #2144 — same reasoning as the refresh-token pair above: a 200 only proves
+    // the payload validated, not that the field survived the write-through.
+    it("persists the revoke-on-clear opt-out through a save", async () => {
+      expect(
+        (await postSettings({ ...base, oauthRevokeOnClear: false })).status,
+      ).toBe(200);
+
+      const res = await fetch(`${h.baseUrl}/api/servers`);
+      const body = (await res.json()) as {
+        mcpServers: Record<string, { oauth?: { revokeOnClear?: boolean } }>;
+      };
+      expect(body.mcpServers.srv?.oauth?.revokeOnClear).toBe(false);
+    });
+
+    it("writes no revoke-on-clear field when the setting is on", async () => {
+      expect(
+        (await postSettings({ ...base, oauthRevokeOnClear: true })).status,
+      ).toBe(200);
+
+      const res = await fetch(`${h.baseUrl}/api/servers`);
+      const body = (await res.json()) as {
+        mcpServers: Record<string, { oauth?: Record<string, unknown> }>;
+      };
+      expect(body.mcpServers.srv?.oauth?.revokeOnClear).toBeUndefined();
+    });
+
     it("accepts a fully-populated valid settings payload", async () => {
       const res = await postSettings({
         ...base,
@@ -724,6 +755,7 @@ describe("server.ts supplemental coverage", () => {
         oauthScopes: "a b",
         enterpriseManaged: true,
         oauthRequestRefreshToken: false,
+        oauthRevokeOnClear: false,
         roots: [{ uri: "file:///x", name: "x" }],
       });
       expect(res.status).toBe(200);
@@ -877,6 +909,30 @@ describe("server.ts supplemental coverage", () => {
               type: "streamable-http",
               url: "https://x.test/mcp",
               oauth: { requestRefreshToken: "no" },
+            },
+          },
+        }),
+      });
+      try {
+        const res = await fetch(`${h.baseUrl}/api/servers`);
+        const body = (await res.json()) as {
+          mcpServers: Record<string, Record<string, unknown>>;
+        };
+        expect(body.mcpServers.srv).not.toHaveProperty("oauth");
+      } finally {
+        await stop(h);
+      }
+    });
+
+    // #2144 — same all-or-nothing rule for the revocation opt-out.
+    it("drops oauth whose revokeOnClear is not a boolean", async () => {
+      const h = await start({
+        seedConfig: JSON.stringify({
+          mcpServers: {
+            srv: {
+              type: "streamable-http",
+              url: "https://x.test/mcp",
+              oauth: { revokeOnClear: "no" },
             },
           },
         }),

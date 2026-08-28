@@ -13,6 +13,12 @@ import type { OAuthClientInformation } from "@modelcontextprotocol/client";
 import { mcpAuth } from "../auth/mcpAuth.js";
 import type { OAuthStorage } from "../auth/storage.js";
 import { parseOAuthState } from "../auth/utils.js";
+import {
+  clearAndPlanRevocation,
+  executeOAuthRevocation,
+  type TokenRevocationOutcome,
+} from "../auth/revocation.js";
+import type { InspectorLogger } from "../logging/index.js";
 import type { EnterpriseManagedAuthIdpConfig } from "../client/types.js";
 import type { ClientConfig } from "../client/types.js";
 import { EmaClientNotConfiguredError } from "../auth/ema/clientConfigError.js";
@@ -71,6 +77,8 @@ export interface OAuthManagerParams {
   dispatchOAuthComplete: (detail: { tokens: OAuthTokens }) => void;
   dispatchOAuthAuthorizationRequired: (detail: { url: URL }) => void;
   dispatchOAuthError: (detail: { error: Error }) => void;
+  /** Used for the best-effort RFC 7009 revocation warning (#2144). */
+  logger?: InspectorLogger;
 }
 
 /**
@@ -488,16 +496,48 @@ export class OAuthManager {
     }
   }
 
-  async clearOAuthTokens(): Promise<void> {
+  /**
+   * Drop this server's local OAuth state, and revoke the grant at the
+   * authorization server (RFC 7009).
+   *
+   * The state is taken and deleted in one atomic step, and the requests are
+   * sent afterwards from what was taken. Both halves matter: the requests need
+   * state the clear destroys, and the clear must not wait on the network, or a
+   * fresh authorization completing during a five-second revocation would be
+   * deleted by a clear reasoning about the grant it replaced.
+   *
+   * Best-effort by construction: every failure is reported through the returned
+   * outcome and the clear has already happened regardless, because forgetting
+   * the tokens is what the caller actually asked for (#2144).
+   *
+   * `options.revoke === false` skips the request. That is not only an escape
+   * hatch for an authorization server that mishandles it — disconnecting while
+   * still holding live tokens is a case a user may want to reproduce
+   * deliberately, to watch how a server under test copes with it.
+   */
+  async clearOAuthTokens(options?: {
+    revoke?: boolean;
+  }): Promise<TokenRevocationOutcome> {
     if (!this.oauthConfig?.storage) {
-      return;
+      return { status: "skipped", reason: "no_tokens" };
     }
 
     const serverUrl = this.getServerUrl();
-    await this.oauthConfig.storage.clear(serverUrl);
+    // Takes the state and deletes it in ONE atomic storage step; separate
+    // reads followed by a separate clear are a check-then-act, and an OAuth
+    // completion landing between them would be destroyed by the clear.
+    const plan = await clearAndPlanRevocation({
+      serverUrl,
+      storage: this.oauthConfig.storage,
+      enabled: options?.revoke,
+    });
 
     this.oauthFlowState = null;
     this.pendingAuthorizationScope = undefined;
+    return executeOAuthRevocation(plan, {
+      fetchFn: this.params.effectiveAuthFetch,
+      logger: this.params.logger,
+    });
   }
 
   async isOAuthAuthorized(): Promise<boolean> {

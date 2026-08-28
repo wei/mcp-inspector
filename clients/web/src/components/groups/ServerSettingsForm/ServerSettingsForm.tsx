@@ -521,6 +521,8 @@ export function ServerSettingsForm({
       onInsufficientScope: settings.oauthOnInsufficientScope,
       // Unset means the default, on — only an explicit opt-out is stored.
       requestRefreshToken: settings.oauthRequestRefreshToken ?? true,
+      // Unset means the default, on — only an explicit opt-out is stored.
+      revokeOnClear: settings.oauthRevokeOnClear ?? true,
     };
   }
 
@@ -567,6 +569,15 @@ export function ServerSettingsForm({
     onOAuthChange({
       ...currentOAuth(),
       requestRefreshToken: event.currentTarget.checked,
+    });
+  }
+
+  function handleRevokeOnClearChange(
+    event: ChangeEvent<HTMLInputElement>,
+  ): void {
+    onOAuthChange({
+      ...currentOAuth(),
+      revokeOnClear: event.currentTarget.checked,
     });
   }
 
@@ -916,6 +927,12 @@ export function ServerSettingsForm({
                 description={`Declares the refresh_token grant, so the authorization server may issue a refresh token and renew access tokens without a new sign-in. Uncheck it for authorization servers that reject the offline_access scope and forced consent prompt the grant brings with it. Applies on the next connect.${refreshTokenEmaNote}`}
                 checked={settings.oauthRequestRefreshToken ?? true}
                 onChange={handleRequestRefreshTokenChange}
+              />
+              <Checkbox
+                label="Revoke tokens on clear"
+                description="Calls the authorization server's RFC 7009 revocation endpoint when the stored OAuth state is cleared, so the grant ends when the session does instead of staying valid until it expires. Servers that advertise no revocation_endpoint are unaffected. Uncheck it to reproduce a client that disconnects still holding live tokens."
+                checked={settings.oauthRevokeOnClear ?? true}
+                onChange={handleRevokeOnClearChange}
               />
               {refreshTokenOptedOut && scopesIncludeOfflineAccess ? (
                 <Alert color="yellow" title="offline_access is still requested">

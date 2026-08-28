@@ -912,6 +912,11 @@ export function useConnectionLifecycle({
                 serverId === activeServerId ? inspectorClient : null,
               isActiveConnection: serverId === activeServerId,
               oauthStorage: webOAuthStorage,
+              // No RFC 7009 revocation here (#2144): this clears a *half-finished*
+              // flow so it can be retried. The authorization never completed, so
+              // there is no grant to revoke — and any token still on disk belongs
+              // to the very session this recovery is trying to rebuild.
+              revoke: false,
             });
           } catch (err) {
             notifications.show({

@@ -123,7 +123,25 @@ Options that specify the MCP server (catalog/config file, ad-hoc command/URL, en
 | `--strict`                    | With `--method tools/list`: report tool-schema portability problems in full (path, issue, suggested fix) on stderr, and exit `6` if any is error-severity. Without it, a one-line count is printed instead. See [Schema portability](#schema-portability---strict). |
 | `--format <text\|json>`       | Output format. `text` (default) pretty-prints the result. `json` emits a single JSON object on stdout (`{ "result": … }`, plus `{ "appInfo": … }` as a sibling key for App tools) with no banners, so the whole output pipes cleanly into `jq`.                                                                                                                                                                      |
 | `--relogin`                   | Delete stored OAuth for this server URL from the shared store before connect; interactive login still only runs if the server requires auth. Requires an HTTP/SSE URL (rejected for stdio). Conflicts with `--stored-auth-only` / `--use-stored-auth` / `--wait-for-auth` / catalog short-circuits.                                                                                                                  |
+| `--no-revoke`                 | With `--relogin`, skip the [RFC 7009](https://datatracker.ietf.org/doc/html/rfc7009) revocation request that would otherwise end the grant at the authorization server when the local state is deleted. The per-server `oauth.revokeOnClear` setting is the persistent form of the same opt-out; either one is enough to skip it. See [Revoking on `--relogin`](#revoking-on---relogin). |
 | `--stored-auth-only`          | **CI / non-interactive safe:** never start interactive OAuth / step-up (and never auto-open a browser); use the shared store if present, otherwise fail immediately with `auth_required`. Prefer this over a bare pipe/CI run that would otherwise attempt interactive login.                                                                                                                                        |
+
+#### Revoking on `--relogin`
+
+`--relogin` deletes this server's stored OAuth state so the next connect cannot silently reuse it. By default it now also **revokes the grant at the authorization server**, per [RFC 7009](https://datatracker.ietf.org/doc/html/rfc7009) ([#2144](https://github.com/modelcontextprotocol/inspector/issues/2144)) — otherwise the delete is invisible to the AS, and the access token, plus the refresh token when one was issued, stay valid there until they expire on their own.
+
+The request is built from the stored state before the delete and sent after it, so the local delete never waits on the network. That matters because the OAuth store is shared: holding this process's view of it across a five-second request would let another CLI or TUI write a fresh grant that this one then erased.
+
+The request names the refresh token when there is one: RFC 7009 §2.1 asks the authorization server to invalidate the access tokens issued under the same grant, so a single request covers both.
+
+It is best-effort and never changes the exit code. An authorization server that advertises no `revocation_endpoint` gets no request at all; a network error, a non-2xx, or the short timeout prints a one-line warning on stderr and the local delete proceeds either way.
+
+Turn it off per run with `--no-revoke`, or per server with `oauth.revokeOnClear: false` in the catalog — either is enough, and neither can turn it on for the other. Disconnecting while still holding live tokens is a case worth reproducing when the server under test is the thing being debugged.
+
+```bash
+mcp-inspector --cli --server-url https://example.com/mcp --relogin --method tools/list
+mcp-inspector --cli --server-url https://example.com/mcp --relogin --no-revoke --method tools/list
+```
 
 `servers/show` redacts secret-bearing fields (`env` values, sensitive headers, sensitive `settings.metadata` keys whose whole value is replaced whether or not it is structured, `requestInit` / `eventSourceInit` headers, `oauthClientSecret`). It does **not** scrub credentials embedded in a server `url` (userinfo or query tokens) or in stdio `args` — treat `detail` / raw URL fields as potentially sensitive before pasting into issues.
 
