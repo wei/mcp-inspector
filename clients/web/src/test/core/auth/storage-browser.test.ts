@@ -358,79 +358,6 @@ describe("BrowserOAuthStorage", () => {
     });
   });
 
-  // #2144 — `clear` deletes every issuer slot, so anything that must act on the
-  // credentials first (RFC 7009 revocation) needs to see them all.
-  describe("listIssuers", () => {
-    it("returns every issuer holding credentials for the server", async () => {
-      await storage.saveTokens(
-        testServerUrl,
-        { access_token: "a", token_type: "Bearer" },
-        { issuer: "https://as-a.example.com" },
-      );
-      await storage.saveTokens(
-        testServerUrl,
-        { access_token: "b", token_type: "Bearer" },
-        { issuer: "https://as-b.example.com" },
-      );
-
-      expect((await storage.listIssuers(testServerUrl)).sort()).toEqual([
-        "https://as-a.example.com",
-        "https://as-b.example.com",
-      ]);
-    });
-
-    // A pre-SEP-2352 entry has its credentials in the legacy unkeyed slot,
-    // which the context-free reads answer — there is no issuer to list.
-    it("is empty for an entry with no issuer-bound credentials", async () => {
-      await storage.saveTokens(testServerUrl, {
-        access_token: "a",
-        token_type: "Bearer",
-      });
-      expect(await storage.listIssuers(testServerUrl)).toEqual([]);
-    });
-
-    it("is empty for a server with no state at all", async () => {
-      expect(await storage.listIssuers("https://unknown.example/mcp")).toEqual(
-        [],
-      );
-    });
-  });
-
-  // The no-fallback read #2144 needs: `getTokens(url, issuer)` deliberately
-  // falls back to the legacy unkeyed slot, which is right for a connect and
-  // wrong for anything enumerating issuers.
-  describe("getIssuerTokens", () => {
-    it("returns only the tokens bound to that issuer", async () => {
-      await storage.saveTokens(
-        testServerUrl,
-        { access_token: "a", token_type: "Bearer" },
-        { issuer: "https://as-a.example.com" },
-      );
-      const tokens = await storage.getIssuerTokens(
-        testServerUrl,
-        "https://as-a.example.com",
-      );
-      expect(tokens?.access_token).toBe("a");
-    });
-
-    it("does not fall back to the legacy unkeyed token", async () => {
-      await storage.saveTokens(testServerUrl, {
-        access_token: "legacy",
-        token_type: "Bearer",
-      });
-      // `getTokens` DOES fall back — that contrast is the point of the method.
-      expect((await storage.getTokens(testServerUrl))?.access_token).toBe(
-        "legacy",
-      );
-      expect(
-        await storage.getIssuerTokens(
-          testServerUrl,
-          "https://as-a.example.com",
-        ),
-      ).toBeUndefined();
-    });
-  });
-
   // #2144 — the atomic take-and-clear. Split reads followed by a separate clear
   // are a check-then-act: each await yields, and an OAuth completion landing in
   // one of those gaps saves a grant the clear then destroys.
@@ -465,7 +392,9 @@ describe("BrowserOAuthStorage", () => {
       // Cleared in the same step.
       expect(await storage.getTokens(testServerUrl)).toBeUndefined();
       expect(await storage.getServerMetadata(testServerUrl)).toBeNull();
-      expect(await storage.listIssuers(testServerUrl)).toEqual([]);
+      expect(
+        (await storage.takeRevocationSnapshot(testServerUrl)).byIssuer,
+      ).toEqual({});
     });
 
     it("returns the legacy unkeyed slot too", async () => {

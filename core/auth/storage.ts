@@ -224,33 +224,6 @@ export interface OAuthStorage {
   takeRevocationSnapshot(serverUrl: string): Promise<RevocationSnapshot>;
 
   /**
-   * Tokens bound to **exactly** `issuer`, with no legacy-unkeyed fallback.
-   *
-   * {@link getTokens} deliberately falls back to the legacy unkeyed slot when
-   * the issuer slot holds none — that is what keeps a pre-SEP-2352 entry
-   * working. But a caller enumerating {@link listIssuers} must not treat that
-   * fallback as belonging to the issuer it happened to ask for: during a
-   * partially migrated flow it would label an old, unbound token with a newly
-   * discovered authorization server and send it there (#2144).
-   */
-  getIssuerTokens(
-    serverUrl: string,
-    issuer: string,
-  ): Promise<OAuthTokens | undefined>;
-
-  /**
-   * The authorization-server `issuer` keys holding credentials for this server
-   * (SEP-2352). Empty when the entry predates issuer binding — its credentials
-   * live in the legacy unkeyed slot, which the ctx-less reads above answer.
-   *
-   * Exists because {@link clear} deletes **every** issuer slot: anything that
-   * must act on the credentials before they are dropped (RFC 7009 revocation,
-   * #2144) would otherwise see only the active issuer's and silently discard
-   * the rest.
-   */
-  listIssuers(serverUrl: string): Promise<string[]>;
-
-  /**
    * Clear all OAuth data for a server
    */
   clear(serverUrl: string): Promise<void>;

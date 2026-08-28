@@ -11,13 +11,21 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { createHash, randomBytes } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   TestServerHttp,
   createOAuthTestServerConfig,
   getDefaultServerConfig,
   waitForOAuthWellKnown,
 } from "@modelcontextprotocol/inspector-test-server";
-import { BrowserOAuthStorage } from "@inspector/core/auth/browser/storage.js";
+// NOT `BrowserOAuthStorage`: the `integration` project runs in the node
+// environment, where `sessionStorage` does not exist. Node 22 gates Web Storage
+// behind a flag and newer Node exposes it by default, so a browser-backed store
+// passes on a developer's machine and fails in CI — which is exactly what
+// happened here.
+import { NodeOAuthStorage } from "@inspector/core/auth/node/storage-node.js";
 import {
   clearAndPlanRevocation,
   executeOAuthRevocation,
@@ -43,6 +51,7 @@ function base64Url(buffer: Buffer): string {
 describe("OAuth token revocation (RFC 7009)", () => {
   let mcpServer: TestServerHttp | null = null;
   let serverUrl = "";
+  let storageDir = "";
   let metadata: OAuthMetadata;
 
   beforeAll(async () => {
@@ -67,6 +76,7 @@ describe("OAuth token revocation (RFC 7009)", () => {
     });
     const port = await mcpServer.start();
     serverUrl = `http://localhost:${port}`;
+    storageDir = mkdtempSync(join(tmpdir(), "mcp-inspector-2144-"));
     await waitForOAuthWellKnown(serverUrl);
     metadata = (await (
       await fetch(`${serverUrl}/.well-known/oauth-authorization-server`)
@@ -76,6 +86,10 @@ describe("OAuth token revocation (RFC 7009)", () => {
   afterAll(async () => {
     await mcpServer?.stop();
     mcpServer = null;
+    if (storageDir) {
+      rmSync(storageDir, { recursive: true, force: true });
+      storageDir = "";
+    }
   }, 30_000);
 
   /** Run a real authorization-code exchange and return the issued tokens. */
@@ -135,8 +149,8 @@ describe("OAuth token revocation (RFC 7009)", () => {
   async function seededStorage(tokens: {
     access_token: string;
     refresh_token?: string;
-  }): Promise<BrowserOAuthStorage> {
-    const storage = new BrowserOAuthStorage();
+  }): Promise<NodeOAuthStorage> {
+    const storage = new NodeOAuthStorage(join(storageDir, "oauth.json"));
     await storage.clear(serverUrl);
     // Issuer-bound and matching the discovered metadata: an unkeyed grant
     // records no authorization server and is deliberately refused.
@@ -207,7 +221,7 @@ describe("OAuth token revocation (RFC 7009)", () => {
    * exercises the ordering the product uses rather than a convenience wrapper.
    */
   async function clearAndRevoke(
-    storage: BrowserOAuthStorage,
+    storage: NodeOAuthStorage,
   ): Promise<TokenRevocationOutcome> {
     const plan = await clearAndPlanRevocation({ serverUrl, storage });
     return executeOAuthRevocation(plan, { fetchFn: fetch });
