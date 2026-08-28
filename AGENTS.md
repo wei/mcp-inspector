@@ -101,6 +101,29 @@ v2/main/
 │   │                                   #   needs to know WHICH candidate
 │   │                                   #   answered, since that is the base its
 │   │                                   #   token request is made against — #2110;
+│   │                                   #   revocation.ts RFC 7009 token revocation —
+│   │                                   #   the request the three clear paths send
+│   │                                   #   BEFORE wiping local state, since the
+│   │                                   #   token, the client credentials and the
+│   │                                   #   discovered `revocation_endpoint` all live
+│   │                                   #   in the store the clear empties. Names the
+│   │                                   #   REFRESH token when there is one (§2.1 asks
+│   │                                   #   the AS to invalidate the access tokens
+│   │                                   #   under the same grant, so one request
+│   │                                   #   covers both). BEST-EFFORT by construction:
+│   │                                   #   every path returns a
+│   │                                   #   TokenRevocationOutcome rather than
+│   │                                   #   throwing — no advertised endpoint means
+│   │                                   #   nothing is sent and the AS behaves exactly
+│   │                                   #   as before, and a network error / non-2xx /
+│   │                                   #   timeout is reported so the local clear
+│   │                                   #   always finishes. Opt out per server with
+│   │                                   #   `oauth.revokeOnClear`, read at CLEAR time
+│   │                                   #   rather than connect time. `lost_authorization_state`
+│   │                                   #   recovery passes `revoke: false` — it clears a
+│   │                                   #   half-finished flow to retry it, and an
+│   │                                   #   authorization that never completed has no
+│   │                                   #   grant to revoke — #2144;
 │   │                                   #   scopes.ts SEP-2350 scope union, oauthUx.ts
 │   │                                   #   shared copy, mcpAuth.ts force-reauthorization,
 │   │                                   #   issuerBinding.ts SEP-2352 callback-leg failure

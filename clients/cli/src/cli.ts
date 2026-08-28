@@ -107,6 +107,7 @@ async function callMethod(
   callbackUrlConfig: RunnerOAuthCallbackConfig,
   storedAuthOnly: boolean,
   relogin: boolean,
+  revoke: boolean,
 ): Promise<void> {
   // Clear after parse-time validation so a bad flag combo never deletes store
   // entries. Deletes the shared URL-keyed OAuth entry (not "ignore for this run").
@@ -116,7 +117,18 @@ async function callMethod(
         "--relogin requires an HTTP/SSE server URL (no OAuth store entry for stdio)",
       );
     }
-    await clearStoredAuthForRelogin(serverConfig.url);
+    // RFC 7009 (#2144). The flag and the per-server setting are both opt-outs,
+    // so either one turns the revocation off; neither can turn it on for the
+    // other. Reported rather than thrown — `--relogin` is a local delete and
+    // must not start failing because an authorization server is unreachable.
+    const revocation = await clearStoredAuthForRelogin(serverConfig.url, {
+      revoke: revoke && serverSettings?.oauthRevokeOnClear !== false,
+    });
+    if (revocation?.status === "failed") {
+      process.stderr.write(
+        `Warning: could not revoke the OAuth grant at the authorization server (${revocation.detail}); it may still be valid there.\n`,
+      );
+    }
   }
 
   // Version comes from the single source of truth — the root package.json —
@@ -570,6 +582,7 @@ type ParseResult =
       callbackUrl?: string;
       storedAuthOnly?: boolean;
       relogin?: boolean;
+      revoke?: boolean;
     }
   // Short-circuit modes (`--list-stored-auth`, `--print-handoff`) do their own
   // output and need no server connection; runCli returns immediately.
@@ -766,6 +779,10 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
       "Delete stored OAuth for this server URL from the shared store before connect (HTTP/SSE URL keys only); interactive login runs only if the server requires auth. Rejected for stdio (no URL-keyed store entry)",
     )
     .option(
+      "--no-revoke",
+      "With --relogin, skip the RFC 7009 revocation request that would otherwise end the grant at the authorization server before the local state is deleted. Also skipped when the server entry sets oauth.revokeOnClear to false.",
+    )
+    .option(
       "--wait-for-auth <sec>",
       "Poll the OAuth state file until a token for --server-url appears (or the timeout elapses), then proceed as if --use-stored-auth were set. Use after handing off to a human to complete OAuth in a browser.",
       (v: string) => {
@@ -820,6 +837,7 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
     useStoredAuth?: boolean;
     storedAuthOnly?: boolean;
     relogin?: boolean;
+    revoke?: boolean;
     waitForAuth?: number;
     listStoredAuth?: boolean;
     printHandoff?: boolean;
@@ -1112,6 +1130,9 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
     callbackUrl: options.callbackUrl,
     storedAuthOnly: options.storedAuthOnly === true,
     relogin: options.relogin === true,
+    // Commander's `--no-revoke` defaults this to true; only an explicit
+    // `--no-revoke` makes it false.
+    revoke: options.revoke !== false,
   };
 }
 
@@ -1130,6 +1151,7 @@ export async function runCli(argv?: string[]): Promise<void> {
     callbackUrl,
     storedAuthOnly,
     relogin,
+    revoke,
   } = parsed;
   const clientConfig = await loadRunnerClientConfig({ clientConfigPath });
   // A bad --callback-url / MCP_OAUTH_CALLBACK_URL is a *usage* error, but its
@@ -1159,5 +1181,6 @@ export async function runCli(argv?: string[]): Promise<void> {
     callbackUrlConfig,
     storedAuthOnly === true,
     relogin === true,
+    revoke !== false,
   );
 }

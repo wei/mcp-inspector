@@ -5,6 +5,7 @@ import type { InspectorClient } from "@inspector/core/mcp/index.js";
 import type { TypedEvent } from "@inspector/core/mcp/inspectorClientEventTarget.js";
 import type {
   ConnectionStatus,
+  InspectorServerSettings,
   MCPServerConfig,
   ServerEntry,
 } from "@inspector/core/mcp/types.js";
@@ -17,6 +18,7 @@ import {
 } from "@inspector/core/auth/index.js";
 import { RemoteInspectorClientStorage } from "@inspector/core/mcp/remote/index.js";
 import { AuthRecoveryRequiredError } from "@inspector/core/auth/challenge.js";
+import type { TokenRevocationOutcome } from "@inspector/core/auth/revocation.js";
 import type {
   AuthChallenge,
   AuthChallengeReason,
@@ -31,6 +33,7 @@ import { isEmaClientNotConfiguredError } from "@inspector/core/auth/ema/clientCo
 import type { OAuthDetails } from "../components/groups/ConnectionInfoContent/ConnectionInfoContent";
 import { oauthDetailsFromConnectionState } from "../components/groups/ConnectionInfoContent/oauthDetailsFromConnectionState";
 import { getWebRemoteOAuthStorage } from "../lib/remoteOAuthStorage";
+import { getWebProxiedFetch } from "../lib/webProxiedFetch";
 import { clearServerOAuthState } from "../lib/clearServerOAuthState";
 import { getAuthToken } from "../lib/authToken";
 import {
@@ -121,6 +124,36 @@ export interface ClearableServer {
   id: string;
   name: string;
   config: MCPServerConfig;
+  /**
+   * Read for `oauthRevokeOnClear` (#2144). Optional so a caller that only has
+   * the identity fields still type-checks; an absent value means the default,
+   * on.
+   */
+  settings?: InspectorServerSettings;
+}
+
+/**
+ * The sentence appended to the "OAuth state cleared" toast describing what the
+ * RFC 7009 leg did (#2144).
+ *
+ * Only the two outcomes a user can act on are surfaced. A success is worth
+ * saying because the whole point of the feature is invisible otherwise — the
+ * local clear looks identical either way. A failure is worth saying because the
+ * grant is still live at the authorization server and the user may want to
+ * revoke it by hand. The remaining skips ("this server advertises no revocation
+ * endpoint", "there were no tokens") describe the status quo and would turn a
+ * confirmation into a notice about something that did not need to happen.
+ */
+export function revocationSuffix(
+  outcome: TokenRevocationOutcome | undefined,
+): string {
+  if (outcome?.status === "revoked") {
+    return " The grant was also revoked at the authorization server.";
+  }
+  if (outcome?.status === "failed") {
+    return ` Revoking the grant at the authorization server failed (${outcome.detail}), so it may still be valid there.`;
+  }
+  return "";
 }
 
 export interface UseOAuthRecoveryOptions {
@@ -1221,11 +1254,13 @@ export function useOAuthRecovery({
   const clearServerOAuthAndDisconnect = useCallback(
     async (server: ClearableServer) => {
       const isActive = server.id === activeServerId;
-      const cleared = await clearServerOAuthState({
+      const { cleared, revocation } = await clearServerOAuthState({
         config: server.config,
         inspectorClient: isActive ? inspectorClient : null,
         isActiveConnection: isActive,
         oauthStorage: webOAuthStorage,
+        revoke: server.settings?.oauthRevokeOnClear !== false,
+        fetchFn: getWebProxiedFetch(getAuthToken()),
       });
       if (!cleared) return;
 
@@ -1243,8 +1278,8 @@ export function useOAuthRecovery({
       notifications.show({
         title: "OAuth state cleared",
         message: isActive
-          ? "Stored tokens and client registration were removed. Reconnect to run a fresh authorization flow."
-          : `Stored OAuth state was removed for "${server.name}". Connect to authorize again.`,
+          ? `Stored tokens and client registration were removed. Reconnect to run a fresh authorization flow.${revocationSuffix(revocation)}`
+          : `Stored OAuth state was removed for "${server.name}". Connect to authorize again.${revocationSuffix(revocation)}`,
         color: "blue",
       });
     },

@@ -238,6 +238,7 @@ import {
   type HandleAuthChallengeOptions,
 } from "../auth/challenge.js";
 import { withOAuthEndpointOverrides } from "../auth/endpointOverrides.js";
+import type { TokenRevocationOutcome } from "../auth/revocation.js";
 import type { OAuthTokens } from "@modelcontextprotocol/client";
 import { silentLogger, type InspectorLogger } from "../logging/logger.js";
 import { createFetchTracker } from "./fetchTracking.js";
@@ -813,6 +814,7 @@ export class InspectorClient extends InspectorClientEventTarget {
           return Promise.resolve();
         },
         initialConfig: oauthConfig,
+        logger: this.logger,
         enterpriseManagedAuth: options.enterpriseManagedAuth,
         installEnterpriseManagedAuth: options.installEnterpriseManagedAuth,
         dispatchOAuthComplete: (detail) =>
@@ -6722,8 +6724,25 @@ export class InspectorClient extends InspectorClientEventTarget {
   /**
    * Clears OAuth tokens and client information
    */
-  async clearOAuthTokens(): Promise<void> {
-    await this.oauthManager?.clearOAuthTokens();
+  /**
+   * Drop this server's stored OAuth state, revoking the grant at the
+   * authorization server first (RFC 7009, #2144).
+   *
+   * The revocation is best-effort — an authorization server that advertises no
+   * `revocation_endpoint` is left behaving exactly as before, and a network
+   * error, a non-2xx or a timeout is reported in the returned outcome rather
+   * than thrown — so the local clear always completes. Pass
+   * `{ revoke: false }` to skip it.
+   */
+  async clearOAuthTokens(options?: {
+    revoke?: boolean;
+  }): Promise<TokenRevocationOutcome> {
+    return (
+      (await this.oauthManager?.clearOAuthTokens(options)) ?? {
+        status: "skipped",
+        reason: "no_tokens",
+      }
+    );
   }
 
   /**

@@ -941,15 +941,30 @@ function App({
 
   const handleClearOAuth = useCallback(async () => {
     if (!selectedInspectorClient) return;
-    await selectedInspectorClient.clearOAuthTokens();
+    // RFC 7009 (#2144). Best-effort: the outcome is reported in the status
+    // line, never thrown, so clearing always completes. The per-server
+    // `oauthRevokeOnClear` opt-out is honored here the same way the web client
+    // honors it.
+    const revocation = await selectedInspectorClient.clearOAuthTokens({
+      revoke: selectedServerEntry?.settings?.oauthRevokeOnClear !== false,
+    });
     setOauthStatus("idle");
-    setOauthMessage(null);
+    setOauthMessage(
+      revocation.status === "failed"
+        ? `Cleared locally, but revoking the grant at the authorization server failed: ${revocation.detail}`
+        : null,
+    );
     setConnectError(null);
     if (inspectorStatus === "connected" || inspectorStatus === "connecting") {
       await disconnectInspector();
     }
     setOauthRevision((n) => n + 1);
-  }, [selectedInspectorClient, inspectorStatus, disconnectInspector]);
+  }, [
+    selectedInspectorClient,
+    selectedServerEntry,
+    inspectorStatus,
+    disconnectInspector,
+  ]);
 
   // Build current server state from InspectorClient data (tools from ManagedToolsState)
   const currentServerState = useMemo(() => {

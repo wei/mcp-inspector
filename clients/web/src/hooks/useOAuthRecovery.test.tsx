@@ -21,6 +21,7 @@ import { EMPTY_SETTINGS } from "../utils/serverSettingsDefaults";
 import { useSessionRef } from "./useSessionRef";
 import { useTabUiState } from "./useTabUiState";
 import {
+  revocationSuffix,
   useOAuthRecovery,
   type FetchRequestSource,
   type OAuthRecovery,
@@ -58,6 +59,14 @@ vi.mock("@inspector/core/mcp/remote/index.js", () => ({
   RemoteInspectorClientStorage: class {
     saveSession = saveSessionMock;
   },
+  // #2144: `clearServerOAuthAndDisconnect` builds the backend-proxied fetch the
+  // revocation POST would travel on. Nothing here exercises a real request, so
+  // this only has to exist.
+  createRemoteFetch: () => remoteFetchMock,
+}));
+
+const { remoteFetchMock } = vi.hoisted(() => ({
+  remoteFetchMock: vi.fn<typeof fetch>(async () => new Response(null)),
 }));
 
 vi.mock("../lib/authToken", () => ({ getAuthToken: () => "test-token" }));
@@ -262,7 +271,7 @@ beforeEach(() => {
   window.sessionStorage.clear();
   window.history.replaceState({}, "", "/");
   oauthStorageMock.load.mockResolvedValue(undefined);
-  clearServerOAuthStateMock.mockResolvedValue(true);
+  clearServerOAuthStateMock.mockResolvedValue({ cleared: true });
   saveSessionMock.mockResolvedValue(undefined);
 });
 
@@ -1271,9 +1280,37 @@ describe("useOAuthRecovery", () => {
     });
   });
 
+  // #2144 — only the two outcomes a user can act on are surfaced. A skip
+  // describes the status quo, and reporting it would turn a confirmation into a
+  // notice about something that did not need to happen.
+  describe("revocationSuffix", () => {
+    it("announces a successful revocation", () => {
+      expect(
+        revocationSuffix({
+          status: "revoked",
+          tokenTypeHint: "refresh_token",
+          endpoint: "https://as.example/revoke",
+        }),
+      ).toContain("revoked at the authorization server");
+    });
+
+    it("warns that the grant may still be live after a failure", () => {
+      const text = revocationSuffix({ status: "failed", detail: "boom" });
+      expect(text).toContain("boom");
+      expect(text).toContain("may still be valid");
+    });
+
+    it("says nothing for a skip or an absent outcome", () => {
+      expect(
+        revocationSuffix({ status: "skipped", reason: "no_endpoint" }),
+      ).toBe("");
+      expect(revocationSuffix(undefined)).toBe("");
+    });
+  });
+
   describe("clearing stored OAuth state", () => {
     it("says nothing when there was nothing to clear", async () => {
-      clearServerOAuthStateMock.mockResolvedValue(false);
+      clearServerOAuthStateMock.mockResolvedValue({ cleared: false });
       const h = harness({ servers: [entry("a")], activeServerId: "a" });
       await act(async () => {
         await h.api().clearServerOAuthAndDisconnect(entry("a"));

@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -64,6 +64,139 @@ describe("clearStoredAuthForRelogin", () => {
       servers: Record<string, unknown>;
     };
     expect(blob.servers["not a url"]).toBeUndefined();
+  });
+
+  // #2144 — RFC 7009. The request has to go out *before* the delete, since it
+  // is built from the token, the client id and the cached metadata the delete
+  // removes.
+  describe("token revocation", () => {
+    function seed(over: Record<string, unknown> = {}): string {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), "cli-relogin-revoke-"));
+      const file = path.join(dir, "oauth.json");
+      fs.writeFileSync(
+        file,
+        JSON.stringify({
+          servers: {
+            "https://example.com/mcp": {
+              tokens: {
+                access_token: "a",
+                token_type: "Bearer",
+                refresh_token: "r",
+              },
+              serverMetadata: {
+                issuer: "https://as.example.com",
+                authorization_endpoint: "https://as.example.com/authorize",
+                token_endpoint: "https://as.example.com/token",
+                revocation_endpoint: "https://as.example.com/revoke",
+                response_types_supported: ["code"],
+              },
+              ...over,
+            },
+          },
+          idpSessions: {},
+        }),
+        "utf8",
+      );
+      prevPath = process.env.MCP_INSPECTOR_OAUTH_STATE_PATH;
+      process.env.MCP_INSPECTOR_OAUTH_STATE_PATH = file;
+      resetNodeOAuthStorageCache();
+      return file;
+    }
+
+    it("revokes the stored grant before deleting it", async () => {
+      const file = seed();
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(new Response(null, { status: 200 }));
+      try {
+        await expect(
+          clearStoredAuthForRelogin("https://example.com/mcp"),
+        ).resolves.toMatchObject({
+          status: "revoked",
+          tokenTypeHint: "refresh_token",
+        });
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        const [url, init] = fetchSpy.mock.calls[0]!;
+        expect(String(url)).toBe("https://as.example.com/revoke");
+        expect(new URLSearchParams(String(init?.body)).get("token")).toBe("r");
+      } finally {
+        fetchSpy.mockRestore();
+      }
+      const blob = JSON.parse(fs.readFileSync(file, "utf8")) as {
+        servers: Record<string, unknown>;
+      };
+      expect(blob.servers["https://example.com/mcp"]).toBeUndefined();
+    });
+
+    // Both key spellings are cleared, but they are two spellings of one server:
+    // a second request would name a grant the first one already ended. The raw
+    // key here holds nothing, so this also proves the walk does not stop at the
+    // first empty one.
+    it("sends one request even though both key spellings are cleared", async () => {
+      seed();
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(new Response(null, { status: 200 }));
+      try {
+        // Normalises to the stored `https://example.com/mcp`.
+        await expect(
+          clearStoredAuthForRelogin("https://Example.com/mcp"),
+        ).resolves.toMatchObject({ status: "revoked" });
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it("deletes the local entry even when the request fails", async () => {
+      const file = seed();
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockRejectedValue(new Error("unreachable"));
+      try {
+        await expect(
+          clearStoredAuthForRelogin("https://example.com/mcp"),
+        ).resolves.toMatchObject({ status: "failed" });
+      } finally {
+        fetchSpy.mockRestore();
+      }
+      const blob = JSON.parse(fs.readFileSync(file, "utf8")) as {
+        servers: Record<string, unknown>;
+      };
+      expect(blob.servers["https://example.com/mcp"]).toBeUndefined();
+    });
+
+    it("skips the request when revocation is turned off", async () => {
+      seed();
+      const fetchSpy = vi.spyOn(globalThis, "fetch");
+      try {
+        await expect(
+          clearStoredAuthForRelogin("https://example.com/mcp", {
+            revoke: false,
+          }),
+        ).resolves.toBeUndefined();
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it("reports no_tokens when the store holds nothing for the server", async () => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), "cli-relogin-empty-"));
+      const file = path.join(dir, "oauth.json");
+      fs.writeFileSync(
+        file,
+        JSON.stringify({ servers: {}, idpSessions: {} }),
+        "utf8",
+      );
+      prevPath = process.env.MCP_INSPECTOR_OAUTH_STATE_PATH;
+      process.env.MCP_INSPECTOR_OAUTH_STATE_PATH = file;
+      resetNodeOAuthStorageCache();
+
+      await expect(
+        clearStoredAuthForRelogin("https://example.com/mcp"),
+      ).resolves.toEqual({ status: "skipped", reason: "no_tokens" });
+    });
   });
 
   it("clears both raw and URL-normalised keys (bare origin / mixed-case host)", async () => {

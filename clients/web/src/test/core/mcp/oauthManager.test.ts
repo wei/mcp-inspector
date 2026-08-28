@@ -197,6 +197,88 @@ describe("OAuthManager", () => {
       expect(manager.getOAuthFlowStep()).toBeUndefined();
     });
 
+    // #2144 — the ordering is the contract, not an implementation detail: the
+    // revocation request is built from the token, the client id and the cached
+    // metadata that `clear` is about to delete.
+    it("revokes at the authorization server before clearing local state", async () => {
+      const params = createMockParams();
+      const storage = params.initialConfig.storage!;
+      vi.mocked(storage.getTokens).mockResolvedValue({
+        access_token: "a",
+        token_type: "Bearer",
+        refresh_token: "r",
+      });
+      vi.mocked(storage.getServerMetadata).mockResolvedValue({
+        issuer: "https://as.example.com",
+        authorization_endpoint: "https://as.example.com/authorize",
+        token_endpoint: "https://as.example.com/token",
+        revocation_endpoint: "https://as.example.com/revoke",
+        response_types_supported: ["code"],
+      });
+      const order: string[] = [];
+      vi.mocked(storage.clear).mockImplementation(async () => {
+        order.push("clear");
+      });
+      const fetchFn = vi.fn<typeof fetch>(async () => {
+        order.push("revoke");
+        return new Response(null, { status: 200 });
+      });
+      const manager = new OAuthManager({
+        ...params,
+        effectiveAuthFetch: fetchFn,
+      });
+
+      await expect(manager.clearOAuthTokens()).resolves.toMatchObject({
+        status: "revoked",
+        tokenTypeHint: "refresh_token",
+      });
+      expect(order).toEqual(["revoke", "clear"]);
+    });
+
+    it("clears local state even when the revocation request fails", async () => {
+      const params = createMockParams();
+      const storage = params.initialConfig.storage!;
+      vi.mocked(storage.getTokens).mockResolvedValue({
+        access_token: "a",
+        token_type: "Bearer",
+      });
+      vi.mocked(storage.getServerMetadata).mockResolvedValue({
+        issuer: "https://as.example.com",
+        authorization_endpoint: "https://as.example.com/authorize",
+        token_endpoint: "https://as.example.com/token",
+        revocation_endpoint: "https://as.example.com/revoke",
+        response_types_supported: ["code"],
+      });
+      const manager = new OAuthManager({
+        ...params,
+        effectiveAuthFetch: vi.fn<typeof fetch>(async () => {
+          throw new Error("unreachable");
+        }),
+      });
+
+      await expect(manager.clearOAuthTokens()).resolves.toMatchObject({
+        status: "failed",
+      });
+      expect(storage.clear).toHaveBeenCalledWith(SERVER_URL);
+    });
+
+    it("skips the request when revocation is turned off", async () => {
+      const params = createMockParams();
+      const fetchFn = vi.fn<typeof fetch>();
+      const manager = new OAuthManager({
+        ...params,
+        effectiveAuthFetch: fetchFn,
+      });
+
+      await expect(
+        manager.clearOAuthTokens({ revoke: false }),
+      ).resolves.toEqual({ status: "skipped", reason: "disabled" });
+      expect(fetchFn).not.toHaveBeenCalled();
+      expect(params.initialConfig.storage!.clear).toHaveBeenCalledWith(
+        SERVER_URL,
+      );
+    });
+
     it("no-ops when storage is not configured", async () => {
       const params = createMockParams({
         initialConfig: {
@@ -207,7 +289,10 @@ describe("OAuthManager", () => {
         } as OAuthManagerConfig,
       });
       const manager = new OAuthManager(params);
-      await manager.clearOAuthTokens();
+      await expect(manager.clearOAuthTokens()).resolves.toEqual({
+        status: "skipped",
+        reason: "no_tokens",
+      });
       expect(params.getServerUrl).not.toHaveBeenCalled();
     });
   });

@@ -191,6 +191,8 @@ export function ServerSettingsModal({
       // server that never touched the switch writes no field at all.
       oauthRequestRefreshToken:
         oauth.requestRefreshToken === false ? false : undefined,
+      // #2144: same shape — `undefined` means on, so only the opt-out persists.
+      oauthRevokeOnClear: oauth.revokeOnClear === false ? false : undefined,
     });
   }
 

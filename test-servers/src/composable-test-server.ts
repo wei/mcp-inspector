@@ -670,6 +670,14 @@ export interface ServerConfig {
      * Whether to support refresh tokens (default: true)
      */
     supportRefreshTokens?: boolean;
+
+    /**
+     * Whether to advertise and serve the RFC 7009 `revocation_endpoint`
+     * (default: true). Set to `false` to reproduce an authorization server that
+     * offers no revocation, where the Inspector must send nothing and clear
+     * local state exactly as it always has. (#2144)
+     */
+    supportRevocation?: boolean;
   };
   /**
    * Serve the modern (2026-07-28) protocol era via the SDK's

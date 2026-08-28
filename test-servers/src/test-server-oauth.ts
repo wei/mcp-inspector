@@ -116,6 +116,9 @@ export function setupOAuthRoutes(
   if (getOAuthMode(config) === "combined") {
     setupAuthorizationEndpoint(app, config);
     setupTokenEndpoint(app, config);
+    if (config.supportRevocation !== false) {
+      setupRevocationEndpoint(app);
+    }
     if (config.supportDCR) {
       setupDCREndpoint(app);
     }
@@ -243,6 +246,17 @@ function setupMetadataEndpoints(
           // RFC 9207 / SEP-2468: advertise iss on authorization responses so
           // clients must validate (and our e2e can exercise reject paths).
           authorization_response_iss_parameter_supported: true,
+          ...(config.supportRevocation !== false && {
+            // RFC 7009 (#2144). Advertised by default so the in-repo servers
+            // exercise the Inspector's revocation leg; set
+            // `oauth.supportRevocation: false` to reproduce an authorization
+            // server that offers none, where the Inspector must do nothing.
+            revocation_endpoint: new URL("/oauth/revoke", actualIssuerUrl).href,
+            revocation_endpoint_auth_methods_supported: [
+              "client_secret_basic",
+              "none",
+            ],
+          }),
           ...(config.supportDCR && {
             registration_endpoint: new URL("/oauth/register", actualIssuerUrl)
               .href,
@@ -645,6 +659,7 @@ function setupTokenEndpoint(
           storeRefreshToken(refreshToken, {
             clientId: client_id,
             scope: authCodeData.scope,
+            accessTokens: new Set([accessToken]),
           });
         }
 
@@ -665,6 +680,9 @@ function setupTokenEndpoint(
         const tokenScope =
           refreshTokenData.scope || config.scopesSupported?.[0] || "mcp";
         const accessToken = generateAccessToken(tokenScope);
+        // Keep the grant linkage current so a later revocation of this refresh
+        // token also kills the access token it just minted.
+        refreshTokenData.accessTokens.add(accessToken);
         const tokenExpiration = config.tokenExpirationSeconds || 3600;
 
         res.json({
@@ -676,6 +694,52 @@ function setupTokenEndpoint(
       } else {
         res.status(400).json({ error: "unsupported_grant_type" });
       }
+    },
+  );
+}
+
+/**
+ * RFC 7009 token revocation (#2144).
+ *
+ * Deliberately faithful on the two points the Inspector depends on, both of
+ * which are easy to get wrong in a fixture:
+ *
+ * - **§2.2 — an unknown token is a success.** A client revoking a token the
+ *   server has already expired must not be told it failed, so the only 400 here
+ *   is a structurally invalid request (no `token` at all).
+ * - **§2.1 — revoking a refresh token also invalidates its access tokens.**
+ *   That is why the Inspector sends one request naming the refresh token, and a
+ *   fixture that ignored the linkage would let a regression through silently.
+ *
+ * Client authentication is accepted but not enforced: the point of the fixture
+ * is the revocation semantics, and every client this repo drives it with is
+ * either public or has already authenticated at the token endpoint.
+ */
+function setupRevocationEndpoint(app: express.Application): void {
+  app.post(
+    "/oauth/revoke",
+    express.urlencoded({ extended: true }),
+    (req: Request, res: Response) => {
+      const token: unknown = req.body?.token;
+      if (typeof token !== "string" || token === "") {
+        res.status(400).json({ error: "invalid_request" });
+        return;
+      }
+
+      const refreshTokenData = refreshTokens.get(token);
+      if (refreshTokenData) {
+        for (const accessToken of refreshTokenData.accessTokens) {
+          accessTokens.delete(accessToken);
+          accessTokenScopes.delete(accessToken);
+        }
+        refreshTokens.delete(token);
+      } else {
+        accessTokens.delete(token);
+        accessTokenScopes.delete(token);
+      }
+
+      // §2.2: 200 whether or not the token was known to us.
+      res.status(200).end();
     },
   );
 }
@@ -732,6 +796,15 @@ interface AuthorizationCodeData {
 interface RefreshTokenData {
   clientId: string;
   scope?: string;
+  /**
+   * Access tokens minted under the same grant. RFC 7009 §2.1 says an
+   * authorization server asked to revoke a refresh token SHOULD also invalidate
+   * the access tokens issued from it, and the Inspector relies on exactly that
+   * — it sends one request naming the refresh token and expects both halves to
+   * die. A fixture that dropped only the refresh token would let a client that
+   * leaves live access tokens behind pass. (#2144)
+   */
+  accessTokens: Set<string>;
 }
 
 interface RegisteredClient {

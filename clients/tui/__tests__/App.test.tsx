@@ -59,9 +59,10 @@ const h = vi.hoisted(() => {
     authenticate: vi.fn<InspectorClient["authenticate"]>(
       async () => new URL("https://auth.example/start"),
     ),
-    clearOAuthTokens: vi.fn<InspectorClient["clearOAuthTokens"]>(
-      async () => {},
-    ),
+    clearOAuthTokens: vi.fn<InspectorClient["clearOAuthTokens"]>(async () => ({
+      status: "skipped" as const,
+      reason: "no_endpoint" as const,
+    })),
     completeOAuthFlow: vi.fn<InspectorClient["completeOAuthFlow"]>(
       async () => {},
     ),

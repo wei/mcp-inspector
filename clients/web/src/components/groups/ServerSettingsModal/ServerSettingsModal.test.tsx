@@ -156,6 +156,42 @@ describe("ServerSettingsModal", () => {
     );
   });
 
+  // #2144 — same omit-the-default shape as the refresh-token pair above.
+  it("maps the revoke-on-clear opt-out into settings, and back to unset", async () => {
+    const user = userEvent.setup();
+    const onSettingsChange = vi.fn();
+    const { rerender } = renderWithMantine(
+      <ServerSettingsModal
+        opened
+        settings={initialSettings}
+        serverType="streamable-http"
+        isStdio={false}
+        onClose={vi.fn()}
+        onSettingsChange={onSettingsChange}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: /OAuth Settings/i }));
+    await user.click(screen.getByLabelText("Revoke tokens on clear"));
+    expect(onSettingsChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ oauthRevokeOnClear: false }),
+    );
+
+    rerender(
+      <ServerSettingsModal
+        opened
+        settings={{ ...initialSettings, oauthRevokeOnClear: false }}
+        serverType="streamable-http"
+        isStdio={false}
+        onClose={vi.fn()}
+        onSettingsChange={onSettingsChange}
+      />,
+    );
+    await user.click(screen.getByLabelText("Revoke tokens on clear"));
+    expect(onSettingsChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ oauthRevokeOnClear: undefined }),
+    );
+  });
+
   it("maps the selected protocol era into settings (#1626)", async () => {
     const user = userEvent.setup();
     const onSettingsChange = vi.fn();
