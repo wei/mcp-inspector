@@ -1834,11 +1834,13 @@ describe("SchemaForm raw JSON (#2151)", () => {
   function RawHarness({
     initial = {},
     onValidityChange,
+    enforceToolArgumentTypes,
     resetKey,
     schema: override,
   }: {
     initial?: Record<string, unknown>;
     onValidityChange?: (hasInvalidDraft: boolean) => void;
+    enforceToolArgumentTypes?: boolean;
     resetKey?: string;
     schema?: InspectorFormSchema;
   }) {
@@ -1850,6 +1852,7 @@ describe("SchemaForm raw JSON (#2151)", () => {
         onChange={setValues}
         resetKey={resetKey}
         onValidityChange={onValidityChange}
+        enforceToolArgumentTypes={enforceToolArgumentTypes}
       />
     );
   }
@@ -1857,6 +1860,87 @@ describe("SchemaForm raw JSON (#2151)", () => {
   async function enableRawJson(user: ReturnType<typeof userEvent.setup>) {
     await user.click(screen.getByLabelText("Edit as JSON"));
   }
+
+  // #2171. The widgets hand every value over as text, so `callTool` retypes a
+  // string to whatever the schema declares — which for a JSON draft means the
+  // wire would carry something other than what the editor showed. The draft is
+  // refused instead, and the value to rewrite is named.
+  describe("tool-argument type enforcement", () => {
+    it("refuses a draft the client would retype, and says which value", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      renderWithMantine(
+        <SchemaForm
+          schema={schema}
+          values={{}}
+          onChange={onChange}
+          enforceToolArgumentTypes
+        />,
+      );
+      await enableRawJson(user);
+      await setAceTextByLabel(/Arguments JSON/, '{"count":"01"}');
+
+      expect(
+        screen.getByText(/`count` would be converted to the type/),
+      ).toBeInTheDocument();
+      // Not merely flagged: the value must not reach the parent either, or a
+      // submit gated on something else would still send it.
+      expect(onChange).not.toHaveBeenCalledWith({ count: "01" });
+    });
+
+    it("blocks submission while such a draft is held", async () => {
+      const user = userEvent.setup();
+      const onValidityChange = vi.fn();
+      renderWithMantine(
+        <RawHarness
+          onValidityChange={onValidityChange}
+          enforceToolArgumentTypes
+        />,
+      );
+      await enableRawJson(user);
+      await setAceTextByLabel(/Arguments JSON/, '{"count":"01"}');
+      expect(onValidityChange).toHaveBeenLastCalledWith(true);
+
+      // Rewritten with the declared type, it is sendable again.
+      await setAceTextByLabel(/Arguments JSON/, '{"count":1}');
+      expect(onValidityChange).toHaveBeenLastCalledWith(false);
+    });
+
+    // The conversion only ever looks at strings, so a value already written
+    // with its declared type is not a mismatch — and neither is a string in a
+    // field the schema declares as one.
+    it("accepts values already written with the declared type", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      renderWithMantine(
+        <SchemaForm
+          schema={schema}
+          values={{}}
+          onChange={onChange}
+          enforceToolArgumentTypes
+        />,
+      );
+      await enableRawJson(user);
+      await setAceTextByLabel(/Arguments JSON/, '{"name":"a","count":2}');
+      expect(screen.queryByText(/would be converted/)).toBeNull();
+      expect(onChange).toHaveBeenLastCalledWith({ name: "a", count: 2 });
+    });
+
+    // Off by default, and that default is load-bearing: an elicitation renders
+    // through this same form and its values are never converted, so enforcing
+    // there would refuse a draft for a reason that is not true of it.
+    it("does not enforce when the caller has not opted in", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      renderWithMantine(
+        <SchemaForm schema={schema} values={{}} onChange={onChange} />,
+      );
+      await enableRawJson(user);
+      await setAceTextByLabel(/Arguments JSON/, '{"count":"01"}');
+      expect(screen.queryByText(/would be converted/)).toBeNull();
+      expect(onChange).toHaveBeenLastCalledWith({ count: "01" });
+    });
+  });
 
   it("replaces the widgets with one editor holding the current values", async () => {
     const user = userEvent.setup();

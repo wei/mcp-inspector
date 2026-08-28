@@ -9,7 +9,10 @@ import type { MessageEntry } from "@inspector/core/mcp/types.js";
 // `components → lib → utils` direction still holds: `LogEntryData` is the shape
 // the Logs screen renders, and this module exists to produce exactly that.
 import type { LogEntryData } from "../components/elements/LogEntry/LogEntry";
-import { convertToolParameters } from "@inspector/core/json/jsonUtils.js";
+import {
+  coercedArgumentNames,
+  coercedArgumentsError,
+} from "@inspector/core/json/jsonUtils.js";
 import { isReplayableProtocolMethod } from "../utils/replayableProtocolMethods";
 
 // Derive `LogEntryData[]` from the MessageLog by filtering for the
@@ -167,12 +170,18 @@ export function replayableParams(
  *   spec types `GetPromptRequest.params.arguments` as `Record<string, string>`,
  *   so a string is the only thing a prompt argument can be.
  * - For **`tools/call`**, the mirror image. `callTool` runs every *string*
- *   entry through `convertToolParameters`, because the Tools form hands
+ *   entry through `convertToolParameters`, because the widget form hands
  *   everything over as text — so `{"count": "2"}` against a schema declaring a
  *   number is sent as `{"count": 2}`. Detected by running that same conversion
  *   and comparing, rather than by reimplementing its rules, so the two cannot
  *   drift. Needs the `tool`; without one this check is skipped, since nothing
  *   can be said about a coercion whose schema is unknown.
+ *
+ *   The Tools and Apps tabs' own "Edit as JSON" switch refuses the identical
+ *   draft, through the identical helper (#2171). Both are JSON documents whose
+ *   values already carry their types, so in both the conversion would send
+ *   something other than what the editor showed — and one of the two answering
+ *   differently is the inconsistency #2171 was filed to remove.
  *
  * `name` and `uri` are deliberately not checked here: the dispatch already
  * refuses a missing or non-string one with a reason the caller surfaces as a
@@ -203,32 +212,18 @@ export function reshapedReplayParam(
     }
   }
   if (method === "tools/call" && tool) {
-    const coerced = coercedToolArgs(tool, args as Record<string, unknown>);
+    // The same check the Tools/Apps form's raw-JSON editor makes, from the same
+    // helper, so the two JSON-authoring surfaces cannot disagree about which
+    // drafts are sendable (#2171).
+    const coerced = coercedArgumentNames(
+      tool.inputSchema,
+      args as Record<string, unknown>,
+    );
     if (coerced.length > 0) {
-      return `${coerced.join(", ")} would be converted to the type ${tool.name}'s schema declares — write the value with that type instead`;
+      return coercedArgumentsError(coerced, tool.name);
     }
   }
   return null;
-}
-
-/**
- * The string-valued argument names `callTool` would convert, per the tool's
- * schema.
- *
- * Runs the conversion the client runs and compares, rather than restating its
- * rules: `convertToolParameters` is the function on the other side, so asking
- * it is the only way this cannot drift from what is actually sent.
- */
-function coercedToolArgs(tool: Tool, args: Record<string, unknown>): string[] {
-  const stringArgs: Record<string, string> = {};
-  for (const [key, value] of Object.entries(args)) {
-    if (typeof value === "string") stringArgs[key] = value;
-  }
-  if (Object.keys(stringArgs).length === 0) return [];
-  const converted = convertToolParameters(tool, stringArgs);
-  return Object.keys(stringArgs)
-    .filter((key) => converted[key] !== stringArgs[key])
-    .map((key) => `\`${key}\``);
 }
 
 export async function replayProtocolRequest(

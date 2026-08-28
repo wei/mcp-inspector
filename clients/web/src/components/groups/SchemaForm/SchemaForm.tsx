@@ -33,6 +33,10 @@ import {
 } from "../../../utils/jsonObjectDraft";
 import { isSerializableJson } from "@inspector/core/json/jsonUtils.js";
 import { useValueChange } from "../../../hooks/useValueChange";
+import {
+  coercedArgumentNames,
+  coercedArgumentsError,
+} from "@inspector/core/json/jsonUtils.js";
 import type {
   InspectorFormSchema,
   JsonSchemaConst,
@@ -626,6 +630,7 @@ function SchemaNumberInput({
  */
 function parseRawArgumentsDraft(
   text: string,
+  coercionSchema?: InspectorFormSchema,
 ): { ok: true; value: Record<string, unknown> } | { ok: false; error: string } {
   if (text.trim() === "") return { ok: true, value: {} };
   let parsed: unknown;
@@ -661,6 +666,21 @@ function parseRawArgumentsDraft(
   if (duplicate !== null) {
     return { ok: false, error: duplicateKeyError(duplicate) };
   }
+  // Last, because it is the only check that needs a *valid* object to run
+  // against — and the only one that is about the schema rather than the JSON.
+  // `callTool` retypes every string-valued argument to what the schema
+  // declares, so a draft it would touch is one whose visible text is not what
+  // the wire would carry; refuse it here instead, and say which value to
+  // rewrite (#2171). Skipped entirely when no schema is supplied: only the
+  // Tools and Apps forms feed `tools/call`, and an elicitation's values are
+  // never converted, so imposing this there would block a submission for a
+  // reason that is not true of it.
+  if (coercionSchema) {
+    const coerced = coercedArgumentNames(coercionSchema, parsed);
+    if (coerced.length > 0) {
+      return { ok: false, error: coercedArgumentsError(coerced) };
+    }
+  }
   return { ok: true, value: parsed };
 }
 
@@ -670,6 +690,12 @@ interface RawArgumentsFieldProps {
   disabled: boolean;
   /** Mirrors {@link SchemaFormProps.onValidityChange} for this one editor. */
   onInvalidChange: (hasInvalidDraft: boolean) => void;
+  /**
+   * The tool `inputSchema` this draft's values will be sent against, when they
+   * will be — see {@link SchemaFormProps.enforceToolArgumentTypes}. Undefined
+   * turns the type check off.
+   */
+  coercionSchema?: InspectorFormSchema;
 }
 
 /**
@@ -697,6 +723,7 @@ function RawArgumentsField({
   onChange,
   disabled,
   onInvalidChange,
+  coercionSchema,
 }: RawArgumentsFieldProps) {
   const [draft, setDraft] = useState(() => serializeJson(values));
   // Canonical JSON of the last object this editor emitted, so the re-sync below
@@ -705,7 +732,7 @@ function RawArgumentsField({
   // change would then look external. See `JsonObjectInput` for the long form.
   const [echoed, setEchoed] = useState(() => serializeJson(values));
 
-  const parsed = parseRawArgumentsDraft(draft);
+  const parsed = parseRawArgumentsDraft(draft, coercionSchema);
 
   useValueChange(serializeJson(values), (next) => {
     if (next === echoed) return;
@@ -732,7 +759,7 @@ function RawArgumentsField({
       maxLines={24}
       onChange={(text) => {
         setDraft(text);
-        const next = parseRawArgumentsDraft(text);
+        const next = parseRawArgumentsDraft(text, coercionSchema);
         if (!next.ok) return;
         setEchoed(serializeJson(next.value));
         onChange(next.value);
@@ -790,6 +817,30 @@ export interface SchemaFormProps {
    * inside the first the moment both were on.
    */
   allowRawJson?: boolean;
+  /**
+   * Whether these values become `tools/call` arguments, and so are subject to
+   * the string-to-declared-type conversion `InspectorClient.callTool` applies
+   * (#2171).
+   *
+   * That conversion exists for the widgets, which hand every value over as
+   * text: `"2"` against a numeric field has to become `2`. A **raw-JSON**
+   * draft already carries its own types, so a value the conversion would touch
+   * is one whose visible text is not what the wire would carry — and showing
+   * one payload while sending another is the one thing an inspector must not
+   * do. With this on, the raw editor refuses such a draft and names the value
+   * to rewrite, exactly as the Edit-and-replay modal does for the same
+   * conversion.
+   *
+   * Off by default, and deliberately opt-in rather than inferred from the
+   * schema: an elicitation renders through this same form and its values are
+   * never converted, so the check would be refusing those drafts for a reason
+   * that is not true of them. Only the Tools and Apps panels pass it.
+   *
+   * Read against {@link SchemaFormProps.schema} — the tool's own `inputSchema`,
+   * root composition included, which is what the client resolves the
+   * conversion against too.
+   */
+  enforceToolArgumentTypes?: boolean;
 }
 
 function getDefaultValue(fieldSchema: InspectorFormSchema): unknown {
@@ -817,6 +868,7 @@ export function SchemaForm({
   resetKey,
   onValidityChange,
   allowRawJson = true,
+  enforceToolArgumentTypes = false,
 }: SchemaFormProps) {
   // Composition at the root of the schema, flattened before anything is
   // rendered (#2123). `allOf` is folded into `base`; a top-level `oneOf`/`anyOf`
@@ -1524,6 +1576,11 @@ export function SchemaForm({
           onChange={handleRawArgumentsChange}
           disabled={disabled}
           onInvalidChange={reportRawJsonValidity}
+          // The schema as the CLIENT resolves it — the whole `inputSchema`,
+          // root composition and all — not the branch this form happens to be
+          // rendering. `coercedArgumentNames` does its own branch selection
+          // from the supplied values, the same way the conversion does.
+          coercionSchema={enforceToolArgumentTypes ? schema : undefined}
         />
       ) : (
         Object.entries(properties).map(([fieldName, fieldSchema]) =>

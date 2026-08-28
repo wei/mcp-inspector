@@ -3,6 +3,8 @@ import {
   convertParameterValue,
   convertToolParameters,
   convertPromptArguments,
+  coercedArgumentNames,
+  coercedArgumentsError,
   toRecord,
 } from "@inspector/core/json/jsonUtils.js";
 import type { Tool } from "@modelcontextprotocol/client";
@@ -58,6 +60,122 @@ describe("JSON Utils", () => {
 
     it("should return string for unknown types", () => {
       expect(convertParameterValue("hello", { type: "unknown" })).toBe("hello");
+    });
+  });
+
+  // #2171: the predicate both raw-JSON editors refuse on. It must agree with
+  // the conversion exactly — a false negative sends a payload other than the
+  // one shown, and a false positive blocks a draft that was fine.
+  describe("coercedArgumentNames", () => {
+    const numeric: Tool = {
+      name: "add",
+      inputSchema: {
+        type: "object",
+        properties: { count: { type: "number" }, label: { type: "string" } },
+      },
+    };
+
+    it("names a string the schema would retype", () => {
+      expect(
+        coercedArgumentNames(numeric.inputSchema, { count: "01" }),
+      ).toEqual(["count"]);
+    });
+
+    // The conversion only inspects strings, so a value already written with
+    // its declared type is untouched and must not be reported.
+    it("ignores a value already of the declared type", () => {
+      expect(coercedArgumentNames(numeric.inputSchema, { count: 1 })).toEqual(
+        [],
+      );
+    });
+
+    it("ignores a string the schema declares as a string", () => {
+      expect(
+        coercedArgumentNames(numeric.inputSchema, { label: "01" }),
+      ).toEqual([]);
+    });
+
+    // An argument the schema does not declare is passed through by the
+    // conversion, so there is nothing to warn about.
+    it("ignores an undeclared argument", () => {
+      expect(coercedArgumentNames(numeric.inputSchema, { extra: "x" })).toEqual(
+        [],
+      );
+    });
+
+    it("reports every offending name, in supplied order", () => {
+      const two: Tool = {
+        name: "pair",
+        inputSchema: {
+          type: "object",
+          properties: { a: { type: "number" }, b: { type: "boolean" } },
+        },
+      };
+      expect(
+        coercedArgumentNames(two.inputSchema, { a: "1", b: "true" }),
+      ).toEqual(["a", "b"]);
+    });
+
+    // Root composition (#2123): the declared type can live on a branch, and
+    // the conversion selects that branch from the supplied values — so this
+    // must too, or a branch's arguments would look unconvertible.
+    it("resolves a type declared on a root union branch", () => {
+      const union: Tool = {
+        name: "u",
+        inputSchema: {
+          type: "object",
+          oneOf: [
+            {
+              type: "object",
+              properties: {
+                kind: { const: "n" },
+                value: { type: "number" },
+              },
+              required: ["kind"],
+            },
+            {
+              type: "object",
+              properties: {
+                kind: { const: "s" },
+                value: { type: "string" },
+              },
+              required: ["kind"],
+            },
+          ],
+        },
+      };
+      expect(
+        coercedArgumentNames(union.inputSchema, { kind: "n", value: "2" }),
+      ).toEqual(["value"]);
+      expect(
+        coercedArgumentNames(union.inputSchema, { kind: "s", value: "2" }),
+      ).toEqual([]);
+    });
+
+    it("says nothing when no argument is a string", () => {
+      expect(coercedArgumentNames(numeric.inputSchema, { count: 1 })).toEqual(
+        [],
+      );
+    });
+  });
+
+  describe("coercedArgumentsError", () => {
+    // Both surfaces refuse the same drafts, so they must not word it two ways;
+    // the tool name is included only where the caller knows it.
+    it("names the tool when it is known", () => {
+      expect(coercedArgumentsError(["count"], "add")).toBe(
+        "`count` would be converted to the type add's schema declares — write the value with that type instead",
+      );
+    });
+
+    it("omits the tool when the caller is already rendering one", () => {
+      expect(coercedArgumentsError(["count"])).toBe(
+        "`count` would be converted to the type the schema declares — write the value with that type instead",
+      );
+    });
+
+    it("lists several names", () => {
+      expect(coercedArgumentsError(["a", "b"], "pair")).toContain("`a`, `b`");
     });
   });
 
