@@ -450,122 +450,62 @@ vi.mock("./lib/publishAppDocument", () => ({
 // that invoke the App's connect / call-tool / get-prompt / read-resource /
 // set-log-level handlers.
 vi.mock("./components/views/InspectorView/InspectorView", () => ({
-  InspectorView: (props: {
-    toolCallState?: { status?: string };
-    toolsUi?: {
-      selectedToolKey?: string;
-      formValues: Record<string, unknown>;
-      search: string;
-    };
-    promptsUi?: {
-      selectedPromptName?: string;
-      argumentValues: Record<string, string>;
-      submittedFor?: string;
-      search: string;
-    };
-    logsUi?: { filterText: string; visibleLevels: Record<string, boolean> };
-    getPromptState?: { status?: string };
-    readResourceState?: { status?: string };
-    currentLogLevel?: string;
-    activeTab?: string;
-    activeServer?: string;
-    erroredServerId?: string;
-    initializeResult?: { serverInfo: { name: string; version: string } };
-    onActiveTabChange: (tab: string) => void;
-    onConnectionInfo: () => void;
-    onToggleConnection: (id: string) => void;
-    onToolsUiChange: (next: {
-      selectedToolKey?: string;
-      formValues: Record<string, unknown>;
-      search: string;
-    }) => void;
-    onPromptsUiChange: (next: {
-      selectedPromptName?: string;
-      argumentValues: Record<string, string>;
-      submittedFor?: string;
-      search: string;
-    }) => void;
-    onLogsUiChange: (next: {
-      filterText: string;
-      visibleLevels: Record<string, boolean>;
-    }) => void;
-    progressByTaskId?: Record<string, unknown>;
-    onCallTool: (
-      name: string,
-      args: Record<string, unknown>,
-      runAsTask?: boolean,
-    ) => void;
-    onGetPrompt: (name: string, args: Record<string, string>) => void;
-    onReadResource: (uri: string) => void;
-    onSetLogLevel: (level: string) => void;
-    onCancelTask: (taskId: string) => void;
-    onCancelToolCall: () => void;
-    onClearCompletedTasks: () => void;
-    onRefreshTasks: () => void;
-    onServerSettings: (id: string) => void;
-    onServerEdit: (id: string) => void;
-    onServerAdd: () => void;
-    highlightedServerIds?: string[];
-    onClearProtocol: () => void;
-    onReplayProtocol: (id: string) => void;
-    onTogglePinProtocol: (id: string) => void;
-    pinnedProtocolIds?: Set<string>;
-    onRefreshTools: () => void;
-    toolsPagination: {
-      paginated: boolean;
-      canLoadMore: boolean;
-      loadedPages: number;
-      onPaginatedChange: (v: boolean) => void;
-      onLoadMore: () => void;
-    };
-  }) => (
+  InspectorView: (props: InspectorViewProps) => (
     <div>
       <span data-testid="tool-status">
-        {props.toolCallState?.status ?? "none"}
+        {props.tools.toolCallState?.status ?? "none"}
       </span>
       <span data-testid="task-progress-keys">
-        {Object.keys(props.progressByTaskId ?? {}).join(",") || "none"}
+        {Object.keys(props.tasks.progressByTaskId ?? {}).join(",") || "none"}
       </span>
       <span data-testid="selected-tool">
-        {props.toolsUi?.selectedToolKey ?? "none"}
+        {props.tools.toolsUi?.selectedToolKey ?? "none"}
       </span>
-      <span data-testid="tool-search">{props.toolsUi?.search || "none"}</span>
+      <span data-testid="tool-search">
+        {props.tools.toolsUi?.search || "none"}
+      </span>
       <span data-testid="selected-prompt">
-        {props.promptsUi?.selectedPromptName ?? "none"}
+        {props.prompts.promptsUi?.selectedPromptName ?? "none"}
       </span>
-      <span data-testid="log-filter">{props.logsUi?.filterText || "none"}</span>
+      <span data-testid="log-filter">
+        {props.logs.logsUi?.filterText || "none"}
+      </span>
       <span data-testid="prompt-status">
-        {props.getPromptState?.status ?? "none"}
+        {props.prompts.getPromptState?.status ?? "none"}
       </span>
       <span data-testid="resource-status">
-        {props.readResourceState?.status ?? "none"}
+        {props.resources.readResourceState?.status ?? "none"}
       </span>
-      <span data-testid="log-level">{props.currentLogLevel}</span>
-      <span data-testid="active-tab">{props.activeTab ?? "none"}</span>
+      <span data-testid="log-level">{props.logs.currentLogLevel}</span>
+      <span data-testid="active-tab">{props.shell.activeTab ?? "none"}</span>
       <span data-testid="init-result">
-        {props.initializeResult
-          ? `name:${props.initializeResult.serverInfo.name || "(empty)"}`
+        {props.connection.initializeResult
+          ? `name:${props.connection.initializeResult.serverInfo.name || "(empty)"}`
           : "none"}
       </span>
       <span data-testid="errored-server">
-        {props.erroredServerId ?? "none"}
+        {props.connection.erroredServerId ?? "none"}
       </span>
-      <span data-testid="active-server">{props.activeServer ?? "none"}</span>
-      <button onClick={() => props.onActiveTabChange("Servers")}>
+      <span data-testid="active-server">
+        {props.connection.activeServer ?? "none"}
+      </span>
+      <button onClick={() => props.shell.onActiveTabChange("Servers")}>
         switch-servers-tab
       </button>
-      <button onClick={() => props.onToggleConnection("A")}>connect</button>
+      <button onClick={() => props.connection.onToggleConnection("A")}>
+        connect
+      </button>
       {/* A second target, so a test can drive an A -> B -> A switch (#2095). */}
-      <button onClick={() => props.onToggleConnection("B")}>connect-b</button>
-      <button onClick={() => props.onConnectionInfo()}>
+      <button onClick={() => props.connection.onToggleConnection("B")}>
+        connect-b
+      </button>
+      <button onClick={() => props.servers.onConnectionInfo("A")}>
         open-connection-info
       </button>
       <button
         onClick={() =>
-          props.onToolsUiChange({
-            formValues: {},
-            search: "",
-            ...props.toolsUi,
+          props.tools.onToolsUiChange({
+            ...props.tools.toolsUi,
             selectedToolKey: "0:get_acts",
           })
         }
@@ -574,10 +514,8 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
       </button>
       <button
         onClick={() =>
-          props.onToolsUiChange({
-            formValues: {},
-            search: "",
-            ...props.toolsUi,
+          props.tools.onToolsUiChange({
+            ...props.tools.toolsUi,
             selectedToolKey: "1:other_tool",
           })
         }
@@ -586,9 +524,8 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
       </button>
       <button
         onClick={() =>
-          props.onToolsUiChange({
-            formValues: {},
-            ...props.toolsUi,
+          props.tools.onToolsUiChange({
+            ...props.tools.toolsUi,
             search: "act",
           })
         }
@@ -597,10 +534,8 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
       </button>
       <button
         onClick={() =>
-          props.onPromptsUiChange({
-            argumentValues: {},
-            search: "",
-            ...props.promptsUi,
+          props.prompts.onPromptsUiChange({
+            ...props.prompts.promptsUi,
             selectedPromptName: "greet",
           })
         }
@@ -609,70 +544,94 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
       </button>
       <button
         onClick={() =>
-          props.onLogsUiChange({
-            visibleLevels: {},
-            ...props.logsUi,
+          props.logs.onLogsUiChange({
+            ...props.logs.logsUi,
             filterText: "err",
           })
         }
       >
         set-log-filter
       </button>
-      <button onClick={() => props.onCallTool("get_acts", {})}>call</button>
-      <button onClick={() => props.onCallTool("get_acts", {}, true)}>
+      <button onClick={() => props.tools.onCallTool("get_acts", {})}>
+        call
+      </button>
+      <button onClick={() => props.tools.onCallTool("get_acts", {}, true)}>
         call-as-task
       </button>
-      <button onClick={() => props.onCancelTask("task-1")}>cancel-task</button>
-      <button onClick={() => props.onCancelToolCall()}>cancel-tool-call</button>
-      <button onClick={() => props.onClearCompletedTasks()}>
+      <button onClick={() => props.tasks.onCancelTask("task-1")}>
+        cancel-task
+      </button>
+      <button onClick={() => props.tools.onCancelToolCall?.()}>
+        cancel-tool-call
+      </button>
+      <button onClick={() => props.tasks.onClearCompletedTasks()}>
         clear-completed
       </button>
-      <button onClick={() => props.onRefreshTasks()}>refresh-tasks</button>
-      <button onClick={() => props.onGetPrompt("greet", {})}>get-prompt</button>
-      <button onClick={() => props.onReadResource("res://x")}>
+      <button onClick={() => props.tasks.onRefreshTasks()}>
+        refresh-tasks
+      </button>
+      <button onClick={() => props.prompts.onGetPrompt("greet", {})}>
+        get-prompt
+      </button>
+      <button onClick={() => props.resources.onReadResource("res://x")}>
         read-resource
       </button>
-      <button onClick={() => props.onSetLogLevel("debug")}>set-level</button>
-      <button onClick={() => props.onServerSettings("A")}>open-settings</button>
+      <button onClick={() => props.logs.onSetLogLevel("debug")}>
+        set-level
+      </button>
+      <button onClick={() => props.servers.onServerSettings("A")}>
+        open-settings
+      </button>
       {/* The real server grid (and its Add / Edit controls) lives inside this
           mocked view, so the config modal is only reachable through these
           callbacks — and the highlight batch only observable through this prop. */}
-      <button onClick={() => props.onServerEdit("A")}>edit-server</button>
-      <button onClick={() => props.onServerAdd()}>add-server</button>
+      <button onClick={() => props.servers.onServerEdit("A")}>
+        edit-server
+      </button>
+      <button onClick={() => props.servers.onServerAdd()}>add-server</button>
       <span data-testid="highlighted-servers">
-        {(props.highlightedServerIds ?? []).join(",") || "none"}
+        {(props.servers.highlightedServerIds ?? []).join(",") || "none"}
       </span>
       <span data-testid="pinned-history">
-        {Array.from(props.pinnedProtocolIds ?? []).join(",")}
+        {Array.from(props.protocol.pinnedProtocolIds ?? []).join(",")}
       </span>
-      <button onClick={() => props.onTogglePinProtocol("hist-1")}>
+      <button onClick={() => props.protocol.onTogglePinProtocol("hist-1")}>
         toggle-pin
       </button>
-      <button onClick={() => props.onReplayProtocol("hist-1")}>
+      <button onClick={() => props.protocol.onReplayProtocol("hist-1")}>
         replay-history
       </button>
-      <button onClick={() => props.onClearProtocol()}>clear-history</button>
+      <button onClick={() => props.protocol.onClearProtocol()}>
+        clear-history
+      </button>
       <span data-testid="tools-paginated">
-        {String(props.toolsPagination.paginated)}
+        {String(props.tools.toolsPagination.paginated)}
       </span>
       <span data-testid="tools-loaded-pages">
-        {props.toolsPagination.loadedPages}
+        {props.tools.toolsPagination.loadedPages}
       </span>
-      <button onClick={() => props.toolsPagination.onPaginatedChange(true)}>
+      <button
+        onClick={() => props.tools.toolsPagination.onPaginatedChange(true)}
+      >
         paginated-on
       </button>
-      <button onClick={() => props.toolsPagination.onPaginatedChange(false)}>
+      <button
+        onClick={() => props.tools.toolsPagination.onPaginatedChange(false)}
+      >
         paginated-off
       </button>
-      <button onClick={() => props.toolsPagination.onLoadMore()}>
+      <button onClick={() => props.tools.toolsPagination.onLoadMore()}>
         load-more-tools
       </button>
-      <button onClick={() => props.onRefreshTools()}>refresh-tools</button>
+      <button onClick={() => props.tools.onRefreshTools()}>
+        refresh-tools
+      </button>
     </div>
   ),
 }));
 
 import App from "./App";
+import type { InspectorViewProps } from "./components/views/InspectorView/InspectorView";
 import { SERVER_INFO_NOT_REPORTED_LABEL } from "./components/groups/ConnectionInfoContent/ConnectionInfoContent";
 import { OAUTH_CALLBACK_PATH } from "./utils/oauthFlow.js";
 import { INSPECTOR_SERVERS_TAB } from "./utils/inspectorTabs.js";
