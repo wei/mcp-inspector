@@ -1220,6 +1220,71 @@ export function createCollectUrlElicitationTool(): ToolDefinition {
 }
 
 /**
+ * Create a "slow_task" tool that runs until the client cancels it (#2140).
+ *
+ * It emits a progress notification every second up to `seconds` (default 60)
+ * and completes only if it is never cancelled, so there is a long, visible
+ * window in which to click Cancel.
+ *
+ * The point is what it does on the way out. On the 2026-07-28 era a client
+ * cancels a Streamable HTTP request by closing that request's response stream,
+ * and the SDK surfaces the disconnect to this handler as `extra.signal`. So the
+ * tool reports which signal it actually received: cancelled through the stream,
+ * the progress stops immediately; cancelled by a `notifications/cancelled` the
+ * server is free to ignore, the progress keeps arriving until the tool
+ * completes on its own — the exact symptom reported.
+ */
+export function createSlowTaskTool(): ToolDefinition {
+  return {
+    name: "slow_task",
+    description:
+      "Run for up to `seconds`, reporting progress each second, until cancelled",
+    inputSchema: {
+      seconds: z
+        .number()
+        .int()
+        .min(1)
+        .max(600)
+        .optional()
+        .describe("How long to run before completing on its own (default 60)"),
+    },
+    handler: async (
+      params: Record<string, unknown>,
+      _context?: TestServerContext,
+      extra?: HandlerExtra,
+    ) => {
+      const total = typeof params.seconds === "number" ? params.seconds : 60;
+      const progressToken = extra?._meta?.progressToken;
+      for (let step = 1; step <= total; step++) {
+        const slept = await new Promise<boolean>((resolve) => {
+          const timer = setTimeout(() => resolve(true), 1000);
+          extra?.signal?.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timer);
+              resolve(false);
+            },
+            { once: true },
+          );
+        });
+        if (!slept || extra?.signal?.aborted) {
+          // Cancelled. Return rather than keep working — the whole point of
+          // the demo is that the work actually stops.
+          return toToolResult(`Cancelled after ${step - 1}s`);
+        }
+        if (progressToken !== undefined) {
+          await extra?.sendNotification?.({
+            method: "notifications/progress",
+            params: { progressToken, progress: step, total },
+          });
+        }
+      }
+      return toToolResult(`Completed all ${total}s without being cancelled`);
+    },
+  };
+}
+
+/**
  * Create a "send_notification" tool that sends a notification message from the server
  */
 export function createSendNotificationTool(): ToolDefinition {

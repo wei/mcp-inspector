@@ -437,6 +437,63 @@ describe("modern-era negotiation (2026-07-28)", () => {
     expect(result.result!.isError).toBeFalsy();
   });
 
+  // #2140: on the 2026-07-28 era, closing the request's own response stream IS
+  // the cancellation signal for Streamable HTTP; `notifications/cancelled` is
+  // the stdio mechanism and the spec says it is neither required nor expected
+  // here. The SDK implements that fork off `transport.hasPerRequestStream` —
+  // but every Inspector connection is wrapped in `MessageTrackingTransport`,
+  // which was not forwarding it, so all three clients POSTed the notification
+  // and a spec-compliant server acknowledged it `202` and kept running.
+  //
+  // This asserts at the far end, on the server's own request signal: nothing on
+  // the client side distinguishes a cancel that reached the server from one
+  // that was dropped, which is exactly how this shipped.
+  it("cancels by aborting the request's stream, which the server observes", async () => {
+    let sawAbort!: (value: boolean) => void;
+    const aborted = new Promise<boolean>((resolve) => {
+      sawAbort = resolve;
+    });
+    let started!: () => void;
+    const running = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+
+    const slowServer = createTestServerHttp({
+      serverInfo: createTestServerInfo("cancel-era-test", "1.0.0"),
+      tools: [
+        {
+          name: "slow_task",
+          description: "Runs until the client cancels it",
+          handler: async (_params, _context, extra) => {
+            extra?.signal?.addEventListener("abort", () => sawAbort(true), {
+              once: true,
+            });
+            started();
+            // Never settles on its own, so a regression is a timeout rather
+            // than a pass.
+            return new Promise(() => {});
+          },
+        },
+      ],
+      modern: {},
+    });
+    await slowServer.start();
+    server = slowServer;
+
+    const connected = await connectWithEra(slowServer.url, "modern");
+    const { tools } = await connected.listTools();
+    const tool = tools.find((t) => t.name === "slow_task");
+
+    // Hold the rejection immediately so it is never seen as unhandled while we
+    // wait on the server side.
+    const settled = connected.callTool(tool!, {}).catch((err: unknown) => err);
+    await running;
+    expect(connected.cancelToolCall()).toBe(true);
+
+    await expect(settled).resolves.toBeInstanceOf(ToolCallCancelledError);
+    await expect(aborted).resolves.toBe(true);
+  }, 30_000);
+
   it("cancels an in-flight MRTR call while its embedded request is pending", async () => {
     const started = await startMrtrServer(createMrtrTool());
     const connected = await connectWithEra(started.url, "modern");

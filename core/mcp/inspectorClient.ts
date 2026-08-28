@@ -648,9 +648,12 @@ export class InspectorClient extends InspectorClientEventTarget {
   >();
   private rawWireRequestCounter = 0;
   // Abort controller for the in-flight ordinary (non-task) tool call. Aborting
-  // it makes the SDK send a `notifications/cancelled` for that request (the MCP
-  // cancellation flow) and reject the pending call, which `callTool` surfaces as
-  // a `ToolCallCancelledError`. Undefined when no ordinary call is in flight.
+  // it hands the SDK the MCP cancellation flow for that request and rejects the
+  // pending call, which `callTool` surfaces as a `ToolCallCancelledError`. Which
+  // signal reaches the server is the transport's business, not ours: a
+  // per-request-stream transport on a 2026-era connection has that request's
+  // stream aborted, and everything else gets `notifications/cancelled` (#2140).
+  // Undefined when no ordinary call is in flight.
   // Task-augmented calls have a server-side task and are cancelled via
   // `cancelRequestorTask` instead, so they don't use this (#1458).
   private activeToolCallAbortController?: AbortController;
@@ -1169,8 +1172,10 @@ export class InspectorClient extends InspectorClientEventTarget {
     if (this.requestTimeout !== undefined) {
       opts.timeout = this.requestTimeout;
     }
-    // When provided, aborting this signal makes the SDK send a
-    // `notifications/cancelled` for the request and reject it (#1458).
+    // When provided, aborting this signal cancels the request and rejects it
+    // (#1458). The SDK picks the wire signal from the transport: an aborted
+    // per-request SSE stream on a 2026-era Streamable HTTP connection, and
+    // `notifications/cancelled` everywhere else (#2140).
     if (signal) {
       opts.signal = signal;
     }
@@ -2976,10 +2981,13 @@ export class InspectorClient extends InspectorClientEventTarget {
 
   /**
    * Cancel the in-flight ordinary (non-task) tool call started by
-   * {@link callTool}. Aborting its request makes the SDK send a
-   * `notifications/cancelled` to the server (the MCP cancellation flow) and
-   * reject the pending call, which `callTool` surfaces as a
-   * {@link ToolCallCancelledError}.
+   * {@link callTool}. Aborting its request runs the MCP cancellation flow and
+   * rejects the pending call, which `callTool` surfaces as a
+   * {@link ToolCallCancelledError}. The SDK chooses the wire signal from the
+   * transport: on a 2026-era Streamable HTTP connection it aborts that
+   * request's own SSE response stream — the spec's cancellation signal —
+   * rather than sending `notifications/cancelled`, which is the stdio
+   * mechanism and remains in use there (#2140).
    *
    * Task-augmented calls have a server-side task and are cancelled via
    * {@link cancelRequestorTask} instead — this is a no-op for them (and whenever

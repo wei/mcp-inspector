@@ -163,6 +163,42 @@ Each config below is a ready-made server for exercising one feature by hand. Loa
 | `subscriptions-{legacy,modern}-http.json` | Resource subscriptions, both eras                   | [#1630](https://github.com/modelcontextprotocol/inspector/issues/1630) |
 | `subscriptions-never-acknowledged-http.json` | A `subscriptions/listen` answered with a bare result  | [#2097](https://github.com/modelcontextprotocol/inspector/issues/2097) |
 | `tasks-{legacy,modern}-http.json`         | Tasks, both eras                                    | [#1631](https://github.com/modelcontextprotocol/inspector/issues/1631) |
+| `cancellation-modern-http.json`           | Cancelling a call by closing its response stream    | [#2140](https://github.com/modelcontextprotocol/inspector/issues/2140) |
+
+#### Cancelling a call
+
+`cancellation-modern-http.json` serves `slow_task`, which reports progress once
+a second for up to 60 seconds and returns early — saying how far it got — if it
+is cancelled. Connect with **Protocol Era = Modern**.
+
+Run `slow_task` from the Tools tab and click **Cancel** after a few seconds. The
+progress must stop immediately, and the result must read `Cancelled after Ns`.
+On the broken build the progress kept arriving until the tool completed all 60
+seconds, because the Inspector was sending the wrong cancellation signal
+([#2140](https://github.com/modelcontextprotocol/inspector/issues/2140)).
+
+The 2026-07-28 spec makes this
+[transport-specific](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation#transport-specific-cancellation):
+for Streamable HTTP, **closing the request's SSE response stream is the
+cancellation signal**, and a `notifications/cancelled` is "neither required nor
+expected"; stdio, which has no per-request stream to close, keeps the
+notification. A spec-compliant server therefore answers the notification `202
+Accepted` and drops it — which is precisely what the reporter observed, with the
+task running on to completion while the Inspector reported it cancelled.
+
+The SDK already implements that fork, off `transport.hasPerRequestStream`. Every
+Inspector connection is wrapped in `MessageTrackingTransport` (it feeds the
+Protocol and Network tabs), which did not forward the flag — so the SDK saw
+`undefined` and took the stdio branch on **every** client, CLI and TUI included.
+The web client needed two more links in the chain: its browser-side transport
+answers for the real upstream one that lives on the Node backend, and the abort
+has to survive the `POST /api/mcp/send` hop to reach it.
+
+Watch it on the wire in the **Protocol** tab: cancelling now emits no
+`notifications/cancelled` frame at all, and the `tools/call` entry ends as an
+aborted request rather than a completed one. Switch the same server to
+**Legacy** and the notification comes back — that era has no per-stream
+mechanism, so it is still the correct signal there.
 
 #### MCP Apps
 
