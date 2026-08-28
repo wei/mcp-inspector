@@ -1254,9 +1254,23 @@ export function useOAuthRecovery({
   const clearServerOAuthAndDisconnect = useCallback(
     async (server: ClearableServer) => {
       const isActive = server.id === activeServerId;
+      const client = isActive ? inspectorClient : null;
+      // The RFC 7009 leg is a bounded network request (#2144), so this callback
+      // can stay suspended for seconds — long enough for the user to close the
+      // modal and switch servers. `isActive` and `inspectorClient` were
+      // snapshotted before it, so everything below would otherwise apply to
+      // whatever session is active *now*: disconnecting a client the user just
+      // switched to, and running the session-wide UI cleanup against it.
+      //
+      // The session ref is the live answer. Only the parts that touch the
+      // *session* are gated on it; the store write already happened and the
+      // toast still belongs to the server the user asked about.
+      const stillTargetsActiveSession = (): boolean =>
+        isActive && sessionRef.current.activeServerId === server.id;
+
       const { cleared, revocation } = await clearServerOAuthState({
         config: server.config,
-        inspectorClient: isActive ? inspectorClient : null,
+        inspectorClient: client,
         isActiveConnection: isActive,
         oauthStorage: webOAuthStorage,
         revoke: server.settings?.oauthRevokeOnClear !== false,
@@ -1264,14 +1278,17 @@ export function useOAuthRecovery({
       });
       if (!cleared) return;
 
-      if (isActive && inspectorClient) {
+      if (client && stillTargetsActiveSession()) {
         try {
-          await inspectorClient.disconnect();
+          await client.disconnect();
         } finally {
-          setConnectionInfoOAuthWhenConnected(undefined);
-          finalizeExplicitDisconnect();
+          // Revalidate after the second await for the same reason.
+          if (stillTargetsActiveSession()) {
+            setConnectionInfoOAuthWhenConnected(undefined);
+            finalizeExplicitDisconnect();
+          }
         }
-      } else {
+      } else if (!isActive) {
         clearOAuthResumeOnExplicitDisconnect();
       }
 
@@ -1286,6 +1303,7 @@ export function useOAuthRecovery({
     [
       activeServerId,
       inspectorClient,
+      sessionRef,
       webOAuthStorage,
       finalizeExplicitDisconnect,
       clearOAuthResumeOnExplicitDisconnect,

@@ -476,9 +476,11 @@ describe("revokeStoredOAuthTokens", () => {
   // Suppressing on the value would drop it unrevoked and unreported, which is
   // why the suppression keys off the store's issuer stamp instead.
   it("keeps the legacy grant when another issuer holds the same token value", async () => {
+    // The metadata names the same issuer as the slot below, so BOTH grants are
+    // genuinely revocable — otherwise this would pass for the wrong reason.
     await storage.saveServerMetadata(
       SERVER_URL,
-      metadata({ issuer: undefined }),
+      metadata({ issuer: "https://as-a.example.com" }),
     );
     // A legacy unkeyed grant...
     await storage.saveTokens(SERVER_URL, {
@@ -507,15 +509,96 @@ describe("revokeStoredOAuthTokens", () => {
     expect(fetchFn).toHaveBeenCalledTimes(2);
   });
 
+  // Absence establishes nothing: a metadata document with no `issuer` cannot
+  // show that its revocation endpoint belongs to the grant's authorization
+  // server, so sending the token anyway would disclose a bearer credential to
+  // a server that may never have minted it.
+  it("refuses an issuer-bound grant when the cached metadata names no issuer", async () => {
+    await storage.saveServerMetadata(
+      SERVER_URL,
+      metadata({ issuer: undefined }),
+    );
+    await storage.saveTokens(
+      SERVER_URL,
+      { access_token: "a", token_type: "Bearer", refresh_token: "r" },
+      { issuer: "https://as-a.example.com" },
+    );
+    const fetchFn = vi.fn<typeof fetch>();
+
+    const outcome = await revokeStoredOAuthTokens({
+      serverUrl: SERVER_URL,
+      storage,
+      fetchFn,
+    });
+
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ status: "failed" });
+    expect(outcome.status === "failed" ? outcome.detail : "").toContain(
+      "names no issuer",
+    );
+  });
+
+  // A legacy unkeyed grant is not bound to any authorization server, so there
+  // is nothing to contradict — it proceeds without the comparison.
+  it("still revokes a legacy grant when the metadata names no issuer", async () => {
+    await storage.saveServerMetadata(
+      SERVER_URL,
+      metadata({ issuer: undefined }),
+    );
+    await storage.saveTokens(SERVER_URL, {
+      access_token: "a",
+      token_type: "Bearer",
+      refresh_token: "r",
+    });
+    const fetchFn = vi.fn<typeof fetch>(
+      async () => new Response(null, { status: 200 }),
+    );
+
+    await expect(
+      revokeStoredOAuthTokens({ serverUrl: SERVER_URL, storage, fetchFn }),
+    ).resolves.toMatchObject({ status: "revoked" });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  // If `listIssuers` fails there is no enumerated slot behind the stamp, so
+  // skipping a stamped ctx-less read would leave the one grant the store can
+  // still produce unrevoked — while `clear` deleted it anyway.
+  it("revokes the active grant even when the issuer list cannot be read", async () => {
+    await storage.saveServerMetadata(
+      SERVER_URL,
+      metadata({ issuer: "https://as-a.example.com" }),
+    );
+    await storage.saveTokens(
+      SERVER_URL,
+      { access_token: "a", token_type: "Bearer", refresh_token: "r-active" },
+      { issuer: "https://as-a.example.com" },
+    );
+    vi.spyOn(storage, "listIssuers").mockRejectedValue(new Error("no list"));
+    const fetchFn = vi.fn<typeof fetch>(
+      async () => new Response(null, { status: 200 }),
+    );
+
+    const outcome = await revokeStoredOAuthTokens({
+      serverUrl: SERVER_URL,
+      storage,
+      fetchFn,
+    });
+
+    expect(
+      new URLSearchParams(String(fetchFn.mock.calls[0]![1]!.body)).get("token"),
+    ).toBe("r-active");
+    // The listing failure is still surfaced — it outranks the success.
+    expect(outcome).toMatchObject({ status: "failed" });
+  });
+
   // The timeout is a budget for the WHOLE teardown, not per request. `clear`
   // deletes every issuer slot, so a per-request bound would let a server with
   // N of them block the disconnect for N × the timeout — at which point the
   // "short timeout" bounds a single request and nothing the user feels.
   it("shares one deadline across grants instead of one per grant", async () => {
-    await storage.saveServerMetadata(
-      SERVER_URL,
-      metadata({ issuer: undefined }),
-    );
+    await storage.saveServerMetadata(SERVER_URL, metadata({ issuer: "a" }));
+    // All three bound to the issuer the cached metadata describes, so all three
+    // are genuinely revocable and the budget is what stops them.
     vi.spyOn(storage, "listIssuers").mockResolvedValue(["a", "b", "c"]);
     vi.spyOn(storage, "getIssuerTokens").mockImplementation(
       async (_url: string, issuer: string) => ({

@@ -1368,6 +1368,47 @@ describe("useOAuthRecovery", () => {
       );
     });
 
+    // #2144 — the RFC 7009 leg is a bounded network request, so this callback
+    // can stay suspended for seconds. `isActive`/`inspectorClient` are captured
+    // before it, so without revalidating, a switch during the wait would
+    // disconnect the session the user just moved to and run the session-wide
+    // cleanup against it.
+    it("does not disconnect a session switched to while a clear is in flight", async () => {
+      let settle: (r: { cleared: boolean }) => void = () => {};
+      clearServerOAuthStateMock.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            settle = resolve as typeof settle;
+          }),
+      );
+      const client = fakeClient();
+      const h = harness({
+        servers: [entry("a"), entry("b")],
+        activeServerId: "a",
+        client,
+      });
+
+      let done: Promise<void>;
+      await act(async () => {
+        done = h.api().clearServerOAuthAndDisconnect(entry("a"));
+        await Promise.resolve();
+      });
+
+      // The user switches away while the clear is still running.
+      h.rerender({
+        servers: [entry("a"), entry("b")],
+        activeServerId: "b",
+        client,
+      });
+
+      await act(async () => {
+        settle({ cleared: true });
+        await done;
+      });
+
+      expect(client.disconnect).not.toHaveBeenCalled();
+    });
+
     it("clears the resume snapshot on an explicit disconnect", () => {
       writeOAuthResumeSnapshot({
         version: 1,

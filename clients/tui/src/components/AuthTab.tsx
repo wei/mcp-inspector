@@ -101,6 +101,13 @@ export function AuthTab({
    */
   const clearAttemptRef = useRef(0);
   /**
+   * In-flight lock. A ref, not the `clearState` above: two `s` keypresses
+   * delivered in the same input turn both read the state React last rendered,
+   * so a state-based guard lets both start and race each other over the same
+   * store entry. A ref is set before the call and seen by the second read.
+   */
+  const clearInFlightRef = useRef(false);
+  /**
    * Set synchronously when a clear starts, and consumed by the reset effect
    * below. The clear itself bumps `oauthRevision` on its way out, so without
    * this the reset would race the confirmation it is meant to outlive — and
@@ -115,6 +122,7 @@ export function AuthTab({
   // banner: neither belongs to the server now on screen.
   useEffect(() => {
     clearAttemptRef.current++;
+    clearInFlightRef.current = false;
     setClearState("idle");
     setClearFailure(null);
     setLastClearDisconnected(false);
@@ -207,8 +215,9 @@ export function AuthTab({
       } else if (input.toLowerCase() === "s") {
         // Ignore repeats while one is in flight: the second would race the
         // first over the same store entry, and the user cannot see that the
-        // first is still running except by this state.
-        if (clearState === "clearing") return;
+        // first is still running except by the pending line below.
+        if (clearInFlightRef.current) return;
+        clearInFlightRef.current = true;
         const attempt = ++clearAttemptRef.current;
         const attemptServer = serverName;
         setLastClearDisconnected(isLiveConnection);
@@ -222,13 +231,21 @@ export function AuthTab({
           serverNameRef.current === attemptServer;
         void Promise.resolve(onClearOAuth()).then(
           () => {
+            clearInFlightRef.current = false;
             if (current()) setClearState("cleared");
           },
           (err: unknown) => {
+            clearInFlightRef.current = false;
             // A rejection is NOT a revocation failure — those come back as
             // outcomes and are reported through the message line. This is the
             // local clear or the disconnect itself failing, so announcing
             // "OAuth state cleared" here would be a plain lie.
+            //
+            // It also means `handleClearOAuth` never reached its
+            // `oauthRevision` bump, so the marker below has no bump to skip.
+            // Left set, it would swallow the next *unrelated* revision change
+            // and strand this banner after the OAuth state moved on.
+            ownClearRef.current = false;
             if (!current()) return;
             setClearFailure(err instanceof Error ? err.message : String(err));
             setClearState("failed");

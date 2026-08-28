@@ -138,6 +138,55 @@ describe("AuthTab", () => {
     expect(lastFrame() ?? "").toContain("OAuth state cleared");
   });
 
+  // A state-based guard is not effective until React re-renders, so two `s`
+  // events in the SAME input turn both read the last-rendered "idle" and start
+  // concurrent clears against one store entry. No tick between the writes.
+  it("ignores a repeat delivered in the same input turn", async () => {
+    const onClearOAuth = vi.fn(() => new Promise<void>(() => {}));
+    const { stdin } = render(
+      <AuthTab
+        {...baseProps}
+        onClearOAuth={onClearOAuth}
+        inspectorClient={null}
+        oauthStatus="idle"
+        oauthMessage={null}
+        focused
+      />,
+    );
+    await tick();
+
+    stdin.write("s");
+    stdin.write("s");
+    await tick();
+
+    expect(onClearOAuth).toHaveBeenCalledTimes(1);
+  });
+
+  // A rejection releases the lock, so the user can retry.
+  it("allows a retry after a rejected clear", async () => {
+    const onClearOAuth = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error("nope"))
+      .mockResolvedValue(undefined);
+    const { stdin } = render(
+      <AuthTab
+        {...baseProps}
+        onClearOAuth={onClearOAuth}
+        inspectorClient={null}
+        oauthStatus="idle"
+        oauthMessage={null}
+        focused
+      />,
+    );
+    await tick();
+    stdin.write("s");
+    await tick();
+    stdin.write("s");
+    await tick();
+
+    expect(onClearOAuth).toHaveBeenCalledTimes(2);
+  });
+
   // A rejection is NOT a revocation failure — those come back as outcomes and
   // are reported through the message line. This is the local clear or the
   // disconnect itself failing, so reporting success would be a plain lie.

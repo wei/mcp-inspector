@@ -405,30 +405,29 @@ async function collectGrants(
     const revocable = selectRevocableToken(tokens);
     if (!revocable) return;
 
-    if (issuer === undefined) {
-      // `getTokens` stamps the resolved issuer onto a value it took from a
-      // byIssuer slot and leaves an unkeyed one unstamped (see `withIssuer` in
-      // oauth-storage.ts — the stamp is the key it came from). That, not the
-      // token's *value*, is what says this read duplicates a slot already
-      // collected: the active slot can hold client information without a token,
-      // in which case this falls back to the legacy grant, and a coincidental
-      // value collision with some other issuer would otherwise drop it
-      // unrevoked and unreported.
-      const fromSlot = (tokens as { issuer?: string } | undefined)?.issuer;
-      if (fromSlot !== undefined) return;
-    } else {
-      const key = `${issuer}\u0000${revocable.token}`;
-      if (seenKeys.has(key)) return;
-      seenKeys.add(key);
-    }
+    // `getTokens` stamps the resolved issuer onto a value it took from a
+    // byIssuer slot and leaves an unkeyed one unstamped (see `withIssuer` in
+    // oauth-storage.ts — the stamp is the key it came from), so the ctx-less
+    // read reports which issuer its answer belongs to, if any.
+    const grantIssuer =
+      issuer ?? (tokens as { issuer?: string } | undefined)?.issuer;
+    // Keyed by issuer AND token: a token means nothing outside the
+    // authorization server that minted it, so two issuers minting the same
+    // opaque value are two grants. Deduping the ctx-less read on its *stamp*
+    // alone would be wrong too — if `listIssuers` failed there is no enumerated
+    // slot behind the stamp, and skipping would leave the one readable grant
+    // unrevoked while `clear` deleted it.
+    const key = `${grantIssuer ?? "\u0000legacy"}\u0000${revocable.token}`;
+    if (seenKeys.has(key)) return;
+    seenKeys.add(key);
 
     grants.push({
-      issuer,
+      issuer: grantIssuer,
       ...revocable,
       clientInformation: await resolveClientInformation(
         storage,
         serverUrl,
-        issuer,
+        grantIssuer,
       ),
     });
   };
@@ -541,17 +540,20 @@ async function computeOutcome(
     for (const grant of grants) {
       // Metadata is cached once per server, not per issuer, so it describes
       // whichever authorization server was discovered last. Sending another
-      // issuer's token to *this* endpoint would hand a credential to a server
-      // that never minted it — worse than not revoking. So say plainly that the
-      // grant is being dropped unrevoked rather than doing either silently.
-      if (
-        grant.issuer !== undefined &&
-        metadata.issuer !== undefined &&
-        grant.issuer !== metadata.issuer
-      ) {
+      // issuer's token to *this* endpoint would disclose a bearer credential to
+      // a server that never minted it — worse than not revoking. So an
+      // issuer-bound grant must be able to PROVE the endpoint is its own, which
+      // means a metadata document carrying no `issuer` is a mismatch rather
+      // than a free pass: absence establishes nothing. Only a legacy unkeyed
+      // grant proceeds without the comparison, since nothing binds it to a
+      // different authorization server in the first place.
+      if (grant.issuer !== undefined && metadata.issuer !== grant.issuer) {
         outcomes.push({
           status: "failed",
-          detail: `the cached authorization-server metadata is for ${metadata.issuer}, so the grant bound to ${grant.issuer} was cleared without revocation`,
+          detail:
+            metadata.issuer === undefined
+              ? `the cached authorization-server metadata names no issuer, so the grant bound to ${grant.issuer} could not be matched to this revocation endpoint and was cleared without revocation`
+              : `the cached authorization-server metadata is for ${metadata.issuer}, so the grant bound to ${grant.issuer} was cleared without revocation`,
         });
         continue;
       }
