@@ -1106,6 +1106,54 @@ describe("resource subscriptions era fork (#1630)", () => {
         expect(int.modernReconnectAttempts).toBe(0);
       });
 
+      /**
+       * The showcase fixture's mode, and the only shape that reaches the badge:
+       * the never-acknowledged status is gated on a live subscription, which a
+       * server refusing from the outset never lets you hold.
+       *
+       * The list-change exemption is the load-bearing half. The Inspector opens
+       * a listen at connect time whenever a list-change opt-in is live (#1920),
+       * so a mode that counted *listens* would spend its allowance there and
+       * refuse the user's very first Subscribe — leaving the documented repro
+       * describing something the trace does not show.
+       */
+      it("acknowledges the first resource subscription, then refuses (after-first)", async () => {
+        const started = await startServer({
+          neverAcknowledgeSubscriptions: "after-first",
+        });
+        // Every list-change opt-in ON, so the connect-time listen really is
+        // opened — that is the listen the exemption has to let through.
+        const { connected, messages } = await connect(started.url, "modern", {
+          tools: true,
+          resources: true,
+          prompts: true,
+        });
+        expect(
+          methodsSent(messages).filter((m) => m === "subscriptions/listen"),
+        ).toHaveLength(1);
+
+        // First resource subscription: acknowledged, so the allowance was still
+        // unspent after the connect-time listen.
+        await expect(
+          connected.subscribeToResource(RESOURCE_URI),
+        ).resolves.toBeUndefined();
+        expect(connected.getResourceSubscriptionStreamState()).toMatchObject({
+          active: true,
+          status: "acknowledged",
+        });
+
+        // Second: refused. The first URI survives the rollback, so the stream
+        // stays `active` and the badge is rendered.
+        await expect(
+          connected.subscribeToResource(RESOURCE_URI_2),
+        ).rejects.toThrow(NEVER_ACKNOWLEDGED_SUBSCRIPTION_MESSAGE);
+        expect(connected.getResourceSubscriptionStreamState()).toMatchObject({
+          active: true,
+          status: "never-acknowledged",
+        });
+        expect(connected.getSubscribedResources()).toEqual([RESOURCE_URI]);
+      });
+
       it("retries again after the user re-subscribes", async () => {
         // The flag is a fact about the last attempt, not a latch: a fresh
         // user-initiated subscribe must be allowed to reach the server again.
