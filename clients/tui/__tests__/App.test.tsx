@@ -1412,6 +1412,39 @@ describe("App (mid-session auth lifecycle events)", () => {
     await expectFrame(r, "unreachable");
   });
 
+  // The wiring is the contract here, not just `AuthTab`'s own behavior: a
+  // `void`-ing arrow between them resolves instantly, which makes the pending
+  // state, the repeat lock and the rejection path all inert while revocation
+  // is still running. Driven through the real App so the arrow cannot come
+  // back (#2144).
+  it("holds the pending state until the clear actually settles", async () => {
+    let settle: () => void = () => {};
+    h.clientSpies.clearOAuthTokens.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          settle = () =>
+            resolve({ status: "skipped", reason: "no_endpoint" as const });
+        }),
+    );
+    const r = await mount(oneHttp());
+    await press(r, ["a", "s"]);
+    await waitUntil(() => h.clientSpies.clearOAuthTokens.mock.calls.length > 0);
+    await tick();
+
+    // Still running: the pending line is up and the confirmation is not.
+    expect(r.lastFrame() ?? "").toContain("Clearing OAuth state");
+    expect(r.lastFrame() ?? "").not.toContain("OAuth state cleared");
+
+    // And the repeat lock is live, so a second press does not start another.
+    await press(r, ["s"]);
+    expect(h.clientSpies.clearOAuthTokens).toHaveBeenCalledTimes(1);
+
+    settle();
+    await waitUntil(() =>
+      (r.lastFrame() ?? "").includes("OAuth state cleared"),
+    );
+  });
+
   it("says nothing when there was nothing to revoke", async () => {
     const r = await mount(oneHttp());
     await press(r, ["a", "s"]);

@@ -1899,9 +1899,12 @@ function App({
                 focused={
                   focus === "tabContentList" || focus === "tabContentDetails"
                 }
-                onClearOAuth={() => {
-                  void handleClearOAuth();
-                }}
+                // Passed directly, NOT wrapped in a `void`-ing arrow: AuthTab
+                // awaits this to hold its pending state, keep its repeat lock,
+                // and route a rejection to the failure line. Dropping the
+                // promise here would resolve it instantly and make all three
+                // inert while revocation was still running (#2144).
+                onClearOAuth={handleClearOAuth}
                 connectionStatus={inspectorStatus}
               />
             ) : null}
