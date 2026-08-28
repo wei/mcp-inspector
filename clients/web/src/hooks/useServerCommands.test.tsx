@@ -862,6 +862,118 @@ describe("subscriptions and completion", () => {
     expect(h.api().onSubscribeResource).toBeTypeOf("function");
   });
 
+  // #2174. Both used to discard the promise with a bare `void`, so a failure
+  // was invisible in the UI and surfaced only as an unhandled rejection.
+  it("toasts a failed subscribe rather than swallowing it", async () => {
+    const h = harness({
+      client: client({
+        subscribeToResource: vi
+          .fn()
+          .mockRejectedValue(
+            new Error("Server does not support resource subscriptions"),
+          ),
+      }),
+    });
+    await act(async () => h.api().onSubscribeResource("u"));
+    await waitFor(() =>
+      expect(notificationsMock.show).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Failed to subscribe to resource",
+          message: "Server does not support resource subscriptions",
+        }),
+      ),
+    );
+  });
+
+  it("toasts a failed unsubscribe rather than swallowing it", async () => {
+    const h = harness({
+      client: client({
+        unsubscribeFromResource: vi
+          .fn()
+          .mockRejectedValue(new Error("Client is not connected")),
+      }),
+    });
+    await act(async () => h.api().onUnsubscribeResource("u"));
+    await waitFor(() =>
+      expect(notificationsMock.show).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Failed to unsubscribe from resource",
+          message: "Client is not connected",
+        }),
+      ),
+    );
+  });
+
+  it("recovers a lapsed authorization on subscribe, and retries", async () => {
+    const recover = vi.fn().mockResolvedValue(true);
+    const subscribeToResource = vi
+      .fn()
+      .mockRejectedValueOnce(authError())
+      .mockResolvedValue(undefined);
+    const h = harness({
+      client: client({ subscribeToResource }),
+      activeServerId: "a",
+      recovery: { handleCommandScopedAuthRecovery: recover },
+    });
+    await act(async () => h.api().onSubscribeResource("u"));
+    await waitFor(() => expect(subscribeToResource).toHaveBeenCalledTimes(2));
+    // `ambient`, not `resource`: a `resource` step-up failure is routed into
+    // the read-preview panel, which this command has nothing to do with.
+    expect(recover).toHaveBeenCalledWith(
+      expect.any(AuthRecoveryRequiredError),
+      {
+        serverId: "a",
+        source: "ambient",
+        retryOperation: expect.any(Function),
+      },
+    );
+    // The recovery owns the prompt, so the command itself stays quiet.
+    expect(notificationsMock.show).not.toHaveBeenCalled();
+  });
+
+  it("recovers a lapsed authorization on unsubscribe, and retries", async () => {
+    const recover = vi.fn().mockResolvedValue(true);
+    const unsubscribeFromResource = vi
+      .fn()
+      .mockRejectedValueOnce(authError())
+      .mockResolvedValue(undefined);
+    const h = harness({
+      client: client({ unsubscribeFromResource }),
+      activeServerId: "a",
+      recovery: { handleCommandScopedAuthRecovery: recover },
+    });
+    await act(async () => h.api().onUnsubscribeResource("u"));
+    await waitFor(() =>
+      expect(unsubscribeFromResource).toHaveBeenCalledTimes(2),
+    );
+    expect(recover).toHaveBeenCalledWith(
+      expect.any(AuthRecoveryRequiredError),
+      {
+        serverId: "a",
+        source: "ambient",
+        retryOperation: expect.any(Function),
+      },
+    );
+    expect(notificationsMock.show).not.toHaveBeenCalled();
+  });
+
+  it("does not toast a subscribe whose recovery was left unsatisfied", async () => {
+    // The recovery has taken over — a redirect is pending or a step-up prompt
+    // is open — so the wrapper resolves `undefined` rather than rejecting, and
+    // a toast here would talk over the prompt the user is looking at.
+    const recover = vi.fn().mockResolvedValue(false);
+    const h = harness({
+      client: client({
+        subscribeToResource: vi.fn().mockRejectedValue(authError()),
+      }),
+      activeServerId: "a",
+      recovery: { handleCommandScopedAuthRecovery: recover },
+    });
+    await act(async () => h.api().onSubscribeResource("u"));
+    await waitFor(() => expect(recover).toHaveBeenCalled());
+    expect(notificationsMock.show).not.toHaveBeenCalled();
+  });
+
   it("returns the completion values", async () => {
     const c = client();
     const h = harness({ client: c });
