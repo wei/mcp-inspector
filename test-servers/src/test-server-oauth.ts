@@ -802,8 +802,16 @@ async function authenticateRevocationClient(
     // server decodes each half after splitting on it. Decoding is what makes a
     // credential containing a reserved character (`:` in the id, `%` or `/` in
     // the secret) survive the round trip.
-    clientId = decodeURIComponent(decoded.slice(0, separator));
-    clientSecret = decodeURIComponent(decoded.slice(separator + 1));
+    //
+    // A malformed escape makes `decodeURIComponent` throw, which Express would
+    // turn into a 500 — so a bad credential would be reported as a server
+    // fault rather than as the `invalid_client` 401 this endpoint means.
+    try {
+      clientId = decodeURIComponent(decoded.slice(0, separator));
+      clientSecret = decodeURIComponent(decoded.slice(separator + 1));
+    } catch {
+      return null;
+    }
   } else {
     const bodyId: unknown = req.body?.client_id;
     const bodySecret: unknown = req.body?.client_secret;

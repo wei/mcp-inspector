@@ -446,7 +446,7 @@ The value now rides the normalized `AuthChallenge` as a string — it has to be 
 
 Add either server, connect and complete authorization, then use **Clear OAuth state and disconnect** (Server Settings → Authorization) and watch the Network tab.
 
-- On `oauth-revocation-http.json` a `POST /oauth/revoke` goes out **before** the local state is dropped, naming the **refresh token**. RFC 7009 §2.1 asks the authorization server to invalidate the access tokens issued under the same grant, so one request ends both halves — the fixture implements that linkage, so re-sending the old bearer token to `/mcp` afterwards gets a 401.
+- On `oauth-revocation-http.json` a `POST /oauth/revoke` goes out naming the **refresh token**. RFC 7009 §2.1 asks the authorization server to invalidate the access tokens issued under the same grant, so one request ends both halves — the fixture implements that linkage, so re-sending the old bearer token to `/mcp` afterwards gets a 401. The request is built from the stored state *before* the local clear and sent *after* it, so the clear never waits on the network; in the Network tab the POST therefore follows the local teardown rather than preceding it.
 - On `oauth-no-revocation-http.json` nothing is sent at all, and the clear behaves exactly as it did before the feature existed. That no-op path is what makes this safe against every authorization server with no RFC 7009 support ([#2144](https://github.com/modelcontextprotocol/inspector/issues/2144)).
 
 On the broken build both servers behaved like the second: the Inspector deleted its local copy and the grant stayed valid at the authorization server until it expired on its own — which for a refresh token is a long time, by design.

@@ -202,9 +202,14 @@ export interface RevokeTokenParams extends RevocationRequestParams {
 export async function revokeToken(
   params: RevokeTokenParams,
 ): Promise<TokenRevocationOutcome> {
-  const { url, init } = buildRevocationRequest(params);
   const timeoutMs = params.timeoutMs ?? DEFAULT_REVOCATION_TIMEOUT_MS;
   try {
+    // Inside the try: `encodeURIComponent` throws on a lone UTF-16 surrogate,
+    // which is valid JSON and so can reach here from a persisted client id or
+    // secret. Built outside, that would reject instead of returning a `failed`
+    // outcome — and every caller has already cleared its local state by now, so
+    // a rejection would break the documented best-effort guarantee.
+    const { url, init } = buildRevocationRequest(params);
     // The signal alone is not enough to bound this. In the browser the fetch is
     // `createRemoteFetch`, which re-issues the call as a POST to `/api/fetch`
     // and does not forward `init.signal`; the backend's outbound fetch gets no
@@ -232,8 +237,10 @@ export async function revokeToken(
     };
   } catch (err) {
     return {
+      // `params.endpoint`, not the built `url`: construction is inside the try
+      // now, so `url` may not exist on this path.
       status: "failed",
-      endpoint: url,
+      endpoint: params.endpoint,
       detail: err instanceof Error ? err.message : String(err),
     };
   }

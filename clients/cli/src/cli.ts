@@ -780,7 +780,7 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
     )
     .option(
       "--no-revoke",
-      "Requires --relogin. Skips the RFC 7009 revocation request that would otherwise end the grant at the authorization server before the local state is deleted. Also skipped when the server entry sets oauth.revokeOnClear to false.",
+      "Requires --relogin. Skips the RFC 7009 revocation request that would otherwise end the grant at the authorization server when the local state is deleted. Also skipped when the server entry sets oauth.revokeOnClear to false.",
     )
     .option(
       "--wait-for-auth <sec>",

@@ -6722,11 +6722,11 @@ export class InspectorClient extends InspectorClientEventTarget {
   }
 
   /**
-   * Clears OAuth tokens and client information
-   */
-  /**
-   * Drop this server's stored OAuth state, revoking the grant at the
-   * authorization server first (RFC 7009, #2144).
+   * Drop this server's stored OAuth state and revoke the grant at the
+   * authorization server (RFC 7009, #2144).
+   *
+   * The request is planned from the stored state, the state is cleared, and
+   * only then is the request sent — so the clear never waits on the network.
    *
    * The revocation is best-effort — an authorization server that advertises no
    * `revocation_endpoint` is left behaving exactly as before, and a network

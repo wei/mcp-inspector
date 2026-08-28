@@ -282,6 +282,27 @@ describe("revokeToken", () => {
     });
   });
 
+  // A lone UTF-16 surrogate is valid JSON, so it can reach here from a
+  // persisted client id or secret and makes `encodeURIComponent` throw. Every
+  // caller has already cleared its local state by the time this runs, so a
+  // rejection here would break the documented best-effort guarantee.
+  it("reports an unencodable credential as failed rather than throwing", async () => {
+    const outcome = await revokeToken({
+      endpoint: REVOKE_URL,
+      token: "r",
+      tokenTypeHint: "refresh_token",
+      clientInformation: {
+        client_id: "cid",
+        // Lone high surrogate.
+        client_secret: `bad${String.fromCharCode(0xd800)}`,
+      },
+      supportedAuthMethods: ["client_secret_basic"],
+      fetchFn: vi.fn<typeof fetch>(),
+    });
+
+    expect(outcome).toMatchObject({ status: "failed", endpoint: REVOKE_URL });
+  });
+
   it("reports a network failure as failed", async () => {
     const fetchFn = vi.fn<typeof fetch>(async () => {
       throw new Error("connect ECONNREFUSED");

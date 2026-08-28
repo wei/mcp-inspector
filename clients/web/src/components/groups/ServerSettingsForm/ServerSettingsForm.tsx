@@ -930,7 +930,7 @@ export function ServerSettingsForm({
               />
               <Checkbox
                 label="Revoke tokens on clear"
-                description="Calls the authorization server's RFC 7009 revocation endpoint before clearing the stored OAuth state, so the grant ends when the session does instead of staying valid until it expires. Servers that advertise no revocation_endpoint are unaffected. Uncheck it to reproduce a client that disconnects still holding live tokens."
+                description="Calls the authorization server's RFC 7009 revocation endpoint when the stored OAuth state is cleared, so the grant ends when the session does instead of staying valid until it expires. Servers that advertise no revocation_endpoint are unaffected. Uncheck it to reproduce a client that disconnects still holding live tokens."
                 checked={settings.oauthRevokeOnClear ?? true}
                 onChange={handleRevokeOnClearChange}
               />

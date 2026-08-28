@@ -833,10 +833,14 @@ export interface InspectorServerSettings {
    */
   oauthRequestRefreshToken?: boolean;
   /**
-   * Whether clearing this server's stored OAuth state first revokes the grant
+   * Whether clearing this server's stored OAuth state also revokes the grant
    * at the authorization server, per RFC 7009 (#2144). `undefined` (the
    * default) means on; persisted as `oauth.revokeOnClear` only when explicitly
    * off.
+   *
+   * The request is built from the stored state *before* the clear and sent
+   * *after* it, so the local delete never waits on the network — see
+   * `core/auth/revocation.ts`.
    *
    * On is the right default because the alternative is silent: the Inspector
    * deletes its local copy and the access token — and the refresh token, which

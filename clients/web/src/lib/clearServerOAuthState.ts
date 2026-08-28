@@ -16,8 +16,8 @@ export interface ClearServerOAuthStateParams {
   /** Shared web OAuth store; required so clear hits the same blob as connect. */
   oauthStorage: OAuthStorage;
   /**
-   * Whether to revoke the grant at the authorization server first (RFC 7009,
-   * #2144). Defaults to on. Two callers turn it off: a server whose settings
+   * Whether to revoke the grant at the authorization server (RFC 7009, #2144).
+   * Defaults to on. Two callers turn it off: a server whose settings
    * opted out, and `lost_authorization_state` recovery — that path clears a
    * half-finished flow in order to retry it, so there is no completed grant to
    * revoke and the request would be noise at best.

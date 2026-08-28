@@ -497,8 +497,8 @@ export class OAuthManager {
   }
 
   /**
-   * Revoke the grant at the authorization server (RFC 7009), then drop the
-   * local OAuth state.
+   * Drop this server's local OAuth state, and revoke the grant at the
+   * authorization server (RFC 7009).
    *
    * The order is **snapshot → clear → revoke**, and it matters. Everything the
    * requests need is read out of the store first, because the clear empties it;
