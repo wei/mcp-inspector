@@ -122,6 +122,21 @@ import { FetchBodyDroppedToastMessage } from "./components/elements/Toasts/Fetch
 import { OutputValidationToastMessage } from "./components/elements/Toasts/OutputValidationToastMessage";
 import { ReAuthBannerBar } from "./components/groups/ReAuthBanner/ReAuthBannerBar";
 
+/**
+ * Terminates a dispatched handler's promise by reporting the failure, for the
+ * `InspectorView` action wrappers below. Module scope because it closes over
+ * nothing — the title is the only thing that varies per action.
+ */
+function reportDispatchFailure(title: string) {
+  return (err: unknown) => {
+    notifications.show({
+      title,
+      message: err instanceof Error ? err.message : String(err),
+      color: "red",
+    });
+  };
+}
+
 function App() {
   const { onToggleTheme } = useThemeToggle();
 
@@ -1550,71 +1565,75 @@ function App() {
     [],
   );
 
-  // The two connection-lifecycle handlers do NOT own every rejection, so they
-  // are terminated with a `.catch` rather than discarded. `onToggleConnection`
-  // has three escape paths outside its own try/catch — awaiting
-  // `initialConfigSettledRef`, constructing the client via
-  // `setupClientForServer`, and the already-connected disconnect branch, whose
-  // `try/finally` runs `finalizeExplicitDisconnect()` and then lets a failed
-  // transport close propagate — and `onDisconnect` is that same `try/finally`
-  // on its own. A bare `void` there turns an ordinary Connect/Disconnect click
-  // into a global unhandled rejection with nothing shown to the user, so each
-  // reports instead. Connect *handshake* failures are already surfaced by the
-  // hook's own catch (`connectErrorMessage` + the failed-card border) and never
-  // reach here.
-  const reportConnectionFailure = useCallback((title: string) => {
-    return (err: unknown) => {
-      notifications.show({
-        title,
-        message: err instanceof Error ? err.message : String(err),
-        color: "red",
-      });
-    };
-  }, []);
-
+  // Every `InspectorView` action prop is synchronous while the handler behind
+  // it is async, so each wrapper below has to terminate its promise somehow.
+  // They all do it the same way: a reporting `.catch`, never a bare `void`.
+  //
+  // The uniformity is the point. Deciding per handler whether it "owns its
+  // failures" is a judgement this PR got wrong twice (#2130 review) — the
+  // handlers really do catch their ordinary errors, but a rejection can still
+  // escape by a route the reading misses:
+  //
+  //   - `onToggleConnection` awaits `initialConfigSettledRef` and constructs
+  //     the client via `setupClientForServer` outside its own try/catch, and
+  //     its already-connected branch is a `try/finally` that lets a failed
+  //     transport close propagate. `onDisconnect` is that `try/finally` alone.
+  //   - `onCallTool` / `onGetPrompt` / `onReadResource` / `onOpenApp` await
+  //     `handleCommandScopedAuthRecovery` from *inside* their catch blocks, and
+  //     a rejection thrown from a catch is not caught by that same catch. That
+  //     helper awaits `checkAuthChallengeSatisfied` and `pushRemoteAuthState`,
+  //     both of which reach the backend and can reject.
+  //
+  // A handler that does surface its own failure resolves, so it never reaches
+  // this `.catch` and there is no double-toast; what lands here is only the
+  // escape, which would otherwise be a global unhandled rejection with nothing
+  // shown to the user.
   const dispatchToggleConnection = useCallback(
     (id: string) => {
       onToggleConnection(id).catch(
-        reportConnectionFailure("Failed to change the connection"),
+        reportDispatchFailure("Failed to change the connection"),
       );
     },
-    [onToggleConnection, reportConnectionFailure],
+    [onToggleConnection],
   );
   const dispatchDisconnect = useCallback(() => {
-    onDisconnect().catch(reportConnectionFailure("Failed to disconnect"));
-  }, [onDisconnect, reportConnectionFailure]);
-
-  // The five wrappers below DO discard a promise the callee already owns —
-  // each of those handlers ends in its own `catch` that surfaces the failure as
-  // a toast or a panel error — and the view's props are synchronous. `void` is
-  // the explicit discard `@typescript-eslint/no-floating-promises` requires.
+    onDisconnect().catch(reportDispatchFailure("Failed to disconnect"));
+  }, [onDisconnect]);
   const dispatchCallTool = useCallback(
     (name: string, args: Record<string, unknown>, runAsTask?: boolean) => {
-      void onCallTool(name, args, runAsTask);
+      onCallTool(name, args, runAsTask).catch(
+        reportDispatchFailure("Tool call failed"),
+      );
     },
     [onCallTool],
   );
   const dispatchGetPrompt = useCallback(
     (name: string, args: Record<string, string>) => {
-      void onGetPrompt(name, args);
+      onGetPrompt(name, args).catch(
+        reportDispatchFailure("Failed to get prompt"),
+      );
     },
     [onGetPrompt],
   );
   const dispatchReadResource = useCallback(
     (uri: string) => {
-      void onReadResource(uri);
+      onReadResource(uri).catch(
+        reportDispatchFailure("Failed to read resource"),
+      );
     },
     [onReadResource],
   );
   const dispatchCancelTask = useCallback(
     (taskId: string) => {
-      void onCancelTask(taskId);
+      onCancelTask(taskId).catch(
+        reportDispatchFailure("Failed to cancel task"),
+      );
     },
     [onCancelTask],
   );
   const dispatchOpenApp = useCallback(
     (name: string, args: Record<string, unknown>) => {
-      void onOpenApp(name, args);
+      onOpenApp(name, args).catch(reportDispatchFailure("Failed to open app"));
     },
     [onOpenApp],
   );

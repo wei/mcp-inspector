@@ -594,6 +594,11 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
         edit-server
       </button>
       <button onClick={() => props.servers.onServerAdd()}>add-server</button>
+      {/* The real drag-and-drop reorder lives inside this mocked view, so the
+          callback is only reachable through a control like this one. */}
+      <button onClick={() => props.servers.onServerReorder(["B", "A"])}>
+        reorder-servers
+      </button>
       <span data-testid="highlighted-servers">
         {(props.servers.highlightedServerIds ?? []).join(",") || "none"}
       </span>
@@ -3806,6 +3811,30 @@ describe("App background command rejections (#2049)", () => {
     return user;
   };
 
+  // A complete `useServers` return with one injected mutator, so the mock stays
+  // type-checked against the hook's contract rather than spread from a call.
+  const serversWithReorder = (
+    reorderServers: ReturnType<typeof useServers>["reorderServers"],
+  ): ReturnType<typeof useServers> => ({
+    servers: [
+      {
+        id: "A",
+        name: "PlotRocket",
+        config: { type: "streamable-http", url: "https://api.example.com/mcp" },
+        connection: { status: "disconnected" },
+      },
+    ],
+    loading: false,
+    error: undefined,
+    refresh: vi.fn().mockResolvedValue(undefined),
+    addServer: vi.fn().mockResolvedValue(undefined),
+    updateServer: vi.fn().mockResolvedValue(undefined),
+    updateServerSettings: vi.fn().mockResolvedValue(undefined),
+    removeServer: vi.fn().mockResolvedValue(undefined),
+    reorderServers,
+    importSource: vi.fn().mockResolvedValue({ servers: {} }),
+  });
+
   it("does not leak an unhandled rejection when an all-pages Refresh fails", async () => {
     vi.mocked(useManagedTools).mockReturnValue({
       tools: [],
@@ -3910,6 +3939,92 @@ describe("App background command rejections (#2049)", () => {
           expect.objectContaining({
             title: "Failed to change the connection",
             message: "close boom",
+            color: "red",
+          }),
+        ),
+      );
+      await settleRejections();
+      expect(rejections.seen).toEqual([]);
+    } finally {
+      rejections.stop();
+    }
+  });
+
+  // The four command handlers await `handleCommandScopedAuthRecovery` from
+  // *inside* their catch blocks, and a rejection thrown from a catch is not
+  // caught by that same catch — so it escapes the handler entirely. That helper
+  // awaits `checkAuthChallengeSatisfied`, which reaches the backend and can
+  // reject. Before #2130's review this escaped a bare `void` as a global
+  // unhandled rejection with nothing shown to the user.
+  it("toasts an auth-recovery failure that escapes a tool call instead of leaking it", async () => {
+    const rejections = captureUnhandledRejections();
+    try {
+      const user = await connect();
+      const client = clientInstances[0] as EventTarget & {
+        callTool: ReturnType<typeof vi.fn>;
+      };
+      client.callTool.mockRejectedValueOnce(
+        new AuthRecoveryRequiredError(
+          new URL("https://as.example.com/authorize"),
+          { reason: "unauthorized" },
+        ),
+      );
+      // The recovery helper's first await is the one that breaks.
+      rejectNextChallengeCheck(new Error("challenge check failed"));
+
+      await user.click(screen.getByText("call"));
+
+      await waitFor(() =>
+        expect(notificationsMock.show).toHaveBeenCalledWith(
+          expect.objectContaining({
+            title: "Tool call failed",
+            message: "challenge check failed",
+            color: "red",
+          }),
+        ),
+      );
+      await settleRejections();
+      expect(rejections.seen).toEqual([]);
+    } finally {
+      rejections.stop();
+    }
+  });
+
+  // The reorder handler was lifted out of the JSX into a named callback with a
+  // `.catch` that toasts (#2130). `reorderServers` reverts its own optimistic
+  // ordering and re-throws — on a 409 from a racing external edit, or a network
+  // error — so without the toast the drag just silently bounces back.
+  it("forwards a reorder to the server list", async () => {
+    const reorderServers = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(useServers).mockReturnValue(serversWithReorder(reorderServers));
+    const user = userEvent.setup();
+    renderWithMantine(<App />);
+
+    await user.click(screen.getByText("reorder-servers"));
+
+    await waitFor(() =>
+      expect(reorderServers).toHaveBeenCalledWith(["B", "A"]),
+    );
+    expect(notificationsMock.show).not.toHaveBeenCalled();
+  });
+
+  it("toasts a failed reorder instead of leaking it", async () => {
+    const reorderServers = vi
+      .fn()
+      .mockRejectedValue(new Error("stale server list"));
+    vi.mocked(useServers).mockReturnValue(serversWithReorder(reorderServers));
+    const rejections = captureUnhandledRejections();
+    try {
+      const user = userEvent.setup();
+      renderWithMantine(<App />);
+
+      await user.click(screen.getByText("reorder-servers"));
+
+      await waitFor(() =>
+        expect(notificationsMock.show).toHaveBeenCalledWith(
+          expect.objectContaining({
+            title: "Failed to reorder servers",
+            message: "stale server list",
             color: "red",
           }),
         ),
