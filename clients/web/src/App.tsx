@@ -1320,19 +1320,42 @@ function App() {
   // target isn't resolvable.
   const settingsModalIsStdio = settingsModalServerType === "stdio";
 
+  /**
+   * Run a clear from a key/click handler, which cannot await.
+   *
+   * `clearServerOAuthAndDisconnect` does **not** own its failures — the store
+   * write or the disconnect can reject — so a bare `void` would produce an
+   * unhandled rejection and leave the user with a control that silently did
+   * nothing. (An RFC 7009 failure is not this: those come back as an outcome
+   * and are already reported in the success toast.)
+   */
+  const runClear = useCallback(
+    (server: Parameters<typeof clearServerOAuthAndDisconnect>[0]) => {
+      clearServerOAuthAndDisconnect(server).catch((err: unknown) => {
+        notifications.show({
+          title: "Could not clear the stored OAuth state",
+          message: err instanceof Error ? err.message : String(err),
+          color: "red",
+          // The tokens may still be on disk and the session may still be up,
+          // so this is not a notice to let time out.
+          autoClose: false,
+        });
+      });
+    },
+    [clearServerOAuthAndDisconnect],
+  );
+
   const handleClearConnectionOAuth = useCallback(() => {
     if (!activeServer) return;
-    void clearServerOAuthAndDisconnect(activeServer);
-  }, [activeServer, clearServerOAuthAndDisconnect]);
+    runClear(activeServer);
+  }, [activeServer, runClear]);
 
   const handleClearStoredOAuthFromSettings = useCallback(() => {
     if (!settingsModalTarget) return;
     // Clear from *inside* the settings modal, so the draft is what the user is
     // looking at rather than what the debounced save has persisted (#2144).
-    void clearServerOAuthAndDisconnect(
-      serverWithDraftSettings(settingsModalTarget, settingsDraft),
-    );
-  }, [settingsModalTarget, settingsDraft, clearServerOAuthAndDisconnect]);
+    runClear(serverWithDraftSettings(settingsModalTarget, settingsDraft));
+  }, [settingsModalTarget, settingsDraft, runClear]);
 
   const onSettingsModalClose = useCallback(() => {
     flushSettingsDraft();
