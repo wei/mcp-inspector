@@ -101,16 +101,21 @@ describe("revocationAuthMethods", () => {
           token_endpoint_auth_methods_supported: ["client_secret_post"],
         }),
       ),
-    ).toEqual([]);
+    ).toEqual(["client_secret_basic"]);
   });
 
-  it("yields nothing when the revocation list is absent", () => {
-    expect(revocationAuthMethods(metadata())).toEqual([]);
+  // Named literally, not left empty. An empty list means "the metadata said
+  // nothing" to `selectClientAuthMethod`, which then honors whatever the
+  // client's own registration declares — so a client registered
+  // `client_secret_post` could put credentials in the body of a request to an
+  // endpoint that promised only Basic. (`OAuthClientInformation` does not carry
+  // that field, so this path cannot construct the case today; naming the
+  // default is what keeps it true if the type widens.)
+  it("names the RFC 8414 default when the revocation list is absent", () => {
+    expect(revocationAuthMethods(metadata())).toEqual(["client_secret_basic"]);
   });
 
-  // The empty list is not "no authentication": it is what makes the SDK apply
-  // RFC 8414's actual default.
-  it("an empty list resolves to the RFC 8414 default", () => {
+  it("the default resolves to Basic for a confidential client", () => {
     const { init } = buildRevocationRequest({
       endpoint: REVOKE_URL,
       token: "r",
@@ -121,7 +126,7 @@ describe("revocationAuthMethods", () => {
     expect(headerOf(init, "Authorization")).toBe(`Basic ${btoa("cid:sec")}`);
   });
 
-  it("an empty list leaves a public client unauthenticated", () => {
+  it("the default leaves a public client unauthenticated", () => {
     const { init } = buildRevocationRequest({
       endpoint: REVOKE_URL,
       token: "r",

@@ -1304,7 +1304,13 @@ export function useOAuthRecovery({
             finalizeExplicitDisconnect();
           }
         }
-      } else if (!isActive) {
+      } else if (!isActive || stillTargetsActiveSession()) {
+        // No client to disconnect — either this is a stored-only clear, or the
+        // active session has none yet (it is being built or torn down). Either
+        // way the resume snapshot is stale and must go; skipping it would leave
+        // OAuth recovery state pointing at credentials that no longer exist.
+        // Guarded so a clear whose session has moved on still publishes
+        // nothing.
         clearOAuthResumeOnExplicitDisconnect();
       }
 

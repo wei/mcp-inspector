@@ -123,10 +123,6 @@ async function sendPlans(
     // may still be live when the key held no grant at all — a false alarm, and
     // one that outranks the real outcome under the failure-first rule below.
     const needsNetwork = plan.outcome === undefined;
-    /* v8 ignore next 10 -- A bound, not a path: `withDeadline` fails any plan
-       that reaches the deadline, so a preceding plan cannot both succeed and
-       leave zero budget. This exists so a plan reached with nothing left is
-       reported rather than firing a request it would immediately abandon. */
     if (needsNetwork && remainingMs <= 0) {
       // Overrides an earlier success rather than deferring to it: this key's
       // grant may still be live at the authorization server, and that is the

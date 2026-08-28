@@ -357,6 +357,28 @@ describe("clearStoredAuthForRelogin", () => {
       }
     });
 
+    // A plan reached with no budget left is reported rather than firing a
+    // request it would immediately abandon — and that report must outrank an
+    // earlier success, since the unattempted key's grant may still be live.
+    it("reports exhaustion for a key it never attempted", async () => {
+      seedBothSpellings("live-r", "stale-r");
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(new Response(null, { status: 200 }));
+      try {
+        const outcome = await clearStoredAuthForRelogin("https://example.com", {
+          budgetMs: 0,
+        });
+        expect(fetchSpy).not.toHaveBeenCalled();
+        expect(outcome).toMatchObject({ status: "failed" });
+        expect(outcome?.status === "failed" ? outcome.detail : "").toContain(
+          "budget was exhausted",
+        );
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
     it("reports a later failure over an earlier success", async () => {
       seedBothSpellings("live-r", "stale-r");
       const fetchSpy = vi

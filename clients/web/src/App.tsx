@@ -1321,9 +1321,12 @@ function App() {
   const settingsModalIsStdio = settingsModalServerType === "stdio";
 
   /**
-   * In-flight lock shared by both clear controls (#2144). See `runClear`.
+   * Servers whose clear is in flight (#2144). Keyed by id, not a single flag:
+   * the callback explicitly supports clearing a server other than the active
+   * one, so a global lock would silently drop B's click while A's revocation
+   * was still out. See `runClear`.
    */
-  const clearOAuthInFlightRef = useRef(false);
+  const clearOAuthInFlightRef = useRef<Set<string>>(new Set());
 
   /**
    * Run a clear from a key/click handler, which cannot await.
@@ -1337,16 +1340,17 @@ function App() {
   const runClear = useCallback(
     (server: Parameters<typeof clearServerOAuthAndDisconnect>[0]) => {
       // Shared by BOTH clear controls (Connection Info and Server Settings),
-      // because they drive the same client and the same store entry. A ref
-      // rather than state: a double click delivers both events before React
-      // re-renders, so a state-based guard would let both through — and with
-      // revocation taking up to five seconds, that means concurrent RFC 7009
-      // requests, concurrent store writes, and two contradictory toasts.
-      if (clearOAuthInFlightRef.current) return;
-      clearOAuthInFlightRef.current = true;
+      // because for one server they drive the same client and the same store
+      // entry. A ref rather than state: a double click delivers both events
+      // before React re-renders, so a state-based guard would let both through
+      // — and with revocation taking up to five seconds, that means concurrent
+      // RFC 7009 requests, concurrent store writes, and two contradictory
+      // toasts. Keyed by server so a *different* server's clear is unaffected.
+      if (clearOAuthInFlightRef.current.has(server.id)) return;
+      clearOAuthInFlightRef.current.add(server.id);
       clearServerOAuthAndDisconnect(server)
         .finally(() => {
-          clearOAuthInFlightRef.current = false;
+          clearOAuthInFlightRef.current.delete(server.id);
         })
         .catch((err: unknown) => {
           notifications.show({

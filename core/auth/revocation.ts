@@ -104,14 +104,20 @@ export function selectRevocableToken(
  * there send POST credentials to a revocation endpoint that never advertised
  * that method, which a strict server rejects.
  *
- * An empty result is returned rather than a literal `["client_secret_basic"]`
- * because that is what makes {@link selectClientAuthMethod} apply exactly the
- * RFC's default — `client_secret_basic` when the client holds a secret, `none`
- * when it does not — while still honoring a `token_endpoint_auth_method` the
- * client's own registration declares.
+ * The default is returned **literally** rather than as an empty list. An empty
+ * list does not mean "apply the RFC default" to `selectClientAuthMethod`: it
+ * means "the metadata said nothing", and the SDK then honors whatever
+ * `token_endpoint_auth_method` the client's own registration declares. A DCR
+ * client registered `client_secret_post` would therefore put its credentials
+ * in the body of a request to an endpoint that promised only Basic, and the
+ * revocation would fail. Naming the default is what actually enforces it.
  */
 export function revocationAuthMethods(metadata: CachedMetadata): string[] {
-  return metadata.revocation_endpoint_auth_methods_supported ?? [];
+  return (
+    metadata.revocation_endpoint_auth_methods_supported ?? [
+      "client_secret_basic",
+    ]
+  );
 }
 
 export interface RevocationRequestParams {
