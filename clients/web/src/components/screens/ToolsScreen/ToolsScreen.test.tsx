@@ -3,6 +3,7 @@ import { describe, it, expect, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import type { Tool } from "@modelcontextprotocol/client";
 import { renderWithMantine, screen } from "../../../test/renderWithMantine";
+import { setAceTextByLabel } from "../../../test/aceEditor";
 import { noopPagination } from "../../../test/fixtures/pagination";
 import {
   ToolsScreen,
@@ -155,6 +156,43 @@ describe("ToolsScreen", () => {
       { zip: "94103" },
       false,
     );
+  });
+
+  // #2171's acceptance asks for a test that pins the WIRE rather than the form
+  // state. Under the refusal answer the wire claim is that nothing is sent, and
+  // `onCallTool` is where a dispatch would begin — so a screen that flagged the
+  // draft but still fired the callback would satisfy every other test here.
+  //
+  // The plain and "Run as task" paths need no separate case: the split between
+  // `callTool` and `callToolStream` happens in `App.tsx`, downstream of this
+  // callback, so a gate that stops the callback stops both.
+  it("dispatches nothing for a draft the schema would retype", async () => {
+    const user = userEvent.setup();
+    const onCallTool = vi.fn();
+    const numeric: Tool[] = [
+      {
+        name: "add",
+        inputSchema: {
+          type: "object",
+          properties: { count: { type: "number" } },
+        },
+      },
+    ];
+    renderWithMantine(
+      <ControlledToolsScreen tools={numeric} onCallTool={onCallTool} />,
+    );
+    await user.click(screen.getByText("add"));
+    await user.click(screen.getByLabelText("Edit as JSON"));
+    await setAceTextByLabel(/Arguments JSON/, '{"count":"01"}');
+    await user.click(screen.getByRole("button", { name: /Execute/ }));
+
+    expect(onCallTool).not.toHaveBeenCalled();
+
+    // And it is the draft that blocks it, not the screen: rewritten with the
+    // declared type, the very same click dispatches.
+    await setAceTextByLabel(/Arguments JSON/, '{"count":1}');
+    await user.click(screen.getByRole("button", { name: /Execute/ }));
+    expect(onCallTool).toHaveBeenCalledWith("add", { count: 1 }, false);
   });
 
   it("filters the sidebar list as the search text changes", async () => {
