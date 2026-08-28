@@ -18,7 +18,11 @@ import {
   waitForOAuthWellKnown,
 } from "@modelcontextprotocol/inspector-test-server";
 import { BrowserOAuthStorage } from "@inspector/core/auth/browser/storage.js";
-import { revokeStoredOAuthTokens } from "@inspector/core/auth/revocation.js";
+import {
+  executeOAuthRevocation,
+  planOAuthRevocation,
+} from "@inspector/core/auth/revocation.js";
+import type { TokenRevocationOutcome } from "@inspector/core/auth/revocation.js";
 import type { OAuthMetadata } from "@modelcontextprotocol/client";
 
 const CLIENT_ID = "test-2144-revocation";
@@ -192,6 +196,18 @@ describe("OAuth token revocation (RFC 7009)", () => {
     expect(await tokenAccepted(tokens.access_token)).toBe(true);
   });
 
+  /**
+   * The caller's real sequence — snapshot, clear, send — so this exercises the
+   * ordering the product uses rather than a convenience wrapper.
+   */
+  async function clearAndRevoke(
+    storage: BrowserOAuthStorage,
+  ): Promise<TokenRevocationOutcome> {
+    const plan = await planOAuthRevocation({ serverUrl, storage });
+    await storage.clear(serverUrl);
+    return executeOAuthRevocation(plan, { fetchFn: fetch });
+  }
+
   it("advertises a revocation endpoint", () => {
     expect(metadata.revocation_endpoint).toBe(`${serverUrl}/oauth/revoke`);
   });
@@ -202,11 +218,7 @@ describe("OAuth token revocation (RFC 7009)", () => {
     const tokens = await authorize();
     expect(await tokenAccepted(tokens.access_token)).toBe(true);
 
-    const outcome = await revokeStoredOAuthTokens({
-      serverUrl,
-      storage: await seededStorage(tokens),
-      fetchFn: fetch,
-    });
+    const outcome = await clearAndRevoke(await seededStorage(tokens));
 
     expect(outcome).toMatchObject({
       status: "revoked",
@@ -219,11 +231,9 @@ describe("OAuth token revocation (RFC 7009)", () => {
 
   it("revokes an access token when no refresh token was issued", async () => {
     const tokens = await authorize();
-    const outcome = await revokeStoredOAuthTokens({
-      serverUrl,
-      storage: await seededStorage({ access_token: tokens.access_token }),
-      fetchFn: fetch,
-    });
+    const outcome = await clearAndRevoke(
+      await seededStorage({ access_token: tokens.access_token }),
+    );
 
     expect(outcome).toMatchObject({
       status: "revoked",
@@ -236,8 +246,8 @@ describe("OAuth token revocation (RFC 7009)", () => {
   // server has already expired must not be reported as a failure.
   it("treats an already-unknown token as revoked", async () => {
     const storage = await seededStorage({ access_token: "never-issued" });
-    await expect(
-      revokeStoredOAuthTokens({ serverUrl, storage, fetchFn: fetch }),
-    ).resolves.toMatchObject({ status: "revoked" });
+    await expect(clearAndRevoke(storage)).resolves.toMatchObject({
+      status: "revoked",
+    });
   });
 });

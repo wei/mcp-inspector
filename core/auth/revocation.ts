@@ -270,54 +270,157 @@ async function withDeadline<T>(
   }
 }
 
-export interface RevokeStoredOAuthTokensParams {
+export interface PlanOAuthRevocationParams {
   serverUrl: string;
   storage: OAuthStorage;
-  fetchFn: typeof fetch;
   /**
-   * `false` skips the request entirely — the deliberate case from #2144, where
-   * a user wants to watch a server cope with a client that walks off still
-   * holding live tokens.
+   * `false` plans nothing — the deliberate case from #2144, where a user wants
+   * to watch a server cope with a client that walks off still holding live
+   * tokens.
    */
   enabled?: boolean;
+}
+
+export interface ExecuteOAuthRevocationParams {
+  fetchFn: typeof fetch;
   timeoutMs?: number;
   logger?: InspectorLogger;
 }
 
 /**
- * Revoke the tokens the Inspector holds for `serverUrl`, reading everything it
- * needs out of the OAuth store.
+ * Everything the revocation requests need, read out of the store **before** the
+ * local clear empties it.
  *
- * Called immediately **before** the local clear, since the store is where the
- * tokens, the client credentials, and the discovered `revocation_endpoint` all
- * live — after the clear there is nothing left to revoke with. Every grant the
- * clear will delete is covered, not just the active issuer's: see
- * {@link collectGrants}.
- *
- * The metadata comes from the cache the OAuth flow already populated rather
- * than from a fresh discovery round-trip: the tokens being revoked were minted
- * by that same authorization server, so its cached document is the document
- * that describes them, and re-discovering would add two network legs to a
- * teardown for no new information. A server that has never completed an OAuth
- * flow has no cached metadata *and* no tokens, so it short-circuits either way.
+ * Split from the sending on purpose, and the ordering it enables is the whole
+ * point: plan → `storage.clear(serverUrl)` → execute. Revoking first and
+ * clearing afterwards delays the clear by however long the network takes, and a
+ * *fresh* authorization completing in that window would then be deleted by a
+ * clear that was reasoning about the grant it replaced. Snapshotting first
+ * closes that window: the clear runs against what the user asked to forget, and
+ * the requests go out against a copy nothing can invalidate.
  */
-export async function revokeStoredOAuthTokens(
-  params: RevokeStoredOAuthTokensParams,
-): Promise<TokenRevocationOutcome> {
-  const { serverUrl, logger } = params;
+export interface OAuthRevocationPlan {
+  serverUrl: string;
+  grants: StoredGrant[];
+  /** Slots that could not be read; reported beside whatever the rest do. */
+  failures: TokenRevocationOutcome[];
+  endpoint?: string;
+  supportedAuthMethods: string[];
+  metadataIssuer?: string;
+  /** Set when there is nothing to send, and why. */
+  outcome?: TokenRevocationOutcome;
+}
+
+/** A plan that sends nothing, carrying the reason. */
+function emptyPlan(
+  serverUrl: string,
+  outcome: TokenRevocationOutcome,
+  failures: TokenRevocationOutcome[] = [],
+): OAuthRevocationPlan {
+  return {
+    serverUrl,
+    grants: [],
+    failures,
+    supportedAuthMethods: [],
+    outcome:
+      failures.length > 0 ? aggregateOutcomes([...failures, outcome]) : outcome,
+  };
+}
+
+/**
+ * Read every grant the impending `clear(serverUrl)` will delete, plus the
+ * endpoint and credentials needed to revoke them.
+ *
+ * Every grant is covered, not just the active issuer's: see
+ * {@link collectGrants}. The metadata comes from the cache the OAuth flow
+ * already populated rather than from a fresh discovery round-trip — the tokens
+ * being revoked were minted by that same authorization server, so its cached
+ * document is the one that describes them, and re-discovering would add two
+ * network legs to a teardown for no new information. A server that never
+ * completed an OAuth flow has no cached metadata *and* no tokens, so it
+ * short-circuits either way.
+ */
+export async function planOAuthRevocation(
+  params: PlanOAuthRevocationParams,
+): Promise<OAuthRevocationPlan> {
+  const { serverUrl, storage } = params;
   if (params.enabled === false) {
-    return { status: "skipped", reason: "disabled" };
+    return emptyPlan(serverUrl, { status: "skipped", reason: "disabled" });
   }
 
-  const outcome = await computeOutcome(params);
+  try {
+    const { grants, failures } = await collectGrants(storage, serverUrl);
+    if (grants.length === 0) {
+      return emptyPlan(
+        serverUrl,
+        { status: "skipped", reason: "no_tokens" },
+        failures,
+      );
+    }
+
+    const metadata = await storage.getServerMetadata(serverUrl);
+    if (!metadata) {
+      return emptyPlan(
+        serverUrl,
+        { status: "skipped", reason: "no_metadata" },
+        failures,
+      );
+    }
+    if (!metadata.revocation_endpoint) {
+      return emptyPlan(
+        serverUrl,
+        { status: "skipped", reason: "no_endpoint" },
+        failures,
+      );
+    }
+
+    return {
+      serverUrl,
+      grants,
+      failures,
+      endpoint: metadata.revocation_endpoint,
+      supportedAuthMethods: revocationAuthMethods(metadata),
+      metadataIssuer: metadata.issuer,
+    };
+  } catch (err) {
+    // A store that cannot be read is not a reason to abandon the clear the
+    // user asked for.
+    return emptyPlan(serverUrl, {
+      status: "failed",
+      detail: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * Send the requests a {@link planOAuthRevocation} snapshot describes.
+ *
+ * Safe to run **after** `storage.clear(serverUrl)` — that is the point: the
+ * plan already holds the tokens, the credentials and the endpoint, so nothing
+ * here reads the store, and the local clear is never waiting on the network.
+ *
+ * Best-effort throughout: every path returns a {@link TokenRevocationOutcome}
+ * rather than throwing, because forgetting the tokens is what the caller
+ * actually asked for and no failure on this leg should undo it.
+ */
+export async function executeOAuthRevocation(
+  plan: OAuthRevocationPlan,
+  params: ExecuteOAuthRevocationParams,
+): Promise<TokenRevocationOutcome> {
+  const outcome = await runPlan(plan, params);
+  const { logger } = params;
   if (outcome.status === "failed") {
     logger?.warn(
-      { serverUrl, endpoint: outcome.endpoint, detail: outcome.detail },
-      "Token revocation failed; clearing local OAuth state anyway",
+      {
+        serverUrl: plan.serverUrl,
+        endpoint: outcome.endpoint,
+        detail: outcome.detail,
+      },
+      "Token revocation failed; local OAuth state was cleared anyway",
     );
   } else if (outcome.status === "skipped" && outcome.reason === "no_endpoint") {
     logger?.debug(
-      { serverUrl },
+      { serverUrl: plan.serverUrl },
       "Skipping token revocation: authorization server metadata has no revocation_endpoint",
     );
   }
@@ -345,7 +448,7 @@ async function resolveClientInformation(
 }
 
 /** One revocable grant held for a server, and which AS minted it. */
-interface StoredGrant {
+export interface StoredGrant {
   /** Undefined for the legacy unkeyed slot, which predates issuer binding. */
   issuer?: string;
   token: string;
@@ -493,100 +596,71 @@ export function aggregateOutcomes(
   );
 }
 
-async function computeOutcome(
-  params: RevokeStoredOAuthTokensParams,
+/** Send one plan's requests against a single shared deadline. */
+async function runPlan(
+  plan: OAuthRevocationPlan,
+  params: ExecuteOAuthRevocationParams,
 ): Promise<TokenRevocationOutcome> {
-  const { serverUrl, storage, fetchFn } = params;
+  if (plan.outcome) return plan.outcome;
+  const endpoint = plan.endpoint;
+  /* v8 ignore next -- `planOAuthRevocation` always sets `outcome` when it sets
+     no endpoint, so this is unreachable; the guard exists to narrow the type. */
+  if (!endpoint) return { status: "skipped", reason: "no_endpoint" };
 
-  try {
-    // Grants first. They are the cheapest disqualifier, and a server with no
-    // stored grant should not provoke a metadata read at all.
-    //
-    // `failures` seeds `outcomes` rather than short-circuiting: a slot that
-    // could not be read is still about to be deleted, so it has to be reported
-    // *alongside* whatever the readable grants do, not instead of them.
-    const { grants, failures } = await collectGrants(storage, serverUrl);
-    if (grants.length === 0) {
-      return failures.length > 0
-        ? aggregateOutcomes(failures)
-        : { status: "skipped", reason: "no_tokens" };
+  const outcomes: TokenRevocationOutcome[] = [...plan.failures];
+  // ONE deadline for the whole teardown, not one per grant. `clear` deletes
+  // every issuer slot, so a server with N of them would otherwise block for
+  // N × the timeout — at which point the "short timeout" bounds a single
+  // request and nothing the user experiences. Grants are revoked sequentially
+  // on purpose (a burst of parallel requests to one authorization server is
+  // not a kindness), so the budget is shared instead.
+  const timeoutMs = params.timeoutMs ?? DEFAULT_REVOCATION_TIMEOUT_MS;
+  const deadlineAt = Date.now() + timeoutMs;
+
+  for (const grant of plan.grants) {
+    // Metadata is cached once per server, not per issuer, so it describes
+    // whichever authorization server was discovered last. Sending another
+    // issuer's token to *this* endpoint would disclose a bearer credential to a
+    // server that never minted it — worse than not revoking. So an issuer-bound
+    // grant must be able to PROVE the endpoint is its own, which means a
+    // metadata document carrying no `issuer` is a mismatch rather than a free
+    // pass: absence establishes nothing. Only a legacy unkeyed grant proceeds
+    // without the comparison, since nothing binds it to a different
+    // authorization server in the first place.
+    if (grant.issuer !== undefined && plan.metadataIssuer !== grant.issuer) {
+      outcomes.push({
+        status: "failed",
+        detail:
+          plan.metadataIssuer === undefined
+            ? `the cached authorization-server metadata names no issuer, so the grant bound to ${grant.issuer} could not be matched to this revocation endpoint and was cleared without revocation`
+            : `the cached authorization-server metadata is for ${plan.metadataIssuer}, so the grant bound to ${grant.issuer} was cleared without revocation`,
+      });
+      continue;
     }
 
-    const metadata = await storage.getServerMetadata(serverUrl);
-    if (!metadata) {
-      return aggregateOutcomes([
-        ...failures,
-        { status: "skipped", reason: "no_metadata" },
-      ]);
-    }
-    const endpoint = metadata.revocation_endpoint;
-    if (!endpoint) {
-      return aggregateOutcomes([
-        ...failures,
-        { status: "skipped", reason: "no_endpoint" },
-      ]);
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) {
+      outcomes.push({
+        status: "failed",
+        endpoint,
+        detail: `the ${timeoutMs}ms revocation budget was exhausted before this grant was attempted${
+          grant.issuer === undefined ? "" : ` (issuer ${grant.issuer})`
+        }`,
+      });
+      continue;
     }
 
-    const supportedAuthMethods = revocationAuthMethods(metadata);
-    const outcomes: TokenRevocationOutcome[] = [...failures];
-    // ONE deadline for the whole teardown, not one per grant. `clear` deletes
-    // every issuer slot, so a server with N of them would otherwise block the
-    // disconnect for N × the timeout — at which point the "short timeout"
-    // bounds a single request and nothing the user experiences. Grants are
-    // revoked sequentially on purpose (a burst of parallel requests to one
-    // authorization server is not a kindness), so the budget is shared instead.
-    const timeoutMs = params.timeoutMs ?? DEFAULT_REVOCATION_TIMEOUT_MS;
-    const deadlineAt = Date.now() + timeoutMs;
-    for (const grant of grants) {
-      // Metadata is cached once per server, not per issuer, so it describes
-      // whichever authorization server was discovered last. Sending another
-      // issuer's token to *this* endpoint would disclose a bearer credential to
-      // a server that never minted it — worse than not revoking. So an
-      // issuer-bound grant must be able to PROVE the endpoint is its own, which
-      // means a metadata document carrying no `issuer` is a mismatch rather
-      // than a free pass: absence establishes nothing. Only a legacy unkeyed
-      // grant proceeds without the comparison, since nothing binds it to a
-      // different authorization server in the first place.
-      if (grant.issuer !== undefined && metadata.issuer !== grant.issuer) {
-        outcomes.push({
-          status: "failed",
-          detail:
-            metadata.issuer === undefined
-              ? `the cached authorization-server metadata names no issuer, so the grant bound to ${grant.issuer} could not be matched to this revocation endpoint and was cleared without revocation`
-              : `the cached authorization-server metadata is for ${metadata.issuer}, so the grant bound to ${grant.issuer} was cleared without revocation`,
-        });
-        continue;
-      }
-      const remainingMs = deadlineAt - Date.now();
-      if (remainingMs <= 0) {
-        outcomes.push({
-          status: "failed",
-          endpoint,
-          detail: `the ${timeoutMs}ms revocation budget was exhausted before this grant was attempted${
-            grant.issuer === undefined ? "" : ` (issuer ${grant.issuer})`
-          }`,
-        });
-        continue;
-      }
-      outcomes.push(
-        await revokeToken({
-          endpoint,
-          token: grant.token,
-          tokenTypeHint: grant.tokenTypeHint,
-          clientInformation: grant.clientInformation,
-          supportedAuthMethods,
-          fetchFn,
-          timeoutMs: remainingMs,
-        }),
-      );
-    }
-    return aggregateOutcomes(outcomes);
-  } catch (err) {
-    // A store that cannot be read (a corrupt blob, a remote backend that 500s)
-    // is not a reason to abandon the clear the user asked for.
-    return {
-      status: "failed",
-      detail: err instanceof Error ? err.message : String(err),
-    };
+    outcomes.push(
+      await revokeToken({
+        endpoint,
+        token: grant.token,
+        tokenTypeHint: grant.tokenTypeHint,
+        clientInformation: grant.clientInformation,
+        supportedAuthMethods: plan.supportedAuthMethods,
+        fetchFn: params.fetchFn,
+        timeoutMs: remainingMs,
+      }),
+    );
   }
+  return aggregateOutcomes(outcomes);
 }

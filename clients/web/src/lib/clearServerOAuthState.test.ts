@@ -80,10 +80,11 @@ describe("clearServerOAuthState", () => {
     expect(clearOAuthTokens).toHaveBeenCalledWith({ revoke: false });
   });
 
-  // #2144 — the non-active path revokes from the store directly. The whole
-  // point is that it happens *before* the clear: after it there is no token,
-  // no client id and no cached metadata left to build a request from.
-  it("revokes before clearing when this server is not the active connection", async () => {
+  // #2144 — the non-active path revokes from the store directly. The snapshot
+  // is taken before the clear (after it there is no token, client id or cached
+  // metadata to build a request from), but the clear itself runs before the
+  // network — so by the time the request goes out the store is already empty.
+  it("clears before sending, using the snapshot it took first", async () => {
     await storage.saveTokens(SERVER_URL, {
       access_token: "tok",
       token_type: "Bearer",
@@ -97,7 +98,7 @@ describe("clearServerOAuthState", () => {
       response_types_supported: ["code"],
     });
 
-    let tokensAtRequestTime: unknown;
+    let tokensAtRequestTime: unknown = "unset";
     const fetchFn = vi.fn<typeof fetch>(async () => {
       tokensAtRequestTime = await storage.getTokens(SERVER_URL);
       return new Response(null, { status: 200 });
@@ -115,7 +116,9 @@ describe("clearServerOAuthState", () => {
       tokenTypeHint: "refresh_token",
       endpoint: "https://as.example.com/revoke",
     });
-    expect(tokensAtRequestTime).toBeDefined();
+    // The store was already empty when the request went out — that is the
+    // ordering, and it is what stops a concurrently-written grant being wiped.
+    expect(tokensAtRequestTime).toBeUndefined();
     expect(await storage.getTokens(SERVER_URL)).toBeUndefined();
   });
 

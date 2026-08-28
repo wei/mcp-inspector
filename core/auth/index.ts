@@ -140,13 +140,16 @@ export {
   aggregateOutcomes,
   buildRevocationRequest,
   revocationAuthMethods,
-  revokeStoredOAuthTokens,
+  executeOAuthRevocation,
+  planOAuthRevocation,
   revokeToken,
   selectRevocableToken,
 } from "./revocation.js";
 export type {
+  ExecuteOAuthRevocationParams,
+  OAuthRevocationPlan,
+  PlanOAuthRevocationParams,
   RevocationRequestParams,
-  RevokeStoredOAuthTokensParams,
   RevokeTokenParams,
   TokenRevocationOutcome,
   TokenRevocationSkipReason,

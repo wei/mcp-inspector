@@ -796,6 +796,11 @@ function App({
     // A connect attempt supersedes whatever the last disconnect reported —
     // including one still in flight, which is what the counter bump retires.
     disconnectAttemptRef.current++;
+    // And whatever a pending clear was going to do (#2144). The server-name
+    // check alone does not cover disconnect/reconnect to the SAME server: the
+    // name still matches on the other side of it, so a clear still in flight
+    // would tear down the session this connect just established.
+    clearOAuthAttemptRef.current++;
     setDisconnectError(null);
 
     const finishConnect = async () => {

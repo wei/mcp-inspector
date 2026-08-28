@@ -102,11 +102,19 @@ v2/main/
 │   │                                   #   answered, since that is the base its
 │   │                                   #   token request is made against — #2110;
 │   │                                   #   revocation.ts RFC 7009 token revocation —
-│   │                                   #   the request the three clear paths send
-│   │                                   #   BEFORE wiping local state, since the
-│   │                                   #   token, the client credentials and the
-│   │                                   #   discovered `revocation_endpoint` all live
-│   │                                   #   in the store the clear empties. Names the
+│   │                                   #   the request the three clear paths send.
+│   │                                   #   TWO halves — planOAuthRevocation then
+│   │                                   #   executeOAuthRevocation — and the order
+│   │                                   #   between them is the contract: plan →
+│   │                                   #   storage.clear() → execute. The snapshot
+│   │                                   #   must precede the clear (the token, the
+│   │                                   #   client credentials and the discovered
+│   │                                   #   `revocation_endpoint` all live in the store
+│   │                                   #   it empties); the CLEAR must precede the
+│   │                                   #   network, or a fresh authorization
+│   │                                   #   completing during a 5s request is deleted
+│   │                                   #   by a clear reasoning about the grant it
+│   │                                   #   replaced. Names the
 │   │                                   #   REFRESH token when there is one (§2.1 asks
 │   │                                   #   the AS to invalidate the access tokens
 │   │                                   #   under the same grant, so one request

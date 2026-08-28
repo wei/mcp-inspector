@@ -199,10 +199,12 @@ describe("OAuthManager", () => {
       expect(manager.getOAuthFlowStep()).toBeUndefined();
     });
 
-    // #2144 — the ordering is the contract, not an implementation detail: the
-    // revocation request is built from the token, the client id and the cached
-    // metadata that `clear` is about to delete.
-    it("revokes at the authorization server before clearing local state", async () => {
+    // #2144 — the ordering is the contract, not an implementation detail. The
+    // request is built from the token, the client id and the cached metadata
+    // `clear` deletes, so the snapshot has to be taken first; but the clear
+    // must then run BEFORE the network, or a fresh authorization completing
+    // during it would be deleted by a clear reasoning about the old grant.
+    it("clears local state before waiting on the revocation request", async () => {
       const params = createMockParams();
       const storage = params.initialConfig.storage!;
       vi.mocked(storage.getTokens).mockResolvedValue({
@@ -234,7 +236,7 @@ describe("OAuthManager", () => {
         status: "revoked",
         tokenTypeHint: "refresh_token",
       });
-      expect(order).toEqual(["revoke", "clear"]);
+      expect(order).toEqual(["clear", "revoke"]);
     });
 
     it("clears local state even when the revocation request fails", async () => {

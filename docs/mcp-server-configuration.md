@@ -217,6 +217,8 @@ Without it, clearing is silent from the authorization server's point of view: th
 
 The request names the **refresh token** when there is one. RFC 7009 §2.1 asks an authorization server to also invalidate the access tokens issued under the same grant, so one request covers both halves; naming the access token instead would leave the long-lived one alive.
 
+The order is **snapshot → clear → revoke**. Everything the request needs — the token, the client credentials, the discovered `revocation_endpoint` — is read out of the store first, because the clear empties it; but the clear then runs immediately rather than behind the network. Waiting would leave a window in which a *fresh* authorization could complete and then be deleted by a clear still reasoning about the grant it replaced.
+
 > **It is best-effort, and the local clear always finishes.** An authorization server that advertises no `revocation_endpoint` is left behaving exactly as it did before this existed — nothing is sent. A network error, a non-2xx, or a slow server that trips the short timeout is reported (a toast in the web client, a status line in the TUI, a stderr warning from the CLI) and nothing more. Forgetting the tokens is what you asked for, so no failure on this leg stops it.
 
 > **Turning it off is a testing affordance, not only an escape hatch.** A client that walks away still holding live tokens is a case a server author may want to reproduce deliberately, to watch how the server under test copes with it.

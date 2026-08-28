@@ -6,11 +6,13 @@ import {
   aggregateOutcomes,
   buildRevocationRequest,
   revocationAuthMethods,
-  revokeStoredOAuthTokens,
+  executeOAuthRevocation,
+  planOAuthRevocation,
   revokeToken,
   selectRevocableToken,
 } from "@inspector/core/auth/revocation.js";
 import type { InspectorLogger } from "@inspector/core/logging/index.js";
+import type { TokenRevocationOutcome } from "@inspector/core/auth/revocation.js";
 
 /** A fully-typed `InspectorLogger` double, so the mock's shape is checked. */
 function fakeLogger(): InspectorLogger {
@@ -339,7 +341,32 @@ describe("revokeToken", () => {
   });
 });
 
-describe("revokeStoredOAuthTokens", () => {
+/**
+ * Compose the two halves the way every caller does, minus the `storage.clear`
+ * between them — these tests are about what is planned and sent, and the
+ * ordering guarantee itself is asserted separately below.
+ */
+async function revokeStoredOAuthTokens(params: {
+  serverUrl: string;
+  storage: BrowserOAuthStorage;
+  fetchFn: typeof fetch;
+  enabled?: boolean;
+  timeoutMs?: number;
+  logger?: InspectorLogger;
+}): Promise<TokenRevocationOutcome> {
+  const plan = await planOAuthRevocation({
+    serverUrl: params.serverUrl,
+    storage: params.storage,
+    enabled: params.enabled,
+  });
+  return executeOAuthRevocation(plan, {
+    fetchFn: params.fetchFn,
+    timeoutMs: params.timeoutMs,
+    logger: params.logger,
+  });
+}
+
+describe("revokeStoredOAuthTokens (plan + execute)", () => {
   let storage: BrowserOAuthStorage;
 
   beforeEach(async () => {
@@ -888,5 +915,89 @@ describe("revokeStoredOAuthTokens", () => {
     expect(outcome.status === "failed" ? outcome.detail : "").toContain(
       "as-b.example.com",
     );
+  });
+});
+
+// The reason the API is two halves rather than one call (#2144, review round
+// 13). Revoking first and clearing afterwards delays the clear by however long
+// the network takes, and a FRESH authorization completing in that window is
+// then deleted by a clear reasoning about the grant it replaced.
+describe("plan / clear / execute ordering", () => {
+  let storage: BrowserOAuthStorage;
+
+  beforeEach(async () => {
+    storage = new BrowserOAuthStorage();
+    await storage.clear(SERVER_URL);
+    await storage.saveServerMetadata(
+      SERVER_URL,
+      metadata({ issuer: "https://as.example.com" }),
+    );
+    await storage.saveTokens(
+      SERVER_URL,
+      { access_token: "old", token_type: "Bearer", refresh_token: "old-r" },
+      { issuer: "https://as.example.com" },
+    );
+  });
+
+  it("does not delete a grant written while the request is in flight", async () => {
+    let releaseRequest: () => void = () => {};
+    const inFlight = new Promise<void>((resolve) => {
+      releaseRequest = resolve;
+    });
+    const fetchFn = vi.fn<typeof fetch>(async () => {
+      await inFlight;
+      return new Response(null, { status: 200 });
+    });
+
+    // The caller's real sequence: snapshot, clear, then send.
+    const plan = await planOAuthRevocation({ serverUrl: SERVER_URL, storage });
+    await storage.clear(SERVER_URL);
+    const sending = executeOAuthRevocation(plan, { fetchFn });
+
+    // A fresh authorization lands while the request is still out.
+    await storage.saveTokens(
+      SERVER_URL,
+      { access_token: "new", token_type: "Bearer", refresh_token: "new-r" },
+      { issuer: "https://as.example.com" },
+    );
+
+    releaseRequest();
+    await sending;
+
+    // The new grant survived, and the OLD token is what was revoked.
+    expect((await storage.getTokens(SERVER_URL))?.access_token).toBe("new");
+    expect(
+      new URLSearchParams(String(fetchFn.mock.calls[0]![1]!.body)).get("token"),
+    ).toBe("old-r");
+  });
+
+  it("sends the snapshot even though the store was emptied first", async () => {
+    const fetchFn = vi.fn<typeof fetch>(
+      async () => new Response(null, { status: 200 }),
+    );
+
+    const plan = await planOAuthRevocation({ serverUrl: SERVER_URL, storage });
+    await storage.clear(SERVER_URL);
+
+    await expect(
+      executeOAuthRevocation(plan, { fetchFn }),
+    ).resolves.toMatchObject({ status: "revoked" });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("plans nothing when revocation is disabled", async () => {
+    const plan = await planOAuthRevocation({
+      serverUrl: SERVER_URL,
+      storage,
+      enabled: false,
+    });
+    const fetchFn = vi.fn<typeof fetch>();
+
+    expect(plan.grants).toHaveLength(0);
+    await expect(executeOAuthRevocation(plan, { fetchFn })).resolves.toEqual({
+      status: "skipped",
+      reason: "disabled",
+    });
+    expect(fetchFn).not.toHaveBeenCalled();
   });
 });
