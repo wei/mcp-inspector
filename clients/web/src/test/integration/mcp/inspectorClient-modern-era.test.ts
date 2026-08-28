@@ -20,6 +20,7 @@ import {
   createMrtrEdgeCaseTool,
   loadConfig,
   resolveConfig,
+  type ToolDefinition,
 } from "@modelcontextprotocol/inspector-test-server";
 import type { ServerConfig } from "@modelcontextprotocol/inspector-test-server";
 import type {
@@ -492,6 +493,89 @@ describe("modern-era negotiation (2026-07-28)", () => {
 
     await expect(settled).resolves.toBeInstanceOf(ToolCallCancelledError);
     await expect(aborted).resolves.toBe(true);
+  }, 30_000);
+
+  // The test above builds its own never-returning tool, which is the sharpest
+  // way to assert on the server's abort signal but says nothing about the
+  // artifacts a human actually uses. This one drives the documented showcase
+  // through the SAME path they would — the checked-in config, resolved through
+  // the preset registry — so a misspelt preset name, a config naming a dead
+  // preset, or a regression in the `slow_task` handler's own abort loop fails
+  // here rather than only when someone runs the repro by hand.
+  //
+  // It observes the handler's own return value, not the client's view. Counting
+  // progress notifications would be a false negative: the SDK drops a cancelled
+  // request's progress handler locally, so the client stops seeing ticks the
+  // moment it cancels whether or not the server ever stopped working — the very
+  // silence this bug hid behind.
+  it("stops the showcase tool's work on cancel (slow_task, via the showcase config)", async () => {
+    const config = loadConfig(
+      join(repoRoot, "test-servers/configs/cancellation-modern-http.json"),
+    );
+    expect(config.tools).toContainEqual({ preset: "slow_task" });
+
+    const resolved = resolveConfig(config);
+    expect(resolved.tools?.map((tool) => tool.name)).toEqual([
+      "slow_task",
+      "echo",
+    ]);
+
+    // Wrap the resolved preset rather than replacing it, so what runs is the
+    // real registered handler and only its outcome is observed. `tools` is a
+    // union with the task-tool shape, whose handler has a different signature,
+    // so narrow to the plain one this preset actually is.
+    const preset = resolved.tools!.find(
+      (tool): tool is ToolDefinition => tool.name === "slow_task",
+    )!;
+    let reportOutcome!: (text: string) => void;
+    const outcome = new Promise<string>((resolve) => {
+      reportOutcome = resolve;
+    });
+    let firstTick!: () => void;
+    const running = new Promise<void>((resolve) => {
+      firstTick = resolve;
+    });
+
+    const started = createTestServerHttp({
+      ...resolved,
+      tools: resolved.tools!.map((tool) =>
+        tool.name === "slow_task"
+          ? {
+              ...preset,
+              handler: async (params, context, extra) => {
+                extra?.signal?.addEventListener("abort", () => firstTick(), {
+                  once: true,
+                });
+                const result = await preset.handler(params, context, extra);
+                reportOutcome(JSON.stringify(result));
+                return result;
+              },
+            }
+          : tool,
+      ),
+    });
+    await started.start();
+    server = started;
+    const connected = await connectWithEra(started.url, "modern");
+
+    const { tools } = await connected.listTools();
+    const tool = tools.find((t) => t.name === "slow_task");
+    expect(tool).toBeDefined();
+
+    // Hold the rejection immediately so it is never seen as unhandled.
+    const settled = connected
+      .callTool(tool!, { seconds: 30 })
+      .catch((err: unknown) => err);
+
+    // Let it get past its first tick, then cancel.
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    expect(connected.cancelToolCall()).toBe(true);
+    await expect(settled).resolves.toBeInstanceOf(ToolCallCancelledError);
+    await running;
+
+    // The handler must return promptly, saying it was cancelled — not run on to
+    // its 30th second, which is what it did before the fix.
+    await expect(outcome).resolves.toContain("cancelled after");
   }, 30_000);
 
   it("cancels an in-flight MRTR call while its embedded request is pending", async () => {
