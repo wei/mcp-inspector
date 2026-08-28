@@ -12,6 +12,7 @@ import {
   Text,
 } from "@mantine/core";
 import { RiErrorWarningLine } from "react-icons/ri";
+import type { Tool } from "@modelcontextprotocol/client";
 import type { MessageEntry } from "@inspector/core/mcp/types.js";
 import { ContentViewer } from "../../elements/ContentViewer/ContentViewer";
 import { CopyButton } from "../../elements/CopyButton/CopyButton";
@@ -21,6 +22,8 @@ import { McpErrorBadge } from "../../elements/McpErrorBadge/McpErrorBadge";
 import { ExpandToggle } from "../../elements/ExpandToggle/ExpandToggle";
 import { PinToggle } from "../../elements/PinToggle/PinToggle";
 import { ReplayButton } from "../../elements/ReplayButton/ReplayButton";
+import { EditReplayButton } from "../../elements/EditReplayButton/EditReplayButton";
+import { EditReplayModal } from "../EditReplayModal/EditReplayModal";
 import { useValueChange } from "../../../hooks/useValueChange";
 import {
   classifyProtocolSpecError,
@@ -32,12 +35,22 @@ import {
   extractSubscriptionId,
 } from "../protocolUtils.js";
 import { isReplayableProtocolMethod } from "../../../utils/replayableProtocolMethods";
+import {
+  replayableParams,
+  type ReplayParamsOverride,
+} from "../../../lib/protocolReplay";
 
 export interface ProtocolEntryProps {
   entry: MessageEntry;
   isPinned: boolean;
   isListExpanded: boolean;
-  onReplay: () => void;
+  /**
+   * Re-issue this entry's request. Called with no argument by the Replay
+   * button (the entry's own params, verbatim), and with an edited params object
+   * by the Edit-and-replay modal — one dispatch path, two ways to supply the
+   * params (#2151).
+   */
+  onReplay: (overrideParams?: ReplayParamsOverride) => void;
   onTogglePin: () => void;
   /**
    * Compact two-line header for the narrow monitoring sidebar (#1616): line 1 is
@@ -58,6 +71,13 @@ export interface ProtocolEntryProps {
    * correlated HTTP record.
    */
   correlatedHttpStatus?: number;
+  /**
+   * The connected server's tools, used only to tell whether an edited
+   * `tools/call` argument would be coerced by the schema on the way out
+   * (#2151). Optional: without it that one check is skipped, which is the right
+   * answer when the tool list is not known rather than a reason to block.
+   */
+  tools?: Tool[];
 }
 
 const EntryContainer = Card.withProps({
@@ -194,6 +214,17 @@ function formatTimestampCompact(date: Date): string {
   return date.toISOString().slice(11, 19);
 }
 
+// The request's `params` object, which the Edit-and-replay editor is seeded
+// from and the expanded detail renders. `undefined` for a frame that carries
+// none — a bare `tools/list`, or a response.
+function extractParams(
+  entry: MessageEntry,
+): Record<string, unknown> | undefined {
+  const msg = entry.message;
+  if (!("params" in msg) || !msg.params) return undefined;
+  return msg.params as Record<string, unknown>;
+}
+
 function extractTarget(entry: MessageEntry): string | undefined {
   const msg = entry.message;
   if (!("params" in msg) || !msg.params) return undefined;
@@ -304,13 +335,17 @@ export function ProtocolEntry({
   embedded = false,
   onRevealInNetwork,
   correlatedHttpStatus,
+  tools,
 }: ProtocolEntryProps) {
   const [isExpanded, setIsExpanded] = useState(isListExpanded);
+  const [isEditingReplay, setIsEditingReplay] = useState(false);
   const method = extractMethod(entry);
   const target = extractTarget(entry);
   const resourceUri = extractResourceUri(entry);
   const status = extractStatus(entry);
+  const requestParams = extractParams(entry);
   const canReplay = isReplayableProtocolMethod(method);
+  const editableParams = replayableParams(method, requestParams);
   const resultType = extractResultType(entry);
   const subscriptionId = extractSubscriptionId(entry);
 
@@ -363,6 +398,14 @@ export function ProtocolEntry({
   const durationText = entry.duration != null && (
     <DurationText>{formatDuration(entry.duration)}</DurationText>
   );
+  // Both replay affordances are gated on the same predicate, so a method that
+  // cannot be replayed does not offer an editor that would fail on Send.
+  const replayControls = canReplay && (
+    <>
+      <ReplayButton onReplay={() => onReplay()} />
+      <EditReplayButton onClick={() => setIsEditingReplay(true)} />
+    </>
+  );
 
   return (
     <EntryContainer>
@@ -401,7 +444,7 @@ export function ProtocolEntry({
                 )}
               </HeaderCluster>
               <ControlsCluster>
-                {canReplay && <ReplayButton onReplay={onReplay} />}
+                {replayControls}
                 <PinToggle pinned={isPinned} onToggle={onTogglePin} />
                 <ExpandToggle
                   expanded={isExpanded}
@@ -436,7 +479,7 @@ export function ProtocolEntry({
             </HeaderRow>
 
             <ToggleRow>
-              {canReplay && <ReplayButton onReplay={onReplay} />}
+              {replayControls}
               <PinToggle pinned={isPinned} onToggle={onTogglePin} />
               <ExpandToggle
                 expanded={isExpanded}
@@ -444,6 +487,22 @@ export function ProtocolEntry({
               />
             </ToggleRow>
           </>
+        )}
+
+        {canReplay && (
+          <EditReplayModal
+            opened={isEditingReplay}
+            method={method}
+            // Seeded with what replay will actually read, not the whole frame:
+            // the editor must not offer a field that Send would drop.
+            params={editableParams.params}
+            droppedParamKeys={editableParams.dropped}
+            // The whole list, not this entry's tool: `name` is editable, so the
+            // schema to validate against is whichever the draft now names.
+            tools={tools}
+            onSend={onReplay}
+            onClose={() => setIsEditingReplay(false)}
+          />
         )}
 
         <Collapse in={isExpanded}>
@@ -464,15 +523,19 @@ export function ProtocolEntry({
                 }
               />
             )}
-            {"params" in entry.message && entry.message.params && (
+            {requestParams && (
               <Stack gap="xs">
                 <Text size="sm">Parameters:</Text>
                 <ContentViewer
                   block={{
                     type: "text",
-                    text: serializeMessage(entry.message.params),
+                    text: serializeMessage(requestParams),
                   }}
                   copyable
+                  // Named, because an expanded entry holds two of these and a
+                  // list holds many pairs — unnamed they all announce the same
+                  // thing, leaving only the visible headings to tell them apart.
+                  jsonLabel={`${method} request parameters JSON`}
                 />
               </Stack>
             )}
@@ -485,6 +548,7 @@ export function ProtocolEntry({
                     text: serializeMessage(entry.response),
                   }}
                   copyable
+                  jsonLabel={`${method} response JSON`}
                 />
               </Stack>
             )}

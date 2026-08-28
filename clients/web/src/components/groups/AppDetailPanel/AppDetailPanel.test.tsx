@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import type { Tool } from "@modelcontextprotocol/client";
 import { renderWithMantine, screen } from "../../../test/renderWithMantine";
+import { setAceTextByLabel } from "../../../test/aceEditor";
 import { AppDetailPanel } from "./AppDetailPanel";
 
 const noFieldsTool: Tool = {
@@ -179,7 +180,6 @@ describe("AppDetailPanel", () => {
   // `undefined` — so an optional argument was dropped from the call with no
   // gate. The form reports draft validity for this reason.
   it("disables Open App while a field holds text it cannot send", async () => {
-    const user = userEvent.setup();
     const jsonFieldTool: Tool = {
       name: "chart_app",
       title: "Chart App",
@@ -192,11 +192,10 @@ describe("AppDetailPanel", () => {
     const openApp = screen.getByRole("button", { name: /open app/i });
     expect(openApp).not.toBeDisabled();
 
-    const jsonInput = screen.getByLabelText(/Series/);
-    await user.type(jsonInput, "x");
+    await setAceTextByLabel(/Series/, "x");
     expect(openApp).toBeDisabled();
 
-    await user.clear(jsonInput);
+    await setAceTextByLabel(/Series/, "");
     expect(openApp).not.toBeDisabled();
   });
 });

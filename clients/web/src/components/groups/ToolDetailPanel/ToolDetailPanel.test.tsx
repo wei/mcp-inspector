@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import type { Tool } from "@modelcontextprotocol/client";
 import { renderWithMantine, screen } from "../../../test/renderWithMantine";
+import { setAceTextByLabel } from "../../../test/aceEditor";
 import { ToolDetailPanel } from "./ToolDetailPanel";
 
 const simpleTool: Tool = {
@@ -572,7 +573,6 @@ describe("ToolDetailPanel", () => {
     });
 
     it("disables Execute while an optional field holds text it cannot send", async () => {
-      const user = userEvent.setup();
       renderWithMantine(
         <ToolDetailPanel {...baseProps} tool={optionalJsonTool} />,
       );
@@ -582,11 +582,10 @@ describe("ToolDetailPanel", () => {
       // The draft never reaches `formValues` — the field reports `undefined`
       // for text it cannot parse — so only the form's validity channel makes
       // this visible to the gate.
-      const jsonInput = screen.getByLabelText(/Payload/);
-      await user.type(jsonInput, "x");
+      await setAceTextByLabel(/Payload/, "x");
       expect(execute).toBeDisabled();
 
-      await user.clear(jsonInput);
+      await setAceTextByLabel(/Payload/, "");
       expect(execute).not.toBeDisabled();
     });
   });

@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import type { MessageEntry } from "@inspector/core/mcp/types.js";
 import { renderWithMantine, screen } from "../../../test/renderWithMantine";
+import { getAceText, setAceText } from "../../../test/aceEditor";
 import { ProtocolEntry } from "./ProtocolEntry";
 
 const successEntry: MessageEntry = {
@@ -203,6 +204,106 @@ describe("ProtocolEntry", () => {
     expect(onReplay).toHaveBeenCalledTimes(1);
   });
 
+  // Edit-and-replay is a second way to *supply* the params, not a second replay
+  // implementation — it dispatches through the same `onReplay` (#2151).
+  describe("edit and replay (#2151)", () => {
+    async function openEditor(user: ReturnType<typeof userEvent.setup>) {
+      await user.click(screen.getByRole("button", { name: "Edit and replay" }));
+    }
+
+    it("seeds the editor with the entry's params", async () => {
+      const user = userEvent.setup();
+      renderWithMantine(<ProtocolEntry {...baseProps} entry={successEntry} />);
+      await openEditor(user);
+      expect(JSON.parse(getAceText())).toEqual({
+        name: "get_weather",
+        arguments: { city: "San Francisco" },
+      });
+    });
+
+    // The entry's frame carries `_meta.progressToken`, which replay cannot
+    // re-send — so it must not appear in the editor as though it could.
+    it("seeds only the params replay will actually read", async () => {
+      const user = userEvent.setup();
+      const withMeta: MessageEntry = {
+        ...successEntry,
+        message: {
+          ...successEntry.message,
+          params: {
+            name: "get_weather",
+            arguments: { city: "San Francisco" },
+            _meta: { progressToken: 2 },
+          },
+        },
+      } as MessageEntry;
+      renderWithMantine(<ProtocolEntry {...baseProps} entry={withMeta} />);
+      await openEditor(user);
+
+      expect(getAceText()).not.toContain("_meta");
+      expect(screen.getByText(/`_meta` is not re-sent/)).toBeInTheDocument();
+    });
+
+    it("replays with the edited params", async () => {
+      const user = userEvent.setup();
+      const onReplay = vi.fn();
+      renderWithMantine(
+        <ProtocolEntry
+          {...baseProps}
+          entry={successEntry}
+          onReplay={onReplay}
+        />,
+      );
+      await openEditor(user);
+      await setAceText('{"name":"get_weather","arguments":{"city":"Boston"}}');
+      await user.click(screen.getByRole("button", { name: "Send" }));
+
+      expect(onReplay).toHaveBeenCalledWith({
+        name: "get_weather",
+        arguments: { city: "Boston" },
+      });
+      // And the modal is gone — the entry itself is unchanged.
+      expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
+    });
+
+    it("replays verbatim from the plain Replay button", async () => {
+      const user = userEvent.setup();
+      const onReplay = vi.fn();
+      renderWithMantine(
+        <ProtocolEntry
+          {...baseProps}
+          entry={successEntry}
+          onReplay={onReplay}
+        />,
+      );
+      await user.click(screen.getByRole("button", { name: "Replay" }));
+      // No argument at all: "not edited" has to be distinguishable from
+      // "edited to no params" one level up.
+      expect(onReplay).toHaveBeenCalledWith();
+    });
+
+    it("is offered only where Replay is", () => {
+      const notification: MessageEntry = {
+        id: "note-1",
+        timestamp: new Date(),
+        direction: "notification",
+        message: { jsonrpc: "2.0", method: "notifications/message" },
+      };
+      renderWithMantine(<ProtocolEntry {...baseProps} entry={notification} />);
+      expect(
+        screen.queryByRole("button", { name: "Edit and replay" }),
+      ).toBeNull();
+    });
+
+    it("is offered in the compact layout too", () => {
+      renderWithMantine(
+        <ProtocolEntry {...baseProps} entry={successEntry} embedded />,
+      );
+      expect(
+        screen.getByRole("button", { name: "Edit and replay" }),
+      ).toBeInTheDocument();
+    });
+  });
+
   it("hides the Replay button for a method that can't be replayed", () => {
     // A notification isn't a replayable client→server request.
     renderWithMantine(
@@ -337,6 +438,24 @@ describe("ProtocolEntry", () => {
     );
     expect(
       screen.getByRole("button", { name: "Collapse" }),
+    ).toBeInTheDocument();
+  });
+
+  // Both payloads render the same kind of control, so without distinct names a
+  // screen reader announces them identically.
+  it("names the parameters and response editors distinctly", () => {
+    renderWithMantine(
+      <ProtocolEntry
+        {...baseProps}
+        entry={successEntry}
+        isListExpanded={true}
+      />,
+    );
+    expect(
+      screen.getByLabelText(/tools\/call request parameters JSON/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText(/tools\/call response JSON/),
     ).toBeInTheDocument();
   });
 

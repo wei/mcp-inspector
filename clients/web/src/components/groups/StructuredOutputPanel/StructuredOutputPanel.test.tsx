@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import { renderWithMantine, screen } from "../../../test/renderWithMantine";
+import { getAceText } from "../../../test/aceEditor";
 import { StructuredOutputPanel } from "./StructuredOutputPanel";
 
 // The real CodeHighlight dynamic-imports the Prism runtime and each grammar
@@ -30,12 +31,14 @@ describe("StructuredOutputPanel", () => {
     expect(
       screen.getByRole("heading", { name: "Structured Output" }),
     ).toBeInTheDocument();
-    const code = screen.getByTestId("code-highlight");
-    expect(code).toHaveAttribute("data-language", "json");
-    expect(code).toHaveTextContent(/"total": 2/);
+    // Read through the editor rather than the DOM: Ace virtualizes its lines,
+    // so only what a viewport would show is in the document — and happy-dom has
+    // no layout to give it one.
+    const shown = getAceText();
+    expect(shown).toContain('"total": 2');
     // Nested values are inspectable field by field, not summarized away.
-    expect(code).toHaveTextContent(/"name": "Item A"/);
-    expect(code).toHaveTextContent(/"tags"/);
+    expect(shown).toContain('"name": "Item A"');
+    expect(shown).toContain('"tags"');
   });
 
   it("starts expanded by default", () => {
@@ -82,7 +85,7 @@ describe("StructuredOutputPanel", () => {
     expect(
       screen.getByRole("heading", { name: "Structured Output" }),
     ).toBeInTheDocument();
-    expect(screen.getByTestId("code-highlight")).toHaveTextContent("{}");
+    expect(getAceText()).toBe("{}");
   });
 });
 

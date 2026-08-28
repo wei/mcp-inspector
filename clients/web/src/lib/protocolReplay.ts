@@ -9,6 +9,7 @@ import type { MessageEntry } from "@inspector/core/mcp/types.js";
 // `components → lib → utils` direction still holds: `LogEntryData` is the shape
 // the Logs screen renders, and this module exists to produce exactly that.
 import type { LogEntryData } from "../components/elements/LogEntry/LogEntry";
+import { convertToolParameters } from "@inspector/core/json/jsonUtils.js";
 import { isReplayableProtocolMethod } from "../utils/replayableProtocolMethods";
 
 // Derive `LogEntryData[]` from the MessageLog by filtering for the
@@ -57,6 +58,178 @@ export type ReplayClient = Pick<
   | "listRequestorTasks"
   | "ping"
 >;
+
+/**
+ * Params supplied by the Edit-and-replay editor, in place of the entry's own
+ * (#2151).
+ *
+ * `undefined` and `null` are **not** interchangeable, which is why this is not
+ * just an optional object: `undefined` means the user did not edit anything —
+ * replay the entry verbatim — while `null` means they cleared the editor, which
+ * is a legitimate replay of a params-less request. Collapsing the two would
+ * make an emptied editor silently re-send the original params.
+ */
+export type ReplayParamsOverride = Record<string, unknown> | null | undefined;
+
+/**
+ * The params of a replayed request that `replayProtocolRequest` actually reads,
+ * per method.
+ *
+ * This is the other half of the switch below, and the two must move together.
+ * Replay does not re-send a captured frame verbatim — it dispatches through the
+ * typed `InspectorClient` methods, which take named arguments. Everything those
+ * signatures have no room for is dropped: `_meta` on any method (a captured
+ * `tools/call` carries `_meta.progressToken`), and every key of a list request
+ * other than `cursor`.
+ *
+ * That is invisible and harmless for one-click Replay, which re-sends what it
+ * was given. It is neither once the params are put in front of the user to
+ * edit (#2151): an editor showing `_meta` invites them to change it, and Send
+ * would then transmit something other than what they were looking at. So the
+ * Edit-and-replay modal seeds from *this* rather than from the raw frame, and
+ * names what it left out.
+ */
+export function replayableParams(
+  method: string,
+  params: Record<string, unknown> | undefined,
+): { params: Record<string, unknown> | undefined; dropped: string[] } {
+  if (!params) return { params: undefined, dropped: [] };
+
+  const keep = (...names: string[]): string[] =>
+    names.filter((name) => Object.hasOwn(params, name));
+
+  let kept: string[];
+  switch (method) {
+    case "tools/call":
+    case "prompts/get":
+      kept = keep("name", "arguments");
+      break;
+    case "resources/read":
+      kept = keep("uri");
+      break;
+    case "tools/list":
+    case "prompts/list":
+    case "resources/list":
+    case "resources/templates/list":
+    case "tasks/list":
+      // Only a *string* cursor survives: the dispatcher ignores any other type,
+      // so keeping it would put a value in the editor that changes nothing.
+      //
+      // And an **empty** one survives on `tools/list` alone. `listTools` builds
+      // its params with `cursor !== undefined`, carrying `""` deliberately —
+      // its own comment explains that dropping it asks for page one again. The
+      // other four adapters use a truthiness check and drop it. That asymmetry
+      // looks like a latent bug in those four rather than an intention, but
+      // this function's job is to describe what the dispatch *does*, so it
+      // reports the empty cursor as dropped where it would be dropped.
+      kept =
+        typeof params.cursor === "string" &&
+        (method === "tools/list" || params.cursor !== "")
+          ? ["cursor"]
+          : [];
+      break;
+    default:
+      // `ping` takes nothing, and an unreplayable method never reaches here.
+      kept = [];
+      break;
+  }
+
+  const dropped = Object.keys(params).filter((name) => !kept.includes(name));
+  // `fromEntries`, never an assignment loop: an argument legitimately named
+  // `__proto__` would otherwise reach the prototype setter.
+  return {
+    params:
+      kept.length > 0
+        ? Object.fromEntries(kept.map((name) => [name, params[name]]))
+        : undefined,
+    dropped,
+  };
+}
+
+/**
+ * A param the dispatch below would *reshape* on the way out, or null when every
+ * kept param is sent as written.
+ *
+ * {@link replayableParams} answers which keys survive; this answers whether the
+ * surviving ones survive *intact*. Only `arguments` can fail that, and it fails
+ * three ways, each of which the Edit-and-replay editor has to catch before
+ * Send:
+ *
+ * - `arguments: null` is nullish, so `?? {}` replaces it — the editor shows
+ *   `null` and the wire carries `{}`.
+ * - `arguments: [1,2]` or `arguments: 4` is not nullish, so the cast carries it
+ *   through unchanged into a call whose type says it is a named-argument
+ *   record. Nothing reshapes it, but nothing can send it either.
+ * - For **`prompts/get`**, a non-string *value*. `getPrompt` runs
+ *   `convertPromptArguments`, which `JSON.stringify`s anything that is not
+ *   already a string — so `{"count": 2}` is sent as `{"count": "2"}` while the
+ *   editor still shows the number. This is not a quirk to route around: the
+ *   spec types `GetPromptRequest.params.arguments` as `Record<string, string>`,
+ *   so a string is the only thing a prompt argument can be.
+ * - For **`tools/call`**, the mirror image. `callTool` runs every *string*
+ *   entry through `convertToolParameters`, because the Tools form hands
+ *   everything over as text — so `{"count": "2"}` against a schema declaring a
+ *   number is sent as `{"count": 2}`. Detected by running that same conversion
+ *   and comparing, rather than by reimplementing its rules, so the two cannot
+ *   drift. Needs the `tool`; without one this check is skipped, since nothing
+ *   can be said about a coercion whose schema is unknown.
+ *
+ * `name` and `uri` are deliberately not checked here: the dispatch already
+ * refuses a missing or non-string one with a reason the caller surfaces as a
+ * toast, so those fail visibly rather than silently.
+ */
+export function reshapedReplayParam(
+  method: string,
+  params: Record<string, unknown> | undefined,
+  tool?: Tool,
+): string | null {
+  if (!params) return null;
+  if (method !== "tools/call" && method !== "prompts/get") return null;
+  if (!Object.hasOwn(params, "arguments")) return null;
+  const args = params.arguments;
+  const isRecord =
+    args !== null && typeof args === "object" && !Array.isArray(args);
+  if (!isRecord) {
+    return args === null
+      ? "`arguments` is sent as `{}` when null — remove it, or give it an object"
+      : "`arguments` must be a JSON object (`{ … }`)";
+  }
+  if (method === "prompts/get") {
+    const coerced = Object.entries(args as Record<string, unknown>)
+      .filter(([, value]) => typeof value !== "string")
+      .map(([key]) => `\`${key}\``);
+    if (coerced.length > 0) {
+      return `A prompt argument is always a string — ${coerced.join(", ")} would be sent as JSON text`;
+    }
+  }
+  if (method === "tools/call" && tool) {
+    const coerced = coercedToolArgs(tool, args as Record<string, unknown>);
+    if (coerced.length > 0) {
+      return `${coerced.join(", ")} would be converted to the type ${tool.name}'s schema declares — write the value with that type instead`;
+    }
+  }
+  return null;
+}
+
+/**
+ * The string-valued argument names `callTool` would convert, per the tool's
+ * schema.
+ *
+ * Runs the conversion the client runs and compares, rather than restating its
+ * rules: `convertToolParameters` is the function on the other side, so asking
+ * it is the only way this cannot drift from what is actually sent.
+ */
+function coercedToolArgs(tool: Tool, args: Record<string, unknown>): string[] {
+  const stringArgs: Record<string, string> = {};
+  for (const [key, value] of Object.entries(args)) {
+    if (typeof value === "string") stringArgs[key] = value;
+  }
+  if (Object.keys(stringArgs).length === 0) return [];
+  const converted = convertToolParameters(tool, stringArgs);
+  return Object.keys(stringArgs)
+    .filter((key) => converted[key] !== stringArgs[key])
+    .map((key) => `\`${key}\``);
+}
 
 export async function replayProtocolRequest(
   client: ReplayClient,
