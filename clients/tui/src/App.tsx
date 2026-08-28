@@ -464,6 +464,11 @@ function App({
     // server name matching again, so the stale rejection would land on the
     // re-selected A. Retiring the token on every switch is what closes that.
     disconnectAttemptRef.current++;
+    // Same reasoning for the clear (#2144): the A → B → A round trip would
+    // otherwise leave both its attempt token and the captured server name
+    // matching again, so a clear started on the first A could publish into the
+    // re-selected one.
+    clearOAuthAttemptRef.current++;
     setDisconnectError(null);
     const stepUp = pendingStepUpRef.current;
     if (stepUp && selectedServer && stepUp.serverName !== selectedServer) {
@@ -983,6 +988,14 @@ function App({
     setConnectError(null);
     if (inspectorStatus === "connected" || inspectorStatus === "connecting") {
       await disconnectInspector();
+      // Revalidate: the disconnect is a second await, and a switch during it
+      // would make the revision bump below land on the new selection.
+      if (
+        clearOAuthAttemptRef.current !== attempt ||
+        selectedServerRef.current !== attemptServer
+      ) {
+        return;
+      }
     }
     setOauthRevision((n) => n + 1);
   }, [

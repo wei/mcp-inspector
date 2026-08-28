@@ -507,6 +507,43 @@ describe("revokeStoredOAuthTokens", () => {
     expect(fetchFn).toHaveBeenCalledTimes(2);
   });
 
+  // The timeout is a budget for the WHOLE teardown, not per request. `clear`
+  // deletes every issuer slot, so a per-request bound would let a server with
+  // N of them block the disconnect for N × the timeout — at which point the
+  // "short timeout" bounds a single request and nothing the user feels.
+  it("shares one deadline across grants instead of one per grant", async () => {
+    await storage.saveServerMetadata(
+      SERVER_URL,
+      metadata({ issuer: undefined }),
+    );
+    vi.spyOn(storage, "listIssuers").mockResolvedValue(["a", "b", "c"]);
+    vi.spyOn(storage, "getIssuerTokens").mockImplementation(
+      async (_url: string, issuer: string) => ({
+        access_token: `a-${issuer}`,
+        token_type: "Bearer",
+        refresh_token: `r-${issuer}`,
+      }),
+    );
+    // Every request hangs, so each one burns the whole remaining budget.
+    const fetchFn = vi.fn<typeof fetch>(() => new Promise<Response>(() => {}));
+
+    const started = Date.now();
+    const outcome = await revokeStoredOAuthTokens({
+      serverUrl: SERVER_URL,
+      storage,
+      fetchFn,
+      timeoutMs: 30,
+    });
+    const elapsed = Date.now() - started;
+
+    expect(outcome).toMatchObject({ status: "failed" });
+    // Three grants: with a per-grant bound this would be ~90ms. Generous upper
+    // bound so the assertion is about the shape, not the machine.
+    expect(elapsed).toBeLessThan(70);
+    // The first burned the budget; the rest are reported as never attempted.
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
   // A grant bound to an issuer the cached metadata does not describe cannot be
   // revoked — that endpoint belongs to a different authorization server, and
   // sending it another AS's token would hand a credential to a server that

@@ -36,6 +36,11 @@ import type { OAuthStorage } from "./storage.js";
  * committed to, so an unreachable or wedged authorization server must not hold
  * the teardown open — five seconds is long enough for a real endpoint on a slow
  * link and short enough that a dead one is not felt as a hang.
+ *
+ * It is a budget for the **whole** call, not per request: a server with several
+ * issuer-bound grants revokes them sequentially against one shared deadline, so
+ * the bound the user feels is this number regardless of how many grants the
+ * clear is about to delete.
  */
 export const DEFAULT_REVOCATION_TIMEOUT_MS = 5000;
 
@@ -525,6 +530,14 @@ async function computeOutcome(
 
     const supportedAuthMethods = revocationAuthMethods(metadata);
     const outcomes: TokenRevocationOutcome[] = [...failures];
+    // ONE deadline for the whole teardown, not one per grant. `clear` deletes
+    // every issuer slot, so a server with N of them would otherwise block the
+    // disconnect for N × the timeout — at which point the "short timeout"
+    // bounds a single request and nothing the user experiences. Grants are
+    // revoked sequentially on purpose (a burst of parallel requests to one
+    // authorization server is not a kindness), so the budget is shared instead.
+    const timeoutMs = params.timeoutMs ?? DEFAULT_REVOCATION_TIMEOUT_MS;
+    const deadlineAt = Date.now() + timeoutMs;
     for (const grant of grants) {
       // Metadata is cached once per server, not per issuer, so it describes
       // whichever authorization server was discovered last. Sending another
@@ -542,6 +555,17 @@ async function computeOutcome(
         });
         continue;
       }
+      const remainingMs = deadlineAt - Date.now();
+      if (remainingMs <= 0) {
+        outcomes.push({
+          status: "failed",
+          endpoint,
+          detail: `the ${timeoutMs}ms revocation budget was exhausted before this grant was attempted${
+            grant.issuer === undefined ? "" : ` (issuer ${grant.issuer})`
+          }`,
+        });
+        continue;
+      }
       outcomes.push(
         await revokeToken({
           endpoint,
@@ -550,7 +574,7 @@ async function computeOutcome(
           clientInformation: grant.clientInformation,
           supportedAuthMethods,
           fetchFn,
-          timeoutMs: params.timeoutMs,
+          timeoutMs: remainingMs,
         }),
       );
     }

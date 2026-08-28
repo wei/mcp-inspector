@@ -138,10 +138,13 @@ describe("AuthTab", () => {
     expect(lastFrame() ?? "").toContain("OAuth state cleared");
   });
 
-  // A failed revocation still cleared local state, and the failure is reported
-  // through the message line — so the confirmation must not hang forever.
-  it("settles the confirmation even when the clear rejects", async () => {
-    const onClearOAuth = vi.fn(() => Promise.reject(new Error("nope")));
+  // A rejection is NOT a revocation failure — those come back as outcomes and
+  // are reported through the message line. This is the local clear or the
+  // disconnect itself failing, so reporting success would be a plain lie.
+  it("reports a rejected clear as a failure, not as success", async () => {
+    const onClearOAuth = vi.fn(() =>
+      Promise.reject(new Error("keychain locked")),
+    );
     const { lastFrame, stdin } = render(
       <AuthTab
         {...baseProps}
@@ -155,7 +158,57 @@ describe("AuthTab", () => {
     await tick();
     stdin.write("s");
     await tick();
-    expect(lastFrame() ?? "").toContain("OAuth state cleared");
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("Could not clear OAuth state");
+    expect(frame).toContain("keychain locked");
+    expect(frame).not.toContain("OAuth state cleared.");
+    expect(frame).not.toContain("Clearing OAuth state");
+  });
+
+  // A clear started on server A must not confirm under server B: it is a
+  // bounded network request now, so it can settle after the user has moved on.
+  it("does not confirm a clear that settles after the server changed", async () => {
+    let settle: () => void = () => {};
+    const onClearOAuth = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          settle = resolve;
+        }),
+    );
+    const { lastFrame, stdin, rerender } = render(
+      <AuthTab
+        {...baseProps}
+        serverName="a"
+        onClearOAuth={onClearOAuth}
+        inspectorClient={null}
+        oauthStatus="idle"
+        oauthMessage={null}
+        focused
+      />,
+    );
+    await tick();
+    stdin.write("s");
+    await tick();
+    expect(lastFrame() ?? "").toContain("Clearing OAuth state");
+
+    rerender(
+      <AuthTab
+        {...baseProps}
+        serverName="b"
+        onClearOAuth={onClearOAuth}
+        inspectorClient={null}
+        oauthStatus="idle"
+        oauthMessage={null}
+        focused
+      />,
+    );
+    await tick();
+    settle();
+    await tick();
+
+    const frame = lastFrame() ?? "";
+    expect(frame).not.toContain("OAuth state cleared");
+    expect(frame).not.toContain("Clearing OAuth state");
   });
 
   // #2144 — a revocation failure is a *partial* success: the local state really

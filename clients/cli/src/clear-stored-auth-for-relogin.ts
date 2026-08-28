@@ -3,6 +3,7 @@ import {
   resetNodeOAuthStorageCache,
 } from "@inspector/core/auth/node/storage-node.js";
 import {
+  DEFAULT_REVOCATION_TIMEOUT_MS,
   revokeStoredOAuthTokens,
   type TokenRevocationOutcome,
 } from "@inspector/core/auth/revocation.js";
@@ -92,13 +93,26 @@ async function revokeStoredKeys(
   keys: string[],
 ): Promise<TokenRevocationOutcome | undefined> {
   const fetchFn = createProxyFetch() ?? fetch;
+  // One budget across both keys, for the same reason `revokeStoredOAuthTokens`
+  // shares one across grants: two keys would otherwise double the wait a user
+  // feels before `--relogin` gets on with the local delete.
+  const deadlineAt = Date.now() + DEFAULT_REVOCATION_TIMEOUT_MS;
   let reported: TokenRevocationOutcome | undefined;
   let lastSkip: TokenRevocationOutcome | undefined;
   for (const key of new Set(keys)) {
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) {
+      reported ??= {
+        status: "failed",
+        detail: `the ${DEFAULT_REVOCATION_TIMEOUT_MS}ms revocation budget was exhausted before "${key}" was attempted`,
+      };
+      continue;
+    }
     const outcome = await revokeStoredOAuthTokens({
       serverUrl: key,
       storage,
       fetchFn,
+      timeoutMs: remainingMs,
     });
     if (outcome.status === "skipped" && outcome.reason === "no_tokens") {
       lastSkip = outcome;

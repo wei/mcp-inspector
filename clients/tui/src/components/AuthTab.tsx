@@ -90,9 +90,16 @@ export function AuthTab({
   const [oauthState, setOauthState] = useState<
     OAuthConnectionState | undefined
   >(undefined);
-  const [clearState, setClearState] = useState<"idle" | "clearing" | "cleared">(
-    "idle",
-  );
+  const [clearState, setClearState] = useState<
+    "idle" | "clearing" | "cleared" | "failed"
+  >("idle");
+  const [clearFailure, setClearFailure] = useState<string | null>(null);
+  /**
+   * The server a clear was started for, and a sequence number. The clear is a
+   * bounded network request now, so it can settle after the user has moved on
+   * — at which point server A's confirmation must not appear under server B.
+   */
+  const clearAttemptRef = useRef(0);
   /**
    * Set synchronously when a clear starts, and consumed by the reset effect
    * below. The clear itself bumps `oauthRevision` on its way out, so without
@@ -100,6 +107,18 @@ export function AuthTab({
    * which of the two lands first is not something the ordering guarantees.
    */
   const ownClearRef = useRef(false);
+  const serverNameRef = useRef(serverName);
+  useEffect(() => {
+    serverNameRef.current = serverName;
+  }, [serverName]);
+  // A new selection retires any in-flight clear and drops the previous one's
+  // banner: neither belongs to the server now on screen.
+  useEffect(() => {
+    clearAttemptRef.current++;
+    setClearState("idle");
+    setClearFailure(null);
+    setLastClearDisconnected(false);
+  }, [serverName]);
   const [lastClearDisconnected, setLastClearDisconnected] = useState(false);
   const [stepUpChoiceIndex, setStepUpChoiceIndex] = useState(0);
 
@@ -123,6 +142,7 @@ export function AuthTab({
       return;
     }
     setClearState("idle");
+    setClearFailure(null);
     setLastClearDisconnected(false);
   }, [oauthRevision]);
 
@@ -189,13 +209,31 @@ export function AuthTab({
         // first over the same store entry, and the user cannot see that the
         // first is still running except by this state.
         if (clearState === "clearing") return;
+        const attempt = ++clearAttemptRef.current;
+        const attemptServer = serverName;
         setLastClearDisconnected(isLiveConnection);
+        setClearFailure(null);
         ownClearRef.current = true;
         setClearState("clearing");
-        const settle = () => setClearState("cleared");
-        // Settled either way: a failed revocation still cleared local state,
-        // and `handleClearOAuth` reports the failure through the message line.
-        void Promise.resolve(onClearOAuth()).then(settle, settle);
+        // A completion is only ours if nothing has superseded it and the
+        // selection has not moved on.
+        const current = () =>
+          clearAttemptRef.current === attempt &&
+          serverNameRef.current === attemptServer;
+        void Promise.resolve(onClearOAuth()).then(
+          () => {
+            if (current()) setClearState("cleared");
+          },
+          (err: unknown) => {
+            // A rejection is NOT a revocation failure — those come back as
+            // outcomes and are reported through the message line. This is the
+            // local clear or the disconnect itself failing, so announcing
+            // "OAuth state cleared" here would be a plain lie.
+            if (!current()) return;
+            setClearFailure(err instanceof Error ? err.message : String(err));
+            setClearState("failed");
+          },
+        );
       }
     },
     { isActive: focused },
@@ -369,6 +407,12 @@ export function AuthTab({
                 {lastClearDisconnected
                   ? "OAuth state cleared. Disconnected."
                   : "OAuth state cleared."}
+              </Text>
+            )}
+            {clearState === "failed" && (
+              <Text color="red">
+                Could not clear OAuth state
+                {clearFailure ? `: ${clearFailure}` : "."}
               </Text>
             )}
           </Box>
