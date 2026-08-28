@@ -38,9 +38,21 @@ import {
  * SDK v2's {@link WebStandardStreamableHTTPServerTransport} speaks the Fetch API
  * (`Request`/`Response`) rather than Node `req`/`res`. The JSON body is passed
  * to `handleRequest` via `parsedBody` (Express already parsed it), so the Web
- * request carries only method, URL, and headers.
+ * request carries only method, URL, headers — and a `signal`.
+ *
+ * The signal is load-bearing, not decoration (#2140). On the 2026-07-28 era a
+ * client cancels a request by closing that request's response stream, and the
+ * SDK server surfaces the disconnect to a tool handler as `ctx.mcpReq.signal`
+ * — reading it off this Request. Building one without a signal therefore makes
+ * every fixture server deaf to cancellation, which is indistinguishable from a
+ * client that never sent the signal: a test asserting that a cancel reaches the
+ * server passes only if this is wired.
+ *
+ * `res`'s `close` is the disconnect, but only when the response had not already
+ * finished — Express emits it on every completed response too, and aborting
+ * then would cancel handlers that had already succeeded.
  */
-function toWebRequest(req: Request): globalThis.Request {
+function toWebRequest(req: Request, res: Response): globalThis.Request {
   const headers = new Headers();
   for (const [key, value] of Object.entries(req.headers)) {
     if (Array.isArray(value)) {
@@ -50,7 +62,17 @@ function toWebRequest(req: Request): globalThis.Request {
     }
   }
   const url = `http://localhost${req.originalUrl || req.url}`;
-  return new globalThis.Request(url, { method: req.method, headers });
+  const controller = new AbortController();
+  res.on("close", () => {
+    if (!res.writableEnded) {
+      controller.abort();
+    }
+  });
+  return new globalThis.Request(url, {
+    method: req.method,
+    headers,
+    signal: controller.signal,
+  });
 }
 
 /**
@@ -436,7 +458,7 @@ export class TestServerHttp {
       }
       this.currentRequestHeaders = extractHeaders(req);
       try {
-        const webResponse = await handler.fetch(toWebRequest(req), {
+        const webResponse = await handler.fetch(toWebRequest(req, res), {
           parsedBody: req.body,
         });
         await writeWebResponse(res, webResponse);
@@ -540,9 +562,12 @@ export class TestServerHttp {
         }
 
         try {
-          const webResponse = await transport.handleRequest(toWebRequest(req), {
-            parsedBody: req.body,
-          });
+          const webResponse = await transport.handleRequest(
+            toWebRequest(req, res),
+            {
+              parsedBody: req.body,
+            },
+          );
           await writeWebResponse(res, webResponse);
         } catch (error) {
           // If response already sent (e.g., by OAuth middleware), don't send another
@@ -577,7 +602,7 @@ export class TestServerHttp {
 
         try {
           const webResponse = await newTransport.handleRequest(
-            toWebRequest(req),
+            toWebRequest(req, res),
             { parsedBody: req.body },
           );
           await writeWebResponse(res, webResponse);
@@ -615,7 +640,9 @@ export class TestServerHttp {
       // Let the transport handle the GET request
       this.currentRequestHeaders = extractHeaders(req);
       try {
-        const webResponse = await transport.handleRequest(toWebRequest(req));
+        const webResponse = await transport.handleRequest(
+          toWebRequest(req, res),
+        );
         await writeWebResponse(res, webResponse);
       } catch (error) {
         if (!res.headersSent) {

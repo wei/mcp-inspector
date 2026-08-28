@@ -33,6 +33,7 @@ import {
   createCollectUrlElicitationTool,
   createUrlElicitationFormTool,
   createSendNotificationTool,
+  createSlowTaskTool,
   createGetAnnotatedMessageTool,
   createGetTempTool,
   createGetTempExtraTool,
@@ -165,6 +166,8 @@ function resolveToolPreset(
       return createUrlElicitationFormTool();
     case "send_notification":
       return createSendNotificationTool();
+    case "slow_task":
+      return createSlowTaskTool();
     case "get_annotated_message":
       return createGetAnnotatedMessageTool();
     case "get_temp":
