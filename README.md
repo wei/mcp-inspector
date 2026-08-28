@@ -168,14 +168,23 @@ Each config below is a ready-made server for exercising one feature by hand. Loa
 #### Cancelling a call
 
 `cancellation-modern-http.json` serves `slow_task`, which reports progress once
-a second for up to 60 seconds and returns early — saying how far it got — if it
-is cancelled. Connect with **Protocol Era = Modern**.
+a second for up to 60 seconds and stops early if it is cancelled, printing how
+far it got to **the server's terminal**. Connect with **Protocol Era = Modern**.
 
-Run `slow_task` from the Tools tab and click **Cancel** after a few seconds. The
-progress must stop immediately, and the result must read `Cancelled after Ns`.
-On the broken build the progress kept arriving until the tool completed all 60
-seconds, because the Inspector was sending the wrong cancellation signal
+Watch the terminal you started the server in, run `slow_task` from the Tools
+tab, and click **Cancel** after a few seconds. The progress must stop
+immediately, the Inspector must report the call cancelled, and the server must
+print `[slow_task] cancelled after Ns`. On the broken build the progress kept
+arriving until the tool completed all 60 seconds and the server printed
+`completed all 60s without being cancelled`, because the Inspector was sending
+the wrong cancellation signal
 ([#2140](https://github.com/modelcontextprotocol/inspector/issues/2140)).
+
+The server's terminal is the place to watch, not the Inspector's result panel:
+cancellation closes the very stream the tool's result would travel on, so on a
+successful cancel the tool's return value is undeliverable by construction and
+the Inspector shows a cancelled call rather than a result. Which is the point —
+what has to stop is the *work*, and only the server can report that.
 
 The 2026-07-28 spec makes this
 [transport-specific](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation#transport-specific-cancellation):

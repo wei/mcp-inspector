@@ -579,7 +579,7 @@ describe("RemoteClientTransport", () => {
     it("advertises hasPerRequestStream only for streamable-http", () => {
       const forType = (c: MCPServerConfig) =>
         new RemoteClientTransport(
-          { baseUrl, fetchFn: vi.fn() as unknown as typeof fetch },
+          { baseUrl, fetchFn: vi.fn<typeof fetch>() },
           c,
         ).hasPerRequestStream;
 
@@ -640,7 +640,7 @@ describe("RemoteClientTransport", () => {
       await transport.close();
     });
 
-    it("aborting the requestSignal rejects the in-flight send and releases its response wait", async () => {
+    it("aborting the requestSignal rejects the in-flight send", async () => {
       let sse = createPushableSseStream();
       const fetchFn = vi
         .fn<typeof fetch>()
@@ -675,15 +675,13 @@ describe("RemoteClientTransport", () => {
         { jsonrpc: "2.0", id: 7, method: "tools/call" },
         { requestSignal: controller.signal },
       );
-      const settled = vi.fn();
-      void sent.then(settled, settled);
 
       controller.abort();
+      // The backend never answers an aborted send, so the rejection has to come
+      // from the fetch itself. `postSend` already cancels the SSE response wait
+      // it registered for this id on that path (its catch does, unchanged by
+      // #2140) — so the send surfaces the abort rather than the wait's timeout.
       await expect(sent).rejects.toThrow(/Aborted/);
-      // The response wait registered for id 7 must have been cancelled too —
-      // otherwise this send would hang past the abort waiting for a JSON-RPC
-      // response the aborted request can never produce.
-      expect(settled).toHaveBeenCalledTimes(1);
 
       await transport.close();
     });
