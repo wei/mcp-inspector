@@ -1,6 +1,6 @@
 import {
+  clearAndPlanRevocation,
   executeOAuthRevocation,
-  planOAuthRevocation,
   type TokenRevocationOutcome,
 } from "@inspector/core/auth/revocation.js";
 import type { OAuthStorage } from "@inspector/core/auth/storage.js";
@@ -72,18 +72,17 @@ export async function clearServerOAuthState(
   // No proxied fetch on hand means no request we could usefully make, so the
   // leg is reported as skipped rather than attempted against the page origin.
   const fetchFn = params.fetchFn;
-  // Snapshot → clear → revoke. The clear must not wait on the network: this
-  // server can be inactive when the call starts and complete a *fresh*
-  // authorization while the request is in flight, at which point an unconditional
-  // clear afterwards would delete the new credentials. The session checks in
-  // `useOAuthRecovery` run after this helper returns and cannot protect the
-  // store, so the ordering is what does (#2144).
-  const plan = await planOAuthRevocation({
+  // Takes the state and deletes it in ONE atomic storage step, then sends. The
+  // clear must not wait on the network: this server can be inactive when the
+  // call starts and complete a *fresh* authorization while the request is in
+  // flight, at which point a later clear would delete the new credentials. The
+  // session checks in `useOAuthRecovery` run after this helper returns and
+  // cannot protect the store, so the ordering is what does (#2144).
+  const plan = await clearAndPlanRevocation({
     serverUrl,
     storage: params.oauthStorage,
     enabled: revoke && fetchFn !== undefined,
   });
-  await params.oauthStorage.clear(serverUrl);
   const revocation: TokenRevocationOutcome = fetchFn
     ? await executeOAuthRevocation(plan, { fetchFn })
     : { status: "skipped", reason: "disabled" };

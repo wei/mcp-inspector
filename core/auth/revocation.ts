@@ -22,12 +22,15 @@
 
 import type {
   OAuthClientInformation,
-  OAuthMetadata,
   OAuthTokens,
 } from "@modelcontextprotocol/client";
 import { selectClientAuthMethod } from "@modelcontextprotocol/client";
+import {
+  OAuthClientInformationSchema,
+  OAuthTokensSchema,
+} from "@modelcontextprotocol/core";
 import type { InspectorLogger } from "../logging/index.js";
-import type { OAuthStorage } from "./storage.js";
+import type { OAuthStorage, RevocationSnapshot } from "./storage.js";
 
 /**
  * How long a revocation request may take before it is abandoned.
@@ -107,7 +110,7 @@ export function selectRevocableToken(
  * when it does not — while still honoring a `token_endpoint_auth_method` the
  * client's own registration declares.
  */
-export function revocationAuthMethods(metadata: OAuthMetadata): string[] {
+export function revocationAuthMethods(metadata: CachedMetadata): string[] {
   return metadata.revocation_endpoint_auth_methods_supported ?? [];
 }
 
@@ -298,13 +301,12 @@ export interface ExecuteOAuthRevocationParams {
  * Everything the revocation requests need, read out of the store **before** the
  * local clear empties it.
  *
- * Split from the sending on purpose, and the ordering it enables is the whole
- * point: plan → `storage.clear(serverUrl)` → execute. Revoking first and
- * clearing afterwards delays the clear by however long the network takes, and a
- * *fresh* authorization completing in that window would then be deleted by a
- * clear that was reasoning about the grant it replaced. Snapshotting first
- * closes that window: the clear runs against what the user asked to forget, and
- * the requests go out against a copy nothing can invalidate.
+ * Split from the sending on purpose. `clearAndPlanRevocation` takes the state
+ * and deletes it in one atomic storage step; the requests then go out from this
+ * copy, which nothing can invalidate. Revoking first and clearing afterwards
+ * would delay the clear by however long the network takes, and a *fresh*
+ * authorization completing in that window would be deleted by a clear
+ * reasoning about the grant it replaced.
  */
 export interface OAuthRevocationPlan {
   serverUrl: string;
@@ -335,28 +337,45 @@ function emptyPlan(
 }
 
 /**
- * Read every grant the impending `clear(serverUrl)` will delete, plus the
- * endpoint and credentials needed to revoke them.
+ * Take the server's OAuth state — deleting it — and build the revocation
+ * requests from what was taken.
+ *
+ * The take and the delete are one atomic storage step
+ * ({@link OAuthStorage.takeRevocationSnapshot}), which is what closes the
+ * check-then-act window: separate reads followed by a separate clear each yield
+ * at an `await`, and an OAuth completion landing in one of those gaps would
+ * save a fresh grant that the clear then destroyed.
+ *
+ * The state is cleared **even when revocation is disabled or nothing can be
+ * revoked** — clearing is what the caller asked for; the requests are the
+ * optional part.
  *
  * Every grant is covered, not just the active issuer's: see
  * {@link collectGrants}. The metadata comes from the cache the OAuth flow
  * already populated rather than from a fresh discovery round-trip — the tokens
  * being revoked were minted by that same authorization server, so its cached
  * document is the one that describes them, and re-discovering would add two
- * network legs to a teardown for no new information. A server that never
- * completed an OAuth flow has no cached metadata *and* no tokens, so it
- * short-circuits either way.
+ * network legs to a teardown for no new information.
  */
-export async function planOAuthRevocation(
+export async function clearAndPlanRevocation(
   params: PlanOAuthRevocationParams,
 ): Promise<OAuthRevocationPlan> {
   const { serverUrl, storage } = params;
+
+  let snapshot: RevocationSnapshot;
+  try {
+    snapshot = await storage.takeRevocationSnapshot(serverUrl);
+  } catch (err) {
+    // The clear did not happen, and the caller has no other way to learn that.
+    throw err instanceof Error ? err : new Error(String(err));
+  }
+
   if (params.enabled === false) {
     return emptyPlan(serverUrl, { status: "skipped", reason: "disabled" });
   }
 
   try {
-    const { grants, failures } = await collectGrants(storage, serverUrl);
+    const { grants, failures } = await collectGrants(snapshot);
     if (grants.length === 0) {
       return emptyPlan(
         serverUrl,
@@ -365,7 +384,7 @@ export async function planOAuthRevocation(
       );
     }
 
-    const metadata = await storage.getServerMetadata(serverUrl);
+    const metadata = parseServerMetadata(snapshot.serverMetadata);
     if (!metadata) {
       return emptyPlan(
         serverUrl,
@@ -390,13 +409,32 @@ export async function planOAuthRevocation(
       metadataIssuer: metadata.issuer,
     };
   } catch (err) {
-    // A store that cannot be read is not a reason to abandon the clear the
-    // user asked for.
+    // The state is already gone; a snapshot we cannot interpret is reported,
+    // not thrown, because there is nothing left for the caller to retry.
     return emptyPlan(serverUrl, {
       status: "failed",
       detail: err instanceof Error ? err.message : String(err),
     });
   }
+}
+
+/**
+ * The cached authorization-server metadata from a snapshot.
+ *
+ * Read structurally rather than schema-parsed: this is a document the SDK's own
+ * discovery wrote and the store round-trips as-is, and only two fields are
+ * used. A parse failure here would lose an otherwise revocable grant.
+ */
+function parseServerMetadata(raw: unknown): CachedMetadata | undefined {
+  if (raw === null || typeof raw !== "object") return undefined;
+  return raw as CachedMetadata;
+}
+
+/** The three fields revocation reads out of cached AS metadata. */
+interface CachedMetadata {
+  revocation_endpoint?: string;
+  revocation_endpoint_auth_methods_supported?: string[];
+  issuer?: string;
 }
 
 /**
@@ -434,50 +472,33 @@ export async function executeOAuthRevocation(
   return outcome;
 }
 
-/**
- * The client credentials to authenticate the revocation request with.
- *
- * Deliberately the **reverse** of `BaseOAuthClientProvider.clientInformation`,
- * which prefers the preregistered (static) entry. That order answers "who
- * should I authenticate as *now*"; revocation asks a different question — "who
- * minted *this* token" — and the two diverge. The store lets a preregistered
- * client and an issuer-bound dynamic registration coexist
- * (`savePreregisteredClientInformation` does not clear the issuer slot), so
- * after a server is switched from DCR to a configured `oauth.clientId`, an
- * older DCR grant would be revoked with the configured client's credentials.
- * RFC 7009 §2.2 makes a 200 the answer for a token the server does not
- * recognise as the caller's, so that reports `revoked` while the grant stays
- * live — the worst possible outcome, since the local record is gone.
- *
- * So the registration bound to this grant's `issuer` wins where the store has
- * one, and the preregistered entry is the fallback. That covers both
- * directions: a token minted with the configured client leaves the issuer slot
- * empty (the SDK only writes it after DCR) and falls through correctly.
- *
- * This is best available evidence, not proof: the store records client
- * information per issuer, not per token, so a server that re-registered
- * dynamically under one issuer still cannot distinguish which registration
- * minted which grant. Binding the client identity to the token at save time is
- * the real fix and is a storage-shape change beyond this PR.
- */
-async function resolveClientInformation(
-  storage: OAuthStorage,
-  serverUrl: string,
-  issuer?: string,
-): Promise<OAuthClientInformation | undefined> {
-  return (
-    (issuer !== undefined
-      ? await storage.getClientInformation(serverUrl, false, issuer)
-      : undefined) ?? (await storage.getClientInformation(serverUrl, true))
-  );
-}
-
 /** One revocable grant held for a server, and which AS minted it. */
 export interface StoredGrant {
   /** Undefined for the legacy unkeyed slot, which predates issuer binding. */
   issuer?: string;
   token: string;
   tokenTypeHint: "refresh_token" | "access_token";
+  /**
+   * The credentials to authenticate the revocation request with: the
+   * registration bound to this grant's issuer, falling back to the
+   * preconfigured (static) one.
+   *
+   * Deliberately the **reverse** of `BaseOAuthClientProvider.clientInformation`,
+   * which prefers the preregistered entry. That order answers "who should I
+   * authenticate as *now*"; revocation asks "who minted *this* token", and the
+   * two diverge — the store lets a preregistered client and an issuer-bound
+   * dynamic registration coexist, so after a server is switched from DCR to a
+   * configured `oauth.clientId` an older DCR grant would be revoked with the
+   * configured client's credentials. RFC 7009 §2.2 answers 200 for a token the
+   * server does not recognise as the caller's, so that reports `revoked` while
+   * the grant stays live and the local record is already gone.
+   *
+   * Best available evidence, not proof: the store records client information
+   * per issuer, not per token, so a server that re-registered dynamically under
+   * one issuer still cannot say which registration minted which grant. Binding
+   * the identity to the token at save time is the real fix and is a
+   * storage-shape change.
+   */
   clientInformation?: OAuthClientInformation;
 }
 
@@ -485,85 +506,73 @@ export interface StoredGrant {
 interface CollectedGrants {
   grants: StoredGrant[];
   /**
-   * One `failed` outcome per slot whose read threw. Kept apart from the grants
-   * so a single corrupt slot cannot abandon the ones that are still revocable
-   * — the clear deletes them all either way, so the failure has to be reported
+   * One `failed` outcome per slot that could not be parsed. Kept apart from the
+   * grants so a single corrupt slot cannot abandon the ones that are still
+   * revocable — the state is gone either way, so the failure has to be reported
    * *beside* the successes rather than instead of them.
    */
   failures: TokenRevocationOutcome[];
 }
 
 /**
- * Every grant `clear(serverUrl)` is about to delete.
+ * Every grant the snapshot took, deduplicated by **issuer and token**.
  *
- * `clear` drops **every** `byIssuer` slot, so reading only the context-free
- * (active-issuer) token would leave an earlier authorization server's grant
- * live while destroying the local record of it — the exact leak this feature
- * exists to close, just moved one level down. A server that authorized against
- * issuers A and B has two grants here, not one.
+ * The snapshot is of state that has already been deleted, so this covers every
+ * grant the clear removed rather than just the active issuer's: a server that
+ * authorized against issuers A and B has two grants here, not one. Otherwise
+ * B would be revoked while A's grant stayed live at its authorization server —
+ * the same leak this feature closes, one level down.
  *
- * Deduplication is by **issuer *and* token**, not by token alone. A token is
- * only meaningful to the authorization server that minted it, so two issuers
- * that happen to mint the same opaque string are two grants; collapsing them
- * would drop the second before the issuer-mismatch check could even report it.
+ * Deduplication is by issuer *and* token because a token means nothing outside
+ * the authorization server that minted it: two issuers that happen to mint the
+ * same opaque string are two grants, and collapsing them would drop the second
+ * before the issuer check could report it.
  *
- * The ctx-less read is included last and is the one exception: it resolves to
- * the *active* issuer's slot (already collected above) or, on a pre-SEP-2352
- * entry, to the legacy unkeyed token — which nothing else returns. It is
- * suppressed on the issuer *stamp* the store puts on a slot-sourced value
- * rather than on the token's value, because the active slot may hold client
- * information without a token: the read then falls back to the legacy grant,
- * and a value collision with any other issuer would drop a real grant. It is
- * also the only read here allowed to fall back; an enumerated issuer is read
- * exactly, so a legacy token is never mislabelled as belonging to one.
+ * Parsing happens here rather than in the snapshot: it is pure, so it belongs
+ * after the mutation — running it inside would reintroduce the `await` the
+ * atomic read exists to remove.
  */
 async function collectGrants(
-  storage: OAuthStorage,
-  serverUrl: string,
+  snapshot: RevocationSnapshot,
 ): Promise<CollectedGrants> {
   const grants: StoredGrant[] = [];
   const failures: TokenRevocationOutcome[] = [];
   const seenKeys = new Set<string>();
 
-  const add = async (issuer?: string): Promise<void> => {
-    const tokens =
-      issuer === undefined
-        ? await storage.getTokens(serverUrl)
-        : await storage.getIssuerTokens(serverUrl, issuer);
-    const revocable = selectRevocableToken(tokens);
+  const preregistered = await parseClient(
+    snapshot.preregisteredClientInformation,
+  );
+
+  const add = async (
+    issuer: string | undefined,
+    rawTokens: unknown,
+    rawClient: unknown,
+  ): Promise<void> => {
+    const revocable = selectRevocableToken(await parseTokens(rawTokens));
     if (!revocable) return;
 
-    // `getTokens` stamps the resolved issuer onto a value it took from a
-    // byIssuer slot and leaves an unkeyed one unstamped (see `withIssuer` in
-    // oauth-storage.ts — the stamp is the key it came from), so the ctx-less
-    // read reports which issuer its answer belongs to, if any.
-    const grantIssuer =
-      issuer ?? (tokens as { issuer?: string } | undefined)?.issuer;
-    // Keyed by issuer AND token: a token means nothing outside the
-    // authorization server that minted it, so two issuers minting the same
-    // opaque value are two grants. Deduping the ctx-less read on its *stamp*
-    // alone would be wrong too — if `listIssuers` failed there is no enumerated
-    // slot behind the stamp, and skipping would leave the one readable grant
-    // unrevoked while `clear` deleted it.
-    const key = `${grantIssuer ?? "\u0000legacy"}\u0000${revocable.token}`;
+    const key = `${issuer ?? "\u0000legacy"}\u0000${revocable.token}`;
     if (seenKeys.has(key)) return;
     seenKeys.add(key);
 
+    // The registration bound to THIS grant wins, with the preconfigured entry
+    // as the fallback — see the note on `StoredGrant.clientInformation`.
+    const bound = await parseClient(rawClient);
     grants.push({
-      issuer: grantIssuer,
+      issuer,
       ...revocable,
-      clientInformation: await resolveClientInformation(
-        storage,
-        serverUrl,
-        grantIssuer,
-      ),
+      clientInformation: bound ?? preregistered,
     });
   };
 
-  /** Read one slot; a slot that throws is reported, not fatal to the rest. */
-  const addSafely = async (issuer?: string): Promise<void> => {
+  /** Read one slot; a slot that cannot be parsed is reported, not fatal. */
+  const addSafely = async (
+    issuer: string | undefined,
+    rawTokens: unknown,
+    rawClient: unknown,
+  ): Promise<void> => {
     try {
-      await add(issuer);
+      await add(issuer, rawTokens, rawClient);
     } catch (err) {
       const where =
         issuer === undefined ? "the unkeyed slot" : `issuer ${issuer}`;
@@ -576,25 +585,31 @@ async function collectGrants(
     }
   };
 
-  // A `listIssuers` failure is fatal on its own — there is nothing to
-  // enumerate — but the ctx-less read below can still find a legacy grant, so
-  // it is recorded rather than thrown.
-  let issuers: string[] = [];
-  try {
-    issuers = await storage.listIssuers(serverUrl);
-  } catch (err) {
-    failures.push({
-      status: "failed",
-      detail: `could not list the stored authorization servers: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    });
+  for (const [issuer, slot] of Object.entries(snapshot.byIssuer)) {
+    await addSafely(issuer, slot?.tokens, slot?.clientInformation);
   }
-  for (const issuer of issuers) {
-    await addSafely(issuer);
-  }
-  await addSafely();
+  await addSafely(
+    undefined,
+    snapshot.legacyTokens,
+    snapshot.legacyClientInformation,
+  );
   return { grants, failures };
+}
+
+/** Parse stored tokens, or `undefined` when the slot held none. */
+async function parseTokens(raw: unknown): Promise<OAuthTokens | undefined> {
+  return raw === undefined || raw === null
+    ? undefined
+    : await OAuthTokensSchema.parseAsync(raw);
+}
+
+/** Parse stored client information, or `undefined` when the slot held none. */
+async function parseClient(
+  raw: unknown,
+): Promise<OAuthClientInformation | undefined> {
+  return raw === undefined || raw === null
+    ? undefined
+    : await OAuthClientInformationSchema.parseAsync(raw);
 }
 
 /**

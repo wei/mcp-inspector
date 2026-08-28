@@ -14,8 +14,8 @@ import { mcpAuth } from "../auth/mcpAuth.js";
 import type { OAuthStorage } from "../auth/storage.js";
 import { parseOAuthState } from "../auth/utils.js";
 import {
+  clearAndPlanRevocation,
   executeOAuthRevocation,
-  planOAuthRevocation,
   type TokenRevocationOutcome,
 } from "../auth/revocation.js";
 import type { InspectorLogger } from "../logging/index.js";
@@ -500,11 +500,11 @@ export class OAuthManager {
    * Drop this server's local OAuth state, and revoke the grant at the
    * authorization server (RFC 7009).
    *
-   * The order is **snapshot → clear → revoke**, and it matters. Everything the
-   * requests need is read out of the store first, because the clear empties it;
-   * but the clear then runs immediately rather than behind the network, because
-   * a fresh authorization completing during a five-second revocation would
-   * otherwise be deleted by a clear reasoning about the grant it replaced.
+   * The state is taken and deleted in one atomic step, and the requests are
+   * sent afterwards from what was taken. Both halves matter: the requests need
+   * state the clear destroys, and the clear must not wait on the network, or a
+   * fresh authorization completing during a five-second revocation would be
+   * deleted by a clear reasoning about the grant it replaced.
    *
    * Best-effort by construction: every failure is reported through the returned
    * outcome and the clear has already happened regardless, because forgetting
@@ -523,12 +523,14 @@ export class OAuthManager {
     }
 
     const serverUrl = this.getServerUrl();
-    const plan = await planOAuthRevocation({
+    // Takes the state and deletes it in ONE atomic storage step; separate
+    // reads followed by a separate clear are a check-then-act, and an OAuth
+    // completion landing between them would be destroyed by the clear.
+    const plan = await clearAndPlanRevocation({
       serverUrl,
       storage: this.oauthConfig.storage,
       enabled: options?.revoke,
     });
-    await this.oauthConfig.storage.clear(serverUrl);
 
     this.oauthFlowState = null;
     this.pendingAuthorizationScope = undefined;

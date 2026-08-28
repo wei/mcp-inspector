@@ -19,8 +19,8 @@ import {
 } from "@modelcontextprotocol/inspector-test-server";
 import { BrowserOAuthStorage } from "@inspector/core/auth/browser/storage.js";
 import {
+  clearAndPlanRevocation,
   executeOAuthRevocation,
-  planOAuthRevocation,
 } from "@inspector/core/auth/revocation.js";
 import type { TokenRevocationOutcome } from "@inspector/core/auth/revocation.js";
 import type { OAuthMetadata } from "@modelcontextprotocol/client";
@@ -203,14 +203,13 @@ describe("OAuth token revocation (RFC 7009)", () => {
   });
 
   /**
-   * The caller's real sequence — snapshot, clear, send — so this exercises the
-   * ordering the product uses rather than a convenience wrapper.
+   * The caller's real sequence — take-and-clear atomically, then send — so this
+   * exercises the ordering the product uses rather than a convenience wrapper.
    */
   async function clearAndRevoke(
     storage: BrowserOAuthStorage,
   ): Promise<TokenRevocationOutcome> {
-    const plan = await planOAuthRevocation({ serverUrl, storage });
-    await storage.clear(serverUrl);
+    const plan = await clearAndPlanRevocation({ serverUrl, storage });
     return executeOAuthRevocation(plan, { fetchFn: fetch });
   }
 

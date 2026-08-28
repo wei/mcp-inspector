@@ -1287,6 +1287,16 @@ export function useOAuthRecovery({
       if (client && stillTargetsActiveSession()) {
         try {
           await client.disconnect();
+        } catch (err) {
+          // The clear has already succeeded, so this must not propagate: the
+          // caller's catch would report "Could not clear the stored OAuth
+          // state", which is false. Reported as what it is, and the
+          // cleared-successfully toast below still goes out.
+          notifications.show({
+            title: "Cleared, but the session did not disconnect cleanly",
+            message: err instanceof Error ? err.message : String(err),
+            color: "yellow",
+          });
         } finally {
           // Revalidate after the second await for the same reason.
           if (stillTargetsActiveSession()) {

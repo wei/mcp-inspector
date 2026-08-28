@@ -4,8 +4,8 @@ import {
 } from "@inspector/core/auth/node/storage-node.js";
 import {
   DEFAULT_REVOCATION_TIMEOUT_MS,
+  clearAndPlanRevocation,
   executeOAuthRevocation,
-  planOAuthRevocation,
   type OAuthRevocationPlan,
   type TokenRevocationOutcome,
 } from "@inspector/core/auth/revocation.js";
@@ -52,22 +52,23 @@ export async function clearStoredAuthForRelogin(
   // with, so the grant actually in use is the one whose outcome is reported.
   // They are deliberately not deduplicated; see `sendPlans`.
   const keys = normalized === raw ? [raw] : [normalized, raw];
-  const plans =
-    options?.revoke === false
-      ? []
-      : await Promise.all(
-          keys.map((key) => planOAuthRevocation({ serverUrl: key, storage })),
-        );
-
-  await storage.clear(raw);
-  if (normalized !== raw) {
-    await storage.clear(normalized);
+  // Each key's state is taken and deleted in ONE atomic storage step, so the
+  // clear is never a separate check-then-act over an already-read snapshot.
+  const plans: OAuthRevocationPlan[] = [];
+  for (const key of keys) {
+    plans.push(
+      await clearAndPlanRevocation({
+        serverUrl: key,
+        storage,
+        enabled: options?.revoke !== false,
+      }),
+    );
   }
   // Drop the in-process singleton so the next connect cannot reuse a cleared
   // entry from the NodeOAuthStorage cache.
   resetNodeOAuthStorageCache();
 
-  return plans.length > 0 ? sendPlans(plans) : undefined;
+  return options?.revoke === false ? undefined : sendPlans(plans);
 }
 
 /**
@@ -106,7 +107,12 @@ async function sendPlans(
   let lastSkip: TokenRevocationOutcome | undefined;
   for (const plan of plans) {
     const remainingMs = deadlineAt - Date.now();
-    if (remainingMs <= 0) {
+    // A plan that already knows its answer needs no network, so the budget is
+    // irrelevant to it. Synthesising exhaustion here would warn that a grant
+    // may still be live when the key held no grant at all — a false alarm, and
+    // one that outranks the real outcome under the failure-first rule below.
+    const needsNetwork = plan.outcome === undefined;
+    if (needsNetwork && remainingMs <= 0) {
       reported ??= {
         status: "failed",
         detail: `the ${DEFAULT_REVOCATION_TIMEOUT_MS}ms revocation budget was exhausted before "${plan.serverUrl}" was attempted`,
@@ -115,7 +121,7 @@ async function sendPlans(
     }
     const outcome = await executeOAuthRevocation(plan, {
       fetchFn,
-      timeoutMs: remainingMs,
+      timeoutMs: needsNetwork ? remainingMs : undefined,
     });
     if (outcome.status === "skipped" && outcome.reason === "no_tokens") {
       lastSkip = outcome;

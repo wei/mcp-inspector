@@ -140,8 +140,8 @@ export {
   aggregateOutcomes,
   buildRevocationRequest,
   revocationAuthMethods,
+  clearAndPlanRevocation,
   executeOAuthRevocation,
-  planOAuthRevocation,
   revokeToken,
   selectRevocableToken,
 } from "./revocation.js";

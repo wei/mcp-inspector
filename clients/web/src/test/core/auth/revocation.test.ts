@@ -6,8 +6,8 @@ import {
   aggregateOutcomes,
   buildRevocationRequest,
   revocationAuthMethods,
+  clearAndPlanRevocation,
   executeOAuthRevocation,
-  planOAuthRevocation,
   revokeToken,
   selectRevocableToken,
 } from "@inspector/core/auth/revocation.js";
@@ -363,8 +363,8 @@ describe("revokeToken", () => {
 });
 
 /**
- * Compose the two halves the way every caller does, minus the `storage.clear`
- * between them — these tests are about what is planned and sent, and the
+ * Compose the two halves the way every caller does. The first one clears, so a
+ * test that asserts on the store afterwards is looking at an emptied one — the
  * ordering guarantee itself is asserted separately below.
  */
 async function revokeStoredOAuthTokens(params: {
@@ -375,7 +375,7 @@ async function revokeStoredOAuthTokens(params: {
   timeoutMs?: number;
   logger?: InspectorLogger;
 }): Promise<TokenRevocationOutcome> {
-  const plan = await planOAuthRevocation({
+  const plan = await clearAndPlanRevocation({
     serverUrl: params.serverUrl,
     storage: params.storage,
     enabled: params.enabled,
@@ -385,6 +385,43 @@ async function revokeStoredOAuthTokens(params: {
     timeoutMs: params.timeoutMs,
     logger: params.logger,
   });
+}
+
+/**
+ * Stub the atomic take-and-clear with a hand-built snapshot. Needed wherever
+ * the shape under test cannot be produced through the store's own API — a
+ * legacy slot alongside an issuer slot, for instance, since an issuer-stamped
+ * save promotes and clears the legacy one.
+ */
+function stubSnapshot(
+  storage: BrowserOAuthStorage,
+  snapshot: Partial<Parameters<typeof stubSnapshotShape>[0]> = {},
+): void {
+  vi.spyOn(storage, "takeRevocationSnapshot").mockResolvedValue(
+    stubSnapshotShape(snapshot),
+  );
+}
+
+function stubSnapshotShape(snapshot: {
+  byIssuer?: Record<
+    string,
+    { tokens?: unknown; clientInformation?: unknown } | undefined
+  >;
+  legacyTokens?: unknown;
+  legacyClientInformation?: unknown;
+  preregisteredClientInformation?: unknown;
+  serverMetadata?: unknown;
+}): {
+  byIssuer: Record<
+    string,
+    { tokens?: unknown; clientInformation?: unknown } | undefined
+  >;
+  legacyTokens?: unknown;
+  legacyClientInformation?: unknown;
+  preregisteredClientInformation?: unknown;
+  serverMetadata?: unknown;
+} {
+  return { byIssuer: {}, ...snapshot };
 }
 
 describe("revokeStoredOAuthTokens (plan + execute)", () => {
@@ -568,28 +605,30 @@ describe("revokeStoredOAuthTokens (plan + execute)", () => {
   // Suppressing on the value would drop it unrevoked and unreported, which is
   // why the suppression keys off the store's issuer stamp instead.
   it("keeps the legacy grant when another issuer holds the same token value", async () => {
-    // The metadata names the same issuer as the slot below, so BOTH grants are
-    // genuinely revocable — otherwise this would pass for the wrong reason.
-    await storage.saveServerMetadata(
-      SERVER_URL,
-      metadata({ issuer: "https://as-a.example.com" }),
-    );
-    // A legacy unkeyed grant...
-    await storage.saveTokens(SERVER_URL, {
-      access_token: "shared",
-      token_type: "Bearer",
-      refresh_token: "shared-r",
-    });
-    // ...and an issuer slot that coincidentally holds the same token value.
-    // Saved via the client-information path so it does not clear the legacy
-    // slot, then given tokens through a stubbed exact read.
-    vi.spyOn(storage, "listIssuers").mockResolvedValue([
-      "https://as-a.example.com",
-    ]);
-    vi.spyOn(storage, "getIssuerTokens").mockResolvedValue({
-      access_token: "shared",
-      token_type: "Bearer",
-      refresh_token: "shared-r",
+    // Hand-built: an issuer-stamped save promotes and clears the legacy slot,
+    // so the store's own API cannot produce both at once.
+    stubSnapshot(storage, {
+      byIssuer: {
+        "https://as-a.example.com": {
+          tokens: {
+            access_token: "shared",
+            token_type: "Bearer",
+            refresh_token: "shared-r",
+          },
+        },
+      },
+      legacyTokens: {
+        access_token: "shared",
+        token_type: "Bearer",
+        refresh_token: "shared-r",
+      },
+      serverMetadata: {
+        issuer: "https://as-a.example.com",
+        authorization_endpoint: "https://as-a.example.com/authorize",
+        token_endpoint: "https://as-a.example.com/token",
+        revocation_endpoint: REVOKE_URL,
+        response_types_supported: ["code"],
+      },
     });
     const fetchFn = vi.fn<typeof fetch>(
       async () => new Response(null, { status: 200 }),
@@ -601,10 +640,9 @@ describe("revokeStoredOAuthTokens (plan + execute)", () => {
       fetchFn,
     });
 
-    // Still two GRANTS — that is what this is about. The issuer-bound one is
-    // revoked; the legacy one is refused (unknown authorization server) and
-    // reported, rather than being silently collapsed into the other by a
-    // token-value dedup.
+    // Two GRANTS despite one token value. The issuer-bound one is revoked; the
+    // legacy one is refused (unknown authorization server) and reported, rather
+    // than being silently collapsed into the other by a token-value dedup.
     expect(fetchFn).toHaveBeenCalledTimes(1);
     expect(outcome).toMatchObject({ status: "failed" });
     expect(outcome.status === "failed" ? outcome.detail : "").toContain(
@@ -672,35 +710,22 @@ describe("revokeStoredOAuthTokens (plan + execute)", () => {
     );
   });
 
-  // If `listIssuers` fails there is no enumerated slot behind the stamp, so
-  // skipping a stamped ctx-less read would leave the one grant the store can
-  // still produce unrevoked — while `clear` deleted it anyway.
-  it("revokes the active grant even when the issuer list cannot be read", async () => {
-    await storage.saveServerMetadata(
-      SERVER_URL,
-      metadata({ issuer: "https://as-a.example.com" }),
-    );
-    await storage.saveTokens(
-      SERVER_URL,
-      { access_token: "a", token_type: "Bearer", refresh_token: "r-active" },
-      { issuer: "https://as-a.example.com" },
-    );
-    vi.spyOn(storage, "listIssuers").mockRejectedValue(new Error("no list"));
-    const fetchFn = vi.fn<typeof fetch>(
-      async () => new Response(null, { status: 200 }),
+  // The take-and-clear is one step, so its failure means the state is still
+  // there. That has to REJECT rather than report: every caller's contract is
+  // "the clear happened", and a `failed` outcome would say the opposite of what
+  // occurred. Both clients have a rejection path for exactly this.
+  it("rejects when the atomic take-and-clear itself fails", async () => {
+    vi.spyOn(storage, "takeRevocationSnapshot").mockRejectedValue(
+      new Error("store unwritable"),
     );
 
-    const outcome = await revokeStoredOAuthTokens({
-      serverUrl: SERVER_URL,
-      storage,
-      fetchFn,
-    });
-
-    expect(
-      new URLSearchParams(String(fetchFn.mock.calls[0]![1]!.body)).get("token"),
-    ).toBe("r-active");
-    // The listing failure is still surfaced — it outranks the success.
-    expect(outcome).toMatchObject({ status: "failed" });
+    await expect(
+      revokeStoredOAuthTokens({
+        serverUrl: SERVER_URL,
+        storage,
+        fetchFn: vi.fn<typeof fetch>(),
+      }),
+    ).rejects.toThrow("store unwritable");
   });
 
   // The timeout is a budget for the WHOLE teardown, not per request. `clear`
@@ -708,32 +733,35 @@ describe("revokeStoredOAuthTokens (plan + execute)", () => {
   // N of them block the disconnect for N × the timeout — at which point the
   // "short timeout" bounds a single request and nothing the user feels.
   it("shares one deadline across grants instead of one per grant", async () => {
-    await storage.saveServerMetadata(SERVER_URL, metadata({ issuer: "a" }));
-    // All three bound to the issuer the cached metadata describes, so all three
-    // are genuinely revocable and the budget is what stops them.
-    vi.spyOn(storage, "listIssuers").mockResolvedValue(["a", "b", "c"]);
-    vi.spyOn(storage, "getIssuerTokens").mockImplementation(
-      async (_url: string, issuer: string) => ({
-        access_token: `a-${issuer}`,
-        token_type: "Bearer",
-        refresh_token: `r-${issuer}`,
-      }),
-    );
-    // Every request hangs, so each one burns the whole remaining budget.
+    // Built directly rather than through the store: three *revocable* grants
+    // means three tokens under one issuer, which `byIssuer` cannot hold (one
+    // slot per issuer). The budget logic is what is under test here, and a plan
+    // is a plain value.
+    const grant = (n: string) => ({
+      issuer: "https://as.example.com",
+      token: `r-${n}`,
+      tokenTypeHint: "refresh_token" as const,
+    });
+    // Every request hangs, so the first burns the whole budget.
     const fetchFn = vi.fn<typeof fetch>(() => new Promise<Response>(() => {}));
 
     const started = Date.now();
-    const outcome = await revokeStoredOAuthTokens({
-      serverUrl: SERVER_URL,
-      storage,
-      fetchFn,
-      timeoutMs: 30,
-    });
+    const outcome = await executeOAuthRevocation(
+      {
+        serverUrl: SERVER_URL,
+        grants: [grant("a"), grant("b"), grant("c")],
+        failures: [],
+        endpoint: REVOKE_URL,
+        supportedAuthMethods: [],
+        metadataIssuer: "https://as.example.com",
+      },
+      { fetchFn, timeoutMs: 30 },
+    );
     const elapsed = Date.now() - started;
 
     expect(outcome).toMatchObject({ status: "failed" });
-    // Three grants: with a per-grant bound this would be ~90ms. Generous upper
-    // bound so the assertion is about the shape, not the machine.
+    // With a per-grant bound this would be ~90ms. Generous upper bound so the
+    // assertion is about the shape, not the machine.
     expect(elapsed).toBeLessThan(70);
     // The first burned the budget; the rest are reported as never attempted.
     expect(fetchFn).toHaveBeenCalledTimes(1);
@@ -878,12 +906,23 @@ describe("revokeStoredOAuthTokens (plan + execute)", () => {
     expect(logger.debug).toHaveBeenCalledTimes(1);
   });
 
-  // A store that cannot be read is not a reason to abandon the clear the user
-  // asked for, so the read is inside the try. Spying on the real instance keeps
-  // the `OAuthStorage` contract intact — a spread-and-cast stand-in would type
-  // as storage while being a plain object with none of its methods.
-  it("reports a non-Error store failure as failed", async () => {
-    vi.spyOn(storage, "listIssuers").mockRejectedValue("store exploded");
+  // A snapshot the code cannot interpret is reported, not thrown: the state is
+  // already gone by then, so there is nothing left for the caller to retry.
+  // (A failure of the take-and-clear ITSELF rejects instead — see above.)
+  it("reports an uninterpretable snapshot as failed", async () => {
+    stubSnapshot(storage, {
+      byIssuer: {
+        // Not a valid `OAuthTokens` — no `token_type`.
+        "https://as.example.com": { tokens: { access_token: 42 } },
+      },
+      serverMetadata: {
+        issuer: "https://as.example.com",
+        authorization_endpoint: "https://as.example.com/authorize",
+        token_endpoint: "https://as.example.com/token",
+        revocation_endpoint: REVOKE_URL,
+        response_types_supported: ["code"],
+      },
+    });
 
     const outcome = await revokeStoredOAuthTokens({
       serverUrl: SERVER_URL,
@@ -891,57 +930,32 @@ describe("revokeStoredOAuthTokens (plan + execute)", () => {
       fetchFn: vi.fn<typeof fetch>(),
     });
     expect(outcome).toMatchObject({ status: "failed" });
-    expect(outcome.status === "failed" ? outcome.detail : "").toContain(
-      "store exploded",
-    );
-  });
-
-  it("reports a store read failure as failed", async () => {
-    vi.spyOn(storage, "getTokens").mockRejectedValue(
-      new Error("store unreadable"),
-    );
-
-    const outcome = await revokeStoredOAuthTokens({
-      serverUrl: SERVER_URL,
-      storage,
-      fetchFn: vi.fn<typeof fetch>(),
-    });
-    expect(outcome).toMatchObject({ status: "failed" });
-    expect(outcome.status === "failed" ? outcome.detail : "").toContain(
-      "store unreadable",
-    );
   });
 
   // A corrupt slot must not abandon the grants that are still revocable — the
-  // clear deletes them all either way, so the failure has to be reported
-  // BESIDE the successes rather than instead of them.
-  it("still revokes the readable grants when one issuer slot cannot be read", async () => {
-    await storage.saveServerMetadata(
-      SERVER_URL,
-      metadata({ issuer: "https://as.example.com" }),
-    );
-    await storage.saveTokens(
-      SERVER_URL,
-      { access_token: "a", token_type: "Bearer", refresh_token: "r-good" },
-      { issuer: "https://as.example.com" },
-    );
-    // A second issuer whose exact read throws.
-    vi.spyOn(storage, "listIssuers").mockResolvedValue([
-      "https://as.example.com",
-      "https://broken.example.com",
-    ]);
-    vi.spyOn(storage, "getIssuerTokens").mockImplementation(
-      async (_url: string, issuer: string) => {
-        if (issuer === "https://broken.example.com") {
-          throw new Error("corrupt slot");
-        }
-        return {
-          access_token: "a",
-          token_type: "Bearer",
-          refresh_token: "r-good",
-        };
+  // state is gone either way, so the failure has to be reported BESIDE the
+  // successes rather than instead of them.
+  it("still revokes the readable grants when one slot cannot be parsed", async () => {
+    stubSnapshot(storage, {
+      byIssuer: {
+        "https://as.example.com": {
+          tokens: {
+            access_token: "a",
+            token_type: "Bearer",
+            refresh_token: "r-good",
+          },
+        },
+        // Unparseable: no `token_type`.
+        "https://broken.example.com": { tokens: { access_token: 42 } },
       },
-    );
+      serverMetadata: {
+        issuer: "https://as.example.com",
+        authorization_endpoint: "https://as.example.com/authorize",
+        token_endpoint: "https://as.example.com/token",
+        revocation_endpoint: REVOKE_URL,
+        response_types_supported: ["code"],
+      },
+    });
     const fetchFn = vi.fn<typeof fetch>(
       async () => new Response(null, { status: 200 }),
     );
@@ -960,7 +974,7 @@ describe("revokeStoredOAuthTokens (plan + execute)", () => {
     // ...and the unreadable slot is reported rather than swallowed.
     expect(outcome).toMatchObject({ status: "failed" });
     expect(outcome.status === "failed" ? outcome.detail : "").toContain(
-      "corrupt slot",
+      "could not read the stored grant",
     );
   });
 
@@ -1034,9 +1048,11 @@ describe("plan / clear / execute ordering", () => {
       return new Response(null, { status: 200 });
     });
 
-    // The caller's real sequence: snapshot, clear, then send.
-    const plan = await planOAuthRevocation({ serverUrl: SERVER_URL, storage });
-    await storage.clear(SERVER_URL);
+    // The caller's real sequence: take-and-clear atomically, then send.
+    const plan = await clearAndPlanRevocation({
+      serverUrl: SERVER_URL,
+      storage,
+    });
     const sending = executeOAuthRevocation(plan, { fetchFn });
 
     // A fresh authorization lands while the request is still out.
@@ -1061,8 +1077,11 @@ describe("plan / clear / execute ordering", () => {
       async () => new Response(null, { status: 200 }),
     );
 
-    const plan = await planOAuthRevocation({ serverUrl: SERVER_URL, storage });
-    await storage.clear(SERVER_URL);
+    const plan = await clearAndPlanRevocation({
+      serverUrl: SERVER_URL,
+      storage,
+    });
+    expect(await storage.getTokens(SERVER_URL)).toBeUndefined();
 
     await expect(
       executeOAuthRevocation(plan, { fetchFn }),
@@ -1071,7 +1090,7 @@ describe("plan / clear / execute ordering", () => {
   });
 
   it("plans nothing when revocation is disabled", async () => {
-    const plan = await planOAuthRevocation({
+    const plan = await clearAndPlanRevocation({
       serverUrl: SERVER_URL,
       storage,
       enabled: false,

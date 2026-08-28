@@ -992,7 +992,15 @@ function App({
     }
     setConnectError(null);
     if (inspectorStatus === "connected" || inspectorStatus === "connecting") {
-      await disconnectInspector();
+      // The clear has already succeeded by here, so a disconnect failure must
+      // not propagate as one: `AuthTab` would report "Could not clear OAuth
+      // state", which is false. It goes to the disconnect error line instead,
+      // where the same failure from the `d` key already lands.
+      try {
+        await disconnectInspector();
+      } catch (err) {
+        setDisconnectError(err instanceof Error ? err.message : String(err));
+      }
       // Revalidate: the disconnect is a second await, and a switch during it
       // would make the revision bump below land on the new selection.
       if (

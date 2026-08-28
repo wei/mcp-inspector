@@ -1445,6 +1445,41 @@ describe("App (mid-session auth lifecycle events)", () => {
     );
   });
 
+  // The clear has already succeeded when the disconnect runs, so its failure
+  // must not propagate: `AuthTab` would report "Could not clear OAuth state",
+  // which is false. It goes to the disconnect error line, where the same
+  // failure from the `d` key already lands.
+  it("reports a post-clear disconnect failure as a disconnect failure", async () => {
+    h.ctrl.status = "connected";
+    h.disconnect.mockRejectedValue(new Error("disconnect-blew-up"));
+    const r = await mount(oneHttp());
+    await press(r, ["a", "s"]);
+
+    await expectFrame(r, "disconnect-blew-up");
+    expect(r.lastFrame() ?? "").not.toContain("Could not clear OAuth state");
+  });
+
+  // A transport can reject with something that is not an `Error`; the message
+  // line must still be readable rather than "[object Object]".
+  it("reports a non-Error disconnect failure from a clear", async () => {
+    h.ctrl.status = "connected";
+    h.disconnect.mockRejectedValue("plain-disconnect-string");
+    const r = await mount(oneHttp());
+    await press(r, ["a", "s"]);
+    await expectFrame(r, "plain-disconnect-string");
+  });
+
+  // A clear while still CONNECTING tears the attempt down too — the session is
+  // half-built, and leaving it up with its OAuth state gone is worse than not
+  // having it.
+  it("disconnects a connecting session when clearing", async () => {
+    h.ctrl.status = "connecting";
+    const r = await mount(oneHttp());
+    await press(r, ["a", "s"]);
+    await waitUntil(() => h.disconnect.mock.calls.length > 0);
+    expect(h.disconnect).toHaveBeenCalled();
+  });
+
   it("says nothing when there was nothing to revoke", async () => {
     const r = await mount(oneHttp());
     await press(r, ["a", "s"]);
