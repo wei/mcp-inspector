@@ -93,10 +93,27 @@ test("a paint landing just under the deadline is not failed by the render timer"
       `setTimeout(() => { console.log(${JSON.stringify(MARKER)}); ` +
         `setInterval(() => {}, 1000); }, ${paintAt});`,
     ),
-    // Deliberately tight: the render deadline expires while the survival window
-    // is still open, which is the whole shape of the bug.
-    timeoutMs: paintAt + 150,
-    surviveMs: 400,
+    // The shape being reproduced is an overlap, and only an overlap:
+    //
+    //   actual paint  <  timeoutMs  <  actual paint + surviveMs
+    //
+    // i.e. the render deadline expires while the survival window is still
+    // open. Both margins are deliberately wide, because `paintAt` is measured
+    // from the child's first JS tick while `renderTimer` is armed in the
+    // parent at spawn — so the left margin has to absorb `script(1)` PTY
+    // allocation plus Node boot, which measured 66-114ms on an *idle* machine
+    // and goes past 150ms under the load of a full `local:gate` run. These
+    // constants used to be `paintAt + 150` / `400`, which left ~36ms of slack
+    // at best and failed deterministically inside the gate (#2177) — with the
+    // "did not render" diagnostic that is exactly the misreport this test
+    // exists to catch.
+    //
+    // Do not tighten these back up to make the test faster: the overlap is the
+    // point, not the tightness. Worst-case paint lands near 365ms, well under
+    // the 1200ms deadline, and 1200ms still falls inside a survival window
+    // that closes no earlier than ~1750ms.
+    timeoutMs: 1200,
+    surviveMs: 1500,
   });
   assert.equal(r.code, 0, `expected pass, got: ${r.message}`);
   assert.doesNotMatch(r.message, /did not render/);
