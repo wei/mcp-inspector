@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { buildDiscoveryUrls } from "@modelcontextprotocol/client";
 import {
+  COMPAT_SOURCE_HEADER,
   oidcDiscoveryCandidates,
   isRfc8414OnlyMetadata,
   withRfc8414OidcCompat,
@@ -144,9 +145,32 @@ describe("withRfc8414OidcCompat", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("application/json");
     await expect(response.json()).resolves.toEqual(RFC8414_DOC);
+    // The substitution names where its body came from, so a captured Network
+    // entry does not read as a 200 from the RFC 8414 path.
+    expect(response.headers.get(COMPAT_SOURCE_HEADER)).toBe(OIDC_APPENDED);
     // The failed original, then both OIDC candidates.
     expect(base).toHaveBeenCalledTimes(3);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining(OIDC_APPENDED));
+  });
+
+  it("does not touch a non-GET request to a matching path", async () => {
+    // An authorization or token endpoint may legally live under the RFC 8414
+    // well-known prefix; its ordinary OAuth error must reach the caller intact
+    // rather than being replaced with a metadata document (Copilot).
+    const original = new Response(JSON.stringify({ error: "invalid_grant" }), {
+      status: 400,
+      headers: { "content-type": "application/json" },
+    });
+    const base = vi.fn<typeof fetch>().mockResolvedValue(original);
+    const wrapped = withRfc8414OidcCompat(base);
+
+    await expect(
+      wrapped(`${RFC8414_URL}/token`, { method: "post" }),
+    ).resolves.toBe(original);
+    await expect(
+      wrapped(new Request(`${RFC8414_URL}/token`, { method: "POST" })),
+    ).resolves.toBe(original);
+    expect(base).toHaveBeenCalledTimes(2);
   });
 
   it("serves an RFC 8414 document found on the path-suffixed OIDC path", async () => {

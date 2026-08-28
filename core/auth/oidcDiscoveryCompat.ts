@@ -68,10 +68,18 @@
  *   Inspector would then be displaying, in the Auth and Network tabs, a
  *   metadata document the server never published — which is the one thing a
  *   debugging tool must not do.
- * - **It does not hide the real traffic.** It is installed *above* the fetch
- *   tracker (`InspectorClient.effectiveAuthFetch`), so the Network tab records
- *   the genuine 404 on the RFC 8414 path and the genuine request to the OIDC
- *   path. The substitution is visible only to the SDK's parse.
+ * - **It does not present the substitution as the server's own answer.** It is
+ *   installed on `InspectorClient`'s *base* fetch — below both fetch trackers,
+ *   the same seam `withOAuthEndpointOverrides` uses — because that is the only
+ *   place that also covers the discovery the SDK runs from **inside the
+ *   transport**, which is handed the base fetch directly and whose tracker is
+ *   built inside the transport where nothing here can reach above it
+ *   (Copilot). One seam therefore covers every path, at the cost that a
+ *   captured entry shows the substituted document rather than the real 404 —
+ *   so the substituted response carries {@link COMPAT_SOURCE_HEADER} naming
+ *   the URL the body actually came from, and the warning below says the same
+ *   thing on the console. The probe itself is issued through the wrapped fetch
+ *   and so is not separately tracked.
  *
  * ## Removing this
  *
@@ -92,6 +100,14 @@ const RFC8414_WELL_KNOWN = "/.well-known/oauth-authorization-server";
 
 /** The OpenID Connect Discovery well-known path. */
 const OIDC_WELL_KNOWN = "/.well-known/openid-configuration";
+
+/**
+ * Response header stamped on a substituted document, naming the URL the body
+ * was actually fetched from. Inspector-private (`x-inspector-`), never sent on
+ * a request — it exists so a captured Network entry is self-describing rather
+ * than appearing to be a 200 from the RFC 8414 path.
+ */
+export const COMPAT_SOURCE_HEADER = "x-inspector-oauth-metadata-source";
 
 /**
  * The OIDC discovery candidates the SDK would try after the RFC 8414 candidate
@@ -197,6 +213,21 @@ function discoveryHeaders(
 }
 
 /**
+ * The effective HTTP method of a `fetch` call, normalized. `fetch` defaults to
+ * `GET` and treats the method case-insensitively.
+ */
+function requestMethodOf(
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+): string {
+  if (init?.method) return init.method.toUpperCase();
+  if (typeof input !== "string" && !(input instanceof URL)) {
+    return input.method.toUpperCase();
+  }
+  return "GET";
+}
+
+/**
  * Wrap a `fetch` so a plain OAuth 2.0 authorization server publishing RFC 8414
  * metadata at `/.well-known/openid-configuration` is discoverable.
  *
@@ -209,6 +240,13 @@ export function withRfc8414OidcCompat(fetchFn: typeof fetch): typeof fetch {
     const response = await fetchFn(input, init);
     if (response.ok) return response;
     if (!continuesDiscovery(response.status)) return response;
+    // The URL shape alone does not prove this was a discovery request: nothing
+    // stops an authorization or token endpoint from living under
+    // `/.well-known/oauth-authorization-server/…`, and a `POST` there returning
+    // an ordinary OAuth `400 invalid_grant` must reach its caller intact rather
+    // than being replaced with a metadata document (Copilot). Metadata
+    // discovery is a `GET`, so anything else is not ours.
+    if (requestMethodOf(input, init) !== "GET") return response;
 
     const candidates = oidcDiscoveryCandidates(requestUrlOf(input));
     if (candidates.length === 0) return response;
@@ -252,7 +290,15 @@ export function withRfc8414OidcCompat(fetchFn: typeof fetch): typeof fetch {
       return new Response(body, {
         status: 200,
         statusText: "OK",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          // The substituted response is what the fetch trackers above this
+          // wrapper record, so it says where its body actually came from
+          // rather than letting the Network tab imply the RFC 8414 path
+          // answered. Named on the response, not logged only, so it survives
+          // into the captured entry.
+          [COMPAT_SOURCE_HEADER]: candidate,
+        },
       });
     }
 

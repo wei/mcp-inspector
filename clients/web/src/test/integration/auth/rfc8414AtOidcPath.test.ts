@@ -17,7 +17,12 @@ import {
   createOAuthTestServerConfig,
   waitForOAuthWellKnown,
 } from "@modelcontextprotocol/inspector-test-server";
-import { withRfc8414OidcCompat } from "@inspector/core/auth/oidcDiscoveryCompat.js";
+import {
+  COMPAT_SOURCE_HEADER,
+  withRfc8414OidcCompat,
+} from "@inspector/core/auth/oidcDiscoveryCompat.js";
+import { InspectorClient } from "@inspector/core/mcp/inspectorClient.js";
+import { createTransportNode } from "@inspector/core/mcp/node/transport.js";
 
 const OIDC_PATH = "/.well-known/openid-configuration";
 
@@ -37,7 +42,9 @@ describe("RFC 8414 metadata at the OIDC well-known path (#2172)", () => {
       ...getDefaultServerConfig(),
       serverType: "streamable-http" as const,
       ...createOAuthTestServerConfig({
-        requireAuth: true,
+        // Metadata routes are served either way; leaving auth unrequired lets
+        // the transport-wiring test below actually connect.
+        requireAuth: false,
         asMetadataPath: OIDC_PATH,
       }),
     });
@@ -94,6 +101,45 @@ describe("RFC 8414 metadata at the OIDC well-known path (#2172)", () => {
         expect.stringContaining(`${serverUrl}${OIDC_PATH}`),
       );
     } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("hands the transport a fetch that carries the shim", async () => {
+    // The SDK also runs discovery from *inside* the transport, which receives
+    // `InspectorClient`'s base fetch directly — so a reconnect with an existing
+    // auth provider must not bypass the shim (Copilot). Capturing the fetch the
+    // transport was handed and driving it against this server is what proves
+    // the wiring, without depending on the SDK to trigger that leg.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let transportFetch: typeof fetch | undefined;
+    const capturingTransport: typeof createTransportNode = (
+      config,
+      options,
+    ) => {
+      transportFetch = options?.fetchFn;
+      return createTransportNode(config, options);
+    };
+    const client = new InspectorClient(
+      { type: "streamable-http", url: `${serverUrl}/mcp` },
+      { environment: { transport: capturingTransport } },
+    );
+    try {
+      await client.connect();
+      expect(transportFetch).toBeDefined();
+
+      const response = await transportFetch!(
+        `${serverUrl}/.well-known/oauth-authorization-server`,
+      );
+      expect(response.status).toBe(200);
+      expect(response.headers.get(COMPAT_SOURCE_HEADER)).toBe(
+        `${serverUrl}${OIDC_PATH}`,
+      );
+      await expect(response.json()).resolves.toMatchObject({
+        issuer: serverUrl,
+      });
+    } finally {
+      await client.disconnect();
       warn.mockRestore();
     }
   });

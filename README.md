@@ -453,7 +453,7 @@ The cause is upstream. `discoverAuthorizationServerMetadata` in `@modelcontextpr
 
 `core/auth/oidcDiscoveryCompat.ts` works around it without fabricating anything. When the RFC 8414 candidate comes back 4xx, it fetches the OIDC candidates the SDK would try next; if one returns a document that satisfies `OAuthMetadataSchema` but *fails* the OIDC schema, that document is returned as the response to the RFC 8414 request — so the SDK validates it under the schema that actually describes it. A genuine OpenID provider document is left alone and takes the SDK's normal OIDC leg. Issuer validation is untouched, since the substituted document is the one the server published, `issuer` included.
 
-Watch the Network tab to confirm the Inspector is not hiding anything: the real 404 on `/.well-known/oauth-authorization-server` and the real request to `/.well-known/openid-configuration` are both recorded, and the metadata shown in the Auth tab is exactly what the server sent — no invented `jwks_uri`. The wrapper sits above the fetch tracker for that reason.
+The metadata shown in the Auth tab is exactly what the server sent — no invented `jwks_uri`. In the Network tab the substituted response is captured against the RFC 8414 URL (the wrapper sits on the base fetch, below the tracker, because that is the only seam that also covers the discovery the SDK runs from inside the transport), so it carries an `x-inspector-oauth-metadata-source` response header naming the URL its body was actually fetched from. The same URL is printed as a console warning.
 
 #### Logging, both eras
 

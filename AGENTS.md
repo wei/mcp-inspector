@@ -135,10 +135,15 @@ v2/main/
 │   │                                   #   one is RFC 8414 metadata that is not a
 │   │                                   #   valid OIDC document, serves that body as
 │   │                                   #   the RFC 8414 response so the SDK picks the
-│   │                                   #   right schema. Sits ABOVE the fetch tracker
-│   │                                   #   (unlike endpointOverrides, which sits
-│   │                                   #   below) so the Network tab records the real
-│   │                                   #   404 and the real probe — #2172;
+│   │                                   #   right schema. GET-only, and the well-known
+│   │                                   #   match requires a `/` boundary, so a token
+│   │                                   #   endpoint living under that prefix keeps its
+│   │                                   #   own error. Sits on the BASE fetch like
+│   │                                   #   endpointOverrides — the one seam that also
+│   │                                   #   covers the discovery the SDK runs inside the
+│   │                                   #   transport — so the substituted response
+│   │                                   #   carries COMPAT_SOURCE_HEADER naming the URL
+│   │                                   #   its body came from — #2172;
 │   │                                   #   secret-storage-info.ts browser-safe
 │   │                                   #   descriptor of WHERE a typed secret lands
 │   │                                   #   — kind/plaintext/durable plus the label,

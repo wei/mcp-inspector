@@ -795,12 +795,14 @@ export class InspectorClient extends InspectorClientEventTarget {
     // #2172: recover discovery when a plain OAuth 2.0 authorization server
     // publishes RFC 8414 metadata at `/.well-known/openid-configuration`, which
     // the SDK validates as an OpenID provider document and rejects. Wraps the
-    // tracked fetch rather than the base one — the opposite of the overrides
-    // above — so the Network tab records the real 404 and the real probe rather
-    // than the substitution the SDK's parse sees.
-    this.effectiveAuthFetch = withRfc8414OidcCompat(
-      this.buildEffectiveAuthFetch(),
-    );
+    // *base* fetch for the same reason the overrides above do: the SDK also
+    // runs discovery from inside the transport, which is handed `this.fetchFn`
+    // directly, so a reconnect with an existing auth provider would otherwise
+    // still hit the upstream failure. The substituted response is stamped with
+    // `COMPAT_SOURCE_HEADER` so a captured entry names the URL its body came
+    // from rather than appearing to be a 200 from the RFC 8414 path.
+    this.fetchFn = withRfc8414OidcCompat(this.fetchFn);
+    this.effectiveAuthFetch = this.buildEffectiveAuthFetch();
 
     this.sessionId = options.sessionId;
 
