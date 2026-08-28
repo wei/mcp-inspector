@@ -61,11 +61,7 @@ const noopBridgeFactory: BridgeFactory = () =>
 
 /**
  * Per-bundle overrides. Each key takes a `Partial` of that bundle, so a test
- * names only the field it cares about — `makeProps({
-   tools: {
-     tools: { tools: [t] },
-   },
- })`
+ * names only the field it cares about — `makeProps({ tools: { tools: [t] } })`
  * — and inherits the rest of the bundle's defaults.
  */
 type PropOverrides = {

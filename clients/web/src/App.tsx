@@ -1550,19 +1550,44 @@ function App() {
     [],
   );
 
-  // The seven wrappers below discard a promise the callee already owns — each
-  // of these handlers ends in its own `catch` that surfaces the failure as a
-  // toast or a panel error — and the view's props are synchronous. `void` is
-  // the explicit discard `@typescript-eslint/no-floating-promises` requires.
+  // The two connection-lifecycle handlers do NOT own every rejection, so they
+  // are terminated with a `.catch` rather than discarded. `onToggleConnection`
+  // has three escape paths outside its own try/catch — awaiting
+  // `initialConfigSettledRef`, constructing the client via
+  // `setupClientForServer`, and the already-connected disconnect branch, whose
+  // `try/finally` runs `finalizeExplicitDisconnect()` and then lets a failed
+  // transport close propagate — and `onDisconnect` is that same `try/finally`
+  // on its own. A bare `void` there turns an ordinary Connect/Disconnect click
+  // into a global unhandled rejection with nothing shown to the user, so each
+  // reports instead. Connect *handshake* failures are already surfaced by the
+  // hook's own catch (`connectErrorMessage` + the failed-card border) and never
+  // reach here.
+  const reportConnectionFailure = useCallback((title: string) => {
+    return (err: unknown) => {
+      notifications.show({
+        title,
+        message: err instanceof Error ? err.message : String(err),
+        color: "red",
+      });
+    };
+  }, []);
+
   const dispatchToggleConnection = useCallback(
     (id: string) => {
-      void onToggleConnection(id);
+      onToggleConnection(id).catch(
+        reportConnectionFailure("Failed to change the connection"),
+      );
     },
-    [onToggleConnection],
+    [onToggleConnection, reportConnectionFailure],
   );
   const dispatchDisconnect = useCallback(() => {
-    void onDisconnect();
-  }, [onDisconnect]);
+    onDisconnect().catch(reportConnectionFailure("Failed to disconnect"));
+  }, [onDisconnect, reportConnectionFailure]);
+
+  // The five wrappers below DO discard a promise the callee already owns —
+  // each of those handlers ends in its own `catch` that surfaces the failure as
+  // a toast or a panel error — and the view's props are synchronous. `void` is
+  // the explicit discard `@typescript-eslint/no-floating-promises` requires.
   const dispatchCallTool = useCallback(
     (name: string, args: Record<string, unknown>, runAsTask?: boolean) => {
       void onCallTool(name, args, runAsTask);

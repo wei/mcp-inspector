@@ -499,6 +499,11 @@ vi.mock("./components/views/InspectorView/InspectorView", () => ({
       <button onClick={() => props.connection.onToggleConnection("B")}>
         connect-b
       </button>
+      {/* The header's explicit Disconnect, which routes to the standalone
+          `onDisconnect` rather than through the toggle. */}
+      <button onClick={() => props.connection.onDisconnect()}>
+        disconnect
+      </button>
       <button onClick={() => props.servers.onConnectionInfo("A")}>
         open-connection-info
       </button>
@@ -3868,6 +3873,70 @@ describe("App background command rejections (#2049)", () => {
           expect.objectContaining({
             title: "Failed to set log level",
             message: "no logging",
+            color: "red",
+          }),
+        ),
+      );
+      await settleRejections();
+      expect(rejections.seen).toEqual([]);
+    } finally {
+      rejections.stop();
+    }
+  });
+
+  // `onToggleConnection` and `onDisconnect` both close a live session with
+  // `try { await disconnect() } finally { finalizeExplicitDisconnect() }` — a
+  // `finally`, not a `catch` — so a transport that fails to close rejects out
+  // of the handler. App discards neither: both are terminated with a `.catch`
+  // that toasts, because a bare `void` would turn an ordinary click into a
+  // global unhandled rejection with nothing shown to the user (#2130 review).
+  const CLOSE_FAILURE = new Error("close boom");
+
+  it("toasts a failed transport close from the connection toggle instead of leaking it", async () => {
+    const rejections = captureUnhandledRejections();
+    try {
+      const user = await connect();
+      const client = clientInstances[0] as EventTarget & {
+        disconnect: ReturnType<typeof vi.fn>;
+      };
+      client.disconnect.mockRejectedValueOnce(CLOSE_FAILURE);
+
+      // Second click on the same, now-connected server takes the disconnect
+      // branch of the toggle.
+      await user.click(screen.getByText("connect"));
+
+      await waitFor(() =>
+        expect(notificationsMock.show).toHaveBeenCalledWith(
+          expect.objectContaining({
+            title: "Failed to change the connection",
+            message: "close boom",
+            color: "red",
+          }),
+        ),
+      );
+      await settleRejections();
+      expect(rejections.seen).toEqual([]);
+    } finally {
+      rejections.stop();
+    }
+  });
+
+  it("toasts a failed transport close from the explicit Disconnect instead of leaking it", async () => {
+    const rejections = captureUnhandledRejections();
+    try {
+      const user = await connect();
+      const client = clientInstances[0] as EventTarget & {
+        disconnect: ReturnType<typeof vi.fn>;
+      };
+      client.disconnect.mockRejectedValueOnce(CLOSE_FAILURE);
+
+      await user.click(screen.getByText("disconnect"));
+
+      await waitFor(() =>
+        expect(notificationsMock.show).toHaveBeenCalledWith(
+          expect.objectContaining({
+            title: "Failed to disconnect",
+            message: "close boom",
             color: "red",
           }),
         ),
