@@ -1321,6 +1321,11 @@ function App() {
   const settingsModalIsStdio = settingsModalServerType === "stdio";
 
   /**
+   * In-flight lock shared by both clear controls (#2144). See `runClear`.
+   */
+  const clearOAuthInFlightRef = useRef(false);
+
+  /**
    * Run a clear from a key/click handler, which cannot await.
    *
    * `clearServerOAuthAndDisconnect` does **not** own its failures — the store
@@ -1331,16 +1336,28 @@ function App() {
    */
   const runClear = useCallback(
     (server: Parameters<typeof clearServerOAuthAndDisconnect>[0]) => {
-      clearServerOAuthAndDisconnect(server).catch((err: unknown) => {
-        notifications.show({
-          title: "Could not clear the stored OAuth state",
-          message: err instanceof Error ? err.message : String(err),
-          color: "red",
-          // The tokens may still be on disk and the session may still be up,
-          // so this is not a notice to let time out.
-          autoClose: false,
+      // Shared by BOTH clear controls (Connection Info and Server Settings),
+      // because they drive the same client and the same store entry. A ref
+      // rather than state: a double click delivers both events before React
+      // re-renders, so a state-based guard would let both through — and with
+      // revocation taking up to five seconds, that means concurrent RFC 7009
+      // requests, concurrent store writes, and two contradictory toasts.
+      if (clearOAuthInFlightRef.current) return;
+      clearOAuthInFlightRef.current = true;
+      clearServerOAuthAndDisconnect(server)
+        .finally(() => {
+          clearOAuthInFlightRef.current = false;
+        })
+        .catch((err: unknown) => {
+          notifications.show({
+            title: "Could not clear the stored OAuth state",
+            message: err instanceof Error ? err.message : String(err),
+            color: "red",
+            // The tokens may still be on disk and the session may still be up,
+            // so this is not a notice to let time out.
+            autoClose: false,
+          });
         });
-      });
     },
     [clearServerOAuthAndDisconnect],
   );
