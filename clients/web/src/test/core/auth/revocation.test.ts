@@ -617,13 +617,15 @@ describe("revokeStoredOAuthTokens", () => {
   it("reports a non-Error store failure as failed", async () => {
     vi.spyOn(storage, "listIssuers").mockRejectedValue("store exploded");
 
-    await expect(
-      revokeStoredOAuthTokens({
-        serverUrl: SERVER_URL,
-        storage,
-        fetchFn: vi.fn<typeof fetch>(),
-      }),
-    ).resolves.toEqual({ status: "failed", detail: "store exploded" });
+    const outcome = await revokeStoredOAuthTokens({
+      serverUrl: SERVER_URL,
+      storage,
+      fetchFn: vi.fn<typeof fetch>(),
+    });
+    expect(outcome).toMatchObject({ status: "failed" });
+    expect(outcome.status === "failed" ? outcome.detail : "").toContain(
+      "store exploded",
+    );
   });
 
   it("reports a store read failure as failed", async () => {
@@ -631,12 +633,104 @@ describe("revokeStoredOAuthTokens", () => {
       new Error("store unreadable"),
     );
 
-    await expect(
-      revokeStoredOAuthTokens({
-        serverUrl: SERVER_URL,
-        storage,
-        fetchFn: vi.fn<typeof fetch>(),
-      }),
-    ).resolves.toEqual({ status: "failed", detail: "store unreadable" });
+    const outcome = await revokeStoredOAuthTokens({
+      serverUrl: SERVER_URL,
+      storage,
+      fetchFn: vi.fn<typeof fetch>(),
+    });
+    expect(outcome).toMatchObject({ status: "failed" });
+    expect(outcome.status === "failed" ? outcome.detail : "").toContain(
+      "store unreadable",
+    );
+  });
+
+  // A corrupt slot must not abandon the grants that are still revocable — the
+  // clear deletes them all either way, so the failure has to be reported
+  // BESIDE the successes rather than instead of them.
+  it("still revokes the readable grants when one issuer slot cannot be read", async () => {
+    await storage.saveServerMetadata(
+      SERVER_URL,
+      metadata({ issuer: "https://as.example.com" }),
+    );
+    await storage.saveTokens(
+      SERVER_URL,
+      { access_token: "a", token_type: "Bearer", refresh_token: "r-good" },
+      { issuer: "https://as.example.com" },
+    );
+    // A second issuer whose exact read throws.
+    vi.spyOn(storage, "listIssuers").mockResolvedValue([
+      "https://as.example.com",
+      "https://broken.example.com",
+    ]);
+    vi.spyOn(storage, "getIssuerTokens").mockImplementation(
+      async (_url: string, issuer: string) => {
+        if (issuer === "https://broken.example.com") {
+          throw new Error("corrupt slot");
+        }
+        return {
+          access_token: "a",
+          token_type: "Bearer",
+          refresh_token: "r-good",
+        };
+      },
+    );
+    const fetchFn = vi.fn<typeof fetch>(
+      async () => new Response(null, { status: 200 }),
+    );
+
+    const outcome = await revokeStoredOAuthTokens({
+      serverUrl: SERVER_URL,
+      storage,
+      fetchFn,
+    });
+
+    // The good grant was still revoked...
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(
+      new URLSearchParams(String(fetchFn.mock.calls[0]![1]!.body)).get("token"),
+    ).toBe("r-good");
+    // ...and the unreadable slot is reported rather than swallowed.
+    expect(outcome).toMatchObject({ status: "failed" });
+    expect(outcome.status === "failed" ? outcome.detail : "").toContain(
+      "corrupt slot",
+    );
+  });
+
+  // A token is only meaningful to the AS that minted it, so two issuers minting
+  // the same opaque string are two grants. Collapsing them would drop the
+  // second before the issuer-mismatch check could even report it.
+  it("does not collapse two issuers that minted the same token value", async () => {
+    await storage.saveServerMetadata(
+      SERVER_URL,
+      metadata({ issuer: "https://as-a.example.com" }),
+    );
+    for (const issuer of [
+      "https://as-a.example.com",
+      "https://as-b.example.com",
+    ]) {
+      await storage.saveTokens(
+        SERVER_URL,
+        { access_token: "same", token_type: "Bearer", refresh_token: "same-r" },
+        { issuer },
+      );
+    }
+    const fetchFn = vi.fn<typeof fetch>(
+      async () => new Response(null, { status: 200 }),
+    );
+
+    const outcome = await revokeStoredOAuthTokens({
+      serverUrl: SERVER_URL,
+      storage,
+      fetchFn,
+    });
+
+    // Only as-a matches the cached metadata, so only it is revocable — but
+    // as-b is REPORTED rather than silently dropped, which is what collapsing
+    // by token alone would have done.
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ status: "failed" });
+    expect(outcome.status === "failed" ? outcome.detail : "").toContain(
+      "as-b.example.com",
+    );
   });
 });

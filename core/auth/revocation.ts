@@ -346,8 +346,20 @@ interface StoredGrant {
   clientInformation?: OAuthClientInformation;
 }
 
+/** What {@link collectGrants} found, including the slots it could not read. */
+interface CollectedGrants {
+  grants: StoredGrant[];
+  /**
+   * One `failed` outcome per slot whose read threw. Kept apart from the grants
+   * so a single corrupt slot cannot abandon the ones that are still revocable
+   * — the clear deletes them all either way, so the failure has to be reported
+   * *beside* the successes rather than instead of them.
+   */
+  failures: TokenRevocationOutcome[];
+}
+
 /**
- * Every grant `clear(serverUrl)` is about to delete, deduplicated by token.
+ * Every grant `clear(serverUrl)` is about to delete.
  *
  * `clear` drops **every** `byIssuer` slot, so reading only the context-free
  * (active-issuer) token would leave an earlier authorization server's grant
@@ -355,31 +367,46 @@ interface StoredGrant {
  * exists to close, just moved one level down. A server that authorized against
  * issuers A and B has two grants here, not one.
  *
- * The ctx-less read is included last and deduped: on an issuer-bound entry it
- * returns the active issuer's token, which the loop above has already seen; on
- * a legacy entry it is the only thing that returns anything at all. It is also
- * the only read here allowed to fall back — an *enumerated* issuer is read
- * exactly, so a legacy token is never mislabelled as belonging to it.
+ * Deduplication is by **issuer *and* token**, not by token alone. A token is
+ * only meaningful to the authorization server that minted it, so two issuers
+ * that happen to mint the same opaque string are two grants; collapsing them
+ * would drop the second before the issuer-mismatch check could even report it.
+ *
+ * The ctx-less read is included last and is the one exception: it resolves to
+ * the *active* issuer's slot (already collected above) or, on a pre-SEP-2352
+ * entry, to the legacy unkeyed token — which nothing else returns. So it is
+ * suppressed when its token was already taken from any slot, which is exactly
+ * the first case and never the second. It is also the only read here allowed
+ * to fall back; an enumerated issuer is read exactly, so a legacy token is
+ * never mislabelled as belonging to one.
  */
 async function collectGrants(
   storage: OAuthStorage,
   serverUrl: string,
-): Promise<StoredGrant[]> {
+): Promise<CollectedGrants> {
   const grants: StoredGrant[] = [];
-  const seen = new Set<string>();
+  const failures: TokenRevocationOutcome[] = [];
+  const seenKeys = new Set<string>();
+  const slotTokens = new Set<string>();
 
   const add = async (issuer?: string): Promise<void> => {
-    // Exact read for an enumerated issuer. `getTokens(serverUrl, issuer)` falls
-    // back to the legacy unkeyed slot when that issuer holds none, and treating
-    // the fallback as the issuer's would label an old, unbound token with a
-    // newly discovered authorization server and send it there.
     const tokens =
       issuer === undefined
         ? await storage.getTokens(serverUrl)
         : await storage.getIssuerTokens(serverUrl, issuer);
     const revocable = selectRevocableToken(tokens);
-    if (!revocable || seen.has(revocable.token)) return;
-    seen.add(revocable.token);
+    if (!revocable) return;
+
+    if (issuer === undefined) {
+      // Same grant as the active issuer's slot, already collected.
+      if (slotTokens.has(revocable.token)) return;
+    } else {
+      const key = `${issuer}\u0000${revocable.token}`;
+      if (seenKeys.has(key)) return;
+      seenKeys.add(key);
+      slotTokens.add(revocable.token);
+    }
+
     grants.push({
       issuer,
       ...revocable,
@@ -391,11 +418,41 @@ async function collectGrants(
     });
   };
 
-  for (const issuer of await storage.listIssuers(serverUrl)) {
-    await add(issuer);
+  /** Read one slot; a slot that throws is reported, not fatal to the rest. */
+  const addSafely = async (issuer?: string): Promise<void> => {
+    try {
+      await add(issuer);
+    } catch (err) {
+      const where =
+        issuer === undefined ? "the unkeyed slot" : `issuer ${issuer}`;
+      failures.push({
+        status: "failed",
+        detail: `could not read the stored grant for ${where}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      });
+    }
+  };
+
+  // A `listIssuers` failure is fatal on its own — there is nothing to
+  // enumerate — but the ctx-less read below can still find a legacy grant, so
+  // it is recorded rather than thrown.
+  let issuers: string[] = [];
+  try {
+    issuers = await storage.listIssuers(serverUrl);
+  } catch (err) {
+    failures.push({
+      status: "failed",
+      detail: `could not list the stored authorization servers: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    });
   }
-  await add();
-  return grants;
+  for (const issuer of issuers) {
+    await addSafely(issuer);
+  }
+  await addSafely();
+  return { grants, failures };
 }
 
 /**
@@ -430,16 +487,34 @@ async function computeOutcome(
   try {
     // Grants first. They are the cheapest disqualifier, and a server with no
     // stored grant should not provoke a metadata read at all.
-    const grants = await collectGrants(storage, serverUrl);
-    if (grants.length === 0) return { status: "skipped", reason: "no_tokens" };
+    //
+    // `failures` seeds `outcomes` rather than short-circuiting: a slot that
+    // could not be read is still about to be deleted, so it has to be reported
+    // *alongside* whatever the readable grants do, not instead of them.
+    const { grants, failures } = await collectGrants(storage, serverUrl);
+    if (grants.length === 0) {
+      return failures.length > 0
+        ? aggregateOutcomes(failures)
+        : { status: "skipped", reason: "no_tokens" };
+    }
 
     const metadata = await storage.getServerMetadata(serverUrl);
-    if (!metadata) return { status: "skipped", reason: "no_metadata" };
+    if (!metadata) {
+      return aggregateOutcomes([
+        ...failures,
+        { status: "skipped", reason: "no_metadata" },
+      ]);
+    }
     const endpoint = metadata.revocation_endpoint;
-    if (!endpoint) return { status: "skipped", reason: "no_endpoint" };
+    if (!endpoint) {
+      return aggregateOutcomes([
+        ...failures,
+        { status: "skipped", reason: "no_endpoint" },
+      ]);
+    }
 
     const supportedAuthMethods = revocationAuthMethods(metadata);
-    const outcomes: TokenRevocationOutcome[] = [];
+    const outcomes: TokenRevocationOutcome[] = [...failures];
     for (const grant of grants) {
       // Metadata is cached once per server, not per issuer, so it describes
       // whichever authorization server was discovered last. Sending another

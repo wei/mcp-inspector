@@ -4,7 +4,6 @@ import {
 } from "@inspector/core/auth/node/storage-node.js";
 import {
   revokeStoredOAuthTokens,
-  selectRevocableToken,
   type TokenRevocationOutcome,
 } from "@inspector/core/auth/revocation.js";
 import { createProxyFetch } from "@inspector/core/mcp/node/proxyFetch.js";
@@ -44,10 +43,10 @@ export async function clearStoredAuthForRelogin(
   // Both spellings are cleared below, so both are revoked from — a stale entry
   // under the other key is a live grant at the authorization server, and
   // deleting it locally without revoking is exactly the leak this closes. The
-  // normalised key goes first because that is the precedence `findStoredServerState`
-  // reads with, so the grant actually in use is the one whose outcome is
-  // reported; a second key holding the *same* token is skipped rather than
-  // revoked twice.
+  // normalised key goes first because that is the precedence
+  // `findStoredServerState` reads with, so the grant actually in use is the one
+  // whose outcome is reported. They are deliberately not deduplicated; see
+  // `revokeStoredKeys`.
   const revocation =
     options?.revoke === false
       ? undefined
@@ -63,22 +62,26 @@ export async function clearStoredAuthForRelogin(
 }
 
 /**
- * Revoke every distinct grant held under `keys`, in order, and report the first
- * key that had something to revoke.
+ * Revoke every grant held under `keys`, in order, and report the outcome that
+ * matters most.
  *
  * Both keys are about to be deleted, so both are revoked from: a stale entry
  * under the other spelling is still a live grant at the authorization server,
  * and deleting it locally without revoking is the leak this whole change
- * closes. Two keys holding the *same* token are one grant, so the duplicate is
- * skipped rather than producing a second request for something already ended —
- * but only once one has actually been *revoked*, since a failed or unsupported
- * attempt has ended nothing and the other key may hold the credentials that
- * would have worked.
+ * closes.
  *
- * Reporting prefers a **failure** over any earlier success — a grant still live
- * at the authorization server is what the user needs to hear about, and an
- * earlier success would otherwise silence the warning. Failing that, it is the
- * first key's outcome that was not "nothing to do", which with `keys` in
+ * There is deliberately **no** cross-key deduplication. It looked cheap — the
+ * two keys are usually two spellings of one server — but it can only be done
+ * by pre-reading a single token, and `revokeStoredOAuthTokens` enumerates every
+ * issuer slot under a key. So a shared *active* token would have skipped the
+ * second key entirely, taking any additional issuer-bound grant under it with
+ * the local delete. A duplicate RFC 7009 request is harmless (§2.2 makes an
+ * unknown token a success), which is a much better trade than a missed one.
+ *
+ * Reporting prefers a **failure** over any success — a grant still live at the
+ * authorization server is what the user needs to hear about, and a success
+ * would otherwise silence the warning. Failing that it is the first key's
+ * outcome that was not "nothing to do", which with `keys` in
  * `findStoredServerState` precedence means the grant the CLI would actually
  * have connected with. When no key holds a token, the last "nothing to do"
  * answer is returned so the caller can still tell "no tokens" from "this
@@ -89,26 +92,9 @@ async function revokeStoredKeys(
   keys: string[],
 ): Promise<TokenRevocationOutcome | undefined> {
   const fetchFn = createProxyFetch() ?? fetch;
-  const revokedTokens = new Set<string>();
   let reported: TokenRevocationOutcome | undefined;
   let lastSkip: TokenRevocationOutcome | undefined;
   for (const key of new Set(keys)) {
-    // This read is OUTSIDE `revokeStoredOAuthTokens`'s own best-effort catch,
-    // so it needs its own: `getTokens` parses through `OAuthTokensSchema` and
-    // rejects on a persisted token that no longer validates. Letting that
-    // escape would abandon the *local* delete `--relogin` promises, over a
-    // grant we could not have revoked anyway.
-    let token: string | undefined;
-    try {
-      token = selectRevocableToken(await storage.getTokens(key))?.token;
-    } catch (err) {
-      reported ??= {
-        status: "failed",
-        detail: err instanceof Error ? err.message : String(err),
-      };
-      continue;
-    }
-    if (token !== undefined && revokedTokens.has(token)) continue;
     const outcome = await revokeStoredOAuthTokens({
       serverUrl: key,
       storage,
@@ -118,16 +104,6 @@ async function revokeStoredKeys(
       lastSkip = outcome;
       continue;
     }
-    // Only a token the authorization server actually accepted counts as spent.
-    // Marking one revoked on a `failed` or `no_endpoint` outcome would skip a
-    // duplicate entry under the other key that may carry usable metadata or
-    // credentials — the one chance left to end that grant.
-    if (token !== undefined && outcome.status === "revoked") {
-      revokedTokens.add(token);
-    }
-    // A failure outranks an earlier success for reporting: a grant that is
-    // still live is what the user needs to hear about, and reporting the
-    // success would print no warning while a stale grant survives.
     if (outcome.status === "failed") {
       if (reported?.status !== "failed") reported = outcome;
     } else {

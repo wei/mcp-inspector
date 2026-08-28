@@ -287,10 +287,11 @@ describe("clearStoredAuthForRelogin", () => {
       }
     });
 
-    // A token the AS never accepted is not spent, so the other key — which may
-    // carry the credentials or metadata that would have worked — must still be
-    // tried rather than skipped as a duplicate.
-    it("does not treat a failed attempt as having ended the grant", async () => {
+    // Keys are revoked from independently. Deduplicating them could only be
+    // done by pre-reading one token, which would skip the second key's OTHER
+    // issuer-bound grants along with it; a duplicate RFC 7009 request is
+    // harmless (§2.2 makes an unknown token a success), a missed one is not.
+    it("revokes from both keys even when they hold the same token", async () => {
       seedBothSpellings("same-r", "same-r");
       const fetchSpy = vi
         .spyOn(globalThis, "fetch")
