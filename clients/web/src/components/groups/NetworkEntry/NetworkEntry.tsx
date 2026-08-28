@@ -17,6 +17,7 @@ import { RiErrorWarningLine } from "react-icons/ri";
 import type { FetchRequestEntry } from "@inspector/core/mcp/types.js";
 import { isLongLivedStreamResponse } from "@inspector/core/mcp/fetchTracking.js";
 import { ContentViewer } from "../../elements/ContentViewer/ContentViewer";
+import { getMimeKind } from "../../elements/ContentViewer/contentViewerUtils";
 import { CopyButton } from "../../elements/CopyButton/CopyButton";
 import { ExpandToggle } from "../../elements/ExpandToggle/ExpandToggle";
 import { MethodBadge } from "../../elements/MethodBadge/MethodBadge";
@@ -371,9 +372,16 @@ const RevealButton = Button.withProps({
 function BodyPreview({
   body,
   contentType,
+  label,
 }: {
   body: string;
   contentType?: string;
+  /**
+   * What this body *is* ("Request body", "Response body"), so a JSON payload's
+   * editor is named. An expanded entry holds both, and the list holds many
+   * pairs, so unnamed they all announce identically to a screen reader.
+   */
+  label: string;
 }) {
   // Reveal state for masked secrets. Hooks run before any early return so the
   // order stays stable across the too-large / has-secrets branches. The reveal
@@ -383,6 +391,23 @@ function BodyPreview({
   const [revealed, setRevealed] = useState(false);
 
   const tooLarge = body.length > MAX_INLINE_BODY_CHARS;
+
+  // Forward the declared MIME, but only when it is JSON.
+  //
+  // `ContentViewer` renders a *declared* `application/json` as JSON even when
+  // it does not parse — the server said what it sent — while an undeclared
+  // body only gets that treatment if it parses. Without this the Network tab
+  // could never reach the declared branch, so a malformed JSON response read
+  // as plain text with no indication that it was meant to be JSON.
+  //
+  // Narrowed to JSON on purpose: forwarding the content type wholesale would
+  // also route a `text/html` body into the sandboxed HTML frame and a
+  // `text/csv` one into a table. Turning wire bodies into rendered documents
+  // is a real change to what the Network tab is, and not one this makes.
+  const jsonMimeType =
+    contentType && getMimeKind(contentType) === "json"
+      ? contentType
+      : undefined;
 
   // OAuth responses (token exchange, DCR) and the token request carry
   // bearer-grade secrets. Mask them by default and gate the raw values behind
@@ -413,7 +438,14 @@ function BodyPreview({
   }
 
   if (!hasSecrets) {
-    return <ContentViewer block={{ type: "text", text: body }} copyable />;
+    return (
+      <ContentViewer
+        block={{ type: "text", text: body }}
+        copyable
+        mimeType={jsonMimeType}
+        jsonLabel={`${label} JSON`}
+      />
+    );
   }
 
   const shown = revealed ? body : masked;
@@ -432,7 +464,14 @@ function BodyPreview({
           {revealed ? "Hide" : "Reveal"}
         </RevealButton>
       </Group>
-      <ContentViewer block={{ type: "text", text: shown }} copyable />
+      <ContentViewer
+        block={{ type: "text", text: shown }}
+        copyable
+        // The masked form is what is rendered, and masking can leave a
+        // still-valid JSON document — so the declared type still applies.
+        mimeType={jsonMimeType}
+        jsonLabel={`${label} JSON`}
+      />
     </Stack>
   );
 }
@@ -587,6 +626,7 @@ export function NetworkEntry({
                   key={`${entry.requestHeaders["content-type"] ?? ""}|${entry.requestBody}`}
                   body={entry.requestBody}
                   contentType={entry.requestHeaders["content-type"]}
+                  label="Request body"
                 />
               </Stack>
             )}
@@ -604,6 +644,7 @@ export function NetworkEntry({
                     key={`${entry.responseHeaders?.["content-type"] ?? ""}|${entry.responseBody}`}
                     body={entry.responseBody}
                     contentType={entry.responseHeaders?.["content-type"]}
+                    label="Response body"
                   />
                 ) : (
                   <DimmedNote>

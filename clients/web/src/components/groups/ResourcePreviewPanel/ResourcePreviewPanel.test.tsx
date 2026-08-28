@@ -6,6 +6,7 @@ import type {
   TextResourceContents,
 } from "@modelcontextprotocol/client";
 import { renderWithMantine, screen } from "../../../test/renderWithMantine";
+import { getAceText } from "../../../test/aceEditor";
 import { ResourcePreviewPanel } from "./ResourcePreviewPanel";
 
 // Stub the lazy highlighter so JSON/XML/CSS branches render synchronously
@@ -483,7 +484,7 @@ describe("ResourcePreviewPanel", () => {
       expect(screen.getByText("text/csv")).toBeInTheDocument();
     });
 
-    it("infers application/json from a .json URI and highlights", () => {
+    it("infers application/json from a .json URI and renders the editor", () => {
       renderWithMantine(
         <ResourcePreviewPanel
           {...baseProps}
@@ -491,10 +492,7 @@ describe("ResourcePreviewPanel", () => {
           contents={[{ uri: "file:///cfg.json", text: '{"a":1}' }]}
         />,
       );
-      expect(screen.getByTestId("code-highlight")).toHaveAttribute(
-        "data-language",
-        "json",
-      );
+      expect(getAceText()).toBe('{\n  "a": 1\n}');
     });
 
     it("infers application/xml from a .xml URI and highlights", () => {

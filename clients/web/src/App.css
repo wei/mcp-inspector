@@ -615,3 +615,10 @@ body.resizing-col {
 .ace_editor.ace-github-dark .ace_gutter {
   color: var(--inspector-code-gutter-text);
 }
+
+/* A read-only Ace editor still paints a caret, which reads as an editable field
+   whose keystrokes are being swallowed. `readOnly` has no option that removes
+   it, so — like the gutter above — it can only be reached by selector. */
+.ace_editor.json-editor-readonly .ace_cursor {
+  display: none;
+}

@@ -7,6 +7,7 @@ import {
   type Ref,
 } from "react";
 import type { MalformedListItem } from "@inspector/core/mcp";
+import type { ReplayParamsOverride } from "../../../lib/protocolReplay";
 import type { DeepLink, DeepLinkParseStatus } from "../../../utils/deepLink";
 import {
   AppShell,
@@ -615,7 +616,7 @@ export interface InspectorViewProps {
   onExportProtocol: () => void;
   onClearProtocolSection: (section: "pinned" | "history") => void;
   onExportProtocolSection: (section: "pinned" | "history") => void;
-  onReplayProtocol: (id: string) => void;
+  onReplayProtocol: (id: string, overrideParams?: ReplayParamsOverride) => void;
   onTogglePinProtocol: (id: string) => void;
 
   onNetworkUiChange: (next: NetworkUiState) => void;
@@ -1254,6 +1255,9 @@ export function InspectorView({
     onExportSection: onExportProtocolSection,
     onReplay: onReplayProtocol,
     onTogglePin: onTogglePinProtocol,
+    // Only so an edited `tools/call` replay can tell whether an argument would
+    // be coerced by the schema on the way out (#2151).
+    tools,
     sortDirection: protocolSort,
     onSortChange: setProtocolSort,
     compact: protocolCompact,
