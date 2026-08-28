@@ -699,6 +699,20 @@ export interface ServerConfig {
      * error rendering (a conformant server never produces these on demand).
      */
     injectSpecErrors?: boolean;
+    /**
+     * When true, the modern HTTP leg installs a middleware that answers every
+     * `subscriptions/listen` with a bare JSON-RPC `result` — the spec's
+     * graceful-closure marker — instead of acknowledging it. That is the
+     * non-conformant server shape from #2097: "acknowledged and closed in the
+     * same breath". Used by the `subscriptions-never-acknowledged-http`
+     * showcase; a conformant server never does this on an opening listen.
+     *
+     * `"after-first"` acknowledges the first listen and refuses every one after
+     * it — the *reconnect* shape, and the only way to reach the Inspector's
+     * never-acknowledged badge by hand (it is gated on a live subscription,
+     * which a server refusing from the outset never lets you hold).
+     */
+    neverAcknowledgeSubscriptions?: boolean | "after-first";
   };
   /**
    * Optional server control for orderly shutdown (test HTTP server).

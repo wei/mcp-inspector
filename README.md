@@ -161,6 +161,7 @@ Each config below is a ready-made server for exercising one feature by hand. Loa
 | `oauth-custom-resource-metadata-http.json` **(legacy era)** | OAuth discovery driven by the challenge's `resource_metadata` | [#2071](https://github.com/modelcontextprotocol/inspector/issues/2071) |
 | `logging-{legacy,modern}-http.json`       | Logging, both eras                                  | [#1629](https://github.com/modelcontextprotocol/inspector/issues/1629) |
 | `subscriptions-{legacy,modern}-http.json` | Resource subscriptions, both eras                   | [#1630](https://github.com/modelcontextprotocol/inspector/issues/1630) |
+| `subscriptions-never-acknowledged-http.json` | A `subscriptions/listen` answered with a bare result  | [#2097](https://github.com/modelcontextprotocol/inspector/issues/2097) |
 | `tasks-{legacy,modern}-http.json`         | Tasks, both eras                                    | [#1631](https://github.com/modelcontextprotocol/inspector/issues/1631) |
 
 #### MCP Apps
@@ -456,6 +457,22 @@ That gating is faithful to the spec ("a server MUST NOT emit `notifications/mess
 The modern config deliberately **omits** `update_resource`. The SDK's modern leg is stateless/per-request (`createMcpHandler(() => createMcpServer(config))`), so the tool would run against a throwaway server instance — the content change wouldn't persist for the next `resources/read`, and its `resources/updated` wouldn't reach the separate listen stream. More confusing than useful.
 
 So the live update-notification round-trip is demonstrated on the legacy (stateful-session) server, and the modern server is for the subscribe/listen/badge behavior. The Inspector's _receive_ path is era-transparent, so a real stateful modern server that routes `resources/updated` onto the listen stream drives the subscribed tile the same way.
+
+#### A listen that is never acknowledged
+
+`subscriptions-never-acknowledged-http.json` serves the same three `numbered_resources` on the modern leg. It acknowledges the **first** `subscriptions/listen` normally and answers every one after it with a bare JSON-RPC `result` instead of a `notifications/subscriptions/acknowledged`. Connect with **Protocol Era = Modern**.
+
+That result is not a malformed message. On the 2026-07-28 era the listen request is long-lived, and the `result` for its id is reserved as the [graceful-closure](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/subscriptions#graceful-closure) marker — so a server sending it up front is saying "acknowledged and closed in the same breath". It is deliberately bare, with no `resultType` discriminator, matching the payload from the original report rather than the spec's example.
+
+Open the Resources tab and **Subscribe** to `resource_1`: an ordinary acknowledged stream, badge **Listening**. Now **Subscribe** to `resource_2`. Changing the filter re-lists, this one is refused, and:
+
+- the subscribe fails with the reason spelled out — *"The server closed the subscription without acknowledging it… Not retrying"*;
+- the Subscriptions badge turns an orange **Not acknowledged** and the panel carries the same sentence as a notice;
+- the Protocol tab shows exactly **one** further `subscriptions/listen`.
+
+On the broken build that second click produced eight `subscriptions/listen` requests with increasing ids over roughly a minute, the badge flickering `Reconnecting…` between them, and a final bare **Stream ended** that said nothing about why ([#2097](https://github.com/modelcontextprotocol/inspector/issues/2097), split out of [#2063](https://github.com/modelcontextprotocol/inspector/issues/2063), where it read as the Inspector "accepting" an invalid response). The condition is deterministic — the server answers the same way every time — so retrying it is noise, not recovery.
+
+The first listen is acknowledged **so the badge is reachable at all**: it is gated on a live subscription, which a server refusing from the outset never lets you hold. That variant — refuse every listen, the literal shape in the report — is what the integration tests drive; it is the same code path, minus the badge. And `never-acknowledged` is a status of its own rather than **Stream ended** on purpose: `ended` covers the two *expected* closes (a server tearing an established stream down, and reconnection abandoned after repeated failures), and reading a deterministic conformance failure as either of them is the silence the issue is about.
 
 #### Tasks, both eras
 

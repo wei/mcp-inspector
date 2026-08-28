@@ -490,12 +490,19 @@ export interface InspectorResourceSubscription {
  * - `"ended"` — the server tore the stream down deliberately (`closed` resolved
  *   `"graceful"`, e.g. on shutdown) or reconnection was abandoned; no automatic
  *   re-listen.
+ * - `"never-acknowledged"` — the server answered the `listen()` request itself
+ *   with a JSON-RPC `result` (the spec's graceful-closure marker) without ever
+ *   sending `notifications/subscriptions/acknowledged`, so the stream was closed
+ *   in the same breath it was opened (#2097). Distinct from `"ended"` because
+ *   the condition is deterministic rather than a shutdown of an established
+ *   stream: the Inspector does not retry it, and the UI says why.
  */
 export type ResourceSubscriptionStreamStatus =
   | "connecting"
   | "acknowledged"
   | "reconnecting"
-  | "ended";
+  | "ended"
+  | "never-acknowledged";
 
 /**
  * State of the modern-era resource-subscription listen stream (#1630).

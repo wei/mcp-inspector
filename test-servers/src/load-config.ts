@@ -107,7 +107,11 @@ export interface ConfigFile {
      */
     modern?:
       | boolean
-      | { legacy?: "stateless" | "reject"; injectSpecErrors?: boolean };
+      | {
+          legacy?: "stateless" | "reject";
+          injectSpecErrors?: boolean;
+          neverAcknowledgeSubscriptions?: boolean | "after-first";
+        };
   };
 }
 

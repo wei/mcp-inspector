@@ -12,6 +12,7 @@ import {
 } from "@modelcontextprotocol/inspector-test-server";
 import type { ServerConfig } from "@modelcontextprotocol/inspector-test-server";
 import type { MessageEntry } from "@inspector/core/mcp/types.js";
+import { NEVER_ACKNOWLEDGED_SUBSCRIPTION_MESSAGE } from "@inspector/core/mcp/subscriptionAck.js";
 
 /**
  * Live coverage of the resource-subscription era fork (#1630). On the legacy era
@@ -139,6 +140,7 @@ describe("resource subscriptions era fork (#1630)", () => {
     modernSubscription: McpSubscription | null;
     modernListenGeneration: number;
     modernReconnectAttempts: number;
+    modernNeverAcknowledged: boolean;
     subscribedResources: Set<string>;
     refreshModernSubscription(fromReconnect?: boolean): Promise<void>;
     onModernSubscriptionClosed(
@@ -1015,6 +1017,112 @@ describe("resource subscriptions era fork (#1630)", () => {
         int.modernListenGeneration,
       );
       expect(connected.getResourceSubscriptionStreamState().active).toBe(false);
+    });
+
+    /**
+     * A server that answers `subscriptions/listen` with a bare JSON-RPC result
+     * — the spec's graceful-closure marker — instead of acknowledging it
+     * (#2097). The condition is deterministic, so the Inspector must end the
+     * stream on the first occurrence and say why, rather than re-listing eight
+     * times in silence (#2063).
+     *
+     * These run against the real never-acknowledging test server rather than a
+     * stubbed rejection, which is what keeps them honest: the predicate reads
+     * the SDK's message, so an SDK that rephrases it fails here instead of
+     * silently reverting to the retry loop.
+     */
+    describe("server never acknowledges the listen (#2097)", () => {
+      const NEVER_ACK = { neverAcknowledgeSubscriptions: true } as const;
+
+      it("fails the subscribe with the explanation, without retrying", async () => {
+        const started = await startServer(NEVER_ACK);
+        const { connected, messages } = await connect(started.url, "modern");
+        messages.length = 0;
+
+        await expect(
+          connected.subscribeToResource(RESOURCE_URI),
+        ).rejects.toThrow(NEVER_ACKNOWLEDGED_SUBSCRIPTION_MESSAGE);
+
+        // One attempt, not the eight-deep backoff run. Give the reconnect timer
+        // room to have fired had one been armed (the base delay is 500ms).
+        await new Promise((resolve) => setTimeout(resolve, 1_200));
+        expect(
+          methodsSent(messages).filter((m) => m === "subscriptions/listen"),
+        ).toHaveLength(1);
+      });
+
+      it("reports the never-acknowledged status while a subscription remains", async () => {
+        const started = await startServer(NEVER_ACK);
+        const { connected } = await connect(started.url, "modern");
+        const int = internals(connected);
+        // A URI already in the set stands in for a first subscription this
+        // server would never have honored: the failing subscribe below rolls
+        // back only its own URI, so the stream state stays `active` and the
+        // badge — the surface the reason has to reach — is rendered.
+        int.subscribedResources.add(RESOURCE_URI_2);
+
+        await expect(
+          connected.subscribeToResource(RESOURCE_URI),
+        ).rejects.toThrow(/not retrying/i);
+
+        const state = connected.getResourceSubscriptionStreamState();
+        expect(state.status).toBe("never-acknowledged");
+        expect(state.active).toBe(true);
+        expect(state.honoredUris).toEqual([]);
+      });
+
+      it("ends a reconnect run rather than spending it on the same answer", async () => {
+        // A stream that dropped and now re-lists against a server that will not
+        // acknowledge. The reconnect must stop at the first such answer instead
+        // of exhausting the eight-attempt cap — the behavior #2063 observed.
+        const started = await startServer(NEVER_ACK);
+        const { connected, messages } = await connect(started.url, "modern");
+        const int = internals(connected);
+        // Stand in for the state a dropped stream leaves behind: a subscribed
+        // URI (so the filter still wants a stream) and a live subscription
+        // object to close.
+        int.subscribedResources.add(RESOURCE_URI);
+        const fake = await installFakeSubscription(int);
+
+        messages.length = 0;
+        int.onModernSubscriptionClosed(
+          fake.sub,
+          "remote",
+          int.modernListenGeneration,
+        );
+        await vi.waitFor(
+          () => {
+            expect(connected.getResourceSubscriptionStreamState().status).toBe(
+              "never-acknowledged",
+            );
+          },
+          { timeout: 5_000 },
+        );
+        // One re-listen consumed, not the eight the cap allows; and the run is
+        // ended rather than counting up towards it.
+        expect(
+          methodsSent(messages).filter((m) => m === "subscriptions/listen"),
+        ).toHaveLength(1);
+        expect(int.modernReconnectAttempts).toBe(0);
+      });
+
+      it("retries again after the user re-subscribes", async () => {
+        // The flag is a fact about the last attempt, not a latch: a fresh
+        // user-initiated subscribe must be allowed to reach the server again.
+        const started = await startServer(NEVER_ACK);
+        const { connected } = await connect(started.url, "modern");
+        await expect(
+          connected.subscribeToResource(RESOURCE_URI),
+        ).rejects.toThrow();
+        expect(internals(connected).modernNeverAcknowledged).toBe(true);
+
+        await expect(
+          connected.subscribeToResource(RESOURCE_URI_2),
+        ).rejects.toThrow();
+        // Reset at the start of the second attempt and set again by its own
+        // rejection — i.e. the second listen really went out.
+        expect(internals(connected).modernNeverAcknowledged).toBe(true);
+      });
     });
 
     it("ignores a close callback from a superseded generation", async () => {

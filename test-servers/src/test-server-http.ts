@@ -190,6 +190,73 @@ interface JsonRpcCallBody {
   params?: { name?: string };
 }
 
+/** The slice of a `subscriptions/listen` body the never-ack injector reads. */
+interface JsonRpcListenBody {
+  id?: string | number | null;
+  method?: string;
+  params?: { notifications?: { resourceSubscriptions?: unknown } };
+}
+
+/**
+ * Answer every opening `subscriptions/listen` with a bare JSON-RPC `result`
+ * instead of a `notifications/subscriptions/acknowledged` (#2097).
+ *
+ * On the 2026-07-28 era a listen request is long-lived: the acknowledgement is
+ * the first message on its stream, and the `result` for the listen id is
+ * reserved as the *graceful-closure* marker. Answering with the result up front
+ * is therefore the "acknowledged and closed in the same breath" shape the
+ * Inspector used to re-list against eight times in silence. The result is
+ * deliberately bare — no `resultType` discriminator — matching the payload in
+ * the original report rather than the spec's example.
+ *
+ * A conformant server never does this, which is the point: there is no way to
+ * reach the Inspector's never-acknowledged path from one.
+ *
+ * `"after-first"` acknowledges the first listen that actually **subscribes to a
+ * resource** and refuses every one after it. That is the *reconnect* shape — a
+ * stream that was acknowledged, then re-listed against a server that has since
+ * started refusing — and it is the only way to reach the never-acknowledged
+ * badge by hand: the badge is gated on a live subscription, which a server
+ * refusing from the outset never lets you hold.
+ *
+ * Counting *resource-subscription* listens rather than listens is what makes
+ * that reproducible. The Inspector already opens a listen at connect time when a
+ * list-change opt-in is live (#1920), so a plain "let the first one through"
+ * rule spends its allowance before the user has clicked anything, and the very
+ * first Subscribe is refused. Such list-change-only listens are always
+ * acknowledged here, so they neither consume the allowance nor break the
+ * unrelated notifications riding that stream.
+ */
+function createNeverAcknowledgeSubscriptionsInjector(
+  mode: true | "after-first",
+): express.RequestHandler {
+  let subscribingListens = 0;
+  return (req, res, next) => {
+    const body = req.body as JsonRpcListenBody | undefined;
+    if (body?.method !== "subscriptions/listen") {
+      next();
+      return;
+    }
+    if (mode === "after-first") {
+      const uris = body.params?.notifications?.resourceSubscriptions;
+      if (!Array.isArray(uris) || uris.length === 0) {
+        next();
+        return;
+      }
+      subscribingListens += 1;
+      if (subscribingListens === 1) {
+        next();
+        return;
+      }
+    }
+    res.status(200).json({
+      jsonrpc: "2.0",
+      id: body.id ?? null,
+      result: {},
+    });
+  };
+}
+
 const specErrorInjector: express.RequestHandler = (req, res, next) => {
   const body = req.body as JsonRpcCallBody | undefined;
   const trigger =
@@ -389,6 +456,16 @@ export class TestServerHttp {
       ?.injectSpecErrors
       ? [specErrorInjector]
       : [];
+
+    // Optional never-acknowledge injector (#2097): answers `subscriptions/listen`
+    // with the graceful-closure result up front, so the Inspector's
+    // never-acknowledged path has a server to reproduce it against.
+    const neverAck = this.config.modern?.neverAcknowledgeSubscriptions;
+    if (neverAck) {
+      extraMiddleware.push(
+        createNeverAcknowledgeSubscriptionsInjector(neverAck),
+      );
+    }
 
     // Modern tasks extension (SEP-2663): the SDK's modern leg era-gates inbound
     // `tasks/*` spec methods, so serve them from a middleware ahead of the SDK
