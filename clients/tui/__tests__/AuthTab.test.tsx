@@ -187,6 +187,46 @@ describe("AuthTab", () => {
     expect(onClearOAuth).toHaveBeenCalledTimes(2);
   });
 
+  // A stale completion owns nothing: server A settling after the user moved to
+  // B and started a clear there must not drop B's lock, or a second B clear
+  // could run concurrently against the same store entry.
+  it("a stale completion does not release the current server's lock", async () => {
+    const settlers: Array<() => void> = [];
+    const onClearOAuth = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          settlers.push(resolve);
+        }),
+    );
+    const props = (serverName: string) => ({
+      ...baseProps,
+      serverName,
+      onClearOAuth,
+      inspectorClient: null,
+      oauthStatus: "idle" as const,
+      oauthMessage: null,
+      focused: true,
+    });
+    const { stdin, rerender } = render(<AuthTab {...props("a")} />);
+    await tick();
+
+    stdin.write("s"); // A's clear starts
+    await tick();
+    rerender(<AuthTab {...props("b")} />);
+    await tick();
+    stdin.write("s"); // B's clear starts
+    await tick();
+    expect(onClearOAuth).toHaveBeenCalledTimes(2);
+
+    // A settles late. B's clear is still running, so its lock must hold.
+    settlers[0]!();
+    await tick();
+    stdin.write("s");
+    await tick();
+
+    expect(onClearOAuth).toHaveBeenCalledTimes(2);
+  });
+
   // A rejection is NOT a revocation failure — those come back as outcomes and
   // are reported through the message line. This is the local clear or the
   // disconnect itself failing, so reporting success would be a plain lie.

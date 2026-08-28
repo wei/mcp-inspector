@@ -123,6 +123,10 @@ export function AuthTab({
   useEffect(() => {
     clearAttemptRef.current++;
     clearInFlightRef.current = false;
+    // The retired clear returns before its `oauthRevision` bump, so the marker
+    // has no bump to skip. Left set, it would swallow the first unrelated
+    // revision on the server just selected and strand that server's banner.
+    ownClearRef.current = false;
     setClearState("idle");
     setClearFailure(null);
     setLastClearDisconnected(false);
@@ -231,10 +235,16 @@ export function AuthTab({
           serverNameRef.current === attemptServer;
         void Promise.resolve(onClearOAuth()).then(
           () => {
+            // `current()` FIRST, before touching either shared ref. A stale
+            // completion — server A settling after the user moved to B and
+            // started a clear there — would otherwise drop B's lock and let a
+            // second B clear run concurrently. A stale clear owns nothing.
+            if (!current()) return;
             clearInFlightRef.current = false;
-            if (current()) setClearState("cleared");
+            setClearState("cleared");
           },
           (err: unknown) => {
+            if (!current()) return;
             clearInFlightRef.current = false;
             // A rejection is NOT a revocation failure — those come back as
             // outcomes and are reported through the message line. This is the
@@ -246,7 +256,6 @@ export function AuthTab({
             // Left set, it would swallow the next *unrelated* revision change
             // and strand this banner after the OAuth state moved on.
             ownClearRef.current = false;
-            if (!current()) return;
             setClearFailure(err instanceof Error ? err.message : String(err));
             setClearState("failed");
           },

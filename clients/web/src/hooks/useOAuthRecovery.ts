@@ -1265,8 +1265,14 @@ export function useOAuthRecovery({
       // The session ref is the live answer. Only the parts that touch the
       // *session* are gated on it; the store write already happened and the
       // toast still belongs to the server the user asked about.
+      // The client identity is part of the check, not just the server id: a
+      // disconnect/reconnect to the SAME server builds a replacement
+      // `InspectorClient`, so an id-only check passes again and the old clear
+      // would run its session-wide cleanup against the new session.
       const stillTargetsActiveSession = (): boolean =>
-        isActive && sessionRef.current.activeServerId === server.id;
+        isActive &&
+        sessionRef.current.activeServerId === server.id &&
+        sessionRef.current.inspectorClient === client;
 
       const { cleared, revocation } = await clearServerOAuthState({
         config: server.config,

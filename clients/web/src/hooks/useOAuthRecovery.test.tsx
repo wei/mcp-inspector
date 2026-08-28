@@ -1409,6 +1409,50 @@ describe("useOAuthRecovery", () => {
       expect(client.disconnect).not.toHaveBeenCalled();
     });
 
+    // A disconnect/reconnect to the SAME server builds a replacement client, so
+    // an id-only check passes again and the old clear would run its
+    // session-wide cleanup — including the disconnect — against the new session.
+    it("does not disconnect a replacement client for the same server", async () => {
+      let settle: (r: { cleared: boolean }) => void = () => {};
+      clearServerOAuthStateMock.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            settle = resolve as typeof settle;
+          }),
+      );
+      const original = fakeClient();
+      const h = harness({
+        servers: [entry("a")],
+        activeServerId: "a",
+        client: original,
+      });
+
+      let done: Promise<void>;
+      await act(async () => {
+        done = h.api().clearServerOAuthAndDisconnect(entry("a"));
+        await Promise.resolve();
+      });
+
+      // Same server, new client — a reconnect while the clear is pending.
+      const replacement = fakeClient();
+      h.rerender({
+        servers: [entry("a")],
+        activeServerId: "a",
+        client: replacement,
+      });
+
+      await act(async () => {
+        settle({ cleared: true });
+        await done;
+      });
+
+      // Neither client is torn down: the replacement is the live session and
+      // must not be touched, and the original is already gone — disconnecting
+      // it would only drag `finalizeExplicitDisconnect` across the new one.
+      expect(original.disconnect).not.toHaveBeenCalled();
+      expect(replacement.disconnect).not.toHaveBeenCalled();
+    });
+
     it("clears the resume snapshot on an explicit disconnect", () => {
       writeOAuthResumeSnapshot({
         version: 1,
