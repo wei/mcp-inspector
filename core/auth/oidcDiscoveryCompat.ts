@@ -161,19 +161,6 @@ function continuesDiscovery(status: number): boolean {
 }
 
 /**
- * Whether a `content-type` names a whole JSON document.
- *
- * An exact media-type test rather than a substring search for "json", for the
- * same reason `endpointOverrides.ts` uses one: a streaming media type would be
- * read to completion and never resolve.
- */
-function isJsonDocumentResponse(contentType: string | null): boolean {
-  if (!contentType) return false;
-  const mediaType = contentType.split(";")[0].trim().toLowerCase();
-  return mediaType === "application/json" || mediaType.endsWith("+json");
-}
-
-/**
  * Whether a parsed body is RFC 8414 authorization-server metadata that is *not*
  * a valid OpenID provider document — the exact shape the upstream schema
  * selection rejects.
@@ -252,26 +239,41 @@ export function withRfc8414OidcCompat(fetchFn: typeof fetch): typeof fetch {
     if (candidates.length === 0) return response;
 
     const headers = discoveryHeaders(input, init);
+    // The loop advances to the next candidate only where the SDK's own loop
+    // would. Anywhere else it hands the original response back and lets
+    // discovery run its normal course, because *promoting a later candidate
+    // over an earlier one the SDK would have stopped at* would turn a failure
+    // into a success — a much worse defect than the one being worked around
+    // (Copilot). Concretely: a 500 on the first OIDC candidate is an outage the
+    // SDK surfaces, a malformed JSON body there is terminal for it, and a
+    // network error propagates outside the browser's CORS case. In each of
+    // those, returning `response` leaves the SDK to make the same request and
+    // reach the same verdict it always would.
     for (const candidate of candidates) {
       let probe: Response;
       try {
         probe = await fetchFn(candidate, { headers });
       } catch {
-        // A network or CORS failure on a URL the SDK had not asked for yet is
-        // not this wrapper's to report — the SDK will make the same request and
-        // handle it. Try the next candidate.
-        continue;
+        return response;
       }
-      if (!probe.ok) continue;
-      if (!isJsonDocumentResponse(probe.headers.get("content-type"))) continue;
+      if (!probe.ok) {
+        if (continuesDiscovery(probe.status)) continue;
+        return response;
+      }
 
+      // Deliberately not gated on `content-type`: the SDK parses a 2xx
+      // discovery body whatever media type it carries, so gating here could
+      // skip a genuine OIDC document served with an odd one and substitute a
+      // later RFC-8414-only document in its place. A body that will not parse
+      // falls through to `return response` below, where the SDK re-fetches it
+      // and raises its own parse error.
       let parsed: unknown;
       let body: string;
       try {
         body = await probe.text();
         parsed = JSON.parse(body);
       } catch {
-        continue;
+        return response;
       }
       if (!isRfc8414OnlyMetadata(parsed)) {
         // Either not metadata at all, or a genuine OpenID provider document the

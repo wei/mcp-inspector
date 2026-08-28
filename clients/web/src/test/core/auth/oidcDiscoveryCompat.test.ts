@@ -203,17 +203,17 @@ describe("withRfc8414OidcCompat", () => {
     expect(base).toHaveBeenCalledTimes(2);
   });
 
-  it("skips a candidate that is not JSON and keeps looking", async () => {
+  it("accepts a 2xx candidate whatever media type it carries", async () => {
+    // The SDK parses a 2xx discovery body regardless of `content-type`, so
+    // gating on it here could skip a document the SDK would have used (Copilot).
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const base = vi.fn<typeof fetch>(async (input) => {
-      const url = String(input);
-      if (url === OIDC_SUFFIXED) {
-        return new Response("<html>login</html>", {
+      if (String(input) === OIDC_SUFFIXED) {
+        return new Response(JSON.stringify(RFC8414_DOC), {
           status: 200,
-          headers: { "content-type": "text/html" },
+          headers: { "content-type": "text/plain" },
         });
       }
-      if (url === OIDC_APPENDED) return json(RFC8414_DOC);
       return notFound();
     });
     const wrapped = withRfc8414OidcCompat(base);
@@ -223,10 +223,12 @@ describe("withRfc8414OidcCompat", () => {
     );
   });
 
-  it("skips a candidate whose JSON body will not parse", async () => {
+  it("stops at a candidate whose body will not parse", async () => {
+    // Terminal for the SDK, so a later candidate must not be promoted over it
+    // — that would turn a failure into a success (Copilot).
     const original = notFound();
     const base = vi.fn<typeof fetch>(async (input) => {
-      if (String(input).includes("openid-configuration")) {
+      if (String(input) === OIDC_SUFFIXED) {
         return new Response("{ not json", {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -237,10 +239,12 @@ describe("withRfc8414OidcCompat", () => {
     const wrapped = withRfc8414OidcCompat(base);
 
     await expect(wrapped(RFC8414_URL)).resolves.toBe(original);
-    expect(base).toHaveBeenCalledTimes(3);
+    // The failed original and the first candidate only — the second is not
+    // reached.
+    expect(base).toHaveBeenCalledTimes(2);
   });
 
-  it("skips a candidate that itself fails", async () => {
+  it("walks past a candidate that 404s, as the SDK does", async () => {
     const original = notFound();
     const base = vi.fn<typeof fetch>().mockResolvedValue(original);
     const wrapped = withRfc8414OidcCompat(base);
@@ -249,7 +253,27 @@ describe("withRfc8414OidcCompat", () => {
     expect(base).toHaveBeenCalledTimes(3);
   });
 
-  it("treats a probe that throws as a candidate to skip", async () => {
+  it("stops at a candidate returning a status the SDK would not walk past", async () => {
+    // A 500 on the first OIDC candidate is an outage the SDK surfaces; hiding
+    // it behind a second candidate's document would be worse than the bug
+    // being worked around (Copilot).
+    const original = notFound();
+    const base = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url === OIDC_SUFFIXED) return new Response("boom", { status: 500 });
+      if (url === OIDC_APPENDED) return json(RFC8414_DOC);
+      return original;
+    });
+    const wrapped = withRfc8414OidcCompat(base);
+
+    await expect(wrapped(RFC8414_URL)).resolves.toBe(original);
+    expect(base).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops when a probe throws", async () => {
+    // The SDK swallows only the browser's CORS `TypeError`; elsewhere a network
+    // error propagates. Leave it to the SDK to make the same request and reach
+    // its own verdict (Copilot).
     const original = notFound();
     const base = vi.fn<typeof fetch>(async (input) => {
       if (String(input).includes("openid-configuration")) {
@@ -260,7 +284,7 @@ describe("withRfc8414OidcCompat", () => {
     const wrapped = withRfc8414OidcCompat(base);
 
     await expect(wrapped(RFC8414_URL)).resolves.toBe(original);
-    expect(base).toHaveBeenCalledTimes(3);
+    expect(base).toHaveBeenCalledTimes(2);
   });
 
   it("probes on a 502, which the SDK also walks past", async () => {
