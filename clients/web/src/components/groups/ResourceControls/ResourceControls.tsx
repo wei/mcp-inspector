@@ -1,4 +1,12 @@
-import { Accordion, Group, Stack, Text, TextInput, Title } from "@mantine/core";
+import {
+  Accordion,
+  Alert,
+  Group,
+  Stack,
+  Text,
+  TextInput,
+  Title,
+} from "@mantine/core";
 import { ClearButton } from "../../elements/ClearButton/ClearButton";
 import { RiArrowRightSLine } from "react-icons/ri";
 import type {
@@ -10,6 +18,7 @@ import type {
   InspectorResourceSubscription,
   ResourceSubscriptionStreamState,
 } from "../../../../../../core/mcp/types.js";
+import { NEVER_ACKNOWLEDGED_SUBSCRIPTION_MESSAGE } from "../../../../../../core/mcp/subscriptionAck.js";
 import { isModernEra } from "../../elements/EraBadge/eraUtils";
 import { SubscriptionStreamBadge } from "../../elements/SubscriptionStreamBadge/SubscriptionStreamBadge";
 import { ListChangedIndicator } from "../../elements/ListChangedIndicator/ListChangedIndicator";
@@ -32,6 +41,15 @@ const TightRow = Group.withProps({ gap: "xs", wrap: "nowrap" });
 // can claim the remaining space; `mih: 0` lets that child shrink and scroll
 // instead of overflowing the card (#1462).
 const SidebarStack = Stack.withProps({ gap: "sm", flex: 1, mih: 0 });
+
+// The never-acknowledged close (#2097) is the one stream status whose reason has
+// to be readable without hovering the badge: it is a server-conformance problem
+// the user has to act on, not a lifecycle event they can wait out.
+const StreamNotice = Alert.withProps({
+  color: "orange",
+  variant: "light",
+  title: "Subscription not acknowledged",
+});
 
 const SearchInput = TextInput.withProps({
   flex: 1,
@@ -358,6 +376,11 @@ export function ResourceControls({
             </Accordion.Control>
             <Accordion.Panel>
               <Stack gap="xs">
+                {streamStatus === "never-acknowledged" && (
+                  <StreamNotice>
+                    {NEVER_ACKNOWLEDGED_SUBSCRIPTION_MESSAGE}
+                  </StreamNotice>
+                )}
                 {filteredSubscriptions.map((sub) => (
                   <ResourceSubscribedItem
                     key={sub.resource.uri}

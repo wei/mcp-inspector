@@ -291,7 +291,25 @@ v2/main/
 │   │                                   #   (`InspectorClientOptions.appElicitation`), and
 │   │                                   #   supplying one is what advertises the nested
 │   │                                   #   `elicitation` setting — so web opts in and
-│   │                                   #   cli/tui, which cannot host an App, do not)
+│   │                                   #   cli/tui, which cannot host an App, do not;
+│   │                                   #   subscriptionAck.ts: recognizing the modern
+│   │                                   #   `subscriptions/listen` a server answers with a
+│   │                                   #   bare graceful-closure result instead of
+│   │                                   #   acknowledging (#2097). The SDK gives that close
+│   │                                   #   NO code of its own — it is the same
+│   │                                   #   `SdkError(ConnectionClosed)` any pre-ack close
+│   │                                   #   carries — so the predicate reads the message,
+│   │                                   #   deliberately, since the alternative is refusing
+│   │                                   #   to retry a genuinely transient drop. The live
+│   │                                   #   check on that string is the integration test,
+│   │                                   #   which drives a real never-acknowledging server
+│   │                                   #   (`subscriptions-never-acknowledged-http.json`);
+│   │                                   #   an SDK that rephrases it fails there rather than
+│   │                                   #   silently reverting to the eight-retry loop. The
+│   │                                   #   status is `"never-acknowledged"`, NOT `"ended"`:
+│   │                                   #   `ended` means an EXPECTED close, and reading a
+│   │                                   #   deterministic conformance failure as one is the
+│   │                                   #   silence #2063 reported)
 │   │   ├── import/                     # Config import strategies (#1348): client-config parsers
 │   │   │                               #   (Claude Desktop/Cursor/Cline/VS Code), registry
 │   │   │                               #   server.json parser, strategy registry + well-known
