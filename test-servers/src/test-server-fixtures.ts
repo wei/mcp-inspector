@@ -2915,6 +2915,13 @@ export function createOAuthTestServerConfig(options: {
    * it via `WWW-Authenticate: Bearer resource_metadata="…"` (#2071).
    */
   resourceMetadataPath?: string;
+  /**
+   * Move the RFC 8414 authorization-server metadata document off the
+   * well-known path — set it to `/.well-known/openid-configuration` to serve
+   * plain OAuth 2.0 metadata where the SDK expects an OpenID provider
+   * document (#2172).
+   */
+  asMetadataPath?: string;
 }): Partial<ServerConfig> {
   return {
     oauth: {
@@ -2927,6 +2934,11 @@ export function createOAuthTestServerConfig(options: {
       // well-known route instead of reporting the bad fixture (Copilot).
       ...(options.resourceMetadataPath !== undefined
         ? { resourceMetadataPath: options.resourceMetadataPath }
+        : {}),
+      // Same `!== undefined` reasoning as above: an explicit `""` is invalid
+      // and must reach the server so it reports the bad fixture.
+      ...(options.asMetadataPath !== undefined
+        ? { asMetadataPath: options.asMetadataPath }
         : {}),
       staticClients: options.staticClients,
       supportDCR: options.supportDCR ?? false,

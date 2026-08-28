@@ -159,6 +159,7 @@ Each config below is a ready-made server for exercising one feature by hand. Loa
 | `rfc6570-templates-http.json`             | Resources tab: RFC 6570 resource-template expansion | [#1919](https://github.com/modelcontextprotocol/inspector/issues/1919) |
 | `advertised-extensions-http.json`         | Tool registration gated on advertised extensions    | [#1739](https://github.com/modelcontextprotocol/inspector/issues/1739) |
 | `oauth-custom-resource-metadata-http.json` **(legacy era)** | OAuth discovery driven by the challenge's `resource_metadata` | [#2071](https://github.com/modelcontextprotocol/inspector/issues/2071) |
+| `oauth-rfc8414-at-oidc-path-http.json` **(legacy era)** | Plain OAuth 2.0 AS metadata served at the OIDC well-known path | [#2172](https://github.com/modelcontextprotocol/inspector/issues/2172) |
 | `logging-{legacy,modern}-http.json`       | Logging, both eras                                  | [#1629](https://github.com/modelcontextprotocol/inspector/issues/1629) |
 | `subscriptions-{legacy,modern}-http.json` | Resource subscriptions, both eras                   | [#1630](https://github.com/modelcontextprotocol/inspector/issues/1630) |
 | `subscriptions-never-acknowledged-http.json` | A `subscriptions/listen` answered with a bare result  | [#2097](https://github.com/modelcontextprotocol/inspector/issues/2097) |
@@ -437,6 +438,22 @@ Add the server, click **Connect**, and watch the Inspector's first protected-res
 The same server is worth running against `--cli` / `--tui`, which reach it by a different route: with no stored token in the legacy era the Inspector connects with no auth provider (so the SDK cannot open a browser before the callback server is listening), the 401 surfaces as the SDK's headerless `UnauthorizedError`, and the client calls `authenticate()` with no challenge in hand. The transport therefore *observes* every 401/403 passively, so the advertised URL is still available on that path.
 
 The value now rides the normalized `AuthChallenge` as a string — it has to be serializable, because the web client's challenge crosses the remote-backend boundary as JSON — and is converted to a `URL` at the OAuth boundary, where it is handed to `auth()` as `resourceMetadataUrl` and to the CIMD pre-registration probe, which runs *before* `auth()` and would otherwise do its own default-location discovery. A malformed value is ignored rather than surfaced, matching the SDK's own `WWW-Authenticate` parser: discovery falls back to the default locations instead of failing the whole authorization on a bad header. The callback leg needs nothing extra — SDK `auth()` persists the URL in its discovery state, so it survives both the web full-page redirect and the CLI/TUI loopback callback.
+
+#### Plain OAuth 2.0 metadata at the OIDC well-known path
+
+`oauth-rfc8414-at-oidc-path-http.json` is an OAuth-protected server (combined AS + resource, DCR enabled) whose RFC 8414 authorization-server metadata is served **only** from `/.well-known/openid-configuration`. It is a plain OAuth 2.0 authorization server — no ID tokens, no `jwks_uri`, no `sub` claims — and RFC 8414 §5 explicitly permits that filename for general OAuth metadata. `/.well-known/oauth-authorization-server` is deliberately left unserved. Plain streamable-HTTP — connect with the **default (legacy)** protocol era.
+
+Add the server and click **Connect**: authorization must proceed normally. On the broken build it failed before the browser ever opened, with a `ZodError` naming three fields the server had no reason to publish:
+
+```
+"path":["jwks_uri"] … "path":["subject_types_supported"] … "path":["id_token_signing_alg_values_supported"]
+```
+
+The cause is upstream. `discoverAuthorizationServerMetadata` in `@modelcontextprotocol/client@2.0.0` picks its validation schema from the well-known **filename that resolved**, not from the document that came back — anything found at `openid-configuration` is parsed as OpenID Connect Discovery 1.0 provider metadata, which requires those three fields. And because the parse *throws* rather than continuing the candidate loop, discovery aborts outright instead of falling through ([#2172](https://github.com/modelcontextprotocol/inspector/issues/2172), filed upstream as [typescript-sdk#2733](https://github.com/modelcontextprotocol/typescript-sdk/issues/2733)).
+
+`core/auth/oidcDiscoveryCompat.ts` works around it without fabricating anything. When the RFC 8414 candidate comes back 4xx, it fetches the OIDC candidates the SDK would try next; if one returns a document that satisfies `OAuthMetadataSchema` but *fails* the OIDC schema, that document is returned as the response to the RFC 8414 request — so the SDK validates it under the schema that actually describes it. A genuine OpenID provider document is left alone and takes the SDK's normal OIDC leg. Issuer validation is untouched, since the substituted document is the one the server published, `issuer` included.
+
+Watch the Network tab to confirm the Inspector is not hiding anything: the real 404 on `/.well-known/oauth-authorization-server` and the real request to `/.well-known/openid-configuration` are both recorded, and the metadata shown in the Auth tab is exactly what the server sent — no invented `jwks_uri`. The wrapper sits above the fetch tracker for that reason.
 
 #### Logging, both eras
 

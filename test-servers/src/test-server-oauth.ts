@@ -84,6 +84,24 @@ function resourceMetadataPath(config: OAuthConfig): string | undefined {
 }
 
 /**
+ * The path the RFC 8414 authorization-server metadata document is served from,
+ * validated the same way `resourceMetadataPath` is. Defaults to the well-known
+ * location; `asMetadataPath` moves it (see the field's doc comment).
+ */
+function asMetadataPath(config: OAuthConfig): string {
+  const path = config.asMetadataPath;
+  if (path === undefined) {
+    return "/.well-known/oauth-authorization-server";
+  }
+  if (!isOriginRelativePath(path)) {
+    throw new Error(
+      `oauth.asMetadataPath must be an origin-relative path (got ${JSON.stringify(path)})`,
+    );
+  }
+  return path;
+}
+
+/**
  * The `WWW-Authenticate` challenge sent with every 401.
  *
  * RFC 9728 §5.1: a resource server advertises where its protected-resource
@@ -219,42 +237,36 @@ function setupMetadataEndpoints(
 
   if (mode === "combined") {
     // OAuth Authorization Server Metadata (local AS)
-    app.get(
-      "/.well-known/oauth-authorization-server",
-      (req: Request, res: Response) => {
-        const requestBaseUrl = `${req.protocol}://${req.get("host")}`;
-        const actualIssuerUrl = config.issuerUrl ?? new URL(requestBaseUrl);
-        const metadata = {
-          // RFC 8414 §3.3: the issuer MUST be identical to the base URL the
-          // well-known path was appended to — i.e. no trailing slash. SDK v2's
-          // client enforces this exactly (IssuerMismatchError otherwise).
-          issuer: actualIssuerUrl.href.replace(/\/$/, ""),
-          authorization_endpoint: new URL("/oauth/authorize", actualIssuerUrl)
+    app.get(asMetadataPath(config), (req: Request, res: Response) => {
+      const requestBaseUrl = `${req.protocol}://${req.get("host")}`;
+      const actualIssuerUrl = config.issuerUrl ?? new URL(requestBaseUrl);
+      const metadata = {
+        // RFC 8414 §3.3: the issuer MUST be identical to the base URL the
+        // well-known path was appended to — i.e. no trailing slash. SDK v2's
+        // client enforces this exactly (IssuerMismatchError otherwise).
+        issuer: actualIssuerUrl.href.replace(/\/$/, ""),
+        authorization_endpoint: new URL("/oauth/authorize", actualIssuerUrl)
+          .href,
+        token_endpoint: new URL("/oauth/token", actualIssuerUrl).href,
+        scopes_supported: scopes,
+        response_types_supported: ["code"],
+        grant_types_supported: ["authorization_code", "refresh_token"],
+        code_challenge_methods_supported: ["S256"],
+        token_endpoint_auth_methods_supported: ["client_secret_basic", "none"],
+        // RFC 9207 / SEP-2468: advertise iss on authorization responses so
+        // clients must validate (and our e2e can exercise reject paths).
+        authorization_response_iss_parameter_supported: true,
+        ...(config.supportDCR && {
+          registration_endpoint: new URL("/oauth/register", actualIssuerUrl)
             .href,
-          token_endpoint: new URL("/oauth/token", actualIssuerUrl).href,
-          scopes_supported: scopes,
-          response_types_supported: ["code"],
-          grant_types_supported: ["authorization_code", "refresh_token"],
-          code_challenge_methods_supported: ["S256"],
-          token_endpoint_auth_methods_supported: [
-            "client_secret_basic",
-            "none",
-          ],
-          // RFC 9207 / SEP-2468: advertise iss on authorization responses so
-          // clients must validate (and our e2e can exercise reject paths).
-          authorization_response_iss_parameter_supported: true,
-          ...(config.supportDCR && {
-            registration_endpoint: new URL("/oauth/register", actualIssuerUrl)
-              .href,
-          }),
-          ...(config.supportCIMD && {
-            client_id_metadata_document_supported: true,
-          }),
-        };
+        }),
+        ...(config.supportCIMD && {
+          client_id_metadata_document_supported: true,
+        }),
+      };
 
-        res.json(metadata);
-      },
-    );
+      res.json(metadata);
+    });
   }
 
   // OAuth Protected Resource Metadata. `resourceMetadataPath` moves the

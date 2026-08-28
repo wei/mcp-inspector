@@ -1,0 +1,100 @@
+/**
+ * RFC 8414 authorization-server metadata served at the OpenID Connect
+ * well-known path, end to end against a real OAuth test server (#2172).
+ *
+ * The unit tests prove the wrapper substitutes the right document. This file
+ * proves the two halves only a real server can: that the SDK genuinely rejects
+ * a conforming plain-OAuth document found at `openid-configuration`, and that
+ * the wrapper recovers discovery against the same server without adding a
+ * field the server never published.
+ */
+
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { discoverAuthorizationServerMetadata } from "@modelcontextprotocol/client";
+import {
+  TestServerHttp,
+  getDefaultServerConfig,
+  createOAuthTestServerConfig,
+  waitForOAuthWellKnown,
+} from "@modelcontextprotocol/inspector-test-server";
+import { withRfc8414OidcCompat } from "@inspector/core/auth/oidcDiscoveryCompat.js";
+
+const OIDC_PATH = "/.well-known/openid-configuration";
+
+/** The three fields OpenID Connect Discovery requires and RFC 8414 does not. */
+const OIDC_ONLY_FIELDS = [
+  "jwks_uri",
+  "subject_types_supported",
+  "id_token_signing_alg_values_supported",
+] as const;
+
+describe("RFC 8414 metadata at the OIDC well-known path (#2172)", () => {
+  let mcpServer: TestServerHttp | null = null;
+  let serverUrl = "";
+
+  beforeAll(async () => {
+    mcpServer = new TestServerHttp({
+      ...getDefaultServerConfig(),
+      serverType: "streamable-http" as const,
+      ...createOAuthTestServerConfig({
+        requireAuth: true,
+        asMetadataPath: OIDC_PATH,
+      }),
+    });
+    const port = await mcpServer.start();
+    serverUrl = `http://localhost:${port}`;
+    await waitForOAuthWellKnown(serverUrl, { metadataPath: OIDC_PATH });
+  }, 30_000);
+
+  afterAll(async () => {
+    await mcpServer?.stop();
+    mcpServer = null;
+  }, 30_000);
+
+  it("serves plain RFC 8414 metadata only from the OIDC path", async () => {
+    const oidc = await fetch(`${serverUrl}${OIDC_PATH}`);
+    expect(oidc.status).toBe(200);
+    const metadata = (await oidc.json()) as Record<string, unknown>;
+    expect(metadata.issuer).toBe(serverUrl);
+    for (const field of OIDC_ONLY_FIELDS) {
+      expect(metadata).not.toHaveProperty(field);
+    }
+
+    const rfc8414 = await fetch(
+      `${serverUrl}/.well-known/oauth-authorization-server`,
+    );
+    expect(rfc8414.status).toBe(404);
+  });
+
+  it("is rejected by unwrapped SDK discovery", async () => {
+    // The upstream defect this module exists for
+    // (modelcontextprotocol/typescript-sdk#2733). If this ever starts
+    // resolving, the SDK has been fixed and `oidcDiscoveryCompat` can go.
+    await expect(
+      discoverAuthorizationServerMetadata(serverUrl),
+    ).rejects.toThrow(/jwks_uri/);
+  });
+
+  it("resolves through the compat wrapper without fabricating a field", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const metadata = await discoverAuthorizationServerMetadata(serverUrl, {
+        fetchFn: withRfc8414OidcCompat(fetch),
+      });
+
+      expect(metadata?.issuer).toBe(serverUrl);
+      expect(metadata?.authorization_endpoint).toBe(
+        `${serverUrl}/oauth/authorize`,
+      );
+      expect(metadata?.token_endpoint).toBe(`${serverUrl}/oauth/token`);
+      for (const field of OIDC_ONLY_FIELDS) {
+        expect(metadata).not.toHaveProperty(field);
+      }
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining(`${serverUrl}${OIDC_PATH}`),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});

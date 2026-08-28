@@ -22,6 +22,8 @@ export interface ConfigFileOAuth {
   resource?: string;
   /** Serve RFC 9728 metadata from this path and advertise it on 401 (#2071). */
   resourceMetadataPath?: string;
+  /** Serve RFC 8414 AS metadata from this path instead of the default (#2172). */
+  asMetadataPath?: string;
   issuerUrl?: string;
   accessTokenIssuers?: string[];
   jwksUri?: string;
@@ -220,6 +222,12 @@ function validateConfig(
     if (metadataPath !== undefined && !isOriginRelativePath(metadataPath)) {
       throw new Error(
         `Invalid config in ${filePath}: oauth.resourceMetadataPath must be an origin-relative path (e.g. "/custom/protected-resource") — a value such as "//host/doc" would advertise a document the server does not serve`,
+      );
+    }
+    const asPath = oauth.asMetadataPath;
+    if (asPath !== undefined && !isOriginRelativePath(asPath)) {
+      throw new Error(
+        `Invalid config in ${filePath}: oauth.asMetadataPath must be an origin-relative path (e.g. "/.well-known/openid-configuration") — a value such as "//host/doc" would move the document off this server entirely`,
       );
     }
     if (transportType === "stdio" && oauth.enabled === true) {

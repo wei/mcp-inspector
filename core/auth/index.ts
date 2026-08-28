@@ -45,6 +45,11 @@ export {
   withOAuthEndpointOverrides,
 } from "./endpointOverrides.js";
 export type { OAuthEndpointOverrides } from "./endpointOverrides.js";
+export {
+  oidcDiscoveryCandidates,
+  isRfc8414OnlyMetadata,
+  withRfc8414OidcCompat,
+} from "./oidcDiscoveryCompat.js";
 
 // Storage
 export type {

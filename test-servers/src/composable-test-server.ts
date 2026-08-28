@@ -614,6 +614,21 @@ export interface ServerConfig {
     resourceMetadataPath?: string;
 
     /**
+     * Serve the RFC 8414 authorization-server metadata document from this
+     * non-default path *instead of* `/.well-known/oauth-authorization-server`
+     * (combined mode only).
+     *
+     * Set it to `/.well-known/openid-configuration` to reproduce #2172: a
+     * plain OAuth 2.0 authorization server — no `jwks_uri`, no
+     * `subject_types_supported`, no `id_token_signing_alg_values_supported` —
+     * publishing RFC 8414 metadata at the OIDC well-known path, which RFC 8414
+     * §5 permits. As with `resourceMetadataPath`, the default route is left
+     * unserved, so a client that cannot read the document where it actually
+     * lives fails outright rather than quietly succeeding elsewhere.
+     */
+    asMetadataPath?: string;
+
+    /**
      * OAuth authorization server issuer URL (combined mode AS metadata).
      * If not provided, defaults to the test server's base URL.
      */
