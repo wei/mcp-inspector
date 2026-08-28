@@ -295,11 +295,31 @@ export function convertToolParameters(
   tool: Tool,
   params: Record<string, string>,
 ): Record<string, JsonValue> {
+  return convertParametersForSchema(tool.inputSchema, params);
+}
+
+/**
+ * {@link convertToolParameters} against a bare `inputSchema` rather than a
+ * `Tool`.
+ *
+ * Split out because the two callers hold different things: the client has the
+ * `Tool`, while a form holds only the schema it is rendering (which is that
+ * same object, structurally narrowed). Both must reach the SAME conversion —
+ * one of them decides what goes on the wire and the other decides whether to
+ * let the user send it, so a second implementation would let them disagree
+ * about which values are convertible.
+ */
+export function convertParametersForSchema(
+  inputSchema: unknown,
+  params: Record<string, string>,
+): Record<string, JsonValue> {
   const result: Record<string, JsonValue> = {};
   // A property's schema can live on a root composition branch rather than on
   // the root itself (#2123); see `coercionProperties` for how the branch is
   // identified when it does.
-  const { base, branches } = resolveRootUnion(tool.inputSchema ?? {});
+  const { base, branches } = resolveRootUnion(
+    (inputSchema ?? {}) as RootUnionSchema,
+  );
   const properties = coercionProperties(base, branches, params);
   for (const [key, value] of Object.entries(params)) {
     const declared = properties[key];
@@ -336,6 +356,62 @@ export function convertToolParameters(
   }
 
   return result;
+}
+
+/**
+ * The argument names a `tools/call` would silently retype, per the tool's
+ * schema — empty when every value is already the type the schema declares.
+ *
+ * Runs the conversion the client runs and compares, rather than restating its
+ * rules: {@link convertParametersForSchema} is the function on the other side,
+ * so asking it is the only way a caller cannot drift from what is actually
+ * sent.
+ *
+ * Only string-valued arguments can be retyped, because that is all the
+ * conversion looks at — a JSON draft that already writes `2` as a number is
+ * passed through untouched, and is not reported here.
+ *
+ * Used by the two places a payload is authored as JSON rather than through
+ * widgets — the Tools/Apps form's "Edit as JSON" switch and the
+ * Edit-and-replay modal — each of which refuses a draft this returns anything
+ * for, so what the editor shows is what the wire carries (#2171).
+ */
+export function coercedArgumentNames(
+  inputSchema: unknown,
+  args: Record<string, unknown>,
+): string[] {
+  const stringArgs: Record<string, string> = {};
+  for (const [key, value] of Object.entries(args)) {
+    if (typeof value === "string") stringArgs[key] = value;
+  }
+  if (Object.keys(stringArgs).length === 0) return [];
+  const converted = convertParametersForSchema(inputSchema, stringArgs);
+  // `Object.keys` of the *supplied* names, so an argument the schema does not
+  // declare (which the conversion passes through) cannot be reported.
+  return Object.keys(stringArgs).filter(
+    (key) => converted[key] !== stringArgs[key],
+  );
+}
+
+/**
+ * The refusal {@link coercedArgumentNames} justifies, as one sentence.
+ *
+ * Shared for the same reason the check is: the Tools/Apps raw-JSON editor and
+ * the Edit-and-replay modal refuse the same drafts, so they must not word it
+ * two different ways. `toolName` is included when the caller knows which tool
+ * the draft targets — the replay modal does, because its `name` is editable
+ * and the schema is looked up from it; a form is already rendering one tool
+ * and would only be repeating itself.
+ */
+export function coercedArgumentsError(
+  names: string[],
+  toolName?: string,
+): string {
+  const quoted = names.map((name) => `\`${name}\``).join(", ");
+  const whose = toolName
+    ? `the type ${toolName}'s schema declares`
+    : "the type the schema declares";
+  return `${quoted} would be converted to ${whose} — write the value with that type instead`;
 }
 
 /**

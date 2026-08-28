@@ -564,20 +564,45 @@ export function useServerCommands({
     [inspectorClient, activeServerId, handleCommandScopedAuthRecovery],
   );
 
+  // Both route through the shared recovery like every other command (#2174).
+  // They used to discard the promise with a bare `void`, which neither the
+  // callee nor anything else owned: `subscribeToResource` throws when the
+  // client is disconnected, when the server declares no subscription support,
+  // and (wrapped) on a failed request, so a subscribe that failed did nothing
+  // visible and surfaced only as an unhandled rejection.
+  //
+  // The source is `ambient`, not `resource`. A `resource` step-up failure is
+  // routed into `readResourceState` — the *preview* panel — which describes a
+  // read of whatever resource is selected, not this subscribe; marking it
+  // errored would contradict a read that succeeded. Subscribing has no panel
+  // of its own (the tile only flips its button label), which is the same
+  // position the refreshes and the pagination toggle are in, and they are
+  // `ambient` for the same reason.
+  //
+  // Both pass an `errorTitle`: nothing else records these failures, so without
+  // one the button would go on silently doing nothing.
   const onSubscribeResource = useCallback(
     (uri: string) => {
       if (!inspectorClient) return;
-      void inspectorClient.subscribeToResource(uri);
+      runCommandInBackground(
+        () => inspectorClient.subscribeToResource(uri),
+        "ambient",
+        "Failed to subscribe to resource",
+      );
     },
-    [inspectorClient],
+    [inspectorClient, runCommandInBackground],
   );
 
   const onUnsubscribeResource = useCallback(
     (uri: string) => {
       if (!inspectorClient) return;
-      void inspectorClient.unsubscribeFromResource(uri);
+      runCommandInBackground(
+        () => inspectorClient.unsubscribeFromResource(uri),
+        "ambient",
+        "Failed to unsubscribe from resource",
+      );
     },
-    [inspectorClient],
+    [inspectorClient, runCommandInBackground],
   );
 
   const onCompleteArgument = useCallback(

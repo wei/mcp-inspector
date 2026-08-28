@@ -355,6 +355,10 @@ export function ToolDetailPanel({
             // tool's in-progress field text. See SchemaFormProps.resetKey.
             resetKey={resetKey ?? name}
             onValidityChange={setHasInvalidDraft}
+            // These values become `tools/call` arguments, so a raw-JSON draft the
+            // client would retype is refused rather than sent as something other
+            // than what the editor shows (#2171).
+            enforceToolArgumentTypes
           />
 
           {progress && <ProgressDisplay params={progress} />}
