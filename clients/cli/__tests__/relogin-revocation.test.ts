@@ -185,6 +185,20 @@ describe("--relogin token revocation", () => {
     }
   });
 
+  // Inert-but-accepted flags are rejected in this parser (see the `--strict`
+  // rationale in `cli.ts`). On its own `--no-revoke` reads as "this run will
+  // not revoke anything", which is true only because nothing was being cleared.
+  it("rejects --no-revoke without --relogin", async () => {
+    const result = await runCli([
+      "--no-revoke",
+      "--server-url",
+      SERVER_URL,
+      "--method",
+      "tools/list",
+    ]);
+    expect(result.stderr).toMatch(/--no-revoke requires --relogin/);
+  });
+
   // A failed revocation must be visible — the grant is still live at the
   // authorization server — without turning `--relogin` into a failure, which
   // is a local delete the user still gets.

@@ -92,6 +92,7 @@ import {
   type PendingClientRequestContent,
 } from "./components/groups/PendingClientRequestModal/PendingClientRequestModal";
 import { downloadJsonFile } from "./lib/downloadFile";
+import { serverWithDraftSettings } from "./utils/serverWithDraftSettings";
 import { enrichProtocolEntries } from "./utils/correlateTransportErrors";
 import { visibleMalformedListItems } from "./utils/malformedListReport";
 import { parseDeepLink, deepLinkParseStatus } from "./utils/deepLink";
@@ -1327,16 +1328,10 @@ function App() {
   const handleClearStoredOAuthFromSettings = useCallback(() => {
     if (!settingsModalTarget) return;
     // Clear from *inside* the settings modal, so the draft is what the user is
-    // looking at: `settingsModalTarget` comes from the persisted `servers`
-    // list, and edits only reach it after the save debounce. Reading it would
-    // mean toggling "Revoke tokens on clear" and immediately clearing used the
-    // previous value — revoking despite an opt-out, or skipping despite an
-    // opt-in (#2144). The draft is the live answer; `settingsModalValue` falls
-    // back to the persisted entry whenever there is no draft.
-    void clearServerOAuthAndDisconnect({
-      ...settingsModalTarget,
-      settings: settingsDraft ?? settingsModalTarget.settings,
-    });
+    // looking at rather than what the debounced save has persisted (#2144).
+    void clearServerOAuthAndDisconnect(
+      serverWithDraftSettings(settingsModalTarget, settingsDraft),
+    );
   }, [settingsModalTarget, settingsDraft, clearServerOAuthAndDisconnect]);
 
   const onSettingsModalClose = useCallback(() => {

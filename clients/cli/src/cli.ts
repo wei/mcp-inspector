@@ -780,7 +780,7 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
     )
     .option(
       "--no-revoke",
-      "With --relogin, skip the RFC 7009 revocation request that would otherwise end the grant at the authorization server before the local state is deleted. Also skipped when the server entry sets oauth.revokeOnClear to false.",
+      "Requires --relogin. Skips the RFC 7009 revocation request that would otherwise end the grant at the authorization server before the local state is deleted. Also skipped when the server entry sets oauth.revokeOnClear to false.",
     )
     .option(
       "--wait-for-auth <sec>",
@@ -865,6 +865,15 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
         "--relogin cannot be combined with --method servers/list or servers/show (no OAuth connect)",
       );
     }
+  }
+
+  // `--no-revoke` only means anything alongside `--relogin` — it suppresses the
+  // RFC 7009 request that clear makes. Accepted on its own it is inert, and
+  // worse than inert: it reads as "this run will not revoke anything", which is
+  // true only because nothing was going to be cleared. Rejected here, ahead of
+  // the short-circuit returns, for the same reason `--strict` is (#2144).
+  if (options.revoke === false && !options.relogin) {
+    throw new Error("--no-revoke requires --relogin (it has no other effect).");
   }
 
   // `--strict` is checked HERE, ahead of every short-circuit return below

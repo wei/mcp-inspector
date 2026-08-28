@@ -70,13 +70,19 @@ export async function clearStoredAuthForRelogin(
  * under the other spelling is still a live grant at the authorization server,
  * and deleting it locally without revoking is the leak this whole change
  * closes. Two keys holding the *same* token are one grant, so the duplicate is
- * skipped rather than producing a second request for something already ended.
+ * skipped rather than producing a second request for something already ended —
+ * but only once one has actually been *revoked*, since a failed or unsupported
+ * attempt has ended nothing and the other key may hold the credentials that
+ * would have worked.
  *
- * The reported outcome is the first key's that was not "nothing to do", which
- * with `keys` in `findStoredServerState` precedence means the grant the CLI
- * would actually have connected with. When no key holds a token, the last
- * "nothing to do" answer is returned so the caller can still tell "no tokens"
- * from "this authorization server advertises no revocation endpoint".
+ * Reporting prefers a **failure** over any earlier success — a grant still live
+ * at the authorization server is what the user needs to hear about, and an
+ * earlier success would otherwise silence the warning. Failing that, it is the
+ * first key's outcome that was not "nothing to do", which with `keys` in
+ * `findStoredServerState` precedence means the grant the CLI would actually
+ * have connected with. When no key holds a token, the last "nothing to do"
+ * answer is returned so the caller can still tell "no tokens" from "this
+ * authorization server advertises no revocation endpoint".
  */
 async function revokeStoredKeys(
   storage: NodeOAuthStorage,
@@ -87,7 +93,21 @@ async function revokeStoredKeys(
   let reported: TokenRevocationOutcome | undefined;
   let lastSkip: TokenRevocationOutcome | undefined;
   for (const key of new Set(keys)) {
-    const token = selectRevocableToken(await storage.getTokens(key))?.token;
+    // This read is OUTSIDE `revokeStoredOAuthTokens`'s own best-effort catch,
+    // so it needs its own: `getTokens` parses through `OAuthTokensSchema` and
+    // rejects on a persisted token that no longer validates. Letting that
+    // escape would abandon the *local* delete `--relogin` promises, over a
+    // grant we could not have revoked anyway.
+    let token: string | undefined;
+    try {
+      token = selectRevocableToken(await storage.getTokens(key))?.token;
+    } catch (err) {
+      reported ??= {
+        status: "failed",
+        detail: err instanceof Error ? err.message : String(err),
+      };
+      continue;
+    }
     if (token !== undefined && revokedTokens.has(token)) continue;
     const outcome = await revokeStoredOAuthTokens({
       serverUrl: key,
@@ -98,8 +118,21 @@ async function revokeStoredKeys(
       lastSkip = outcome;
       continue;
     }
-    if (token !== undefined) revokedTokens.add(token);
-    reported ??= outcome;
+    // Only a token the authorization server actually accepted counts as spent.
+    // Marking one revoked on a `failed` or `no_endpoint` outcome would skip a
+    // duplicate entry under the other key that may carry usable metadata or
+    // credentials — the one chance left to end that grant.
+    if (token !== undefined && outcome.status === "revoked") {
+      revokedTokens.add(token);
+    }
+    // A failure outranks an earlier success for reporting: a grant that is
+    // still live is what the user needs to hear about, and reporting the
+    // success would print no warning while a stale grant survives.
+    if (outcome.status === "failed") {
+      if (reported?.status !== "failed") reported = outcome;
+    } else {
+      reported ??= outcome;
+    }
   }
   return reported ?? lastSkip;
 }

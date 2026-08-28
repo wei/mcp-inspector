@@ -103,6 +103,44 @@ describe("clearStoredAuthForRelogin", () => {
       return file;
     }
 
+    /** Seed both key spellings of one server, each with its own refresh token. */
+    function seedBothSpellings(
+      normalizedToken: string,
+      rawToken: string,
+    ): void {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), "cli-relogin-two-"));
+      const file = path.join(dir, "oauth.json");
+      const metadata = {
+        issuer: "https://as.example.com",
+        authorization_endpoint: "https://as.example.com/authorize",
+        token_endpoint: "https://as.example.com/token",
+        revocation_endpoint: "https://as.example.com/revoke",
+        response_types_supported: ["code"],
+      };
+      const entry = (refresh: string) => ({
+        tokens: {
+          access_token: `a-${refresh}`,
+          token_type: "Bearer",
+          refresh_token: refresh,
+        },
+        serverMetadata: metadata,
+      });
+      fs.writeFileSync(
+        file,
+        JSON.stringify({
+          servers: {
+            "https://example.com": entry(rawToken),
+            "https://example.com/": entry(normalizedToken),
+          },
+          idpSessions: {},
+        }),
+        "utf8",
+      );
+      prevPath = process.env.MCP_INSPECTOR_OAUTH_STATE_PATH;
+      process.env.MCP_INSPECTOR_OAUTH_STATE_PATH = file;
+      resetNodeOAuthStorageCache();
+    }
+
     it("revokes the stored grant before deleting it", async () => {
       const file = seed();
       const fetchSpy = vi
@@ -247,6 +285,74 @@ describe("clearStoredAuthForRelogin", () => {
       } finally {
         fetchSpy.mockRestore();
       }
+    });
+
+    // A token the AS never accepted is not spent, so the other key — which may
+    // carry the credentials or metadata that would have worked — must still be
+    // tried rather than skipped as a duplicate.
+    it("does not treat a failed attempt as having ended the grant", async () => {
+      seedBothSpellings("same-r", "same-r");
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(new Response(null, { status: 500 }));
+      try {
+        await expect(
+          clearStoredAuthForRelogin("https://example.com"),
+        ).resolves.toMatchObject({ status: "failed" });
+        expect(fetchSpy).toHaveBeenCalledTimes(2);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    // A grant still live at the authorization server is what the user needs to
+    // hear about; reporting the earlier success would print no warning at all.
+    it("reports a later failure over an earlier success", async () => {
+      seedBothSpellings("live-r", "stale-r");
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce(new Response(null, { status: 200 }))
+        .mockResolvedValue(new Response(null, { status: 500 }));
+      try {
+        await expect(
+          clearStoredAuthForRelogin("https://example.com"),
+        ).resolves.toMatchObject({ status: "failed" });
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    // `getTokens` parses through `OAuthTokensSchema`, so a persisted token that
+    // no longer validates rejects. That must not abandon the local delete
+    // `--relogin` promises — over a grant that could not have been revoked.
+    it("still clears when the stored token cannot be parsed", async () => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), "cli-relogin-bad-token-"));
+      const file = path.join(dir, "oauth.json");
+      fs.writeFileSync(
+        file,
+        JSON.stringify({
+          servers: {
+            "https://example.com/mcp": {
+              // No `token_type` — fails OAuthTokensSchema.
+              tokens: { access_token: 42 },
+            },
+          },
+          idpSessions: {},
+        }),
+        "utf8",
+      );
+      prevPath = process.env.MCP_INSPECTOR_OAUTH_STATE_PATH;
+      process.env.MCP_INSPECTOR_OAUTH_STATE_PATH = file;
+      resetNodeOAuthStorageCache();
+
+      await expect(
+        clearStoredAuthForRelogin("https://example.com/mcp"),
+      ).resolves.toMatchObject({ status: "failed" });
+
+      const blob = JSON.parse(fs.readFileSync(file, "utf8")) as {
+        servers: Record<string, unknown>;
+      };
+      expect(blob.servers["https://example.com/mcp"]).toBeUndefined();
     });
 
     it("reports no_tokens when the store holds nothing for the server", async () => {
