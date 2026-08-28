@@ -117,7 +117,7 @@ export function setupOAuthRoutes(
     setupAuthorizationEndpoint(app, config);
     setupTokenEndpoint(app, config);
     if (config.supportRevocation !== false) {
-      setupRevocationEndpoint(app);
+      setupRevocationEndpoint(app, config);
     }
     if (config.supportDCR) {
       setupDCREndpoint(app);
@@ -711,18 +711,33 @@ function setupTokenEndpoint(
  *   That is why the Inspector sends one request naming the refresh token, and a
  *   fixture that ignored the linkage would let a regression through silently.
  *
- * Client authentication is accepted but not enforced: the point of the fixture
- * is the revocation semantics, and every client this repo drives it with is
- * either public or has already authenticated at the token endpoint.
+ * Client authentication is **enforced**, not merely accepted. RFC 7009 §2.1
+ * requires it of a confidential client, and a fixture that skipped the check
+ * would answer 200 to a request carrying no `Authorization` header at all — at
+ * which point the end-to-end test claiming to prove the Inspector authenticates
+ * correctly proves nothing. Both RFC 6749 §2.3.1 forms are accepted (Basic and
+ * the request body), as is a public client identifying itself by `client_id`.
  */
-function setupRevocationEndpoint(app: express.Application): void {
+function setupRevocationEndpoint(
+  app: express.Application,
+  config: OAuthConfig,
+): void {
   app.post(
     "/oauth/revoke",
     express.urlencoded({ extended: true }),
-    (req: Request, res: Response) => {
+    async (req: Request, res: Response) => {
       const token: unknown = req.body?.token;
       if (typeof token !== "string" || token === "") {
         res.status(400).json({ error: "invalid_request" });
+        return;
+      }
+
+      const authenticated = await authenticateRevocationClient(req, config);
+      if (!authenticated) {
+        res
+          .status(401)
+          .set("WWW-Authenticate", 'Basic realm="revoke"')
+          .json({ error: "invalid_client" });
         return;
       }
 
@@ -742,6 +757,52 @@ function setupRevocationEndpoint(app: express.Application): void {
       res.status(200).end();
     },
   );
+}
+
+/**
+ * Authenticate the caller of `/oauth/revoke` (RFC 7009 §2.1).
+ *
+ * Credentials may arrive either way RFC 6749 §2.3.1 allows — an `Authorization:
+ * Basic` header or `client_id`/`client_secret` in the form body — because the
+ * Inspector picks between them from the metadata, and a fixture that only read
+ * one would silently pass a request whose credentials went to the other place.
+ *
+ * A request naming no client at all is rejected: the Inspector always sends at
+ * least `client_id` once it holds any client information, so an unidentified
+ * request means it lost track of its credentials.
+ */
+async function authenticateRevocationClient(
+  req: Request,
+  config: OAuthConfig,
+): Promise<boolean> {
+  let clientId: string | undefined;
+  let clientSecret: string | undefined;
+
+  const authorization = req.get("authorization");
+  if (authorization?.startsWith("Basic ")) {
+    const decoded = Buffer.from(
+      authorization.slice("Basic ".length),
+      "base64",
+    ).toString("utf8");
+    const separator = decoded.indexOf(":");
+    if (separator === -1) return false;
+    clientId = decoded.slice(0, separator);
+    clientSecret = decoded.slice(separator + 1);
+  } else {
+    const bodyId: unknown = req.body?.client_id;
+    const bodySecret: unknown = req.body?.client_secret;
+    if (typeof bodyId === "string") clientId = bodyId;
+    if (typeof bodySecret === "string") clientSecret = bodySecret;
+  }
+
+  if (!clientId) return false;
+  const client = await findClient(clientId, config);
+  if (!client) return false;
+  // A client registered with a secret must present it; a public one must not be
+  // asked for one it never had.
+  return client.clientSecret === undefined
+    ? true
+    : clientSecret === client.clientSecret;
 }
 
 /**

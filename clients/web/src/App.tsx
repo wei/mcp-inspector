@@ -1326,8 +1326,18 @@ function App() {
 
   const handleClearStoredOAuthFromSettings = useCallback(() => {
     if (!settingsModalTarget) return;
-    void clearServerOAuthAndDisconnect(settingsModalTarget);
-  }, [settingsModalTarget, clearServerOAuthAndDisconnect]);
+    // Clear from *inside* the settings modal, so the draft is what the user is
+    // looking at: `settingsModalTarget` comes from the persisted `servers`
+    // list, and edits only reach it after the save debounce. Reading it would
+    // mean toggling "Revoke tokens on clear" and immediately clearing used the
+    // previous value — revoking despite an opt-out, or skipping despite an
+    // opt-in (#2144). The draft is the live answer; `settingsModalValue` falls
+    // back to the persisted entry whenever there is no draft.
+    void clearServerOAuthAndDisconnect({
+      ...settingsModalTarget,
+      settings: settingsDraft ?? settingsModalTarget.settings,
+    });
+  }, [settingsModalTarget, settingsDraft, clearServerOAuthAndDisconnect]);
 
   const onSettingsModalClose = useCallback(() => {
     flushSettingsDraft();

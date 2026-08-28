@@ -138,6 +138,31 @@ describe("OAuth token revocation (RFC 7009)", () => {
     return storage;
   }
 
+  // The fixture enforces RFC 7009 §2.1 client authentication, so this is what
+  // makes the passing cases below mean something: a request with the wrong
+  // credentials is refused, and the endpoint is not simply answering 200 to
+  // anything.
+  it("refuses a revocation request with the wrong client secret", async () => {
+    const response = await fetch(`${serverUrl}/oauth/revoke`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Authorization: `Basic ${Buffer.from(`${CLIENT_ID}:wrong`).toString("base64")}`,
+      },
+      body: new URLSearchParams({ token: "anything" }),
+    });
+    expect(response.status).toBe(401);
+  });
+
+  it("refuses a revocation request naming no client at all", async () => {
+    const response = await fetch(`${serverUrl}/oauth/revoke`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ token: "anything" }),
+    });
+    expect(response.status).toBe(401);
+  });
+
   it("advertises a revocation endpoint", () => {
     expect(metadata.revocation_endpoint).toBe(`${serverUrl}/oauth/revoke`);
   });

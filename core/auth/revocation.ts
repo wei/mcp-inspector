@@ -87,20 +87,23 @@ export function selectRevocableToken(
 }
 
 /**
- * The client-authentication methods to consider for the revocation endpoint.
+ * The client-authentication methods the revocation endpoint advertises.
  *
- * RFC 8414 gives `revocation_endpoint_auth_methods_supported` the same default
- * as the token endpoint's when it is omitted, so fall through to
- * `token_endpoint_auth_methods_supported` before giving up. An empty result
- * lets {@link selectClientAuthMethod} apply the SDK's own default rather than
- * this module inventing a second one.
+ * RFC 8414 §2 gives `revocation_endpoint_auth_methods_supported` a default of
+ * **`client_secret_basic`** when it is omitted — it does *not* inherit
+ * `token_endpoint_auth_methods_supported`. Falling through to the token
+ * endpoint's list would make metadata advertising only `client_secret_post`
+ * there send POST credentials to a revocation endpoint that never advertised
+ * that method, which a strict server rejects.
+ *
+ * An empty result is returned rather than a literal `["client_secret_basic"]`
+ * because that is what makes {@link selectClientAuthMethod} apply exactly the
+ * RFC's default — `client_secret_basic` when the client holds a secret, `none`
+ * when it does not — while still honoring a `token_endpoint_auth_method` the
+ * client's own registration declares.
  */
 export function revocationAuthMethods(metadata: OAuthMetadata): string[] {
-  return (
-    metadata.revocation_endpoint_auth_methods_supported ??
-    metadata.token_endpoint_auth_methods_supported ??
-    []
-  );
+  return metadata.revocation_endpoint_auth_methods_supported ?? [];
 }
 
 export interface RevocationRequestParams {
@@ -195,10 +198,18 @@ export async function revokeToken(
   const { url, init } = buildRevocationRequest(params);
   const timeoutMs = params.timeoutMs ?? DEFAULT_REVOCATION_TIMEOUT_MS;
   try {
-    const response = await params.fetchFn(url, {
-      ...init,
-      signal: AbortSignal.timeout(timeoutMs),
-    });
+    // The signal alone is not enough to bound this. In the browser the fetch is
+    // `createRemoteFetch`, which re-issues the call as a POST to `/api/fetch`
+    // and does not forward `init.signal`; the backend's outbound fetch gets no
+    // signal either. So a wedged authorization server would hold the teardown
+    // open indefinitely on exactly the path the timeout exists for. The race is
+    // what actually enforces the deadline; the signal is kept because it does
+    // cancel the direct-fetch paths (CLI, TUI, backend) rather than merely
+    // abandoning them.
+    const response = await withDeadline(
+      params.fetchFn(url, { ...init, signal: AbortSignal.timeout(timeoutMs) }),
+      timeoutMs,
+    );
     if (!response.ok) {
       return {
         status: "failed",
@@ -218,6 +229,34 @@ export async function revokeToken(
       endpoint: url,
       detail: err instanceof Error ? err.message : String(err),
     };
+  }
+}
+
+/**
+ * Reject with a timeout error if `promise` has not settled within `timeoutMs`.
+ *
+ * The underlying request is abandoned rather than cancelled — nothing here can
+ * cancel a fetch the proxy already stripped the signal from. That is the right
+ * trade for this caller: the point is that the *teardown* proceeds, and the
+ * response, if it ever arrives, is a revocation we no longer need to wait for.
+ * The timer is cleared on the settled path so a caller is never held awake by it.
+ */
+async function withDeadline<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(new Error(`revocation request timed out after ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+  });
+  try {
+    return await Promise.race([promise, deadline]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 

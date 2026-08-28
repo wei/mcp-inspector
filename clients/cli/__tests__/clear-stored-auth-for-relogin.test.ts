@@ -128,11 +128,10 @@ describe("clearStoredAuthForRelogin", () => {
       expect(blob.servers["https://example.com/mcp"]).toBeUndefined();
     });
 
-    // Both key spellings are cleared, but they are two spellings of one server:
-    // a second request would name a grant the first one already ended. The raw
-    // key here holds nothing, so this also proves the walk does not stop at the
-    // first empty one.
-    it("sends one request even though both key spellings are cleared", async () => {
+    // Both spellings resolve to the same stored entry, so this is one grant and
+    // must produce one request. It also proves the walk does not stop at the
+    // first empty key: the raw spelling holds nothing.
+    it("sends one request when both key spellings name the same grant", async () => {
       seed();
       const fetchSpy = vi
         .spyOn(globalThis, "fetch")
@@ -146,6 +145,75 @@ describe("clearStoredAuthForRelogin", () => {
       } finally {
         fetchSpy.mockRestore();
       }
+    });
+
+    // Both keys are deleted, so both must be revoked: a stale entry under the
+    // other spelling is still a live grant at the authorization server, and
+    // dropping it locally without revoking is the exact leak this closes.
+    // The *reported* outcome is the normalised key's, matching the precedence
+    // `findStoredServerState` reads with — that is the grant a connect uses.
+    it("revokes a stale entry under the other spelling too", async () => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), "cli-relogin-both-"));
+      const file = path.join(dir, "oauth.json");
+      const metadata = {
+        issuer: "https://as.example.com",
+        authorization_endpoint: "https://as.example.com/authorize",
+        token_endpoint: "https://as.example.com/token",
+        revocation_endpoint: "https://as.example.com/revoke",
+        response_types_supported: ["code"],
+      };
+      fs.writeFileSync(
+        file,
+        JSON.stringify({
+          servers: {
+            // The raw spelling the transport keyed by, holding a STALE grant.
+            "https://example.com": {
+              tokens: {
+                access_token: "stale-a",
+                token_type: "Bearer",
+                refresh_token: "stale-r",
+              },
+              serverMetadata: metadata,
+            },
+            // The normalised spelling, holding the CURRENT grant.
+            "https://example.com/": {
+              tokens: {
+                access_token: "live-a",
+                token_type: "Bearer",
+                refresh_token: "live-r",
+              },
+              serverMetadata: metadata,
+            },
+          },
+          idpSessions: {},
+        }),
+        "utf8",
+      );
+      prevPath = process.env.MCP_INSPECTOR_OAUTH_STATE_PATH;
+      process.env.MCP_INSPECTOR_OAUTH_STATE_PATH = file;
+      resetNodeOAuthStorageCache();
+
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(new Response(null, { status: 200 }));
+      try {
+        await expect(
+          clearStoredAuthForRelogin("https://example.com"),
+        ).resolves.toMatchObject({ status: "revoked" });
+        const tokens = fetchSpy.mock.calls.map((call) =>
+          new URLSearchParams(String(call[1]?.body)).get("token"),
+        );
+        // Normalised first, then the stale raw one — neither is left behind.
+        expect(tokens).toEqual(["live-r", "stale-r"]);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+
+      const blob = JSON.parse(fs.readFileSync(file, "utf8")) as {
+        servers: Record<string, unknown>;
+      };
+      expect(blob.servers["https://example.com"]).toBeUndefined();
+      expect(blob.servers["https://example.com/"]).toBeUndefined();
     });
 
     it("deletes the local entry even when the request fails", async () => {

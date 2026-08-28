@@ -360,6 +360,26 @@ function oneHttp(): Record<string, TuiServer> {
   };
 }
 
+/** An HTTP server that opted out of RFC 7009 revocation on clear (#2144). */
+function oneHttpNoRevoke(): Record<string, TuiServer> {
+  return {
+    web: {
+      config: { type: "streamable-http", url: "http://x" },
+      settings: {
+        requestTimeout: 0,
+        metadata: {},
+        headers: [],
+        env: [],
+        roots: [],
+        maxFetchRequests: 1000,
+        taskTtl: 0,
+        connectionTimeout: 0,
+        oauthRevokeOnClear: false,
+      },
+    } as never,
+  };
+}
+
 function oneEmaHttp(): Record<string, TuiServer> {
   return {
     ema: {
@@ -666,6 +686,12 @@ beforeEach(() => {
     new URL("https://auth.example/start"),
   );
   h.clientSpies.clearOAuthTokens.mockReset();
+  // #2144: the clear now reads the returned revocation outcome, so the reset
+  // default has to be an outcome rather than `undefined`.
+  h.clientSpies.clearOAuthTokens.mockResolvedValue({
+    status: "skipped",
+    reason: "no_endpoint",
+  });
   h.clientSpies.completeOAuthFlow.mockReset();
   h.clientSpies.completeOAuthFlow.mockResolvedValue(undefined);
   h.clientSpies.getOAuthState.mockReset();
@@ -1349,6 +1375,39 @@ describe("App (mid-session auth lifecycle events)", () => {
     await waitUntil(() => h.clientSpies.clearOAuthTokens.mock.calls.length > 0);
     expect(h.clientSpies.clearOAuthTokens).toHaveBeenCalled();
     expect(h.disconnect).toHaveBeenCalled();
+  });
+
+  // #2144 — revocation is on unless the entry opted out, and the opt-out has to
+  // reach the client, since that is where the RFC 7009 request is made.
+  it("asks for revocation by default when clearing", async () => {
+    const r = await mount(oneHttp());
+    await press(r, ["a", "s"]);
+    await waitUntil(() => h.clientSpies.clearOAuthTokens.mock.calls.length > 0);
+    expect(h.clientSpies.clearOAuthTokens).toHaveBeenCalledWith({
+      revoke: true,
+    });
+  });
+
+  it("forwards the per-server revocation opt-out", async () => {
+    const r = await mount(oneHttpNoRevoke());
+    await press(r, ["a", "s"]);
+    await waitUntil(() => h.clientSpies.clearOAuthTokens.mock.calls.length > 0);
+    expect(h.clientSpies.clearOAuthTokens).toHaveBeenCalledWith({
+      revoke: false,
+    });
+  });
+
+  // A failed revocation leaves the grant live at the authorization server, so
+  // it has to be visible rather than swallowed — the local clear succeeded and
+  // would otherwise look like the whole operation did.
+  it("reports a failed revocation without failing the clear", async () => {
+    h.clientSpies.clearOAuthTokens.mockResolvedValue({
+      status: "failed",
+      detail: "unreachable",
+    });
+    const r = await mount(oneHttp());
+    await press(r, ["a", "s"]);
+    await expectFrame(r, "unreachable");
   });
 
   const stepUpChallenge = {

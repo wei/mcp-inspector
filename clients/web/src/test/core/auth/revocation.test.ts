@@ -9,6 +9,22 @@ import {
   revokeToken,
   selectRevocableToken,
 } from "@inspector/core/auth/revocation.js";
+import type { InspectorLogger } from "@inspector/core/logging/index.js";
+
+/** A fully-typed `InspectorLogger` double, so the mock's shape is checked. */
+function fakeLogger(): InspectorLogger {
+  return {
+    level: "info",
+    fatal: vi.fn(),
+    error: vi.fn(),
+    warn: vi.fn(),
+    info: vi.fn(),
+    debug: vi.fn(),
+    trace: vi.fn(),
+    silent: vi.fn(),
+    child: vi.fn(() => fakeLogger()),
+  };
+}
 
 const SERVER_URL = "https://mcp.example.com/mcp";
 const REVOKE_URL = "https://as.example.com/revoke";
@@ -72,18 +88,46 @@ describe("revocationAuthMethods", () => {
     ).toEqual(["client_secret_post"]);
   });
 
-  // RFC 8414 gives the revocation endpoint the token endpoint's default when it
-  // advertises no list of its own.
-  it("falls back to the token endpoint's list", () => {
+  // RFC 8414 §2 defaults an omitted revocation list to `client_secret_basic` —
+  // it does NOT inherit the token endpoint's. Inheriting would send POST
+  // credentials to an endpoint that never advertised that method.
+  it("ignores the token endpoint's list", () => {
     expect(
       revocationAuthMethods(
-        metadata({ token_endpoint_auth_methods_supported: ["none"] }),
+        metadata({
+          token_endpoint_auth_methods_supported: ["client_secret_post"],
+        }),
       ),
-    ).toEqual(["none"]);
+    ).toEqual([]);
   });
 
-  it("yields nothing when neither is advertised", () => {
+  it("yields nothing when the revocation list is absent", () => {
     expect(revocationAuthMethods(metadata())).toEqual([]);
+  });
+
+  // The empty list is not "no authentication": it is what makes the SDK apply
+  // RFC 8414's actual default.
+  it("an empty list resolves to the RFC 8414 default", () => {
+    const { init } = buildRevocationRequest({
+      endpoint: REVOKE_URL,
+      token: "r",
+      tokenTypeHint: "refresh_token",
+      clientInformation: { client_id: "cid", client_secret: "sec" },
+      supportedAuthMethods: revocationAuthMethods(metadata()),
+    });
+    expect(headerOf(init, "Authorization")).toBe(`Basic ${btoa("cid:sec")}`);
+  });
+
+  it("an empty list leaves a public client unauthenticated", () => {
+    const { init } = buildRevocationRequest({
+      endpoint: REVOKE_URL,
+      token: "r",
+      tokenTypeHint: "refresh_token",
+      clientInformation: { client_id: "cid" },
+      supportedAuthMethods: revocationAuthMethods(metadata()),
+    });
+    expect(headerOf(init, "Authorization")).toBeUndefined();
+    expect(body(init).get("client_id")).toBe("cid");
   });
 });
 
@@ -201,6 +245,26 @@ describe("revokeToken", () => {
       endpoint: REVOKE_URL,
       detail: "connect ECONNREFUSED",
     });
+  });
+
+  // The web fetch is `createRemoteFetch`, which re-issues the call as a POST to
+  // `/api/fetch` and drops `init.signal`; the backend's outbound fetch gets no
+  // signal either. A signal-only bound is therefore inert on exactly the path
+  // the timeout exists for, so the deadline has to hold against a fetch that
+  // ignores the signal entirely.
+  it("gives up on a fetch that never settles and ignores the signal", async () => {
+    const outcome = await revokeToken({
+      endpoint: REVOKE_URL,
+      token: "r",
+      tokenTypeHint: "refresh_token",
+      supportedAuthMethods: [],
+      fetchFn: () => new Promise<Response>(() => {}),
+      timeoutMs: 20,
+    });
+    expect(outcome).toMatchObject({ status: "failed", endpoint: REVOKE_URL });
+    expect(outcome.status === "failed" ? outcome.detail : "").toContain(
+      "timed out",
+    );
   });
 
   // The teardown is already committed by the time this runs, so a wedged
@@ -334,18 +398,7 @@ describe("revokeStoredOAuthTokens", () => {
 
   it("warns and reports rather than throwing when the request fails", async () => {
     await seed();
-    const warn = vi.fn();
-    const logger = {
-      level: "info",
-      fatal: vi.fn(),
-      error: vi.fn(),
-      warn,
-      info: vi.fn(),
-      debug: vi.fn(),
-      trace: vi.fn(),
-      silent: vi.fn(),
-      child: vi.fn(),
-    };
+    const logger = fakeLogger();
     const fetchFn = vi.fn<typeof fetch>(
       async () => new Response(null, { status: 500, statusText: "Boom" }),
     );
@@ -354,52 +407,38 @@ describe("revokeStoredOAuthTokens", () => {
       serverUrl: SERVER_URL,
       storage,
       fetchFn,
-      logger: logger as unknown as Parameters<
-        typeof revokeStoredOAuthTokens
-      >[0]["logger"],
+      logger,
     });
 
     expect(outcome.status).toBe("failed");
-    expect(warn).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledTimes(1);
   });
 
   it("logs the no-endpoint case at debug", async () => {
     await seed({ revocation_endpoint: undefined });
-    const debug = vi.fn();
-    const logger = {
-      level: "info",
-      fatal: vi.fn(),
-      error: vi.fn(),
-      warn: vi.fn(),
-      info: vi.fn(),
-      debug,
-      trace: vi.fn(),
-      silent: vi.fn(),
-      child: vi.fn(),
-    };
+    const logger = fakeLogger();
     await revokeStoredOAuthTokens({
       serverUrl: SERVER_URL,
       storage,
       fetchFn: vi.fn<typeof fetch>(),
-      logger: logger as unknown as Parameters<
-        typeof revokeStoredOAuthTokens
-      >[0]["logger"],
+      logger,
     });
-    expect(debug).toHaveBeenCalledTimes(1);
+    expect(logger.debug).toHaveBeenCalledTimes(1);
   });
 
   // A store that cannot be read is not a reason to abandon the clear the user
-  // asked for, so the read is inside the try.
+  // asked for, so the read is inside the try. Spying on the real instance keeps
+  // the `OAuthStorage` contract intact — a spread-and-cast stand-in would type
+  // as storage while being a plain object with none of its methods.
   it("reports a store read failure as failed", async () => {
-    const broken = {
-      ...storage,
-      getTokens: () => Promise.reject(new Error("store unreadable")),
-    } as unknown as BrowserOAuthStorage;
+    vi.spyOn(storage, "getTokens").mockRejectedValue(
+      new Error("store unreadable"),
+    );
 
     await expect(
       revokeStoredOAuthTokens({
         serverUrl: SERVER_URL,
-        storage: broken,
+        storage,
         fetchFn: vi.fn<typeof fetch>(),
       }),
     ).resolves.toEqual({ status: "failed", detail: "store unreadable" });
