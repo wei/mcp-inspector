@@ -161,6 +161,15 @@ function continuesDiscovery(status: number): boolean {
 }
 
 /**
+ * Discard a response body nobody is going to read, so the connection under it
+ * is returned to the pool rather than held open. Best-effort: a body already
+ * consumed, locked, or absent is not an error here.
+ */
+async function releaseBody(response: Response): Promise<void> {
+  await response.body?.cancel().catch(() => {});
+}
+
+/**
  * Whether a parsed body is RFC 8414 authorization-server metadata that is *not*
  * a valid OpenID provider document — the exact shape the upstream schema
  * selection rejects.
@@ -257,6 +266,12 @@ export function withRfc8414OidcCompat(fetchFn: typeof fetch): typeof fetch {
         return response;
       }
       if (!probe.ok) {
+        // A probe response nobody will read still holds its connection open on
+        // Node/undici, and this loop can run on every OAuth attempt — so
+        // release it rather than letting repeated discovery against a 404
+        // candidate exhaust the origin's pool (Copilot). Same discipline as
+        // `core/mcp/node/authChallengeFetch.ts`.
+        await releaseBody(probe);
         if (continuesDiscovery(probe.status)) continue;
         return response;
       }
@@ -282,8 +297,16 @@ export function withRfc8414OidcCompat(fetchFn: typeof fetch): typeof fetch {
         return response;
       }
 
+      // `fetch` follows redirects, so the candidate is where the probe was
+      // *aimed*; `probe.url` is where the body actually came from. Report the
+      // latter, falling back for a synthesized response that carries no url
+      // (Copilot).
+      const source = probe.url || candidate;
+      // The original failed response is about to be dropped in favour of the
+      // substitution, so release its connection too.
+      await releaseBody(response);
       console.warn(
-        `[oauth] ${candidate} returned RFC 8414 OAuth 2.0 authorization server ` +
+        `[oauth] ${source} returned RFC 8414 OAuth 2.0 authorization server ` +
           `metadata, not an OpenID provider document. The MCP TypeScript SDK ` +
           `validates that path as OpenID Connect Discovery and would reject it ` +
           `(modelcontextprotocol/typescript-sdk#2733), so the Inspector is ` +
@@ -299,7 +322,7 @@ export function withRfc8414OidcCompat(fetchFn: typeof fetch): typeof fetch {
           // rather than letting the Network tab imply the RFC 8414 path
           // answered. Named on the response, not logged only, so it survives
           // into the captured entry.
-          [COMPAT_SOURCE_HEADER]: candidate,
+          [COMPAT_SOURCE_HEADER]: source,
         },
       });
     }

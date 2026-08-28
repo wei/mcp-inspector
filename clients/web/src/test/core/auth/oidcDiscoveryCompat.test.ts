@@ -244,6 +244,59 @@ describe("withRfc8414OidcCompat", () => {
     expect(base).toHaveBeenCalledTimes(2);
   });
 
+  it("releases the bodies it discards", async () => {
+    // A response nobody reads still holds its connection on Node/undici, and
+    // this loop runs on every OAuth attempt (Copilot).
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const cancelled: string[] = [];
+    const streamed = (name: string, body: string): Response =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(body));
+            controller.close();
+          },
+          cancel() {
+            cancelled.push(name);
+          },
+        }),
+        { status: name === "appended" ? 200 : 404 },
+      );
+
+    const base = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url === OIDC_APPENDED)
+        return streamed("appended", JSON.stringify(RFC8414_DOC));
+      if (url === OIDC_SUFFIXED) return streamed("suffixed", "nope");
+      return streamed("original", "nope");
+    });
+    const wrapped = withRfc8414OidcCompat(base);
+
+    await expect((await wrapped(RFC8414_URL)).json()).resolves.toEqual(
+      RFC8414_DOC,
+    );
+    // The 404 probe, and the original response the substitution replaces.
+    expect(cancelled.sort()).toEqual(["original", "suffixed"]);
+  });
+
+  it("names the URL the body came from after a redirect", async () => {
+    // `fetch` follows redirects, so the candidate is where the probe was aimed
+    // — `probe.url` is where the document actually lives (Copilot).
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const redirected = "https://as.example.com/tenant/oidc-metadata";
+    const base = vi.fn<typeof fetch>(async (input) => {
+      if (String(input) !== OIDC_SUFFIXED) return notFound();
+      const probe = json(RFC8414_DOC);
+      Object.defineProperty(probe, "url", { value: redirected });
+      return probe;
+    });
+    const wrapped = withRfc8414OidcCompat(base);
+
+    const response = await wrapped(RFC8414_URL);
+    expect(response.headers.get(COMPAT_SOURCE_HEADER)).toBe(redirected);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(redirected));
+  });
+
   it("walks past a candidate that 404s, as the SDK does", async () => {
     const original = notFound();
     const base = vi.fn<typeof fetch>().mockResolvedValue(original);

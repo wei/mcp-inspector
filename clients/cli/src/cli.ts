@@ -335,15 +335,21 @@ export async function refreshStoredAuthToken(
   // wrapper — otherwise a stored refresh token with no persisted
   // `serverMetadata` still cannot refresh against an authorization server that
   // publishes RFC 8414 metadata at the OIDC well-known path (Copilot).
-  const compatFetch = withRfc8414OidcCompat(fetch);
+  //
+  // Built over `createProxyFetch()` for the same reason `environment.fetch` is
+  // (#2067): this whole function runs outside `InspectorClient`, so nothing
+  // else puts a proxy under it, and a server reachable only through
+  // `HTTPS_PROXY` would otherwise be probed directly. The same fetch is handed
+  // to the token request below, so neither leg bypasses the proxy (Copilot).
+  const storedAuthFetch = withRfc8414OidcCompat(createProxyFetch() ?? fetch);
   const discover: typeof discoverAuthorizationServerMetadata =
     deps.discover ??
     ((authorizationServerUrl, options) =>
       discoverAuthorizationServerMetadata(authorizationServerUrl, {
         ...options,
         // A caller-supplied fetch is left alone — it is theirs to compose. The
-        // walker below passes no options, so in practice this wraps the global.
-        fetchFn: options?.fetchFn ?? compatFetch,
+        // walker below passes no options, so in practice this is ours.
+        fetchFn: options?.fetchFn ?? storedAuthFetch,
       }));
 
   const snapshot = await readOAuthSnapshot(statePath);
@@ -395,6 +401,7 @@ export async function refreshStoredAuthToken(
       clientInformation,
       refreshToken,
       resource: new URL(serverUrl),
+      fetchFn: storedAuthFetch,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
