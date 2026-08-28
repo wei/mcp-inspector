@@ -25,6 +25,7 @@ import {
   type ServerCommands,
 } from "./useServerCommands";
 import type { ToolsUiState } from "../components/screens/ToolsScreen/ToolsScreen";
+import type { StepUpSource } from "../utils/stepUp";
 
 // --- Module doubles ---------------------------------------------------------
 // Only the toast layer, which every failure path reaches. The client is a bare
@@ -207,11 +208,17 @@ function harness(initial: HarnessProps = {}): Harness {
   };
 
   /**
-   * The real wrappers are thin: `runWithCommandAuthRecovery` awaits the
-   * operation and retries once through the recovery, and
-   * `runCommandInBackground` is its fire-and-forget form. Reproducing that
-   * shape here (rather than stubbing them as pass-throughs) is what makes the
-   * commands' own auth branches reachable.
+   * The two recovery wrappers, reimplemented to match `useOAuthRecovery`'s
+   * rather than stubbed as pass-throughs.
+   *
+   * That distinction is the point, not tidiness. A pass-through would let
+   * `onCompleteArgument` and `onCancelTask` pass every test here while
+   * bypassing the shared recovery entirely — and routing *through* it is the
+   * integration this extraction exists to preserve. So the stand-in keeps the
+   * three behaviors a command depends on: it catches an
+   * `AuthRecoveryRequiredError`, hands it to `handleCommandScopedAuthRecovery`
+   * with that call site's `source` and a `retryOperation`, retries once when
+   * the recovery reports satisfied, and rethrows anything else.
    */
   function Probe({ p }: { p: HarnessProps }) {
     const servers = p.servers ?? [];
@@ -228,7 +235,24 @@ function harness(initial: HarnessProps = {}): Harness {
         | undefined) ?? s.handleCommandScopedAuthRecovery;
     const runWithCommandAuthRecovery = async <T,>(
       operation: () => Promise<T>,
-    ): Promise<T | undefined> => operation();
+      source: StepUpSource,
+    ): Promise<T | undefined> => {
+      const serverId = p.activeServerId;
+      if (!p.client || serverId === undefined) return operation();
+      try {
+        return await operation();
+      } catch (err) {
+        if (err instanceof AuthRecoveryRequiredError) {
+          const satisfied = await handleCommandScopedAuthRecovery(err, {
+            serverId,
+            source,
+            retryOperation: operation,
+          });
+          return satisfied ? operation() : undefined;
+        }
+        throw err;
+      }
+    };
     latest = useServerCommands({
       sessionRef,
       servers,
@@ -273,13 +297,21 @@ function harness(initial: HarnessProps = {}): Harness {
       refreshInitialConfig: s.refreshInitialConfig,
       handleCommandScopedAuthRecovery,
       runWithCommandAuthRecovery,
-      runCommandInBackground: (operation, _source, errorTitle) => {
-        void operation().catch((err: unknown) => {
-          s.runCommandInBackgroundErrors.push(err);
-          if (errorTitle) {
-            notificationsMock.show({ title: errorTitle });
-          }
-        });
+      // The real one is `runWithCommandAuthRecovery(...).catch(...)`, so a
+      // background command reaches the recovery on the same terms an awaited
+      // one does; only the reporting is its own.
+      runCommandInBackground: (operation, source, errorTitle) => {
+        void runWithCommandAuthRecovery(operation, source).catch(
+          (err: unknown) => {
+            s.runCommandInBackgroundErrors.push(err);
+            if (errorTitle) {
+              notificationsMock.show({
+                title: errorTitle,
+                message: err instanceof Error ? err.message : String(err),
+              });
+            }
+          },
+        );
       },
     });
     return null;
@@ -854,6 +886,51 @@ describe("subscriptions and completion", () => {
     ).resolves.toEqual([]);
   });
 
+  it("routes a lapsed authorization through the shared recovery, and retries", async () => {
+    const recover = vi.fn().mockResolvedValue(true);
+    const getCompletions = vi
+      .fn()
+      .mockRejectedValueOnce(authError())
+      .mockResolvedValue({ values: ["after-reauth"] });
+    const h = harness({
+      client: client({ getCompletions }),
+      activeServerId: "a",
+      recovery: { handleCommandScopedAuthRecovery: recover },
+    });
+    await expect(
+      h
+        .api()
+        .onCompleteArgument({ type: "ref/prompt", name: "p" }, "a", "", {}),
+    ).resolves.toEqual(["after-reauth"]);
+    // The source is what decides which panel a step-up failure is reported
+    // into, so it is pinned rather than merely "some recovery ran".
+    expect(recover).toHaveBeenCalledWith(
+      expect.any(AuthRecoveryRequiredError),
+      {
+        serverId: "a",
+        source: "tool",
+        retryOperation: expect.any(Function),
+      },
+    );
+    expect(getCompletions).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns no completions when the recovery was not satisfied", async () => {
+    const recover = vi.fn().mockResolvedValue(false);
+    const h = harness({
+      client: client({
+        getCompletions: vi.fn().mockRejectedValue(authError()),
+      }),
+      activeServerId: "a",
+      recovery: { handleCommandScopedAuthRecovery: recover },
+    });
+    await expect(
+      h
+        .api()
+        .onCompleteArgument({ type: "ref/prompt", name: "p" }, "a", "", {}),
+    ).resolves.toEqual([]);
+  });
+
   it("returns no completions when the result carries none", async () => {
     const h = harness({
       client: client({ getCompletions: vi.fn().mockResolvedValue({}) }),
@@ -880,7 +957,34 @@ describe("cancellation and tasks", () => {
     expect(notificationsMock.show).not.toHaveBeenCalled();
   });
 
-  it("stays silent when the cancel raised a recovery", async () => {
+  it("routes a lapsed authorization through the shared recovery, and retries", async () => {
+    const recover = vi.fn().mockResolvedValue(true);
+    const cancelRequestorTask = vi
+      .fn()
+      .mockRejectedValueOnce(authError())
+      .mockResolvedValue(undefined);
+    const h = harness({
+      client: client({ cancelRequestorTask }),
+      activeServerId: "a",
+      recovery: { handleCommandScopedAuthRecovery: recover },
+    });
+    await act(async () => h.api().onCancelTask("t1"));
+    expect(recover).toHaveBeenCalledWith(
+      expect.any(AuthRecoveryRequiredError),
+      {
+        serverId: "a",
+        source: "tool",
+        retryOperation: expect.any(Function),
+      },
+    );
+    expect(cancelRequestorTask).toHaveBeenCalledTimes(2);
+    // The recovery owns the prompt, so the cancel itself says nothing.
+    expect(notificationsMock.show).not.toHaveBeenCalled();
+  });
+
+  it("stays silent when a recovery it could not run rethrows", async () => {
+    // No active server, so the wrapper cannot recover and the error reaches
+    // the handler's own catch — which swallows it deliberately.
     const h = harness({
       client: client({
         cancelRequestorTask: vi.fn().mockRejectedValue(authError()),
