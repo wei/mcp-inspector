@@ -891,8 +891,8 @@ export function useServerCommands({
       runCommandInBackground,
     ],
   );
-  // Wrap Load-next-page in ambient auth recovery too, so a paginated
-  // paginated fetch that hits a 401 recovers like the all-pages path (#1721).
+  // Wrap Load-next-page in ambient auth recovery too, so a paginated fetch
+  // that hits a 401 recovers like the all-pages path (#1721).
   const onLoadMoreTools = useCallback(
     () => runCommandInBackground(() => toolsPagination.onLoadMore(), "ambient"),
     [toolsPagination, runCommandInBackground],
