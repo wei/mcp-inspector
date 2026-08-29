@@ -161,6 +161,7 @@ Each config below is a ready-made server for exercising one feature by hand. Loa
 | `advertised-extensions-http.json`         | Tool registration gated on advertised extensions    | [#1739](https://github.com/modelcontextprotocol/inspector/issues/1739) |
 | `oauth-custom-resource-metadata-http.json` **(legacy era)** | OAuth discovery driven by the challenge's `resource_metadata` | [#2071](https://github.com/modelcontextprotocol/inspector/issues/2071) |
 | `oauth-revocation-http.json` / `oauth-no-revocation-http.json` **(legacy era)** | RFC 7009 token revocation on clear, with and without a `revocation_endpoint` | [#2144](https://github.com/modelcontextprotocol/inspector/issues/2144) |
+| `oauth-rfc8414-at-oidc-path-http.json` **(legacy era)** | Plain OAuth 2.0 AS metadata served at the OIDC well-known path | [#2172](https://github.com/modelcontextprotocol/inspector/issues/2172) |
 | `logging-{legacy,modern}-http.json`       | Logging, both eras                                  | [#1629](https://github.com/modelcontextprotocol/inspector/issues/1629) |
 | `subscriptions-{legacy,modern}-http.json` | Resource subscriptions, both eras                   | [#1630](https://github.com/modelcontextprotocol/inspector/issues/1630) |
 | `subscriptions-never-acknowledged-http.json` | A `subscriptions/listen` answered with a bare result  | [#2097](https://github.com/modelcontextprotocol/inspector/issues/2097) |
@@ -499,6 +500,22 @@ On the broken build both servers behaved like the second: the Inspector deleted 
 Uncheck **Revoke tokens on clear** in the same panel (persisted as `oauth.revokeOnClear: false`) and the first server behaves like the second. That is not only an escape hatch: a client that disconnects still holding live tokens is a case worth reproducing when the server is the thing under test.
 
 The same behavior is reachable from the other clients — the TUI's **Clear OAuth State**, and the CLI's `--relogin` (with `--no-revoke` as the per-run opt-out).
+
+#### Plain OAuth 2.0 metadata at the OIDC well-known path
+
+`oauth-rfc8414-at-oidc-path-http.json` is an OAuth-protected server (combined AS + resource, DCR enabled) whose RFC 8414 authorization-server metadata is served **only** from `/.well-known/openid-configuration`. It is a plain OAuth 2.0 authorization server — no ID tokens, no `jwks_uri`, no `sub` claims — and RFC 8414 §5 explicitly permits that filename for general OAuth metadata. `/.well-known/oauth-authorization-server` is deliberately left unserved. Plain streamable-HTTP — connect with the **default (legacy)** protocol era.
+
+Add the server and click **Connect**: authorization must proceed normally. On the broken build it failed before the browser ever opened, with a `ZodError` naming three fields the server had no reason to publish:
+
+```
+"path":["jwks_uri"] … "path":["subject_types_supported"] … "path":["id_token_signing_alg_values_supported"]
+```
+
+The cause is upstream. `discoverAuthorizationServerMetadata` in `@modelcontextprotocol/client@2.0.0` picks its validation schema from the well-known **filename that resolved**, not from the document that came back — anything found at `openid-configuration` is parsed as OpenID Connect Discovery 1.0 provider metadata, which requires those three fields. And because the parse *throws* rather than continuing the candidate loop, discovery aborts outright instead of falling through ([#2172](https://github.com/modelcontextprotocol/inspector/issues/2172), filed upstream as [typescript-sdk#2733](https://github.com/modelcontextprotocol/typescript-sdk/issues/2733)).
+
+`core/auth/oidcDiscoveryCompat.ts` works around it without fabricating anything. When the RFC 8414 candidate comes back 4xx, it fetches the OIDC candidates the SDK would try next; if one returns a document that satisfies `OAuthMetadataSchema` but *fails* the OIDC schema, that document is returned as the response to the RFC 8414 request — so the SDK validates it under the schema that actually describes it. A genuine OpenID provider document is left alone and takes the SDK's normal OIDC leg. Issuer validation is untouched, since the substituted document is the one the server published, `issuer` included.
+
+The metadata shown in the Auth tab is exactly what the server sent — no invented `jwks_uri`. In the Network tab the substituted response is captured against the RFC 8414 URL (the wrapper sits on the base fetch, below the tracker, because that is the only seam that also covers the discovery the SDK runs from inside the transport), so it carries an `x-inspector-oauth-metadata-source` response header naming the URL its body was actually fetched from. The same URL is printed as a console warning.
 
 #### Logging, both eras
 

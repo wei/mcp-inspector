@@ -238,6 +238,7 @@ import {
   type HandleAuthChallengeOptions,
 } from "../auth/challenge.js";
 import { withOAuthEndpointOverrides } from "../auth/endpointOverrides.js";
+import { withRfc8414OidcCompat } from "../auth/oidcDiscoveryCompat.js";
 import type { TokenRevocationOutcome } from "../auth/revocation.js";
 import type { OAuthTokens } from "@modelcontextprotocol/client";
 import { silentLogger, type InspectorLogger } from "../logging/logger.js";
@@ -795,6 +796,16 @@ export class InspectorClient extends InspectorClientEventTarget {
     this.fetchFn = withOAuthEndpointOverrides(this.fetchFn ?? fetch, () =>
       this.oauthManager?.getEndpointOverrides(),
     );
+    // #2172: recover discovery when a plain OAuth 2.0 authorization server
+    // publishes RFC 8414 metadata at `/.well-known/openid-configuration`, which
+    // the SDK validates as an OpenID provider document and rejects. Wraps the
+    // *base* fetch for the same reason the overrides above do: the SDK also
+    // runs discovery from inside the transport, which is handed `this.fetchFn`
+    // directly, so a reconnect with an existing auth provider would otherwise
+    // still hit the upstream failure. The substituted response is stamped with
+    // `COMPAT_SOURCE_HEADER` so a captured entry names the URL its body came
+    // from rather than appearing to be a 200 from the RFC 8414 path.
+    this.fetchFn = withRfc8414OidcCompat(this.fetchFn);
     this.effectiveAuthFetch = this.buildEffectiveAuthFetch();
 
     this.sessionId = options.sessionId;
