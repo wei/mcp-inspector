@@ -11,9 +11,18 @@
 // regression, and it is the failure nobody notices by hand. `verify:skills`
 // requires both.
 //
-// NOT part of `validate`, `local:gate`, or CI: it needs the `claude` CLI and
-// real model calls, so it is metered and non-deterministic. Run it when adding
-// a skill or editing a model-invoked skill's description.
+// NOT part of `validate`, `local:gate`, or CI, and that is a decision rather
+// than an omission. A trigger eval cannot be a gate: it spends metered model
+// calls on every push, the measurement IS a hit rate over samples so it is
+// non-deterministic by construction, and it goes red on a rate limit or an
+// expired token — failures unrelated to the diff, whose first consequence is
+// that people stop trusting the gate. Run it when adding a skill or editing a
+// model-invoked skill's description.
+//
+// The cost of that split, stated plainly: `verify:skills` cannot detect a
+// well-formed skill whose description simply never matches anything. Nothing in
+// the gate can. Closing that would need a deterministic trigger oracle, which
+// does not exist.
 //
 // Usage:
 //   npm run skills:eval                  # every model-invoked skill's cases

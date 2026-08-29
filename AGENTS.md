@@ -180,6 +180,12 @@ that from happening:
    ("how does the `@inspector/core` alias resolve?") invites a `Read`, which is
    a *better* answer than a skill. Good cases are "how do I / where does this go"
    questions whose answer is a procedure.
+   ⚠️ **The gate cannot catch a description that never matches.** `verify:skills`
+   checks that a skill is well-formed and that its cases exist; only
+   `skills:eval` observes whether it actually fires, and that cannot be gated —
+   it spends metered model calls, its result is a hit rate rather than a verdict,
+   and it goes red on a rate limit. So the eval is a tuning tool you run
+   deliberately, and a case below threshold is a signal, not a build break.
 4. **Re-check the listing budget when adding a skill.** Claude Code loads a
    listing of every skill's name and description into context, truncates it when it
    overflows, and drops the least-invoked entries **first** — which are exactly the
