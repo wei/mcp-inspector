@@ -182,8 +182,13 @@ export function restoreTabUiFromSnapshot(
 }
 
 /**
- * Persist the snapshot, returning the exact serialization stored — the
- * "attempt token" {@link clearOwnOAuthResumeSnapshot} matches against (#2165).
+ * Persist the snapshot, returning the **`attemptId`** it was stored under —
+ * the identifier {@link clearOwnOAuthResumeSnapshot} matches on (#2165), not
+ * the serialized snapshot and not anything to compare bytes against.
+ *
+ * A fresh id is minted per write unless the caller supplied one, so two
+ * redirect attempts are always distinguishable even when their snapshots are
+ * byte-identical.
  *
  * `undefined` when nothing was stored (no `window`, privacy mode, quota), so a
  * caller holding one knows a clear is meaningful.

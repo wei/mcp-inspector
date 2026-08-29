@@ -1462,6 +1462,17 @@ export function useOAuthRecovery({
     if (stepUp.enterpriseManaged) {
       stepUpAuthorizeInProgressRef.current = true;
       setPendingStepUp(null);
+      // Take this attempt's retry out of the shared ref BEFORE any await
+      // (#2165). Dismissing the prompt above frees the step-up slot, so a
+      // newer command can open its own prompt and install its own retry while
+      // the authorization below is in flight — and every arm that reads or
+      // clears the ref afterwards would then be acting on that newer
+      // operation: running it under this authorization and reporting its
+      // failure to this attempt's source, or deleting it outright. Owning the
+      // value locally is what makes each arm's decision apply to the attempt
+      // that made it, and leaves a later prompt's retry untouched.
+      const retry = pendingStepUpRetryRef.current;
+      pendingStepUpRetryRef.current = null;
       notifications.show({
         title: "Organization permissions",
         message: emaStepUpInProgressMessage(),
@@ -1482,8 +1493,6 @@ export function useOAuthRecovery({
             color: "green",
             autoClose: 5000,
           });
-          const retry = pendingStepUpRetryRef.current;
-          pendingStepUpRetryRef.current = null;
           if (retry) {
             try {
               await retry();
@@ -1513,23 +1522,15 @@ export function useOAuthRecovery({
             authChallenge: outcome.challenge,
             recoverySource: stepUp.source,
           });
-          // Handing off, so the retry goes too — as the standard (non-EMA)
-          // step-up below already does. A full-page redirect cannot carry a
-          // closure across the navigation, so keeping it buys nothing on the
-          // success path; and `prepareOAuthRedirect` returns before the
-          // navigation is resolved, so on the failure path it would survive
-          // as a stale operation a later, unrelated step-up could re-run
-          // (#2165).
-          pendingStepUpRetryRef.current = null;
+          // Nothing to drop: this attempt's retry left the shared ref
+          // before the awaits above, and a full-page redirect could not
+          // carry the closure across the navigation anyway.
           return;
         }
         if (outcome.kind === "failed") {
-          // Terminal: drop the stored retry with it. The prompt is already
-          // dismissed, so nothing will ever consume this operation — and a
-          // *later* step-up does not overwrite the ref, so leaving it would
-          // let that unrelated authorization silently re-run this command
-          // (#2165).
-          pendingStepUpRetryRef.current = null;
+          // Terminal, and this attempt's retry is already out of the shared
+          // ref — so it dies with the attempt, and whatever a later prompt
+          // has installed is left alone.
           const failureMessage = emaStepUpFailureMessage(outcome.error.message);
           notifications.show({
             title: "Organization permissions",
@@ -1544,9 +1545,7 @@ export function useOAuthRecovery({
         // rejection escaping here reaches nobody: the `finally` resets the
         // latch and the prompt is already dismissed, leaving the panel that
         // asked for the permissions never told (#2165). Reported exactly as
-        // the `failed` outcome above is, so the two cannot disagree — and it
-        // drops the stored retry for the same reason that arm does.
-        pendingStepUpRetryRef.current = null;
+        // the `failed` outcome above is, so the two cannot disagree.
         const failureMessage = emaStepUpFailureMessage(
           err instanceof Error ? err.message : String(err),
         );

@@ -2004,6 +2004,61 @@ describe("useOAuthRecovery", () => {
       expect(retry).not.toHaveBeenCalled();
     });
 
+    it("never touches a retry installed by a newer step-up", async () => {
+      // Dismissing the prompt frees the slot, so a newer command can open its
+      // own step-up while this authorization is still in flight. Reading the
+      // shared ref afterwards would run that newer command under this
+      // authorization; clearing it would delete it (#2165).
+      let settleFirst: ((outcome: unknown) => void) | undefined;
+      const handleAuthChallenge = vi
+        .fn()
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              settleFirst = resolve;
+            }),
+        )
+        .mockResolvedValue({ kind: "satisfied" });
+      const client = fakeClient({ handleAuthChallenge });
+      const h = harness({
+        servers: [entry("a", {}, true)],
+        activeServerId: "a",
+        client,
+      });
+
+      const firstRetry = vi.fn().mockResolvedValue(undefined);
+      await openStepUp(h, "tool", firstRetry);
+      let authorize: Promise<void> | undefined;
+      await act(async () => {
+        authorize = h.api().handleStepUpAuthorize();
+      });
+      await waitFor(() => expect(settleFirst).toBeDefined());
+
+      // A newer command opens its own step-up mid-flight.
+      const secondRetry = vi.fn().mockResolvedValue(undefined);
+      await openStepUp(h, "prompt", secondRetry);
+
+      await act(async () => {
+        settleFirst!({ kind: "failed", error: new Error("denied") });
+        await authorize;
+      });
+
+      // The old attempt reported against its own source and ran nothing.
+      expect(h.spies.setSourceScopedError).toHaveBeenCalledWith(
+        "tool",
+        expect.stringContaining("denied"),
+      );
+      expect(firstRetry).not.toHaveBeenCalled();
+      expect(secondRetry).not.toHaveBeenCalled();
+
+      // …and the newer prompt's retry survived to run on its own authorization.
+      await act(async () => {
+        await h.api().handleStepUpAuthorize();
+      });
+      expect(secondRetry).toHaveBeenCalledTimes(1);
+      expect(firstRetry).not.toHaveBeenCalled();
+    });
+
     it("cancels back to the panel that asked", async () => {
       const client = fakeClient();
       const h = harness({ servers: [entry("a")], activeServerId: "a", client });
