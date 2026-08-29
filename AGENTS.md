@@ -149,10 +149,8 @@ that from happening:
    **malformed YAML**, which loads the body with an *empty* description, so
    `/skill-name` still works and a manual spot check passes while the skill can
    never auto-fire again. An unquoted colon in a description is enough. It also
-   runs `claude plugin validate` — the authoritative schema — when that CLI is on
-   PATH **and new enough to have the subcommand** (2.1.233+; below that it exits
-   nonzero as an unknown command, which must not fail the gate for someone who
-   simply has not upgraded).
+   runs `claude plugin validate` — the authoritative schema — when the installed
+   CLI is **exactly** the pinned version, and otherwise says so and moves on.
    That best-effort hand-off keeps `validate` fast and offline, but it also
    means it usually does not run — so the authoritative check gets a **guaranteed
    step of its own**, `npm run verify:skills:cli`, in `local:gate` and in CI.

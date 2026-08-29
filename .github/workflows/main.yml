@@ -60,9 +60,12 @@ jobs:
         # would mean always, in CI. Installing it here is what makes the
         # acceptance criterion true rather than aspirational.
         #
-        # The script resolves the CLI itself — an installed one when it is new
-        # enough, otherwise a PINNED one via `npx -y` — so this is the same
-        # command `npm run local:gate` runs, and the two cannot drift. Pinned
+        # The script resolves the CLI itself — an installed one ONLY when it
+        # matches the pin exactly, otherwise the pinned package via `npx -y` —
+        # so this is the same command `npm run local:gate` runs, and the two
+        # cannot drift. Exact rather than a floor: a newer local CLI is a
+        # DIFFERENT schema, which is how a "reproducible" gate starts disagreeing
+        # across machines. Pinned
         # rather than @latest: an unpinned validator can start failing a PR that
         # changed nothing. It needs no authentication — verified with a clean HOME.
         run: npm run verify:skills:cli

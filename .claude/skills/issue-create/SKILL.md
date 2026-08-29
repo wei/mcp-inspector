@@ -33,9 +33,14 @@ item is a real GitHub issue.
 
 ## 0. Check the board first
 
+Search **all** states, not just open. A closed issue is still a duplicate — it
+may have been completed, rejected, or filed and superseded — and refiling it
+loses that history. When one matches, the call is whether to reopen it or file
+genuinely new work; either way you need to have seen it (Copilot).
+
 ```sh
-gh issue list --repo modelcontextprotocol/inspector --state open --limit 1000 \
-  --search "<keywords>" --json number,title,labels,milestone
+gh issue list --repo modelcontextprotocol/inspector --state all --limit 1000 \
+  --search "<keywords>" --json number,title,state,stateReason,labels,milestone
 ```
 
 ## 1. Pick the labels

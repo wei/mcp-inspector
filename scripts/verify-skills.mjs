@@ -33,7 +33,7 @@ import { fileURLToPath } from "node:url";
 import {
   compareVersions,
   parseClaudeVersion,
-  PLUGIN_VALIDATE_MIN_VERSION,
+  PINNED_CLI_VERSION,
   parseSkill,
   validateEvalCases,
   listingCost,
@@ -42,6 +42,9 @@ import {
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_SKILLS_DIR = path.join(ROOT, ".claude", "skills");
+
+/** `PINNED_CLI_VERSION` as a comparable triple. */
+const PINNED_VERSION_PARTS = parseClaudeVersion(PINNED_CLI_VERSION) ?? [];
 
 /** Directory names under `.claude/skills` that contain a SKILL.md. */
 export function skillDirs(
@@ -134,27 +137,30 @@ function main(argv = process.argv.slice(2)) {
 
   if (override) return;
 
-  // The authoritative parse, when it is available — strictly a bonus. An older
-  // CLI does not have `plugin validate` and exits nonzero on it as an unknown
-  // command, which would fail the MANDATORY gate for a contributor whose only
-  // sin is not having upgraded (Copilot). So gate on the version that
-  // introduced it and skip below it, reserving a failure for a validator that
-  // actually rejected the skills.
+  // The authoritative parse, when it is available — strictly a bonus, and only
+  // from the EXACT pinned CLI.
+  //
+  // `local:gate` runs `validate` (and therefore this) before the pinned
+  // `verify:skills:cli` step, so a local CLI on any other version could reject
+  // skills that CI's pinned validator accepts — and the gate would exit here,
+  // never reaching the reproducible step (Copilot). Accepting merely "new enough"
+  // would reintroduce exactly the cross-machine schema drift the pin removes.
+  // Anything else is left to `verify:skills:cli`, which fetches the pin.
   const probe = spawnSync("claude", ["--version"], { encoding: "utf8" });
   if (probe.error || probe.status !== 0) {
     console.log(
-      "verify:skills — `claude` CLI not usable here; skipped `claude plugin validate`.",
+      "verify:skills — no usable `claude` CLI here; `verify:skills:cli` runs the pinned validator.",
     );
     return;
   }
   const version = parseClaudeVersion(probe.stdout ?? "");
   if (
     version === null ||
-    compareVersions(version, PLUGIN_VALIDATE_MIN_VERSION) < 0
+    compareVersions(version, PINNED_VERSION_PARTS) !== 0
   ) {
     console.log(
-      `verify:skills — \`claude\` ${version?.join(".") ?? "(unreadable version)"} predates ` +
-        `${PLUGIN_VALIDATE_MIN_VERSION.join(".")}; skipped \`claude plugin validate\`.`,
+      `verify:skills — local \`claude\` is ${version?.join(".") ?? "(unreadable)"}, not the pinned ` +
+        `${PINNED_CLI_VERSION}; \`verify:skills:cli\` runs the pinned validator.`,
     );
     return;
   }

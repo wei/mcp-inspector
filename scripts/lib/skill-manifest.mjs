@@ -237,9 +237,6 @@ export function validateEvalCases(skillName, cases) {
  */
 export const PINNED_CLI_VERSION = "2.1.250";
 
-/** First Claude Code release with `claude plugin validate`. */
-export const PLUGIN_VALIDATE_MIN_VERSION = [2, 1, 233];
-
 /**
  * Read a semver triple out of `claude --version` output ("2.1.250 (Claude Code)").
  *

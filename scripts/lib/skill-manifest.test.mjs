@@ -13,7 +13,7 @@ import {
   listingCost,
   parseClaudeVersion,
   compareVersions,
-  PLUGIN_VALIDATE_MIN_VERSION,
+  PINNED_CLI_VERSION,
 } from "./skill-manifest.mjs";
 
 const fm = (body) => `---\n${body}\n---\n\n# Body\n`;
@@ -208,16 +208,18 @@ test("parseClaudeVersion reads the CLI's version banner", () => {
   assert.equal(parseClaudeVersion("no version here"), null);
 });
 
-test("compareVersions orders the plugin-validate floor correctly", () => {
-  // An older CLI has no `plugin validate` and exits nonzero on it as an unknown
-  // command; failing the mandatory gate for that would be wrong, so the probe
-  // must skip below the floor rather than run and fail.
-  assert.ok(compareVersions([2, 1, 232], PLUGIN_VALIDATE_MIN_VERSION) < 0);
-  assert.equal(compareVersions([2, 1, 233], PLUGIN_VALIDATE_MIN_VERSION), 0);
-  assert.ok(compareVersions([2, 1, 250], PLUGIN_VALIDATE_MIN_VERSION) > 0);
-  assert.ok(compareVersions([2, 2, 0], PLUGIN_VALIDATE_MIN_VERSION) > 0);
-  assert.ok(compareVersions([3], PLUGIN_VALIDATE_MIN_VERSION) > 0);
-  assert.ok(compareVersions([1, 9, 999], PLUGIN_VALIDATE_MIN_VERSION) < 0);
+test("compareVersions can decide exact equality with the pin", () => {
+  // Both validators require the EXACT pinned version, so what matters is that
+  // "equal" is distinguishable from newer as well as older — a floor would let a
+  // newer local CLI validate against a different schema than CI's.
+  const pin = parseClaudeVersion(PINNED_CLI_VERSION);
+  assert.equal(compareVersions(pin, pin), 0);
+  assert.ok(compareVersions([pin[0], pin[1], pin[2] - 1], pin) < 0);
+  assert.ok(compareVersions([pin[0], pin[1], pin[2] + 1], pin) > 0);
+  assert.ok(compareVersions([pin[0] + 1, 0, 0], pin) > 0);
+  // Shorter and longer triples still order sanely.
+  assert.ok(compareVersions([pin[0]], pin) < 0);
+  assert.equal(compareVersions([...pin, 0], pin), 0);
 });
 
 test("the listing-entry cap covers description AND when_to_use together", () => {
