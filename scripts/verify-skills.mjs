@@ -32,6 +32,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { claudeSpawnArgs, probeClaudeVersion } from "./lib/claude-cli.mjs";
 import { reachableScripts, rootReachesScript } from "./lib/npm-scripts.mjs";
+import { extractExecutableRegions } from "./lib/workflow-gate.mjs";
 import {
   compareVersions,
   parseClaudeVersion,
@@ -73,6 +74,14 @@ export function skillDirs(
  *     the step that actually runs the authoritative validator, and it is
  *     reachable from neither `validate` nor any test, so nothing else would
  *     notice it going missing.
+ *
+ * The workflow half reads the **executable** regions rather than the file's
+ * text. A raw substring match is satisfied by a comment, a step `name:`, or an
+ * unused anchor that merely mentions the command — so deleting the real step
+ * while leaving this very docblock's wording nearby would keep the guard green
+ * (Copilot). `extractExecutableRegions` already descends only the schema paths
+ * Actions actually runs, with aliases resolved, and it is the same helper the
+ * #2146 workflow gate is built on.
  */
 export function checkWiring(rootScripts, workflowText) {
   const problems = [];
@@ -86,9 +95,14 @@ export function checkWiring(rootScripts, workflowText) {
       "`npm run local:gate` no longer runs `verify:skills:cli`, so the authoritative validator never runs locally. Restore it.",
     );
   }
-  if (!/npm run verify:skills:cli/.test(workflowText)) {
+  const runsInCi = extractExecutableRegions(workflowText, "main.yml").some(
+    (region) =>
+      region.kind === "run" &&
+      /\bnpm run verify:skills:cli\b/.test(region.text),
+  );
+  if (!runsInCi) {
     problems.push(
-      "`.github/workflows/main.yml` no longer runs `npm run verify:skills:cli`, so the authoritative validator never runs in CI. Restore it.",
+      "`.github/workflows/main.yml` has no step that runs `npm run verify:skills:cli`, so the authoritative validator never runs in CI. Restore it.",
     );
   }
   return problems;

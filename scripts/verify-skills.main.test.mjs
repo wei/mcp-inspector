@@ -236,12 +236,15 @@ test("checkWiring catches the authoritative validator dropped from CI", () => {
       WIRED_SCRIPTS,
       "jobs:\n  build:\n    steps:\n      - run: npm run validate\n",
     ).join(),
-    /workflows\/main\.yml` no longer runs/,
+    /has no step that runs/,
   );
 });
 
 test("checkWiring reports every broken link at once", () => {
-  assert.equal(checkWiring({ validate: "", "local:gate": "" }, "").length, 3);
+  assert.equal(
+    checkWiring({ validate: "", "local:gate": "" }, "jobs: {}\n").length,
+    3,
+  );
 });
 
 test("the repository as it stands is wired", () => {
@@ -258,4 +261,28 @@ test("the repository as it stands is wired", () => {
     "utf8",
   );
   assert.deepEqual(checkWiring(scripts, workflow), []);
+});
+
+test("checkWiring is not satisfied by a mention outside an executable step", () => {
+  // A raw substring match would pass on any of these while CI ran nothing —
+  // including on a step whose NAME describes the check it no longer performs,
+  // which is exactly how a wiring guard goes quietly vacuous.
+  const mentions = [
+    "# npm run verify:skills:cli\njobs:\n  build:\n    steps:\n      - run: npm run validate\n",
+    "jobs:\n  build:\n    steps:\n      - name: npm run verify:skills:cli\n        run: npm run validate\n",
+    "on:\n  workflow_dispatch:\n    inputs:\n      cmd:\n        default: npm run verify:skills:cli\njobs:\n  build:\n    steps:\n      - run: npm run validate\n",
+  ];
+  for (const workflow of mentions) {
+    assert.match(
+      checkWiring(WIRED_SCRIPTS, workflow).join(),
+      /has no step that runs/,
+      `should not count: ${workflow.split("\n")[0]}`,
+    );
+  }
+});
+
+test("checkWiring accepts the command inside a multi-line run step", () => {
+  const workflow =
+    "jobs:\n  build:\n    steps:\n      - run: |\n          npm run validate\n          npm run verify:skills:cli\n";
+  assert.deepEqual(checkWiring(WIRED_SCRIPTS, workflow), []);
 });
