@@ -54,6 +54,53 @@ function collectCases(only) {
   return cases;
 }
 
+/**
+ * Extract the payloads the `Skill` tool was invoked with from a chunk of
+ * `--output-format stream-json` output.
+ *
+ * Pure and separately tested: everything below spawns a real CLI, so the
+ * parsing and the process-outcome handling are unreachable from the happy path
+ * of an eval run and would otherwise only ever be exercised by the thing they
+ * are supposed to measure.
+ *
+ * @param {string} text One or more newline-delimited JSON events. A trailing
+ *   partial line is ignored, so this can be fed incrementally.
+ * @returns {{ invoked: Set<string>, rest: string }}
+ */
+export function collectSkillInvocations(text) {
+  const lines = text.split("\n");
+  const rest = lines.pop() ?? "";
+  const invoked = new Set();
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    let evt;
+    try {
+      evt = JSON.parse(line);
+    } catch {
+      // A malformed line is noise from the CLI, not an observation.
+      continue;
+    }
+    if (evt?.type !== "assistant") continue;
+    for (const block of evt.message?.content ?? []) {
+      if (block?.type !== "tool_use" || block.name !== "Skill") continue;
+      // Don't assume the input field's name — match on the whole payload.
+      invoked.add(JSON.stringify(block.input ?? {}));
+    }
+  }
+  return { invoked, rest };
+}
+
+/**
+ * Whether one sample satisfies a case.
+ *
+ * @param {string | null} expect Skill name, or null for a negative case.
+ * @param {Set<string>} invoked
+ */
+export function sampleHit(expect, invoked) {
+  if (expect === null) return invoked.size === 0;
+  return [...invoked].some((payload) => payload.includes(expect));
+}
+
 /** Returns the payloads the Skill tool was called with in one fresh session. */
 function runOnce(prompt) {
   return new Promise((resolve, reject) => {
@@ -72,33 +119,28 @@ function runOnce(prompt) {
         "--disallowedTools",
         "Bash,Write,Edit,NotebookEdit",
       ],
-      { cwd: ROOT, stdio: ["ignore", "pipe", "ignore"] },
+      { cwd: ROOT, stdio: ["ignore", "pipe", "inherit"] },
     );
 
     let buf = "";
     const invoked = new Set();
     p.stdout.on("data", (chunk) => {
-      buf += chunk.toString();
-      const lines = buf.split("\n");
-      buf = lines.pop() ?? "";
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        let evt;
-        try {
-          evt = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        if (evt?.type !== "assistant") continue;
-        for (const block of evt.message?.content ?? []) {
-          if (block?.type !== "tool_use" || block.name !== "Skill") continue;
-          // Don't assume the input field's name — match on the whole payload.
-          invoked.add(JSON.stringify(block.input ?? {}));
-        }
-      }
+      const parsed = collectSkillInvocations(buf + chunk.toString());
+      buf = parsed.rest;
+      for (const payload of parsed.invoked) invoked.add(payload);
     });
     p.on("error", reject);
-    p.on("close", () => resolve(invoked));
+    p.on("close", (code) => {
+      // A CLI that failed to run observed NOTHING. Resolving it as an empty set
+      // would silently pass every negative case and read as a trigger miss on
+      // every positive one, so an auth error or a rate limit would come back as
+      // a plausible-looking hit rate (Copilot).
+      if (code !== 0) {
+        reject(new Error(`\`claude -p\` exited ${code} for prompt: ${prompt}`));
+        return;
+      }
+      resolve(invoked);
+    });
   });
 }
 
@@ -142,9 +184,7 @@ async function main() {
   let failed = 0;
   for (const c of cases) {
     const mine = results.filter((r) => r.c === c);
-    const passes = mine.filter((r) =>
-      c.expect === null ? r.invoked.size === 0 : hit(r.invoked, c.expect),
-    ).length;
+    const passes = mine.filter((r) => sampleHit(c.expect, r.invoked)).length;
     const rate = passes / mine.length;
     const ok = rate >= THRESHOLD;
     if (!ok) failed++;
@@ -160,7 +200,12 @@ async function main() {
   process.exit(failed > 0 ? 1 : 0);
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+if (
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  main().catch((e) => {
+    console.error(e.message ?? e);
+    process.exit(1);
+  });
+}

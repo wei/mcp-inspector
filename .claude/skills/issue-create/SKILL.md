@@ -89,18 +89,16 @@ in **Todo** with its milestone already set — not in Incoming, which is the que
 for issues nobody has evaluated yet. Work you are starting immediately goes
 straight to **In Progress**.
 
-```sh
-ITEM_ID=$(gh project item-add 28 --owner modelcontextprotocol --url <issue-url> --format json --jq '.id')
-# Status → Todo
-gh project item-edit --project-id PVT_kwDOCt2Azc4BJVxt --id "$ITEM_ID" \
-  --field-id PVTSSF_lADOCt2Azc4BJVxtzg5iI8c --single-select-option-id fbdaf21e
-# Priority → Medium (score it with the rubric in /issue-triage; don't eyeball it)
-gh project item-edit --project-id PVT_kwDOCt2Azc4BJVxt --id "$ITEM_ID" \
-  --field-id PVTSSF_lADOCt2Azc4BJVxtzg5iJE4 --single-select-option-id da944a9c
-```
+Run the **add-card recipe in `/board-ops`** with **Status → Todo** and the
+Priority you scored. The project, field and option IDs live there and only
+there: an option ID is regenerated whenever its field's option list is edited,
+so a second copy here would go stale silently and break issue creation even
+after `board-ops` was fixed.
 
-Full ID tables, the v1 board's recipe, and the option-deletion hazard are in
-`/board-ops`. The priority rubric is in `/issue-triage`.
+For a **v1** issue, the same recipe against board #11 — no Priority, that board
+has no such field.
+
+The priority rubric is in `/issue-triage`.
 
 ## Note on issues that arrive from elsewhere
 

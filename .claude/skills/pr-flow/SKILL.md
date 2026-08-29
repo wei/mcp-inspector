@@ -173,7 +173,9 @@ Poll for the review with a `startswith` match — the review login carries a
 ## 9. Merge and close out
 
 **On merge of a v2 PR, manually close its issue and move the board item to
-Done** (`259d6aab`), since auto-close won't fire on `v2/main`.
+Done**, since auto-close won't fire on `v2/main`. Use the move-a-card recipe in
+`/board-ops` — the option IDs are unstable, so this file names the column and
+nothing else.
 
 `Done` is only for work that **shipped** — a merged PR, or a parent whose last
 sub-issue closed. Anything else (duplicate, won't fix, not planned, obsolete)

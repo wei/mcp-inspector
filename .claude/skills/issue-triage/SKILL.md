@@ -200,11 +200,11 @@ count means the board contradicts a rule, not that the rule needs revisiting.
 | Double-boarded | An issue has a card on **one** board, the one matching its version label | Delete the wrong-board card |
 | Non-Issue items | **Only issues go on a board** — never PRs, never drafts | Delete the item |
 | No Status | Every card carries a Status | Set one — `Incoming` if unmilestoned, else by where it actually is |
-| `Incoming` **with** a milestone | Incoming ⇔ no milestone | Approval was never recorded: move to **Todo**, or clear the milestone |
-| Past Incoming **without** a milestone | Everything past Incoming ⇔ milestoned | Claims an approval nobody made: milestone it, or move back to Incoming |
+| `Incoming` **with** a milestone (#28) | Incoming ⇔ no milestone | Approval was never recorded: move to **Todo**, or clear the milestone |
+| Past Incoming **without** a milestone (#28) | Everything past Incoming ⇔ milestoned | Claims an approval nobody made: milestone it, or move back to Incoming |
 | Wrong board for label | `v1` → #11, `v2` → #28 | Move the card to the right board |
-| No version label | Every issue carries exactly one of `v1`/`v2` | Apply it |
-| No type label | Every issue carries one of the five types | Classify it |
+| Not exactly one version label | Every issue carries **exactly one** of `v1`/`v2` | Apply the missing one, or remove the extra |
+| Not exactly one type label | Every issue carries **exactly one** of the five types | Classify it, or remove the extra |
 | No Priority (#28) | Every board item is prioritized | Score it with the rubric |
 | Closed, not shipped, still carded | **Done means the work shipped** | Delete the card |
 
@@ -231,17 +231,21 @@ jq -nr --slurpfile o "$D/i.json" --slurpfile a "$D/b28.json" --slurpfile b "$D/b
     "double-boarded":        [$B28[].n | select(. as $n | [$B11[].n]|index($n))],
     "non-Issue on a board":  [(own($a)[], own($b)[]) | select(.content.type!="Issue") | .content.number],
     "no Status":             [($B28[], $B11[]) | select(.s==null) | .n],
-    "Incoming w/ milestone": [($B28[], $B11[]) | select(.s=="Incoming" and ms(.n)!=null) | .n],
-    "past Incoming, no ms":  [($B28[], $B11[]) | select(.s!=null and .s!="Incoming" and .s!="Done"
-                                                        and isopen(.n) and ms(.n)==null) | .n],
+    "Incoming w/ milestone": [$B28[] | select(.s=="Incoming" and ms(.n)!=null) | .n],
+    "past Incoming, no ms":  [$B28[] | select(.s!=null and .s!="Incoming" and .s!="Done"
+                                              and isopen(.n) and ms(.n)==null) | .n],
     "v1 label on #28":       [$B28[] | select(isopen(.n) and (lab(.n)|index("v1"))) | .n],
     "v2 label on #11":       [$B11[] | select(isopen(.n) and (lab(.n)|index("v2"))) | .n],
-    "open, no version label":[$o[0][] | select(.state=="OPEN")
-                              | select(([.labels[].name]|index("v1") or index("v2"))|not) | .number],
-    "open, no type label":   [$o[0][] | select(.state=="OPEN")
-                              | select(([.labels[].name] | index("bug") or index("enhancement")
-                                        or index("documentation") or index("chore")
-                                        or index("question"))|not) | .number],
+    "open, not exactly 1 version label":
+                             [$o[0][] | select(.state=="OPEN")
+                              | select(([.labels[].name] | map(select(IN("v1","v2"))) | length) != 1)
+                              | .number],
+    "open, not exactly 1 type label":
+                             [$o[0][] | select(.state=="OPEN")
+                              | select(([.labels[].name]
+                                        | map(select(IN("bug","enhancement","documentation","chore","question")))
+                                        | length) != 1)
+                              | .number],
     "#28 open, no Priority": [$B28[] | select(.p==null and isopen(.n)) | .n],
     "closed unshipped, still carded":
                              [($B28[], $B11[]) | select(I(.n)!=null and (isopen(.n)|not)
@@ -256,6 +260,14 @@ Two things the queries must account for, both learned the hard way:
   `modelcontextprotocol/servers` issue. Without the `.content.repository` filter
   it reads as a statusless-card defect, and "fixing" it would mean editing
   another repo's tracking.
+- **The two milestone checks are #28-only.** Every milestone in this repo is a
+  v2 release bucket, so a `v1` issue has none it could take — running the
+  Incoming⇔milestone invariant over board #11 would flag every card on it for a
+  state it cannot reach.
+- **Count the labels; don't test for presence.** The invariant is *exactly
+  one*, so a predicate that only asks "is any version label present" passes an
+  issue carrying **both** `v1` and `v2` — which belongs to two lines at once
+  and shows up in both filtered queries. Same for the five type labels (Copilot).
 - **Only open issues have a `$I` entry.** A closed issue still has a card
   (correctly, in `Done`), so a check that treats "no milestone found" as a
   violation must gate on `isopen(.n)` or it flags every closed card.

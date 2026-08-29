@@ -49,12 +49,15 @@ export function splitFrontmatter(text) {
     };
   }
   const rest = text.slice(FRONTMATTER_FENCE.length + 1);
-  const end = rest.indexOf("\n" + FRONTMATTER_FENCE);
-  if (end === -1)
+  // The closing fence must occupy the WHOLE line. Matching a mere prefix would
+  // accept `---oops` as a terminator, silently truncating the frontmatter to
+  // whatever preceded it — the very failure this function exists to catch.
+  const close = /\n---[ \t]*(\r?\n|$)/.exec(rest);
+  if (close === null)
     return { error: "frontmatter is never closed by a `---` line" };
   return {
-    frontmatter: rest.slice(0, end),
-    body: rest.slice(end + FRONTMATTER_FENCE.length + 2),
+    frontmatter: rest.slice(0, close.index),
+    body: rest.slice(close.index + close[0].length),
   };
 }
 

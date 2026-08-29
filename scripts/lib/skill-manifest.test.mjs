@@ -28,6 +28,25 @@ test("splitFrontmatter requires the fence on the very first line", () => {
   assert.equal(splitFrontmatter(fm("name: x")).error, undefined);
 });
 
+test("splitFrontmatter requires the closing fence to be a whole line", () => {
+  // `---oops` is not a terminator. Accepting it would silently truncate the
+  // frontmatter to whatever preceded it and report the file as valid.
+  assert.match(
+    splitFrontmatter("---\nname: x\n---oops\nbody\n").error ?? "",
+    /never closed/,
+  );
+  // Trailing whitespace on the fence is still a fence, and so is EOF.
+  assert.equal(
+    splitFrontmatter("---\nname: x\n---  \nbody\n").frontmatter,
+    "name: x",
+  );
+  assert.equal(splitFrontmatter("---\nname: x\n---").frontmatter, "name: x");
+  assert.equal(
+    splitFrontmatter("---\nname: x\n---\r\nbody").frontmatter,
+    "name: x",
+  );
+});
+
 test("splitFrontmatter reports an unterminated block", () => {
   assert.match(splitFrontmatter("---\nname: x\n").error ?? "", /never closed/);
 });

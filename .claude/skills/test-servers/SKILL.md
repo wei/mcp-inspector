@@ -43,15 +43,28 @@ the cache.
 
 ## Run one
 
+Two processes: the test server, then the Inspector.
+
 ```sh
-# From the repo root, with a built launcher:
-node clients/launcher/build/index.js --web
-# then in the Inspector, add the server the config announces
+# 1. The server, from the repo root, with the config you picked:
+node test-servers/build/server-composable.js --config test-servers/configs/<name>.json
 ```
 
-The server prints its URL on **stderr**, and the bound port is **not
-necessarily** the config's — `findAvailablePort()` walks upward when the
-configured port is taken. Parse the announced URL rather than assuming.
+```sh
+# 2. The Inspector, in another terminal (needs a built launcher — `npm run build`):
+node clients/launcher/build/index.js --web
+```
+
+Then add the server in the Inspector using the URL the first process announced.
+
+Two mechanics that bite:
+
+- **The server announces its URL on _stderr_**, not stdout (`console.error` in
+  `server-composable.ts`). Watching stdout alone looks like a server that never
+  started.
+- **The bound port is not necessarily the config's.** `createTestServerHttp`
+  resolves through `findAvailablePort()`, which walks upward when the configured
+  port is taken — so read the announced URL rather than assuming.
 
 ## Pick the right protocol era
 

@@ -26,33 +26,36 @@ This is what lets an Inspector connection negotiating `protocolEra: "auto" | "mo
 
 ## Showcase configs
 
-Each config below is a ready-made server for exercising one feature by hand. Load one with `--config`, and unless noted, connect with **Protocol Era = Modern**.
+Each config below is a ready-made server for exercising one feature by hand.
+Load one with `--config` and connect with the era its row names — every row says
+which, because the two are not interchangeable and the wrong one usually presents
+as a missing capability rather than an error.
 
 | Config                                    | Demonstrates                                        | Issue                                                                  |
 | ----------------------------------------- | --------------------------------------------------- | ---------------------------------------------------------------------- |
 | `mcp-app-http.json` **(legacy era)**      | An MCP App (UI resource + app tool) in the Apps tab | [#1859](https://github.com/modelcontextprotocol/inspector/issues/1859) |
 | `app-elicitation-http.json` **(legacy era)** | An MCP App rendering a form elicitation           | [#1854](https://github.com/modelcontextprotocol/inspector/issues/1854) |
 | `mcp-app-domain-http.json` **(legacy era)** | An MCP App asking for a dedicated origin (`_meta.ui.domain`) | [#2056](https://github.com/modelcontextprotocol/inspector/issues/2056) |
-| `modern-mrtr-http.json`                   | A single MRTR round-trip                           | —                                                                      |
-| `mrtr-showcase-http.json`                 | Every MRTR preset in one server                    | [#1860](https://github.com/modelcontextprotocol/inspector/issues/1860) |
-| `modern-network-http.json`                | Network tab: `Mcp-*` headers + error taxonomy      | [#1628](https://github.com/modelcontextprotocol/inspector/issues/1628) |
-| `xmcpheader-modern-http.json`             | Tools tab: `x-mcp-header` mirroring and exclusions | [#1632](https://github.com/modelcontextprotocol/inspector/issues/1632) |
-| `pagination-http.json`                    | Page-by-page list fetching                         | [#1721](https://github.com/modelcontextprotocol/inspector/issues/1721) |
-| `structured-output-http.json`             | Tools tab: a result's `structuredContent` section  | [#1908](https://github.com/modelcontextprotocol/inspector/issues/1908) |
-| `duplicate-tool-names-http.json`          | A `tools/list` that repeats a tool name            | [#1957](https://github.com/modelcontextprotocol/inspector/issues/1957) |
-| `nullable-fields-http.json`               | Tools tab: nullable (`anyOf` + `null`) arguments   | [#1928](https://github.com/modelcontextprotocol/inspector/issues/1928) |
+| `modern-mrtr-http.json` **(modern era)**                   | A single MRTR round-trip                           | —                                                                      |
+| `mrtr-showcase-http.json` **(modern era)**                 | Every MRTR preset in one server                    | [#1860](https://github.com/modelcontextprotocol/inspector/issues/1860) |
+| `modern-network-http.json` **(modern era)**                | Network tab: `Mcp-*` headers + error taxonomy      | [#1628](https://github.com/modelcontextprotocol/inspector/issues/1628) |
+| `xmcpheader-modern-http.json` **(modern era)**             | Tools tab: `x-mcp-header` mirroring and exclusions | [#1632](https://github.com/modelcontextprotocol/inspector/issues/1632) |
+| `pagination-http.json` **(legacy era)**                    | Page-by-page list fetching                         | [#1721](https://github.com/modelcontextprotocol/inspector/issues/1721) |
+| `structured-output-http.json` **(legacy era)**             | Tools tab: a result's `structuredContent` section  | [#1908](https://github.com/modelcontextprotocol/inspector/issues/1908) |
+| `duplicate-tool-names-http.json` **(legacy era)**          | A `tools/list` that repeats a tool name            | [#1957](https://github.com/modelcontextprotocol/inspector/issues/1957) |
+| `nullable-fields-http.json` **(legacy era)**               | Tools tab: nullable (`anyOf` + `null`) arguments   | [#1928](https://github.com/modelcontextprotocol/inspector/issues/1928) |
 | `root-union-schemas-http.json` **(legacy era)** | Tool schemas whose arguments are a root `anyOf` / `oneOf` | [#2123](https://github.com/modelcontextprotocol/inspector/issues/2123) |
 | `unportable-schemas-http.json` **(legacy era)** | Tool schemas a real client rejects, flagged in all three clients | [#1005](https://github.com/modelcontextprotocol/inspector/issues/1005) |
-| `rfc6570-templates-http.json`             | Resources tab: RFC 6570 resource-template expansion | [#1919](https://github.com/modelcontextprotocol/inspector/issues/1919) |
-| `advertised-extensions-http.json`         | Tool registration gated on advertised extensions    | [#1739](https://github.com/modelcontextprotocol/inspector/issues/1739) |
+| `rfc6570-templates-http.json` **(legacy era)**             | Resources tab: RFC 6570 resource-template expansion | [#1919](https://github.com/modelcontextprotocol/inspector/issues/1919) |
+| `advertised-extensions-http.json` **(legacy era)**         | Tool registration gated on advertised extensions    | [#1739](https://github.com/modelcontextprotocol/inspector/issues/1739) |
 | `oauth-custom-resource-metadata-http.json` **(legacy era)** | OAuth discovery driven by the challenge's `resource_metadata` | [#2071](https://github.com/modelcontextprotocol/inspector/issues/2071) |
 | `oauth-revocation-http.json` / `oauth-no-revocation-http.json` **(legacy era)** | RFC 7009 token revocation on clear, with and without a `revocation_endpoint` | [#2144](https://github.com/modelcontextprotocol/inspector/issues/2144) |
 | `oauth-rfc8414-at-oidc-path-http.json` **(legacy era)** | Plain OAuth 2.0 AS metadata served at the OIDC well-known path | [#2172](https://github.com/modelcontextprotocol/inspector/issues/2172) |
-| `logging-{legacy,modern}-http.json`       | Logging, both eras                                  | [#1629](https://github.com/modelcontextprotocol/inspector/issues/1629) |
-| `subscriptions-{legacy,modern}-http.json` | Resource subscriptions, both eras                   | [#1630](https://github.com/modelcontextprotocol/inspector/issues/1630) |
-| `subscriptions-never-acknowledged-http.json` | A `subscriptions/listen` answered with a bare result  | [#2097](https://github.com/modelcontextprotocol/inspector/issues/2097) |
-| `tasks-{legacy,modern}-http.json`         | Tasks, both eras                                    | [#1631](https://github.com/modelcontextprotocol/inspector/issues/1631) |
-| `cancellation-modern-http.json`           | Cancelling a call by closing its response stream    | [#2140](https://github.com/modelcontextprotocol/inspector/issues/2140) |
+| `logging-{legacy,modern}-http.json` **(era per file)** | Logging, both eras                                  | [#1629](https://github.com/modelcontextprotocol/inspector/issues/1629) |
+| `subscriptions-{legacy,modern}-http.json` **(era per file)** | Resource subscriptions, both eras                   | [#1630](https://github.com/modelcontextprotocol/inspector/issues/1630) |
+| `subscriptions-never-acknowledged-http.json` **(modern era)** | A `subscriptions/listen` answered with a bare result  | [#2097](https://github.com/modelcontextprotocol/inspector/issues/2097) |
+| `tasks-{legacy,modern}-http.json` **(era per file)** | Tasks, both eras                                    | [#1631](https://github.com/modelcontextprotocol/inspector/issues/1631) |
+| `cancellation-modern-http.json` **(modern era)**           | Cancelling a call by closing its response stream    | [#2140](https://github.com/modelcontextprotocol/inspector/issues/2140) |
 
 ## Cancelling a call
 
