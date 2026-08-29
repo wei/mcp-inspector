@@ -52,19 +52,26 @@ export interface SnapshotStore<E extends string> {
  *
  * ## Caller contract
  *
- * `read` and `whenAbsent` must be module-scope constants, not values built in
- * the component body — every caller in this directory declares them beside the
- * hook.
+ * `read` and `whenAbsent` must be **referentially stable across renders**, and
+ * they are part of the cache key below (along with `event`) so that a changed
+ * argument is never answered with a value computed from the previous one.
  *
- * They are part of the cache key below, along with `event`, so that a changed
- * argument can never be answered with a value computed from the previous one.
- * The consequence is that passing a fresh closure (or a fresh `[]`) per render
- * defeats the cache entirely: each read returns a new defensive copy, and
- * React fails it outright with "The result of getSnapshot should be cached".
- * That is the intended failure mode. The alternative — keying only on the
- * store and its revision — would tolerate an unstable argument by silently
- * serving a stale value, and a loud error at first render beats a wrong list
- * nobody can account for.
+ * What "stable" requires depends on the value. A `read` is always a function,
+ * so declare it at module scope — every caller in this directory does. A
+ * `whenAbsent` that is a **primitive** (`false`, `undefined`, `"disconnected"`)
+ * is stable under `Object.is` already and is passed inline throughout these
+ * hooks; only an object or array fallback needs a module-scope constant, which
+ * is what `NO_TOOLS` and `NO_PAGINATION` are for.
+ *
+ * Getting that wrong is a quiet cost rather than a failure, so it will not
+ * announce itself. Measured (React 19, #1955): an inline `read` closure throws
+ * nothing, logs nothing — not even React's "The result of getSnapshot should be
+ * cached" dev warning, since that check calls `getSnapshot` twice within one
+ * render and the closure is the same both times, so the cache answers both
+ * identically — and forces no extra render pass. What it does is hand back a
+ * fresh value on every render, which defeats every downstream `useMemo`,
+ * `React.memo` and effect dependency that keys on it. That is the whole reason
+ * the contract is stated rather than merely implied.
  *
  * @param store       the state store, or `null` when no server is active
  * @param event       the store event that signals this value changed
