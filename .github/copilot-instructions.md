@@ -55,6 +55,9 @@ const CardContent = Group.withProps({
 - Use **`useValueChange(value, onChange)`** (`src/hooks/useValueChange.ts`) — React's documented "adjusting state during render" pattern. It does not fire on the first render; seed the state with `useState`. The comparison is `Object.is`, so pass a **referentially stable** value — a primitive key (id/name/URI) or a memoized one, never a fresh object literal.
 - The `onChange` runs **during render**, so it must be pure — `setState` and nothing else. No fetches, DOM writes, logging, ref mutation, or parent callbacks; a render can be replayed or abandoned.
 - Effects remain correct for real external-system synchronization (DOM measurement, rAF, subscriptions, timers).
+- **Subscribing to an `@inspector/core` state store is `useSyncExternalStore`, never `useState` + a subscribing `useEffect`** — that shape re-seeds state from the store prop, so it carries the same stale frame plus a window where an event dispatched between render and subscribe is lost. Use **`useStoreSnapshot(store, event, read, whenAbsent)`** (`core/react/useStoreSnapshot.ts`), once per value; `useValueChange` is web-only and `core/react/` is shared with the CLI and TUI. Pass `read`/`whenAbsent` as **module-scope constants**.
+- The snapshot is cached against the store's per-event dispatch counter (`TypedEventTarget.getEventRevision`), **not** its contents — a contents compare cannot see a dispatch that mutated an entry already in the list. Don't replace it with a shallow compare.
+- The store is the source of truth; the event is only the signal. A test firing a store event must set the value on the store first, and a fake store must extend the real `TypedEventTarget` (a bare `EventTarget` lacks `getEventRevision`).
 
 ### Theme files vs. element components
 
