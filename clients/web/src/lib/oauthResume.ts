@@ -57,6 +57,19 @@ export interface OAuthResumeSnapshot {
   authChallenge?: AuthChallenge;
   /** Command-scoped recovery source when redirect was triggered by a user action. */
   recoverySource?: OAuthRecoverySource;
+  /**
+   * Identifies the redirect attempt that wrote this snapshot (#2165).
+   *
+   * Stamped by {@link writeOAuthResumeSnapshot} and matched by
+   * {@link clearOwnOAuthResumeSnapshot}, so an attempt that fails before
+   * navigating cannot delete a *later* attempt's snapshot. Nothing else reads
+   * it: the callback identifies its server by `serverId`, as before.
+   *
+   * Optional because a snapshot written by an older build (across a redirect
+   * that spans an upgrade) has none, and dropping such a snapshot would strand
+   * a live callback.
+   */
+  attemptId?: string;
 }
 
 export interface LiftedTabUiState {
@@ -181,14 +194,31 @@ export function writeOAuthResumeSnapshot(
   if (typeof window === "undefined") {
     return undefined;
   }
-  const serialized = JSON.stringify(snapshot);
+  const attemptId = snapshot.attemptId ?? newAttemptId();
   try {
-    window.sessionStorage.setItem(OAUTH_RESUME_KEY, serialized);
-    return serialized;
+    window.sessionStorage.setItem(
+      OAUTH_RESUME_KEY,
+      JSON.stringify({ ...snapshot, attemptId }),
+    );
+    return attemptId;
   } catch {
     // Best-effort — privacy mode / quota.
     return undefined;
   }
+}
+
+/**
+ * A per-attempt identifier. `randomUUID` where it exists (it needs a secure
+ * context, which a `file://` page or a plain-HTTP non-loopback host is not),
+ * and otherwise a value that only has to be unique among the handful of
+ * redirect attempts one page can have in flight — never a security token.
+ */
+function newAttemptId(): string {
+  const uuid = globalThis.crypto?.randomUUID?.bind(globalThis.crypto);
+  if (uuid) {
+    return uuid();
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
 export function readOAuthResumeSnapshot(): OAuthResumeSnapshot | undefined {
@@ -249,24 +279,30 @@ function readLegacyPendingServerSnapshot(): OAuthResumeSnapshot | undefined {
  * `prepareOAuthRedirect` has no single-flight guard, so a redirect that fails
  * before navigating can reject after a *later* attempt has already written its
  * own snapshot. An unconditional clear there would delete the newer attempt's
- * callback-routing state, which is a worse failure than the one it is trying
- * to avoid.
+ * callback-routing state — a worse failure than the stale snapshot it is
+ * trying to avoid, since that redirect is actually in flight.
  *
- * The token is the stored serialization, which makes two byte-identical
- * snapshots indistinguishable — deliberately: identical bytes describe the
- * same redirect, for the same server, with the same shell state, so clearing
- * "the other one" reaches the same end state.
+ * Matched on the snapshot's `attemptId` rather than on its bytes: two
+ * concurrent redirects for the same server with the same shell state serialize
+ * identically while carrying *different* authorization URLs, which the
+ * snapshot does not record — so a byte comparison would report them as the
+ * same attempt and delete the wrong one.
  *
  * Returns whether anything was removed.
  */
 export function clearOwnOAuthResumeSnapshot(
-  token: string | undefined,
+  attemptId: string | undefined,
 ): boolean {
-  if (typeof window === "undefined" || token === undefined) {
+  if (typeof window === "undefined" || attemptId === undefined) {
     return false;
   }
   try {
-    if (window.sessionStorage.getItem(OAUTH_RESUME_KEY) !== token) {
+    const raw = window.sessionStorage.getItem(OAUTH_RESUME_KEY);
+    if (!raw) {
+      return false;
+    }
+    const stored = JSON.parse(raw) as Partial<OAuthResumeSnapshot>;
+    if (stored?.attemptId !== attemptId) {
       return false;
     }
     window.sessionStorage.removeItem(OAUTH_RESUME_KEY);

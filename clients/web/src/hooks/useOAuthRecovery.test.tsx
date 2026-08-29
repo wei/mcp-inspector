@@ -595,6 +595,47 @@ describe("useOAuthRecovery", () => {
       expect(window.sessionStorage.getItem(OAUTH_RESUME_KEY)).toBeNull();
     });
 
+    it("ends a failed connect-scoped attempt instead of leaving it spinning", async () => {
+      // `connect()` rejecting with an auth-recovery error holds the status at
+      // "connecting"; the redirect was what would have ended that attempt, so
+      // if it never happens nothing else does (#2165).
+      const client = fakeClient({
+        beginInteractiveAuthorization: vi
+          .fn()
+          .mockRejectedValue(new Error("provider state unreadable")),
+      });
+      const h = harness({ servers: [entry("a")], activeServerId: "a", client });
+      await act(async () => {
+        h.api().prepareOAuthRedirect({
+          serverId: "a",
+          authKind: "reauth",
+          authorizationUrl: AUTH_URL,
+          preRedirectContext: "connect",
+        });
+      });
+      await waitFor(() => expect(client.disconnect).toHaveBeenCalled());
+      expect(h.spies.setFailedServerId).toHaveBeenCalledWith("a");
+      await waitFor(() => expect(h.api().reAuthBanner?.serverId).toBe("a"));
+    });
+
+    it("leaves a non-connect attempt's session alone", async () => {
+      const client = fakeClient({
+        beginInteractiveAuthorization: vi
+          .fn()
+          .mockRejectedValue(new Error("provider state unreadable")),
+      });
+      const h = harness({ servers: [entry("a")], activeServerId: "a", client });
+      await act(async () => {
+        h.api().prepareOAuthRedirect({
+          serverId: "a",
+          authKind: "step_up",
+          authorizationUrl: AUTH_URL,
+        });
+      });
+      await waitFor(() => expect(h.api().reAuthBanner?.serverId).toBe("a"));
+      expect(client.disconnect).not.toHaveBeenCalled();
+    });
+
     it("tolerates having no client at all", () => {
       const h = harness({ servers: [entry("a")], client: null });
       act(() =>
@@ -1171,6 +1212,10 @@ describe("useOAuthRecovery", () => {
       await waitFor(() =>
         expect(toastTitles()).toContain("Could not continue authorization"),
       );
+
+      // …and says so, rather than promising a retry it will not make.
+      expect(toastWith("the session it belonged to has ended")).toBeTruthy();
+      expect(toastWith("will try again")).toBeUndefined();
 
       // Nothing was restored, so returning to the tab resumes nothing.
       await act(async () => {
@@ -1868,6 +1913,61 @@ describe("useOAuthRecovery", () => {
         "tool",
         "tools/call failed",
       );
+    });
+
+    it("drops the stored retry when an EMA step-up fails", async () => {
+      // The prompt is already dismissed and a later step-up does not overwrite
+      // the ref, so a retained operation would be re-run by an unrelated
+      // authorization (#2165).
+      const handleAuthChallenge = vi
+        .fn()
+        .mockResolvedValueOnce({ kind: "failed", error: new Error("denied") })
+        .mockResolvedValue({ kind: "satisfied" });
+      const client = fakeClient({ handleAuthChallenge });
+      const h = harness({
+        servers: [entry("a", {}, true)],
+        activeServerId: "a",
+        client,
+      });
+      const retry = vi.fn().mockResolvedValue(undefined);
+      await openStepUp(h, "tool", retry);
+      await act(async () => {
+        await h.api().handleStepUpAuthorize();
+      });
+      expect(retry).not.toHaveBeenCalled();
+
+      // A later, unrelated EMA step-up succeeds — and must not re-run it.
+      await openStepUp(h, "tool");
+      await act(async () => {
+        await h.api().handleStepUpAuthorize();
+      });
+      expect(toastTitles()).toContain("Permissions updated");
+      expect(retry).not.toHaveBeenCalled();
+    });
+
+    it("drops the stored retry when an EMA step-up rejects", async () => {
+      const handleAuthChallenge = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("IdP unreachable"))
+        .mockResolvedValue({ kind: "satisfied" });
+      const client = fakeClient({ handleAuthChallenge });
+      const h = harness({
+        servers: [entry("a", {}, true)],
+        activeServerId: "a",
+        client,
+      });
+      const retry = vi.fn().mockResolvedValue(undefined);
+      await openStepUp(h, "tool", retry);
+      await act(async () => {
+        await h.api().handleStepUpAuthorize();
+      });
+
+      await openStepUp(h, "tool");
+      await act(async () => {
+        await h.api().handleStepUpAuthorize();
+      });
+      expect(toastTitles()).toContain("Permissions updated");
+      expect(retry).not.toHaveBeenCalled();
     });
 
     it("cancels back to the panel that asked", async () => {

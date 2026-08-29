@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   authRecoveryRestoredMessage,
   authRecoveryRetryFailedMessage,
+  authRecoveryAbandonedMessage,
   emaStepUpFailureMessage,
   emaStepUpInProgressMessage,
   emaStepUpSuccessMessage,
@@ -217,6 +218,15 @@ describe("oauthUx resume/restore copy", () => {
     expect(authRecoveryRetryFailedMessage(" token endpoint 500 ")).toBe(
       `${base} (token endpoint 500)`,
     );
+  });
+
+  it("authRecoveryAbandonedMessage promises no retry", () => {
+    const base =
+      "Could not continue the pending authorization, and the session it belonged to has ended. Reconnect to authorize again.";
+    expect(authRecoveryAbandonedMessage()).toBe(base);
+    expect(authRecoveryAbandonedMessage("  ")).toBe(base);
+    expect(authRecoveryAbandonedMessage(" nope ")).toBe(`${base} (nope)`);
+    expect(authRecoveryAbandonedMessage()).not.toContain("try again");
   });
 
   it("oauthResumeAbandonedMessage reauth is retry-agnostic", () => {

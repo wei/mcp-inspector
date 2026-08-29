@@ -56,6 +56,7 @@ import { INSPECTOR_SERVERS_TAB } from "../utils/inspectorTabs";
 import type { PendingReauth } from "../utils/pendingReauth";
 import {
   authRecoveryRestoredMessage,
+  authRecoveryAbandonedMessage,
   authRecoveryRetryFailedMessage,
   isReAuthBannerReason,
   issuerBindingFailureCopy,
@@ -556,8 +557,18 @@ export function useOAuthRecovery({
       // in flight.
       oauthClient
         ?.beginInteractiveAuthorization(authorizationUrl)
-        .catch((err: unknown) => {
+        .catch(async (err: unknown) => {
           clearOwnOAuthResumeSnapshot(snapshotToken);
+          // A connect-scoped redirect is the tail of a `connect()` that
+          // rejected with an `AuthRecoveryRequiredError`, which deliberately
+          // holds the status at `"connecting"` rather than moving it to
+          // `"error"`. The redirect was the thing that would have ended that
+          // attempt, so with it gone nothing else does: the toggle spins and
+          // the active-server lock is held. Tear it down first, exactly as the
+          // sibling arm in `useConnectionLifecycle` does for the same reason.
+          if (preRedirectContext === "connect") {
+            await oauthClient?.disconnect().catch(() => {});
+          }
           setFailedServerId(serverId);
           showReAuthBanner(serverId, err);
         });
@@ -872,17 +883,23 @@ export function useOAuthRecovery({
         // is now. The restore is a functional update so it sees the queued
         // state rather than the render-time value, and yields to whatever is
         // already there — latest wins.
-        if (
+        const stillThisSession =
           sessionRef.current.activeServerId === pending.serverId &&
-          sessionRef.current.inspectorClient === client
-        ) {
+          sessionRef.current.inspectorClient === client;
+        if (stillThisSession) {
           setPendingReauth((prev) => prev ?? pending);
         }
+        const detail = err instanceof Error ? err.message : String(err);
         notifications.show({
           title: "Could not continue authorization",
-          message: authRecoveryRetryFailedMessage(
-            err instanceof Error ? err.message : String(err),
-          ),
+          // The copy has to match what actually happens. When the session is
+          // gone nothing was restored and no retry is coming, so promising one
+          // would leave the user waiting on it. When it survives, something is
+          // pending either way — this attempt's challenge, or the newer one
+          // the functional update yielded to.
+          message: stillThisSession
+            ? authRecoveryRetryFailedMessage(detail)
+            : authRecoveryAbandonedMessage(detail),
           color: "yellow",
           autoClose: 6000,
         });
@@ -1493,6 +1510,13 @@ export function useOAuthRecovery({
           return;
         }
         if (outcome.kind === "failed") {
+          // Terminal: drop the stored retry with it. The prompt is already
+          // dismissed, so nothing will ever consume this operation — and a
+          // *later* step-up does not overwrite the ref, so leaving it would
+          // let that unrelated authorization silently re-run this command
+          // (#2165). The `interactive` arm above deliberately keeps it: that
+          // one is still on its way to a redirect.
+          pendingStepUpRetryRef.current = null;
           const failureMessage = emaStepUpFailureMessage(outcome.error.message);
           notifications.show({
             title: "Organization permissions",
@@ -1507,7 +1531,9 @@ export function useOAuthRecovery({
         // rejection escaping here reaches nobody: the `finally` resets the
         // latch and the prompt is already dismissed, leaving the panel that
         // asked for the permissions never told (#2165). Reported exactly as
-        // the `failed` outcome above is, so the two cannot disagree.
+        // the `failed` outcome above is, so the two cannot disagree — and it
+        // drops the stored retry for the same reason that arm does.
+        pendingStepUpRetryRef.current = null;
         const failureMessage = emaStepUpFailureMessage(
           err instanceof Error ? err.message : String(err),
         );
