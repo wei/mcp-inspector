@@ -1,4 +1,11 @@
-import { useCallback, useMemo, useRef, useSyncExternalStore } from "react";
+import {
+  useCallback,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import type { RefObject } from "react";
 import { notifications } from "@mantine/notifications";
 import type { ElicitResult, Resource } from "@modelcontextprotocol/client";
@@ -88,9 +95,14 @@ export function useMcpApps({
   // hints (`connect-src 'none'`), exactly as before this wiring existed.
   // Walking the whole list to close that would issue the very requests the user
   // opted out of by turning pagination on, so the setting wins.
+  //
+  // Published from a layout effect rather than written during render: the only
+  // reader is the async `sandboxready` handler below, which runs long after the
+  // commit this writes in, so it sees the same listing either way.
   const listedResourcesRef = useRef<Resource[]>([]);
-  // eslint-disable-next-line react-hooks/refs -- pre-existing latest-ref pattern, unmasked when this component dropped below the React Compiler's bail-out (#2161)
-  listedResourcesRef.current = resources;
+  useLayoutEffect(() => {
+    listedResourcesRef.current = resources;
+  }, [resources]);
   // Best-effort by construction: this reads the list as it stands when the app
   // opens, and does not distinguish "no entry for this URI" from "the list
   // hasn't arrived yet". Both yield no hints, which is the same outcome as
@@ -117,9 +129,15 @@ export function useMcpApps({
     [configBaseUrl],
   );
 
+  // `react-hooks/refs` cannot see through `createAppBridgeFactory`, so it warns
+  // that a ref-reading callback handed to it (`getListedResourceMeta`) *may* be
+  // called during render. It is not: the factory only stores its deps, and the
+  // sole call site is inside the async `sandboxready` handler, which runs once
+  // an app frame has mounted and its sandbox has handshaked. Reading the
+  // listing lazily there is the whole point — see `listedResourcesRef` above.
   const sandboxBridgeFactory = useMemo(
     () =>
-      // eslint-disable-next-line react-hooks/refs -- pre-existing latest-ref pattern, unmasked when this component dropped below the React Compiler's bail-out (#2161)
+      // eslint-disable-next-line react-hooks/refs -- justified directly above
       createAppBridgeFactory({
         publishAppDocument: publishDocument,
         getClient: () => inspectorClient?.getAppRendererClient() ?? null,
@@ -150,9 +168,12 @@ export function useMcpApps({
   // handed to every InspectorClient at construction — its `render` is what opts
   // this client into advertising the nested MCP Apps `elicitation` capability,
   // which is why only the web client (the one with a sandbox) claims it.
-  const appElicitationControllerRef = useRef<AppElicitationController>(null);
-  appElicitationControllerRef.current ??= new AppElicitationController();
-  const appElicitationController = appElicitationControllerRef.current;
+  // Held as lazily-initialized state rather than a ref seeded during render:
+  // the instance is never reassigned, so `useState`'s initializer gives the
+  // same create-once semantics without reading a ref while rendering.
+  const [appElicitationController] = useState(
+    () => new AppElicitationController(),
+  );
   // The window onto the controller for the CURRENT client. Closing it when the
   // client is replaced both rejects that connection's queued requests and
   // refuses any it enqueues during its own (asynchronous) teardown — a late
@@ -160,9 +181,7 @@ export function useMcpApps({
   // client, i.e. read and answered through a different server.
   const appElicitationSessionRef = useRef<AppElicitationSession>(null);
   const appElicitations = useSyncExternalStore(
-    // eslint-disable-next-line react-hooks/refs -- pre-existing latest-ref pattern, unmasked when this component dropped below the React Compiler's bail-out (#2161)
     appElicitationController.subscribe,
-    // eslint-disable-next-line react-hooks/refs -- pre-existing latest-ref pattern, unmasked when this component dropped below the React Compiler's bail-out (#2161)
     appElicitationController.getEntries,
   );
 
@@ -171,7 +190,7 @@ export function useMcpApps({
   // an elicitation, so telling those apps otherwise would be a false claim.
   const elicitationBridgeFactory = useMemo(
     () =>
-      // eslint-disable-next-line react-hooks/refs -- pre-existing latest-ref pattern, unmasked when this component dropped below the React Compiler's bail-out (#2161)
+      // eslint-disable-next-line react-hooks/refs -- same dep, same reason as `sandboxBridgeFactory` above
       createAppBridgeFactory({
         advertiseElicitation: true,
         publishAppDocument: publishDocument,

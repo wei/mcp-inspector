@@ -245,18 +245,26 @@ export function useConnectionLifecycle({
   sessionReset,
   seedModernLogLevel,
 }: UseConnectionLifecycleOptions): ConnectionLifecycle {
-  const [connectedServerId, setConnectedServerId] = useState<
-    string | undefined
-  >(undefined);
+  // Track the just-connected server so its card gets the green highlight +
+  // scroll-into-view (#1682). It is a pure function of the two values it reads,
+  // so it is derived rather than mirrored into state by an effect: a state copy
+  // could only ever lag the status it copies by one committed render, which is
+  // a frame of the wrong highlight for no gain.
+  const connectedServerId =
+    connectionStatus === "connected" ? activeServerId : undefined;
 
   // `setupClientForServer` is synchronous and memoized, so a caller that
   // awaited the config would still resume with the `sandboxUrl` captured by the
   // render it STARTED in — undefined, on the very load this matters for. The
-  // ref is written every render, so client construction reads the current value
-  // whichever entry point (connect, deep link, OAuth callback) reached it.
+  // ref carries the latest value instead, so client construction reads the
+  // current one whichever entry point (connect, deep link, OAuth callback)
+  // reached it. Published from a layout effect rather than written during
+  // render: every reader is an event handler or a passive effect, both of which
+  // run after the commit this writes in, so the value they see is unchanged.
   const sandboxUrlRef = useRef<string | undefined>(undefined);
-  // eslint-disable-next-line react-hooks/refs -- pre-existing latest-ref pattern, unmasked when this component dropped below the React Compiler's bail-out (#2161)
-  sandboxUrlRef.current = sandboxUrl;
+  useLayoutEffect(() => {
+    sandboxUrlRef.current = sandboxUrl;
+  }, [sandboxUrl]);
 
   const {
     clearResultPanels,
@@ -270,18 +278,6 @@ export function useConnectionLifecycle({
   const deepLinkEnsureRef = useRef(false);
   const deepLinkUpdateRef = useRef(false);
   const deepLinkConnectRef = useRef(false);
-  // Track the just-connected server so its card gets the green highlight +
-  // scroll-into-view (#1682). Unlike `failedServerId` (which must survive the
-  // `disconnect` event a failed connect fires), "connected" is a stable status,
-  // so a status-driven effect can both set and clear it: set on connect, clear
-  // whenever the session isn't connected (disconnect, a new attempt's
-  // "connecting", or an error).
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- pre-existing status-driven effect, unmasked when this component dropped below the React Compiler's bail-out (#2161)
-    setConnectedServerId(
-      connectionStatus === "connected" ? activeServerId : undefined,
-    );
-  }, [connectionStatus, activeServerId]);
 
   // Disconnect the previous InspectorClient when it's replaced (server
   // switch) or when App unmounts (HMR, tests). Without this the prior
@@ -843,7 +839,13 @@ export function useConnectionLifecycle({
     const alreadyConnected =
       activeServerId === deepLink.serverId && connectionStatus === "connected";
     if (!alreadyConnected) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- pre-existing status-driven effect, unmasked when this component dropped below the React Compiler's bail-out (#2161)
+      // `onToggleConnection` is a connect, not a state sync: it opens a
+      // transport and drives the whole handshake, so the state it sets along
+      // the way is a consequence of that I/O rather than something derivable
+      // from props. An effect is the right tool here, and the one-shot
+      // `deepLinkConnectRef` guard above is what keeps it from re-firing; the
+      // rule sees only that an effect called something that reaches setState.
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- justified directly above
       void onToggleConnection(deepLink.serverId).catch((err) => {
         // The toast fires from inside `onToggleConnection` for the common
         // cases; this catch covers the rest (surfaced on `data-error-message`).
