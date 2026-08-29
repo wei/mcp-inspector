@@ -105,6 +105,9 @@ function fakeSpawn({ chunks = [], code = 0, error = null }) {
   return () => {
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
+    // The prompt is written to stdin rather than passed in argv, so the
+    // stand-in needs one or `runPrompt` throws before the child can close.
+    child.stdin = { end: () => {} };
     queueMicrotask(() => {
       if (error) {
         child.emit("error", error);
@@ -214,4 +217,48 @@ test("a negative case ignores skills that are not this repo's", () => {
   assert.equal(sampleHit("testing", foreign, ours), false);
   // With no repo set, any invocation still fails a negative case.
   assert.equal(sampleHit(null, foreign), false);
+});
+
+test("runPrompt sends the prompt on stdin, never in argv", () => {
+  // On Windows the CLI is a `.cmd` shim and can only start through a shell,
+  // where `cmd.exe` re-parses any metacharacter in an argument as syntax. Off
+  // Windows it also keeps the prompt out of the process table.
+  const prompt = "does it? (yes & no)";
+  let seen;
+  let written = null;
+  runPrompt(prompt, {
+    spawnFn: (command, args, options) => {
+      seen = { command, args, options };
+      const c = new EventEmitter();
+      c.stdout = new EventEmitter();
+      c.stdin = {
+        end: (text) => {
+          written = text;
+        },
+      };
+      queueMicrotask(() => c.emit("close", 0));
+      return c;
+    },
+    platform: "linux",
+  }).catch(() => {});
+  assert.equal(seen.command, "claude");
+  assert.ok(!seen.args.includes(prompt), "prompt must not appear in argv");
+  assert.deepEqual(seen.options.stdio, ["pipe", "pipe", "inherit"]);
+  assert.equal(written, prompt);
+});
+
+test("runPrompt asks for a shell on Windows", () => {
+  let seen;
+  runPrompt("p", {
+    spawnFn: (_c, _a, options) => {
+      seen = options;
+      const c = new EventEmitter();
+      c.stdout = new EventEmitter();
+      c.stdin = { end: () => {} };
+      queueMicrotask(() => c.emit("close", 0));
+      return c;
+    },
+    platform: "win32",
+  }).catch(() => {});
+  assert.equal(seen.shell, true);
 });

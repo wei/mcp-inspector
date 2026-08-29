@@ -22,6 +22,8 @@
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { probeClaudeVersion } from "./lib/claude-cli.mjs";
+import { winShellArgs } from "./lib/win-shell-args.mjs";
 import {
   compareVersions,
   parseClaudeVersion,
@@ -83,32 +85,29 @@ export function validatorCommand({ version }) {
  * propagation of a rejected validator would leave `test:scripts` green while
  * this gate quietly stopped gating (Copilot).
  *
- * @param {{ probe?: () => {error?: Error, status?: number|null, stdout?: string},
+ * @param {{ probe?: () => number[] | null,
  *           spawn?: (cmd: string, args: string[], opts: object) => {error?: Error, status?: number|null},
  *           log?: (msg: string) => void, error?: (msg: string) => void }} [io]
  * @returns {number} Process exit code.
  */
 export function runValidator(io = {}) {
   const {
-    probe = () => spawnSync("claude", ["--version"], { encoding: "utf8" }),
+    probe = () => probeClaudeVersion(parseClaudeVersion),
     spawn = (cmd, args, opts) => spawnSync(cmd, args, opts),
     log = console.log,
     error = console.error,
+    platform = process.platform,
   } = io;
 
-  const probed = probe();
-  const version =
-    probed.error || probed.status !== 0
-      ? null
-      : parseClaudeVersion(probed.stdout ?? "");
+  const version = probe();
 
   const { command, args, via } = validatorCommand({ version });
   log(`verify:skills:cli — validating ${SKILLS_DIR} via ${via}…`);
 
-  const res = spawn(command, args, {
+  const res = spawn(command, winShellArgs(args, platform), {
     cwd: ROOT,
     stdio: "inherit",
-    shell: process.platform === "win32",
+    shell: platform === "win32",
   });
   if (res.error) {
     error(

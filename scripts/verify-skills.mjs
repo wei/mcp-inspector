@@ -30,6 +30,7 @@ import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { claudeSpawnArgs, probeClaudeVersion } from "./lib/claude-cli.mjs";
 import {
   compareVersions,
   parseClaudeVersion,
@@ -146,29 +147,25 @@ function main(argv = process.argv.slice(2)) {
   // never reaching the reproducible step (Copilot). Accepting merely "new enough"
   // would reintroduce exactly the cross-machine schema drift the pin removes.
   // Anything else is left to `verify:skills:cli`, which fetches the pin.
-  const probe = spawnSync("claude", ["--version"], { encoding: "utf8" });
-  if (probe.error || probe.status !== 0) {
+  const version = probeClaudeVersion(parseClaudeVersion);
+  if (version === null) {
     console.log(
       "verify:skills — no usable `claude` CLI here; `verify:skills:cli` runs the pinned validator.",
     );
     return;
   }
-  const version = parseClaudeVersion(probe.stdout ?? "");
-  if (
-    version === null ||
-    compareVersions(version, PINNED_VERSION_PARTS) !== 0
-  ) {
+  if (compareVersions(version, PINNED_VERSION_PARTS) !== 0) {
     console.log(
-      `verify:skills — local \`claude\` is ${version?.join(".") ?? "(unreadable)"}, not the pinned ` +
+      `verify:skills — local \`claude\` is ${version.join(".")}, not the pinned ` +
         `${PINNED_CLI_VERSION}; \`verify:skills:cli\` runs the pinned validator.`,
     );
     return;
   }
-  const res = spawnSync("claude", ["plugin", "validate", ".claude/skills"], {
-    cwd: ROOT,
-    stdio: "inherit",
-  });
-  if (res.status !== 0) {
+  const { command, args, options } = claudeSpawnArgs(
+    ["plugin", "validate", ".claude/skills"],
+    { cwd: ROOT, stdio: "inherit" },
+  );
+  if (spawnSync(command, args, options).status !== 0) {
     console.error("\nverify:skills — `claude plugin validate` failed.");
     process.exit(1);
   }

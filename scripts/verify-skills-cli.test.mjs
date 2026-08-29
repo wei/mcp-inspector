@@ -72,7 +72,7 @@ function harness({ probe, spawnResult }) {
   return { code, spawned, logs, errors };
 }
 
-const okProbe = { status: 0, stdout: `${PINNED_CLI_VERSION} (Claude Code)\n` };
+const okProbe = PINNED_CLI_VERSION.split(".").map(Number);
 
 test("runs the local CLI and succeeds when the validator accepts", () => {
   const r = harness({ probe: okProbe, spawnResult: { status: 0 } });
@@ -83,16 +83,11 @@ test("runs the local CLI and succeeds when the validator accepts", () => {
 });
 
 test("treats an unusable probe as no CLI at all", () => {
-  // A `claude` that fails `--version` cannot be trusted to have the subcommand.
-  for (const probe of [
-    { error: new Error("ENOENT") },
-    { status: 1, stdout: "" },
-    { status: 0, stdout: "not a version" },
-  ]) {
-    const r = harness({ probe, spawnResult: { status: 0 } });
-    assert.equal(r.code, 0);
-    assert.equal(r.spawned[0].command, "npx");
-  }
+  // `probeClaudeVersion` already collapses ENOENT, a nonzero `--version`, and
+  // unparseable output into null — this asserts what runValidator does with it.
+  const r = harness({ probe: null, spawnResult: { status: 0 } });
+  assert.equal(r.code, 0);
+  assert.equal(r.spawned[0].command, "npx");
 });
 
 test("fails when the validator rejects the skills", () => {

@@ -29,11 +29,16 @@
 //   npm run skills:eval -- testing       # one skill's cases
 //   RUNS=5 THRESHOLD=0.8 npm run skills:eval
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseSkill, validateEvalCases } from "./lib/skill-manifest.mjs";
+import { claudeSpawnArgs, probeClaudeVersion } from "./lib/claude-cli.mjs";
+import {
+  parseClaudeVersion,
+  parseSkill,
+  validateEvalCases,
+} from "./lib/skill-manifest.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SKILLS_DIR = path.join(ROOT, ".claude", "skills");
@@ -217,13 +222,20 @@ export function sampleHit(expect, invoked, ours = null) {
  * @param {{ spawnFn?: typeof spawn, cwd?: string }} [opts]
  * @returns {Promise<Set<string>>}
  */
-export function runPrompt(prompt, { spawnFn = spawn, cwd = ROOT } = {}) {
+export function runPrompt(
+  prompt,
+  { spawnFn = spawn, cwd = ROOT, platform = process.platform } = {},
+) {
   return new Promise((resolve, reject) => {
-    const p = spawnFn(
-      "claude",
+    // The prompt goes in on STDIN, not in argv. `claude -p` with piped stdin
+    // reads the prompt from it (verified), and that removes two problems at
+    // once: on Windows the CLI is a `.cmd` shim, so it can only be started
+    // through a shell, and `cmd.exe` would re-parse any prompt containing a
+    // metacharacter as syntax (Copilot). It also keeps the prompt out of the
+    // process table.
+    const { command, args, options } = claudeSpawnArgs(
       [
         "-p",
-        prompt,
         "--output-format",
         "stream-json",
         "--verbose",
@@ -234,8 +246,10 @@ export function runPrompt(prompt, { spawnFn = spawn, cwd = ROOT } = {}) {
         "--disallowedTools",
         "Bash,Write,Edit,NotebookEdit",
       ],
-      { cwd, stdio: ["ignore", "pipe", "inherit"] },
+      { cwd, stdio: ["pipe", "pipe", "inherit"] },
+      platform,
     );
+    const p = spawnFn(command, args, options);
 
     let buf = "";
     const invoked = new Set();
@@ -255,11 +269,9 @@ export function runPrompt(prompt, { spawnFn = spawn, cwd = ROOT } = {}) {
       }
       resolve(invoked);
     });
+    p.stdin?.end(prompt);
   });
 }
-
-const hit = (invoked, skill) =>
-  [...invoked].some((payload) => payload.includes(skill));
 
 async function pool(items, n, fn) {
   const out = new Array(items.length);
@@ -276,9 +288,9 @@ async function pool(items, n, fn) {
 }
 
 async function main() {
-  if (spawnSync("claude", ["--version"], { stdio: "ignore" }).error) {
+  if (probeClaudeVersion(parseClaudeVersion) === null) {
     console.error(
-      "skills:eval — the `claude` CLI is not on PATH. This eval needs it.",
+      "skills:eval — no usable `claude` CLI on PATH. This eval needs one.",
     );
     process.exit(1);
   }
