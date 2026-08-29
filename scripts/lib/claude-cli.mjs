@@ -43,9 +43,15 @@ export function claudeSpawnArgs(
  * `--version` with something unrecognizable cannot be trusted to be the pinned
  * one either, and the callers all treat null as "use the pinned package".
  *
- * @param {(text: string) => number[] | null} parseVersion
+ * Generic in the parser's result: this helper only distinguishes "parsed" from
+ * "did not", so the shape is whatever the caller's parser returns — today
+ * `{ parts, prerelease }` from `parseClaudeVersion`. Hard-coding `number[]`
+ * here made valid callers look type-invalid (Copilot).
+ *
+ * @template T
+ * @param {(text: string) => T | null} parseVersion
  * @param {{ spawn?: typeof spawnSync, platform?: string }} [io]
- * @returns {number[] | null}
+ * @returns {T | null}
  */
 export function probeClaudeVersion(
   parseVersion,

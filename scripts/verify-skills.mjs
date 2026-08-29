@@ -83,7 +83,33 @@ export function runsCommand(script, command) {
 }
 
 /**
+ * Whether a workflow's `on:` includes an event that fires for ordinary changes.
+ *
+ * `on:` takes three shapes — a bare string, a list, or a map of event names.
+ * Note the YAML 1.1 `on` → `true` pitfall does not apply here: the `yaml`
+ * package parses to the 1.2 core schema, where the key stays the string `on`.
+ *
+ * @param {unknown} on
+ */
+function triggersOnPush(on) {
+  const events =
+    typeof on === "string"
+      ? [on]
+      : Array.isArray(on)
+        ? on
+        : on !== null && typeof on === "object"
+          ? Object.keys(on)
+          : [];
+  return events.some((e) => e === "push" || e === "pull_request");
+}
+
+/**
  * Whether the workflow has a step that runs `command` on every push.
+ *
+ * Three things must hold, and the guard has needed each one added in turn:
+ * the WORKFLOW must fire on a push or pull_request (one switched to `on:
+ * release` still contains the step but never runs it on a PR — Copilot), the
+ * JOB must be unconditional, and so must the STEP.
  *
  * Deliberately conservative: a job or step carrying **any** `if:` is skipped.
  * This guard cannot evaluate an Actions expression, and the property being
@@ -102,6 +128,8 @@ export function ciRunsUnconditionally(workflowText, command) {
   } catch {
     return false;
   }
+  if (!triggersOnPush(doc?.on)) return false;
+
   const jobs = doc?.jobs;
   if (jobs === null || typeof jobs !== "object") return false;
 

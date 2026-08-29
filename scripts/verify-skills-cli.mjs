@@ -37,13 +37,14 @@ const SKILLS_DIR = ".claude/skills";
 /**
  * The argv that runs the pinned validator.
  *
- * A local CLI is used only when it matches `PINNED_CLI_VERSION` **exactly**.
- * Accepting anything at or above the floor would defeat the pin: a maintainer on
- * a newer CLI would validate against a different schema than CI's, so the same
- * `local:gate` could disagree across machines — which is the failure a pin
- * exists to prevent (Copilot). Everyone else runs the pinned package.
+ * A local CLI is used only when it matches `PINNED_CLI_VERSION` **exactly** —
+ * same release triple and no prerelease. Accepting anything at or above a floor
+ * would defeat the pin: a maintainer on a different CLI would validate against a
+ * different schema than CI's, so the same `local:gate` could disagree across
+ * machines, which is the failure a pin exists to prevent (Copilot). Everyone
+ * else runs the pinned package.
  *
- * @param {{ version: number[] | null }} local
+ * @param {{ version: { parts: number[], prerelease: string | null } | null }} local
  * @returns {{ command: string, args: string[], via: string }}
  */
 export function validatorCommand({ version }) {
@@ -80,9 +81,10 @@ export function validatorCommand({ version }) {
  * propagation of a rejected validator would leave `test:scripts` green while
  * this gate quietly stopped gating (Copilot).
  *
- * @param {{ probe?: () => number[] | null,
+ * @param {{ probe?: () => { parts: number[], prerelease: string | null } | null,
  *           spawn?: (cmd: string, args: string[], opts: object) => {error?: Error, status?: number|null},
- *           log?: (msg: string) => void, error?: (msg: string) => void }} [io]
+ *           log?: (msg: string) => void, error?: (msg: string) => void,
+ *           platform?: string }} [io]
  * @returns {number} Process exit code.
  */
 export function runValidator(io = {}) {
