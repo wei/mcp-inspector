@@ -31,6 +31,9 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  compareVersions,
+  parseClaudeVersion,
+  PLUGIN_VALIDATE_MIN_VERSION,
   parseSkill,
   validateEvalCases,
   listingCost,
@@ -121,11 +124,27 @@ function main() {
       `(${modelInvoked.join(", ")}); listing ${cost}/${LISTING_BUDGET} chars.`,
   );
 
-  // The authoritative parse, when it is available.
-  const probe = spawnSync("claude", ["--version"], { stdio: "ignore" });
-  if (probe.error) {
+  // The authoritative parse, when it is available — strictly a bonus. An older
+  // CLI does not have `plugin validate` and exits nonzero on it as an unknown
+  // command, which would fail the MANDATORY gate for a contributor whose only
+  // sin is not having upgraded (Copilot). So gate on the version that
+  // introduced it and skip below it, reserving a failure for a validator that
+  // actually rejected the skills.
+  const probe = spawnSync("claude", ["--version"], { encoding: "utf8" });
+  if (probe.error || probe.status !== 0) {
     console.log(
-      "verify:skills — `claude` CLI not on PATH; skipped `claude plugin validate`.",
+      "verify:skills — `claude` CLI not usable here; skipped `claude plugin validate`.",
+    );
+    return;
+  }
+  const version = parseClaudeVersion(probe.stdout ?? "");
+  if (
+    version === null ||
+    compareVersions(version, PLUGIN_VALIDATE_MIN_VERSION) < 0
+  ) {
+    console.log(
+      `verify:skills — \`claude\` ${version?.join(".") ?? "(unreadable version)"} predates ` +
+        `${PLUGIN_VALIDATE_MIN_VERSION.join(".")}; skipped \`claude plugin validate\`.`,
     );
     return;
   }

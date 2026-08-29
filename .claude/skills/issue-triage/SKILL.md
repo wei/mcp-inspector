@@ -219,7 +219,10 @@ for P in 28 11; do gh project item-list $P --owner modelcontextprotocol \
 jq -nr --slurpfile o "$D/i.json" --slurpfile a "$D/b28.json" --slurpfile b "$D/b11.json" --arg R "$R" '
   ($o[0] | map({key:(.number|tostring), value:{st:.state, sr:(.stateReason // ""),
                 lab:[.labels[].name], ms:(.milestone.title // null)}}) | from_entries) as $M
-  | def own($s): [$s[].items[] | select(.content.repository==$R)];
+  | def own($s): [$s[].items[]
+        # A DRAFT card has no `.content.repository`, so filtering on equality
+        # alone drops the very items the "non-Issue" check exists to find.
+        | select((.content.repository // null) == null or .content.repository==$R)];
     def I($n): ($M[($n|tostring)] // null);
     def ms($n): (I($n).ms // null);
     def lab($n): (I($n).lab // []);
@@ -268,6 +271,11 @@ Two things the queries must account for, both learned the hard way:
   one*, so a predicate that only asks "is any version label present" passes an
   issue carrying **both** `v1` and `v2` — which belongs to two lines at once
   and shows up in both filtered queries. Same for the five type labels (Copilot).
+- **Keep drafts inside `own`.** A draft card carries no `.content.repository`,
+  so a plain equality filter removes it before the "non-Issue" check can see it —
+  and that check then reports `0` while the invariant it states (no drafts) is
+  being violated (Copilot). The filter admits an item with no repository and
+  excludes only cards that name a *different* one.
 - **Only open issues have a `$I` entry.** A closed issue still has a card
   (correctly, in `Done`), so a check that treats "no milestone found" as a
   violation must gate on `isopen(.n)` or it flags every closed card.

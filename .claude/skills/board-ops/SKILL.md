@@ -128,9 +128,16 @@ above the board's item count (~265 as of 2026-08-01) — past it `item-list`
 truncates **silently**, `select` matches nothing, and `item-edit --id ""` fails
 with an opaque node-resolution error rather than saying the limit was too low.
 
+⚠️ **Filter by repository, not by number alone.** These are **org** projects and
+issue numbers are **repo-local**, so an unfiltered `select` can match another
+repo's issue that happens to share the number — board #11 really does carry a
+`modelcontextprotocol/servers` card — and then moves or deletes the wrong card,
+or passes two ids at once (Copilot).
+
 ```sh
 ITEM_ID=$(gh project item-list 28 --owner modelcontextprotocol --format json --limit 500 \
-  --jq '.items[] | select(.content.number==<ISSUE_NUMBER>) | .id')
+  --jq '.items[] | select(.content.repository=="modelcontextprotocol/inspector"
+                          and .content.number==<ISSUE_NUMBER>) | .id')
 # e.g. Status → In Review, when its PR opens
 gh project item-edit --project-id PVT_kwDOCt2Azc4BJVxt --id "$ITEM_ID" \
   --field-id PVTSSF_lADOCt2Azc4BJVxtzg5iI8c --single-select-option-id 159c8a02
@@ -144,7 +151,8 @@ not parked in Done:
 
 ```sh
 ITEM_ID=$(gh project item-list 28 --owner modelcontextprotocol --format json --limit 500 \
-  --jq '.items[] | select(.content.number==<ISSUE_NUMBER>) | .id')
+  --jq '.items[] | select(.content.repository=="modelcontextprotocol/inspector"
+                          and .content.number==<ISSUE_NUMBER>) | .id')
 gh project item-delete 28 --owner modelcontextprotocol --id "$ITEM_ID"
 ```
 

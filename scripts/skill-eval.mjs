@@ -100,6 +100,29 @@ export function collectSkillInvocations(text) {
 }
 
 /**
+ * The skill names a `Skill` tool_use payload actually asked for.
+ *
+ * Structural rather than substring: matching `"testing"` against the raw JSON
+ * counts `{"skill":"not-testing"}` as a hit and inflates the measured rate
+ * (Copilot). The field name is still not assumed — every string value in the
+ * payload is a candidate, compared by equality.
+ *
+ * @param {string} payload JSON text as recorded by `collectSkillInvocations`.
+ * @returns {string[]}
+ */
+export function invokedSkillNames(payload) {
+  let parsed;
+  try {
+    parsed = JSON.parse(payload);
+  } catch {
+    return [];
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
+    return [];
+  return Object.values(parsed).filter((v) => typeof v === "string");
+}
+
+/**
  * Whether one sample satisfies a case.
  *
  * @param {string | null} expect Skill name, or null for a negative case.
@@ -107,13 +130,27 @@ export function collectSkillInvocations(text) {
  */
 export function sampleHit(expect, invoked) {
   if (expect === null) return invoked.size === 0;
-  return [...invoked].some((payload) => payload.includes(expect));
+  return [...invoked].some((payload) =>
+    invokedSkillNames(payload).includes(expect),
+  );
 }
 
-/** Returns the payloads the Skill tool was called with in one fresh session. */
-function runOnce(prompt) {
+/**
+ * Drive one fresh session and return the payloads the `Skill` tool was called
+ * with.
+ *
+ * `spawnFn` is injectable so the stream handling and — more importantly — the
+ * exit handling are testable. Without a seam here, changing the nonzero branch
+ * back to resolving an empty set would leave every test green while the eval
+ * silently reported a plausible hit rate for runs that never happened (Copilot).
+ *
+ * @param {string} prompt
+ * @param {{ spawnFn?: typeof spawn, cwd?: string }} [opts]
+ * @returns {Promise<Set<string>>}
+ */
+export function runPrompt(prompt, { spawnFn = spawn, cwd = ROOT } = {}) {
   return new Promise((resolve, reject) => {
-    const p = spawn(
+    const p = spawnFn(
       "claude",
       [
         "-p",
@@ -128,7 +165,7 @@ function runOnce(prompt) {
         "--disallowedTools",
         "Bash,Write,Edit,NotebookEdit",
       ],
-      { cwd: ROOT, stdio: ["ignore", "pipe", "inherit"] },
+      { cwd, stdio: ["ignore", "pipe", "inherit"] },
     );
 
     let buf = "";
@@ -143,7 +180,7 @@ function runOnce(prompt) {
       // A CLI that failed to run observed NOTHING. Resolving it as an empty set
       // would silently pass every negative case and read as a trigger miss on
       // every positive one, so an auth error or a rate limit would come back as
-      // a plausible-looking hit rate (Copilot).
+      // a plausible-looking hit rate.
       if (code !== 0) {
         reject(new Error(`\`claude -p\` exited ${code} for prompt: ${prompt}`));
         return;
@@ -187,7 +224,7 @@ async function main() {
   const jobs = cases.flatMap((c) => Array.from({ length: RUNS }, () => c));
   const results = await pool(jobs, CONCURRENCY, async (c) => ({
     c,
-    invoked: await runOnce(c.prompt),
+    invoked: await runPrompt(c.prompt),
   }));
 
   let failed = 0;

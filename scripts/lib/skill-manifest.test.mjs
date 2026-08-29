@@ -11,6 +11,9 @@ import {
   parseSkill,
   validateEvalCases,
   listingCost,
+  parseClaudeVersion,
+  compareVersions,
+  PLUGIN_VALIDATE_MIN_VERSION,
 } from "./skill-manifest.mjs";
 
 const fm = (body) => `---\n${body}\n---\n\n# Body\n`;
@@ -197,4 +200,22 @@ test("validateEvalCases rejects malformed cases", () => {
     validateEvalCases("x", [{ prompt: "a", expect: 7 }]).join(),
     /expect. must be a skill name or null/,
   );
+});
+
+test("parseClaudeVersion reads the CLI's version banner", () => {
+  assert.deepEqual(parseClaudeVersion("2.1.250 (Claude Code)"), [2, 1, 250]);
+  assert.deepEqual(parseClaudeVersion("claude 10.0.4\n"), [10, 0, 4]);
+  assert.equal(parseClaudeVersion("no version here"), null);
+});
+
+test("compareVersions orders the plugin-validate floor correctly", () => {
+  // An older CLI has no `plugin validate` and exits nonzero on it as an unknown
+  // command; failing the mandatory gate for that would be wrong, so the probe
+  // must skip below the floor rather than run and fail.
+  assert.ok(compareVersions([2, 1, 232], PLUGIN_VALIDATE_MIN_VERSION) < 0);
+  assert.equal(compareVersions([2, 1, 233], PLUGIN_VALIDATE_MIN_VERSION), 0);
+  assert.ok(compareVersions([2, 1, 250], PLUGIN_VALIDATE_MIN_VERSION) > 0);
+  assert.ok(compareVersions([2, 2, 0], PLUGIN_VALIDATE_MIN_VERSION) > 0);
+  assert.ok(compareVersions([3], PLUGIN_VALIDATE_MIN_VERSION) > 0);
+  assert.ok(compareVersions([1, 9, 999], PLUGIN_VALIDATE_MIN_VERSION) < 0);
 });

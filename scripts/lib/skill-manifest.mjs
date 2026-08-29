@@ -206,3 +206,30 @@ export function validateEvalCases(skillName, cases) {
   }
   return errors;
 }
+
+/** First Claude Code release with `claude plugin validate`. */
+export const PLUGIN_VALIDATE_MIN_VERSION = [2, 1, 233];
+
+/**
+ * Read a semver triple out of `claude --version` output ("2.1.250 (Claude Code)").
+ *
+ * @param {string} text
+ * @returns {number[] | null}
+ */
+export function parseClaudeVersion(text) {
+  const m = /(\d+)\.(\d+)\.(\d+)/.exec(text);
+  return m === null ? null : [Number(m[1]), Number(m[2]), Number(m[3])];
+}
+
+/**
+ * @param {number[]} a
+ * @param {number[]} b
+ * @returns {number} negative if a < b, 0 if equal, positive if a > b.
+ */
+export function compareVersions(a, b) {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const diff = (a[i] ?? 0) - (b[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}

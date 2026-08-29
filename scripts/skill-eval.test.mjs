@@ -10,7 +10,13 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { collectSkillInvocations, sampleHit } from "./skill-eval.mjs";
+import { EventEmitter } from "node:events";
+import {
+  collectSkillInvocations,
+  invokedSkillNames,
+  runPrompt,
+  sampleHit,
+} from "./skill-eval.mjs";
 
 const assistant = (...blocks) =>
   JSON.stringify({ type: "assistant", message: { content: blocks } });
@@ -66,4 +72,79 @@ test("sampleHit scores positive and negative cases", () => {
   assert.equal(sampleHit(null, none), true);
   assert.equal(sampleHit(null, fired), false);
   assert.equal(sampleHit("testing", none), false);
+});
+
+test("invokedSkillNames matches structurally, not by substring", () => {
+  // `{"skill":"not-testing"}` contains "testing" and must NOT count — a
+  // substring match inflates the measured hit rate with invocations of a
+  // different skill.
+  assert.deepEqual(invokedSkillNames('{"skill":"not-testing"}'), [
+    "not-testing",
+  ]);
+  assert.equal(
+    sampleHit("testing", new Set(['{"skill":"not-testing"}'])),
+    false,
+  );
+  assert.equal(sampleHit("testing", new Set(['{"skill":"testing"}'])), true);
+  // The field name is not assumed, so any string value is a candidate.
+  assert.equal(
+    sampleHit("testing", new Set(['{"name":"testing","args":""}'])),
+    true,
+  );
+});
+
+test("invokedSkillNames tolerates payloads it cannot read", () => {
+  for (const payload of ["not json", "[1,2]", "null", '"testing"']) {
+    assert.deepEqual(invokedSkillNames(payload), []);
+  }
+});
+
+/** Minimal stand-in for a ChildProcess: emits stdout chunks, then closes. */
+function fakeSpawn({ chunks = [], code = 0, error = null }) {
+  return () => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    queueMicrotask(() => {
+      if (error) {
+        child.emit("error", error);
+        return;
+      }
+      for (const c of chunks) child.stdout.emit("data", Buffer.from(c));
+      child.emit("close", code);
+    });
+    return child;
+  };
+}
+
+test("runPrompt collects invocations across chunk boundaries", async () => {
+  const whole =
+    JSON.stringify({
+      type: "assistant",
+      message: {
+        content: [
+          { type: "tool_use", name: "Skill", input: { skill: "testing" } },
+        ],
+      },
+    }) + "\n";
+  const invoked = await runPrompt("p", {
+    spawnFn: fakeSpawn({ chunks: [whole.slice(0, 30), whole.slice(30)] }),
+  });
+  assert.equal(sampleHit("testing", invoked), true);
+});
+
+test("runPrompt rejects a nonzero exit rather than reporting an empty observation", async () => {
+  // The regression that matters: resolving here would pass every negative case
+  // and read as a trigger miss on every positive one, so a rate-limited run
+  // would report a plausible hit rate.
+  await assert.rejects(
+    runPrompt("p", { spawnFn: fakeSpawn({ code: 1 }) }),
+    /exited 1 for prompt: p/,
+  );
+});
+
+test("runPrompt propagates a spawn error", async () => {
+  await assert.rejects(
+    runPrompt("p", { spawnFn: fakeSpawn({ error: new Error("ENOENT") }) }),
+    /ENOENT/,
+  );
 });

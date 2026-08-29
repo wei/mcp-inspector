@@ -38,8 +38,11 @@ Not `fix/oauth-resource-metadata`. This keeps the two lines legible in
 `git branch -a` and in the PR list once v1 and v2 branches coexist on the same
 remote, and it matches the base branches themselves (`v2/main`, `v1/main`).
 
-**Cut the branch from `v2/main`**, never from a milestone-merge branch — the
-latter carries release-only commits that will show up in your PR's diff.
+**Cut the branch from the base it will target** — `v2/main` for v2 work,
+`v1/main` for v1. The two lines have unrelated histories, so a `v1/fix/…`
+branch cut from `v2/main` arrives at `v1/main` carrying the whole v2 tree
+(Copilot). And never cut from a milestone-merge branch — it carries release-only
+commits that will show up in your PR's diff.
 
 Working in a git worktree is fine and often preferable. ⚠️ **A worktree needs a
 real `npm install`, not a symlinked `node_modules`** — a symlink passes
