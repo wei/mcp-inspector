@@ -301,3 +301,32 @@ test("CRLF does not weaken the first-line rule", () => {
     /never closed/,
   );
 });
+
+test("an eval file may only expect its own skill", () => {
+  // A foreign name passes whenever that OTHER skill fires, so the file reports
+  // a measurement of something it does not describe — and it satisfies the
+  // positive-case requirement while doing it, hiding the absence of a real one.
+  assert.match(
+    validateEvalCases("testing", [
+      { prompt: "a", expect: "local-dev" },
+      { prompt: "b", expect: "testing" },
+      { prompt: "c", expect: null },
+    ]).join(),
+    /expects `local-dev`, but this file only measures `testing`/,
+  );
+  // The masking case: a foreign positive is no longer enough on its own.
+  const masked = validateEvalCases("testing", [
+    { prompt: "a", expect: "local-dev" },
+    { prompt: "b", expect: null },
+  ]);
+  assert.match(masked.join(), /only measures/);
+  assert.match(masked.join(), /no positive case/);
+  // Null and own-name cases are unaffected.
+  assert.deepEqual(
+    validateEvalCases("testing", [
+      { prompt: "a", expect: "testing" },
+      { prompt: "b", expect: null },
+    ]),
+    [],
+  );
+});

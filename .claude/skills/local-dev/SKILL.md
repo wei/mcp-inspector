@@ -81,102 +81,108 @@ build-time alias:
 
 ## Where a dependency goes
 
-Three independent questions. Get them in this order.
+**The rules are in [`AGENTS.md`](../../../AGENTS.md) → Dependency placement, and
+they are not restated here.** Read them there and come back for the *why* — what
+each rule is defending against, what it looked like when it was violated, and how
+to tell you have hit one.
 
-### 1. Which manifest declares it?
+Work the rules in order: which manifest declares it, then `dependencies` vs
+`devDependencies`, then whether the bundlers must also externalise it.
 
-**The MCP SDK packages — `@modelcontextprotocol/client`, `core`, `server`,
-`server-legacy`, `ext-apps` — are declared in the repo-root `package.json` and
-nowhere else.** Node resolution walks up, so the root install already serves
-every client; a per-client declaration installs a *second copy* that drifts. That
-is not theoretical — it put two versions of `ext-apps` and of the transitive v1
-`@modelcontextprotocol/sdk` in the tree at once (#1970), and a second copy of
-`client`/`core` is exactly the failure the `dedupe` + `server.deps.inline`
-workaround in `vitest.shared.mts` exists for.
+### Why the SDK packages are root-only
 
-The same rule covers anything reached only through **root-owned code with no
-manifest of its own** (`test-servers/src`, `core/`): declare it at the root, and
-alias it to the **repo root** in `vitest.shared.mts`. `express` and `yaml` are
-the two today.
+A per-client declaration installs a **second copy** that drifts from the root's.
+Not theoretical: it put two versions of `ext-apps` (1.7.4 / 1.7.5) and of the
+transitive v1 `@modelcontextprotocol/sdk` (1.29.0 / 1.30.0) in the tree at once
+(#1970). A second copy of `client`/`core` is exactly the failure the `dedupe` +
+`server.deps.inline` workaround in `vitest.shared.mts` exists for.
 
-⚠️ The v1 SDK (`@modelcontextprotocol/sdk`) is **not** a dependency of this repo
-and must not become one. It appears in the lock files only as a `"peer": true`
-entry pulled in by `ext-apps`.
+The same reasoning extends to anything reached only through root-owned code that
+has no manifest of its own (`test-servers/src`, `core/`) — hence the repo-root
+alias for those in `vitest.shared.mts`. `express` and `yaml` are the two today.
 
-### 2. `dependencies` or `devDependencies`?
+### Why runtime consumption decides `dependencies`
 
-Follows from who consumes it **at runtime**, not from where it is declared:
+The client builds externalise npm packages, so a published install resolves them
+from the **root** manifest — and devDependencies are not installed for
+consumers. A runtime import parked there therefore **breaks the published
+package while passing every local check**, which is the worst shape a mistake
+can take here.
 
-- A package `core/` imports at runtime → root **`dependencies`**. The client
-  builds externalize npm packages, so a published install resolves them from the
-  root manifest, and devDependencies are not installed for consumers — a runtime
-  import parked there breaks the published package while passing every local
-  check.
-- A package only the tests, the test servers, or the build tooling need →
-  **`devDependencies`** (`express`).
-- `vite` and `@vitejs/plugin-react` are root **`dependencies`** on purpose:
-  `clients/web/server/start-vite-dev-server.ts` imports them at runtime for
-  `--web --dev`, and `tsup.runner.config.ts` externalizes both.
+Two live examples worth knowing:
 
-### 3. Does it also need adding to the bundler `external` lists?
+- `express` is test-only, so it is a devDependency.
+- `vite` and `@vitejs/plugin-react` look like build tooling but are root
+  `dependencies`, because `clients/web/server/start-vite-dev-server.ts` imports
+  them at runtime for `--web --dev`. Moving them would break that for consumers
+  while every local check stayed green.
 
-**Yes, if `core/` imports it at runtime.** tsup and Vite externalize what the
-*client's* `package.json` declares, and a root-only dependency is in none of
-them — so it gets **bundled**, silently. For a CJS package inlined into an ESM
-bundle that is fatal: esbuild leaves a `Dynamic require of "path" is not
-supported` shim that throws at import time.
+### Why a root dependency must also be externalised
 
-The three lists are `clients/cli/tsup.config.ts`,
-`clients/tui/tsup.config.ts`, and `clients/web/tsup.runner.config.ts` — add it
-to **all three**, since which client reaches it is a function of what `core/`
-imports, not of what the client's own code names.
+tsup and Vite externalise what the **client's** `package.json` declares, and a
+root-only dependency is in none of them — so it is **bundled**, silently. For a
+CJS package inlined into an ESM bundle that is fatal: esbuild leaves a
+`Dynamic require of "path" is not supported` shim that throws at *import* time,
+so the binary dies before it parses a flag (`proper-lockfile`, #2082).
 
-**`npm run verify:bundle-externals` enforces this.** It reads the **built
-output**, not the config (the two disagreed for four releases), over the union of
-each client's `external` array and the root manifest's `dependencies`. Note the
-ordinary test tiers cannot catch this class: unit and integration tests run
-against source, and the smokes never take the lazy-`import()` path.
+`undici` (#2067) is the worse variant, because it is `import()`ed lazily: the
+binary boots fine and only the proxied path dies — with esbuild's rewritten
+specifier (`import("./undici-HXPKCIY3.js")`) meaning **no user-side install can
+ever satisfy it**. It was declared in `clients/cli/package.json`, so the CLI
+looked correct while web and TUI silently inlined 1.05 MB of it.
 
-⚠️ Probing it by hand with `node -e` **falsely succeeds** — `node -e` exposes a
-global `require` that satisfies esbuild's guard. Reproduce from a real `.mjs`
+**How to tell.** The ordinary tiers cannot: unit and integration tests run
+against source, where the real package is on the resolution path, and the smokes
+never take the lazy path. `npm run verify:bundle-externals` reads the **built
+output** for exactly this reason — the config and the output disagreed for four
+releases.
+
+⚠️ **Probing by hand with `node -e` falsely succeeds.** `node -e` exposes a
+global `require` that satisfies esbuild's `typeof require !== "undefined"`
+guard, so the chunk looks loadable when it is not. Reproduce from a real `.mjs`
 file.
 
-### The exception: a dependency that renders React must be bundled
+### Why React-rendering packages are the exception
 
-An externalized package resolves its own `react` from wherever npm placed *it*,
-beside a React satisfying **that package's** peer range — looser than ours in
-every case here, which is all it takes to split React. `ink-form` and
-`ink-scroll-view` declare `">=18"`; the bundle renders through one React, those
-packages call hooks on another, and the TUI crashes on the first hook (#1952).
-Both are inlined by `clients/tui/tsup.config.ts` (`noExternal`) and declared
-only in `clients/tui/package.json`.
+An externalised package resolves its own `react` from wherever npm placed
+**it** — beside a React satisfying *that package's* peer range, which is looser
+than ours in every case here. `ink-form` and `ink-scroll-view` declare `">=18"`,
+so a consumer's React 18 satisfies them and hoists them while our React 19 nests
+underneath: the bundle renders through one React, those packages call hooks on
+another, and the TUI crashes on the first hook (#1952).
 
-**`ink` is the single exemption, justified by cost** (~1.4MB), not by safety.
-Never justify an exemption by a peer range. What makes it safe is that the root
-`react` range stays open to the whole major (`^19.0.0`), so npm can dedupe our
-React with a consumer's. `clients/tui/__tests__/tsupConfig.test.ts` enforces all
-of it.
+`ink` is exempt on **cost** (~1.4 MB of `react-reconciler` + `yoga-layout`, plus
+a `createRequire` banner). ⚠️ **Never justify that exemption by a peer range** —
+it briefly read "its `">=19"` peer keeps npm honest", which is false: a consumer
+pinning React 19.0 satisfies `">=19"` while a narrower range of ours nests
+underneath. What makes it safe is the *root `react` range staying open to the
+whole major*, so npm can dedupe. `clients/tui/__tests__/tsupConfig.test.ts`
+enforces the whole split, the exemption included.
 
-### One version per install-crossing dependency
+### Why a version skew is worth aligning rather than working around
 
 Because v2 is not a workspace, the same package can appear **twice in one `tsc`
-program** (a client's own install plus the root's, reached through `core/` or
-`test-servers/src`). At the same version that is harmless; on a skew TypeScript
-must relate two structurally-distinct declarations, which for a recursive-generic
-surface is exponential — a zod `4.3.6`/`4.4.3` skew exhausted the 4GB tsc heap
-(#1896).
+program** — a client's own install plus the root's, reached through `core/` or
+`test-servers/src`. At the same version that is harmless; on a skew TypeScript
+must relate two structurally-distinct declarations, which for a
+recursive-generic surface is exponential. A zod `4.3.6` / `4.4.3` skew exhausted
+the 4 GB tsc heap outright with `TS2589` (#1896).
 
-**Raising the heap hides this class; align the versions instead** — bump it in
-every install that *declares* it (not all four unconditionally; a package absent
-from an install can't skew). `npm run verify:dep-lockstep` is the guard.
+⚠️ **Raising the heap hides the class rather than fixing it.** Align the
+versions; `npm run verify:dep-lockstep` is the guard, and it derives its
+candidate set from what actually enters each `tsc` program, so a package whose
+declarations arrive only through another package's `.d.ts` is still seen.
 
-### Pinning a transitive dependency
+### Why `overrides` beats `npm audit fix`
 
-Reach for an `overrides` entry before `npm audit fix`.
-`clients/{web,cli,tui}/package.json` each override `esbuild` to `^0.28.2`
-because `tsup@8.5.1` declares `^0.27.0` and the advisory has no upward escape
-inside that range — `npm audit fix` "resolves" it by silently *downgrading*.
-Two costs: it puts `tsup` on an esbuild major it does not declare, so `npm run
-build` is the real gate on such a pin; and it is invisible to the audit once
-clean, so **drop it when `tsup` widens its range** rather than carrying it
-forever.
+`tsup@8.5.1` declares `esbuild: ^0.27.0`, and the advisory covers
+`0.27.3 - 0.28.0` with `0.27.7` the last 0.27.x — so there is no *upward* escape
+inside that range, and `npm audit fix` "resolves" it by silently **downgrading**
+to `0.27.2` across three installs (~700 lines of lockfile churn for a low-severity
+dev-only advisory; tried and reverted in #2058). The override forces one deduped
+copy above the range instead.
+
+Two costs: it puts `tsup` on an esbuild **major it does not declare**, so
+`npm run build` — not `npm audit` — is the real gate on such a pin; and it is
+invisible to the audit once clean, so **drop it when `tsup` widens its range**
+rather than carrying it forever.

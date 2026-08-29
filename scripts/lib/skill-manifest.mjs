@@ -221,6 +221,15 @@ export function validateEvalCases(skillName, cases) {
       (c.expect !== null && typeof c.expect !== "string")
     ) {
       errors.push(`case ${i}: \`expect\` must be a skill name or null`);
+    } else if (c.expect !== null && c.expect !== skillName) {
+      // A case living in this skill's evals may only expect THIS skill. A
+      // foreign name passes the eval whenever that other skill fires, so the
+      // file reports a measurement of something it does not describe — and it
+      // still satisfies the positive-case requirement, hiding the absence of a
+      // real one (Copilot).
+      errors.push(
+        `case ${i}: expects \`${c.expect}\`, but this file only measures \`${skillName}\``,
+      );
     }
   });
   const positives = cases.filter((c) => c && c.expect === skillName).length;
