@@ -33,10 +33,16 @@ The bump is part of the milestone's work, so it belongs on the develop branch
 and flows into `main` with everything else.
 
 ```sh
-git checkout -b v2/chore/<ISSUE>-bump-2-3-0 v2/main
+# The branch name carries the version you are bumping TO, so read it first.
+node -p "require('./package.json').version"          # what is on v2/main now
+git checkout -b v2/chore/<ISSUE>-bump-<X-Y-Z> v2/main
 npm version minor --no-git-tag-version   # or major / patch; bump only, no tag
-# PR → v2/main
+node -p "require('./package.json').version"          # confirm, then PR → v2/main
 ```
+
+⚠️ **Never copy a version out of this file.** It would be a version that has
+already shipped by the time you read it, and following it would cut a release
+branch named for the wrong release (Copilot).
 
 ⚠️ **`--no-git-tag-version` is load-bearing.** A bare `npm version` also tags,
 and the tag would land on a `v2/main` commit — but the release must be cut from
@@ -57,9 +63,14 @@ it behind, something went wrong.
 
 ## 3. Tag `origin/main` and draft the Release
 
+Derive the tag from the version that just landed, rather than typing one — a
+hard-coded tag is either already taken (so `git tag` aborts) or, worse, wrong:
+
 ```sh
 git fetch origin main
-git tag 2.3.0 origin/main && git push origin 2.3.0
+VERSION=$(git show origin/main:package.json | node -p "JSON.parse(require('fs').readFileSync(0)).version")
+echo "$VERSION"                                  # sanity-check before tagging
+git tag "$VERSION" origin/main && git push origin "$VERSION"
 # then draft & publish a GitHub Release for that tag → triggers `publish`
 ```
 
@@ -69,8 +80,8 @@ divergent local `main` can quietly produce or replay local commits. Tagging
 `HEAD` there tags a commit that is not on `origin/main`, and `git push origin
 <tag>` pushes only the tag — leaving a release whose commit was never published.
 
-⚠️ **No `v` prefix.** This repo's release tags are bare `x.y.z` — `2.2.0`,
-`2.1.0`, `2.0.0`. npm's own `tag-version-prefix` defaults to `v` and the repo
+⚠️ **No `v` prefix.** This repo's release tags are bare `x.y.z` — which is why
+the command above tags `$VERSION` and not `v$VERSION`. npm's own `tag-version-prefix` defaults to `v` and the repo
 sets no `.npmrc`, so a bare `npm version` would have produced a mismatched tag;
 tagging by hand is what keeps it right. (The workflow's assert step strips a
 leading `v` before comparing, so a `v`-prefixed tag would still publish — it

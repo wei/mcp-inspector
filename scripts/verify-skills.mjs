@@ -31,6 +31,7 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { claudeSpawnArgs, probeClaudeVersion } from "./lib/claude-cli.mjs";
+import { reachableScripts, rootReachesScript } from "./lib/npm-scripts.mjs";
 import {
   compareVersions,
   parseClaudeVersion,
@@ -58,6 +59,41 @@ export function skillDirs(
     .sort();
 }
 
+/**
+ * Assert the two skill gates are still WIRED, not merely present.
+ *
+ * A gate that stops being invoked fails silently and every fixture test stays
+ * green — which is the same failure the sibling guards' vouch cycle exists to
+ * prevent, so this joins it (Copilot). Two distinct links:
+ *
+ *   - `verify:skills` (this file) must be reachable from the root `validate`.
+ *     It cannot detect its own absence, so `verify:format-coverage` vouches for
+ *     it and this vouches back — the established cycle.
+ *   - `verify:skills:cli` must be in `local:gate` AND in the workflow. That is
+ *     the step that actually runs the authoritative validator, and it is
+ *     reachable from neither `validate` nor any test, so nothing else would
+ *     notice it going missing.
+ */
+export function checkWiring(rootScripts, workflowText) {
+  const problems = [];
+  if (!rootReachesScript(rootScripts, "verify:format-coverage")) {
+    problems.push(
+      "the root `validate` no longer runs `verify:format-coverage` (a sibling guard). Restore it.",
+    );
+  }
+  if (!reachableScripts(rootScripts, "local:gate").has("verify:skills:cli")) {
+    problems.push(
+      "`npm run local:gate` no longer runs `verify:skills:cli`, so the authoritative validator never runs locally. Restore it.",
+    );
+  }
+  if (!/npm run verify:skills:cli/.test(workflowText)) {
+    problems.push(
+      "`.github/workflows/main.yml` no longer runs `npm run verify:skills:cli`, so the authoritative validator never runs in CI. Restore it.",
+    );
+  }
+  return problems;
+}
+
 function main(argv = process.argv.slice(2)) {
   // An explicit directory is the seam the fixture tests drive; without it this
   // guard could only ever be exercised against the repo's own (green) skills,
@@ -65,6 +101,20 @@ function main(argv = process.argv.slice(2)) {
   const override = argv[0];
   const SKILLS_DIR = override ? path.resolve(override) : DEFAULT_SKILLS_DIR;
   const failures = [];
+
+  // Only meaningful against the real repo; a fixture run has no wiring.
+  if (!override) {
+    const rootScripts = JSON.parse(
+      readFileSync(path.join(ROOT, "package.json"), "utf8"),
+    ).scripts;
+    const workflow = readFileSync(
+      path.join(ROOT, ".github", "workflows", "main.yml"),
+      "utf8",
+    );
+    for (const problem of checkWiring(rootScripts, workflow)) {
+      failures.push(problem);
+    }
+  }
 
   if (!existsSync(SKILLS_DIR)) {
     console.error(

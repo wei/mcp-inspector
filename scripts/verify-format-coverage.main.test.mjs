@@ -74,24 +74,26 @@ function runWithGuards(guards) {
   }
 }
 
-const BOTH_SIBLINGS = ["verify:typecheck-coverage", "verify:dep-lockstep"];
+const ALL_SIBLINGS = [
+  "verify:typecheck-coverage",
+  "verify:dep-lockstep",
+  "verify:skills",
+];
 
-test("vouch: fails when `verify:dep-lockstep` is dropped from validate", () => {
-  const { status, out } = runWithGuards(["verify:typecheck-coverage"]);
-  assert.equal(status, 1, out);
-  assert.match(out, /no longer runs `verify:dep-lockstep`/);
-});
+for (const dropped of ALL_SIBLINGS) {
+  test(`vouch: fails when \`${dropped}\` is dropped from validate`, () => {
+    const { status, out } = runWithGuards(
+      ALL_SIBLINGS.filter((g) => g !== dropped),
+    );
+    assert.equal(status, 1, out);
+    assert.match(out, new RegExp("no longer runs `" + dropped + "`"));
+  });
+}
 
-test("vouch: fails when `verify:typecheck-coverage` is dropped from validate", () => {
-  const { status, out } = runWithGuards(["verify:dep-lockstep"]);
-  assert.equal(status, 1, out);
-  assert.match(out, /no longer runs `verify:typecheck-coverage`/);
-});
-
-test("vouch: passes when both siblings are still wired", () => {
+test("vouch: passes when every sibling is still wired", () => {
   // The run still fails afterwards — the fixture has no client manifests to
   // harvest globs from — so assert on the *reason*, not the exit status: no
   // sibling may be reported missing.
-  const { out } = runWithGuards(BOTH_SIBLINGS);
+  const { out } = runWithGuards(ALL_SIBLINGS);
   assert.doesNotMatch(out, /no longer runs/);
 });

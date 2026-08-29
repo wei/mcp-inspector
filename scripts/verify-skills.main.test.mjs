@@ -12,10 +12,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { checkWiring } from "./verify-skills.mjs";
 
 const SCRIPT = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -174,4 +183,79 @@ test("reports every offender in one pass rather than dying on the first", () => 
   assert.equal(code, 1);
   assert.match(out, /3 problem\(s\)/);
   rmSync(dir, { recursive: true, force: true });
+});
+
+// --- wiring vouch -----------------------------------------------------------
+//
+// The gates cannot detect being unrun, so they vouch for each other — the same
+// cycle the sibling guards use. `checkWiring` is the pure half of that, driven
+// here with fixture inputs; the other half (`verify:format-coverage` noticing
+// `verify:skills` gone from `validate`) lives in that guard.
+//
+// Three distinct links, each of which would otherwise disappear in silence:
+// `verify:skills` reachable from `validate`, `verify:skills:cli` in
+// `local:gate`, and `verify:skills:cli` in the workflow.
+
+const WIRED_SCRIPTS = {
+  validate: "npm run verify:format-coverage && npm run verify:skills",
+  "verify:format-coverage": "node scripts/verify-format-coverage.mjs",
+  "verify:skills": "node scripts/verify-skills.mjs",
+  "local:gate":
+    "npm run validate && npm run verify:skills:cli && npm run coverage",
+  "verify:skills:cli": "node scripts/verify-skills-cli.mjs",
+};
+const WIRED_WORKFLOW =
+  "jobs:\n  build:\n    steps:\n      - run: npm run verify:skills:cli\n";
+
+test("checkWiring is silent when both gates are wired", () => {
+  assert.deepEqual(checkWiring(WIRED_SCRIPTS, WIRED_WORKFLOW), []);
+});
+
+test("checkWiring catches a sibling guard dropped from validate", () => {
+  const scripts = { ...WIRED_SCRIPTS, validate: "npm run verify:skills" };
+  assert.match(
+    checkWiring(scripts, WIRED_WORKFLOW).join(),
+    /no longer runs `verify:format-coverage`/,
+  );
+});
+
+test("checkWiring catches the authoritative validator dropped from local:gate", () => {
+  const scripts = {
+    ...WIRED_SCRIPTS,
+    "local:gate": "npm run validate && npm run coverage",
+  };
+  assert.match(
+    checkWiring(scripts, WIRED_WORKFLOW).join(),
+    /local:gate` no longer runs `verify:skills:cli`/,
+  );
+});
+
+test("checkWiring catches the authoritative validator dropped from CI", () => {
+  assert.match(
+    checkWiring(
+      WIRED_SCRIPTS,
+      "jobs:\n  build:\n    steps:\n      - run: npm run validate\n",
+    ).join(),
+    /workflows\/main\.yml` no longer runs/,
+  );
+});
+
+test("checkWiring reports every broken link at once", () => {
+  assert.equal(checkWiring({ validate: "", "local:gate": "" }, "").length, 3);
+});
+
+test("the repository as it stands is wired", () => {
+  // The live assertion: fixtures can drift from what the repo actually does.
+  const repoRoot = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+  );
+  const scripts = JSON.parse(
+    readFileSync(path.join(repoRoot, "package.json"), "utf8"),
+  ).scripts;
+  const workflow = readFileSync(
+    path.join(repoRoot, ".github/workflows/main.yml"),
+    "utf8",
+  );
+  assert.deepEqual(checkWiring(scripts, workflow), []);
 });
