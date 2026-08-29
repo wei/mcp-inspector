@@ -893,6 +893,38 @@ describe("useOAuthRecovery", () => {
       expect(client.beginInteractiveAuthorization).not.toHaveBeenCalled();
     });
 
+    it("reports a rejected challenge against the server it arrived for", async () => {
+      // The catch must not re-read the active server: a switch during the
+      // await would otherwise flag the wrong one, or drop the report (#2165).
+      let rejectCheck: ((err: Error) => void) | undefined;
+      const client = fakeClient({
+        checkAuthChallengeSatisfied: vi.fn(
+          () =>
+            new Promise((_resolve, reject) => {
+              rejectCheck = reject;
+            }),
+        ),
+      });
+      const servers = [entry("a"), entry("b")];
+      const h = harness({ servers, activeServerId: "a", client });
+      await act(async () => {
+        client.emit("authChallengeInteractive", {
+          challenge: challenge(),
+          authorizationUrl: AUTH_URL,
+        });
+      });
+      await waitFor(() => expect(rejectCheck).toBeDefined());
+
+      h.rerender({ servers, activeServerId: "b", client });
+      await act(async () => {
+        rejectCheck!(new Error("remote auth state unreachable"));
+      });
+
+      await waitFor(() => expect(h.api().reAuthBanner?.serverId).toBe("a"));
+      expect(h.spies.setFailedServerId).toHaveBeenCalledWith("a");
+      expect(h.spies.setFailedServerId).not.toHaveBeenCalledWith("b");
+    });
+
     it("raises the banner on an oauthError event", async () => {
       const client = fakeClient();
       const h = harness({ servers: [entry("a")], activeServerId: "a", client });
@@ -1063,6 +1095,51 @@ describe("useOAuthRecovery", () => {
       await waitFor(() =>
         expect(client.handleAuthChallenge).toHaveBeenCalledTimes(2),
       );
+    });
+
+    it("does not put a stale challenge back over a newer deferral", async () => {
+      // The tab can go hidden mid-resume and a newer challenge defer itself
+      // into the slot; that one describes the session as it is now, so the
+      // failing attempt must not overwrite it (#2165).
+      let rejectResume: ((err: Error) => void) | undefined;
+      const client = fakeClient({
+        handleAuthChallenge: vi.fn(
+          () =>
+            new Promise((_resolve, reject) => {
+              rejectResume = reject;
+            }),
+        ),
+      });
+      const h = harness({ servers: [entry("a")], activeServerId: "a", client });
+      await defer(client, h);
+
+      await act(async () => {
+        becomeVisible();
+      });
+      await waitFor(() => expect(rejectResume).toBeDefined());
+
+      // A newer challenge arrives while the resume is still in flight.
+      visibility.visible = false;
+      await act(async () => {
+        client.emit("authChallengeInteractive", {
+          challenge: challenge("insufficient_scope"),
+          authorizationUrl: AUTH_URL,
+        });
+      });
+
+      await act(async () => {
+        rejectResume!(new Error("token endpoint unreachable"));
+      });
+      await waitFor(() =>
+        expect(toastTitles()).toContain("Could not continue authorization"),
+      );
+
+      // The newer (step-up) challenge is what the next trigger acts on.
+      await act(async () => {
+        becomeVisible();
+      });
+      await waitFor(() => expect(h.api().pendingStepUp).not.toBeNull());
+      expect(client.handleAuthChallenge).toHaveBeenCalledTimes(1);
     });
 
     it("does not resume while disconnected, and resumes on the reconnect", async () => {

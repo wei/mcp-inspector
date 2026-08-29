@@ -539,8 +539,10 @@ export function useOAuthRecovery({
         ...(authKind === "step_up" && authChallenge && { authChallenge }),
         ...(recoverySource && { recoverySource }),
       });
-      // The navigation is what this whole callback exists to reach, so a
-      // rejection here means the flow failed before it started (#2165). Two
+      // The navigation is what this whole callback exists to reach, and
+      // `beginInteractiveAuthorization` resolves it *last* — every await it
+      // can reject on runs before the browser is handed over — so a rejection
+      // here means the flow failed before it started (#2165). Two
       // things then have to happen, and neither is optional: the snapshot
       // written a moment ago has to go — the next page load would otherwise
       // read it as an *abandoned* redirect and offer that diagnosis, which is
@@ -848,7 +850,15 @@ export function useOAuthRecovery({
         // reconnect from starting the same authorization twice — not because
         // the recovery was delivered. It still is owed, so restore it and let
         // the next trigger retry rather than losing it silently (#2165).
-        setPendingReauth(pending);
+        //
+        // Only into an empty slot, though: the tab can go hidden during the
+        // awaits above and a *newer* challenge defer itself into it, and that
+        // one describes the session as it is now. Latest wins — putting this
+        // attempt's stale challenge back over it would retry authorization
+        // data the server has already superseded.
+        if (sessionRef.current.pendingReauth === null) {
+          setPendingReauth(pending);
+        }
         notifications.show({
           title: "Could not continue authorization",
           message: authRecoveryRetryFailedMessage(
@@ -879,12 +889,17 @@ export function useOAuthRecovery({
     const onAuthChallengeInteractive = (
       event: TypedEvent<"authChallengeInteractive">,
     ): void => {
+      // Read at event time, not inside the async body: this is the server the
+      // challenge arrived for, and both the body and the catch below have to
+      // mean *that* one. Re-reading it after an await would let a server
+      // switch (or a session that cleared it) either report against a server
+      // this challenge has nothing to do with, or drop the report entirely.
+      const serverId = sessionRef.current.activeServerId;
+      if (!serverId) {
+        return;
+      }
       void (async () => {
         const { challenge, authorizationUrl } = event.detail;
-        const serverId = sessionRef.current.activeServerId;
-        if (!serverId) {
-          return;
-        }
         const server = sessionRef.current.servers.find(
           (s) => s.id === serverId,
         );
@@ -922,10 +937,6 @@ export function useOAuthRecovery({
         // UI response at all — the stored-recovery check or the remote-state
         // push rejected, and the user is left on a session whose
         // authorization has lapsed with nothing on screen saying so.
-        const serverId = sessionRef.current.activeServerId;
-        if (!serverId) {
-          return;
-        }
         setFailedServerId(serverId);
         showReAuthBanner(serverId, err);
       });
