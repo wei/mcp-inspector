@@ -48,14 +48,27 @@ const RUNS = Number(process.env.RUNS ?? 3);
 const CONCURRENCY = Number(process.env.CONCURRENCY ?? 4);
 
 /** Collect the committed cases for every model-invoked skill (optionally one). */
-function collectCases(only) {
+/**
+ * Collect the committed cases, and the set of skill names that are OURS.
+ *
+ * `only` narrows which cases run, but it must NOT narrow `ours`: a negative
+ * case means "no skill of this repo fired", so excluding the repo's other
+ * model-invoked skills from that set would let `skills:eval -- testing` score a
+ * `local-dev` invocation as foreign and pass a negative case it should fail
+ * (Copilot). Every model-invoked skill is inspected; `only` is applied when
+ * enqueueing.
+ *
+ * @param {string | undefined} only
+ * @param {string} [skillsDir]
+ * @returns {{ cases: object[], ours: Set<string> }}
+ */
+export function collectCases(only, skillsDir = SKILLS_DIR) {
   const cases = [];
   const ours = new Set();
-  for (const dir of readdirSync(SKILLS_DIR).sort()) {
-    if (only && dir !== only) continue;
-    const skillFile = path.join(SKILLS_DIR, dir, "SKILL.md");
+  for (const dir of readdirSync(skillsDir).sort()) {
+    const skillFile = path.join(skillsDir, dir, "SKILL.md");
     if (
-      !statSync(path.join(SKILLS_DIR, dir)).isDirectory() ||
+      !statSync(path.join(skillsDir, dir)).isDirectory() ||
       !existsSync(skillFile)
     )
       continue;
@@ -71,7 +84,8 @@ function collectCases(only) {
     }
     if (!skill.modelInvoked) continue;
     ours.add(dir);
-    const evalsFile = path.join(SKILLS_DIR, dir, "evals", "evals.json");
+
+    const evalsFile = path.join(skillsDir, dir, "evals", "evals.json");
     if (!existsSync(evalsFile)) {
       throw new Error(
         `${dir} is model-invoked but has no evals/evals.json. Run \`npm run verify:skills\`.`,
@@ -89,6 +103,7 @@ function collectCases(only) {
     if (invalid.length > 0) {
       throw new Error(`${dir}/evals/evals.json: ${invalid.join("; ")}`);
     }
+    if (only && dir !== only) continue;
     for (const c of parsed) cases.push({ ...c, from: dir });
   }
   return { cases, ours };

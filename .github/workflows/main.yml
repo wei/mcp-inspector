@@ -38,8 +38,9 @@ jobs:
         run: npm install
 
       - name: Validate (coverage guards, format, lint, typecheck, build, fast tests)
-        # Runs the two coverage guards first (verify:format-coverage +
-        # verify:typecheck-coverage), then validate:core, then each client's
+        # Runs the four durable guards first (verify:format-coverage,
+        # verify:skills, verify:typecheck-coverage, verify:dep-lockstep), then
+        # test:scripts, then validate:core, then each client's
         # self-validation: format:check + lint + typecheck + build + test (no
         # coverage instrumentation — fast). This also builds every client bundle
         # (web dist, cli/tui/launcher) that the smokes below need. The heavier

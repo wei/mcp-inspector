@@ -11,7 +11,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import {
+  collectCases,
   collectSkillInvocations,
   runRejection,
   invokedSkillNames,
@@ -261,4 +265,79 @@ test("runPrompt asks for a shell on Windows", () => {
     platform: "win32",
   }).catch(() => {});
   assert.equal(seen.shell, true);
+});
+
+/** A skills directory with two model-invoked skills and one name-only skill. */
+function skillsFixture() {
+  const root = mkdtempSync(path.join(tmpdir(), "skill-eval-"));
+  const write = (name, frontmatter, evals) => {
+    const dir = path.join(root, name);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      path.join(dir, "SKILL.md"),
+      `---\nname: ${name}\ndescription: d\n${frontmatter}---\n\nBody\n`,
+    );
+    if (evals) {
+      mkdirSync(path.join(dir, "evals"), { recursive: true });
+      writeFileSync(
+        path.join(dir, "evals", "evals.json"),
+        JSON.stringify(evals),
+      );
+    }
+  };
+  write("alpha", "disable-model-invocation: false\n", [
+    { prompt: "a+", expect: "alpha" },
+    { prompt: "a-", expect: null },
+  ]);
+  write("beta", "disable-model-invocation: false\n", [
+    { prompt: "b+", expect: "beta" },
+    { prompt: "b-", expect: null },
+  ]);
+  write("gamma", "disable-model-invocation: true\n");
+  return root;
+}
+
+test("focused mode narrows the cases but not the repo's own skill set", () => {
+  // `ours` decides what a NEGATIVE case counts as a false trigger. Narrowing it
+  // with `only` would let `skills:eval -- alpha` score a `beta` invocation as
+  // somebody else's skill and pass a negative case it should fail.
+  const root = skillsFixture();
+
+  const all = collectCases(undefined, root);
+  assert.deepEqual([...all.ours].sort(), ["alpha", "beta"]);
+  assert.equal(all.cases.length, 4);
+
+  const focused = collectCases("alpha", root);
+  assert.deepEqual([...focused.ours].sort(), ["alpha", "beta"]);
+  assert.deepEqual(
+    focused.cases.map((c) => c.prompt),
+    ["a+", "a-"],
+  );
+  // The consequence, stated as the assertion that matters:
+  assert.equal(
+    sampleHit(null, new Set(['{"skill":"beta"}']), focused.ours),
+    false,
+  );
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("a name-only skill is not part of the repo's model-invoked set", () => {
+  const root = skillsFixture();
+  const { ours } = collectCases(undefined, root);
+  assert.equal(ours.has("gamma"), false);
+  // So its firing does not fail a negative case — it cannot fire on its own.
+  assert.equal(sampleHit(null, new Set(['{"skill":"gamma"}']), ours), true);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("collection fails loudly rather than silently shrinking the set", () => {
+  const root = skillsFixture();
+  // A model-invoked skill whose evals vanished.
+  rmSync(path.join(root, "beta", "evals"), { recursive: true, force: true });
+  assert.throws(
+    () => collectCases(undefined, root),
+    /beta is model-invoked but has no/,
+  );
+  rmSync(root, { recursive: true, force: true });
 });
