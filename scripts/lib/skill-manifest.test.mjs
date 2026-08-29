@@ -254,3 +254,50 @@ test("listingCost counts when_to_use too", () => {
     7,
   );
 });
+
+test("a CRLF manifest is valid — the fence is still the first line", () => {
+  // A Windows checkout with `core.autocrlf` produces these. Rejecting one would
+  // fail `npm run validate` on a manifest the authoritative validator accepts,
+  // and would fail it *before* that validator ever ran.
+  const crlf =
+    "---\r\nname: x\r\ndescription: d\r\ndisable-model-invocation: true\r\n---\r\n\r\nBody\r\n";
+  assert.equal(
+    splitFrontmatter(crlf).frontmatter,
+    "name: x\r\ndescription: d\r\ndisable-model-invocation: true",
+  );
+  assert.deepEqual(parseSkill("x", crlf).errors, []);
+
+  // Mixed endings are still fine, and so is a CRLF file with no trailing body.
+  assert.deepEqual(
+    parseSkill(
+      "x",
+      "---\r\nname: x\ndescription: d\r\ndisable-model-invocation: true\n---\r\n",
+    ).errors,
+    [],
+  );
+  assert.deepEqual(
+    parseSkill(
+      "x",
+      "---\r\nname: x\r\ndescription: d\r\ndisable-model-invocation: true\r\n---",
+    ).errors,
+    [],
+  );
+});
+
+test("CRLF does not weaken the first-line rule", () => {
+  // The point of the opening check is that anything before the fence turns the
+  // whole file into body — accepting CRLF must not start accepting those.
+  for (const text of [
+    "\r\n---\r\nname: x\r\n---\r\n",
+    "﻿---\r\nname: x\r\n---\r\n",
+    "# Title\r\n---\r\nname: x\r\n---\r\n",
+    "--- \r\nname: x\r\n---\r\n".replace("--- ", "---x"),
+  ]) {
+    assert.match(splitFrontmatter(text).error ?? "", /first line|never closed/);
+  }
+  // And `---oops` is still not a terminator with CRLF endings either.
+  assert.match(
+    splitFrontmatter("---\r\nname: x\r\n---oops\r\nbody\r\n").error ?? "",
+    /never closed/,
+  );
+});

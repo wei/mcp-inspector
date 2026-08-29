@@ -46,17 +46,23 @@ const FRONTMATTER_FENCE = "---";
 export function splitFrontmatter(text) {
   // A BOM or a leading blank line means the fence is not the first line, and
   // Claude Code then treats the WHOLE file — `---` markers included — as body.
-  if (!text.startsWith(FRONTMATTER_FENCE + "\n")) {
+  //
+  // CRLF is accepted on both fences. A Windows checkout with `core.autocrlf`
+  // has `---\r\n` and the fence is still the first line, so rejecting it would
+  // fail `npm run validate` on a valid manifest — before the authoritative
+  // validator, which accepts platform line endings, ever ran (Copilot).
+  const open = /^---[ \t]*\r?\n/.exec(text);
+  if (open === null) {
     return {
       error:
         "frontmatter must open with `---` on the very first line (no BOM, no leading blank line)",
     };
   }
-  const rest = text.slice(FRONTMATTER_FENCE.length + 1);
+  const rest = text.slice(open[0].length);
   // The closing fence must occupy the WHOLE line. Matching a mere prefix would
   // accept `---oops` as a terminator, silently truncating the frontmatter to
   // whatever preceded it — the very failure this function exists to catch.
-  const close = /\n---[ \t]*(\r?\n|$)/.exec(rest);
+  const close = /\r?\n---[ \t]*(\r?\n|$)/.exec(rest);
   if (close === null)
     return { error: "frontmatter is never closed by a `---` line" };
   return {
