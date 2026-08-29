@@ -29,8 +29,11 @@ need: the root `postinstall` (`scripts/install-clients.mjs`) cascades
   the root to re-sync every client.
 
 The cascade is dev-only — it exits early when the package is installed under
-`node_modules`, and the published tarball ships only each client's `build/`. Set
-`INSPECTOR_SKIP_CLIENT_INSTALL=1` to skip it.
+`node_modules`, and a consumer never needs it because the tarball ships
+**prebuilt** artifacts (each client's `build/`, plus `clients/web/dist` and
+`clients/web/static`) rather than sources to compile. Set
+`INSPECTOR_SKIP_CLIENT_INSTALL=1` to skip it. The `files` allowlist itself is
+[`docs/publishing.md`](../../../docs/publishing.md).
 
 ⚠️ **In a git worktree, do a real `npm install`.** A symlinked `node_modules`
 passes lint, tests and coverage, then fails every Storybook story file on Vite's
@@ -70,8 +73,11 @@ build-time alias:
 - **CLI / TUI** — `esbuildOptions.alias` in `tsup.config.ts` maps
   `@inspector/core` → the repo `core/` directory, with
   `noExternal: [/^@inspector\/core/]` inlining it.
-- **Web** — the same alias in `clients/web/vite.config.ts`, for both the browser
-  app and the Node backend runner.
+- **Web** — **two** configs, because the client is two builds:
+  `clients/web/vite.config.ts` for the browser app, and
+  `clients/web/tsup.runner.config.ts` for the Node backend runner, which
+  defines the alias itself. Dependency or debugging work on the runner belongs
+  in the tsup config, not the Vite one (Copilot).
 
 ## Where a dependency goes
 

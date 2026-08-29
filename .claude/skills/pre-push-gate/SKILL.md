@@ -23,7 +23,7 @@ npm run format      # auto-fix: core/, scripts/, the shared surface, every clien
 npm run local:gate  # several minutes
 ```
 
-`local:gate` is `validate` → `coverage` → `verify:build-gate` →
+`local:gate` is `validate` → `verify:skills:cli` → `coverage` → `verify:build-gate` →
 `verify:bundle-externals` → `smoke` → `smoke:web:firefox` → `local:storybook`.
 
 It is a **strict superset** of GitHub CI (which additionally runs `npm install`,
@@ -61,6 +61,13 @@ Something isn't formatted, or a tracked source file is covered by no
 A tracked `.ts`/`.tsx`/`.mts`/`.cts` lands in no tsconfig project. Usually a new
 top-level file in a client whose build config roots at `./src`; add it to that
 client's `tsconfig.test.json` (or the src config's `include`).
+
+### `verify:skills` / `verify:skills:cli`
+
+A `.claude/skills` manifest does not parse, declares no invocation mode, or a
+model-invoked skill is missing its eval cases. `verify:skills:cli` is the
+authoritative validator and fetches a pinned CLI over the network if you have
+none installed — so it is also the one stage that will fail offline.
 
 ### `verify:dep-lockstep`
 

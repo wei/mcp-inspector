@@ -197,3 +197,21 @@ test("runPrompt propagates a spawn error", async () => {
     /ENOENT/,
   );
 });
+
+test("a negative case ignores skills that are not this repo's", () => {
+  // A contributor's own `~/.claude/skills` entry, or a bundled skill, firing on
+  // a negative prompt says nothing about these skills — failing on it would be
+  // a false failure about someone else's environment.
+  const ours = new Set(["testing", "local-dev"]);
+  const foreign = new Set(['{"skill":"my-personal-notes"}']);
+  const mine = new Set(['{"skill":"testing"}']);
+
+  assert.equal(sampleHit(null, foreign, ours), true);
+  assert.equal(sampleHit(null, mine, ours), false);
+  assert.equal(sampleHit(null, new Set(), ours), true);
+  // A positive case is unaffected: it names the skill it wants.
+  assert.equal(sampleHit("testing", mine, ours), true);
+  assert.equal(sampleHit("testing", foreign, ours), false);
+  // With no repo set, any invocation still fails a negative case.
+  assert.equal(sampleHit(null, foreign), false);
+});

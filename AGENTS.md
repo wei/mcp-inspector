@@ -152,9 +152,13 @@ that from happening:
    runs `claude plugin validate` — the authoritative schema — when that CLI is on
    PATH **and new enough to have the subcommand** (2.1.233+; below that it exits
    nonzero as an unknown command, which must not fail the gate for someone who
-   simply has not upgraded). Because the guard skips it when absent, CI installs
-   a pinned CLI and runs it as its own step, so "authoritative validation runs in
-   CI" is true rather than aspirational.
+   simply has not upgraded).
+   That best-effort hand-off keeps `validate` fast and offline, but it also
+   means it usually does not run — so the authoritative check gets a **guaranteed
+   step of its own**, `npm run verify:skills:cli`, in `local:gate` and in CI.
+   It resolves the CLI rather than hoping for one: an installed CLI when it is
+   new enough, otherwise a **pinned** one via `npx -y`. Both tiers run the same
+   script, so they cannot drift.
    ⚠️ Frontmatter is only read when the opening `---` is the file's **first
    line** — no BOM, no leading blank line.
 2. **Every skill declares its invocation mode explicitly.**

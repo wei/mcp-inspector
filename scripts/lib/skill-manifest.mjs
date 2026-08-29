@@ -13,7 +13,11 @@
 
 import { parse as parseYaml } from "yaml";
 
-/** Combined per-entry cap Claude Code applies to a skill listing entry. */
+/**
+ * Per-entry cap Claude Code applies to a skill listing entry. It covers
+ * `description` **and** `when_to_use` together, so checking `description` alone
+ * would pass an over-cap entry (Copilot).
+ */
 export const DESCRIPTION_CAP = 1536;
 
 /**
@@ -101,9 +105,18 @@ export function parseSkill(dirName, text) {
   const description = meta.description;
   if (typeof description !== "string" || description.trim().length === 0) {
     errors.push("`description` is required and must be a non-empty string");
-  } else if (description.length > DESCRIPTION_CAP) {
+  }
+
+  const whenToUse = meta["when_to_use"];
+  if ("when_to_use" in meta && typeof whenToUse !== "string") {
+    errors.push("`when_to_use` must be a string");
+  }
+  const entryLength =
+    (typeof description === "string" ? description.length : 0) +
+    (typeof whenToUse === "string" ? whenToUse.length : 0);
+  if (entryLength > DESCRIPTION_CAP) {
     errors.push(
-      `\`description\` is ${description.length} chars; Claude Code caps a listing entry at ${DESCRIPTION_CAP}`,
+      `\`description\` + \`when_to_use\` is ${entryLength} chars; Claude Code caps a listing entry at ${DESCRIPTION_CAP}`,
     );
   }
 
@@ -141,6 +154,7 @@ export function parseSkill(dirName, text) {
   return {
     name: typeof name === "string" ? name : undefined,
     description: typeof description === "string" ? description : undefined,
+    whenToUse: typeof whenToUse === "string" ? whenToUse : undefined,
     modelInvoked,
     userInvocable: meta["user-invocable"] !== false,
     paths: Array.isArray(meta.paths) ? meta.paths : undefined,
@@ -152,13 +166,22 @@ export function parseSkill(dirName, text) {
  * Cost of the skill listing Claude Code loads into context, counting only the
  * skills that appear in it.
  *
- * @param {Array<{ name?: string, description?: string, modelInvoked?: boolean }>} skills
+ * The number is this repo's CONTRIBUTION to the listing, not the whole listing:
+ * bundled skills and a contributor's own `~/.claude/skills` share the same
+ * budget, and none of those is visible from here (Copilot). Keeping the repo's
+ * share well under the cap is what leaves room for them.
+ *
+ * @param {Array<{ name?: string, description?: string, whenToUse?: string, modelInvoked?: boolean }>} skills
  */
 export function listingCost(skills) {
   return skills
     .filter((s) => s.modelInvoked)
     .reduce(
-      (n, s) => n + (s.name?.length ?? 0) + (s.description?.length ?? 0),
+      (n, s) =>
+        n +
+        (s.name?.length ?? 0) +
+        (s.description?.length ?? 0) +
+        (s.whenToUse?.length ?? 0),
       0,
     );
 }
@@ -206,6 +229,13 @@ export function validateEvalCases(skillName, cases) {
   }
   return errors;
 }
+
+/**
+ * Claude Code version the authoritative validator is pinned to when it has to
+ * be fetched. Pinned rather than @latest: a validator that moves on its own can
+ * start failing a PR that changed nothing.
+ */
+export const PINNED_CLI_VERSION = "2.1.250";
 
 /** First Claude Code release with `claude plugin validate`. */
 export const PLUGIN_VALIDATE_MIN_VERSION = [2, 1, 233];

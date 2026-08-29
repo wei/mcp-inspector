@@ -9,7 +9,7 @@
 `core/` intentionally has **no `package.json`** — it is not published on its own. Each client bundles it in via a `@inspector/core` alias:
 
 - **CLI / TUI:** `esbuildOptions.alias` in their `tsup.config.ts` maps `@inspector/core` → the repo `core/` directory, and `noExternal: [/^@inspector\/core/]` inlines it into the bundle.
-- **Web:** the same alias in `clients/web/vite.config.ts` for the browser app and the Node backend runner.
+- **Web:** two configs, because the client is two builds — `clients/web/vite.config.ts` for the browser app, and `clients/web/tsup.runner.config.ts` for the Node backend runner, which defines the alias itself.
 
 Publishing `core/` as its own package (e.g. for third parties to build on) is deliberately deferred — see issue [#1636](https://github.com/modelcontextprotocol/inspector/issues/1636).
 

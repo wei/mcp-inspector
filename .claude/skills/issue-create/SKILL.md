@@ -6,16 +6,22 @@ disable-model-invocation: true
 
 # Creating an issue
 
-An issue **you** create is not "created" until all five of these are true. A
-label is a repo tag, the milestone is a release bucket, and the board is a
-separate org project — `--label v2` does **not** add a board card, and adding a
-card does **not** set a Status or a Priority.
+An issue **you** create is not "created" until every step below that applies to
+its version is done. A label is a repo tag, the milestone is a release bucket,
+and the board is a separate org project — `--label v2` does **not** add a board
+card, and adding a card does **not** set a Status or a Priority.
 
-1. **Version label** — exactly one of `v1` / `v2`
-2. **Type label** — exactly one of `bug` / `enhancement` / `documentation` / `chore` / `question`
-3. **Milestone**
-4. **A card on the board for that version** — `v2` → #28, `v1` → #11
-5. **Status _and_ Priority set on that card** (Priority is v2-only)
+| # | Step | v2 | v1 |
+| --- | --- | --- | --- |
+| 1 | **Version label** — exactly one of `v1` / `v2` | ✅ | ✅ |
+| 2 | **Type label** — exactly one of `bug` / `enhancement` / `documentation` / `chore` / `question` | ✅ | ✅ |
+| 3 | **Milestone** | ✅ | ❌ — every milestone is a v2 release bucket, so there is none to take |
+| 4 | **A card on the board for that version** — `v2` → #28, `v1` → #11 | ✅ | ✅ |
+| 5 | **Status** on that card | ✅ | ✅ |
+| 6 | **Priority** on that card | ✅ | ❌ — board #11 has no such field |
+
+The two ❌ rows are not oversights to fix later: the field does not exist for
+that line, and `AGENTS.md` states both exceptions (Copilot).
 
 Set the labels and milestone at **create time**, never by backfilling: an
 unlabeled issue belongs to no version line and appears in no version-filtered

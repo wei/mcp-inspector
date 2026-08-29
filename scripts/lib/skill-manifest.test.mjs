@@ -219,3 +219,36 @@ test("compareVersions orders the plugin-validate floor correctly", () => {
   assert.ok(compareVersions([3], PLUGIN_VALIDATE_MIN_VERSION) > 0);
   assert.ok(compareVersions([1, 9, 999], PLUGIN_VALIDATE_MIN_VERSION) < 0);
 });
+
+test("the listing-entry cap covers description AND when_to_use together", () => {
+  // The cap is over the combined entry, so checking `description` alone would
+  // pass an over-cap listing entry.
+  const under = fm(
+    `name: x\ndescription: ${"a".repeat(1000)}\nwhen_to_use: ${"b".repeat(536)}\ndisable-model-invocation: true`,
+  );
+  assert.deepEqual(parseSkill("x", under).errors, []);
+
+  const over = fm(
+    `name: x\ndescription: ${"a".repeat(1000)}\nwhen_to_use: ${"b".repeat(537)}\ndisable-model-invocation: true`,
+  );
+  assert.match(parseSkill("x", over).errors.join(), /caps a listing entry/);
+
+  assert.match(
+    parseSkill(
+      "x",
+      fm(
+        "name: x\ndescription: d\nwhen_to_use: 7\ndisable-model-invocation: true",
+      ),
+    ).errors.join(),
+    /when_to_use. must be a string/,
+  );
+});
+
+test("listingCost counts when_to_use too", () => {
+  assert.equal(
+    listingCost([
+      { name: "aa", description: "bbb", whenToUse: "cc", modelInvoked: true },
+    ]),
+    7,
+  );
+});

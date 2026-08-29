@@ -111,8 +111,11 @@ function main(argv = process.argv.slice(2)) {
   const cost = listingCost(parsed);
   if (cost > LISTING_BUDGET) {
     failures.push(
-      `the skill listing costs ${cost} chars, over the recorded budget of ${LISTING_BUDGET}. ` +
-        "Tighten a description, or raise the budget deliberately in scripts/lib/skill-manifest.mjs.",
+      `this repo contributes ${cost} chars to the skill listing, over its recorded ` +
+        `budget of ${LISTING_BUDGET}. Tighten a description, or raise the budget ` +
+        "deliberately in scripts/lib/skill-manifest.mjs — but note the real listing " +
+        "budget is SHARED with bundled skills and the contributor's own " +
+        "~/.claude/skills, none of which is visible from here.",
     );
   }
 
@@ -126,7 +129,7 @@ function main(argv = process.argv.slice(2)) {
   const modelInvoked = parsed.filter((s) => s.modelInvoked).map((s) => s.name);
   console.log(
     `verify:skills — OK: ${parsed.length} skills, ${modelInvoked.length} model-invoked ` +
-      `(${modelInvoked.join(", ")}); listing ${cost}/${LISTING_BUDGET} chars.`,
+      `(${modelInvoked.join(", ")}); this repo's listing share ${cost}/${LISTING_BUDGET} chars.`,
   );
 
   if (override) return;

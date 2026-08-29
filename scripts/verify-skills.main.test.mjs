@@ -147,7 +147,7 @@ test("fails when the skill listing exceeds its budget", () => {
   const over = fixture(many);
   const { code, out } = run(over);
   assert.equal(code, 1);
-  assert.match(out, /over the recorded budget/);
+  assert.match(out, /over its recorded budget/);
   rmSync(over, { recursive: true, force: true });
 
   const quiet = {};

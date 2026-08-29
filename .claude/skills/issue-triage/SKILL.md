@@ -6,9 +6,11 @@ disable-model-invocation: true
 
 # Triaging issues
 
-**An issue needs triage when it arrives with no board card and no milestone —
-regardless of who filed it.** That is the whole test, and it is deliberately
-about *state*, not authorship. An outside reporter has no board access, so their
+**An issue needs triage when it has no board card — regardless of who filed
+it.** That is the whole test, and it is deliberately about *state*, not
+authorship. The milestone is not part of the test; it decides *where the card
+lands* (milestoned → **Todo**, unmilestoned → **Incoming**), so an
+approved-but-unboarded issue is still swept in rather than skipped (Copilot). An outside reporter has no board access, so their
 issue necessarily lands this way — but so does a maintainer's, whenever they
 open one by hand instead of through the `/issue-create` flow. Write access makes
 the board *reachable*, not automatic. What puts an issue in Todo is somebody
@@ -276,9 +278,12 @@ Two things the queries must account for, both learned the hard way:
   and that check then reports `0` while the invariant it states (no drafts) is
   being violated (Copilot). The filter admits an item with no repository and
   excludes only cards that name a *different* one.
-- **Only open issues have a `$I` entry.** A closed issue still has a card
-  (correctly, in `Done`), so a check that treats "no milestone found" as a
-  violation must gate on `isopen(.n)` or it flags every closed card.
+- **`$M` holds closed issues too** — the lookup is built from
+  `gh issue list --state all`, which it has to be, because the last check reads
+  closed issues' state reasons. So `isopen` is not there to cope with a missing
+  entry; it is there because the *invariants* are about open work. A closed
+  issue legitimately sits in `Done` with whatever milestone it had, and a check
+  that did not gate on `isopen` would report every one of them (Copilot).
 
 **Do not "fix" a `Done` card that is missing a milestone.** Cards predating a
 rule are not defects to backfill in bulk — the audit exists to stop *new* drift,

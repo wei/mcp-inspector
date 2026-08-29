@@ -45,6 +45,7 @@ const CONCURRENCY = Number(process.env.CONCURRENCY ?? 4);
 /** Collect the committed cases for every model-invoked skill (optionally one). */
 function collectCases(only) {
   const cases = [];
+  const ours = new Set();
   for (const dir of readdirSync(SKILLS_DIR).sort()) {
     if (only && dir !== only) continue;
     const skillFile = path.join(SKILLS_DIR, dir, "SKILL.md");
@@ -64,6 +65,7 @@ function collectCases(only) {
       );
     }
     if (!skill.modelInvoked) continue;
+    ours.add(dir);
     const evalsFile = path.join(SKILLS_DIR, dir, "evals", "evals.json");
     if (!existsSync(evalsFile)) {
       throw new Error(
@@ -84,7 +86,7 @@ function collectCases(only) {
     }
     for (const c of parsed) cases.push({ ...c, from: dir });
   }
-  return cases;
+  return { cases, ours };
 }
 
 /**
@@ -184,14 +186,22 @@ export function invokedSkillNames(payload) {
 /**
  * Whether one sample satisfies a case.
  *
+ * A negative case asserts that no skill **of this repo's** fired. Asserting
+ * that nothing fired at all would fail for a contributor who happens to have an
+ * unrelated skill in `~/.claude/skills`, or when a bundled skill matches — a
+ * false failure about someone else's environment rather than about these
+ * skills (Copilot).
+ *
  * @param {string | null} expect Skill name, or null for a negative case.
  * @param {Set<string>} invoked
+ * @param {Set<string> | null} [ours] Repo skill names. Null counts any skill.
  */
-export function sampleHit(expect, invoked) {
-  if (expect === null) return invoked.size === 0;
-  return [...invoked].some((payload) =>
-    invokedSkillNames(payload).includes(expect),
-  );
+export function sampleHit(expect, invoked, ours = null) {
+  const names = [...invoked].flatMap(invokedSkillNames);
+  if (expect === null) {
+    return ours === null ? names.length === 0 : !names.some((n) => ours.has(n));
+  }
+  return names.includes(expect);
 }
 
 /**
@@ -273,7 +283,7 @@ async function main() {
     process.exit(1);
   }
 
-  const cases = collectCases(process.argv[2]);
+  const { cases, ours } = collectCases(process.argv[2]);
   if (cases.length === 0) {
     console.error("skills:eval — no cases found.");
     process.exit(1);
@@ -288,7 +298,9 @@ async function main() {
   let failed = 0;
   for (const c of cases) {
     const mine = results.filter((r) => r.c === c);
-    const passes = mine.filter((r) => sampleHit(c.expect, r.invoked)).length;
+    const passes = mine.filter((r) =>
+      sampleHit(c.expect, r.invoked, ours),
+    ).length;
     const rate = passes / mine.length;
     const ok = rate >= THRESHOLD;
     if (!ok) failed++;
