@@ -9,10 +9,12 @@
 // "never runs", which made the acceptance criterion aspirational (Copilot).
 //
 // So the authoritative check gets its own step, in `local:gate` and in CI, and
-// it does NOT skip: an already-installed CLI new enough to have the subcommand
-// is used as-is, and otherwise a PINNED one is fetched with `npx -y`. Pinned
-// rather than @latest because a validator that moves on its own can start
-// failing a PR that changed nothing, which is how a gate loses its credibility.
+// it does NOT skip: an already-installed CLI is used only when it matches the
+// pin EXACTLY, and otherwise the pinned package is fetched with `npx -y`.
+// Pinned rather than @latest because a validator that moves on its own can start
+// failing a PR that changed nothing, which is how a gate loses its credibility —
+// and exact rather than a floor because a newer local CLI is a DIFFERENT schema
+// from CI's, which would let the same `local:gate` disagree across machines.
 //
 // It needs no authentication — verified against a scrubbed environment and a
 // clean HOME.
@@ -24,15 +26,22 @@ import {
   compareVersions,
   parseClaudeVersion,
   PINNED_CLI_VERSION,
-  PLUGIN_VALIDATE_MIN_VERSION,
 } from "./lib/skill-manifest.mjs";
+
+/** `PINNED_CLI_VERSION` as a comparable triple. */
+const PINNED_VERSION_PARTS = parseClaudeVersion(PINNED_CLI_VERSION) ?? [];
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SKILLS_DIR = ".claude/skills";
 
 /**
- * The argv that runs a usable validator: the local CLI when it is new enough,
- * otherwise the pinned one through `npx`.
+ * The argv that runs the pinned validator.
+ *
+ * A local CLI is used only when it matches `PINNED_CLI_VERSION` **exactly**.
+ * Accepting anything at or above the floor would defeat the pin: a maintainer on
+ * a newer CLI would validate against a different schema than CI's, so the same
+ * `local:gate` could disagree across machines — which is the failure a pin
+ * exists to prevent (Copilot). Everyone else runs the pinned package.
  *
  * @param {{ version: number[] | null }} local
  * @returns {{ command: string, args: string[], via: string }}
@@ -40,14 +49,18 @@ const SKILLS_DIR = ".claude/skills";
 export function validatorCommand({ version }) {
   if (
     version !== null &&
-    compareVersions(version, PLUGIN_VALIDATE_MIN_VERSION) >= 0
+    compareVersions(version, PINNED_VERSION_PARTS) === 0
   ) {
     return {
       command: "claude",
       args: ["plugin", "validate", SKILLS_DIR],
-      via: `local claude ${version.join(".")}`,
+      via: `local claude ${version.join(".")} (matches the pin)`,
     };
   }
+  const why =
+    version === null
+      ? "no local CLI"
+      : `local CLI is ${version.join(".")}, not the pinned ${PINNED_CLI_VERSION}`;
   return {
     command: "npx",
     args: [
@@ -57,45 +70,64 @@ export function validatorCommand({ version }) {
       "validate",
       SKILLS_DIR,
     ],
-    via:
-      version === null
-        ? `npx @anthropic-ai/claude-code@${PINNED_CLI_VERSION} (no local CLI)`
-        : `npx @anthropic-ai/claude-code@${PINNED_CLI_VERSION} (local ${version.join(".")} predates the subcommand)`,
+    via: `npx @anthropic-ai/claude-code@${PINNED_CLI_VERSION} (${why})`,
   };
 }
 
-function main() {
-  const probe = spawnSync("claude", ["--version"], { encoding: "utf8" });
+/**
+ * Run the authoritative validator.
+ *
+ * The probe and the spawn are injected so the orchestration itself is tested:
+ * on a machine with a working CLI, an actual run only ever walks the happy
+ * path, so a regression in the probe, the spawn-error branch, or the
+ * propagation of a rejected validator would leave `test:scripts` green while
+ * this gate quietly stopped gating (Copilot).
+ *
+ * @param {{ probe?: () => {error?: Error, status?: number|null, stdout?: string},
+ *           spawn?: (cmd: string, args: string[], opts: object) => {error?: Error, status?: number|null},
+ *           log?: (msg: string) => void, error?: (msg: string) => void }} [io]
+ * @returns {number} Process exit code.
+ */
+export function runValidator(io = {}) {
+  const {
+    probe = () => spawnSync("claude", ["--version"], { encoding: "utf8" }),
+    spawn = (cmd, args, opts) => spawnSync(cmd, args, opts),
+    log = console.log,
+    error = console.error,
+  } = io;
+
+  const probed = probe();
   const version =
-    probe.error || probe.status !== 0
+    probed.error || probed.status !== 0
       ? null
-      : parseClaudeVersion(probe.stdout ?? "");
+      : parseClaudeVersion(probed.stdout ?? "");
 
   const { command, args, via } = validatorCommand({ version });
-  console.log(`verify:skills:cli — validating ${SKILLS_DIR} via ${via}…`);
+  log(`verify:skills:cli — validating ${SKILLS_DIR} via ${via}…`);
 
-  const res = spawnSync(command, args, {
+  const res = spawn(command, args, {
     cwd: ROOT,
     stdio: "inherit",
     shell: process.platform === "win32",
   });
   if (res.error) {
-    console.error(
+    error(
       `\nverify:skills:cli — could not run \`${command}\`: ${res.error.message}`,
     );
-    process.exit(1);
+    return 1;
   }
   if (res.status !== 0) {
-    console.error(
+    error(
       "\nverify:skills:cli — `claude plugin validate` rejected the skills.",
     );
-    process.exit(1);
+    return 1;
   }
+  return 0;
 }
 
 if (
   process.argv[1] &&
   path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
-  main();
+  process.exit(runValidator());
 }

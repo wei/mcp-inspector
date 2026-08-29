@@ -107,15 +107,25 @@ committed — so attach them to the PR body from there rather than referencing a
 in-repo path. Name them for what they show (`tools-tab-before.png`), not
 `Screenshot 2026-07-31 at 14.02.11.png`.
 
-To host them, upload to GitHub's attachment endpoint with your `gh` token; the
-parameters go in the **query string** with the raw bytes as the body (a JSON
-body fails with a misleading "Invalid name for request"):
+To host them, upload to GitHub's attachment endpoint with your `gh` token. Two
+mechanics, both of which bite:
+
+- The parameters go in the **query string**, with the raw bytes as the body. A
+  JSON body fails with a misleading "Invalid name for request".
+- ⚠️ **Do not put the token in argv.** `-H "Authorization: token $(gh auth
+  token)"` puts your credential in curl's command line, where any local user or
+  process can read it off the process table while the upload runs (Copilot).
+  Feed it through `--config -` instead: curl reads its options from stdin, so
+  the token never becomes an argument.
 
 ```sh
-curl -sX POST -H "Authorization: token $(gh auth token)" \
-  --data-binary @pr-screenshots/tools-tab-after.png \
+printf 'header = "Authorization: token %s"\n' "$(gh auth token)" | curl -sS --config - \
+  -X POST --data-binary @pr-screenshots/tools-tab-after.png \
   "https://uploads.github.com/user-attachments/assets?repository_id=<REPO_ID>&name=tools-tab-after.png&content_type=image/png"
 ```
+
+(The token is still in the shell's environment and in `printf`'s *stdin*, which
+is not world-readable the way `/proc/<pid>/cmdline` is.)
 
 ## 6. Open the PR
 

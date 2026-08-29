@@ -1,52 +1,111 @@
-// Tests for the authoritative-validator step's CLI resolution (#2163, Copilot).
+// Tests for the guaranteed authoritative-validator step (#2163, Copilot).
 //
-// The point of the step is that it does NOT skip: `verify:skills` treats a
-// missing CLI as a skip, and "skips when absent" plus "usually absent" adds up
-// to "never runs", which is what made the acceptance criterion aspirational.
-// So the branch that matters is the one that falls back to a pinned `npx`
-// rather than giving up — and on a machine with a current CLI installed, that
-// branch is never taken by an actual run.
+// Two things are covered, and neither is reachable from an ordinary run on a
+// machine that has a working, pinned CLI:
+//
+//   1. Which validator gets run. A local CLI is used only when it matches the
+//      pin EXACTLY — accepting anything newer would mean a maintainer validates
+//      against a different schema than CI, so the same `local:gate` could
+//      disagree across machines, which is the failure a pin exists to prevent.
+//   2. The orchestration around it. A regression in the probe, the spawn-error
+//      branch, or the propagation of a rejected validator would otherwise leave
+//      `test:scripts` green while this gate stopped gating.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { validatorCommand } from "./verify-skills-cli.mjs";
-import {
-  PINNED_CLI_VERSION,
-  PLUGIN_VALIDATE_MIN_VERSION,
-} from "./lib/skill-manifest.mjs";
+import { validatorCommand, runValidator } from "./verify-skills-cli.mjs";
+import { PINNED_CLI_VERSION } from "./lib/skill-manifest.mjs";
 
-test("uses an installed CLI that has the subcommand", () => {
-  const cmd = validatorCommand({ version: [2, 1, 250] });
+const pinned = PINNED_CLI_VERSION.split(".").map(Number);
+const npxArgs = [
+  "-y",
+  `@anthropic-ai/claude-code@${PINNED_CLI_VERSION}`,
+  "plugin",
+  "validate",
+  ".claude/skills",
+];
+
+test("uses a local CLI only when it matches the pin exactly", () => {
+  const cmd = validatorCommand({ version: pinned });
   assert.equal(cmd.command, "claude");
   assert.deepEqual(cmd.args, ["plugin", "validate", ".claude/skills"]);
-  assert.match(cmd.via, /local claude 2\.1\.250/);
+  assert.match(cmd.via, /matches the pin/);
 });
 
-test("uses the installed CLI exactly at the floor", () => {
-  assert.equal(
-    validatorCommand({ version: PLUGIN_VALIDATE_MIN_VERSION }).command,
-    "claude",
-  );
+test("falls back to the pinned package for any other local version", () => {
+  // Newer as well as older: a newer CLI is a DIFFERENT schema from CI's, which
+  // is exactly the cross-machine disagreement the pin exists to prevent.
+  for (const version of [
+    [pinned[0], pinned[1], pinned[2] + 1],
+    [pinned[0], pinned[1], pinned[2] - 1],
+    [pinned[0] + 1, 0, 0],
+    [2, 1, 232],
+  ]) {
+    const cmd = validatorCommand({ version });
+    assert.equal(cmd.command, "npx", `expected npx for ${version.join(".")}`);
+    assert.deepEqual(cmd.args, npxArgs);
+    assert.match(cmd.via, /not the pinned/);
+  }
 });
 
-test("falls back to a pinned npx when no CLI is present", () => {
+test("falls back to the pinned package when no CLI is present", () => {
   const cmd = validatorCommand({ version: null });
   assert.equal(cmd.command, "npx");
-  assert.deepEqual(cmd.args, [
-    "-y",
-    `@anthropic-ai/claude-code@${PINNED_CLI_VERSION}`,
-    "plugin",
-    "validate",
-    ".claude/skills",
-  ]);
+  assert.deepEqual(cmd.args, npxArgs);
   assert.match(cmd.via, /no local CLI/);
 });
 
-test("falls back when the installed CLI predates the subcommand", () => {
-  // An older binary answers `--version` fine and then exits nonzero on
-  // `plugin validate` as an unknown command, so running it would fail the gate
-  // for someone whose only sin is not having upgraded.
-  const cmd = validatorCommand({ version: [2, 1, 232] });
-  assert.equal(cmd.command, "npx");
-  assert.match(cmd.via, /predates the subcommand/);
+/** Collects what `runValidator` was asked to spawn. */
+function harness({ probe, spawnResult }) {
+  const spawned = [];
+  const logs = [];
+  const errors = [];
+  const code = runValidator({
+    probe: () => probe,
+    spawn: (command, args, opts) => {
+      spawned.push({ command, args, opts });
+      return spawnResult;
+    },
+    log: (m) => logs.push(m),
+    error: (m) => errors.push(m),
+  });
+  return { code, spawned, logs, errors };
+}
+
+const okProbe = { status: 0, stdout: `${PINNED_CLI_VERSION} (Claude Code)\n` };
+
+test("runs the local CLI and succeeds when the validator accepts", () => {
+  const r = harness({ probe: okProbe, spawnResult: { status: 0 } });
+  assert.equal(r.code, 0);
+  assert.equal(r.spawned[0].command, "claude");
+  assert.equal(r.errors.length, 0);
+  assert.match(r.logs.join(), /validating \.claude\/skills via local claude/);
+});
+
+test("treats an unusable probe as no CLI at all", () => {
+  // A `claude` that fails `--version` cannot be trusted to have the subcommand.
+  for (const probe of [
+    { error: new Error("ENOENT") },
+    { status: 1, stdout: "" },
+    { status: 0, stdout: "not a version" },
+  ]) {
+    const r = harness({ probe, spawnResult: { status: 0 } });
+    assert.equal(r.code, 0);
+    assert.equal(r.spawned[0].command, "npx");
+  }
+});
+
+test("fails when the validator rejects the skills", () => {
+  const r = harness({ probe: okProbe, spawnResult: { status: 1 } });
+  assert.equal(r.code, 1);
+  assert.match(r.errors.join(), /rejected the skills/);
+});
+
+test("fails when the validator cannot be spawned at all", () => {
+  const r = harness({
+    probe: okProbe,
+    spawnResult: { error: new Error("spawn npx ENOENT") },
+  });
+  assert.equal(r.code, 1);
+  assert.match(r.errors.join(), /could not run `claude`: spawn npx ENOENT/);
 });

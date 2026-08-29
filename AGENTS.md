@@ -156,9 +156,12 @@ that from happening:
    That best-effort hand-off keeps `validate` fast and offline, but it also
    means it usually does not run — so the authoritative check gets a **guaranteed
    step of its own**, `npm run verify:skills:cli`, in `local:gate` and in CI.
-   It resolves the CLI rather than hoping for one: an installed CLI when it is
-   new enough, otherwise a **pinned** one via `npx -y`. Both tiers run the same
-   script, so they cannot drift.
+   It resolves the CLI rather than hoping for one: an installed CLI **only when
+   it matches the pin exactly**, otherwise the pinned package via `npx -y`.
+   Exact rather than a floor, because a newer local CLI is a *different* schema
+   from CI's — accepting it would let the same `local:gate` disagree across
+   machines, which is what a pin exists to prevent. Both tiers run the same
+   script, so they cannot drift either.
    ⚠️ Frontmatter is only read when the opening `---` is the file's **first
    line** — no BOM, no leading blank line.
 2. **Every skill declares its invocation mode explicitly.**
