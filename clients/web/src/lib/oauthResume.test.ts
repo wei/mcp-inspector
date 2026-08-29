@@ -11,6 +11,7 @@ import {
   readOAuthResumeSnapshot,
   restoreTabUiFromSnapshot,
   writeOAuthResumeSnapshot,
+  clearOwnOAuthResumeSnapshot,
   type OAuthResumeSnapshot,
 } from "./oauthResume.js";
 import {
@@ -349,6 +350,43 @@ describe("oauthResume", () => {
     }
   });
 
+  it("clearOwnOAuthResumeSnapshot removes only the snapshot it was given", () => {
+    const first = writeOAuthResumeSnapshot({
+      version: 1,
+      serverId: "a",
+      activeTab: "tools",
+      authKind: "reauth",
+      tabUi: {},
+    });
+    // A later attempt replaces it before the first one's failure lands.
+    writeOAuthResumeSnapshot({
+      version: 1,
+      serverId: "b",
+      activeTab: "prompts",
+      authKind: "reauth",
+      tabUi: {},
+    });
+
+    expect(clearOwnOAuthResumeSnapshot(first)).toBe(false);
+    expect(readOAuthResumeSnapshot()?.serverId).toBe("b");
+
+    const second = window.sessionStorage.getItem(OAUTH_RESUME_KEY)!;
+    expect(clearOwnOAuthResumeSnapshot(second)).toBe(true);
+    expect(window.sessionStorage.getItem(OAUTH_RESUME_KEY)).toBeNull();
+  });
+
+  it("clearOwnOAuthResumeSnapshot is a no-op without a token", () => {
+    writeOAuthResumeSnapshot({
+      version: 1,
+      serverId: "a",
+      activeTab: "tools",
+      authKind: "reauth",
+      tabUi: {},
+    });
+    expect(clearOwnOAuthResumeSnapshot(undefined)).toBe(false);
+    expect(readOAuthResumeSnapshot()?.serverId).toBe("a");
+  });
+
   it("writeOAuthResumeSnapshot swallows setItem failures", () => {
     vi.stubGlobal("sessionStorage", {
       getItem: () => null,
@@ -366,6 +404,17 @@ describe("oauthResume", () => {
         tabUi: {},
       }),
     ).not.toThrow();
+  });
+
+  it("clearOwnOAuthResumeSnapshot swallows storage failures", () => {
+    vi.stubGlobal("sessionStorage", {
+      getItem: () => {
+        throw new Error("blocked");
+      },
+      setItem: () => {},
+      removeItem: () => {},
+    });
+    expect(clearOwnOAuthResumeSnapshot("{}")).toBe(false);
   });
 
   it("clearOAuthResumeSnapshot swallows removeItem failures", () => {
@@ -421,6 +470,10 @@ describe("oauthResume", () => {
 
     it("clearOAuthResumeSnapshot is a no-op", () => {
       expect(() => clearOAuthResumeSnapshot()).not.toThrow();
+    });
+
+    it("clearOwnOAuthResumeSnapshot is a no-op", () => {
+      expect(clearOwnOAuthResumeSnapshot("{}")).toBe(false);
     });
   });
 

@@ -44,6 +44,7 @@ import {
   applyOAuthResumeUi,
   buildTabUiSnapshot,
   clearOAuthResumeSnapshot,
+  clearOwnOAuthResumeSnapshot,
   consumeOAuthResumeSnapshot,
   oauthResumeInsufficientScopeMessage,
   oauthResumeToastMessage,
@@ -529,7 +530,7 @@ export function useOAuthRecovery({
       onBeforeOAuthRedirect(authorizationUrl);
       // Write immediately before navigation so implicit client teardown (during
       // connect setup) cannot clear the snapshot after we persist it.
-      writeOAuthResumeSnapshot({
+      const snapshotToken = writeOAuthResumeSnapshot({
         version: 1,
         serverId,
         activeTab,
@@ -548,10 +549,15 @@ export function useOAuthRecovery({
       // read it as an *abandoned* redirect and offer that diagnosis, which is
       // wrong — and the failure has to be reported the way every sibling arm
       // reports one, with the red border (#1621) and the re-auth banner.
+      //
+      // Scoped to the snapshot *this* attempt wrote: nothing single-flights
+      // `prepareOAuthRedirect`, so a later attempt may already have replaced
+      // it, and deleting that one would strand the redirect that is actually
+      // in flight.
       oauthClient
         ?.beginInteractiveAuthorization(authorizationUrl)
         .catch((err: unknown) => {
-          clearOAuthResumeSnapshot();
+          clearOwnOAuthResumeSnapshot(snapshotToken);
           setFailedServerId(serverId);
           showReAuthBanner(serverId, err);
         });
@@ -851,13 +857,26 @@ export function useOAuthRecovery({
         // the recovery was delivered. It still is owed, so restore it and let
         // the next trigger retry rather than losing it silently (#2165).
         //
-        // Only into an empty slot, though: the tab can go hidden during the
-        // awaits above and a *newer* challenge defer itself into it, and that
-        // one describes the session as it is now. Latest wins — putting this
-        // attempt's stale challenge back over it would retry authorization
-        // data the server has already superseded.
-        if (sessionRef.current.pendingReauth === null) {
-          setPendingReauth(pending);
+        // Only into the session this attempt belongs to, and only into an
+        // empty slot.
+        //
+        // The awaits above can outlive the session entirely — a server switch
+        // or a disconnect clears the slot on purpose, and restoring into that
+        // would resurrect a challenge for a session that has ended. The client
+        // identity is part of the check, not just the server id: reconnecting
+        // to the SAME server builds a replacement `InspectorClient`, which an
+        // id-only check would wave through.
+        //
+        // And the tab can go hidden mid-flight with a *newer* challenge
+        // deferring itself into the slot; that one describes the session as it
+        // is now. The restore is a functional update so it sees the queued
+        // state rather than the render-time value, and yields to whatever is
+        // already there — latest wins.
+        if (
+          sessionRef.current.activeServerId === pending.serverId &&
+          sessionRef.current.inspectorClient === client
+        ) {
+          setPendingReauth((prev) => prev ?? pending);
         }
         notifications.show({
           title: "Could not continue authorization",

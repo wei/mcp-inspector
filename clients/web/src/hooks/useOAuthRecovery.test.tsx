@@ -1142,6 +1142,43 @@ describe("useOAuthRecovery", () => {
       expect(client.handleAuthChallenge).toHaveBeenCalledTimes(1);
     });
 
+    it("does not resurrect a challenge whose session ended mid-resume", async () => {
+      // A server switch clears the slot on purpose. The in-flight attempt then
+      // rejects, finds it empty, and must NOT put its own challenge back — it
+      // belongs to a session that has ended (#2165).
+      let rejectResume: ((err: Error) => void) | undefined;
+      const client = fakeClient({
+        handleAuthChallenge: vi.fn(
+          () =>
+            new Promise((_resolve, reject) => {
+              rejectResume = reject;
+            }),
+        ),
+      });
+      const servers = [entry("a"), entry("b")];
+      const h = harness({ servers, activeServerId: "a", client });
+      await defer(client, h);
+
+      await act(async () => {
+        becomeVisible();
+      });
+      await waitFor(() => expect(rejectResume).toBeDefined());
+
+      h.rerender({ servers, activeServerId: "b", client });
+      await act(async () => {
+        rejectResume!(new Error("token endpoint unreachable"));
+      });
+      await waitFor(() =>
+        expect(toastTitles()).toContain("Could not continue authorization"),
+      );
+
+      // Nothing was restored, so returning to the tab resumes nothing.
+      await act(async () => {
+        becomeVisible();
+      });
+      expect(client.handleAuthChallenge).toHaveBeenCalledTimes(1);
+    });
+
     it("does not resume while disconnected, and resumes on the reconnect", async () => {
       const client = fakeClient({
         handleAuthChallenge: vi.fn().mockResolvedValue({ kind: "satisfied" }),

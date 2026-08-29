@@ -168,14 +168,26 @@ export function restoreTabUiFromSnapshot(
   }
 }
 
-export function writeOAuthResumeSnapshot(snapshot: OAuthResumeSnapshot): void {
+/**
+ * Persist the snapshot, returning the exact serialization stored — the
+ * "attempt token" {@link clearOwnOAuthResumeSnapshot} matches against (#2165).
+ *
+ * `undefined` when nothing was stored (no `window`, privacy mode, quota), so a
+ * caller holding one knows a clear is meaningful.
+ */
+export function writeOAuthResumeSnapshot(
+  snapshot: OAuthResumeSnapshot,
+): string | undefined {
   if (typeof window === "undefined") {
-    return;
+    return undefined;
   }
+  const serialized = JSON.stringify(snapshot);
   try {
-    window.sessionStorage.setItem(OAUTH_RESUME_KEY, JSON.stringify(snapshot));
+    window.sessionStorage.setItem(OAUTH_RESUME_KEY, serialized);
+    return serialized;
   } catch {
     // Best-effort — privacy mode / quota.
+    return undefined;
   }
 }
 
@@ -228,6 +240,39 @@ function readLegacyPendingServerSnapshot(): OAuthResumeSnapshot | undefined {
     };
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * Clear the snapshot **only if it is still the one this attempt wrote** (#2165).
+ *
+ * `prepareOAuthRedirect` has no single-flight guard, so a redirect that fails
+ * before navigating can reject after a *later* attempt has already written its
+ * own snapshot. An unconditional clear there would delete the newer attempt's
+ * callback-routing state, which is a worse failure than the one it is trying
+ * to avoid.
+ *
+ * The token is the stored serialization, which makes two byte-identical
+ * snapshots indistinguishable — deliberately: identical bytes describe the
+ * same redirect, for the same server, with the same shell state, so clearing
+ * "the other one" reaches the same end state.
+ *
+ * Returns whether anything was removed.
+ */
+export function clearOwnOAuthResumeSnapshot(
+  token: string | undefined,
+): boolean {
+  if (typeof window === "undefined" || token === undefined) {
+    return false;
+  }
+  try {
+    if (window.sessionStorage.getItem(OAUTH_RESUME_KEY) !== token) {
+      return false;
+    }
+    window.sessionStorage.removeItem(OAUTH_RESUME_KEY);
+    return true;
+  } catch {
+    return false;
   }
 }
 
