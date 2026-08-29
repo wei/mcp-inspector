@@ -14,6 +14,8 @@ import {
   parseClaudeVersion,
   compareVersions,
   PINNED_CLI_VERSION,
+  isPinnedVersion,
+  formatClaudeVersion,
 } from "./skill-manifest.mjs";
 
 const fm = (body) => `---\n${body}\n---\n\n# Body\n`;
@@ -203,23 +205,47 @@ test("validateEvalCases rejects malformed cases", () => {
 });
 
 test("parseClaudeVersion reads the CLI's version banner", () => {
-  assert.deepEqual(parseClaudeVersion("2.1.250 (Claude Code)"), [2, 1, 250]);
-  assert.deepEqual(parseClaudeVersion("claude 10.0.4\n"), [10, 0, 4]);
+  assert.deepEqual(parseClaudeVersion("2.1.250 (Claude Code)"), {
+    parts: [2, 1, 250],
+    prerelease: null,
+  });
+  assert.deepEqual(parseClaudeVersion("claude 10.0.4\n"), {
+    parts: [10, 0, 4],
+    prerelease: null,
+  });
   assert.equal(parseClaudeVersion("no version here"), null);
 });
 
-test("compareVersions can decide exact equality with the pin", () => {
-  // Both validators require the EXACT pinned version, so what matters is that
-  // "equal" is distinguishable from newer as well as older — a floor would let a
-  // newer local CLI validate against a different schema than CI's.
-  const pin = parseClaudeVersion(PINNED_CLI_VERSION);
-  assert.equal(compareVersions(pin, pin), 0);
-  assert.ok(compareVersions([pin[0], pin[1], pin[2] - 1], pin) < 0);
-  assert.ok(compareVersions([pin[0], pin[1], pin[2] + 1], pin) > 0);
-  assert.ok(compareVersions([pin[0] + 1, 0, 0], pin) > 0);
-  // Shorter and longer triples still order sanely.
-  assert.ok(compareVersions([pin[0]], pin) < 0);
-  assert.equal(compareVersions([...pin, 0], pin), 0);
+test("parseClaudeVersion keeps a prerelease suffix rather than dropping it", () => {
+  // Dropping it made `2.1.250-beta.1` compare EQUAL to the stable pin — a
+  // different validator schema running while the log claimed an exact match.
+  assert.deepEqual(parseClaudeVersion("2.1.250-beta.1 (Claude Code)"), {
+    parts: [2, 1, 250],
+    prerelease: "beta.1",
+  });
+  assert.equal(
+    formatClaudeVersion(parseClaudeVersion("2.1.250-beta.1")),
+    "2.1.250-beta.1",
+  );
+  assert.equal(formatClaudeVersion(null), "(unreadable version)");
+});
+
+test("isPinnedVersion accepts only the exact stable pin", () => {
+  const pin = PINNED_CLI_VERSION;
+  assert.equal(isPinnedVersion(parseClaudeVersion(pin), pin), true);
+  // Build metadata is ignored for precedence by SemVer, so it still matches.
+  assert.equal(
+    isPinnedVersion(parseClaudeVersion(`${pin}+build.7`), pin),
+    true,
+  );
+  // A prerelease of the same triple is NOT the pin.
+  assert.equal(
+    isPinnedVersion(parseClaudeVersion(`${pin}-beta.1`), pin),
+    false,
+  );
+  assert.equal(isPinnedVersion(parseClaudeVersion("2.1.249"), pin), false);
+  assert.equal(isPinnedVersion(parseClaudeVersion("99.0.0"), pin), false);
+  assert.equal(isPinnedVersion(null, pin), false);
 });
 
 test("the listing-entry cap covers description AND when_to_use together", () => {

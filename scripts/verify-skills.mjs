@@ -34,7 +34,8 @@ import { claudeSpawnArgs, probeClaudeVersion } from "./lib/claude-cli.mjs";
 import { reachableScripts, rootReachesScript } from "./lib/npm-scripts.mjs";
 import { parse as parseYaml } from "yaml";
 import {
-  compareVersions,
+  formatClaudeVersion,
+  isPinnedVersion,
   parseClaudeVersion,
   PINNED_CLI_VERSION,
   parseSkill,
@@ -45,9 +46,6 @@ import {
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_SKILLS_DIR = path.join(ROOT, ".claude", "skills");
-
-/** `PINNED_CLI_VERSION` as a comparable triple. */
-const PINNED_VERSION_PARTS = parseClaudeVersion(PINNED_CLI_VERSION) ?? [];
 
 /** Directory names under `.claude/skills` that contain a SKILL.md. */
 export function skillDirs(
@@ -273,16 +271,10 @@ function main(argv = process.argv.slice(2)) {
   // would reintroduce exactly the cross-machine schema drift the pin removes.
   // Anything else is left to `verify:skills:cli`, which fetches the pin.
   const version = probeClaudeVersion(parseClaudeVersion);
-  if (version === null) {
+  if (!isPinnedVersion(version, PINNED_CLI_VERSION)) {
     console.log(
-      "verify:skills — no usable `claude` CLI here; `verify:skills:cli` runs the pinned validator.",
-    );
-    return;
-  }
-  if (compareVersions(version, PINNED_VERSION_PARTS) !== 0) {
-    console.log(
-      `verify:skills — local \`claude\` is ${version.join(".")}, not the pinned ` +
-        `${PINNED_CLI_VERSION}; \`verify:skills:cli\` runs the pinned validator.`,
+      `verify:skills — local \`claude\` is ${formatClaudeVersion(version)}, not the ` +
+        `pinned ${PINNED_CLI_VERSION}; \`verify:skills:cli\` runs the pinned validator.`,
     );
     return;
   }

@@ -14,9 +14,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { validatorCommand, runValidator } from "./verify-skills-cli.mjs";
-import { PINNED_CLI_VERSION } from "./lib/skill-manifest.mjs";
+import {
+  PINNED_CLI_VERSION,
+  parseClaudeVersion,
+} from "./lib/skill-manifest.mjs";
 
-const pinned = PINNED_CLI_VERSION.split(".").map(Number);
+const pinned = parseClaudeVersion(PINNED_CLI_VERSION);
+const at = (text) => parseClaudeVersion(text);
 const npxArgs = [
   "-y",
   `@anthropic-ai/claude-code@${PINNED_CLI_VERSION}`,
@@ -35,14 +39,18 @@ test("uses a local CLI only when it matches the pin exactly", () => {
 test("falls back to the pinned package for any other local version", () => {
   // Newer as well as older: a newer CLI is a DIFFERENT schema from CI's, which
   // is exactly the cross-machine disagreement the pin exists to prevent.
-  for (const version of [
-    [pinned[0], pinned[1], pinned[2] + 1],
-    [pinned[0], pinned[1], pinned[2] - 1],
-    [pinned[0] + 1, 0, 0],
-    [2, 1, 232],
+  const [maj, min, patch] = pinned.parts;
+  for (const banner of [
+    `${maj}.${min}.${patch + 1}`,
+    `${maj}.${min}.${patch - 1}`,
+    `${maj + 1}.0.0`,
+    "2.1.232",
+    // A prerelease of the pinned triple is a DIFFERENT validator schema, and
+    // dropping the suffix made it compare equal (Copilot).
+    `${maj}.${min}.${patch}-beta.1`,
   ]) {
-    const cmd = validatorCommand({ version });
-    assert.equal(cmd.command, "npx", `expected npx for ${version.join(".")}`);
+    const cmd = validatorCommand({ version: at(banner) });
+    assert.equal(cmd.command, "npx", `expected npx for ${banner}`);
     assert.deepEqual(cmd.args, npxArgs);
     assert.match(cmd.via, /not the pinned/);
   }
@@ -72,7 +80,7 @@ function harness({ probe, spawnResult }) {
   return { code, spawned, logs, errors };
 }
 
-const okProbe = PINNED_CLI_VERSION.split(".").map(Number);
+const okProbe = parseClaudeVersion(PINNED_CLI_VERSION);
 
 test("runs the local CLI and succeeds when the validator accepts", () => {
   const r = harness({ probe: okProbe, spawnResult: { status: 0 } });

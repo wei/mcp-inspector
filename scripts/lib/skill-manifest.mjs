@@ -253,21 +253,48 @@ export function validateEvalCases(skillName, cases) {
 export const PINNED_CLI_VERSION = "2.1.250";
 
 /**
- * Read a semver triple out of `claude --version` output ("2.1.250 (Claude Code)").
+ * Read the version out of `claude --version` output ("2.1.250 (Claude Code)").
+ *
+ * Returns the release triple **and** whether a prerelease/build suffix was
+ * attached, because the two callers want different things: the pin comparison
+ * must reject `2.1.250-beta.1` (a different validator schema that would compare
+ * equal to the stable pin while the log claimed an exact match — Copilot),
+ * while the eval's availability probe only needs *some* usable CLI.
  *
  * @param {string} text
- * @returns {number[] | null}
+ * @returns {{ parts: number[], prerelease: string | null } | null}
  */
 export function parseClaudeVersion(text) {
-  const m = /(\d+)\.(\d+)\.(\d+)/.exec(text);
-  return m === null ? null : [Number(m[1]), Number(m[2]), Number(m[3])];
+  const m =
+    /(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?/.exec(text);
+  if (m === null) return null;
+  return {
+    parts: [Number(m[1]), Number(m[2]), Number(m[3])],
+    prerelease: m[4] ?? null,
+  };
+}
+
+/** A parsed version, formatted the way the CLI reports it. */
+export function formatClaudeVersion(version) {
+  if (version === null) return "(unreadable version)";
+  return (
+    version.parts.join(".") +
+    (version.prerelease ? `-${version.prerelease}` : "")
+  );
 }
 
 /**
- * @param {number[]} a
- * @param {number[]} b
- * @returns {number} negative if a < b, 0 if equal, positive if a > b.
+ * Whether a parsed version IS the pin — same triple and no prerelease.
+ *
+ * @param {{ parts: number[], prerelease: string | null } | null} version
+ * @param {string} pin e.g. `PINNED_CLI_VERSION`.
  */
+export function isPinnedVersion(version, pin) {
+  if (version === null || version.prerelease !== null) return false;
+  const pinned = parseClaudeVersion(pin);
+  return pinned !== null && compareVersions(version.parts, pinned.parts) === 0;
+}
+
 export function compareVersions(a, b) {
   for (let i = 0; i < Math.max(a.length, b.length); i++) {
     const diff = (a[i] ?? 0) - (b[i] ?? 0);

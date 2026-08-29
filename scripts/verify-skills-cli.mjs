@@ -25,13 +25,11 @@ import { fileURLToPath } from "node:url";
 import { probeClaudeVersion } from "./lib/claude-cli.mjs";
 import { winShellArgs } from "./lib/win-shell-args.mjs";
 import {
-  compareVersions,
+  formatClaudeVersion,
+  isPinnedVersion,
   parseClaudeVersion,
   PINNED_CLI_VERSION,
 } from "./lib/skill-manifest.mjs";
-
-/** `PINNED_CLI_VERSION` as a comparable triple. */
-const PINNED_VERSION_PARTS = parseClaudeVersion(PINNED_CLI_VERSION) ?? [];
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SKILLS_DIR = ".claude/skills";
@@ -49,20 +47,17 @@ const SKILLS_DIR = ".claude/skills";
  * @returns {{ command: string, args: string[], via: string }}
  */
 export function validatorCommand({ version }) {
-  if (
-    version !== null &&
-    compareVersions(version, PINNED_VERSION_PARTS) === 0
-  ) {
+  if (isPinnedVersion(version, PINNED_CLI_VERSION)) {
     return {
       command: "claude",
       args: ["plugin", "validate", SKILLS_DIR],
-      via: `local claude ${version.join(".")} (matches the pin)`,
+      via: `local claude ${formatClaudeVersion(version)} (matches the pin)`,
     };
   }
   const why =
     version === null
       ? "no local CLI"
-      : `local CLI is ${version.join(".")}, not the pinned ${PINNED_CLI_VERSION}`;
+      : `local CLI is ${formatClaudeVersion(version)}, not the pinned ${PINNED_CLI_VERSION}`;
   return {
     command: "npx",
     args: [
