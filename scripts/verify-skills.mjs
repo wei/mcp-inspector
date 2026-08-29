@@ -31,7 +31,7 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { claudeSpawnArgs, probeClaudeVersion } from "./lib/claude-cli.mjs";
-import { reachableScripts, rootReachesScript } from "./lib/npm-scripts.mjs";
+import { rootReachesScript } from "./lib/npm-scripts.mjs";
 import { parse as parseYaml } from "yaml";
 import {
   formatClaudeVersion,
@@ -80,6 +80,44 @@ export function runsCommand(script, command) {
     .split(/[\n;|&]+/)
     .map((segment) => segment.trim())
     .some((segment) => segment === command);
+}
+
+/**
+ * Whether `npm run <entry>` reaches an invocation of `npm run <target>`.
+ *
+ * `reachableScripts` extracts every `npm run …` **substring**, so a gate such as
+ * `echo npm run verify:skills:cli && npm run coverage` satisfies it while the
+ * validator never runs (Copilot) — the same over-match the CI half had, from the
+ * other side. This walks the chain instead, splitting each script on the
+ * separators that begin a new command and requiring an exact invocation, the
+ * way `runsCommand` does.
+ *
+ * A segment naming some OTHER script is followed, with or without trailing
+ * flags: `npm run coverage --silent` still runs `coverage`. Only the target
+ * itself is matched exactly, since these gate scripts take no arguments.
+ *
+ * @param {Record<string, string>} scripts The root manifest's `scripts`.
+ * @param {string} entry
+ * @param {string} target
+ */
+export function scriptChainRuns(scripts, entry, target) {
+  const seen = new Set();
+  const queue = [entry];
+  while (queue.length > 0) {
+    const name = queue.shift();
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const body = scripts?.[name];
+    if (typeof body !== "string") continue;
+    for (const segment of body.split(/[\n;|&]+/).map((s) => s.trim())) {
+      if (segment === `npm run ${target}`) return true;
+      const tokens = segment.split(/\s+/);
+      if (tokens[0] === "npm" && tokens[1] === "run" && tokens[2]) {
+        queue.push(tokens[2]);
+      }
+    }
+  }
+  return false;
 }
 
 /**
@@ -182,7 +220,7 @@ export function checkWiring(rootScripts, workflowText) {
       "the root `validate` no longer runs `verify:format-coverage` (a sibling guard). Restore it.",
     );
   }
-  if (!reachableScripts(rootScripts, "local:gate").has("verify:skills:cli")) {
+  if (!scriptChainRuns(rootScripts, "local:gate", "verify:skills:cli")) {
     problems.push(
       "`npm run local:gate` no longer runs `verify:skills:cli`, so the authoritative validator never runs locally. Restore it.",
     );

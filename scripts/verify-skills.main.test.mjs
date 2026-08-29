@@ -28,6 +28,7 @@ import {
   checkWiring,
   ciRunsUnconditionally,
   runsCommand,
+  scriptChainRuns,
 } from "./verify-skills.mjs";
 
 const SCRIPT = path.join(
@@ -407,4 +408,78 @@ test("ciRunsUnconditionally requires the workflow to fire on ordinary changes", 
     false,
   );
   assert.equal(ciRunsUnconditionally(step, C), false);
+});
+
+test("scriptChainRuns follows the chain to a real invocation", () => {
+  const T = "verify:skills:cli";
+  assert.equal(
+    scriptChainRuns(
+      { "local:gate": `npm run validate && npm run ${T}` },
+      "local:gate",
+      T,
+    ),
+    true,
+  );
+  // Through an intermediate script, with or without flags on the way.
+  assert.equal(
+    scriptChainRuns(
+      { "local:gate": "npm run validate", validate: `npm run ${T}` },
+      "local:gate",
+      T,
+    ),
+    true,
+  );
+  assert.equal(
+    scriptChainRuns(
+      { "local:gate": "npm run validate --silent", validate: `npm run ${T}` },
+      "local:gate",
+      T,
+    ),
+    true,
+  );
+});
+
+test("scriptChainRuns is not satisfied by a mention or a longer name", () => {
+  // `reachableScripts` extracts any `npm run …` substring, so both of these
+  // passed the old check while the validator never ran.
+  const T = "verify:skills:cli";
+  assert.equal(
+    scriptChainRuns(
+      { "local:gate": `echo npm run ${T} && npm run coverage` },
+      "local:gate",
+      T,
+    ),
+    false,
+  );
+  assert.equal(
+    scriptChainRuns({ "local:gate": `npm run ${T}:disabled` }, "local:gate", T),
+    false,
+  );
+  assert.equal(
+    scriptChainRuns({ "local:gate": "npm run coverage" }, "local:gate", T),
+    false,
+  );
+  assert.equal(scriptChainRuns({}, "local:gate", T), false);
+});
+
+test("scriptChainRuns terminates on a cyclic script graph", () => {
+  assert.equal(
+    scriptChainRuns(
+      { "local:gate": "npm run a", a: "npm run b", b: "npm run a" },
+      "local:gate",
+      "verify:skills:cli",
+    ),
+    false,
+  );
+});
+
+test("checkWiring rejects a local:gate that only mentions the validator", () => {
+  const scripts = {
+    ...WIRED_SCRIPTS,
+    "local:gate": "echo npm run verify:skills:cli && npm run coverage",
+  };
+  assert.match(
+    checkWiring(scripts, WIRED_WORKFLOW).join(),
+    /local:gate` no longer runs `verify:skills:cli`/,
+  );
 });
