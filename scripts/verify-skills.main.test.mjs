@@ -24,7 +24,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { checkWiring, ciRunsUnconditionally } from "./verify-skills.mjs";
+import {
+  checkWiring,
+  ciRunsUnconditionally,
+  runsCommand,
+} from "./verify-skills.mjs";
 
 const SCRIPT = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -340,5 +344,43 @@ test("the repository's workflow runs the validator unconditionally", () => {
       "npm run verify:skills:cli",
     ),
     true,
+  );
+});
+
+test("runsCommand matches an exact invocation, not a substring", () => {
+  const C = "npm run verify:skills:cli";
+  for (const script of [
+    C,
+    `npm run validate && ${C}`,
+    `npm run validate\n${C}\n`,
+    `${C} ; npm run something`,
+  ]) {
+    assert.equal(runsCommand(script, C), true, script);
+  }
+});
+
+test("runsCommand rejects a longer script name or a mere mention", () => {
+  // Both would let the real validator be removed while the wiring guard stayed
+  // green — the counterexamples to the substring test this replaced.
+  const C = "npm run verify:skills:cli";
+  for (const script of [
+    "npm run verify:skills:cli:disabled",
+    "echo npm run verify:skills:cli",
+    "npm run verify:skills",
+    "npm run verify:skills:cli --silent",
+    "",
+  ]) {
+    assert.equal(runsCommand(script, C), false, script);
+  }
+});
+
+test("ciRunsUnconditionally inherits the exact-invocation rule", () => {
+  const C = "npm run verify:skills:cli";
+  assert.equal(
+    ciRunsUnconditionally(
+      "jobs:\n  build:\n    steps:\n      - run: npm run verify:skills:cli:disabled\n",
+      C,
+    ),
+    false,
   );
 });

@@ -61,6 +61,30 @@ export function skillDirs(
 }
 
 /**
+ * Whether a shell script invokes exactly `command`.
+ *
+ * A substring test is not enough, and my own justification for one was wrong:
+ * it accepts a LONGER script name (`npm run verify:skills:cli:disabled`) and a
+ * script merely named by another command (`echo npm run verify:skills:cli`),
+ * either of which would let the real validator be removed while this guard
+ * stayed green (Copilot).
+ *
+ * So the script is split on the separators that start a new command, and a
+ * segment must equal the invocation exactly. That is precise for the commands
+ * this guard checks, which take no arguments; a command that did would need
+ * prefix matching with an argument boundary instead.
+ *
+ * @param {string} script A step's `run:` block.
+ * @param {string} command e.g. `npm run verify:skills:cli`.
+ */
+export function runsCommand(script, command) {
+  return script
+    .split(/[\n;|&]+/)
+    .map((segment) => segment.trim())
+    .some((segment) => segment === command);
+}
+
+/**
  * Whether the workflow has a step that runs `command` on every push.
  *
  * Deliberately conservative: a job or step carrying **any** `if:` is skipped.
@@ -90,10 +114,7 @@ export function ciRunsUnconditionally(workflowText, command) {
     for (const step of steps) {
       if (step === null || typeof step !== "object") continue;
       if ("if" in step) continue;
-      // A plain substring is enough and cannot over-match: the command is a
-      // full `npm run <script>` invocation, so `verify:skills` does not match
-      // a search for `verify:skills:cli`.
-      if (typeof step.run === "string" && step.run.includes(command))
+      if (typeof step.run === "string" && runsCommand(step.run, command))
         return true;
     }
   }

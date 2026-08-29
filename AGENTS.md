@@ -16,7 +16,7 @@ users invoke them by name.
 
 | Skill | Covers | How it loads |
 | --- | --- | --- |
-| [`local-dev`](.claude/skills/local-dev/SKILL.md) | Install and run each client; the `@inspector/core` alias; **where a new dependency is declared** (root vs client, `dependencies` vs `devDependencies`, the bundler `external` lists, `overrides`) | Model-invoked |
+| [`local-dev`](.claude/skills/local-dev/SKILL.md) | Install and run each client; the `@inspector/core` alias; and the **reasoning** behind Dependency placement below — what each rule defends against and how to tell you have hit one (the rules themselves stay here) | Model-invoked |
 | [`project-structure`](.claude/skills/project-structure/SKILL.md) | Which client owns which surface, what is in `core/`, where a new file belongs | Model-invoked (not user-invocable) |
 | [`testing`](.claude/skills/testing/SKILL.md) | Where a test file goes, which command runs it, the tiers, clearing the coverage gate, `renderWithMantine` | Model-invoked |
 | [`issue-create`](.claude/skills/issue-create/SKILL.md) | The five-step create flow: version label, type label, milestone, board card, Status + Priority | `/issue-create` |
@@ -201,7 +201,7 @@ that from happening:
    overflows, and drops the least-invoked entries **first** — which are exactly the
    model-invoked skills that must fire on their own. `verify:skills` prints the
    current cost against the budget recorded in `scripts/lib/skill-manifest.mjs`
-   (1,173/4,000 characters as of this writing) and fails when it is exceeded. Raise
+   (1,199/4,000 characters as of this writing) and fails when it is exceeded. Raise
    the budget deliberately, or tighten a description; each entry is capped at 1,536
    characters regardless, so **put the key use case first**.
 
