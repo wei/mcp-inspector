@@ -33,12 +33,20 @@ The bump is part of the milestone's work, so it belongs on the develop branch
 and flows into `main` with everything else.
 
 ```sh
-# The branch name carries the version you are bumping TO, so read it first.
+# Branch from the REMOTE ref, and read the version only once you are on it.
+# A default clone has just `main` checked out, so a local `v2/main` may not
+# exist and `package.json` here is `main`'s — the released version, not the one
+# you are bumping from (Copilot).
+git fetch origin v2/main
+git checkout -b v2/chore/<ISSUE>-bump-<X-Y-Z> origin/v2/main
 node -p "require('./package.json').version"          # what is on v2/main now
-git checkout -b v2/chore/<ISSUE>-bump-<X-Y-Z> v2/main
 npm version minor --no-git-tag-version   # or major / patch; bump only, no tag
 node -p "require('./package.json').version"          # confirm, then PR → v2/main
 ```
+
+The branch name carries the version you are bumping **to**, so it is named after
+that second reading. If you want it before branching:
+`git show origin/v2/main:package.json | node -p "JSON.parse(require('fs').readFileSync(0)).version"`.
 
 ⚠️ **Never copy a version out of this file.** It would be a version that has
 already shipped by the time you read it, and following it would cut a release

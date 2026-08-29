@@ -199,7 +199,7 @@ Safe alternatives, in order of preference:
    `ProjectV2SingleSelectFieldOptionInput.id` is an optional `String`, so a mixed
    list works. Verify afterward that no card lost its value — snapshot
    `gh project item-list … --format json` before and after and diff; don't just
-   spot-check.
+   spot-check. Send those dumps to `$BOARD_TMP` too, for the reason above.
 
 Both the `Incoming` Status option and the Urgent/High/Medium/Low Priority
 options were added this way (#1891), with the before/after diff confirming all
@@ -213,8 +213,16 @@ card's value and never touch the field schema.
 One command, and it is the difference between a five-minute restore and
 reconstructing statuses by inference:
 
+⚠️ **Write it outside the repo.** [The boards are private](../issue-triage/SKILL.md),
+so a snapshot is a full dump of item IDs and every card's Status and Priority.
+Left in the working tree it is one `git add -A` away from being published in a
+PR (Copilot).
+
 ```sh
-gh project item-list 28 --owner modelcontextprotocol --format json --limit 600 > board-snapshot.json
+BOARD_TMP=$(mktemp -d)
+gh project item-list 28 --owner modelcontextprotocol --format json --limit 600 \
+  > "$BOARD_TMP/board-snapshot.json"
+echo "snapshot: $BOARD_TMP/board-snapshot.json"   # note the path; you need it to recover
 ```
 
 ### Recovering from a deleted option
@@ -230,18 +238,24 @@ each single-select field under its lowercased name, so both keys are present),
 and pass the Priority field id `PVTSSF_lADOCt2Azc4BJVxtzg5iJE4`.
 
 ```sh
+# 0. Same temp dir the snapshot went to — keep every dump out of the worktree.
+BOARD_TMP=${BOARD_TMP:-$(mktemp -d)}
+
 # 1. Which cards lost their value, and what did they hold?
-gh project item-list 28 --owner modelcontextprotocol --format json --limit 600 > board-broken.json
-jq -r '[.items[]|select(.status==null)|.id]' board-broken.json > lost-ids.json
-jq -r --slurpfile L lost-ids.json '($L[0]) as $lost
+gh project item-list 28 --owner modelcontextprotocol --format json --limit 600 \
+  > "$BOARD_TMP/board-broken.json"
+jq -r '[.items[]|select(.status==null)|.id]' "$BOARD_TMP/board-broken.json" \
+  > "$BOARD_TMP/lost-ids.json"
+jq -r --slurpfile L "$BOARD_TMP/lost-ids.json" '($L[0]) as $lost
   | [.items[] | select(.id as $i | $lost|index($i)) | .status // "(none)"]
-  | group_by(.) | map({s:.[0],c:length}) | .[] | "was \(.s): \(.c)"' board-snapshot.json
+  | group_by(.) | map({s:.[0],c:length}) | .[] | "was \(.s): \(.c)"' \
+  "$BOARD_TMP/board-snapshot.json"
 
 # 2. Recreate the option, echoing every surviving option's id (see above).
 #    NOTE: the recreated option gets a NEW id — the deleted one never comes back.
 
 # 3. Re-apply it to the orphaned cards.
-for id in $(jq -r '.[]' lost-ids.json); do
+for id in $(jq -r '.[]' "$BOARD_TMP/lost-ids.json"); do
   gh project item-edit --project-id PVT_kwDOCt2Azc4BJVxt --id "$id" \
     --field-id PVTSSF_lADOCt2Azc4BJVxtzg5iI8c --single-select-option-id <NEW_OPTION_ID>
   sleep 0.4
