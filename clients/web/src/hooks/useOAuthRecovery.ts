@@ -934,6 +934,8 @@ export function useOAuthRecovery({
       if (!serverId) {
         return;
       }
+      // `void`: an event listener cannot await, and the `.catch` below is
+      // what terminates the chain.
       void (async () => {
         const { challenge, authorizationUrl } = event.detail;
         const server = sessionRef.current.servers.find(
@@ -1338,6 +1340,10 @@ export function useOAuthRecovery({
         });
       }
     })().catch((err: unknown) => {
+      // `void`: an effect body cannot await, and this `.catch` is what
+      // terminates the chain — the justification AGENTS.md asks of every
+      // surviving `void`.
+      //
       // Everything inside has its own arm; this catches what sits *between*
       // them (#2165) — `setupClientForServer` throwing while it builds the
       // client, and the post-resume `checkAuthChallengeSatisfied`. Both land
@@ -1507,6 +1513,14 @@ export function useOAuthRecovery({
             authChallenge: outcome.challenge,
             recoverySource: stepUp.source,
           });
+          // Handing off, so the retry goes too — as the standard (non-EMA)
+          // step-up below already does. A full-page redirect cannot carry a
+          // closure across the navigation, so keeping it buys nothing on the
+          // success path; and `prepareOAuthRedirect` returns before the
+          // navigation is resolved, so on the failure path it would survive
+          // as a stale operation a later, unrelated step-up could re-run
+          // (#2165).
+          pendingStepUpRetryRef.current = null;
           return;
         }
         if (outcome.kind === "failed") {
@@ -1514,8 +1528,7 @@ export function useOAuthRecovery({
           // dismissed, so nothing will ever consume this operation — and a
           // *later* step-up does not overwrite the ref, so leaving it would
           // let that unrelated authorization silently re-run this command
-          // (#2165). The `interactive` arm above deliberately keeps it: that
-          // one is still on its way to a redirect.
+          // (#2165).
           pendingStepUpRetryRef.current = null;
           const failureMessage = emaStepUpFailureMessage(outcome.error.message);
           notifications.show({

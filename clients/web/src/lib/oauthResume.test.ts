@@ -473,10 +473,17 @@ describe("oauthResume", () => {
       expect(token).toEqual(expect.any(String));
       expect(clearOwnOAuthResumeSnapshot(token)).toBe(true);
     } finally {
+      // `randomUUID` is inherited from `Crypto.prototype`, so there is
+      // normally no OWN descriptor to put back — restoring only when one
+      // existed would leave the `undefined` own property in place and force
+      // every later test in this file onto the fallback path.
       if (original) {
         Object.defineProperty(globalThis.crypto, "randomUUID", original);
+      } else {
+        delete (globalThis.crypto as { randomUUID?: unknown }).randomUUID;
       }
     }
+    expect(globalThis.crypto.randomUUID).toEqual(expect.any(Function));
   });
 
   it("clearOAuthResumeSnapshot swallows removeItem failures", () => {

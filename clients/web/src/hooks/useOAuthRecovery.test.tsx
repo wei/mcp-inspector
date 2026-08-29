@@ -1970,6 +1970,40 @@ describe("useOAuthRecovery", () => {
       expect(retry).not.toHaveBeenCalled();
     });
 
+    it("drops the stored retry when an EMA step-up hands off to a redirect", async () => {
+      // The redirect unloads the page, so the closure cannot survive it
+      // anyway — and `prepareOAuthRedirect` returns before the navigation is
+      // resolved, so on its failure path a retained operation would be left
+      // for a later, unrelated step-up to re-run (#2165).
+      const handleAuthChallenge = vi
+        .fn()
+        .mockResolvedValueOnce({
+          kind: "interactive",
+          challenge: challenge("insufficient_scope"),
+          authorizationUrl: AUTH_URL,
+        })
+        .mockResolvedValue({ kind: "satisfied" });
+      const client = fakeClient({ handleAuthChallenge });
+      const h = harness({
+        servers: [entry("a", {}, true)],
+        activeServerId: "a",
+        client,
+      });
+      const retry = vi.fn().mockResolvedValue(undefined);
+      await openStepUp(h, "tool", retry);
+      await act(async () => {
+        await h.api().handleStepUpAuthorize();
+      });
+      expect(client.beginInteractiveAuthorization).toHaveBeenCalled();
+
+      await openStepUp(h, "tool");
+      await act(async () => {
+        await h.api().handleStepUpAuthorize();
+      });
+      expect(toastTitles()).toContain("Permissions updated");
+      expect(retry).not.toHaveBeenCalled();
+    });
+
     it("cancels back to the panel that asked", async () => {
       const client = fakeClient();
       const h = harness({ servers: [entry("a")], activeServerId: "a", client });
