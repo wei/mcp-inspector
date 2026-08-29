@@ -120,7 +120,7 @@ repo-root `validate:launcher` simply delegates here (`cd clients/launcher && npm
 
 ## Publishing
 
-The launcher provides the `mcp-inspector` bin for the single `@modelcontextprotocol/inspector` tarball. Packaging is a whole-repo concern — how the one-package/single-version tarball is assembled, the `"files"` allowlist invariants (no source maps, why `clients/web/build` needs `.npmignore`, why the cli/tui `package.json`s ship), and the `npm run pack:verify` publish smoke — is documented in the [root README](../../README.md#publishing).
+The launcher provides the `mcp-inspector` bin for the single `@modelcontextprotocol/inspector` tarball. Packaging is a whole-repo concern — how the one-package/single-version tarball is assembled, the `"files"` allowlist invariants (no source maps, why `clients/web/build` needs `.npmignore`, why the cli/tui `package.json`s ship), and the `npm run pack:verify` publish smoke — is documented in the [Publishing](../../docs/publishing.md).
 
 ## Architecture
 

@@ -1,0 +1,85 @@
+---
+name: test-servers
+description: Run a composable MCP test server by hand — pick the showcase config that reproduces a given feature or bug, build test-servers, and connect with the right protocol era. Covers the stale-build hazard.
+disable-model-invocation: true
+---
+
+# Running a test server
+
+`test-servers/` provides **composable MCP servers** so tests and manual checks
+exercise a real server over a real transport instead of mocks. A server is
+assembled from **presets** (fixture factories in
+`test-servers/src/preset-registry.ts`) and configured declaratively with a JSON
+file under `test-servers/configs/`.
+
+The full catalogue of showcase configs — one per feature, each with what to click
+and what the broken build did — is
+[`docs/test-servers.md`](../../../docs/test-servers.md). This skill is how to
+run one.
+
+## Build first
+
+The servers are spawned as real subprocesses, so the build output must exist:
+
+```sh
+cd clients/web && npm run test-servers:build   # tsc -p test-servers → test-servers/build/
+```
+
+Scripts reach this through `scripts/ensure-test-servers.mjs`, which builds
+**unconditionally** (once per process per repo root).
+
+⚠️ **Unconditional emit is not a clean.** A **deleted** source file leaves its
+stale `.js` behind, existence checks pass against it, and anything still
+importing that module silently runs the old code — reported not as staleness but
+as a product failure in whatever was being tested. So after deleting or renaming
+a source file:
+
+```sh
+rm -rf test-servers/build
+```
+
+The `.tsbuildinfo` is pinned inside `build/` so that clean actually invalidates
+the cache.
+
+## Run one
+
+```sh
+# From the repo root, with a built launcher:
+node clients/launcher/build/index.js --web
+# then in the Inspector, add the server the config announces
+```
+
+The server prints its URL on **stderr**, and the bound port is **not
+necessarily** the config's — `findAvailablePort()` walks upward when the
+configured port is taken. Parse the announced URL rather than assuming.
+
+## Pick the right protocol era
+
+Each config in [`docs/test-servers.md`](../../../docs/test-servers.md) says
+which era to connect with. The default is **legacy**; configs setting
+`transport.modern` need **Protocol Era = Modern**. Connecting with the wrong era
+usually looks like a missing capability rather than an error.
+
+## Common starting points
+
+| Want to see | Config |
+| --- | --- |
+| An MCP App in the Apps tab | `mcp-app-http.json` (legacy) |
+| An App-rendered elicitation | `app-elicitation-http.json` (legacy) |
+| `Mcp-*` headers + the modern error taxonomy | `modern-network-http.json` |
+| A tool result's `structuredContent` section | `structured-output-http.json` (legacy) |
+| RFC 6570 resource-template expansion | `rfc6570-templates-http.json` |
+| OAuth token revocation on clear | `oauth-revocation-http.json` (legacy) |
+| Cancelling a call mid-flight | `cancellation-modern-http.json` (modern) |
+
+## Adding a config or preset
+
+- Presets live in `test-servers/src/preset-registry.ts`; configs in
+  `test-servers/configs/*.json`.
+- A new showcase config gets a row in `docs/test-servers.md` saying what to do
+  and what the broken build did — the "what it looked like broken" half is what
+  makes the fixture reproducible later.
+- ⚠️ **An `outputSchema` override must ride a tool that returns structured
+  content.** A conforming client validates the result against the advertised
+  schema, so an override on a preset returning none makes every call fail with
+  "declares an output schema but returned no structured content".
