@@ -52,12 +52,19 @@ export interface SnapshotStore<E extends string> {
  *
  * ## Caller contract
  *
- * `read` and `whenAbsent` should be module-scope constants, not values built
- * in the component body. They are `getSnapshot` dependencies, so a fresh
- * closure or a fresh `[]` literal per render makes React re-run its
- * snapshot check every render. It stays *correct* if they aren't — the cache
- * is keyed on the store and its revision, not on these — but there is no
- * reason to pay for it.
+ * `read` and `whenAbsent` must be module-scope constants, not values built in
+ * the component body — every caller in this directory declares them beside the
+ * hook.
+ *
+ * They are part of the cache key below, along with `event`, so that a changed
+ * argument can never be answered with a value computed from the previous one.
+ * The consequence is that passing a fresh closure (or a fresh `[]`) per render
+ * defeats the cache entirely: each read returns a new defensive copy, and
+ * React fails it outright with "The result of getSnapshot should be cached".
+ * That is the intended failure mode. The alternative — keying only on the
+ * store and its revision — would tolerate an unstable argument by silently
+ * serving a stale value, and a loud error at first render beats a wrong list
+ * nobody can account for.
  *
  * @param store       the state store, or `null` when no server is active
  * @param event       the store event that signals this value changed
@@ -75,6 +82,9 @@ export function useStoreSnapshot<
   // (store, revision) that any render can recompute identically.
   const cache = useRef<{
     store: S | null;
+    event: E;
+    read: (store: S) => V;
+    whenAbsent: V;
     revision: number;
     value: V;
   } | null>(null);
@@ -95,15 +105,22 @@ export function useStoreSnapshot<
     // arrived while nothing was listening is still visible here.
     const revision = store ? store.getEventRevision(event) : 0;
     const cached = cache.current;
+    // Every input the value was derived from is part of the key, not just the
+    // store and its revision: a changed `read` (or `event`, or — with a null
+    // store, where the revision is pinned at 0 — a changed `whenAbsent`) means
+    // the cached value answers a question nobody asked any more.
     if (
       cached &&
       Object.is(cached.store, store) &&
+      cached.event === event &&
+      cached.read === read &&
+      Object.is(cached.whenAbsent, whenAbsent) &&
       cached.revision === revision
     ) {
       return cached.value;
     }
     const value = store ? read(store) : whenAbsent;
-    cache.current = { store, revision, value };
+    cache.current = { store, event, read, whenAbsent, revision, value };
     return value;
   }, [store, event, read, whenAbsent]);
 

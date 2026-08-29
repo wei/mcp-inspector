@@ -196,6 +196,66 @@ describe("useStoreSnapshot", () => {
     expect(result.current).toBe(NO_ITEMS);
   });
 
+  it("re-reads when the reader changes under an unchanged store", () => {
+    // The cache key covers every input the value was derived from, not just
+    // the store and its revision — otherwise a new reader is answered with the
+    // previous reader's output.
+    store.add("a");
+    const readLabels = (s: FakeStore): string[] =>
+      s.getItems().map((i) => i.label);
+    const readCount = (s: FakeStore): string[] => [String(s.getItems().length)];
+
+    const { result, rerender } = renderHook(
+      ({ read }: { read: (s: FakeStore) => string[] }) =>
+        useStoreSnapshot(store, "itemsChange", read, []),
+      { initialProps: { read: readLabels } },
+    );
+    expect(result.current).toEqual(["a"]);
+
+    rerender({ read: readCount });
+    expect(result.current).toEqual(["1"]);
+  });
+
+  it("re-reads when the fallback changes while the store is absent", () => {
+    // With no store the revision is pinned at 0, so the revision alone can
+    // never notice this one.
+    const first: Item[] = [{ label: "first-fallback" }];
+    const second: Item[] = [{ label: "second-fallback" }];
+
+    const { result, rerender } = renderHook(
+      ({ absent }: { absent: Item[] }) =>
+        useStoreSnapshot(null, "itemsChange", readItems, absent),
+      { initialProps: { absent: first } },
+    );
+    expect(result.current).toBe(first);
+
+    rerender({ absent: second });
+    expect(result.current).toBe(second);
+  });
+
+  it("re-reads when the watched event changes", () => {
+    store.add("a");
+    // Widen the prop up front rather than at each `rerender` — `initialProps`
+    // is what fixes the type, so a bare literal there pins it to that one
+    // event and the swap below stops compiling.
+    const initialProps: { event: keyof FakeStoreEventMap } = {
+      event: "itemsChange",
+    };
+    const { result, rerender } = renderHook(
+      ({ event }: { event: keyof FakeStoreEventMap }) =>
+        useStoreSnapshot(store, event, readItems, NO_ITEMS),
+      { initialProps },
+    );
+    const first = result.current;
+
+    // Same store and same reader, so only the event distinguishes the two —
+    // and each event carries its own revision, so the cached entry must not
+    // be reused across them.
+    rerender({ event: "otherChange" });
+    expect(result.current).not.toBe(first);
+    expect(result.current).toEqual([{ label: "a" }]);
+  });
+
   it("stops listening on unmount", () => {
     const { result, unmount } = renderHook(() =>
       useStoreSnapshot(store, "itemsChange", readItems, NO_ITEMS),

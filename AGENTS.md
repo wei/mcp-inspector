@@ -393,12 +393,16 @@ v2/main/
 │   │                                   #   callback listener; also stripBrackets. Used across
 │   │                                   #   clients/web/server, clients/cli, and core/auth/node — #1795)
 │   ├── react/                          # React hooks over the state stores. Every store
-│   │                                   #   subscription reads through useStoreSnapshot.ts
-│   │                                   #   (useSyncExternalStore + a snapshot cached against
-│   │                                   #   TypedEventTarget's per-event dispatch counter), so a
-│   │                                   #   store swap lands in the same frame and an event
-│   │                                   #   dispatched between render and subscribe is not lost
-│   │                                   #   — #1955
+│   │                                   #   subscription reads its snapshot DURING RENDER via
+│   │                                   #   useSyncExternalStore, so a store swap lands in the
+│   │                                   #   same frame and an event dispatched between render
+│   │                                   #   and subscribe is not lost (#1955). Getters that
+│   │                                   #   return a fresh value per read — a defensive copy,
+│   │                                   #   or a freshly built object — go through
+│   │                                   #   useStoreSnapshot.ts, which caches the snapshot
+│   │                                   #   against TypedEventTarget's per-event dispatch
+│   │                                   #   counter; useListError subscribes directly, its
+│   │                                   #   Error|null snapshot being stable already
 │   └── storage/                        # File I/O helpers (store-io.ts) used by OAuth persist backends
 ├── test-servers/                       # Composable MCP test servers + fixtures used by integration tests.
 │   ├── src/                            # TypeScript sources. (modern-tasks.ts: SEP-2663 modern
@@ -1212,8 +1216,10 @@ Nothing **enforces** the boundary: no path alias keys off it, and the coverage `
   - The `onChange` you pass runs **during render**, so it must be pure — `setState` calls and nothing else. No fetches, DOM writes, logging, ref mutation, or parent callbacks: a render can be replayed (StrictMode) or abandoned (concurrent React), so external work would run an unpredictable number of times.
   - An effect is still the right tool for genuine synchronization with an external system (DOM measurement, `requestAnimationFrame`, subscriptions, timers). The rule is about deriving React state from React props, not about effects in general. `NetworkEntry` shows the split: the reveal's force-open is a state update and uses `useValueChange`, while its `requestAnimationFrame` scroll stays a `useEffect`.
   - **Subscribing to an `@inspector/core` state store is `useSyncExternalStore`, never `useState` + a subscribing `useEffect`.** That second shape looks like the legitimate "synchronize with an external system" case above and is not, because it also *seeds and re-seeds local state from the store prop* — so it carries the same stale frame (switching servers paints the previous server's tools for one frame) plus a window where an event dispatched between the render and the effect is lost outright. Every hook in `core/react/` was converted away from it in #1955.
-    - Use **`useStoreSnapshot(store, event, read, whenAbsent)`** (`core/react/useStoreSnapshot.ts`) for one value driven by one store event; call it once per value. `useValueChange` is *not* the tool here — it lives in `clients/web/src` and `core/react/` is consumed by the CLI and TUI too.
-    - `read` and `whenAbsent` must be **module-scope constants**, not built in the component body: they are `getSnapshot` dependencies, and a fresh `[]` literal per render defeats the caching for no reason.
+    - Reach for **`useStoreSnapshot(store, event, read, whenAbsent)`** (`core/react/useStoreSnapshot.ts`) when the getter returns a **fresh value per read** — a defensive copy (`getTools()` is `[...this.items]`) or a freshly built object (`getPagination()`). That is nearly all of them, and the caching it adds is what keeps `useSyncExternalStore` from looping. Call it once per value.
+    - When a getter's value is **already referentially stable**, subscribe with `useSyncExternalStore` directly and skip the helper — `useListError` does, because its snapshot is the stored `Error` instance itself (or `null`). The rule is read-during-render, not "always use the helper".
+    - Either way `useValueChange` is *not* the tool here — it lives in `clients/web/src`, and `core/react/` is consumed by the CLI and TUI too.
+    - `read` and `whenAbsent` must be **module-scope constants**, not built in the component body. They are part of the snapshot's cache key, so an unstable one defeats the cache and React fails it outright with "The result of getSnapshot should be cached" — deliberately, since the alternative is silently serving a value derived from the previous argument.
     - The snapshot is cached against the store's **per-event dispatch counter** (`TypedEventTarget.getEventRevision`), which every dispatch advances automatically — not against the snapshot's contents. That is deliberate and load-bearing: these getters return a defensive copy, so contents are the only alternative, and a contents comparison cannot see a dispatch that mutated an entry the list already holds (`MessageLogState` folding a response into its request entry does exactly that). Don't "optimize" it into a shallow compare.
     - Consequently the **store is the source of truth and the event is only the signal** — the hook re-reads the store rather than taking the event's `detail`. A test that fires a store event must put the value on the store first; dispatching alone announces a change that isn't there. A hand-rolled fake must extend the real `TypedEventTarget` (a bare `EventTarget` has no `getEventRevision` and fails at runtime).
     - Genuinely local state accumulated from an event stream, with no getter to read it back from, stays `useState` — `useInspectorClient`'s `lastError` is the one such case. Reset it on a store swap **during render**, not in an effect.
