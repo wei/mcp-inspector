@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import { TypedEventTarget } from "@inspector/core/mcp/typedEventTarget";
 import { useStoreSnapshot } from "@inspector/core/react/useStoreSnapshot";
@@ -257,16 +257,25 @@ describe("useStoreSnapshot", () => {
   });
 
   it("stops listening on unmount", () => {
-    const { result, unmount } = renderHook(() =>
+    // Assert on the listener, not on the rendered value. Watching
+    // `result.current` stay put after unmount proves nothing: React drops a
+    // store notification for an unmounted component either way, so that test
+    // passes with the listener still attached — which is the leak it was
+    // supposed to catch.
+    const addSpy = vi.spyOn(store, "addEventListener");
+    const removeSpy = vi.spyOn(store, "removeEventListener");
+
+    const { unmount } = renderHook(() =>
       useStoreSnapshot(store, "itemsChange", readItems, NO_ITEMS),
     );
-    const before = result.current;
+    expect(addSpy).toHaveBeenCalledWith("itemsChange", expect.any(Function));
+    const subscribed = addSpy.mock.calls[0]?.[1];
+
     unmount();
 
-    // No act(): after unmount there is nothing to re-render, and a listener
-    // still attached here would be a leak rather than an update.
-    store.add("a");
-    expect(result.current).toBe(before);
+    // The exact function that was attached is the one detached — a cleanup
+    // that removed some other listener, or none, fails here.
+    expect(removeSpy).toHaveBeenCalledWith("itemsChange", subscribed);
   });
 
   it("unmounts cleanly with no store to unsubscribe from", () => {
