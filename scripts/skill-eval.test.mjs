@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import {
   collectSkillInvocations,
+  runRejection,
   invokedSkillNames,
   runPrompt,
   sampleHit,
@@ -116,6 +117,38 @@ function fakeSpawn({ chunks = [], code = 0, error = null }) {
   };
 }
 
+const resultEvent = (subtype) =>
+  JSON.stringify({ type: "result", subtype }) + "\n";
+
+test("collectSkillInvocations reports the terminal result subtype", () => {
+  assert.equal(
+    collectSkillInvocations(resultEvent("success")).result,
+    "success",
+  );
+  assert.equal(collectSkillInvocations("").result, null);
+});
+
+test("runRejection accepts a run that hit the turn limit", () => {
+  // With `--max-turns 1`, a run in which a skill FIRES necessarily hits the
+  // limit and the CLI exits 1. Rejecting on the exit code alone would throw away
+  // exactly the observations the eval exists to count — verified against the
+  // real CLI, which ends such a run `error_max_turns` with `num_turns: 2`.
+  assert.equal(runRejection({ result: "error_max_turns", code: 1 }), null);
+  assert.equal(runRejection({ result: "success", code: 0 }), null);
+});
+
+test("runRejection rejects a run that observed nothing", () => {
+  // An auth failure, a rate limit, or a CLI that never started. Counting these
+  // as "no skill invoked" passes every negative case and reads as a trigger
+  // miss on every positive one.
+  assert.match(runRejection({ result: null, code: 1 }) ?? "", /no terminal/);
+  assert.match(runRejection({ result: null, code: 0 }) ?? "", /no terminal/);
+  assert.match(
+    runRejection({ result: "error_during_execution", code: 1 }) ?? "",
+    /ended `error_during_execution`/,
+  );
+});
+
 test("runPrompt collects invocations across chunk boundaries", async () => {
   const whole =
     JSON.stringify({
@@ -127,18 +160,34 @@ test("runPrompt collects invocations across chunk boundaries", async () => {
       },
     }) + "\n";
   const invoked = await runPrompt("p", {
-    spawnFn: fakeSpawn({ chunks: [whole.slice(0, 30), whole.slice(30)] }),
+    spawnFn: fakeSpawn({
+      chunks: [
+        whole.slice(0, 30),
+        whole.slice(30),
+        resultEvent("error_max_turns"),
+      ],
+      code: 1,
+    }),
   });
   assert.equal(sampleHit("testing", invoked), true);
 });
 
-test("runPrompt rejects a nonzero exit rather than reporting an empty observation", async () => {
-  // The regression that matters: resolving here would pass every negative case
-  // and read as a trigger miss on every positive one, so a rate-limited run
-  // would report a plausible hit rate.
+test("runPrompt rejects a run that produced no terminal result", async () => {
   await assert.rejects(
     runPrompt("p", { spawnFn: fakeSpawn({ code: 1 }) }),
-    /exited 1 for prompt: p/,
+    /no terminal `result` event \(exit 1\) for prompt: p/,
+  );
+});
+
+test("runPrompt rejects a run that ended in an unusable state", async () => {
+  await assert.rejects(
+    runPrompt("p", {
+      spawnFn: fakeSpawn({
+        chunks: [resultEvent("error_during_execution")],
+        code: 1,
+      }),
+    }),
+    /ended `error_during_execution`/,
   );
 });
 

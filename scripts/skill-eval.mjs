@@ -19,10 +19,10 @@
 // that people stop trusting the gate. Run it when adding a skill or editing a
 // model-invoked skill's description.
 //
-// The cost of that split, stated plainly: `verify:skills` cannot detect a
-// well-formed skill whose description simply never matches anything. Nothing in
-// the gate can. Closing that would need a deterministic trigger oracle, which
-// does not exist.
+// The cost of that split, stated plainly: neither `verify:skills` nor the
+// authoritative `claude plugin validate` CI step can detect a well-formed skill
+// whose description simply never matches anything. Both check structure.
+// Closing that would need a deterministic trigger oracle, which does not exist.
 //
 // Usage:
 //   npm run skills:eval                  # every model-invoked skill's cases
@@ -33,7 +33,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseSkill } from "./lib/skill-manifest.mjs";
+import { parseSkill, validateEvalCases } from "./lib/skill-manifest.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SKILLS_DIR = path.join(ROOT, ".claude", "skills");
@@ -54,11 +54,35 @@ function collectCases(only) {
     )
       continue;
     const skill = parseSkill(dir, readFileSync(skillFile, "utf8"));
-    if (skill.errors.length > 0 || !skill.modelInvoked) continue;
+    // Skipping a BROKEN skill here would let `skills:eval` run the remaining
+    // cases and exit 0 while omitting the very skill that was just broken —
+    // reporting a green measurement of a set that quietly shrank (Copilot).
+    // Only a well-formed, deliberately name-only skill is skipped.
+    if (skill.errors.length > 0) {
+      throw new Error(
+        `${dir}/SKILL.md does not parse (${skill.errors[0]}). Run \`npm run verify:skills\`.`,
+      );
+    }
+    if (!skill.modelInvoked) continue;
     const evalsFile = path.join(SKILLS_DIR, dir, "evals", "evals.json");
-    if (!existsSync(evalsFile)) continue;
-    for (const c of JSON.parse(readFileSync(evalsFile, "utf8")))
-      cases.push({ ...c, from: dir });
+    if (!existsSync(evalsFile)) {
+      throw new Error(
+        `${dir} is model-invoked but has no evals/evals.json. Run \`npm run verify:skills\`.`,
+      );
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(readFileSync(evalsFile, "utf8"));
+    } catch (e) {
+      throw new Error(
+        `${dir}/evals/evals.json is not valid JSON — ${e.message}`,
+      );
+    }
+    const invalid = validateEvalCases(dir, parsed);
+    if (invalid.length > 0) {
+      throw new Error(`${dir}/evals/evals.json: ${invalid.join("; ")}`);
+    }
+    for (const c of parsed) cases.push({ ...c, from: dir });
   }
   return cases;
 }
@@ -74,12 +98,13 @@ function collectCases(only) {
  *
  * @param {string} text One or more newline-delimited JSON events. A trailing
  *   partial line is ignored, so this can be fed incrementally.
- * @returns {{ invoked: Set<string>, rest: string }}
+ * @returns {{ invoked: Set<string>, rest: string, result: string | null }}
  */
 export function collectSkillInvocations(text) {
   const lines = text.split("\n");
   const rest = lines.pop() ?? "";
   const invoked = new Set();
+  let result = null;
   for (const line of lines) {
     if (!line.trim()) continue;
     let evt;
@@ -89,6 +114,7 @@ export function collectSkillInvocations(text) {
       // A malformed line is noise from the CLI, not an observation.
       continue;
     }
+    if (evt?.type === "result") result = evt.subtype ?? null;
     if (evt?.type !== "assistant") continue;
     for (const block of evt.message?.content ?? []) {
       if (block?.type !== "tool_use" || block.name !== "Skill") continue;
@@ -96,7 +122,40 @@ export function collectSkillInvocations(text) {
       invoked.add(JSON.stringify(block.input ?? {}));
     }
   }
-  return { invoked, rest };
+  return { invoked, rest, result };
+}
+
+/**
+ * Terminal `result` subtypes that mean the session ran to a real conclusion.
+ *
+ * `error_max_turns` is a SUCCESSFUL observation here, not a failure: with
+ * `--max-turns 1`, a run in which the model invokes a skill necessarily hits
+ * the limit and the CLI exits 1 — so treating a nonzero exit as failure would
+ * reject exactly the runs the eval is trying to count. Verified against the
+ * CLI: a firing prompt ends `{subtype: "error_max_turns", num_turns: 2}`.
+ */
+const CONCLUSIVE_RESULTS = new Set(["success", "error_max_turns"]);
+
+/**
+ * Whether a finished run produced a usable observation.
+ *
+ * The failure that matters is the opposite one: an auth error, a rate limit or
+ * a missing CLI observes NOTHING, and counting that as "no skill invoked"
+ * passes every negative case and reads as a trigger miss on every positive one,
+ * so a run that never happened comes back as a plausible hit rate (Copilot).
+ * Classifying on the terminal event rather than the exit code separates the two.
+ *
+ * @param {{ result: string | null, code: number | null }} outcome
+ * @returns {string | null} A reason to reject, or null if the run is usable.
+ */
+export function runRejection({ result, code }) {
+  if (result === null) {
+    return `produced no terminal \`result\` event (exit ${code})`;
+  }
+  if (!CONCLUSIVE_RESULTS.has(result)) {
+    return `ended \`${result}\` (exit ${code})`;
+  }
+  return null;
 }
 
 /**
@@ -170,19 +229,18 @@ export function runPrompt(prompt, { spawnFn = spawn, cwd = ROOT } = {}) {
 
     let buf = "";
     const invoked = new Set();
+    let result = null;
     p.stdout.on("data", (chunk) => {
       const parsed = collectSkillInvocations(buf + chunk.toString());
       buf = parsed.rest;
       for (const payload of parsed.invoked) invoked.add(payload);
+      if (parsed.result !== null) result = parsed.result;
     });
     p.on("error", reject);
     p.on("close", (code) => {
-      // A CLI that failed to run observed NOTHING. Resolving it as an empty set
-      // would silently pass every negative case and read as a trigger miss on
-      // every positive one, so an auth error or a rate limit would come back as
-      // a plausible-looking hit rate.
-      if (code !== 0) {
-        reject(new Error(`\`claude -p\` exited ${code} for prompt: ${prompt}`));
+      const rejection = runRejection({ result, code });
+      if (rejection !== null) {
+        reject(new Error(`\`claude -p\` ${rejection} for prompt: ${prompt}`));
         return;
       }
       resolve(invoked);

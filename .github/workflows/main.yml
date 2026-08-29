@@ -52,6 +52,21 @@ jobs:
         # jobs, but that's a larger restructure and deliberately out of scope.
         run: npm run validate
 
+      - name: Validate the skills with the authoritative CLI (#2163)
+        # `npm run validate` above already ran `verify:skills`, whose own parser
+        # reads each SKILL.md the way Claude Code does. This is the second
+        # opinion: `claude plugin validate` is the authoritative schema, and the
+        # guard skips it whenever the CLI is absent — which, without this step,
+        # would mean always, in CI. Installing it here is what makes the
+        # acceptance criterion true rather than aspirational.
+        #
+        # Pinned rather than @latest: an unpinned validator can start failing a
+        # PR that changed nothing, which is how a gate loses its credibility.
+        # It needs no authentication — verified against a clean HOME.
+        run: |
+          npm install -g @anthropic-ai/claude-code@2.1.250
+          claude plugin validate .claude/skills
+
       - name: Verify the browser-externalized-builtin build gate (#1769)
         # Runs a real `vite build` with a Node built-in forced into the browser
         # graph and asserts the build FAILS via the #1769 gate. The unit tests

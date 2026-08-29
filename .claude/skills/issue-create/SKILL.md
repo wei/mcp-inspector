@@ -102,8 +102,22 @@ The priority rubric is in `/issue-triage`.
 
 ## Note on issues that arrive from elsewhere
 
-An issue opened by hand in the GitHub UI — by an outside reporter *or* by a
-maintainer — arrives with no label, no milestone, and no card. That is normal on
-arrival, not a defect to fix the moment it lands: it comes into the system
-through `/issue-triage` instead, and starts in **Incoming** with no milestone,
-because nobody has approved it.
+An issue opened through the GitHub UI — by an outside reporter *or* by a
+maintainer — arrives with **no milestone and no card**, and that is normal on
+arrival rather than a defect to fix the moment it lands: it comes into the
+system through `/issue-triage` instead, and starts in **Incoming**, because
+nobody has approved it.
+
+Its **labels are partly set already**, which the triage pass has to account for:
+blank issues are disabled, so it came through a form in
+[`.github/ISSUE_TEMPLATE/`](../../../.github/ISSUE_TEMPLATE) (Copilot).
+
+| Form | Applies | Still missing |
+| --- | --- | --- |
+| Bug report | `bug` | the version label — the form carries a version-line **dropdown** a maintainer reads at triage, because a `labels:` list is static and GitHub cannot map an answer to a label |
+| Feature request | `enhancement`, `v2` | nothing — v1 takes security fixes only and cannot receive a feature, so `v2` is correct by construction |
+
+So a bug report needs its version label applied from the dropdown answer, and a
+feature request usually needs no label work at all. ⚠️ GitHub serves the chooser
+from the **default branch**, so a form edited on `v2/main` does not take effect
+until the next milestone merge.

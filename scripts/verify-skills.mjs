@@ -41,7 +41,7 @@ import {
 } from "./lib/skill-manifest.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const SKILLS_DIR = path.join(ROOT, ".claude", "skills");
+const DEFAULT_SKILLS_DIR = path.join(ROOT, ".claude", "skills");
 
 /** Directory names under `.claude/skills` that contain a SKILL.md. */
 export function skillDirs(
@@ -54,7 +54,12 @@ export function skillDirs(
     .sort();
 }
 
-function main() {
+function main(argv = process.argv.slice(2)) {
+  // An explicit directory is the seam the fixture tests drive; without it this
+  // guard could only ever be exercised against the repo's own (green) skills,
+  // so it could stop enforcing anything while every unit test stayed green.
+  const override = argv[0];
+  const SKILLS_DIR = override ? path.resolve(override) : DEFAULT_SKILLS_DIR;
   const failures = [];
 
   if (!existsSync(SKILLS_DIR)) {
@@ -123,6 +128,8 @@ function main() {
     `verify:skills — OK: ${parsed.length} skills, ${modelInvoked.length} model-invoked ` +
       `(${modelInvoked.join(", ")}); listing ${cost}/${LISTING_BUDGET} chars.`,
   );
+
+  if (override) return;
 
   // The authoritative parse, when it is available — strictly a bonus. An older
   // CLI does not have `plugin validate` and exits nonzero on it as an unknown
