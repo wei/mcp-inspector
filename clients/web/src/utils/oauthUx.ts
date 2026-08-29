@@ -1,5 +1,6 @@
 export {
   authRecoveryRestoredMessage,
+  authRecoveryRetryFailedMessage,
   isActionTriggeredOAuthRecovery,
   oauthPreRedirectToastCopy,
   oauthResumeAbandonedMessage,

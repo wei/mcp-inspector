@@ -46,6 +46,20 @@ export function authRecoveryRestoredMessage(options?: {
     : "Session credentials were updated.";
 }
 
+/**
+ * Toast when a *deferred* authorization recovery (#2165) fails partway
+ * through — the tab-visible / reconnect resume, not a user-initiated one.
+ *
+ * Phrased as "will try again" rather than as a final failure because the
+ * pending recovery is restored when this fires: the slot was cleared only to
+ * keep two triggers from racing, and it is still owed.
+ */
+export function authRecoveryRetryFailedMessage(detail?: string): string {
+  const base =
+    "Could not continue the pending authorization. The Inspector will try again the next time this tab becomes active or the session reconnects.";
+  return detail?.trim() ? `${base} (${detail.trim()})` : base;
+}
+
 export function oauthResumeAbandonedMessage(
   authKind: OAuthInteractiveAuthKind,
   options?: { recoverySource?: OAuthRecoverySource },

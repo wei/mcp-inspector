@@ -570,6 +570,31 @@ describe("useOAuthRecovery", () => {
       expect(active.beginInteractiveAuthorization).not.toHaveBeenCalled();
     });
 
+    it("clears the snapshot and reports a redirect that never started", async () => {
+      // The navigation is what the snapshot describes, so a rejection here
+      // must not leave one behind: the next load would read it as an
+      // *abandoned* redirect and offer that (wrong) diagnosis (#2165).
+      const client = fakeClient({
+        beginInteractiveAuthorization: vi
+          .fn()
+          .mockRejectedValue(new Error("provider state unreadable")),
+      });
+      const h = harness({ servers: [entry("a")], activeServerId: "a", client });
+      await act(async () => {
+        h.api().prepareOAuthRedirect({
+          serverId: "a",
+          authKind: "reauth",
+          authorizationUrl: AUTH_URL,
+        });
+      });
+      await waitFor(() => expect(h.api().reAuthBanner?.serverId).toBe("a"));
+      expect(h.api().reAuthBanner?.message).toContain(
+        "provider state unreadable",
+      );
+      expect(h.spies.setFailedServerId).toHaveBeenCalledWith("a");
+      expect(window.sessionStorage.getItem(OAUTH_RESUME_KEY)).toBeNull();
+    });
+
     it("tolerates having no client at all", () => {
       const h = harness({ servers: [entry("a")], client: null });
       act(() =>
@@ -845,6 +870,29 @@ describe("useOAuthRecovery", () => {
       expect(client.beginInteractiveAuthorization).not.toHaveBeenCalled();
     });
 
+    it("reports a challenge whose recovery check rejects", async () => {
+      // A listener cannot be awaited, so without the handler's own catch this
+      // challenge draws no UI response whatsoever (#2165).
+      const client = fakeClient({
+        checkAuthChallengeSatisfied: vi
+          .fn()
+          .mockRejectedValue(new Error("remote auth state unreachable")),
+      });
+      const h = harness({ servers: [entry("a")], activeServerId: "a", client });
+      await act(async () => {
+        client.emit("authChallengeInteractive", {
+          challenge: challenge(),
+          authorizationUrl: AUTH_URL,
+        });
+      });
+      await waitFor(() => expect(h.api().reAuthBanner?.serverId).toBe("a"));
+      expect(h.api().reAuthBanner?.message).toContain(
+        "remote auth state unreachable",
+      );
+      expect(h.spies.setFailedServerId).toHaveBeenCalledWith("a");
+      expect(client.beginInteractiveAuthorization).not.toHaveBeenCalled();
+    });
+
     it("raises the banner on an oauthError event", async () => {
       const client = fakeClient();
       const h = harness({ servers: [entry("a")], activeServerId: "a", client });
@@ -985,6 +1033,36 @@ describe("useOAuthRecovery", () => {
         becomeVisible();
       });
       expect(client.handleAuthChallenge).toHaveBeenCalledTimes(1);
+    });
+
+    it("restores the deferred slot when the resume itself rejects", async () => {
+      // The slot is cleared to keep two triggers from racing, not because the
+      // recovery was delivered — so a rejection has to put it back rather than
+      // dropping the deferred recovery silently (#2165).
+      const client = fakeClient({
+        handleAuthChallenge: vi
+          .fn()
+          .mockRejectedValue(new Error("token endpoint unreachable")),
+      });
+      const h = harness({ servers: [entry("a")], activeServerId: "a", client });
+      await defer(client, h);
+
+      await act(async () => {
+        becomeVisible();
+      });
+      await waitFor(() =>
+        expect(client.handleAuthChallenge).toHaveBeenCalledTimes(1),
+      );
+      expect(toastTitles()).toContain("Could not continue authorization");
+      expect(toastWith("token endpoint unreachable")).toBeTruthy();
+
+      // Restored, so the next trigger retries it.
+      await act(async () => {
+        becomeVisible();
+      });
+      await waitFor(() =>
+        expect(client.handleAuthChallenge).toHaveBeenCalledTimes(2),
+      );
     });
 
     it("does not resume while disconnected, and resumes on the reconnect", async () => {
@@ -1165,6 +1243,43 @@ describe("useOAuthRecovery", () => {
       await waitFor(() =>
         expect(toastTitles()).toContain("OAuth callback could not be matched"),
       );
+    });
+
+    it("flags and banners a client rebuild that throws", async () => {
+      // Between the arms that have their own handling (#2165): by the time
+      // `setupClientForServer` runs, the callback URL and the one-shot
+      // snapshot are both spent, so there is nothing left to retry with.
+      snapshot();
+      onCallbackUrl(`?code=abc&state=${AUTH_ID}`);
+      const h = harness({
+        servers: [entry("a")],
+        setupClient: () => {
+          throw new Error("client construction failed");
+        },
+      });
+      await waitFor(() => expect(h.api().reAuthBanner?.serverId).toBe("a"));
+      expect(h.api().reAuthBanner?.message).toContain(
+        "client construction failed",
+      );
+      expect(h.spies.setFailedServerId).toHaveBeenCalledWith("a");
+    });
+
+    it("flags and banners a post-resume scope check that rejects", async () => {
+      snapshot({
+        authKind: "step_up",
+        authChallenge: { reason: "insufficient_scope" },
+      });
+      const client = fakeClient({
+        checkAuthChallengeSatisfied: vi
+          .fn()
+          .mockRejectedValue(new Error("scope check unreachable")),
+      });
+      const h = callbackHarness(`?code=abc&state=${AUTH_ID}`, {}, client);
+      await waitFor(() => expect(h.api().reAuthBanner?.serverId).toBe("a"));
+      expect(h.api().reAuthBanner?.message).toContain(
+        "scope check unreachable",
+      );
+      expect(h.spies.setFailedServerId).toHaveBeenCalledWith("a");
     });
 
     it("restores the shell, rebuilds the client and completes", async () => {
@@ -1590,6 +1705,54 @@ describe("useOAuthRecovery", () => {
       expect(h.spies.setSourceScopedError).toHaveBeenCalledWith(
         "prompt",
         expect.stringContaining("denied"),
+      );
+    });
+
+    it("routes an EMA step-up that rejects back to the panel that asked", async () => {
+      // `StepUpAuthModal` calls this handler as `void onAuthorize()`, so
+      // without the catch the rejection reaches nobody (#2165).
+      const client = fakeClient({
+        handleAuthChallenge: vi
+          .fn()
+          .mockRejectedValue(new Error("IdP unreachable")),
+      });
+      const h = harness({
+        servers: [entry("a", {}, true)],
+        activeServerId: "a",
+        client,
+      });
+      await openStepUp(h, "prompt");
+      await act(async () => {
+        await h.api().handleStepUpAuthorize();
+      });
+      expect(h.spies.setSourceScopedError).toHaveBeenCalledWith(
+        "prompt",
+        expect.stringContaining("IdP unreachable"),
+      );
+      expect(toastTitles()).toContain("Organization permissions");
+    });
+
+    it("reports a failed retry as the command's failure, not the step-up's", async () => {
+      const client = fakeClient({
+        handleAuthChallenge: vi.fn().mockResolvedValue({ kind: "satisfied" }),
+      });
+      const h = harness({
+        servers: [entry("a", {}, true)],
+        activeServerId: "a",
+        client,
+      });
+      const retry = vi.fn().mockRejectedValue(new Error("tools/call failed"));
+      await openStepUp(h, "tool", retry);
+      await act(async () => {
+        await h.api().handleStepUpAuthorize();
+      });
+      // The permissions leg succeeded, so this is the retried command's
+      // failure and is reported as such.
+      expect(toastTitles()).toContain("Permissions updated");
+      expect(toastTitles()).toContain("Retry failed");
+      expect(h.spies.setSourceScopedError).toHaveBeenCalledWith(
+        "tool",
+        "tools/call failed",
       );
     });
 

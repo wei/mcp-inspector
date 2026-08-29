@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   authRecoveryRestoredMessage,
+  authRecoveryRetryFailedMessage,
   emaStepUpFailureMessage,
   emaStepUpInProgressMessage,
   emaStepUpSuccessMessage,
@@ -205,6 +206,16 @@ describe("oauthUx resume/restore copy", () => {
     );
     expect(authRecoveryRestoredMessage()).toBe(
       "Session credentials were updated.",
+    );
+  });
+
+  it("authRecoveryRetryFailedMessage appends only a non-blank detail", () => {
+    const base =
+      "Could not continue the pending authorization. The Inspector will try again the next time this tab becomes active or the session reconnects.";
+    expect(authRecoveryRetryFailedMessage()).toBe(base);
+    expect(authRecoveryRetryFailedMessage("   ")).toBe(base);
+    expect(authRecoveryRetryFailedMessage(" token endpoint 500 ")).toBe(
+      `${base} (token endpoint 500)`,
     );
   });
 
