@@ -24,7 +24,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { checkWiring } from "./verify-skills.mjs";
+import { checkWiring, ciRunsUnconditionally } from "./verify-skills.mjs";
 
 const SCRIPT = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -236,7 +236,7 @@ test("checkWiring catches the authoritative validator dropped from CI", () => {
       WIRED_SCRIPTS,
       "jobs:\n  build:\n    steps:\n      - run: npm run validate\n",
     ).join(),
-    /has no step that runs/,
+    /has no unconditional step that runs/,
   );
 });
 
@@ -275,7 +275,7 @@ test("checkWiring is not satisfied by a mention outside an executable step", () 
   for (const workflow of mentions) {
     assert.match(
       checkWiring(WIRED_SCRIPTS, workflow).join(),
-      /has no step that runs/,
+      /has no unconditional step that runs/,
       `should not count: ${workflow.split("\n")[0]}`,
     );
   }
@@ -285,4 +285,60 @@ test("checkWiring accepts the command inside a multi-line run step", () => {
   const workflow =
     "jobs:\n  build:\n    steps:\n      - run: |\n          npm run validate\n          npm run verify:skills:cli\n";
   assert.deepEqual(checkWiring(WIRED_SCRIPTS, workflow), []);
+});
+
+test("ciRunsUnconditionally requires a step that runs on every push", () => {
+  const C = "npm run verify:skills:cli";
+  const wired =
+    "jobs:\n  build:\n    steps:\n      - run: npm run verify:skills:cli\n";
+  assert.equal(ciRunsUnconditionally(wired, C), true);
+
+  // A multi-line `run:` block is the obvious way to over-correct; it counts.
+  assert.equal(
+    ciRunsUnconditionally(
+      "jobs:\n  build:\n    steps:\n      - run: |\n          npm run validate\n          npm run verify:skills:cli\n",
+      C,
+    ),
+    true,
+  );
+});
+
+test("ciRunsUnconditionally rejects a step that only runs sometimes", () => {
+  const C = "npm run verify:skills:cli";
+  // Both are syntactically `run:` steps, so an executable-position check alone
+  // reports them as wired while PR CI validates nothing.
+  const releaseOnly =
+    "jobs:\n  publish:\n    if: github.event_name == 'release'\n    steps:\n      - run: npm run verify:skills:cli\n";
+  const stepGated =
+    "jobs:\n  build:\n    steps:\n      - if: false\n        run: npm run verify:skills:cli\n";
+  assert.equal(ciRunsUnconditionally(releaseOnly, C), false);
+  assert.equal(ciRunsUnconditionally(stepGated, C), false);
+});
+
+test("ciRunsUnconditionally is not satisfied by an unrelated or absent command", () => {
+  const C = "npm run verify:skills:cli";
+  // `verify:skills` must not satisfy a search for `verify:skills:cli`.
+  assert.equal(
+    ciRunsUnconditionally(
+      "jobs:\n  build:\n    steps:\n      - run: npm run verify:skills\n",
+      C,
+    ),
+    false,
+  );
+  assert.equal(ciRunsUnconditionally("not: yaml: at: all:", C), false);
+  assert.equal(ciRunsUnconditionally("on: push\n", C), false);
+});
+
+test("the repository's workflow runs the validator unconditionally", () => {
+  const repoRoot = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+  );
+  assert.equal(
+    ciRunsUnconditionally(
+      readFileSync(path.join(repoRoot, ".github/workflows/main.yml"), "utf8"),
+      "npm run verify:skills:cli",
+    ),
+    true,
+  );
 });

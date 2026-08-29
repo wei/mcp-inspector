@@ -23,8 +23,12 @@ npm run format      # auto-fix: core/, scripts/, the shared surface, every clien
 npm run local:gate  # several minutes
 ```
 
-`local:gate` is `validate` → `verify:skills:cli` → `coverage` → `verify:build-gate` →
-`verify:bundle-externals` → `smoke` → `smoke:web:firefox` → `local:storybook`.
+The stages it runs, in order, are listed in
+[`docs/quality-gate.md`](../../../docs/quality-gate.md) — deliberately in one
+place only. That list drifted apart across three copies while this PR was in
+review, which is the argument for not making a fourth. `npm run local:gate`
+prints each stage as it starts, so the running command is the other reliable
+answer.
 
 It is a **strict superset** of GitHub CI (which additionally runs `npm install`,
 and runs `coverage` as a parallel job). So the direction that matters holds:

@@ -32,7 +32,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { claudeSpawnArgs, probeClaudeVersion } from "./lib/claude-cli.mjs";
 import { reachableScripts, rootReachesScript } from "./lib/npm-scripts.mjs";
-import { extractExecutableRegions } from "./lib/workflow-gate.mjs";
+import { parse as parseYaml } from "yaml";
 import {
   compareVersions,
   parseClaudeVersion,
@@ -61,6 +61,46 @@ export function skillDirs(
 }
 
 /**
+ * Whether the workflow has a step that runs `command` on every push.
+ *
+ * Deliberately conservative: a job or step carrying **any** `if:` is skipped.
+ * This guard cannot evaluate an Actions expression, and the property being
+ * asserted is "CI validates the skills on a PR" — which a conditional step does
+ * not establish. Over-strictness costs a false failure that is obvious to fix;
+ * under-strictness costs a guard that reports green while nothing runs.
+ *
+ * @param {string} workflowText
+ * @param {string} command
+ * @returns {boolean}
+ */
+export function ciRunsUnconditionally(workflowText, command) {
+  let doc;
+  try {
+    doc = parseYaml(workflowText);
+  } catch {
+    return false;
+  }
+  const jobs = doc?.jobs;
+  if (jobs === null || typeof jobs !== "object") return false;
+
+  for (const job of Object.values(jobs)) {
+    if (job === null || typeof job !== "object") continue;
+    if ("if" in job) continue;
+    const steps = Array.isArray(job.steps) ? job.steps : [];
+    for (const step of steps) {
+      if (step === null || typeof step !== "object") continue;
+      if ("if" in step) continue;
+      // A plain substring is enough and cannot over-match: the command is a
+      // full `npm run <script>` invocation, so `verify:skills` does not match
+      // a search for `verify:skills:cli`.
+      if (typeof step.run === "string" && step.run.includes(command))
+        return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Assert the two skill gates are still WIRED, not merely present.
  *
  * A gate that stops being invoked fails silently and every fixture test stays
@@ -75,13 +115,18 @@ export function skillDirs(
  *     reachable from neither `validate` nor any test, so nothing else would
  *     notice it going missing.
  *
- * The workflow half reads the **executable** regions rather than the file's
- * text. A raw substring match is satisfied by a comment, a step `name:`, or an
- * unused anchor that merely mentions the command — so deleting the real step
- * while leaving this very docblock's wording nearby would keep the guard green
- * (Copilot). `extractExecutableRegions` already descends only the schema paths
- * Actions actually runs, with aliases resolved, and it is the same helper the
- * #2146 workflow gate is built on.
+ * The workflow half must find a step that **actually runs on a PR**, which takes
+ * two narrowings beyond a text search:
+ *
+ *   - Executable position. A raw substring match is satisfied by a comment, a
+ *     step `name:`, or a workflow input default that merely mentions the
+ *     command — so deleting the real step while leaving this docblock's wording
+ *     nearby would keep the guard green.
+ *   - Unconditional execution. A `run:` inside a release-only job, or behind
+ *     `if: false`, is still syntactically a `run:` — so a step moved there
+ *     would report as wired while PR CI validated nothing (Copilot). Any `if:`
+ *     on the job or the step disqualifies it: this guard cannot evaluate an
+ *     expression, and "runs sometimes" is not the property being asserted.
  */
 export function checkWiring(rootScripts, workflowText) {
   const problems = [];
@@ -95,14 +140,9 @@ export function checkWiring(rootScripts, workflowText) {
       "`npm run local:gate` no longer runs `verify:skills:cli`, so the authoritative validator never runs locally. Restore it.",
     );
   }
-  const runsInCi = extractExecutableRegions(workflowText, "main.yml").some(
-    (region) =>
-      region.kind === "run" &&
-      /\bnpm run verify:skills:cli\b/.test(region.text),
-  );
-  if (!runsInCi) {
+  if (!ciRunsUnconditionally(workflowText, "npm run verify:skills:cli")) {
     problems.push(
-      "`.github/workflows/main.yml` has no step that runs `npm run verify:skills:cli`, so the authoritative validator never runs in CI. Restore it.",
+      "`.github/workflows/main.yml` has no unconditional step that runs `npm run verify:skills:cli`, so the authoritative validator does not run on a PR. Restore it (a step behind an `if:`, or in a release-only job, does not count).",
     );
   }
   return problems;
