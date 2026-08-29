@@ -44,15 +44,16 @@ function scriptsRunning(guards) {
  * symlink — see the note in `verify-dep-lockstep.main.test.mjs`.
  */
 function runWithGuards(guards) {
+  return runWithScripts(scriptsRunning(guards));
+}
+
+/** Same, for a fixture whose `scripts` are built by hand. */
+function runWithScripts(scripts) {
   const dir = realpathSync(mkdtempSync(path.join(tmpdir(), "format-cov-")));
   try {
     writeFileSync(
       path.join(dir, "package.json"),
-      JSON.stringify(
-        { name: "fixture", scripts: scriptsRunning(guards) },
-        null,
-        2,
-      ),
+      JSON.stringify({ name: "fixture", scripts }, null, 2),
     );
     mkdirSync(path.join(dir, "scripts", "lib"), { recursive: true });
     for (const rel of [
@@ -89,6 +90,20 @@ for (const dropped of ALL_SIBLINGS) {
     assert.match(out, new RegExp("no longer runs `" + dropped + "`"));
   });
 }
+
+test("vouch: a mention is not an invocation", () => {
+  // `rootReachesScript` used to match any `npm run …` substring, so a `validate`
+  // reading `echo npm run verify:skills` satisfied the vouch while the guard
+  // never executed — the cycle protecting nothing (Copilot).
+  const scripts = scriptsRunning(ALL_SIBLINGS);
+  scripts.validate = scripts.validate.replace(
+    "npm run verify:skills",
+    "echo npm run verify:skills",
+  );
+  const { status, out } = runWithScripts(scripts);
+  assert.equal(status, 1, out);
+  assert.match(out, /no longer runs `verify:skills`/);
+});
 
 test("vouch: passes when every sibling is still wired", () => {
   // The run still fails afterwards — the fixture has no client manifests to

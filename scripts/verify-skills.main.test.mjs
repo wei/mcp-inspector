@@ -28,8 +28,8 @@ import {
   checkWiring,
   ciRunsUnconditionally,
   runsCommand,
-  scriptChainRuns,
 } from "./verify-skills.mjs";
+import { scriptChainRuns } from "./lib/npm-scripts.mjs";
 
 const SCRIPT = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -481,5 +481,75 @@ test("checkWiring rejects a local:gate that only mentions the validator", () => 
   assert.match(
     checkWiring(scripts, WIRED_WORKFLOW).join(),
     /local:gate` no longer runs `verify:skills:cli`/,
+  );
+});
+
+test("runsCommand rejects failure-masking and conditional shell forms", () => {
+  // `npm run X || true` swallows a rejection so CI stays green; `true || npm
+  // run X` never runs the validator. Both are `run:` steps containing the
+  // command, so a separator-agnostic split counted them (Copilot).
+  const C = "npm run verify:skills:cli";
+  for (const script of [`${C} || true`, `true || ${C}`, `${C} | tee log`]) {
+    assert.equal(runsCommand(script, C), false, script);
+  }
+});
+
+test("ciRunsUnconditionally rejects a step whose failure cannot fail the job", () => {
+  const C = "npm run verify:skills:cli";
+  const head = "on:\n  push:\njobs:\n  build:\n";
+  // `continue-on-error` means a rejected skill leaves the workflow green, so
+  // the step asserts nothing — on the step or on the whole job.
+  assert.equal(
+    ciRunsUnconditionally(
+      `${head}    steps:\n      - continue-on-error: true\n        run: ${C}\n`,
+      C,
+    ),
+    false,
+  );
+  assert.equal(
+    ciRunsUnconditionally(
+      `${head}    steps:\n      - continue-on-error: "true"\n        run: ${C}\n`,
+      C,
+    ),
+    false,
+  );
+  assert.equal(
+    ciRunsUnconditionally(
+      `on:\n  push:\njobs:\n  build:\n    continue-on-error: true\n    steps:\n      - run: ${C}\n`,
+      C,
+    ),
+    false,
+  );
+  // An explicit `false` is the normal case and must still count.
+  assert.equal(
+    ciRunsUnconditionally(
+      `${head}    steps:\n      - continue-on-error: false\n        run: ${C}\n`,
+      C,
+    ),
+    true,
+  );
+});
+
+test("scriptChainRuns rejects failure-masking chains", () => {
+  const T = "verify:skills:cli";
+  assert.equal(
+    scriptChainRuns({ "local:gate": `npm run ${T} || true` }, "local:gate", T),
+    false,
+  );
+  assert.equal(
+    scriptChainRuns({ "local:gate": `true || npm run ${T}` }, "local:gate", T),
+    false,
+  );
+});
+
+test("scriptChainRuns follows npm's implicit pre/post hooks", () => {
+  const T = "verify:skills:cli";
+  assert.equal(
+    scriptChainRuns(
+      { "local:gate": "npm run coverage", precoverage: `npm run ${T}` },
+      "local:gate",
+      T,
+    ),
+    true,
   );
 });

@@ -31,7 +31,7 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { claudeSpawnArgs, probeClaudeVersion } from "./lib/claude-cli.mjs";
-import { rootReachesScript } from "./lib/npm-scripts.mjs";
+import { rootReachesScript, scriptChainRuns } from "./lib/npm-scripts.mjs";
 import { parse as parseYaml } from "yaml";
 import {
   formatClaudeVersion,
@@ -72,52 +72,35 @@ export function skillDirs(
  * this guard checks, which take no arguments; a command that did would need
  * prefix matching with an argument boundary instead.
  *
+ * Splitting is on `\n`, `;` and `&&` only — deliberately NOT on `|` or a bare
+ * `&`. `||` is the failure-masking form, and both of its shapes must be
+ * rejected: `npm run X || true` swallows a rejection so CI stays green, and
+ * `true || npm run X` never runs the validator at all (Copilot). Leaving `||`
+ * inside the segment means the segment does not equal the invocation, so both
+ * are refused without special-casing either.
+ *
  * @param {string} script A step's `run:` block.
  * @param {string} command e.g. `npm run verify:skills:cli`.
  */
 export function runsCommand(script, command) {
   return script
-    .split(/[\n;|&]+/)
+    .split(/\n|;|&&/)
     .map((segment) => segment.trim())
     .some((segment) => segment === command);
 }
 
 /**
- * Whether `npm run <entry>` reaches an invocation of `npm run <target>`.
+ * Whether an Actions boolean-ish value means "yes".
  *
- * `reachableScripts` extracts every `npm run …` **substring**, so a gate such as
- * `echo npm run verify:skills:cli && npm run coverage` satisfies it while the
- * validator never runs (Copilot) — the same over-match the CI half had, from the
- * other side. This walks the chain instead, splitting each script on the
- * separators that begin a new command and requiring an exact invocation, the
- * way `runsCommand` does.
+ * YAML gives `true`, but a workflow may equally write `"true"` — and an
+ * expression (`${{ … }}`) is unevaluable here, so it is treated as masking on
+ * the same conservative principle the `if:` checks use.
  *
- * A segment naming some OTHER script is followed, with or without trailing
- * flags: `npm run coverage --silent` still runs `coverage`. Only the target
- * itself is matched exactly, since these gate scripts take no arguments.
- *
- * @param {Record<string, string>} scripts The root manifest's `scripts`.
- * @param {string} entry
- * @param {string} target
+ * @param {unknown} value
  */
-export function scriptChainRuns(scripts, entry, target) {
-  const seen = new Set();
-  const queue = [entry];
-  while (queue.length > 0) {
-    const name = queue.shift();
-    if (seen.has(name)) continue;
-    seen.add(name);
-    const body = scripts?.[name];
-    if (typeof body !== "string") continue;
-    for (const segment of body.split(/[\n;|&]+/).map((s) => s.trim())) {
-      if (segment === `npm run ${target}`) return true;
-      const tokens = segment.split(/\s+/);
-      if (tokens[0] === "npm" && tokens[1] === "run" && tokens[2]) {
-        queue.push(tokens[2]);
-      }
-    }
-  }
-  return false;
+function isTruthy(value) {
+  if (value === undefined || value === false) return false;
+  return value !== "false";
 }
 
 /**
@@ -144,10 +127,12 @@ function triggersOnPush(on) {
 /**
  * Whether the workflow has a step that runs `command` on every push.
  *
- * Three things must hold, and the guard has needed each one added in turn:
+ * Four things must hold, and the guard has needed each one added in turn:
  * the WORKFLOW must fire on a push or pull_request (one switched to `on:
- * release` still contains the step but never runs it on a PR — Copilot), the
- * JOB must be unconditional, and so must the STEP.
+ * release` still contains the step but never runs it on a PR), the JOB must be
+ * unconditional, so must the STEP, and neither may carry `continue-on-error` —
+ * a step whose failure cannot fail the job asserts nothing, so a rejected skill
+ * would leave the workflow green (Copilot).
  *
  * Deliberately conservative: a job or step carrying **any** `if:` is skipped.
  * This guard cannot evaluate an Actions expression, and the property being
@@ -173,11 +158,11 @@ export function ciRunsUnconditionally(workflowText, command) {
 
   for (const job of Object.values(jobs)) {
     if (job === null || typeof job !== "object") continue;
-    if ("if" in job) continue;
+    if ("if" in job || isTruthy(job["continue-on-error"])) continue;
     const steps = Array.isArray(job.steps) ? job.steps : [];
     for (const step of steps) {
       if (step === null || typeof step !== "object") continue;
-      if ("if" in step) continue;
+      if ("if" in step || isTruthy(step["continue-on-error"])) continue;
       if (typeof step.run === "string" && runsCommand(step.run, command))
         return true;
     }
