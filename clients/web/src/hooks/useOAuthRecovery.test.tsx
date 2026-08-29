@@ -2059,6 +2059,32 @@ describe("useOAuthRecovery", () => {
       expect(firstRetry).not.toHaveBeenCalled();
     });
 
+    it("keeps the open prompt's retry when a second step-up is refused", async () => {
+      // `trySetPendingStepUp` refuses the second prompt, so the second
+      // command's operation must not replace the first's — authorizing the
+      // open prompt would otherwise run the command the user was just told
+      // could not start (#2165).
+      const client = fakeClient({
+        handleAuthChallenge: vi.fn().mockResolvedValue({ kind: "satisfied" }),
+      });
+      const h = harness({
+        servers: [entry("a", {}, true)],
+        activeServerId: "a",
+        client,
+      });
+      const firstRetry = vi.fn().mockResolvedValue(undefined);
+      const refusedRetry = vi.fn().mockResolvedValue(undefined);
+      await openStepUp(h, "tool", firstRetry);
+      await openStepUp(h, "prompt", refusedRetry);
+      expect(toastTitles()).toContain("Step-up authorization in progress");
+
+      await act(async () => {
+        await h.api().handleStepUpAuthorize();
+      });
+      expect(firstRetry).toHaveBeenCalledTimes(1);
+      expect(refusedRetry).not.toHaveBeenCalled();
+    });
+
     it("cancels back to the panel that asked", async () => {
       const client = fakeClient();
       const h = harness({ servers: [entry("a")], activeServerId: "a", client });

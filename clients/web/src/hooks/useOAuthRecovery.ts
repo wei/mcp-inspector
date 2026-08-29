@@ -690,14 +690,23 @@ export function useOAuthRecovery({
         ) {
           return true;
         }
-        pendingStepUpRetryRef.current = options.retryOperation ?? null;
-        trySetPendingStepUp({
-          challenge: error.authChallenge,
-          authorizationUrl: error.authorizationUrl,
-          serverId: options.serverId,
-          source: options.source,
-          enterpriseManaged: isEmaStepUp(error.authChallenge, server),
-        });
+        // The retry belongs to the prompt, so it is installed only once the
+        // prompt is actually open (#2165). `trySetPendingStepUp` REFUSES a
+        // second prompt while one is already up — writing the ref first meant
+        // the refused command's operation replaced the open prompt's, and
+        // authorizing that prompt then ran the command the user was just told
+        // could not start.
+        if (
+          trySetPendingStepUp({
+            challenge: error.authChallenge,
+            authorizationUrl: error.authorizationUrl,
+            serverId: options.serverId,
+            source: options.source,
+            enterpriseManaged: isEmaStepUp(error.authChallenge, server),
+          })
+        ) {
+          pendingStepUpRetryRef.current = options.retryOperation ?? null;
+        }
         return false;
       }
 
