@@ -209,6 +209,7 @@ count means the board contradicts a rule, not that the rule needs revisiting.
 | Not exactly one type label | Every issue carries **exactly one** of the five types | Classify it, or remove the extra |
 | No Priority (#28) | Every board item is prioritized | Score it with the rubric |
 | Closed, not shipped, still carded | **Done means the work shipped** | Delete the card |
+| Open, but carded `Done` | A card in Done ⇒ its issue is closed | Close the issue, or move the card back |
 
 ```sh
 D=$(mktemp -d); R=modelcontextprotocol/inspector
@@ -254,7 +255,8 @@ jq -nr --slurpfile o "$D/i.json" --slurpfile a "$D/b28.json" --slurpfile b "$D/b
     "#28 open, no Priority": [$B28[] | select(.p==null and isopen(.n)) | .n],
     "closed unshipped, still carded":
                              [($B28[], $B11[]) | select(I(.n)!=null and (isopen(.n)|not)
-                                                        and (shipped(.n)|not)) | .n]
+                                                        and (shipped(.n)|not)) | .n],
+    "open, but carded Done": [($B28[], $B11[]) | select(.s=="Done" and isopen(.n)) | .n]
   } | to_entries[] | "\(.value|length)\t\(.key)\t\(.value[0:10])"'
 ```
 
@@ -265,6 +267,12 @@ Two things the queries must account for, both learned the hard way:
   `modelcontextprotocol/servers` issue. Without the `.content.repository` filter
   it reads as a statusless-card defect, and "fixing" it would mean editing
   another repo's tracking.
+- **`Done` is checked from both sides.** One direction catches a card parked in
+  Done for work that never shipped; the other catches an issue still **open**
+  under a Done card. The second is not hypothetical here — closing keywords do
+  not fire on `v2/main`, so every v2 issue is closed **by hand** after its PR
+  merges, and forgetting that step is the normal way this breaks (Copilot). The
+  other checks cannot see it: they either gate on `isopen` or skip `Done`.
 - **The two milestone checks are #28-only.** Every milestone in this repo is a
   v2 release bucket, so a `v1` issue has none it could take — running the
   Incoming⇔milestone invariant over board #11 would flag every card on it for a
