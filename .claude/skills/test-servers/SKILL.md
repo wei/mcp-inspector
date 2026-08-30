@@ -1,7 +1,7 @@
 ---
 name: test-servers
 description: Run a composable MCP test server by hand — pick the showcase config that reproduces a given feature or bug, build test-servers, and connect with the right protocol era. Covers the stale-build hazard.
-disable-model-invocation: true
+disable-model-invocation: false
 ---
 
 # Running a test server

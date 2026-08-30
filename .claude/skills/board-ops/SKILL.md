@@ -1,7 +1,7 @@
 ---
 name: board-ops
 description: gh recipes for the Inspector project boards — add a card, move its Status, set or re-score its Priority, delete a card, and recover from a deleted single-select option. Covers board #28 (v2) and board #11 (v1), their node/field/option IDs, and the option-deletion hazard.
-disable-model-invocation: true
+disable-model-invocation: false
 ---
 
 # Board operations

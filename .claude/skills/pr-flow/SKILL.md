@@ -1,7 +1,7 @@
 ---
 name: pr-flow
-description: Take an issue through to a merged PR — branch naming, the DCO signoff, screenshots, opening the PR against the right base, requesting a Copilot review, responding to review rounds, and closing out (manual close plus Done).
-disable-model-invocation: true
+description: Take an issue through to a merged PR in this repo, and what to do at each step. Use when asked to open, create or submit a PR; when a DCO or signoff check fails; when requesting a Copilot review or responding to review comments; when naming a branch; when attaching screenshots to a PR; or when closing out after a merge.
+disable-model-invocation: false
 ---
 
 # PR flow

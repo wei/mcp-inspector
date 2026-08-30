@@ -1,7 +1,7 @@
 ---
 name: pre-push-gate
-description: Run the mandatory pre-push gate and diagnose a failing stage — npm run format then npm run local:gate, what each stage checks, and the known traps (stale tsc cache, symlinked worktree node_modules, concurrent runs, orphaned smoke ports).
-disable-model-invocation: true
+description: Diagnose a failing stage of this repo's pre-push gate, and run it correctly. Use when npm run local:gate or npm run validate fails; when lint, coverage, a smoke, or Storybook goes red; when a stage behaves differently inside a git worktree; when the whole run times out; or when deciding what to run before pushing.
+disable-model-invocation: false
 ---
 
 # The pre-push gate

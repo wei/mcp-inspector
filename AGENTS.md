@@ -16,16 +16,16 @@ users invoke them by name.
 
 | Skill | Covers | How it loads |
 | --- | --- | --- |
-| [`local-dev`](.claude/skills/local-dev/SKILL.md) | Install and run each client; the `@inspector/core` alias; and the **reasoning** behind Dependency placement below — what each rule defends against and how to tell you have hit one (the rules themselves stay here) | Model-invoked |
-| [`project-structure`](.claude/skills/project-structure/SKILL.md) | Which client owns which surface, what is in `core/`, where a new file belongs | Model-invoked (not user-invocable) |
-| [`testing`](.claude/skills/testing/SKILL.md) | Where a test file goes, which command runs it, the tiers, clearing the coverage gate, `renderWithMantine` | Model-invoked |
+| [`local-dev`](.claude/skills/local-dev/SKILL.md) | Install and run each client; the `@inspector/core` alias; and the **reasoning** behind Dependency placement below — what each rule defends against and how to tell you have hit one (the rules themselves stay here) | Model-invoked, or `/local-dev` |
+| [`project-structure`](.claude/skills/project-structure/SKILL.md) | Which client owns which surface, what is in `core/`, where a new file belongs | Model-invoked only |
+| [`testing`](.claude/skills/testing/SKILL.md) | Where a test file goes, which command runs it, the tiers, clearing the coverage gate, `renderWithMantine` | Model-invoked, or `/testing` |
 | [`issue-create`](.claude/skills/issue-create/SKILL.md) | The five-step create flow: version label, type label, milestone, board card, Status + Priority | `/issue-create` |
 | [`issue-triage`](.claude/skills/issue-triage/SKILL.md) | The two-pass sweep of unboarded issues, the priority rubric and its score comment, the board audit | `/issue-triage` |
-| [`board-ops`](.claude/skills/board-ops/SKILL.md) | `gh project` recipes and the field/option IDs for boards #28 and #11; the option-deletion hazard and its recovery | `/board-ops` |
-| [`pr-flow`](.claude/skills/pr-flow/SKILL.md) | Branch naming, DCO signoff, screenshots, opening the PR, requesting a Copilot review, responding, closing out | `/pr-flow` |
-| [`pre-push-gate`](.claude/skills/pre-push-gate/SKILL.md) | Running `npm run local:gate` and diagnosing a failing stage | `/pre-push-gate` |
+| [`board-ops`](.claude/skills/board-ops/SKILL.md) | `gh project` recipes and the field/option IDs for boards #28 and #11; the option-deletion hazard and its recovery | Model-invoked, or `/board-ops` |
+| [`pr-flow`](.claude/skills/pr-flow/SKILL.md) | Branch naming, DCO signoff, screenshots, opening the PR, requesting a Copilot review, responding, closing out | Model-invoked, or `/pr-flow` |
+| [`pre-push-gate`](.claude/skills/pre-push-gate/SKILL.md) | Running `npm run local:gate` and diagnosing a failing stage | Model-invoked, or `/pre-push-gate` |
 | [`release`](.claude/skills/release/SKILL.md) | Cutting a release: bump on `v2/main`, milestone merge, tag `origin/main`, publish | `/release` |
-| [`test-servers`](.claude/skills/test-servers/SKILL.md) | Picking and running a showcase test server; the stale-build hazard | `/test-servers` |
+| [`test-servers`](.claude/skills/test-servers/SKILL.md) | Picking and running a showcase test server; the stale-build hazard | Model-invoked, or `/test-servers` |
 
 Longer-form human documentation lives in [`docs/`](./docs) — see the table in the
 [README](./README.md#documentation).
@@ -164,10 +164,21 @@ that from happening:
    line** — no BOM, no leading blank line.
 2. **Every skill declares its invocation mode explicitly.**
    `disable-model-invocation` is **required** on every skill (`true` = reachable
-   only by name, `false` = the model may fire it). Prefer `true` for any procedure
-   with side effects: it removes the trigger question entirely *and* keeps the
-   description out of the listing budget. A skill that is background knowledge
-   rather than an action also sets `user-invocable: false`.
+   only by name, `false` = the model may fire it). A skill that is background
+   knowledge rather than an action also sets `user-invocable: false`.
+   **Default to `false`.** `true` was the original default here, on the argument
+   that a procedure with side effects would be typed as `/name` anyway — but
+   *invoking* a skill has no side effects, it loads instructions, and the premise
+   is false for anything a user asks for in prose. "Create a PR for #2163" is how
+   that work actually starts, and under `true` the model **cannot** reach the
+   skill at all: it is absent from the listing and the Skill tool refuses it. The
+   costs are asymmetric — a spurious load costs ~250 characters, a missed one
+   costs a wrong base branch or an unsigned commit — and the budget is not tight
+   (all ten skills would total ~2.8k of 4k). Reserve `true` for a procedure that
+   is genuinely only ever started deliberately, as `/release` is.
+   ⚠️ **A `true` skill cannot be reached by another skill either.** If a
+   model-invocable skill says "see `/board-ops`", that pointer is a dead end for
+   the model unless `board-ops` is model-invocable too.
    ⚠️ **`paths` is not a free win.** It looks like the deterministic option, and
    it does gate loading to matching files — but measured against the `testing`
    skill's own eval cases, adding it roughly **halved** the rate at which the same
@@ -201,7 +212,7 @@ that from happening:
    overflows, and drops the least-invoked entries **first** — which are exactly the
    model-invoked skills that must fire on their own. `verify:skills` prints the
    current cost against the budget recorded in `scripts/lib/skill-manifest.mjs`
-   (1,199/4,000 characters as of this writing) and fails when it is exceeded. Raise
+   (2,256/4,000 characters as of this writing) and fails when it is exceeded. Raise
    the budget deliberately, or tighten a description; each entry is capped at 1,536
    characters regardless, so **put the key use case first**.
 
