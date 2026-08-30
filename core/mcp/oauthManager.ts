@@ -974,11 +974,24 @@ export class OAuthManager {
       }
     }
 
-    this.requireNavigation().navigateToAuthorization(authorizationUrl);
-
+    // Every fallible step runs BEFORE the navigation, deliberately (#2165).
+    // `navigateToAuthorization` hands the browser to the authorization server,
+    // and a caller that treats a rejection as "the flow never started" — the
+    // web client drops its OAuth resume snapshot on one — has no way to tell a
+    // pre-navigation failure from a post-navigation one. Resolving the
+    // navigation last makes every rejection this method can produce a
+    // pre-navigation rejection, so that reading is always correct.
+    //
+    // It is also the better behaviour on its own terms: a provider that cannot
+    // be built, or client information that cannot be read, means the callback
+    // could not have been completed anyway, so sending the user to the
+    // authorization server first only buys them a round trip to a dead end.
+    const navigation = this.requireNavigation();
     const provider = await this.createOAuthProvider();
     const clientInfo = await provider.clientInformation();
     await this.recordAuthorizationCodeFlowState(authorizationUrl, clientInfo);
+
+    navigation.navigateToAuthorization(authorizationUrl);
 
     this.params.dispatchOAuthAuthorizationRequired({ url: authorizationUrl });
   }

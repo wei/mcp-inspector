@@ -44,6 +44,7 @@ import {
   applyOAuthResumeUi,
   buildTabUiSnapshot,
   clearOAuthResumeSnapshot,
+  clearOwnOAuthResumeSnapshot,
   consumeOAuthResumeSnapshot,
   oauthResumeInsufficientScopeMessage,
   oauthResumeToastMessage,
@@ -55,6 +56,8 @@ import { INSPECTOR_SERVERS_TAB } from "../utils/inspectorTabs";
 import type { PendingReauth } from "../utils/pendingReauth";
 import {
   authRecoveryRestoredMessage,
+  authRecoveryAbandonedMessage,
+  authRecoveryRetryFailedMessage,
   isReAuthBannerReason,
   issuerBindingFailureCopy,
   lostAuthorizationStateActionLabel,
@@ -528,7 +531,7 @@ export function useOAuthRecovery({
       onBeforeOAuthRedirect(authorizationUrl);
       // Write immediately before navigation so implicit client teardown (during
       // connect setup) cannot clear the snapshot after we persist it.
-      writeOAuthResumeSnapshot({
+      const snapshotToken = writeOAuthResumeSnapshot({
         version: 1,
         serverId,
         activeTab,
@@ -538,9 +541,47 @@ export function useOAuthRecovery({
         ...(authKind === "step_up" && authChallenge && { authChallenge }),
         ...(recoverySource && { recoverySource }),
       });
-      void oauthClient?.beginInteractiveAuthorization(authorizationUrl);
+      // The navigation is what this whole callback exists to reach, and
+      // `beginInteractiveAuthorization` resolves it *last* — every await it
+      // can reject on runs before the browser is handed over — so a rejection
+      // here means the flow failed before it started (#2165). Two
+      // things then have to happen, and neither is optional: the snapshot
+      // written a moment ago has to go — the next page load would otherwise
+      // read it as an *abandoned* redirect and offer that diagnosis, which is
+      // wrong — and the failure has to be reported the way every sibling arm
+      // reports one, with the red border (#1621) and the re-auth banner.
+      //
+      // Scoped to the snapshot *this* attempt wrote: nothing single-flights
+      // `prepareOAuthRedirect`, so a later attempt may already have replaced
+      // it, and deleting that one would strand the redirect that is actually
+      // in flight.
+      oauthClient
+        ?.beginInteractiveAuthorization(authorizationUrl)
+        .catch(async (err: unknown) => {
+          clearOwnOAuthResumeSnapshot(snapshotToken);
+          // A connect-scoped redirect is the tail of a `connect()` that
+          // rejected with an `AuthRecoveryRequiredError`, which deliberately
+          // holds the status at `"connecting"` rather than moving it to
+          // `"error"`. The redirect was the thing that would have ended that
+          // attempt, so with it gone nothing else does: the toggle spins and
+          // the active-server lock is held. Tear it down first, exactly as the
+          // sibling arm in `useConnectionLifecycle` does for the same reason.
+          if (preRedirectContext === "connect") {
+            await oauthClient?.disconnect().catch(() => {});
+          }
+          setFailedServerId(serverId);
+          showReAuthBanner(serverId, err);
+        });
     },
-    [sessionRef, inspectorClient, activeTab, ui, onBeforeOAuthRedirect],
+    [
+      sessionRef,
+      inspectorClient,
+      activeTab,
+      ui,
+      onBeforeOAuthRedirect,
+      setFailedServerId,
+      showReAuthBanner,
+    ],
   );
 
   const tryApplyStoredAuthRecovery = useCallback(
@@ -649,14 +690,23 @@ export function useOAuthRecovery({
         ) {
           return true;
         }
-        pendingStepUpRetryRef.current = options.retryOperation ?? null;
-        trySetPendingStepUp({
-          challenge: error.authChallenge,
-          authorizationUrl: error.authorizationUrl,
-          serverId: options.serverId,
-          source: options.source,
-          enterpriseManaged: isEmaStepUp(error.authChallenge, server),
-        });
+        // The retry belongs to the prompt, so it is installed only once the
+        // prompt is actually open (#2165). `trySetPendingStepUp` REFUSES a
+        // second prompt while one is already up — writing the ref first meant
+        // the refused command's operation replaced the open prompt's, and
+        // authorizing that prompt then ran the command the user was just told
+        // could not start.
+        if (
+          trySetPendingStepUp({
+            challenge: error.authChallenge,
+            authorizationUrl: error.authorizationUrl,
+            serverId: options.serverId,
+            source: options.source,
+            enterpriseManaged: isEmaStepUp(error.authChallenge, server),
+          })
+        ) {
+          pendingStepUpRetryRef.current = options.retryOperation ?? null;
+        }
         return false;
       }
 
@@ -821,6 +871,47 @@ export function useOAuthRecovery({
             reason: pending.challenge.reason,
           });
         }
+      } catch (err) {
+        // The slot was cleared above only to keep a tab-visible event and a
+        // reconnect from starting the same authorization twice — not because
+        // the recovery was delivered. It still is owed, so restore it and let
+        // the next trigger retry rather than losing it silently (#2165).
+        //
+        // Only into the session this attempt belongs to, and only into an
+        // empty slot.
+        //
+        // The awaits above can outlive the session entirely — a server switch
+        // or a disconnect clears the slot on purpose, and restoring into that
+        // would resurrect a challenge for a session that has ended. The client
+        // identity is part of the check, not just the server id: reconnecting
+        // to the SAME server builds a replacement `InspectorClient`, which an
+        // id-only check would wave through.
+        //
+        // And the tab can go hidden mid-flight with a *newer* challenge
+        // deferring itself into the slot; that one describes the session as it
+        // is now. The restore is a functional update so it sees the queued
+        // state rather than the render-time value, and yields to whatever is
+        // already there — latest wins.
+        const stillThisSession =
+          sessionRef.current.activeServerId === pending.serverId &&
+          sessionRef.current.inspectorClient === client;
+        if (stillThisSession) {
+          setPendingReauth((prev) => prev ?? pending);
+        }
+        const detail = err instanceof Error ? err.message : String(err);
+        notifications.show({
+          title: "Could not continue authorization",
+          // The copy has to match what actually happens. When the session is
+          // gone nothing was restored and no retry is coming, so promising one
+          // would leave the user waiting on it. When it survives, something is
+          // pending either way — this attempt's challenge, or the newer one
+          // the functional update yielded to.
+          message: stillThisSession
+            ? authRecoveryRetryFailedMessage(detail)
+            : authRecoveryAbandonedMessage(detail),
+          color: "yellow",
+          autoClose: 6000,
+        });
       } finally {
         reauthResumeInProgressRef.current = false;
       }
@@ -843,12 +934,19 @@ export function useOAuthRecovery({
     const onAuthChallengeInteractive = (
       event: TypedEvent<"authChallengeInteractive">,
     ): void => {
+      // Read at event time, not inside the async body: this is the server the
+      // challenge arrived for, and both the body and the catch below have to
+      // mean *that* one. Re-reading it after an await would let a server
+      // switch (or a session that cleared it) either report against a server
+      // this challenge has nothing to do with, or drop the report entirely.
+      const serverId = sessionRef.current.activeServerId;
+      if (!serverId) {
+        return;
+      }
+      // `void`: an event listener cannot await, and the `.catch` below is
+      // what terminates the chain.
       void (async () => {
         const { challenge, authorizationUrl } = event.detail;
-        const serverId = sessionRef.current.activeServerId;
-        if (!serverId) {
-          return;
-        }
         const server = sessionRef.current.servers.find(
           (s) => s.id === serverId,
         );
@@ -880,7 +978,15 @@ export function useOAuthRecovery({
           authorizationUrl,
           source: "ambient",
         });
-      })();
+      })().catch((err: unknown) => {
+        // An event listener cannot be awaited, so this is the only place the
+        // failure can be reported (#2165). Without it the challenge draws no
+        // UI response at all — the stored-recovery check or the remote-state
+        // push rejected, and the user is left on a session whose
+        // authorization has lapsed with nothing on screen saying so.
+        setFailedServerId(serverId);
+        showReAuthBanner(serverId, err);
+      });
     };
 
     inspectorClient.addEventListener(
@@ -900,12 +1006,16 @@ export function useOAuthRecovery({
     tryApplyStoredAuthRecovery,
     runVisibleInteractiveAuth,
     deferAmbientReauth,
+    setFailedServerId,
+    showReAuthBanner,
   ]);
 
   useEffect(() => {
     return onBrowserTabVisible(() => {
       const pending = sessionRef.current.pendingReauth;
       if (pending) {
+        // `void`: a visibility listener cannot be awaited, and
+        // `resumePendingReauth` now terminates its own failures (#2165).
         void resumePendingReauth(pending);
       }
     });
@@ -921,6 +1031,8 @@ export function useOAuthRecovery({
     }
     const pending = sessionRef.current.pendingReauth;
     if (pending) {
+      // `void`: an effect body cannot be awaited, and `resumePendingReauth`
+      // now terminates its own failures (#2165).
       void resumePendingReauth(pending);
     }
   }, [sessionRef, connectionStatus, inspectorClient, resumePendingReauth]);
@@ -1236,7 +1348,21 @@ export function useOAuthRecovery({
           autoClose: 6000,
         });
       }
-    })();
+    })().catch((err: unknown) => {
+      // `void`: an effect body cannot await, and this `.catch` is what
+      // terminates the chain — the justification AGENTS.md asks of every
+      // surviving `void`.
+      //
+      // Everything inside has its own arm; this catches what sits *between*
+      // them (#2165) — `setupClientForServer` throwing while it builds the
+      // client, and the post-resume `checkAuthChallengeSatisfied`. Both land
+      // after the callback URL and the one-shot resume snapshot have been
+      // consumed, so there is nothing left to retry with and the failure has
+      // to be reported here or nowhere.
+      connectStartRef.current = undefined;
+      setFailedServerId(server.id);
+      showReAuthBanner(server.id, err instanceof Error ? err : String(err));
+    });
   }, [
     servers,
     setupClientForServerRef,
@@ -1345,6 +1471,17 @@ export function useOAuthRecovery({
     if (stepUp.enterpriseManaged) {
       stepUpAuthorizeInProgressRef.current = true;
       setPendingStepUp(null);
+      // Take this attempt's retry out of the shared ref BEFORE any await
+      // (#2165). Dismissing the prompt above frees the step-up slot, so a
+      // newer command can open its own prompt and install its own retry while
+      // the authorization below is in flight — and every arm that reads or
+      // clears the ref afterwards would then be acting on that newer
+      // operation: running it under this authorization and reporting its
+      // failure to this attempt's source, or deleting it outright. Owning the
+      // value locally is what makes each arm's decision apply to the attempt
+      // that made it, and leaves a later prompt's retry untouched.
+      const retry = pendingStepUpRetryRef.current;
+      pendingStepUpRetryRef.current = null;
       notifications.show({
         title: "Organization permissions",
         message: emaStepUpInProgressMessage(),
@@ -1365,10 +1502,24 @@ export function useOAuthRecovery({
             color: "green",
             autoClose: 5000,
           });
-          const retry = pendingStepUpRetryRef.current;
-          pendingStepUpRetryRef.current = null;
           if (retry) {
-            await retry();
+            try {
+              await retry();
+            } catch (err) {
+              // Its own catch, not the outer one: the permissions leg
+              // succeeded, so a failure from here belongs to the retried
+              // command and is reported as that command's — routed to the
+              // panel that issued it rather than dressed up as a step-up
+              // failure (#2165).
+              const message = err instanceof Error ? err.message : String(err);
+              notifications.show({
+                title: "Retry failed",
+                message,
+                color: "red",
+                autoClose: 6000,
+              });
+              setSourceScopedError(stepUp.source, message);
+            }
           }
           return;
         }
@@ -1380,9 +1531,15 @@ export function useOAuthRecovery({
             authChallenge: outcome.challenge,
             recoverySource: stepUp.source,
           });
+          // Nothing to drop: this attempt's retry left the shared ref
+          // before the awaits above, and a full-page redirect could not
+          // carry the closure across the navigation anyway.
           return;
         }
         if (outcome.kind === "failed") {
+          // Terminal, and this attempt's retry is already out of the shared
+          // ref — so it dies with the attempt, and whatever a later prompt
+          // has installed is left alone.
           const failureMessage = emaStepUpFailureMessage(outcome.error.message);
           notifications.show({
             title: "Organization permissions",
@@ -1392,6 +1549,22 @@ export function useOAuthRecovery({
           });
           setSourceScopedError(stepUp.source, failureMessage);
         }
+      } catch (err) {
+        // `StepUpAuthModal` calls this handler as `void onAuthorize()`, so a
+        // rejection escaping here reaches nobody: the `finally` resets the
+        // latch and the prompt is already dismissed, leaving the panel that
+        // asked for the permissions never told (#2165). Reported exactly as
+        // the `failed` outcome above is, so the two cannot disagree.
+        const failureMessage = emaStepUpFailureMessage(
+          err instanceof Error ? err.message : String(err),
+        );
+        notifications.show({
+          title: "Organization permissions",
+          message: failureMessage,
+          color: "red",
+          autoClose: 6000,
+        });
+        setSourceScopedError(stepUp.source, failureMessage);
       } finally {
         stepUpAuthorizeInProgressRef.current = false;
       }
