@@ -245,11 +245,25 @@ export function useInitialConfig(
   }, [base, authToken, doFetch]);
 
   useEffect(() => {
+    // `load` commits nothing before its first `await`: it claims a generation
+    // token, builds headers, and only then fetches, so every setState it makes
+    // runs in a continuation. `set-state-in-effect` follows the call into an
+    // async function without modelling the `await` boundary, so it reports
+    // this even though there is no synchronous commit to cascade from.
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- no commit before the first await
     void load();
     return () => {
       // Invalidate whatever is in flight: this fires on unmount and on a
       // `baseUrl`/`authToken` change, and in both cases a response for the
       // old inputs must not commit.
+      //
+      // `generation` is a monotonic request token, not a ref to a rendered
+      // node. `exhaustive-deps`' advice — copy `generation.current` into a
+      // variable inside the effect and use the copy here — is exactly wrong:
+      // the cleanup must bump whatever the counter holds *at teardown*, since
+      // that is what invalidates the load currently in flight. A value
+      // captured at effect setup would let a superseded response commit.
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- must read the token at teardown
       generation.current++;
     };
   }, [load]);
