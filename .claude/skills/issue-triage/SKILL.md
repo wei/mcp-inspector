@@ -1,7 +1,7 @@
 ---
 name: issue-triage
 description: Triage unboarded Inspector issues — the two-pass sweep, the priority rubric and its score comment, and the board audit that checks the whole board against its invariants. Use for "triage new issues" or when scoring an issue's Priority.
-disable-model-invocation: true
+disable-model-invocation: false
 ---
 
 # Triaging issues
