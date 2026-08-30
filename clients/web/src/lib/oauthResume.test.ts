@@ -11,6 +11,7 @@ import {
   readOAuthResumeSnapshot,
   restoreTabUiFromSnapshot,
   writeOAuthResumeSnapshot,
+  clearOwnOAuthResumeSnapshot,
   type OAuthResumeSnapshot,
 } from "./oauthResume.js";
 import {
@@ -52,8 +53,10 @@ describe("oauthResume", () => {
       authKind: "reauth",
       tabUi: {},
     };
-    writeOAuthResumeSnapshot(snapshot);
-    expect(consumeOAuthResumeSnapshot()).toEqual(snapshot);
+    const attemptId = writeOAuthResumeSnapshot(snapshot);
+    // The write stamps the per-attempt id `clearOwnOAuthResumeSnapshot`
+    // matches on (#2165); everything else round-trips unchanged.
+    expect(consumeOAuthResumeSnapshot()).toEqual({ ...snapshot, attemptId });
     expect(readOAuthResumeSnapshot()).toBeUndefined();
     expect(consumeOAuthResumeSnapshot()).toBeUndefined();
   });
@@ -86,8 +89,8 @@ describe("oauthResume", () => {
       },
       remoteSessionId: "remote-abc",
     };
-    writeOAuthResumeSnapshot(snapshot);
-    expect(readOAuthResumeSnapshot()).toEqual(snapshot);
+    const attemptId = writeOAuthResumeSnapshot(snapshot);
+    expect(readOAuthResumeSnapshot()).toEqual({ ...snapshot, attemptId });
     expect(storage.get(OAUTH_PENDING_SERVER_KEY)).toBeUndefined();
     clearOAuthResumeSnapshot();
     expect(readOAuthResumeSnapshot()).toBeUndefined();
@@ -349,6 +352,59 @@ describe("oauthResume", () => {
     }
   });
 
+  it("clearOwnOAuthResumeSnapshot removes only the attempt it was given", () => {
+    // Deliberately IDENTICAL snapshots: two concurrent redirects for the same
+    // server with the same shell state serialize the same way while carrying
+    // different authorization URLs, which the snapshot does not record. A byte
+    // comparison would call them one attempt and delete the wrong one (#2165).
+    const snapshot = {
+      version: 1,
+      serverId: "a",
+      activeTab: "tools",
+      authKind: "reauth",
+      tabUi: {},
+    } as const;
+    const first = writeOAuthResumeSnapshot({ ...snapshot });
+    const second = writeOAuthResumeSnapshot({ ...snapshot });
+    expect(first).toBeTruthy();
+    expect(second).not.toBe(first);
+
+    expect(clearOwnOAuthResumeSnapshot(first)).toBe(false);
+    expect(readOAuthResumeSnapshot()?.attemptId).toBe(second);
+
+    expect(clearOwnOAuthResumeSnapshot(second)).toBe(true);
+    expect(window.sessionStorage.getItem(OAUTH_RESUME_KEY)).toBeNull();
+  });
+
+  it("clearOwnOAuthResumeSnapshot ignores a snapshot with no attemptId", () => {
+    // An older build's snapshot, mid-redirect across an upgrade — dropping it
+    // would strand a live callback.
+    window.sessionStorage.setItem(
+      OAUTH_RESUME_KEY,
+      JSON.stringify({
+        version: 1,
+        serverId: "a",
+        activeTab: "tools",
+        authKind: "reauth",
+        tabUi: {},
+      }),
+    );
+    expect(clearOwnOAuthResumeSnapshot("some-attempt")).toBe(false);
+    expect(readOAuthResumeSnapshot()?.serverId).toBe("a");
+  });
+
+  it("clearOwnOAuthResumeSnapshot is a no-op without a token", () => {
+    writeOAuthResumeSnapshot({
+      version: 1,
+      serverId: "a",
+      activeTab: "tools",
+      authKind: "reauth",
+      tabUi: {},
+    });
+    expect(clearOwnOAuthResumeSnapshot(undefined)).toBe(false);
+    expect(readOAuthResumeSnapshot()?.serverId).toBe("a");
+  });
+
   it("writeOAuthResumeSnapshot swallows setItem failures", () => {
     vi.stubGlobal("sessionStorage", {
       getItem: () => null,
@@ -366,6 +422,68 @@ describe("oauthResume", () => {
         tabUi: {},
       }),
     ).not.toThrow();
+  });
+
+  it("clearOwnOAuthResumeSnapshot swallows storage failures", () => {
+    vi.stubGlobal("sessionStorage", {
+      getItem: () => {
+        throw new Error("blocked");
+      },
+      setItem: () => {},
+      removeItem: () => {},
+    });
+    expect(clearOwnOAuthResumeSnapshot("attempt")).toBe(false);
+  });
+
+  it("clearOwnOAuthResumeSnapshot is a no-op with nothing stored", () => {
+    expect(clearOwnOAuthResumeSnapshot("attempt")).toBe(false);
+  });
+
+  it("writeOAuthResumeSnapshot mints an attemptId per write", () => {
+    const token = writeOAuthResumeSnapshot({
+      version: 1,
+      serverId: "a",
+      activeTab: "tools",
+      authKind: "reauth",
+      tabUi: {},
+    });
+    expect(token).toEqual(expect.any(String));
+    expect(readOAuthResumeSnapshot()?.attemptId).toBe(token);
+  });
+
+  it("writeOAuthResumeSnapshot falls back when randomUUID is unavailable", () => {
+    // `crypto.randomUUID` needs a secure context, which a plain-HTTP
+    // non-loopback host is not.
+    const original = Object.getOwnPropertyDescriptor(
+      globalThis.crypto,
+      "randomUUID",
+    );
+    Object.defineProperty(globalThis.crypto, "randomUUID", {
+      configurable: true,
+      value: undefined,
+    });
+    try {
+      const token = writeOAuthResumeSnapshot({
+        version: 1,
+        serverId: "a",
+        activeTab: "tools",
+        authKind: "reauth",
+        tabUi: {},
+      });
+      expect(token).toEqual(expect.any(String));
+      expect(clearOwnOAuthResumeSnapshot(token)).toBe(true);
+    } finally {
+      // `randomUUID` is inherited from `Crypto.prototype`, so there is
+      // normally no OWN descriptor to put back — restoring only when one
+      // existed would leave the `undefined` own property in place and force
+      // every later test in this file onto the fallback path.
+      if (original) {
+        Object.defineProperty(globalThis.crypto, "randomUUID", original);
+      } else {
+        delete (globalThis.crypto as { randomUUID?: unknown }).randomUUID;
+      }
+    }
+    expect(globalThis.crypto.randomUUID).toEqual(expect.any(Function));
   });
 
   it("clearOAuthResumeSnapshot swallows removeItem failures", () => {
@@ -421,6 +539,10 @@ describe("oauthResume", () => {
 
     it("clearOAuthResumeSnapshot is a no-op", () => {
       expect(() => clearOAuthResumeSnapshot()).not.toThrow();
+    });
+
+    it("clearOwnOAuthResumeSnapshot is a no-op", () => {
+      expect(clearOwnOAuthResumeSnapshot("{}")).toBe(false);
     });
   });
 
