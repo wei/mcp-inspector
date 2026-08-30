@@ -44,12 +44,21 @@ const { messageLogClear } = vi.hoisted(() => ({ messageLogClear: vi.fn() }));
 // trigger the handlers). See #1368.
 
 // --- Fake InspectorClient ---------------------------------------------------
-// Extends EventTarget so the App's `addEventListener("disconnect", …)` wiring
-// is real; the test fires `dispatchEvent(new Event("disconnect"))` to simulate
-// any of the three disconnect paths (toggle, header button, transport failure).
+// Extends the real TypedEventTarget so the App's `addEventListener("disconnect",
+// …)` wiring is real; the test fires `dispatchEvent(new Event("disconnect"))` to
+// simulate any of the three disconnect paths (toggle, header button, transport
+// failure).
+//
+// The real base rather than a bare EventTarget because the hooks this fake is
+// handed to read state through `useStoreSnapshot`, which caches its snapshot
+// against `getEventRevision` — a method the base owns and a bare EventTarget
+// does not have (#1955). Inheriting it also means the counter is advanced by
+// the `dispatchEvent` calls below, exactly as it would be in production.
 vi.mock("@inspector/core/mcp/index.js", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("@inspector/core/mcp/index.js")>();
+  const { TypedEventTarget } =
+    await import("@inspector/core/mcp/typedEventTarget.js");
   // Each armed value makes one `connect()` reject, in FIFO order, so a test can
   // exercise the handshake-failure path — or a two-connect sequence such as the
   // auth-recovery retry, where the first call rejects with the recovery error
@@ -68,7 +77,9 @@ vi.mock("@inspector/core/mcp/index.js", async (importOriginal) => {
   // control-flow decision from its resolving `false` (#2108): a throw is
   // surfaced as a failed attempt rather than falling through to the redirect.
   let nextChallengeCheckRejection: unknown = null;
-  class FakeInspectorClient extends EventTarget {
+  class FakeInspectorClient extends TypedEventTarget<
+    import("@inspector/core/mcp/index.js").InspectorClientEventMap
+  > {
     connect = vi.fn(() => {
       if (connectRejections.length > 0) {
         return Promise.reject(connectRejections.shift());
@@ -694,6 +705,50 @@ const DEFAULT_USE_INSPECTOR_CLIENT: ReturnType<typeof useInspectorClient> = {
 const clientInstances = (
   McpIndex as unknown as { __clientInstances: EventTarget[] }
 ).__clientInstances;
+
+/**
+ * Mirror how the real client enqueues a server-initiated request: put it on the
+ * queue, then announce the change.
+ *
+ * Both halves matter now that `usePendingClientRequests` reads the queue back
+ * off the client (`useStoreSnapshot`, #1955) rather than taking the event's
+ * `detail`. The store is the source of truth and the event is only the signal
+ * that it moved, so dispatching alone would announce a change that isn't there
+ * — and the modal under test would never open.
+ */
+function enqueuePendingRequests(
+  client: EventTarget,
+  queue: "getPendingSamples" | "getPendingElicitations",
+  event: "pendingSamplesChange" | "pendingElicitationsChange",
+  entries: readonly unknown[],
+): void {
+  const withQueue = client as EventTarget &
+    Record<typeof queue, ReturnType<typeof vi.fn>>;
+  withQueue[queue].mockReturnValue(entries);
+  client.dispatchEvent(new CustomEvent(event, { detail: entries }));
+}
+
+const enqueuePendingSamples = (
+  client: EventTarget,
+  samples: readonly unknown[],
+): void =>
+  enqueuePendingRequests(
+    client,
+    "getPendingSamples",
+    "pendingSamplesChange",
+    samples,
+  );
+
+const enqueuePendingElicitations = (
+  client: EventTarget,
+  elicitations: readonly unknown[],
+): void =>
+  enqueuePendingRequests(
+    client,
+    "getPendingElicitations",
+    "pendingElicitationsChange",
+    elicitations,
+  );
 
 // The mock factory adds four test-only arming hooks to the module namespace.
 // Intersecting with `typeof McpIndex` keeps the real module's shape checked and
@@ -1417,9 +1472,7 @@ describe("App pending server-initiated request modal", () => {
       reject: vi.fn(),
     };
     act(() => {
-      clientInstances[0].dispatchEvent(
-        new CustomEvent("pendingSamplesChange", { detail: [sample] }),
-      );
+      enqueuePendingSamples(clientInstances[0], [sample]);
     });
 
     await waitFor(() =>
@@ -1433,9 +1486,7 @@ describe("App pending server-initiated request modal", () => {
 
     // The client clearing its queue (empty event) closes the modal.
     act(() => {
-      clientInstances[0].dispatchEvent(
-        new CustomEvent("pendingSamplesChange", { detail: [] }),
-      );
+      enqueuePendingSamples(clientInstances[0], []);
     });
     await waitFor(() =>
       expect(screen.queryByText("Sampling Request")).not.toBeInTheDocument(),
@@ -1581,9 +1632,7 @@ describe("App task wiring", () => {
       respond,
     };
     act(() => {
-      clientInstances[0].dispatchEvent(
-        new CustomEvent("pendingElicitationsChange", { detail: [elicitation] }),
-      );
+      enqueuePendingElicitations(clientInstances[0], [elicitation]);
     });
 
     await waitFor(() =>
