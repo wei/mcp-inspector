@@ -2847,6 +2847,26 @@ describe("OAuthManager", () => {
       parseSpy.mockRestore();
     });
 
+    it("does not navigate when the fallible setup rejects", async () => {
+      // #2165: the web client drops its OAuth resume snapshot when this
+      // rejects, which is only sound because the navigation resolves last.
+      const params = createMockParams();
+      storageOf(params).getClientInformation.mockRejectedValue(
+        new Error("client information unreadable"),
+      );
+      const manager = new OAuthManager(params);
+
+      await expect(
+        manager.beginInteractiveAuthorization(
+          new URL("https://auth.example.com/authorize"),
+        ),
+      ).rejects.toThrow("client information unreadable");
+      expect(
+        params.initialConfig.navigation!.navigateToAuthorization,
+      ).not.toHaveBeenCalled();
+      expect(params.dispatchOAuthAuthorizationRequired).not.toHaveBeenCalled();
+    });
+
     it("throws when navigation is not configured", async () => {
       const params = createMockParams({
         initialConfig: {
