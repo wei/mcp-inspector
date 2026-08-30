@@ -231,6 +231,14 @@ export function useServers(opts: UseServersOptions): UseServersResult {
   );
 
   useEffect(() => {
+    // Loading the server list from the backend is the external-system
+    // synchronization this effect is for, and every list/error commit happens
+    // after `loadServers()` resolves. `set-state-in-effect` follows the call
+    // without modelling the `await`, so it reports the whole shape. The
+    // synchronous part is the pair that *opens* a load — `setLoading(true)`
+    // and clearing a stale error — which settles in one extra render, and is
+    // the point of having a loading flag at all.
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- async load of an external list
     void refresh();
   }, [refresh]);
 

@@ -1,5 +1,6 @@
 import js from "@eslint/js";
 import globals from "globals";
+import reactHooks from "eslint-plugin-react-hooks";
 import tseslint from "typescript-eslint";
 import { defineConfig, globalIgnores } from "eslint/config";
 
@@ -10,22 +11,25 @@ import { defineConfig, globalIgnores } from "eslint/config";
 // isomorphic TypeScript (browser-side OAuth + Node backends + shared runtime);
 // the shared surface is Node-only tooling/tests.
 //
-// ⚠️ There is no React plugin here, and "neither surface has JSX" is NOT a
-// sufficient reason for that — `core/react/` is a directory of React hooks,
-// which the hook rules judge whether or not any JSX is present. So the whole
-// `eslint-plugin-react-hooks` set, `set-state-in-effect` included, has never
-// looked at them: it is a devDependency of `clients/web` only, and Node
-// resolution walks up rather than down, so the root cannot even load it.
-// That is why the prop-into-effect re-sync #1955 fixed sat here unreported
-// while the identical shape is an error over in `clients/web/src`. Closing the
-// gap means adding the plugin at the root and taking what it then reports —
-// measured during #1955 as 15 findings, every one of them in a hook that issue
-// did not convert (the two settings-draft hooks and the three async fetch
-// hooks) and none in the 16 it did. Tracked on its own rather than folded in.
+// `core/react/` gets the React hook rules, and "neither surface has JSX" was
+// never a reason to withhold them — the hook rules judge hooks, not JSX, and
+// that directory is nothing but hooks. Until #2192 the whole
+// `eslint-plugin-react-hooks` set, `set-state-in-effect` included, had never
+// looked at them: the plugin was a devDependency of `clients/web` only, and
+// Node resolution walks up rather than down, so the root could not load it.
+// That is how the prop-into-effect re-sync #1955 fixed sat here unreported
+// while the identical shape was an error over in `clients/web/src`. The plugin
+// is now a root devDependency and the block below applies it.
 //
-// Type-aware linting for the two blocks below. `no-floating-promises` needs
-// type information, which `tseslint.configs.recommended` (the non-type-aware
-// set) does not provide — so each block adds a parser project (#1959).
+// Scoped to `core/react/**` rather than all of `core/**`: everything else
+// there is plain isomorphic TypeScript, and the rules key off the `use`-prefix
+// naming convention, so a non-React `useFoo` helper elsewhere in `core/` would
+// be judged as a hook it is not.
+//
+// Type-aware linting for the `core/` and shared surfaces below.
+// `no-floating-promises` needs type information, which
+// `tseslint.configs.recommended` (the non-type-aware set) does not provide —
+// so a block of its own adds a parser project (#1959).
 //
 // `tsconfig.lint.json` exists for this and nothing else: the root has no
 // tsconfig of its own (`core/` is typechecked through `clients/web`'s
@@ -80,6 +84,17 @@ export default defineConfig([
       },
     },
     rules: sharedRules,
+  },
+  {
+    // #2192. `exhaustive-deps` is promoted from the recommended set's `warn`
+    // for the same reason `clients/web` promotes it (#2085): `--max-warnings 0`
+    // already fails the gate on it, and matching the severity keeps an editor
+    // squiggle honest rather than depending on a CLI flag.
+    files: ["core/react/**/*.{ts,tsx}"],
+    extends: [reactHooks.configs.flat.recommended],
+    rules: {
+      "react-hooks/exhaustive-deps": "error",
+    },
   },
   {
     files: [

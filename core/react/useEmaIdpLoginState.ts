@@ -35,6 +35,16 @@ export function useEmaIdpLoginState(
 
   useEffect(() => {
     if (!active) return;
+    // Reading the persisted IdP session *is* the external system this effect
+    // exists to synchronize with, and the read is asynchronous: the
+    // `loginState` commit happens in a continuation after
+    // `getEmaIdpLoginState` resolves. `set-state-in-effect` follows the call
+    // into `refresh` without modelling the `await`, so it reports every
+    // "fetch on open" effect alike — verified against a minimal hook whose
+    // only setState is after an `await`. The one commit here that *is*
+    // synchronous is the no-issuer reset to "none", which settles in a single
+    // extra render rather than cascading.
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- async read of an external store
     void refresh();
   }, [active, refresh]);
 
