@@ -38,8 +38,9 @@ jobs:
         run: npm install
 
       - name: Validate (coverage guards, format, lint, typecheck, build, fast tests)
-        # Runs the two coverage guards first (verify:format-coverage +
-        # verify:typecheck-coverage), then validate:core, then each client's
+        # Runs the four durable guards first (verify:format-coverage,
+        # verify:skills, verify:typecheck-coverage, verify:dep-lockstep), then
+        # test:scripts, then validate:core, then each client's
         # self-validation: format:check + lint + typecheck + build + test (no
         # coverage instrumentation — fast). This also builds every client bundle
         # (web dist, cli/tui/launcher) that the smokes below need. The heavier
@@ -51,6 +52,24 @@ jobs:
         # A future optimization could split `coverage` into per-client parallel
         # jobs, but that's a larger restructure and deliberately out of scope.
         run: npm run validate
+
+      - name: Validate the skills with the authoritative CLI (#2163)
+        # `npm run validate` above already ran `verify:skills`, whose own parser
+        # reads each SKILL.md the way Claude Code does. This is the second
+        # opinion: `claude plugin validate` is the authoritative schema, and the
+        # guard skips it whenever the CLI is absent — which, without this step,
+        # would mean always, in CI. Installing it here is what makes the
+        # acceptance criterion true rather than aspirational.
+        #
+        # The script resolves the CLI itself — an installed one ONLY when it
+        # matches the pin exactly, otherwise the pinned package via `npx -y` —
+        # so this is the same command `npm run local:gate` runs, and the two
+        # cannot drift. Exact rather than a floor: a newer local CLI is a
+        # DIFFERENT schema, which is how a "reproducible" gate starts disagreeing
+        # across machines. Pinned
+        # rather than @latest: an unpinned validator can start failing a PR that
+        # changed nothing. It needs no authentication — verified with a clean HOME.
+        run: npm run verify:skills:cli
 
       - name: Verify the browser-externalized-builtin build gate (#1769)
         # Runs a real `vite build` with a Node built-in forced into the browser

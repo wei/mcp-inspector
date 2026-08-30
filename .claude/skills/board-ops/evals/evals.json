@@ -1,0 +1,22 @@
+[
+  {
+    "prompt": "Move the board card for issue 2189 to In Review.",
+    "expect": "board-ops"
+  },
+  {
+    "prompt": "How do I set the Priority field on a card in the v2 project board?",
+    "expect": "board-ops"
+  },
+  {
+    "prompt": "The project board rejected my Status option ID. How do I get the current ones?",
+    "expect": "board-ops"
+  },
+  {
+    "prompt": "Explain the difference between TCP and UDP.",
+    "expect": null
+  },
+  {
+    "prompt": "What year was the first Moon landing?",
+    "expect": null
+  }
+]

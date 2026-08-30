@@ -1,0 +1,22 @@
+[
+  {
+    "prompt": "I just added clients/tui/__tests__/serverList.test.ts. What command runs only the TUI suite?",
+    "expect": "testing"
+  },
+  {
+    "prompt": "In clients/web/src/components/Foo.test.tsx I need to assert on a Mantine transition mid-flight. How?",
+    "expect": "testing"
+  },
+  {
+    "prompt": "Which test tier in this repo spawns the built binary rather than importing it?",
+    "expect": "testing"
+  },
+  {
+    "prompt": "What does this regex do? /^\\d{3}-\\d{4}$/",
+    "expect": null
+  },
+  {
+    "prompt": "Rename the variable `foo` to `bar` in this snippet.",
+    "expect": null
+  }
+]

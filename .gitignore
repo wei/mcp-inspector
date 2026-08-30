@@ -1,7 +1,11 @@
 .idea
 .vscode
 .DS_Store
-.claude/
+# Claude Code's local state (worktrees, settings.local.json, …) stays out of the
+# repo — but `.claude/skills/` is committed on purpose: the skills ARE the
+# repo's procedures, and every contributor gets them with the checkout.
+.claude/*
+!.claude/skills/
 node_modules
 dist
 clients/web/dist

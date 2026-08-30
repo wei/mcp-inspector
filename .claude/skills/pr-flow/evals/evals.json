@@ -1,0 +1,22 @@
+[
+  {
+    "prompt": "I've finished the fix for issue 2071. Take it through to a pull request.",
+    "expect": "pr-flow"
+  },
+  {
+    "prompt": "How do I get Copilot to review a PR in this repo?",
+    "expect": "pr-flow"
+  },
+  {
+    "prompt": "The DCO check is red on my branch. How do I fix the commits I already pushed?",
+    "expect": "pr-flow"
+  },
+  {
+    "prompt": "What does this regex match? /^[a-z]+$/",
+    "expect": null
+  },
+  {
+    "prompt": "Translate 'good morning' into Spanish.",
+    "expect": null
+  }
+]

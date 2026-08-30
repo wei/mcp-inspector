@@ -1,0 +1,22 @@
+[
+  {
+    "prompt": "What lives in clients/web versus @inspector/core?",
+    "expect": "project-structure"
+  },
+  {
+    "prompt": "I'm adding a helper both the CLI and the web client need. Which directory does it belong in?",
+    "expect": "project-structure"
+  },
+  {
+    "prompt": "Which package owns the OAuth secret storage backends?",
+    "expect": "project-structure"
+  },
+  {
+    "prompt": "Convert this array of strings to uppercase.",
+    "expect": null
+  },
+  {
+    "prompt": "What is the capital of France?",
+    "expect": null
+  }
+]

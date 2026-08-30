@@ -1,0 +1,22 @@
+[
+  {
+    "prompt": "I want to reproduce the OAuth token revocation behaviour by hand. Which test server do I run?",
+    "expect": "test-servers"
+  },
+  {
+    "prompt": "How do I start one of the composable MCP test servers with a config file?",
+    "expect": "test-servers"
+  },
+  {
+    "prompt": "I renamed a file under test-servers/src and the fixture is still running the old code. Why?",
+    "expect": "test-servers"
+  },
+  {
+    "prompt": "Sort this list alphabetically: banana, apple, cherry.",
+    "expect": null
+  },
+  {
+    "prompt": "What is the boiling point of water in Fahrenheit?",
+    "expect": null
+  }
+]

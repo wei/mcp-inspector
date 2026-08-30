@@ -1,0 +1,26 @@
+[
+  {
+    "prompt": "How do I get the web client running locally?",
+    "expect": "local-dev"
+  },
+  {
+    "prompt": "I added a dependency and the TUI bundle broke at import time. Where should it have gone?",
+    "expect": "local-dev"
+  },
+  {
+    "prompt": "Do I need to rebuild anything before I can run `npm run web` in this repo?",
+    "expect": "local-dev"
+  },
+  {
+    "prompt": "How do I run the CLI from the built launcher in this repo instead of via npx?",
+    "expect": "local-dev"
+  },
+  {
+    "prompt": "Write a haiku about autumn.",
+    "expect": null
+  },
+  {
+    "prompt": "Explain the difference between let and const in JavaScript.",
+    "expect": null
+  }
+]

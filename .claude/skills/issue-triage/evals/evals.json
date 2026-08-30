@@ -1,0 +1,22 @@
+[
+  {
+    "prompt": "Triage the new issues.",
+    "expect": "issue-triage"
+  },
+  {
+    "prompt": "What Priority should issue 2189 be given?",
+    "expect": "issue-triage"
+  },
+  {
+    "prompt": "Audit the project board for anything that has drifted.",
+    "expect": "issue-triage"
+  },
+  {
+    "prompt": "Who wrote the novel Moby-Dick?",
+    "expect": null
+  },
+  {
+    "prompt": "Convert 45 degrees Celsius to Fahrenheit.",
+    "expect": null
+  }
+]
