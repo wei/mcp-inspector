@@ -189,4 +189,47 @@ describe("useEmaIdpLoginState", () => {
     ).not.toHaveBeenCalled();
     expect(result.current.loginState).toBe("none");
   });
+  it("swallows a session-read rejection and leaves loginState unchanged", async () => {
+    const exp = Math.floor(Date.now() / 1000) + 3600;
+    const payload = btoa(JSON.stringify({ exp }))
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+    vi.mocked(storage.getIdpSession).mockResolvedValue({
+      idToken: `h.${payload}.s`,
+    });
+
+    const { result, rerender } = renderHook(
+      ({ issuer }: { issuer: string }) =>
+        useEmaIdpLoginState(storage, issuer, true),
+      { initialProps: { issuer: "https://idp.test" } },
+    );
+
+    await waitFor(() => {
+      expect(result.current.loginState).toBe("logged_in");
+    });
+
+    // The storage backend goes away. The effect-triggered refresh must not
+    // surface an unhandled rejection, and must leave the last state we
+    // actually read in place rather than falsely reporting signed-out.
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    try {
+      vi.mocked(storage.getIdpSession).mockRejectedValue(
+        new Error("storage unreachable"),
+      );
+      await act(async () => {
+        rerender({ issuer: "https://other-idp.test" });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    } finally {
+      process.off("unhandledRejection", unhandled);
+    }
+
+    expect(storage.getIdpSession).toHaveBeenCalledWith(
+      "https://other-idp.test",
+    );
+    expect(unhandled).not.toHaveBeenCalled();
+    expect(result.current.loginState).toBe("logged_in");
+  });
 });

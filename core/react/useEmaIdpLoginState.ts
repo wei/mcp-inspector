@@ -45,7 +45,14 @@ export function useEmaIdpLoginState(
     // synchronous is the no-issuer reset to "none", which settles in a single
     // extra render rather than cascading.
     // eslint-disable-next-line react-hooks/set-state-in-effect -- async read of an external store
-    void refresh();
+    refresh().catch(() => {
+      // `refresh` does not own its failures: `getEmaIdpLoginState` awaits
+      // `storage.getIdpSession`, which rejects when the backend is
+      // unreachable. Swallow it here so it does not surface as an unhandled
+      // rejection, and leave `loginState` untouched — the same choice `logout`
+      // makes, so the UI keeps reflecting the last state we actually read
+      // rather than falsely reporting signed-out.
+    });
   }, [active, refresh]);
 
   const logout = useCallback(() => {

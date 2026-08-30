@@ -51,7 +51,7 @@ const CardContent = Group.withProps({
 
 ### State and effects
 
-- **Never reset or re-sync local state from a prop inside a `useEffect`.** `useEffect(() => setX(prop), [prop])` paints the stale value first and renders twice; it is an error under `react-hooks/set-state-in-effect` — enforced in `clients/web`, `clients/tui`, and `core/react/**` (#2192). The same rule set forbids writing a ref during render (`react-hooks/refs`): sync a "latest value" ref in an effect instead.
+- **Never reset or re-sync local state from a prop inside a `useEffect`.** `useEffect(() => setX(prop), [prop])` paints the stale value first and renders twice; it is an error under `react-hooks/set-state-in-effect` — enforced in `clients/web` and, since #2192, in `core/react/**`. The same rule set forbids writing a ref during render (`react-hooks/refs`): sync a "latest value" ref in an effect instead. `clients/tui` is the exception — it enables only `rules-of-hooks` and `exhaustive-deps`, so do not cite these two against TUI code.
 - Use **`useValueChange(value, onChange)`** (`src/hooks/useValueChange.ts`) — React's documented "adjusting state during render" pattern. It does not fire on the first render; seed the state with `useState`. The comparison is `Object.is`, so pass a **referentially stable** value — a primitive key (id/name/URI) or a memoized one, never a fresh object literal.
 - The `onChange` runs **during render**, so it must be pure — `setState` and nothing else. No fetches, DOM writes, logging, ref mutation, or parent callbacks; a render can be replayed or abandoned.
 - Effects remain correct for real external-system synchronization (DOM measurement, rAF, subscriptions, timers).

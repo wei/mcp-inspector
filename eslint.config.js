@@ -15,11 +15,12 @@ import { defineConfig, globalIgnores } from "eslint/config";
 // never a reason to withhold them — the hook rules judge hooks, not JSX, and
 // that directory is nothing but hooks. Until #2192 the whole
 // `eslint-plugin-react-hooks` set, `set-state-in-effect` included, had never
-// looked at them: the plugin was a devDependency of `clients/web` only, and
-// Node resolution walks up rather than down, so the root could not load it.
-// That is how the prop-into-effect re-sync #1955 fixed sat here unreported
-// while the identical shape was an error over in `clients/web/src`. The plugin
-// is now a root devDependency and the block below applies it.
+// looked at them: every copy of the plugin was *client-local* (a devDependency
+// of `clients/web` and of `clients/tui`), and Node resolution walks up rather
+// than down, so the root could reach neither. That is how the prop-into-effect
+// re-sync #1955 fixed sat here unreported while the identical shape was an
+// error over in `clients/web/src`. The plugin is now a root devDependency too,
+// and the block below applies it.
 //
 // Scoped to `core/react/**` rather than all of `core/**`: everything else
 // there is plain isomorphic TypeScript, and the rules key off the `use`-prefix
