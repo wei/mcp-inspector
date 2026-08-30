@@ -8,8 +8,21 @@ import { defineConfig, globalIgnores } from "eslint/config";
 // (#1689) and the root-owned "shared" surface — `test-servers/src/**`, the
 // root `vitest.shared.mts`, and this config file itself (#1767). `core/` is
 // isomorphic TypeScript (browser-side OAuth + Node backends + shared runtime);
-// the shared surface is Node-only tooling/tests. Neither has JSX, so no React
-// plugin is needed.
+// the shared surface is Node-only tooling/tests.
+//
+// ⚠️ There is no React plugin here, and "neither surface has JSX" is NOT a
+// sufficient reason for that — `core/react/` is a directory of React hooks,
+// which the hook rules judge whether or not any JSX is present. So the whole
+// `eslint-plugin-react-hooks` set, `set-state-in-effect` included, has never
+// looked at them: it is a devDependency of `clients/web` only, and Node
+// resolution walks up rather than down, so the root cannot even load it.
+// That is why the prop-into-effect re-sync #1955 fixed sat here unreported
+// while the identical shape is an error over in `clients/web/src`. Closing the
+// gap means adding the plugin at the root and taking what it then reports —
+// measured during #1955 as 15 findings, every one of them in a hook that issue
+// did not convert (the two settings-draft hooks and the three async fetch
+// hooks) and none in the 16 it did. Tracked on its own rather than folded in.
+//
 // Type-aware linting for the two blocks below. `no-floating-promises` needs
 // type information, which `tseslint.configs.recommended` (the non-type-aware
 // set) does not provide — so each block adds a parser project (#1959).
