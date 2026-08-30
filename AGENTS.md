@@ -187,8 +187,13 @@ that from happening:
    measured 100% and every negative case stayed clean. So the ceiling is
    attention, not characters — we were at 2.8k of a 4k budget throughout. Adding
    a skill therefore has a cost paid by the *existing* ones, which only
-   `skills:eval` can see. **Re-run the full eval after any flip**, not just the
-   new skill's own cases.
+   `skills:eval` can see. **Re-run the full eval after any flip _or description
+   edit_**, not just the changed skill's own cases.
+   The lever that works is the description's *shape*. Leading with the actions
+   and then enumerating concrete situations ("Use when … ; when … ; when …")
+   beats a noun-phrase list of contents: it took `pre-push-gate` from 3/5 to 5/5
+   and `testing`'s three cases from 25/50/25% to 100% each (n=4), displacing
+   nothing else.
    ⚠️ **`paths` is not a free win.** It looks like the deterministic option, and
    it does gate loading to matching files — but measured against the `testing`
    skill's own eval cases, adding it roughly **halved** the rate at which the same

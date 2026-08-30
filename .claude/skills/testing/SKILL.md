@@ -1,6 +1,6 @@
 ---
 name: testing
-description: Testing procedures for this repo — which npm command runs which suite (web unit, web integration, Storybook, cli, tui, launcher, scripts), the test tiers from unit through smoke and pack:verify, where a new test file goes (side-by-side vs src/test/ vs __tests__/), diagnosing the per-file 90% coverage gate, and the renderWithMantine / renderWithMantineTransitions rules for React and Mantine tests. Use for any question about running, placing, or fixing a test here.
+description: Run, place and fix tests in this repo. Use when choosing which npm command runs a given suite (web unit, web integration, Storybook, cli, tui, launcher, scripts); when deciding where a new test file belongs — beside its source, under src/test/, or in a client's __tests__/; when a per-file coverage check fails or a v8 ignore is in question; when asking which test tier spawns the built binary rather than importing it; or when rendering, mounting or asserting on Mantine components and their transitions in a test.
 disable-model-invocation: false
 ---
 
