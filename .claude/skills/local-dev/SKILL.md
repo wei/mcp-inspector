@@ -118,11 +118,16 @@ which is the point. A lint or format tool that differs per client makes the gate
 verdict a function of *where you ran it*, and the exact `prettier` pin (#1790)
 only means something when there is one of it.
 
-⚠️ The line is **who uses it**, not what kind of thing it is. `tsup`, `tsx`,
-`vite`, `vite-node`, `playwright`, `storybook`, `happy-dom`,
-`ink-testing-library` and each client's own `@types/*` are toolchain too and stay
-where they are, because only one client runs them. Hoisting those would make
-every client install the union of all four.
+⚠️ The line is **used by every client**, not "used by one" and not "is it
+toolchain". `tsx`, `playwright`, `storybook`, `happy-dom`, `ink-testing-library`,
+`vite-node` and each client's own `@types/*` are toolchain too and stay where
+they are — hoisting them would make every client install the union of all four.
+So do the ones **more than one** client declares without all of them doing so:
+`tsup` sits in web, cli and tui, and `vite` in web and tui on top of the root
+*runtime* `dependency` that `--web --dev` needs. Neither is in scope here;
+whether to consolidate them is a separate call with a separate rationale (`vite`
+especially, since its root declaration is a `dependency`, not a
+`devDependency`).
 
 #### What the walk-up does *not* buy you
 
@@ -145,8 +150,21 @@ rather than assuming — the assumption is what made the first cut of #2196 clai
 more than it delivered (Copilot).
 
 So the consolidation buys **one declaration and one place to bump**, not one copy
-on disk. What has to hold is that the copies *agree*, and
-`npm run verify:dep-lockstep` is the guard for exactly that (see below).
+on disk. Each surviving copy is pinned by its holder's peer range rather than by
+a second declaration of ours, which is why they agree today.
+
+⚠️ **Nothing gates that automatically, and `verify:dep-lockstep` is not it.**
+That guard derives its candidate set from what each `tsc` **program** resolves
+(see below), so it sees only packages a program loads from two installs. A tool
+*binary* — `eslint`, `prettier`, `vitest` — never enters a program, so it is
+outside the candidate set no matter how far it drifts, and cli's `@types/node`
+`24.13.1` against the root's `24.13.3` is a live skew that passes for the same
+reason (no one program sees both). When you change what a client declares, check
+by hand from that client:
+
+```sh
+cd clients/web && npm exec -- which eslint prettier tsc vitest
+```
 
 #### Why the vitest trio is pinned exactly
 
