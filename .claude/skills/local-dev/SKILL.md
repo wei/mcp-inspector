@@ -150,17 +150,26 @@ rather than assuming — the assumption is what made the first cut of #2196 clai
 more than it delivered (Copilot).
 
 So the consolidation buys **one declaration and one place to bump**, not one copy
-on disk. Each surviving copy is pinned by its holder's peer range rather than by
-a second declaration of ours, which is why they agree today.
+on disk. The two mechanisms are **not** equally safe, and neither is a guarantee:
 
-⚠️ **Nothing gates that automatically, and `verify:dep-lockstep` is not it.**
+- A **peer** copy is at least constrained by its holder's peer range. That is a
+  real pin only when the range is exact — `@vitest/browser-playwright` pins
+  `vitest` to a single version, which is why the trio below is pinned too. For a
+  wide range (`eslint-plugin-react-refresh` accepts `^9 || ^10`) the copies agree
+  only because npm happens to resolve the same latest in both installs, which is
+  a coincidence that holds until it doesn't.
+- A **transitive** copy is constrained by nothing of ours whatsoever, and one has
+  already diverged: cli's `@types/node` is `24.13.1` against the root's
+  `24.13.3`, and was `24.13.1` on `v2/main` too — a declared `^24.12.4` loses to
+  a nearer transitive.
+
+⚠️ **Nothing gates either of those, and `verify:dep-lockstep` is not it.**
 That guard derives its candidate set from what each `tsc` **program** resolves
 (see below), so it sees only packages a program loads from two installs. A tool
 *binary* — `eslint`, `prettier`, `vitest` — never enters a program, so it is
-outside the candidate set no matter how far it drifts, and cli's `@types/node`
-`24.13.1` against the root's `24.13.3` is a live skew that passes for the same
-reason (no one program sees both). When you change what a client declares, check
-by hand from that client:
+outside the candidate set no matter how far it drifts, and the cli `@types/node`
+skew above passes for a second reason on top of that: no one program sees both
+copies. When you change what a client declares, check by hand from that client:
 
 ```sh
 cd clients/web && npm exec -- which eslint prettier tsc vitest
