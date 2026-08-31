@@ -106,10 +106,10 @@ alias for those in `vitest.shared.mts`. `express` and `yaml` are the two today.
 Every client's `validate` shells out to `prettier`, `eslint`, `tsc` and `vitest`,
 which makes them look like they belong beside the scripts that call them. They
 do not need to be: `npm run` prepends **every ancestor** `node_modules/.bin` to
-`PATH`, and Node and TypeScript walk parent `node_modules` / `node_modules/@types`
-the same way — so a client with no toolchain declaration at all still resolves
-the root's copy. `clients/launcher` declares no `devDependencies` whatsoever and
-its `validate` is unchanged.
+`PATH`, and Node and TypeScript walk parent `node_modules` /
+`node_modules/@types` the same way — so a client that declares no toolchain at
+all still resolves the root's copy. `clients/launcher` declares no
+`devDependencies` whatsoever and its `validate` is unchanged.
 
 What a per-client declaration *does* buy is a second copy free to drift, and it
 had (#2196): `globals` sat at `^17.7.0` at the root against `^17.4.0` in all four
@@ -123,6 +123,43 @@ only means something when there is one of it.
 `ink-testing-library` and each client's own `@types/*` are toolchain too and stay
 where they are, because only one client runs them. Hoisting those would make
 every client install the union of all four.
+
+#### What the walk-up does *not* buy you
+
+⚠️ **Deleting a client's declaration does not always delete the copy** — and
+where a copy survives, it is the one that wins. Two mechanisms put one back,
+neither of which the manifest mentions:
+
+- **An unmet peer.** npm auto-installs a peer into the install that needs it, and
+  a client install has no visibility into the root's tree, so the root's copy
+  cannot satisfy it. Web's `eslint-plugin-react-refresh` / `eslint-plugin-storybook`
+  and the TUI's `eslint-plugin-react-hooks` each pull a client-local `eslint`;
+  web's Storybook/Vitest stack pulls a local `typescript` and `vitest`.
+- **A hoisted transitive.** `@types/express` brings `@types/node` into web and
+  cli's trees on its own.
+
+Those copies sit *nearer* than the root's, so `clients/web/node_modules/.bin`
+precedes the root bin directory on `PATH` and TypeScript resolves the nearest
+`node_modules/@types`. Verify with `npm exec -- which eslint` from the client
+rather than assuming — the assumption is what made the first cut of #2196 claim
+more than it delivered (Copilot).
+
+So the consolidation buys **one declaration and one place to bump**, not one copy
+on disk. What has to hold is that the copies *agree*, and
+`npm run verify:dep-lockstep` is the guard for exactly that (see below).
+
+#### Why the vitest trio is pinned exactly
+
+`@vitest/browser-playwright` declares an **exact** peer on `vitest` (`"vitest":
+"4.1.10"`, not a range), so that package — not the root's range — decides which
+`vitest` lands in `clients/web`. Left floating, the root resolves the newest
+patch while web's peer stays pinned to the older one, and web's tests then run on
+one `vitest` while loading a `@vitest/coverage-v8` provider built against
+another. Both would still pass, which is the bad part.
+
+So `vitest` and `@vitest/coverage-v8` at the root and `@vitest/browser-playwright`
+in `clients/web` are all pinned **exactly**, and a bump edits all three in one
+change — the same discipline as the exact `prettier` pin (#1790).
 
 ### Why runtime consumption decides `dependencies`
 
