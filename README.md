@@ -40,7 +40,7 @@ npm run web        # prod web launcher against clients/web/dist
 npm run web:dev    # web launcher in --dev mode (Vite)
 ```
 
-v2 is **not** an npm workspace — each client under `clients/*` keeps its own `package.json` and `node_modules`, and shared code lives in `core/`, consumed via a `@inspector/core` build-time alias. What that means for adding a dependency (root vs. client, `dependencies` vs. `devDependencies`, and the bundler `external` lists) is in the [`local-dev` skill](./.claude/skills/local-dev/SKILL.md).
+v2 is **not** an npm workspace — each client under `clients/*` keeps its own `package.json` and `node_modules`, and shared code lives in `core/`, consumed via a `@inspector/core` build-time alias. **Every runtime dependency `core/` imports is declared once, in the repo-root `package.json`**, and each client declares only what that client alone consumes — its UI stack, its bundler-inlined packages, its dev tooling — which leaves `clients/cli` and `clients/launcher` with no runtime dependencies of their own. What that means for adding a dependency (root vs. client, `dependencies` vs. `devDependencies`, and the bundler `external` lists) is in the [`local-dev` skill](./.claude/skills/local-dev/SKILL.md).
 
 ## Project layout
 

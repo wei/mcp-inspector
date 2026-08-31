@@ -89,7 +89,7 @@ to tell you have hit one.
 Work the rules in order: which manifest declares it, then `dependencies` vs
 `devDependencies`, then whether the bundlers must also externalise it.
 
-### Why the SDK packages are root-only
+### Why `core/`'s runtime dependencies are root-only
 
 A per-client declaration installs a **second copy** that drifts from the root's.
 Not theoretical: it put two versions of `ext-apps` (1.7.4 / 1.7.5) and of the
@@ -99,7 +99,30 @@ transitive v1 `@modelcontextprotocol/sdk` (1.29.0 / 1.30.0) in the tree at once
 
 The same reasoning extends to anything reached only through root-owned code that
 has no manifest of its own (`test-servers/src`, `core/`) — hence the repo-root
-alias for those in `vitest.shared.mts`. `express` and `yaml` are the two today.
+alias for those in `vitest.shared.mts`. That used to be `express` and `yaml`
+alone; #2195 made it the general case, moving `ajv`, `atomically`, `chokidar`,
+`commander`, `hono`, `@hono/node-server`, `@napi-rs/keyring`, `open`, `pino`,
+`react`, `undici` and `zod` to the root as well.
+
+The point of deleting the client-side copies rather than merely keeping them in
+step is that **a package installs only into an install root that declares it**.
+Aligned duplicate declarations still drift the next time someone bumps one of
+them; no declaration at all cannot. `npm run verify:dep-lockstep` is the detector
+for the skew, and consolidation is what removes the opportunity.
+
+Two consequences that read as bugs and are not:
+
+- **`clients/cli` and `clients/launcher` declare no runtime dependencies.** Their
+  manifests carry `devDependencies` only. Everything they import at runtime is
+  root-declared and resolves by walking up from the client directory.
+- **A client's `node_modules` still contains some of these names.** They arrive
+  transitively (`chokidar` under `vite`, `react` as a peer of `react-dom` and
+  `ink`). That is why the `vitest.shared.mts` pins matter: an unpinned specifier
+  would resolve the nearest copy, which is the transitive one, not the root's.
+
+When a package moves to the root, its `vitest.shared.mts` pin has to move with
+it — a `path.resolve(dirname, …)` pin left behind points at a directory that no
+longer exists.
 
 ### Why runtime consumption decides `dependencies`
 

@@ -141,6 +141,14 @@ export default defineConfig({
     // `Dynamic require of "path" is not supported` shim, which throws at
     // import time and takes the whole binary down before it parses a flag.
     "proper-lockfile",
+    // Consolidated to the ROOT manifest by #2195, along with every other
+    // runtime dependency `core/` imports. tsup externalizes only what the
+    // *nearest* package.json declares, so once a client stops declaring one it
+    // must be named here or esbuild inlines it — the #2067 failure class, now
+    // reached by a manifest edit rather than an omission.
+    "ajv",
+    "atomically",
+    "zod",
   ],
   esbuildPlugins: [inkFormLabelPatch],
   esbuildOptions(options) {

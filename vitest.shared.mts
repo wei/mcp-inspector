@@ -50,43 +50,15 @@ export function vitestSharedPaths(clientDir: string) {
       find: /^react-dom\/client$/,
       replacement: path.resolve(dirname, "node_modules/react-dom/client.js"),
     },
-    { find: /^pino$/, replacement: path.resolve(dirname, "node_modules/pino") },
-    {
-      find: /^pino\/browser\.js$/,
-      replacement: path.resolve(dirname, "node_modules/pino/browser.js"),
-    },
-    {
-      find: /^hono$/,
-      replacement: path.resolve(dirname, "node_modules/hono/dist/index.js"),
-    },
-    {
-      find: /^hono\/streaming$/,
-      replacement: path.resolve(
-        dirname,
-        "node_modules/hono/dist/helper/streaming/index.js",
-      ),
-    },
-    {
-      find: /^@hono\/node-server$/,
-      replacement: path.resolve(dirname, "node_modules/@hono/node-server"),
-    },
-    {
-      find: /^atomically$/,
-      replacement: path.resolve(dirname, "node_modules/atomically"),
-    },
-    {
-      find: /^chokidar$/,
-      replacement: path.resolve(dirname, "node_modules/chokidar"),
-    },
-    {
-      find: /^@napi-rs\/keyring$/,
-      replacement: path.resolve(dirname, "node_modules/@napi-rs/keyring"),
-    },
-    // `express` and `yaml` resolve from the **repo root**, unlike every pin
-    // above. Both are reached only through `test-servers/src` — express by the
-    // http/oauth servers, yaml by `load-config.ts` — which is root-owned code
-    // with no manifest of its own, so the root is where they are declared and
-    // the only place a client's resolution chain is guaranteed to find them.
+    // Everything below resolves from the **repo root**, unlike the `react` /
+    // `react-dom` pins above. These are the runtime dependencies declared in
+    // the root manifest and nowhere else, so the root install is the only place
+    // a client's resolution chain is guaranteed to find them.
+    //
+    // `express` and `yaml` are reached only through `test-servers/src` —
+    // express by the http/oauth servers, yaml by `load-config.ts` — which is
+    // root-owned code with no manifest of its own.
+    //
     // Pointing these at `<client>/node_modules` is what broke when the MCP
     // packages moved to the root (#1970): express was never declared by a client
     // at all, it arrived in `clients/cli` as a peer of `express-rate-limit`
@@ -111,6 +83,49 @@ export function vitestSharedPaths(clientDir: string) {
     {
       find: /^proper-lockfile$/,
       replacement: path.resolve(repoRoot, "node_modules/proper-lockfile"),
+    },
+    // The rest of `core/`'s runtime dependencies, consolidated into the root
+    // manifest by #2195. Each of these used to be declared by the clients that
+    // reached it and was pinned to `<client>/node_modules` accordingly; once
+    // the declarations went away those paths stopped existing, so the pin has
+    // to follow the package to the root. Left un-repointed they would resolve
+    // to a directory that is not there — or, worse, to a transitive copy some
+    // unrelated dependency happened to drag in, which is the duplicate this
+    // whole pin list exists to prevent.
+    {
+      find: /^pino$/,
+      replacement: path.resolve(repoRoot, "node_modules/pino"),
+    },
+    {
+      find: /^pino\/browser\.js$/,
+      replacement: path.resolve(repoRoot, "node_modules/pino/browser.js"),
+    },
+    {
+      find: /^hono$/,
+      replacement: path.resolve(repoRoot, "node_modules/hono/dist/index.js"),
+    },
+    {
+      find: /^hono\/streaming$/,
+      replacement: path.resolve(
+        repoRoot,
+        "node_modules/hono/dist/helper/streaming/index.js",
+      ),
+    },
+    {
+      find: /^@hono\/node-server$/,
+      replacement: path.resolve(repoRoot, "node_modules/@hono/node-server"),
+    },
+    {
+      find: /^atomically$/,
+      replacement: path.resolve(repoRoot, "node_modules/atomically"),
+    },
+    {
+      find: /^chokidar$/,
+      replacement: path.resolve(repoRoot, "node_modules/chokidar"),
+    },
+    {
+      find: /^@napi-rs\/keyring$/,
+      replacement: path.resolve(repoRoot, "node_modules/@napi-rs/keyring"),
     },
   ];
 

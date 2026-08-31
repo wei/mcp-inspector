@@ -46,6 +46,15 @@ export default defineConfig({
     "@modelcontextprotocol/ext-apps",
     "commander",
     "pino",
+    // Consolidated to the ROOT manifest by #2195, along with every other
+    // runtime dependency `core/` imports. tsup externalizes only what the
+    // *nearest* package.json declares, so once a client stops declaring one it
+    // must be named here or esbuild inlines it — the #2067 failure class, now
+    // reached by a manifest edit rather than an omission.
+    "ajv",
+    "atomically",
+    "open",
+    "zod",
   ],
   esbuildOptions(options) {
     options.alias = {
