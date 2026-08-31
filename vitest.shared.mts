@@ -50,10 +50,14 @@ export function vitestSharedPaths(clientDir: string) {
       find: /^react-dom\/client$/,
       replacement: path.resolve(dirname, "node_modules/react-dom/client.js"),
     },
-    // Everything below resolves from the **repo root**, unlike the `react` /
-    // `react-dom` pins above. These are the runtime dependencies declared in
-    // the root manifest and nowhere else, so the root install is the only place
-    // a client's resolution chain is guaranteed to find them.
+    // Everything below is **root-owned** and resolves from the repo root,
+    // unlike the `react` / `react-dom` pins above. What they have in common is
+    // that no client declares them, so the root install is the only place a
+    // client's resolution chain is guaranteed to find one — not that they are
+    // all root `dependencies`: `express` is test-only and sits in the root
+    // `devDependencies`. Nor is this the complete root runtime set; a package
+    // that resolves unambiguously without help (`ajv`, `commander`, `open`,
+    // `undici`, `zod`) needs no pin and has none.
     //
     // `express` and `yaml` are reached only through `test-servers/src` —
     // express by the http/oauth servers, yaml by `load-config.ts` — which is

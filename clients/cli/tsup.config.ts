@@ -55,6 +55,14 @@ export default defineConfig({
     "atomically",
     "open",
     "zod",
+    // Reached through `core/` but not through this client's own code today.
+    // AGENTS.md requires every root-declared package `core/` imports at runtime
+    // in ALL three lists regardless, because which client reaches one is a
+    // function of what `core/` imports rather than of what the client names —
+    // so the list must not depend on today's reachability (Copilot).
+    "chokidar",
+    "hono",
+    "react",
   ],
   esbuildOptions(options) {
     options.alias = {

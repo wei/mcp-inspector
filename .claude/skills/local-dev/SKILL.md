@@ -122,7 +122,17 @@ Two consequences that read as bugs and are not:
 
 When a package moves to the root, its `vitest.shared.mts` pin has to move with
 it — a `path.resolve(dirname, …)` pin left behind points at a directory that no
-longer exists.
+longer exists, or (for the transitive cases above) at the duplicate the pin was
+supposed to rule out.
+
+**`react` and `react-dom` are the exception, and stay pinned per client.** They
+are a matched pair — `react-dom` reaches into React internals — and `react-dom`
+is still web-declared, so npm resolves it and its React peer together inside
+`clients/web/node_modules` (19.2.8 today, against the root's 19.2.7). Pointing
+`react` at the root while `react-dom` resolves from the client would pair a
+renderer with a React it was not installed against, which is the same split the
+pin exists to prevent, arrived at from the other side. `dedupe` still collapses
+each install to one copy, which is what actually has to hold.
 
 ### Why runtime consumption decides `dependencies`
 
