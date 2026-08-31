@@ -44,21 +44,12 @@
     "esbuild": "^0.28.2"
   },
   "devDependencies": {
-    "@eslint/js": "^10.0.1",
-    "@types/node": "^24.12.4",
     "@types/react": "^19.2.14",
-    "@vitest/coverage-v8": "^4.1.10",
-    "eslint": "^10.8.0",
     "eslint-plugin-react-hooks": "^7.1.1",
-    "globals": "^17.4.0",
     "ink-testing-library": "^4.0.0",
-    "prettier": "3.8.4",
     "tsup": "^8.5.0",
     "tsx": "^4.21.0",
-    "typescript": "~5.9.3",
-    "typescript-eslint": "^8.56.1",
     "vite": "^8.1.5",
-    "vite-node": "^6.0.0",
-    "vitest": "^4.1.10"
+    "vite-node": "^6.0.0"
   }
 }

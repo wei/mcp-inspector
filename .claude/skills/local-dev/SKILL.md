@@ -101,6 +101,29 @@ The same reasoning extends to anything reached only through root-owned code that
 has no manifest of its own (`test-servers/src`, `core/`) — hence the repo-root
 alias for those in `vitest.shared.mts`. `express` and `yaml` are the two today.
 
+### Why the shared toolchain is root-only
+
+Every client's `validate` shells out to `prettier`, `eslint`, `tsc` and `vitest`,
+which makes them look like they belong beside the scripts that call them. They
+do not need to be: `npm run` prepends **every ancestor** `node_modules/.bin` to
+`PATH`, and Node and TypeScript walk parent `node_modules` / `node_modules/@types`
+the same way — so a client with no toolchain declaration at all still resolves
+the root's copy. `clients/launcher` declares no `devDependencies` whatsoever and
+its `validate` is unchanged.
+
+What a per-client declaration *does* buy is a second copy free to drift, and it
+had (#2196): `globals` sat at `^17.7.0` at the root against `^17.4.0` in all four
+clients, and `typescript-eslint` at `^8.65.0` against `^8.56.1`. Nothing failed —
+which is the point. A lint or format tool that differs per client makes the gate's
+verdict a function of *where you ran it*, and the exact `prettier` pin (#1790)
+only means something when there is one of it.
+
+⚠️ The line is **who uses it**, not what kind of thing it is. `tsup`, `tsx`,
+`vite`, `vite-node`, `playwright`, `storybook`, `happy-dom`,
+`ink-testing-library` and each client's own `@types/*` are toolchain too and stay
+where they are, because only one client runs them. Hoisting those would make
+every client install the union of all four.
+
 ### Why runtime consumption decides `dependencies`
 
 The client builds externalise npm packages, so a published install resolves them
