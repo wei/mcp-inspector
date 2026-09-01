@@ -111,10 +111,16 @@ Keep two distinctions straight, because AGENTS.md's rules split on them:
   `external` lists.
 - **Root-declared is not the same as aliased.** The `vitest.shared.mts` pins and
   the `clients/web/tsconfig.*.json` `paths` cover the packages whose resolution
-  is genuinely ambiguous — a transitive copy sits in the client install, or the
-  importer is `core/`, which has no manifest to resolve from. A package that
-  resolves unambiguously by walk-up (`ajv`, `commander`, `open`, `undici`,
-  `zod`) is deliberately absent from both.
+  is genuinely ambiguous, which is two different situations: the importer is
+  `core/`, which has no manifest to resolve from, **or** a copy still sits in
+  the client install and would win. The second case is the one that is easy to
+  get wrong — `chokidar` (under `vite`), `zod` (under
+  `eslint-plugin-react-hooks`), `open` (under Storybook) and `react` (a peer of
+  `react-dom` and `ink`) are all present in a client's `node_modules` without
+  being declared there, so "we deleted the declaration" is not the same as "it
+  resolves from the root now". **Check the install, don't reason from the
+  manifest.** `ajv`, `commander` and `undici` carry no pin because no client
+  install has a copy of them at all.
 
 The point of deleting the client-side copies rather than merely keeping them in
 step is that **a package installs only into an install root that declares it**.

@@ -24,6 +24,10 @@ export function vitestSharedPaths(clientDir: string) {
     "react-dom",
     "@modelcontextprotocol/client",
     "@modelcontextprotocol/core",
+    // Every SDK schema is a zod type, so a second copy breaks `instanceof`
+    // across the whole surface. The alias below picks the install; this keeps
+    // it to one copy within it.
+    "zod",
   ];
 
   const nodeModulesAliases = [
@@ -130,6 +134,32 @@ export function vitestSharedPaths(clientDir: string) {
     {
       find: /^@napi-rs\/keyring$/,
       replacement: path.resolve(repoRoot, "node_modules/@napi-rs/keyring"),
+    },
+    // `zod` and `open` are pinned for a different reason from everything above:
+    // they resolve *somewhere* without help, and the somewhere is wrong. Both
+    // still sit at the top level of `clients/web/node_modules` as transitive
+    // copies — zod under `eslint-plugin-react-hooks`, open under Storybook —
+    // so an unpinned bare import from a web test resolves the client copy while
+    // `core/` and the SDK packages resolve the root's (Copilot).
+    //
+    // For `open` that is merely wasteful. For `zod` it is the hazard this file
+    // exists for: two copies in one process means a schema built by one and an
+    // `instanceof` check made by the other, across the entire
+    // `@modelcontextprotocol/*` surface. The versions are identical today and
+    // `verify:dep-lockstep` is what keeps them that way, but identical is not
+    // the same as single, and only a pin makes it single.
+    //
+    // `zod/v4` needs its own entry — first-party code imports both specifiers,
+    // and pinning only the bare one would split the package across two installs
+    // rather than collapse it.
+    { find: /^zod$/, replacement: path.resolve(repoRoot, "node_modules/zod") },
+    {
+      find: /^zod\/v4$/,
+      replacement: path.resolve(repoRoot, "node_modules/zod/v4/index.js"),
+    },
+    {
+      find: /^open$/,
+      replacement: path.resolve(repoRoot, "node_modules/open"),
     },
   ];
 
