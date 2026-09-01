@@ -122,6 +122,26 @@ oscillates — and looks like eval noise rather than a defect in the case. Two o
 | "I added a dependency and the TUI bundle broke at import time. **Where should it have gone?**" | 33 / 67 / 100 / 100 / 60% | Dependency placement is stated in full in `AGENTS.md`; only the diagnosis is the skill's |
 | "I just pulled and a client's dependencies look out of sync. **What do I need to run?**"       | 80 / 80 / 60%             | `AGENTS.md` says a single root `npm install` is all you need                             |
 
+⚠️ **A high score does not clear a case of overlap, and this is the eval's real
+blind spot.** The two rules above — outright overlap pins a case near 0%, partial
+overlap makes it oscillate — describe what the *scores* look like once you already
+suspect a case. They are not a detector. Across code review of this PR, three
+committed cases were identified as `AGENTS.md`-answerable by *reading* them, and
+all three were scoring **80–100%** at the time:
+
+| Case | Score when flagged |
+| --- | --- |
+| `project-structure`: "Does a new Node-only backend piece for the web client belong in core…?" | 80 → 100% |
+| `project-structure`: "Does a helper that only the CLI and TUI use belong in core…?" | 80% |
+| `issue-create`: "What do I need to do beyond `gh issue create`…?" | 100 / 100 / 100% |
+
+The first two were re-aimed; the third was kept, because a case that holds at
+100% across three independent suites is measuring *something* the rules file does
+not supply on its own. But the lesson stands either way: **the eval cannot tell
+you a passing case is well-aimed.** It can only tell you a case is failing. Read
+every new case against `AGENTS.md` by hand before committing it, and do not let a
+green suite substitute for that.
+
 Both stabilised at 100% once re-aimed at what only the skill holds — "what do I
 **check**" instead of "where should it have **gone**", and the worktree install
 trap instead of the install command. If a case keeps moving between runs while
@@ -147,8 +167,9 @@ neighbour and the neighbour is right, the case is aimed at the wrong skill.
 
 ### Negative cases
 
-Every skill file needs at least one `"expect": null` case; a skill that fires on
-everything is a context regression nobody notices by hand. Keep them plainly
+Every **model-invoked** skill's eval file needs at least one `"expect": null`
+case; a skill that fires on everything is a context regression nobody notices by
+hand. (A name-only skill has no eval file to put one in — see the checklist.) Keep them plainly
 unrelated to the repo (arithmetic, trivia, a one-line refactor). All 18 in this
 repo have held at 100% through every reshaping so far — if one starts firing, a
 description has grown too broad.

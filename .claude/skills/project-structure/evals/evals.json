@@ -16,7 +16,7 @@
     "expect": "project-structure"
   },
   {
-    "prompt": "Does a helper that only the CLI and TUI use belong in core or in one of the clients?",
+    "prompt": "I need to find where a feature is implemented but I do not know which client owns it. How do I work that out in this repo?",
     "expect": "project-structure"
   },
   {

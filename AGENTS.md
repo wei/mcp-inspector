@@ -187,7 +187,7 @@ that from happening:
    skill at all: it is absent from the listing and the Skill tool refuses it. The
    costs are asymmetric — a spurious load costs ~250 characters, a missed one
    costs a wrong base branch or an unsigned commit — and the budget is not tight
-   (nine of the ten are model-invoked today and total ~2.8k of 4k). Reserve
+   (nine of the ten are model-invoked today and total ~3.2k of 4k). Reserve
    `true` for a procedure that is genuinely only ever started deliberately —
    `release` is the only one left, because nobody cuts a release by implication.
    ⚠️ **A `true` skill cannot be reached by another skill either.** If a
@@ -198,7 +198,8 @@ that from happening:
    of the ones already there: `project-structure` fell from 100% to 0% on two
    cases (n=4) and `testing` from 3/5 to 2/5, while the six new skills all
    measured 100% and every negative case stayed clean. So the ceiling is
-   attention, not characters — we were at 2.8k of a 4k budget throughout. Adding
+   attention, not characters — we were at 2.8k of a 4k budget throughout *that
+   experiment* (it is ~3.2k now; the point is that nothing was near the cap). Adding
    a skill therefore has a cost paid by the *existing* ones, which only
    `skills:eval` can see. **Re-run the full eval after any flip _or description
    edit_**, not just the changed skill's own cases.

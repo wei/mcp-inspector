@@ -443,3 +443,30 @@ test("a model-invoked skill needs at least MIN_POSITIVE_CASES positives", () => 
     /no positive case expects/,
   );
 });
+
+test("the truncation guard covers `when_to_use`, not just `description`", () => {
+  // The guard loops over both fields, so a regression that dropped `when_to_use`
+  // from that list would be invisible to the description-only tests above.
+  const withHash = [
+    "---",
+    "name: alpha",
+    'description: "safe because quoted"',
+    "when_to_use: Use when filing against board #28 or board #11.",
+    "disable-model-invocation: false",
+    "---",
+    "body",
+  ].join("\n");
+  const parsed = parseSkill("alpha", withHash);
+  assert.equal(parsed.whenToUse, "Use when filing against board");
+  assert.match(parsed.errors.join(" "), /`when_to_use` is truncated/);
+  // The description is quoted, so it must not be implicated.
+  assert.doesNotMatch(parsed.errors.join(" "), /`description` is truncated/);
+
+  const quoted = withHash.replace(
+    /^when_to_use: (.*)$/m,
+    (_m, w) => `when_to_use: "${w}"`,
+  );
+  const ok = parseSkill("alpha", quoted);
+  assert.deepEqual(ok.errors, []);
+  assert.equal(ok.whenToUse, "Use when filing against board #28 or board #11.");
+});
