@@ -85,5 +85,49 @@ export function rootRunsClientValidate(rootScripts, clientDir) {
  * `validate` is caught by its sibling. Only deleting both slips through.
  */
 export function rootReachesScript(rootScripts, scriptName) {
-  return reachableScripts(rootScripts, "validate").has(scriptName);
+  return scriptChainRuns(rootScripts, "validate", scriptName);
+}
+
+/**
+ * Whether `npm run <entry>` reaches a real invocation of `npm run <target>`.
+ *
+ * `reachableScripts` matches every `npm run …` **substring**, which is right for
+ * harvesting (over-inclusion is safe there) and wrong for a vouch: `echo npm run
+ * verify:skills` would satisfy it while the guard never executes (Copilot).
+ *
+ * Splitting is on `\n`, `;` and `&&` only — deliberately NOT on `|` or a bare
+ * `&`, because `||` is the failure-masking form and both of its shapes must be
+ * rejected: `npm run X || true` swallows the guard's own failure, and `true ||
+ * npm run X` never runs it. Leaving them inside a segment means the segment does
+ * not equal the invocation, so both are refused without special-casing either.
+ *
+ * A segment naming some OTHER script is followed, with or without trailing
+ * flags, as are npm's implicit `pre`/`post` hooks. Only the target is matched
+ * exactly, which suits the argument-less scripts a vouch asks about.
+ *
+ * @param {Record<string, string>} scripts
+ * @param {string} entry
+ * @param {string} target
+ */
+export function scriptChainRuns(scripts, entry, target) {
+  const seen = new Set();
+  const queue = [entry];
+  while (queue.length > 0) {
+    const name = queue.shift();
+    if (seen.has(name)) continue;
+    seen.add(name);
+    // npm runs pre<name>/post<name> implicitly around <name>.
+    for (const hook of [`pre${name}`, `post${name}`])
+      if (typeof scripts?.[hook] === "string") queue.push(hook);
+    const body = scripts?.[name];
+    if (typeof body !== "string") continue;
+    for (const segment of body.split(/\n|;|&&/).map((part) => part.trim())) {
+      if (segment === `npm run ${target}`) return true;
+      const tokens = segment.split(/\s+/);
+      if (tokens[0] === "npm" && tokens[1] === "run" && tokens[2]) {
+        queue.push(tokens[2]);
+      }
+    }
+  }
+  return false;
 }

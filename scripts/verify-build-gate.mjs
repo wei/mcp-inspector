@@ -13,7 +13,7 @@
  *
  * This temporarily injects a `node:fs` import into the browser entry
  * (src/main.tsx), runs `vite build`, and asserts the build FAILS with the #1769
- * error, then restores the entry. Run from `npm run ci`.
+ * error, then restores the entry. Run from `npm run local:gate` and from GitHub CI.
  *
  * Why the REAL config + entry (and not a fast throwaway temp entry / generated
  * config): building the actual `clients/web` config is what catches config-level
@@ -350,7 +350,7 @@ if (!output.includes(ERROR_PREFIX)) {
 // so PROBE_MODULE must appear. Without this, a repo that already leaks a built-in
 // would report OK even if the probe was tree-shaken or entryPath went stale —
 // branch (c)'s failure, silently inverted into a pass. (Unreachable inside
-// `npm run ci`: `validate`'s `build:web` fails first on a pre-existing leak — but
+// `npm run local:gate`: `validate`'s `build:web` fails first on a pre-existing leak — but
 // this script is a documented standalone command, run exactly when debugging one.)
 if (!output.includes(PROBE_MODULE)) {
   fail(

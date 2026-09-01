@@ -74,6 +74,7 @@ function createMemoryStorage(
     saveScope: vi.fn(),
     clear: vi.fn(),
     clearEnterpriseManagedResourceServers: vi.fn(),
+    takeRevocationSnapshot: vi.fn().mockResolvedValue({ byIssuer: {} }),
   } as unknown as OAuthStorage;
 }
 

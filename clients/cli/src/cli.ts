@@ -52,6 +52,7 @@ import {
   getAuthorizationServerUrl,
   getAuthorizationServerUrlCandidates,
 } from "@inspector/core/auth/discovery.js";
+import { withRfc8414OidcCompat } from "@inspector/core/auth/oidcDiscoveryCompat.js";
 import { writeStoreFile } from "@inspector/core/storage/store-io.js";
 import {
   refreshAuthorization,
@@ -107,6 +108,7 @@ async function callMethod(
   callbackUrlConfig: RunnerOAuthCallbackConfig,
   storedAuthOnly: boolean,
   relogin: boolean,
+  revoke: boolean,
 ): Promise<void> {
   // Clear after parse-time validation so a bad flag combo never deletes store
   // entries. Deletes the shared URL-keyed OAuth entry (not "ignore for this run").
@@ -116,7 +118,18 @@ async function callMethod(
         "--relogin requires an HTTP/SSE server URL (no OAuth store entry for stdio)",
       );
     }
-    await clearStoredAuthForRelogin(serverConfig.url);
+    // RFC 7009 (#2144). The flag and the per-server setting are both opt-outs,
+    // so either one turns the revocation off; neither can turn it on for the
+    // other. Reported rather than thrown — `--relogin` is a local delete and
+    // must not start failing because an authorization server is unreachable.
+    const revocation = await clearStoredAuthForRelogin(serverConfig.url, {
+      revoke: revoke && serverSettings?.oauthRevokeOnClear !== false,
+    });
+    if (revocation?.status === "failed") {
+      process.stderr.write(
+        `Warning: could not revoke the OAuth grant at the authorization server (${revocation.detail}); it may still be valid there.\n`,
+      );
+    }
   }
 
   // Version comes from the single source of truth — the root package.json —
@@ -329,7 +342,27 @@ export async function refreshStoredAuthToken(
   deps: RefreshStoredAuthDeps = {},
 ): Promise<string> {
   const refresh = deps.refresh ?? refreshAuthorization;
-  const discover = deps.discover ?? discoverAuthorizationServerMetadata;
+  // #2172: this path calls SDK discovery directly rather than through
+  // `InspectorClient.effectiveAuthFetch`, so it needs the same compatibility
+  // wrapper — otherwise a stored refresh token with no persisted
+  // `serverMetadata` still cannot refresh against an authorization server that
+  // publishes RFC 8414 metadata at the OIDC well-known path (Copilot).
+  //
+  // Built over `createProxyFetch()` for the same reason `environment.fetch` is
+  // (#2067): this whole function runs outside `InspectorClient`, so nothing
+  // else puts a proxy under it, and a server reachable only through
+  // `HTTPS_PROXY` would otherwise be probed directly. The same fetch is handed
+  // to the token request below, so neither leg bypasses the proxy (Copilot).
+  const storedAuthFetch = withRfc8414OidcCompat(createProxyFetch() ?? fetch);
+  const discover: typeof discoverAuthorizationServerMetadata =
+    deps.discover ??
+    ((authorizationServerUrl, options) =>
+      discoverAuthorizationServerMetadata(authorizationServerUrl, {
+        ...options,
+        // A caller-supplied fetch is left alone — it is theirs to compose. The
+        // walker below passes no options, so in practice this is ours.
+        fetchFn: options?.fetchFn ?? storedAuthFetch,
+      }));
 
   const snapshot = await readOAuthSnapshot(statePath);
   const servers = snapshot.servers as StoredServers;
@@ -380,6 +413,7 @@ export async function refreshStoredAuthToken(
       clientInformation,
       refreshToken,
       resource: new URL(serverUrl),
+      fetchFn: storedAuthFetch,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -570,6 +604,7 @@ type ParseResult =
       callbackUrl?: string;
       storedAuthOnly?: boolean;
       relogin?: boolean;
+      revoke?: boolean;
     }
   // Short-circuit modes (`--list-stored-auth`, `--print-handoff`) do their own
   // output and need no server connection; runCli returns immediately.
@@ -766,6 +801,10 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
       "Delete stored OAuth for this server URL from the shared store before connect (HTTP/SSE URL keys only); interactive login runs only if the server requires auth. Rejected for stdio (no URL-keyed store entry)",
     )
     .option(
+      "--no-revoke",
+      "Requires --relogin. Skips the RFC 7009 revocation request that would otherwise end the grant at the authorization server when the local state is deleted. Also skipped when the server entry sets oauth.revokeOnClear to false.",
+    )
+    .option(
       "--wait-for-auth <sec>",
       "Poll the OAuth state file until a token for --server-url appears (or the timeout elapses), then proceed as if --use-stored-auth were set. Use after handing off to a human to complete OAuth in a browser.",
       (v: string) => {
@@ -820,6 +859,7 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
     useStoredAuth?: boolean;
     storedAuthOnly?: boolean;
     relogin?: boolean;
+    revoke?: boolean;
     waitForAuth?: number;
     listStoredAuth?: boolean;
     printHandoff?: boolean;
@@ -847,6 +887,15 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
         "--relogin cannot be combined with --method servers/list or servers/show (no OAuth connect)",
       );
     }
+  }
+
+  // `--no-revoke` only means anything alongside `--relogin` — it suppresses the
+  // RFC 7009 request that clear makes. Accepted on its own it is inert, and
+  // worse than inert: it reads as "this run will not revoke anything", which is
+  // true only because nothing was going to be cleared. Rejected here, ahead of
+  // the short-circuit returns, for the same reason `--strict` is (#2144).
+  if (options.revoke === false && !options.relogin) {
+    throw new Error("--no-revoke requires --relogin (it has no other effect).");
   }
 
   // `--strict` is checked HERE, ahead of every short-circuit return below
@@ -1112,6 +1161,9 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
     callbackUrl: options.callbackUrl,
     storedAuthOnly: options.storedAuthOnly === true,
     relogin: options.relogin === true,
+    // Commander's `--no-revoke` defaults this to true; only an explicit
+    // `--no-revoke` makes it false.
+    revoke: options.revoke !== false,
   };
 }
 
@@ -1130,6 +1182,7 @@ export async function runCli(argv?: string[]): Promise<void> {
     callbackUrl,
     storedAuthOnly,
     relogin,
+    revoke,
   } = parsed;
   const clientConfig = await loadRunnerClientConfig({ clientConfigPath });
   // A bad --callback-url / MCP_OAUTH_CALLBACK_URL is a *usage* error, but its
@@ -1159,5 +1212,6 @@ export async function runCli(argv?: string[]): Promise<void> {
     callbackUrlConfig,
     storedAuthOnly === true,
     relogin === true,
+    revoke !== false,
   );
 }

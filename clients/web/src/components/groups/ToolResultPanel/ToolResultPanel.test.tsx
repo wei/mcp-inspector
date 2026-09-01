@@ -6,6 +6,7 @@ import {
   screen,
   waitFor,
 } from "../../../test/renderWithMantine";
+import { getAceText } from "../../../test/aceEditor";
 import { ToolResultPanel } from "./ToolResultPanel";
 import { resultHasResourceLinks } from "./toolResultUtils";
 
@@ -78,9 +79,9 @@ describe("ToolResultPanel", () => {
       screen.getByRole("button", { name: "Expand resource demo://r/1" }),
     );
     expect(onReadResource).toHaveBeenCalledWith("demo://r/1");
-    await waitFor(() =>
-      expect(screen.getByText(/"linked body"/)).toBeInTheDocument(),
-    );
+    // The body lands in the read-only JSON editor, whose lines are
+    // virtualized — so it is read through the editor, not the DOM.
+    await waitFor(() => expect(getAceText()).toContain('"linked body"'));
   });
 
   it("collapses consecutive resource_link blocks into a single box", () => {

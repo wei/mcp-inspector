@@ -222,7 +222,12 @@ export function ResourcePreviewPanel({
   const sourceToggleable = isSourceToggleable(mimeType);
 
   return (
-    <PanelStack>
+    // `data-testid` so a driver can wait on the preview having actually
+    // RENDERED, not merely on `resources/read` having returned (#2148). The
+    // read status flips as soon as the RPC resolves, so a smoke stopping there
+    // would stay green with this panel removed. A `data-*` attribute is not
+    // part of a component's typed props, so it is passed at the call site.
+    <PanelStack data-testid="resource-preview">
       <HeaderRow>
         <HeaderLeft>
           {onClose && (

@@ -46,6 +46,11 @@ import {
   resolveModernLogLevel,
 } from "./types.js";
 import { cleanRoots } from "./serverList.js";
+import {
+  isNeverAcknowledgedSubscriptionClose,
+  subscriptionFailureMessage,
+  NEVER_ACKNOWLEDGED_SUBSCRIPTION_MESSAGE,
+} from "./subscriptionAck.js";
 // Fallback client identity, used ONLY when a caller doesn't pass
 // `clientIdentity`. Real clients supply their own: the Node clients (CLI, TUI)
 // read the single-source version from the root package.json via
@@ -233,6 +238,8 @@ import {
   type HandleAuthChallengeOptions,
 } from "../auth/challenge.js";
 import { withOAuthEndpointOverrides } from "../auth/endpointOverrides.js";
+import { withRfc8414OidcCompat } from "../auth/oidcDiscoveryCompat.js";
+import type { TokenRevocationOutcome } from "../auth/revocation.js";
 import type { OAuthTokens } from "@modelcontextprotocol/client";
 import { silentLogger, type InspectorLogger } from "../logging/logger.js";
 import { createFetchTracker } from "./fetchTracking.js";
@@ -608,6 +615,13 @@ export class InspectorClient extends InspectorClientEventTarget {
   // pending re-listen timer.
   private modernReconnectAttempts = 0;
   private modernReconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  // Set when the last `listen()` was rejected because the server answered it
+  // with a bare graceful-closure result instead of acknowledging (#2097). That
+  // condition is deterministic, so the reconnect machinery must not treat it as
+  // a drop to retry; the flag is what carries the distinction from the rejection
+  // site to the two failure handlers. Cleared by any user-initiated refresh (a
+  // subscribe/unsubscribe is a fresh attempt, and the server may have changed).
+  private modernNeverAcknowledged = false;
   // Task ids the user explicitly cancelled. A cancel makes the in-flight
   // `callToolStream` reject with a generic -32603 error, which the stream's
   // error path would otherwise report as a *failed* task — flashing "failed"
@@ -636,9 +650,12 @@ export class InspectorClient extends InspectorClientEventTarget {
   >();
   private rawWireRequestCounter = 0;
   // Abort controller for the in-flight ordinary (non-task) tool call. Aborting
-  // it makes the SDK send a `notifications/cancelled` for that request (the MCP
-  // cancellation flow) and reject the pending call, which `callTool` surfaces as
-  // a `ToolCallCancelledError`. Undefined when no ordinary call is in flight.
+  // it hands the SDK the MCP cancellation flow for that request and rejects the
+  // pending call, which `callTool` surfaces as a `ToolCallCancelledError`. Which
+  // signal reaches the server is the transport's business, not ours: a
+  // per-request-stream transport on a 2026-era connection has that request's
+  // stream aborted, and everything else gets `notifications/cancelled` (#2140).
+  // Undefined when no ordinary call is in flight.
   // Task-augmented calls have a server-side task and are cancelled via
   // `cancelRequestorTask` instead, so they don't use this (#1458).
   private activeToolCallAbortController?: AbortController;
@@ -779,6 +796,16 @@ export class InspectorClient extends InspectorClientEventTarget {
     this.fetchFn = withOAuthEndpointOverrides(this.fetchFn ?? fetch, () =>
       this.oauthManager?.getEndpointOverrides(),
     );
+    // #2172: recover discovery when a plain OAuth 2.0 authorization server
+    // publishes RFC 8414 metadata at `/.well-known/openid-configuration`, which
+    // the SDK validates as an OpenID provider document and rejects. Wraps the
+    // *base* fetch for the same reason the overrides above do: the SDK also
+    // runs discovery from inside the transport, which is handed `this.fetchFn`
+    // directly, so a reconnect with an existing auth provider would otherwise
+    // still hit the upstream failure. The substituted response is stamped with
+    // `COMPAT_SOURCE_HEADER` so a captured entry names the URL its body came
+    // from rather than appearing to be a 200 from the RFC 8414 path.
+    this.fetchFn = withRfc8414OidcCompat(this.fetchFn);
     this.effectiveAuthFetch = this.buildEffectiveAuthFetch();
 
     this.sessionId = options.sessionId;
@@ -801,6 +828,7 @@ export class InspectorClient extends InspectorClientEventTarget {
           return Promise.resolve();
         },
         initialConfig: oauthConfig,
+        logger: this.logger,
         enterpriseManagedAuth: options.enterpriseManagedAuth,
         installEnterpriseManagedAuth: options.installEnterpriseManagedAuth,
         dispatchOAuthComplete: (detail) =>
@@ -1157,8 +1185,10 @@ export class InspectorClient extends InspectorClientEventTarget {
     if (this.requestTimeout !== undefined) {
       opts.timeout = this.requestTimeout;
     }
-    // When provided, aborting this signal makes the SDK send a
-    // `notifications/cancelled` for the request and reject it (#1458).
+    // When provided, aborting this signal cancels the request and rejects it
+    // (#1458). The SDK picks the wire signal from the transport: an aborted
+    // per-request SSE stream on a 2026-era Streamable HTTP connection, and
+    // `notifications/cancelled` everywhere else (#2140).
     if (signal) {
       opts.signal = signal;
     }
@@ -1786,6 +1816,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     this.modernListenGeneration++;
     this.clearModernReconnectTimer();
     this.modernReconnectAttempts = 0;
+    this.modernNeverAcknowledged = false;
     this.modernSubscription = null;
     // Announced only once both have moved: a listener that ran between them
     // would see an empty set with an `active` stream — the combination this
@@ -2963,10 +2994,13 @@ export class InspectorClient extends InspectorClientEventTarget {
 
   /**
    * Cancel the in-flight ordinary (non-task) tool call started by
-   * {@link callTool}. Aborting its request makes the SDK send a
-   * `notifications/cancelled` to the server (the MCP cancellation flow) and
-   * reject the pending call, which `callTool` surfaces as a
-   * {@link ToolCallCancelledError}.
+   * {@link callTool}. Aborting its request runs the MCP cancellation flow and
+   * rejects the pending call, which `callTool` surfaces as a
+   * {@link ToolCallCancelledError}. The SDK chooses the wire signal from the
+   * transport: on a 2026-era Streamable HTTP connection it aborts that
+   * request's own SSE response stream — the spec's cancellation signal —
+   * rather than sending `notifications/cancelled`, which is the stdio
+   * mechanism and remains in use there (#2140).
    *
    * Task-augmented calls have a server-side task and are cancelled via
    * {@link cancelRequestorTask} instead — this is a no-op for them (and whenever
@@ -5968,6 +6002,7 @@ export class InspectorClient extends InspectorClientEventTarget {
     if (!fromReconnect) {
       this.clearModernReconnectTimer();
       this.modernReconnectAttempts = 0;
+      this.modernNeverAcknowledged = false;
     }
     const generation = ++this.modernListenGeneration;
 
@@ -5984,10 +6019,31 @@ export class InspectorClient extends InspectorClientEventTarget {
       return;
     }
 
-    const subscription = await this.client.listen(
-      this.buildSubscriptionFilter(),
-      this.getRequestOptions(),
-    );
+    let subscription: McpSubscription;
+    try {
+      subscription = await this.client.listen(
+        this.buildSubscriptionFilter(),
+        this.getRequestOptions(),
+      );
+    } catch (error) {
+      // Record the one rejection that must not be retried, so the failure
+      // handlers can tell it from a drop (#2097). Recorded rather than acted on
+      // here because *which* state to write depends on whether this caller still
+      // owns the stream, which only they know — see
+      // `reconcileModernStreamStateAfterFailedRefresh`.
+      //
+      // Gated on the same generation test the callers use: a newer refresh has
+      // already cleared the flag for its own attempt, and a stale caller writing
+      // to it afterwards would make that attempt's *unrelated* failure look
+      // deterministic and end a stream that deserved a retry.
+      if (
+        generation === this.modernListenGeneration &&
+        isNeverAcknowledgedSubscriptionClose(error)
+      ) {
+        this.modernNeverAcknowledged = true;
+      }
+      throw error;
+    }
 
     // A newer refresh superseded us while awaiting the ack — discard this one.
     if (generation !== this.modernListenGeneration) {
@@ -6101,7 +6157,37 @@ export class InspectorClient extends InspectorClientEventTarget {
       this.setModernStreamState(INACTIVE_SUBSCRIPTION_STREAM_STATE);
       return;
     }
+    // The one failure a retry cannot fix (#2097) — end the stream here rather
+    // than spending the whole backoff run on a server that will answer the same
+    // way every time.
+    if (this.modernNeverAcknowledged) {
+      this.endModernStreamNeverAcknowledged();
+      return;
+    }
     this.scheduleModernReconnect();
+  }
+
+  /**
+   * Settle the stream on the never-acknowledged close (#2097): a status of its
+   * own so the UI can say what happened, no reconnect, and a log line carrying
+   * the same sentence the UI shows.
+   *
+   * The state is *not* `"ended"` — that badge covers the two expected closes (a
+   * server shutting an established stream down, and reconnection abandoned after
+   * repeated failures), and reading this case as either of them is exactly the
+   * silence #2063 reported.
+   */
+  private endModernStreamNeverAcknowledged(): void {
+    this.clearModernReconnectTimer();
+    this.logger.warn(
+      { message: NEVER_ACKNOWLEDGED_SUBSCRIPTION_MESSAGE },
+      "subscriptions/listen closed without an acknowledgement",
+    );
+    this.setModernStreamState({
+      active: this.modernStreamActive(),
+      status: "never-acknowledged",
+      honoredUris: [],
+    });
   }
 
   /**
@@ -6140,6 +6226,18 @@ export class InspectorClient extends InspectorClientEventTarget {
    * stream ended (re-subscribing resets the run and tries again).
    */
   private onModernReconnectFailed(): void {
+    // A reconnect that lost to the never-acknowledged close (#2097) ends the run
+    // immediately: the remaining attempts would each buy the same answer. This
+    // is reachable when a stream that *had* been acknowledged dropped and the
+    // server has since started refusing to acknowledge.
+    if (
+      this.modernNeverAcknowledged &&
+      !isTerminalStatus(this.status) &&
+      this.wantsModernStream()
+    ) {
+      this.endModernStreamNeverAcknowledged();
+      return;
+    }
     this.modernReconnectAttempts += 1;
     if (
       this.modernReconnectAttempts > MODERN_RECONNECT_MAX_ATTEMPTS ||
@@ -6233,7 +6331,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       this.dispatchSubscriptionsChange();
     } catch (error) {
       throw new Error(
-        `Failed to subscribe to resource: ${error instanceof Error ? error.message : String(error)}`,
+        `Failed to subscribe to resource: ${subscriptionFailureMessage(error)}`,
         { cause: error },
       );
     }
@@ -6294,7 +6392,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       }
     } catch (error) {
       throw new Error(
-        `Failed to unsubscribe from resource: ${error instanceof Error ? error.message : String(error)}`,
+        `Failed to unsubscribe from resource: ${subscriptionFailureMessage(error)}`,
         { cause: error },
       );
     }
@@ -6643,10 +6741,27 @@ export class InspectorClient extends InspectorClientEventTarget {
   }
 
   /**
-   * Clears OAuth tokens and client information
+   * Drop this server's stored OAuth state and revoke the grant at the
+   * authorization server (RFC 7009, #2144).
+   *
+   * The request is planned from the stored state, the state is cleared, and
+   * only then is the request sent — so the clear never waits on the network.
+   *
+   * The revocation is best-effort — an authorization server that advertises no
+   * `revocation_endpoint` is left behaving exactly as before, and a network
+   * error, a non-2xx or a timeout is reported in the returned outcome rather
+   * than thrown — so the local clear always completes. Pass
+   * `{ revoke: false }` to skip it.
    */
-  async clearOAuthTokens(): Promise<void> {
-    await this.oauthManager?.clearOAuthTokens();
+  async clearOAuthTokens(options?: {
+    revoke?: boolean;
+  }): Promise<TokenRevocationOutcome> {
+    return (
+      (await this.oauthManager?.clearOAuthTokens(options)) ?? {
+        status: "skipped",
+        reason: "no_tokens",
+      }
+    );
   }
 
   /**

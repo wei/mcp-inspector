@@ -731,4 +731,75 @@ describe("admitsNull", () => {
       }),
     ).toBe(true);
   });
+
+  describe("a const-null schema (#2123)", () => {
+    it("admits null when nothing else rules it out", () => {
+      expect(admitsNull({ const: null })).toBe(true);
+      expect(admitsNull({ type: "null", const: null })).toBe(true);
+      expect(admitsNull({ type: ["string", "null"], const: null })).toBe(true);
+    });
+
+    it("honors a sibling `nullable` flag", () => {
+      expect(admitsNull({ type: "string", nullable: true, const: null })).toBe(
+        true,
+      );
+    });
+
+    it("admits null when a sibling anyOf branch does", () => {
+      // The union decides in both directions: an all-string one rejects null,
+      // and a null branch admits it just as plainly.
+      expect(admitsNull({ const: null, anyOf: [{ type: "null" }] })).toBe(true);
+    });
+
+    it("recognizes a branch that spells its nullability another way", () => {
+      // The branch admits null through `const`, not through `type`.
+      expect(admitsNull({ const: null, anyOf: [{ const: null }] })).toBe(true);
+      expect(admitsNull({ const: null, anyOf: [{ nullable: true }] })).toBe(
+        true,
+      );
+    });
+
+    it("admits null when a sibling branch constrains nothing", () => {
+      // `{}` is the equivalent of `true` — it admits every value, null among
+      // them — so the pinned null stays reachable and its field submittable.
+      expect(admitsNull({ const: null, anyOf: [{}] })).toBe(true);
+      expect(admitsNull({ const: null, anyOf: [{ title: "anything" }] })).toBe(
+        true,
+      );
+    });
+
+    it("reads the boolean schema form", () => {
+      // `true` is the unconstrained schema; `false` admits nothing at all.
+      expect(admitsNull({ const: null, anyOf: [true] })).toBe(true);
+      expect(admitsNull({ const: null, anyOf: [false] })).toBe(false);
+    });
+
+    it("treats core identifier keywords as asserting nothing", () => {
+      // `$defs` declares subschemas for reference; it constrains nothing on its
+      // own, so this branch is unconstrained and admits null.
+      expect(admitsNull({ const: null, anyOf: [{ $defs: {} }] })).toBe(true);
+      // `$ref` is different — it applies whatever it points at.
+      expect(admitsNull({ const: null, anyOf: [{ $ref: "#/$defs/T" }] })).toBe(
+        false,
+      );
+    });
+
+    it("reads an enum that offers null", () => {
+      expect(admitsNull({ enum: [null] })).toBe(true);
+      expect(admitsNull({ const: null, anyOf: [{ enum: [null] }] })).toBe(true);
+      // …under the same sibling conditions a `const: null` answers to.
+      expect(admitsNull({ type: "string", enum: [null] })).toBe(false);
+    });
+
+    it("does not override a sibling that rejects null", () => {
+      // `const` is conjunctive with its siblings, not an override: both of
+      // these reject every value, so claiming nullability would let the
+      // required-field gate accept a `null` the schema forbids.
+      expect(admitsNull({ type: "string", const: null })).toBe(false);
+      expect(admitsNull({ const: null, anyOf: [{ type: "string" }] })).toBe(
+        false,
+      );
+      expect(admitsNull({ const: null, not: { type: "null" } })).toBe(false);
+    });
+  });
 });

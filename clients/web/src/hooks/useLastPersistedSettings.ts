@@ -145,14 +145,31 @@ export function useLastPersistedSettings(
   const outcomesRef = useRef<Map<string, { sequence: number; ok: boolean }>>(
     new Map(),
   );
-  // Read the list through a ref so a write pairs with the entry as it stands
-  // when it finishes, not the one captured when it was issued. Mirrored in an
-  // effect rather than assigned during render: writing a ref mid-render is an
-  // error under `react-hooks/refs`, and every reader runs from a settled
-  // promise or an event handler, long after the commit.
+  // `landed` reads the list through a ref so a write pairs with the entry as
+  // it stands when it *finishes*, not the one captured when it was issued.
+  // Mirrored in an effect rather than assigned during render: writing a ref
+  // mid-render is an error under `react-hooks/refs`, and this reader runs from
+  // a settled promise, long after the commit. `resolve` deliberately does not
+  // use it — see there.
   const serversRef = useRef(servers);
   useEffect(() => {
     serversRef.current = servers;
+  }, [servers]);
+
+  // Drop records the list has moved past. This used to happen lazily inside
+  // `resolve`, which is no longer allowed: `useSettingsDraft` seeds its draft
+  // during render (#2192) and so calls `resolve` there, where a ref mutation
+  // would run an unpredictable number of times — React may replay a render
+  // under StrictMode or abandon it altogether. Nothing depends on the eviction
+  // happening at any particular moment; it only keeps a dead record from being
+  // re-checked on every later write for that server, so an effect is the right
+  // home for it.
+  useEffect(() => {
+    for (const [serverId, record] of recordsRef.current) {
+      if (record.entry !== servers.find((s) => s.id === serverId)) {
+        recordsRef.current.delete(serverId);
+      }
+    }
   }, [servers]);
 
   const begin = useCallback((serverId: string): SettingsWrite => {
@@ -194,22 +211,25 @@ export function useLastPersistedSettings(
     [],
   );
 
+  // Pure, and over `servers` rather than `serversRef`. Both properties are
+  // required because `useSettingsDraft` calls this during render to seed its
+  // draft (#2192): a render must not mutate shared state, and the ref trails
+  // the value it mirrors by one passive-effect flush, so reading it here would
+  // answer from the previous commit's list on exactly the render where a
+  // refreshed list arrives. Reading `servers` also makes the supersession test
+  // fire a render earlier, which is the direction that matters — a list that
+  // has genuinely been re-read is what the record is being checked against.
   const resolve = useCallback(
     (serverId: string): InspectorServerSettings | undefined => {
-      const entry = serversRef.current.find((s) => s.id === serverId);
+      const entry = servers.find((s) => s.id === serverId);
       const current = recordsRef.current.get(serverId);
       if (!current) return entry?.settings;
       // Identity, not deep equality: the question is whether the list has been
       // re-read since the write, not whether the values happen to match.
-      if (current.entry !== entry) {
-        // Superseded — drop it rather than re-checking a dead record on every
-        // later write for this server.
-        recordsRef.current.delete(serverId);
-        return entry?.settings;
-      }
+      if (current.entry !== entry) return entry?.settings;
       return current.written;
     },
-    [],
+    [servers],
   );
 
   return { begin, resolve, lastWriteFailed };

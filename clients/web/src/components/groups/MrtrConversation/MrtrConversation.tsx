@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { Tool } from "@modelcontextprotocol/client";
 import {
   Badge,
   Collapse,
@@ -8,6 +9,7 @@ import {
   Stack,
   Text,
 } from "@mantine/core";
+import type { ReplayParamsOverride } from "../../../lib/protocolReplay";
 import type { MessageEntry } from "@inspector/core/mcp/types.js";
 import { ProtocolEntry } from "../ProtocolEntry/ProtocolEntry";
 import { ExpandToggle } from "../../elements/ExpandToggle/ExpandToggle";
@@ -26,7 +28,13 @@ export interface MrtrConversationProps {
   isListExpanded: boolean;
   /** Compact per-round layout for the narrow monitoring column. */
   embedded?: boolean;
-  onReplay: (id: string) => void;
+  onReplay: (id: string, overrideParams?: ReplayParamsOverride) => void;
+  /**
+   * The connected server's tools. Forwarded to each entry only so an edited
+   * `tools/call` replay can tell whether an argument would be coerced by the
+   * schema on the way out (#2151).
+   */
+  tools?: Tool[];
   onTogglePin: (id: string) => void;
 }
 
@@ -122,6 +130,7 @@ function formatRoundLabel(index: number): string {
 }
 
 export function MrtrConversation({
+  tools,
   requestState,
   rounds,
   pinnedIds,
@@ -182,8 +191,11 @@ export function MrtrConversation({
                   isPinned={pinnedIds.has(round.id)}
                   isListExpanded={isListExpanded}
                   embedded={embedded}
-                  onReplay={() => onReplay(round.id)}
+                  onReplay={(overrideParams) =>
+                    onReplay(round.id, overrideParams)
+                  }
                   onTogglePin={() => onTogglePin(round.id)}
+                  tools={tools}
                 />
               </Stack>
             ))}

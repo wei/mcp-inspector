@@ -3,6 +3,7 @@ import { describe, it, expect, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import type { Tool } from "@modelcontextprotocol/client";
 import { renderWithMantine, screen } from "../../../test/renderWithMantine";
+import { setAceTextByLabel } from "../../../test/aceEditor";
 import { noopPagination } from "../../../test/fixtures/pagination";
 import {
   ToolsScreen,
@@ -155,6 +156,43 @@ describe("ToolsScreen", () => {
       { zip: "94103" },
       false,
     );
+  });
+
+  // #2171's acceptance asks for a test that pins the WIRE rather than the form
+  // state. Under the refusal answer the wire claim is that nothing is sent, and
+  // `onCallTool` is where a dispatch would begin — so a screen that flagged the
+  // draft but still fired the callback would satisfy every other test here.
+  //
+  // The plain and "Run as task" paths need no separate case: the split between
+  // `callTool` and `callToolStream` happens in `App.tsx`, downstream of this
+  // callback, so a gate that stops the callback stops both.
+  it("dispatches nothing for a draft the schema would retype", async () => {
+    const user = userEvent.setup();
+    const onCallTool = vi.fn();
+    const numeric: Tool[] = [
+      {
+        name: "add",
+        inputSchema: {
+          type: "object",
+          properties: { count: { type: "number" } },
+        },
+      },
+    ];
+    renderWithMantine(
+      <ControlledToolsScreen tools={numeric} onCallTool={onCallTool} />,
+    );
+    await user.click(screen.getByText("add"));
+    await user.click(screen.getByLabelText("Edit as JSON"));
+    await setAceTextByLabel(/Arguments JSON/, '{"count":"01"}');
+    await user.click(screen.getByRole("button", { name: /Execute/ }));
+
+    expect(onCallTool).not.toHaveBeenCalled();
+
+    // And it is the draft that blocks it, not the screen: rewritten with the
+    // declared type, the very same click dispatches.
+    await setAceTextByLabel(/Arguments JSON/, '{"count":1}');
+    await user.click(screen.getByRole("button", { name: /Execute/ }));
+    expect(onCallTool).toHaveBeenCalledWith("add", { count: 1 }, false);
   });
 
   it("filters the sidebar list as the search text changes", async () => {
@@ -443,5 +481,43 @@ describe("ToolsScreen", () => {
     );
     expect(screen.getByText("Excluded (SEP-2243)")).toBeInTheDocument();
     expect(screen.getByText("invalid_header_tool")).toBeInTheDocument();
+  });
+});
+
+// The `data-*` readiness contract the headless tab smoke drives (#2148). It is
+// a documented public contract (clients/web/README.md), and a smoke asserting
+// it fails as an opaque 45s timeout rather than a mismatch — so the attribute
+// names are pinned here, where a rename fails loudly instead.
+describe("automation contract (#2148)", () => {
+  it("reports the tool count and an idle call status", () => {
+    renderWithMantine(<ToolsScreen {...baseProps} />);
+    const root = screen.getByTestId("tools-screen");
+    expect(root).toHaveAttribute("data-tool-count", String(tools.length));
+    // Absent call state reads `idle`, not empty: the smoke waits on a value.
+    expect(root).toHaveAttribute("data-call-status", "idle");
+  });
+
+  it("reports an empty list distinctly from a missing one", () => {
+    renderWithMantine(<ToolsScreen {...baseProps} tools={[]} />);
+    expect(screen.getByTestId("tools-screen")).toHaveAttribute(
+      "data-tool-count",
+      "0",
+    );
+  });
+
+  it("tracks the call status through to a result", () => {
+    renderWithMantine(
+      <ToolsScreen
+        {...baseProps}
+        callState={{
+          status: "ok",
+          result: { content: [{ type: "text", text: "done" }] },
+        }}
+      />,
+    );
+    expect(screen.getByTestId("tools-screen")).toHaveAttribute(
+      "data-call-status",
+      "ok",
+    );
   });
 });

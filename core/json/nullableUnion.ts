@@ -368,6 +368,11 @@ function collapsed<T extends NullableUnionSchema>(
  * an optimistic guess, and a schema this module cannot read renders through the
  * JSON editor with its constraints intact.
  */
+/** Whether an absent or null-naming `type` leaves null on the table. */
+function typeAdmitsNull(type: string | string[] | undefined): boolean {
+  return type === undefined || typeNamesNull(type);
+}
+
 export function admitsNull(schema: NullableUnionSchema): boolean {
   if (nullExcludedBySiblings(schema)) {
     return false;
@@ -381,6 +386,36 @@ export function admitsNull(schema: NullableUnionSchema): boolean {
   if (hasOpaqueApplicator(schema)) {
     return false;
   }
+  // `const: null` admits null and nothing else — the case a required field
+  // pinned to null needs, or it is seeded with the only value it accepts and
+  // then reported missing, leaving submit permanently disabled on a field the
+  // user cannot change (#2123).
+  //
+  // Claimed only where the siblings agree, since `const` is conjunctive with
+  // them rather than an override: `{ type: "string", const: null }` and
+  // `{ const: null, anyOf: [...] }` reject every value, and saying otherwise
+  // would let the gate accept a `null` the schema forbids. The opaque
+  // applicators (`not`, `allOf`, `oneOf`) are already refused above.
+  if (schema.const === null) {
+    if (schema.nullable !== true && !typeAdmitsNull(schema.type)) return false;
+    // A sibling `anyOf` is conjunctive with the `const`, so it decides too —
+    // but it decides in *both* directions: `{ const: null, anyOf: [{ type:
+    // "null" }] }` admits null just as plainly as an all-string union rejects
+    // it. Evaluating the branches is what keeps the first case usable, since
+    // the field is rendered read-only and seeded with the only value it takes.
+    return schema.anyOf === undefined || anyOfAdmitsNull(schema);
+  }
+
+  // An `enum` offering `null` admits it, the same way a `const: null` does —
+  // and under the same sibling conditions, since the two are equally
+  // conjunctive with whatever else the schema states.
+  if (Array.isArray(schema.enum) && schema.enum.includes(null)) {
+    return (
+      (schema.nullable === true || typeAdmitsNull(schema.type)) &&
+      (schema.anyOf === undefined || anyOfAdmitsNull(schema))
+    );
+  }
+
   if (schema.nullable === true) {
     return true;
   }
@@ -399,25 +434,68 @@ export function admitsNull(schema: NullableUnionSchema): boolean {
     }
     return typeNamesNull(schema.type);
   }
-  return (
-    schema.anyOf?.some((entry) => {
-      const branch = toBranch(entry);
-      if (branch === null || !typeNamesNull(branch.type)) {
-        return false;
-      }
-      // A branch that names null can still admit nothing: `{ type: "null",
-      // const: "x" }` is unsatisfiable, and its own applicators are as opaque
-      // here as the wrapper's.
-      const branchSchema = branch as NullableUnionSchema;
-      // A branch that names null can still admit nothing: `{ type: "null",
-      // const: "x" }` is unsatisfiable, and a nested union or applicator inside
-      // it is as opaque here as one on the wrapper.
-      return (
-        !nullExcludedBySiblings(branchSchema) &&
-        !hasUnevaluatedComposition(branchSchema)
-      );
-    }) ?? false
+  return anyOfAdmitsNull(schema);
+}
+
+/**
+ * Keywords that annotate rather than constrain — a schema carrying only these
+ * (or nothing at all) is the equivalent of `true`.
+ */
+const ANNOTATION_ONLY_KEYWORDS = new Set([
+  "title",
+  "description",
+  "examples",
+  "default",
+  "deprecated",
+  "readOnly",
+  "writeOnly",
+  "$comment",
+  // Core keywords that identify or declare rather than assert. `$ref` is
+  // deliberately absent: it applies whatever it points at, which is exactly an
+  // assertion this module cannot see.
+  "$defs",
+  "$id",
+  "$schema",
+  "$anchor",
+  "$dynamicAnchor",
+  "$vocabulary",
+]);
+
+/** Whether a schema states no assertion at all. */
+function constrainsNothing(schema: NullableUnionSchema): boolean {
+  return Object.keys(schema).every((keyword) =>
+    ANNOTATION_ONLY_KEYWORDS.has(keyword),
   );
+}
+
+/** Whether some `anyOf` branch is one that admits `null`. */
+function anyOfAdmitsNull(schema: NullableUnionSchema): boolean {
+  const branches = schema.anyOf;
+  if (!Array.isArray(branches)) return false;
+  return branches.some((entry) => {
+    // JSON Schema's boolean form: `true` is the unconstrained schema and admits
+    // every value, `null` among them, while `false` admits none.
+    if (typeof entry === "boolean") return entry;
+    const branch = toBranch(entry);
+    if (branch === null) return false;
+    const branchSchema = branch as NullableUnionSchema;
+    // A nested union or applicator inside a branch is as opaque here as one on
+    // the wrapper, and refusing it also bounds this recursion: what remains is
+    // a composition-free schema, which `admitsNull` answers without reaching
+    // back into this function.
+    if (hasUnevaluatedComposition(branchSchema)) return false;
+    // A branch that constrains nothing admits every value, `null` among them.
+    // `admitsNull` cannot say so on its own — an unconstrained schema tells it
+    // nothing either way, and it declines rather than guesses — but here the
+    // question is only whether this alternative leaves null on the table.
+    if (constrainsNothing(branchSchema)) return true;
+    // Asked through `admitsNull` rather than by testing `type` alone, so a
+    // branch spelling its nullability another way — `{ const: null }`,
+    // `{ nullable: true }` — is recognized the same way the wrapper's own
+    // forms are, and an unsatisfiable `{ type: "null", const: "x" }` is still
+    // rejected by the sibling check inside it.
+    return admitsNull(branchSchema);
+  });
 }
 
 /**

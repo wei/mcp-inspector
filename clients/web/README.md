@@ -2,7 +2,7 @@
 
 The browser incarnation of the Inspector: a **Vite + React + [Mantine](https://mantine.dev)** single-page app backed by a small **Node (Hono)** server. The SPA is presentational — it renders data and fires callbacks; all MCP state comes from the shared `@inspector/core` hooks. The backend proxies MCP connections, serves the built SPA, and exposes `/api/*`.
 
-This README covers what's specific to the web client. For the repo-wide picture (the `@inspector/core` shared package, the "dumb components" philosophy, the top-level `validate`/`coverage`/`ci` scripts, and publishing), see the [root README](../../README.md).
+This README covers what's specific to the web client. For the repo-wide picture (the `@inspector/core` shared package, the "dumb components" philosophy, the top-level `validate`/`coverage`/`local:gate` scripts, and publishing), see the [root README](../../README.md).
 
 ## Two halves: `src/` (browser) and `server/` (Node)
 
@@ -49,8 +49,8 @@ Components live under `src/components/` in four layers, smallest to largest:
 
 | Layer       | Count | What it is                                                                     |
 | ----------- | ----- | ------------------------------------------------------------------------------ |
-| `elements/` | ~31   | Leaf presentational pieces (badges, buttons, toggles) over Mantine primitives. |
-| `groups/`   | ~63   | Composite pieces (cards, panels, modals, control bars).                        |
+| `elements/` | ~48   | Leaf presentational pieces (badges, buttons, toggles) over Mantine primitives. |
+| `groups/`   | ~64   | Composite pieces (cards, panels, modals, control bars).                        |
 | `screens/`  | ~11   | Full tab screens (Tools, Resources, Servers, monitoring screens…).             |
 | `views/`    | 1     | `InspectorView` — the top-level layout that composes the screens.              |
 
@@ -81,15 +81,45 @@ exercises every rule.
 
 Two grab-bag directories, split by one rule: **`utils` = functions that compute; `lib` = things that instantiate, adapt, or touch the environment.** If it does I/O or wraps a subsystem, it's `lib`; if it's a pure transform, it's `utils`.
 
-- **`src/utils/`** — pure, side-effect-free functions (no DOM/`window`/`sessionStorage` I/O, no subsystem ownership), trivially unit-testable with no mocks. Examples: `jsonUtils`, `schemaUtils`, `toolUtils`, `maskSecrets`, `inspectorTabs`, `deepLink`, `mcpNetworkHeaders`. Carve-outs that stay `utils`:
+- **`src/utils/`** — pure, side-effect-free functions (no DOM/`window`/`sessionStorage` I/O, no subsystem ownership), trivially unit-testable with no mocks. Examples: `jsonUtils`, `schemaUtils`, `toolUtils`, `maskSecrets`, `inspectorTabs`, `deepLink`, `mcpNetworkHeaders`, `errorFormat`, `stepUp`, and the toast ids/formatters under `utils/toasts/`. Carve-outs that stay `utils`:
   - _Diagnostic logging_ (`console.warn`/`console.error`) doesn't count as a side effect.
   - _Importing from `@inspector/core`_ — neither a type-only import nor re-exporting core's pure functions/constants is a subsystem dependency (what makes a module `lib` is wrapping core's stateful runtime).
   - _Pure domain types + their constructors_ (`customHeaders`) — there is no `types/` sub-bucket inside `lib`/`utils`.
-- **`src/lib/`** — infrastructure / stateful adapters: modules that compose subsystems, wrap the `@inspector/core` **runtime**, or produce side effects. Examples: `environmentFactory`, `remoteOAuthStorage`, `oauthResume` (sessionStorage), `browserTabVisibility` (DOM listeners), `clearServerOAuthState`, `downloadFile`.
+- **`src/lib/`** — infrastructure / stateful adapters: modules that compose subsystems, wrap the `@inspector/core` **runtime**, or produce side effects. Examples: `environmentFactory`, `remoteOAuthStorage`, `oauthResume` (sessionStorage), `browserTabVisibility` (DOM listeners), `clearServerOAuthState`, `downloadFile`, `authToken` (`window.location` + `sessionStorage`), `protocolReplay` (re-issues through the live client).
 
 The top-level `src/types/` is a separate sibling — ambient `.d.ts` module stubs, not the place for new domain types (the one that lingers there, dead `navigation.ts`, is tracked for removal in [#1785](https://github.com/modelcontextprotocol/inspector/issues/1785)).
 
 Nothing _enforces_ the boundary — no path alias keys off it, and the coverage `include` in `vite.config.ts` lists both directories, so a move between them is coverage-neutral. It's a human-legible import-time signal. See [`AGENTS.md`](../../AGENTS.md) for the full rule (including the whitelist caveat — a module placed outside `components`/`lib`/`utils`/`server` falls out of the ≥90 gate).
+
+## Core tab automation contract
+
+The Tools, Resources, and Prompts screens each expose a `data-testid` plus a
+small set of `data-*` attributes, so a headless driver can `waitForSelector` on
+a deterministic signal rather than on visible copy. `scripts/smoke-web-tabs.mjs`
+drives all three against `test-servers/configs/web-tabs-http.json` ([#2148](https://github.com/modelcontextprotocol/inspector/issues/2148)).
+Treat them as a public contract, for the same reason as the Apps ones below:
+
+| Attribute                            | Where              | Meaning                                                                                                                                                     |
+| ------------------------------------ | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `data-testid="tools-screen"`         | Tools screen root  | The element carrying the two attributes below.                                                                                                              |
+| `data-tool-count`                    | on `tools-screen`  | How many tools the list holds. `0` is a *populated screen with an empty list* — distinct from the screen being absent, which is what a driver waits out.     |
+| `data-call-status`                   | on `tools-screen`  | `idle` → `pending` → `ok` / `error` for the current `tools/call`. Always a value; an absent call state reads `idle`, never empty.                            |
+| `data-testid="structured-output"`    | result panel       | The `structuredContent` section of a tool result ([#1908](https://github.com/modelcontextprotocol/inspector/issues/1908)). Absent when a result carries none. |
+| `data-testid="resources-screen"`     | Resources root     | The element carrying the three attributes below.                                                                                                            |
+| `data-resource-count`                | on `resources-screen` | Entries from `resources/list`.                                                                                                                           |
+| `data-template-count`                | on `resources-screen` | Entries from `resources/templates/list` — a **separate** call that can fail on its own, so it is reported separately.                                     |
+| `data-read-status`                   | on `resources-screen` | `idle` → `pending` → `ok` / `error` for the current `resources/read`.                                                                                     |
+| `data-testid="resource-preview"`     | preview panel      | The read resource's **rendered** contents. Assert this *and* `data-read-status`: the status flips as soon as the RPC resolves, so it alone stays true with the panel removed. |
+| `data-testid="prompts-screen"`       | Prompts root       | The element carrying the two attributes below.                                                                                                              |
+| `data-prompt-count`                  | on `prompts-screen`| Entries from `prompts/list`.                                                                                                                                |
+| `data-get-status`                    | on `prompts-screen`| `idle` → `pending` → `ok` / `error` for the current `prompts/get`.                                                                                          |
+| `data-testid="prompt-messages"`      | messages panel     | The fetched prompt's **rendered** messages — the `prompts/get` counterpart of `resource-preview`, and asserted alongside `data-get-status` for the same reason. |
+
+Why attributes rather than text: a smoke that waited on a label fails the next
+time the label is reworded, which is noise rather than signal — and it fails as
+an opaque timeout, because there is nothing to compare against. The screen tests
+pin each attribute name for the same reason: a rename should fail loudly in a
+unit test, not silently in a five-minute gate.
 
 ## MCP Apps screen automation contract
 
@@ -253,17 +283,57 @@ Each customized Mantine component has a `Theme<Name>.ts` file (`Button.ts`, `Tex
 
 **`cssVariables.ts` is the third piece, beside the component files and `App.css`.** It holds overrides for the CSS variables `MantineProvider` injects at runtime, which `App.css` cannot reach: the provider appends its generated `<style>` after the stylesheet imports, so a `:root` rule there loses on source order at equal specificity. `cssVariablesResolver` is the supported seam. It is passed at **all three** `MantineProvider` sites — the app (`main.tsx`), the Storybook preview, and `renderWithMantine` — so the running app, the stories, and the tests cannot disagree about a token's value. It currently corrects `--mantine-color-error`, whose Mantine defaults fail WCAG AA in both schemes at the size input error text renders.
 
-## Code editing (`JsonObjectInput`)
+## JSON editing and display (`JsonEditor`)
 
-Payloads whose _values_ may be arbitrary JSON — `_meta` is the case that forced it ([#1910](https://github.com/modelcontextprotocol/inspector/issues/1910)) — are edited with **Ace** (`react-ace` + `ace-builds`, declared in this client because they render React) rather than the key/value rows used for headers and env, which cannot express an object value. Ace brings code folding, brace auto-closing, and per-line error annotation from its JSON worker.
+Every surface in this client where JSON is **typed**, plus `ContentViewer`'s read-only JSON branch, renders one element: **`elements/JsonEditor`**, an **Ace** editor (`react-ace` + `ace-builds`, declared in this client because they render React). Ace brings code folding, line numbers, brace auto-closing, and per-line error annotation from its JSON worker — the last three are why hand-writing a nested payload in a bare textarea was the actual pain ([#2151](https://github.com/modelcontextprotocol/inspector/issues/2151)).
 
-Three integration details are load-bearing:
+`JsonEditor` is deliberately **text in, text out**: it never parses. The editing contracts above it disagree about what an unparseable draft means, and neither can be expressed by a component that decides for them:
 
-- **The worker is imported as `?url`** so Vite emits it as an asset. Without it Ace fetches `worker-json.js` from a path that does not exist in a bundled app and silently loses its annotations.
-- **The gutter's colors are overridden in `App.css`**, keyed off Ace's cssClass (`ace-github` / `ace-github-dark` — _not_ the `theme-github_dark` module name). Ace's own themes are 1.89:1 and 4.13:1 there, both under AA, and folding needs the gutter so it cannot simply be hidden.
+| Consumer | While the draft is invalid |
+| --- | --- |
+| `elements/JsonObjectInput` (Server Settings → Request Metadata) | Parent is **not** told; the last valid object stands. There is no Save button to gate — `onChange` writes straight through — so emitting `{}` would discard configured metadata on a stray keystroke ([#1910](https://github.com/modelcontextprotocol/inspector/issues/1910)). |
+| `SchemaJsonField` (the object/array/union fallback in `groups/SchemaForm`) | Parent is told `undefined`, **and** invalidity is reported up through `onValidityChange` so Execute / Open App / Submit are disabled ([#2020](https://github.com/modelcontextprotocol/inspector/issues/2020)). |
+| `SchemaForm`'s **Edit as JSON** switch | Same as above, for the whole arguments object — the v1 escape hatch, restored. Seeded from what the form holds, so a root-union switch's pruning ([#2123](https://github.com/modelcontextprotocol/inspector/issues/2123)) is not undone by a round trip. |
+| `groups/EditReplayModal` (Protocol → Edit and replay) | Send is disabled. Unlike the metadata editor this modal *has* a commit gesture to gate. |
+| `groups/ImportServerJsonPanel`, `groups/ExperimentalFeaturesPanel` | The panel owns the text and validates it itself. |
+| `elements/ContentViewer`'s JSON branch | Read-only — see below. |
+
+**A raw-JSON draft is refused when the client would retype it.** `callTool`
+converts every *string-valued* argument to the type the tool's `inputSchema`
+declares, because the widget form hands everything over as text — so `"2"`
+against a numeric field has to become `2`. A JSON draft already carries its own
+types, so a value that conversion would touch is one whose visible text is not
+what the wire would carry, and showing one payload while sending another is the
+one thing an inspector must not do. Both JSON-authoring surfaces therefore
+refuse such a draft and name the value to rewrite
+([#2171](https://github.com/modelcontextprotocol/inspector/issues/2171)):
+**Edit as JSON** in the Tools and Apps tabs (which had been sending it, coerced
+and silently), and **Edit and replay**, which already did.
+
+One helper decides it for both — `coercedArgumentNames` in
+[`core/json/jsonUtils.ts`](../../core/json/jsonUtils.ts), which runs the real
+conversion and compares rather than restating its rules, so a surface cannot
+drift from what would actually be sent. `coercedArgumentsError` is the sentence
+they share, so the same refusal cannot be worded two ways.
+
+The check is **opt-in** (`SchemaFormProps.enforceToolArgumentTypes`), not
+inferred from the schema: an elicitation renders through the same `SchemaForm`
+and its values are never converted, so enforcing there would refuse a draft for
+a reason that is not true of it. Only the Tools and Apps panels pass it.
+
+**Read-only mode is what `ContentViewer` renders JSON as**, and through it every payload that reaches the app that way: Protocol and Network entries, tool results, structured output, resource previews, server cards. Highlighting is *not* what that buys — JSON already highlighted, via the lazily-imported Prism grammar `CodeHighlight` loads. What Ace adds is **folding**, line numbers and a gutter on a large payload. The Prism `json` grammar was dropped in the same change rather than kept beside it: two highlighters for one language drift, and nothing else asks for `json`. Two cases stay on the plain renderer — a `wrap={false}` caller (the server card's fixed-height, single-line box) and untyped text that only *looks* like JSON but does not parse, which in an editor would frame a server's prose as a malformed document.
+
+Two read-only JSON displays deliberately do **not** go through `ContentViewer`, and so are not on this editor — worth knowing before assuming it is the route for all of them. `ExperimentalFeaturesPanel` renders its JSON-RPC **response** in a read-only `Textarea` (its *request* box is on the editor), and `ConnectionInfoContent/OAuthTokenField` renders a decoded JWT in a `Code` block beside the raw token, where the decoded/raw toggle and the copy affordance belong to the field rather than to a viewer. Both are candidates for the same treatment; neither is in [#2151](https://github.com/modelcontextprotocol/inspector/issues/2151)'s scope.
+
+Five integration details are load-bearing:
+
+- **The worker is imported as `?url`** so Vite emits it as an asset. Without it Ace fetches `worker-json.js` from a path that does not exist in a bundled app and silently loses its annotations. It is registered at **module scope** — the registration is global to Ace and idempotent, so it must not move into a per-mount effect.
+- **Ace fires two change events for a replace** (a remove, then an insert), so a select-all-and-retype passes through a momentarily *empty* document. `JsonEditor` coalesces the pair in a microtask and reports only the settled text; acting on the first event reports the empty document as the user's answer.
+- **The gutter's colors are overridden in `App.css`**, keyed off Ace's cssClass (`ace-github` / `ace-github-dark` — _not_ the `theme-github_dark` module name). Ace's own themes are 1.89:1 and 4.13:1 there, both under AA, and folding needs the gutter so it cannot simply be hidden. The read-only caret is hidden the same way (`.json-editor-readonly`), since `readOnly` has no option that removes it.
 - **The label and error are wired to Ace's hidden textarea by hand.** `Input.Wrapper` associates a _Mantine_ input through context; Ace renders its own DOM, so the id, `aria-invalid` and `aria-describedby` are set on the textarea in an effect.
+- **`ariaLabel` is required.** Ace names its hidden textarea "Cursor at row N", which is a position readout rather than a name — and it only recomputes that label when the cursor moves, so the option has to be applied *and* recomputed in `onLoad` to reach the DOM before the user clicks in.
 
-**Testing it is split by necessity.** Ace's input path does not work under happy-dom — `userEvent.type` reaches the textarea and produces no edit — so a keyboard test in the unit project passes while asserting nothing. Unit tests drive the editor instance through `src/test/aceEditor.ts`; real keyboard behaviour lives in the Storybook play functions, which run in Chromium.
+**Testing it is split by necessity.** Ace's input path does not work under happy-dom — `userEvent.type` reaches the textarea and produces no edit — so a keyboard test in the unit project passes while asserting nothing. Unit tests drive the editor instance through `src/test/aceEditor.ts` (`setAceText` / `getAceText`, plus the `*ByLabel` variants for a screen holding more than one editor); real keyboard behaviour lives in the Storybook play functions, which run in Chromium. The same split applies to *reading* a payload back: Ace virtualizes its lines, so a read-only editor's text is not fully in the DOM and assertions go through the editor rather than `getByText`.
 
 ## Testing
 
@@ -289,7 +359,7 @@ npm run build:storybook  # static build
 npm run test:storybook   # run every story's play function in headless Chromium
 ```
 
-Storybook is first-class here because the components are presentational — each renders against fixture props. **Play functions double as interaction tests** and run headless in real Chromium via `@vitest/browser-playwright` + `@storybook/addon-vitest` (the `storybook` Vitest project). They're part of `npm run ci` (which installs the Chromium binary first) but kept out of the fast `validate` loop since they need the browser.
+Storybook is first-class here because the components are presentational — each renders against fixture props. **Play functions double as interaction tests** and run headless in real Chromium via `@vitest/browser-playwright` + `@storybook/addon-vitest` (the `storybook` Vitest project). GitHub CI runs them directly (`npm run test:storybook`); the local pre-push gate runs them through `npm run local:storybook`, which installs the Chromium binary first. Either way they are kept out of the fast `validate` loop, since they need the browser.
 
 ## Auth token
 

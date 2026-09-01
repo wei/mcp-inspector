@@ -51,17 +51,31 @@ interface Harness {
  * Hands the hook's API back to the test. The hook holds refs, so it has to be
  * read from inside a rendered component; `setServers` re-renders it with a new
  * list the way `useServers` does after a read.
+ *
+ * The returned object *delegates* rather than being the API from the first
+ * render. `resolve` is keyed on the current `servers` (#2192) instead of on a
+ * ref, so its identity changes with the list — handing back a snapshot would
+ * give every test a `resolve` closed over the initial list, and `setServers`
+ * would appear to do nothing.
  */
 function harness(initial: ServerEntry[]): Harness {
-  let api: LastPersistedSettings | undefined;
+  let latest: LastPersistedSettings | undefined;
   function Probe({ servers }: { servers: ServerEntry[] }) {
-    api = useLastPersistedSettings(servers);
+    latest = useLastPersistedSettings(servers);
     return null;
   }
   const { rerender } = renderWithMantine(<Probe servers={initial} />);
-  if (!api) throw new Error("hook did not render");
+  if (!latest) throw new Error("hook did not render");
+  const current = () => {
+    if (!latest) throw new Error("hook did not render");
+    return latest;
+  };
   return {
-    api,
+    api: {
+      begin: (serverId) => current().begin(serverId),
+      resolve: (serverId) => current().resolve(serverId),
+      lastWriteFailed: (serverId) => current().lastWriteFailed(serverId),
+    },
     setServers: (next) => rerender(<Probe servers={next} />),
   };
 }
@@ -221,5 +235,29 @@ describe("useLastPersistedSettings", () => {
     api.begin("A").landed(settings({ paginatedLists: true }));
     setServers([]);
     expect(api.resolve("A")).toBeUndefined();
+  });
+  it("answers from the list of the render it is called in", () => {
+    // `useSettingsDraft` seeds its draft during render (#2192), so `resolve`
+    // is called there. Reading the effect-mirrored `serversRef` would answer
+    // from the *previous* commit's list on exactly the render where a
+    // refreshed list arrives — which is the render that seeds the draft.
+    const before = entry("A", settings({ paginatedLists: false }));
+    const after = entry("A", settings({ paginatedLists: true }));
+    const answers: Array<InspectorServerSettings | undefined> = [];
+
+    function Probe({ servers }: { servers: ServerEntry[] }) {
+      const api = useLastPersistedSettings(servers);
+      answers.push(api.resolve("A"));
+      return null;
+    }
+
+    const { rerender } = renderWithMantine(<Probe servers={[before]} />);
+    expect(answers.at(-1)).toBe(before.settings);
+
+    answers.length = 0;
+    rerender(<Probe servers={[after]} />);
+
+    expect(answers.length).toBeGreaterThan(0);
+    for (const answer of answers) expect(answer).toBe(after.settings);
   });
 });

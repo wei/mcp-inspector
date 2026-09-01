@@ -89,6 +89,10 @@ export function AppDetailPanel({
           // SchemaFormProps.resetKey.
           resetKey={tool.name}
           onValidityChange={setHasInvalidDraft}
+          // These values become `tools/call` arguments, so a raw-JSON draft the
+          // client would retype is refused rather than sent as something other
+          // than what the editor shows (#2171).
+          enforceToolArgumentTypes
         />
 
         <OpenAppButton

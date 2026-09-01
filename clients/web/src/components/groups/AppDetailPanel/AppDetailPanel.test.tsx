@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import type { Tool } from "@modelcontextprotocol/client";
 import { renderWithMantine, screen } from "../../../test/renderWithMantine";
+import { setAceTextByLabel } from "../../../test/aceEditor";
 import { AppDetailPanel } from "./AppDetailPanel";
 
 const noFieldsTool: Tool = {
@@ -135,6 +136,29 @@ describe("AppDetailPanel", () => {
     expect(screen.getByRole("button", { name: /open app/i })).toBeDisabled();
   });
 
+  // #2171: an App's arguments are a `tools/call` like any other, so its form
+  // opts into the same enforcement the Tools tab uses.
+  it("refuses a raw-JSON argument the schema would retype", async () => {
+    const user = userEvent.setup();
+    const numericTool: Tool = {
+      name: "chart",
+      inputSchema: {
+        type: "object",
+        properties: { count: { type: "number" } },
+      },
+    };
+    renderWithMantine(
+      <AppDetailPanel {...baseProps} tool={numericTool} formValues={{}} />,
+    );
+    await user.click(screen.getByLabelText("Edit as JSON"));
+    await setAceTextByLabel(/Arguments JSON/, '{"count":"01"}');
+
+    expect(
+      screen.getByText(/`count` would be converted to the type/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /open app/i })).toBeDisabled();
+  });
+
   it("invokes onOpenApp when the button is clicked", async () => {
     const user = userEvent.setup();
     const onOpenApp = vi.fn();
@@ -179,7 +203,6 @@ describe("AppDetailPanel", () => {
   // `undefined` — so an optional argument was dropped from the call with no
   // gate. The form reports draft validity for this reason.
   it("disables Open App while a field holds text it cannot send", async () => {
-    const user = userEvent.setup();
     const jsonFieldTool: Tool = {
       name: "chart_app",
       title: "Chart App",
@@ -192,11 +215,10 @@ describe("AppDetailPanel", () => {
     const openApp = screen.getByRole("button", { name: /open app/i });
     expect(openApp).not.toBeDisabled();
 
-    const jsonInput = screen.getByLabelText(/Series/);
-    await user.type(jsonInput, "x");
+    await setAceTextByLabel(/Series/, "x");
     expect(openApp).toBeDisabled();
 
-    await user.clear(jsonInput);
+    await setAceTextByLabel(/Series/, "");
     expect(openApp).not.toBeDisabled();
   });
 });
