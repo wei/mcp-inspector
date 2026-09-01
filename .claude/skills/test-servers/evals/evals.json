@@ -8,7 +8,7 @@
     "expect": "test-servers"
   },
   {
-    "prompt": "I need a real server to exercise this change against by hand. What do I run?",
+    "prompt": "I need to run a real MCP server locally to exercise this change by hand. Which one do I run, and how do I start it?",
     "expect": "test-servers"
   },
   {

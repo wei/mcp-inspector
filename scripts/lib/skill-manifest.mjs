@@ -177,11 +177,19 @@ export function parseSkill(dirName, text) {
     );
     if (start === -1) continue;
     const head = lines[start].slice(field.length + 1).trim();
+    // A scalar may carry YAML properties — a tag, an anchor, or both, in either
+    // order — before its value. Testing the first character alone read
+    // `&copy "Counts # safely"` as unquoted and then rejected the `#` that the
+    // quotes make harmless, so strip the properties before deciding (Copilot).
+    const value = head.replace(
+      /^(?:(?:!(?:!?[\w:.-]*|<[^>]*>)|&[^\s]+)\s+)+/,
+      "",
+    );
     // Only an unquoted scalar can lose text to a comment; a quoted one is safe,
     // and a block scalar (`|`/`>`) is read literally rather than comment-stripped.
-    if (/^["'|>]/.test(head)) continue;
+    if (/^["'|>]/.test(value)) continue;
     // Continuation lines are indented and are not the next `key:` of the map.
-    const parts = [head];
+    const parts = [value];
     for (let i = start + 1; i < lines.length; i++) {
       const l = lines[i];
       if (!/^[ \t]/.test(l) || l.trim() === "") break;
@@ -307,18 +315,31 @@ export function validateEvalCases(skillName, cases) {
       );
     }
   });
-  const positives = cases.filter((c) => c && c.expect === skillName).length;
+  const positiveCases = cases.filter((c) => c && c.expect === skillName);
+  const positives = positiveCases.length;
+  // The floor exists for breadth, so it has to count *phrasings*, not entries:
+  // five copies of one prompt clear an entry count while exercising exactly the
+  // one trigger the floor is meant to look past (Copilot). Compare on collapsed,
+  // case-folded text so trivial edits do not read as a new situation.
+  const distinctPositives = new Set(
+    positiveCases.map((c) =>
+      String(c.prompt ?? "")
+        .toLowerCase()
+        .replace(/\s+/g, " ")
+        .trim(),
+    ),
+  ).size;
   const negatives = cases.filter((c) => c && c.expect === null).length;
   if (positives === 0) {
     errors.push(`no positive case expects \`${skillName}\``);
-  } else if (positives < MIN_POSITIVE_CASES) {
+  } else if (distinctPositives < MIN_POSITIVE_CASES) {
     // A non-zero floor is not enough: one prompt measures one phrasing. Since
     // each prompt is scored on its own `passes / RUNS`, extra prompts do not
     // make any single rate steadier — they cover more of the ways someone might
     // reach the skill, so a description that only fires on one narrow shape is
     // visible instead of passing on its single lucky case (Copilot).
     errors.push(
-      `only ${positives} positive case(s); a model-invoked skill needs at least ${MIN_POSITIVE_CASES} to cover the range of situations it should fire on`,
+      `only ${distinctPositives} distinct positive prompt(s)${positives === distinctPositives ? "" : ` across ${positives} case(s)`}; a model-invoked skill needs at least ${MIN_POSITIVE_CASES} to cover the range of situations it should fire on`,
     );
   }
   if (negatives === 0) {

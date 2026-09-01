@@ -426,7 +426,7 @@ test("a model-invoked skill needs at least MIN_POSITIVE_CASES positives", () => 
 
   assert.match(
     validateEvalCases("alpha", withPositives(1)).join(" "),
-    /only 1 positive case\(s\)/,
+    /only 1 distinct positive prompt\(s\)/,
   );
   assert.match(
     validateEvalCases("alpha", withPositives(MIN_POSITIVE_CASES - 1)).join(" "),
@@ -531,5 +531,73 @@ test("the truncation guard ignores anchors and tags, which are not `#`", () => {
   assert.match(
     parseSkill("alpha", mk("Covers board #28 (v2).")).errors.join(" "),
     /`description` is truncated/,
+  );
+});
+
+test("a quoted scalar stays safe behind a tag or an anchor", () => {
+  // Properties may precede the value, in either order. Testing the first
+  // character alone read these as unquoted and then rejected the `#` that the
+  // quotes make harmless.
+  const mk = (value) =>
+    [
+      "---",
+      "name: alpha",
+      `description: ${value}`,
+      "disable-model-invocation: false",
+      "---",
+      "body",
+    ].join("\n");
+
+  for (const value of [
+    '&copy "Counts # safely"',
+    '!!str "Counts # safely"',
+    '!!str &a "Counts # safely"',
+  ]) {
+    const parsed = parseSkill("alpha", mk(value));
+    assert.deepEqual(parsed.errors, [], `rejected: ${value}`);
+    assert.equal(parsed.description, "Counts # safely");
+  }
+});
+
+test("the positive floor counts distinct prompts, not entries", () => {
+  // The floor exists for breadth, so repeating one prompt five times clears an
+  // entry count while exercising exactly the single trigger it looks past.
+  const duplicated = [
+    ...Array.from({ length: MIN_POSITIVE_CASES }, () => ({
+      prompt: "the same prompt",
+      expect: "alpha",
+    })),
+    { prompt: "n", expect: null },
+  ];
+  const errors = validateEvalCases("alpha", duplicated).join(" ");
+  assert.match(
+    errors,
+    /only 1 distinct positive prompt\(s\) across 5 case\(s\)/,
+  );
+
+  // Whitespace and casing are not a new situation either.
+  const nearDuplicates = [
+    { prompt: "How do I do the thing?", expect: "alpha" },
+    { prompt: "how do i   do the thing?", expect: "alpha" },
+    { prompt: "How do I do the thing?  ", expect: "alpha" },
+    { prompt: "b", expect: "alpha" },
+    { prompt: "c", expect: "alpha" },
+    { prompt: "n", expect: null },
+  ];
+  assert.match(
+    validateEvalCases("alpha", nearDuplicates).join(" "),
+    /only 3 distinct positive prompt\(s\)/,
+  );
+
+  // Five genuinely different prompts pass.
+  assert.deepEqual(
+    validateEvalCases("alpha", [
+      ...Array.from({ length: MIN_POSITIVE_CASES }, (_, i) => ({
+        prompt: `p${i}`,
+        expect: "alpha",
+      })),
+      { prompt: "n", expect: null },
+    ]),
+    [],
   );
 });

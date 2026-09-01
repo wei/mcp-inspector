@@ -1,6 +1,6 @@
 [
   {
-    "prompt": "This repo has three clients over a shared core. How should I orient myself in it before changing anything?",
+    "prompt": "Something in the web client's Node backend needs changing but I do not know which piece handles what. How do I work that out?",
     "expect": "project-structure"
   },
   {
