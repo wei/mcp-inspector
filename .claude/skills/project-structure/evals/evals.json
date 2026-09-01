@@ -1,6 +1,6 @@
 [
   {
-    "prompt": "What lives in clients/web versus @inspector/core?",
+    "prompt": "This repo has three clients over a shared core. How should I orient myself in it before changing anything?",
     "expect": "project-structure"
   },
   {

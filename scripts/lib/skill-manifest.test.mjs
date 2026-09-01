@@ -412,9 +412,10 @@ test("a `#` inside a quoted description is not treated as truncation", () => {
 
 test("a model-invoked skill needs at least MIN_POSITIVE_CASES positives", () => {
   // `positives === 0` alone let a skill regress to a single prompt and still
-  // pass the gate. At RUNS=5 one case is 20 points of that skill's reading, so
-  // a one- or two-case skill reports a rate a single flake can move across the
-  // threshold — well-formed to the checker, meaningless as a measurement.
+  // pass the gate. The floor is about breadth, not variance: each prompt is
+  // scored on its own `passes / RUNS`, so extra prompts steady nothing — they
+  // cover more of the ways someone might reach the skill, so a description that
+  // fires on one narrow phrasing cannot pass on that single case alone.
   const withPositives = (n) => [
     ...Array.from({ length: n }, (_, i) => ({
       prompt: `p${i}`,
@@ -429,7 +430,7 @@ test("a model-invoked skill needs at least MIN_POSITIVE_CASES positives", () => 
   );
   assert.match(
     validateEvalCases("alpha", withPositives(MIN_POSITIVE_CASES - 1)).join(" "),
-    /needs at least 5/,
+    /needs at least 5 to cover the range/,
   );
   assert.deepEqual(
     validateEvalCases("alpha", withPositives(MIN_POSITIVE_CASES)),

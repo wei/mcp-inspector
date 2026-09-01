@@ -156,7 +156,7 @@ test("fails eval cases that are unreadable, all-positive, or all-negative", () =
         { prompt: "a", expect: "beta" },
         { prompt: "b", expect: null },
       ]),
-      /needs at least 5/,
+      /needs at least 5 to cover the range/,
     ],
     [JSON.stringify([{ prompt: "a", expect: null }]), /no positive case/],
     [JSON.stringify([{ expect: null }]), /prompt/],

@@ -243,9 +243,11 @@ break.
    (`disable-model-invocation: true`, as `release` is) has no eval file at all:
    nothing can measure a trigger that only a human types, so an eval there would
    be unrunnable rather than merely redundant. `verify:skills` enforces the
-   floor — fewer than five positives fails the gate, because at `RUNS=5` one
-   case is 20 points of that skill's reading and a two-case skill reports a rate
-   a single flake can move across the threshold.
+   floor — fewer than five positives fails the gate. The reason is **breadth,
+   not variance**: each prompt is scored on its own `passes / RUNS`, so extra
+   prompts do not steady any rate (`RUNS` is the knob for that). Five prompts
+   cover five ways someone might arrive at the skill, which is what catches a
+   description that fires on one narrow phrasing and nothing else.
 5. `npm run verify:skills` passes and the listing is under budget.
 6. `RUNS=5 npm run skills:eval` — the **whole** suite — is ≥80% on every case,
    including the skills you did not touch.

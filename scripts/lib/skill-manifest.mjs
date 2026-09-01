@@ -225,6 +225,18 @@ export function listingCost(skills) {
 }
 
 /**
+ * The number of positive cases a model-invoked skill's eval file must carry.
+ *
+ * This is a **breadth** floor, not a statistical one. The evaluator scores each
+ * prompt independently — `passes / RUNS` for that prompt alone — so adding
+ * prompts does not steady any other prompt's rate; `RUNS` is the only knob that
+ * does. What five prompts buy is coverage of five different ways someone might
+ * arrive at the skill, which is what exposes a description that fires on one
+ * narrow phrasing and nothing else (Copilot).
+ */
+export const MIN_POSITIVE_CASES = 5;
+
+/**
  * Validate an `evals/evals.json` payload for a model-invoked skill.
  *
  * A skill that fires on everything is a context regression, not a win, and it
@@ -235,12 +247,6 @@ export function listingCost(skills) {
  * @param {unknown} cases Parsed JSON.
  * @returns {string[]} errors
  */
-/**
- * The number of positive cases a model-invoked skill's eval file must carry.
- * Raised from an implicit 3 to 5 so a single flake cannot cross the threshold.
- */
-export const MIN_POSITIVE_CASES = 5;
-
 export function validateEvalCases(skillName, cases) {
   if (!Array.isArray(cases) || cases.length === 0) {
     return ["evals.json must be a non-empty array of cases"];
@@ -275,13 +281,13 @@ export function validateEvalCases(skillName, cases) {
   if (positives === 0) {
     errors.push(`no positive case expects \`${skillName}\``);
   } else if (positives < MIN_POSITIVE_CASES) {
-    // A non-zero floor is not enough. At RUNS=5 one case is worth 20 points of
-    // that skill's reading, so a skill measured by one or two prompts reports a
-    // rate that a single flake can move across the threshold — and the gate,
-    // seeing a positive, would call that well-formed. Five is the count every
-    // skill here was raised to for exactly that reason (Copilot).
+    // A non-zero floor is not enough: one prompt measures one phrasing. Since
+    // each prompt is scored on its own `passes / RUNS`, extra prompts do not
+    // make any single rate steadier — they cover more of the ways someone might
+    // reach the skill, so a description that only fires on one narrow shape is
+    // visible instead of passing on its single lucky case (Copilot).
     errors.push(
-      `only ${positives} positive case(s); a model-invoked skill needs at least ${MIN_POSITIVE_CASES} for its rate to mean anything`,
+      `only ${positives} positive case(s); a model-invoked skill needs at least ${MIN_POSITIVE_CASES} to cover the range of situations it should fire on`,
     );
   }
   if (negatives === 0) {
