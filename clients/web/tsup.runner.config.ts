@@ -50,6 +50,19 @@ export default defineConfig({
     // client's own code, so all three lists carry it (AGENTS.md). The CLI was
     // inlining it; the #2067 guard surfaced that.
     "@modelcontextprotocol/ext-apps",
+    // Consolidated to the ROOT manifest by #2195, along with every other
+    // runtime dependency `core/` imports. tsup externalizes only what the
+    // *nearest* package.json declares, so once a client stops declaring one it
+    // must be named here or esbuild inlines it — the #2067 failure class, now
+    // reached by a manifest edit rather than an omission.
+    "ajv",
+    "zod",
+    // Reached through `core/` but not through this client's own code today.
+    // AGENTS.md requires every root-declared package `core/` imports at runtime
+    // in ALL three lists regardless, because which client reaches one is a
+    // function of what `core/` imports rather than of what the client names —
+    // so the list must not depend on today's reachability (Copilot).
+    "react",
   ],
   esbuildOptions(options) {
     options.alias = {
