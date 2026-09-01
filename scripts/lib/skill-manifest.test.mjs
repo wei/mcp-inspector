@@ -602,6 +602,41 @@ test("the positive floor counts distinct prompts, not entries", () => {
   );
 });
 
+test("a quoted or block scalar may carry a trailing comment", () => {
+  // `yaml` attaches a legitimate trailing comment to these nodes too, so keying
+  // on `.comment` alone rejected valid frontmatter and told the author to quote
+  // a value that was already quoted. Only a PLAIN scalar can lose text to one.
+  for (const value of ['"Complete value" # note', "'Complete value' # note"]) {
+    const parsed = parseSkill(
+      "alpha",
+      [
+        "---",
+        "name: alpha",
+        `description: ${value}`,
+        "disable-model-invocation: false",
+        "---",
+        "body",
+      ].join("\n"),
+    );
+    assert.deepEqual(parsed.errors, [], value);
+    assert.equal(parsed.description, "Complete value");
+  }
+
+  const block = parseSkill(
+    "alpha",
+    [
+      "---",
+      "name: alpha",
+      "description: | # note",
+      "  Complete value",
+      "disable-model-invocation: false",
+      "---",
+      "body",
+    ].join("\n"),
+  );
+  assert.deepEqual(block.errors, []);
+});
+
 test("the truncation guard covers noncanonical key forms", () => {
   // `"description":` and `description :` both populate the mapping, so a guard
   // that located the field by matching a `^description:` LINE skipped them

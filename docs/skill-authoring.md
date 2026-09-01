@@ -16,9 +16,15 @@ the `Skill` tool fired with the expected name.
 
 Four properties of that harness drive everything below:
 
-- **`--max-turns 1`.** The skill must be the model's **first** tool call. If it
-  opens a file first — even on its way to a perfect answer — the sample is a
-  miss. This is the single most important fact about writing cases.
+- **`--max-turns 1`.** The skill must fire in the model's **first assistant
+  turn**. Ordering _within_ that turn does not matter — `collectSkillInvocations`
+  scans every `tool_use` block in the event, so a turn that calls `Read` and
+  `Skill` together still scores a hit. What loses the sample is needing a tool
+  *result* first: read a file, look at what came back, then decide — that
+  decision lands in turn two, which never runs. So a prompt that invites the
+  model to go look at something before answering is a miss even when its
+  eventual answer would have been perfect. This is the single most important
+  fact about writing cases.
 - **The session is fresh, but not empty.** `CLAUDE.md` → `AGENTS.md` is loaded
   in full on every turn, so anything the rules file already answers gets
   answered without a skill.

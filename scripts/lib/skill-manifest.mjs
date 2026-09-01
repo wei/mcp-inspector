@@ -176,6 +176,13 @@ export function parseSkill(dirName, text) {
     // `typeof node.value !== "string"` also covers the non-scalar cases: a map
     // or list node has no `.value`, and its own checks above already report it.
     if (!node || typeof node.value !== "string") continue;
+    // Only on a PLAIN scalar is a comment evidence of loss. A quoted or block
+    // scalar can carry a perfectly legitimate trailing one — `description:
+    // "Complete value" # note` keeps its whole value — and flagging that told
+    // the author to quote a value they had already quoted (Copilot). The regex
+    // this replaced tested the same thing by reading the first character; the
+    // node states it outright.
+    if (node.type !== "PLAIN") continue;
     const dropped = node.comment;
     if (typeof dropped !== "string") continue;
     errors.push(
