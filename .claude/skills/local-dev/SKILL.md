@@ -152,6 +152,93 @@ renderer with a React it was not installed against, which is the same split the
 pin exists to prevent, arrived at from the other side. `dedupe` still collapses
 each install to one copy, which is what actually has to hold.
 
+### Why the shared toolchain is root-only
+
+Every client's `validate` shells out to `prettier`, `eslint`, `tsc` and `vitest`,
+which makes them look like they belong beside the scripts that call them. They
+do not need to be: `npm run` prepends **every ancestor** `node_modules/.bin` to
+`PATH`, and Node and TypeScript walk parent `node_modules` /
+`node_modules/@types` the same way — so a client that declares no toolchain at
+all still resolves the root's copy. `clients/launcher` declares no
+`devDependencies` whatsoever and its `validate` is unchanged.
+
+What a per-client declaration *does* buy is a second copy free to drift, and it
+had (#2196): `globals` sat at `^17.7.0` at the root against `^17.4.0` in all four
+clients, and `typescript-eslint` at `^8.65.0` against `^8.56.1`. Nothing failed —
+which is the point. A lint or format tool that differs per client makes the gate's
+verdict a function of *where you ran it*, and the exact `prettier` pin (#1790)
+only means something when there is one of it.
+
+⚠️ The line is **used by every client**, not "used by one" and not "is it
+toolchain". `tsx`, `playwright`, `storybook`, `happy-dom`, `ink-testing-library`,
+`vite-node` and each client's own `@types/*` are toolchain too and stay where
+they are — hoisting them would make every client install the union of all four.
+So do the ones **more than one** client declares without all of them doing so:
+`tsup` sits in web, cli and tui, and `vite` in web and tui on top of the root
+*runtime* `dependency` that `--web --dev` needs. Neither is in scope here;
+whether to consolidate them is a separate call with a separate rationale (`vite`
+especially, since its root declaration is a `dependency`, not a
+`devDependency`).
+
+#### What the walk-up does *not* buy you
+
+⚠️ **Deleting a client's declaration does not always delete the copy** — and
+where a copy survives, it is the one that wins. Two mechanisms put one back,
+neither of which the manifest mentions:
+
+- **An unmet peer.** npm auto-installs a peer into the install that needs it, and
+  a client install has no visibility into the root's tree, so the root's copy
+  cannot satisfy it. Web's `eslint-plugin-react-refresh` / `eslint-plugin-storybook`
+  and the TUI's `eslint-plugin-react-hooks` each pull a client-local `eslint`;
+  web's Storybook/Vitest stack pulls a local `typescript` and `vitest`.
+- **A hoisted transitive.** `@types/express` brings `@types/node` into web and
+  cli's trees on its own.
+
+Those copies sit *nearer* than the root's, so `clients/web/node_modules/.bin`
+precedes the root bin directory on `PATH` and TypeScript resolves the nearest
+`node_modules/@types`. Verify with `npm exec -- which eslint` from the client
+rather than assuming — the assumption is what made the first cut of #2196 claim
+more than it delivered (Copilot).
+
+So the consolidation buys **one declaration and one place to bump**, not one copy
+on disk. The two mechanisms are **not** equally safe, and neither is a guarantee:
+
+- A **peer** copy is at least constrained by its holder's peer range. That is a
+  real pin only when the range is exact — `@vitest/browser-playwright` pins
+  `vitest` to a single version, which is why the trio below is pinned too. For a
+  wide range (`eslint-plugin-react-refresh` accepts `^9 || ^10`) the copies agree
+  only because npm happens to resolve the same latest in both installs, which is
+  a coincidence that holds until it doesn't.
+- A **transitive** copy is constrained by nothing of ours whatsoever, and one has
+  already diverged: cli's `@types/node` is `24.13.1` against the root's
+  `24.13.3`, and was `24.13.1` on `v2/main` too — a declared `^24.12.4` loses to
+  a nearer transitive.
+
+⚠️ **Nothing gates either of those, and `verify:dep-lockstep` is not it.**
+That guard derives its candidate set from what each `tsc` **program** resolves
+(see below), so it sees only packages a program loads from two installs. A tool
+*binary* — `eslint`, `prettier`, `vitest` — never enters a program, so it is
+outside the candidate set no matter how far it drifts, and the cli `@types/node`
+skew above passes for a second reason on top of that: no one program sees both
+copies. When you change what a client declares, check by hand from that client:
+
+```sh
+cd clients/web && npm exec -- which eslint prettier tsc vitest
+```
+
+#### Why the vitest trio is pinned exactly
+
+`@vitest/browser-playwright` declares an **exact** peer on `vitest` (`"vitest":
+"4.1.10"`, not a range), so that package — not the root's range — decides which
+`vitest` lands in `clients/web`. Left floating, the root resolves the newest
+patch while web's peer stays pinned to the older one, and web's tests then run on
+one `vitest` while loading a `@vitest/coverage-v8` provider built against
+another. Both would still pass, which is the bad part.
+
+So `vitest` and `@vitest/coverage-v8` at the root and `@vitest/browser-playwright`
+in `clients/web` are all pinned **exactly**, and a bump edits all three in one
+change — the same discipline as the exact `prettier` pin (#1790).
+
 ### Why runtime consumption decides `dependencies`
 
 The client builds externalise npm packages, so a published install resolves them
