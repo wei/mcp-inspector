@@ -154,7 +154,14 @@ that from happening:
    Code does and fails on anything that would strip the metadata — most importantly
    **malformed YAML**, which loads the body with an *empty* description, so
    `/skill-name` still works and a manual spot check passes while the skill can
-   never auto-fire again. An unquoted colon in a description is enough. It also
+   never auto-fire again. An unquoted colon in a description is enough — and so
+   is an unquoted **`#`**, which YAML reads as a comment and which truncates the
+   description *silently* from that point on rather than emptying it. `board-ops`
+   shipped that way: `Covers board #28 (v2) and board #11 (v1), their
+   node/field/option IDs, and the option-deletion hazard` was cut at `#28`, so 90
+   characters — including both board numbers — were absent from the listing while
+   every check stayed green, because a truncated description is still a non-empty
+   one. **Quote any description containing `#` or `:`.** It also
    runs `claude plugin validate` — the authoritative schema — when the installed
    CLI is **exactly** the pinned version, and otherwise says so and moves on.
    That best-effort hand-off keeps `validate` fast and offline, but it also
@@ -236,7 +243,7 @@ that from happening:
    overflows, and drops the least-invoked entries **first** — which are exactly the
    model-invoked skills that must fire on their own. `verify:skills` prints the
    current cost against the budget recorded in `scripts/lib/skill-manifest.mjs`
-   (3,144/4,000 characters as of this writing) and fails when it is exceeded. Raise
+   (3,234/4,000 characters as of this writing) and fails when it is exceeded. Raise
    the budget deliberately, or tighten a description; each entry is capped at 1,536
    characters regardless, so **put the key use case first**.
 

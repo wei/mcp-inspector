@@ -150,6 +150,38 @@ export function parseSkill(dirName, text) {
       errors.push("`paths` must be a list of glob strings");
     }
   }
+  // An unquoted `#` is a YAML comment, so a description containing one is
+  // truncated at that point — silently, and *not* to empty, which is why the
+  // "malformed YAML" checks sail past it: what survives still parses as a
+  // non-empty string. `board-ops` shipped for a while with its two board numbers
+  // and the option-deletion hazard cut off this way. Compare the raw scalar
+  // against what YAML actually kept and make any loss an error.
+  for (const [field, parsed] of [
+    ["description", description],
+    ["when_to_use", whenToUse],
+  ]) {
+    if (typeof parsed !== "string") continue;
+    const raw = new RegExp("^" + field + ":[ \\t]*(.*)$", "m").exec(
+      frontmatter,
+    )?.[1];
+    if (raw === undefined) continue;
+    const trimmed = raw.trim();
+    // Only an unquoted scalar can lose text to a comment; a quoted one is safe,
+    // and a block scalar (`|`/`>`) puts nothing on this line to compare.
+    if (/^["'|>]/.test(trimmed)) continue;
+    if (trimmed.length > parsed.trim().length) {
+      errors.push(
+        "`" +
+          field +
+          "` is truncated by an unquoted `#` — YAML kept " +
+          parsed.trim().length +
+          " of " +
+          trimmed.length +
+          " characters; quote the value",
+      );
+    }
+  }
+
   // A skill nothing can reach is dead weight that still costs a directory.
   if (!modelInvoked && meta["user-invocable"] === false) {
     errors.push(

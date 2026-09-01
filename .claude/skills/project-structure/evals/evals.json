@@ -4,7 +4,7 @@
     "expect": "project-structure"
   },
   {
-    "prompt": "Does a new Node-only backend piece for the web client belong in core or in the web client itself?",
+    "prompt": "I am adding a module that both the browser side and the Node side need to run. How do I decide where it goes in this repo?",
     "expect": "project-structure"
   },
   {

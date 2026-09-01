@@ -356,3 +356,46 @@ test("an eval file may only expect its own skill", () => {
     [],
   );
 });
+
+test("an unquoted `#` truncates a description, and that is an error", () => {
+  // The dangerous part is that YAML leaves a *non-empty* string behind, so the
+  // "description is required and non-empty" check passes and the skill keeps
+  // auto-firing — just with its most distinctive words missing from the
+  // listing. `board-ops` shipped this way, losing both board numbers.
+  const withHash = [
+    "---",
+    "name: board-ops",
+    "description: Recipes. Covers board #28 (v2) and board #11 (v1).",
+    "disable-model-invocation: false",
+    "---",
+    "body",
+  ].join("\n");
+  const parsed = parseSkill("board-ops", withHash);
+  assert.equal(parsed.description, "Recipes. Covers board");
+  assert.match(parsed.errors.join(" "), /truncated by an unquoted `#`/);
+
+  // Quoting is the fix, and it must come back clean.
+  const quoted = withHash.replace(
+    /^description: (.*)$/m,
+    (_m, d) => `description: "${d}"`,
+  );
+  const ok = parseSkill("board-ops", quoted);
+  assert.deepEqual(ok.errors, []);
+  assert.equal(
+    ok.description,
+    "Recipes. Covers board #28 (v2) and board #11 (v1).",
+  );
+});
+
+test("a `#` inside a quoted description is not treated as truncation", () => {
+  // Guard against the check firing on every legitimately quoted description.
+  const quoted = [
+    "---",
+    "name: alpha",
+    'description: "counts # and : safely"',
+    "disable-model-invocation: false",
+    "---",
+    "body",
+  ].join("\n");
+  assert.deepEqual(parseSkill("alpha", quoted).errors, []);
+});

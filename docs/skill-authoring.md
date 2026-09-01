@@ -76,6 +76,14 @@ Measured, one probe each, on this repo:
 | "Which parts of the gate only ever run locally and never in CI?"                         | `Read`          |
 | "The gate failed at the lint stage. How do I work out what is wrong?"                    | `Skill` ✅      |
 
+⚠️ Those rows come from an **unrestricted** probe, run before the snippet below
+was aligned with the harness. The eval itself forbids `Bash` (and `Write`,
+`Edit`, `NotebookEdit`), so a scored case cannot actually reach for one — what
+the rows show is the *pull*: given a free choice, these prompts send the model
+to read the repo rather than to load a skill, and under the harness's flags that
+same pull simply produces no `Skill` call at all. Read them as a diagnosis of
+why a prompt scores badly, never as a claim about which tools the eval offers.
+
 Shapes that reliably fire:
 
 - **"How do I …"** — a procedure, not an explanation.
@@ -152,10 +160,16 @@ of metered model calls; a single probe is one. Iterate with probes until a
 prompt fires at all, and only then spend a full run on its rate:
 
 ```sh
-# One sample, printing which tool actually fired first.
-print -r -- "<prompt>" \
-  | claude -p --output-format stream-json --verbose --max-turns 1 --allowedTools "Skill" \
-  | grep -o '"name":"[^"]*"' | head -3
+# One sample, printing which tool actually fired first. The flags are the
+# harness's own (see `runPrompt` in `scripts/skill-eval.mjs`), so a probe and a
+# scored case see the same tool policy — a probe that may call a tool the eval
+# forbids predicts nothing. `printf` rather than zsh's `print -r`, so the
+# snippet also runs under bash.
+printf '%s' "<prompt>" \
+  | claude -p --output-format stream-json --verbose --max-turns 1 \
+      --disallowedTools Bash,Write,Edit,NotebookEdit \
+  | jq -r 'select(.message.content?) | .message.content[]?
+           | select(.type == "tool_use") | .name' | head -3
 ```
 
 **Probe a marginal case more than once.** A prompt that fires on a single probe
