@@ -209,13 +209,22 @@ break.
 
 ## Checklist for a new or edited skill
 
-1. Frontmatter opens on line 1 (no BOM, no blank line), YAML is valid — an
-   unquoted colon in a description loads the body with an _empty_ description,
-   so `/name` still works while the skill can never auto-fire again.
+1. Frontmatter opens on line 1 (no BOM, no blank line), YAML is valid, and any
+   description containing `:` or `#` is **quoted**. An unquoted colon loads the
+   body with an _empty_ description, so `/name` still works while the skill can
+   never auto-fire again; an unquoted `#` is worse-behaved, truncating the
+   description from that point on so it stays non-empty and every check passes.
 2. `disable-model-invocation` is declared explicitly; default it to `false`.
 3. Description is action-first, with `Use when …; when …; when …`.
-4. `evals/evals.json` has both positives and at least one negative, every
-   positive shaped by the first-move rule and none answerable from `AGENTS.md`.
+4. **If the skill is model-invoked**, `evals/evals.json` carries **at least
+   five positives and at least one negative** — every positive shaped by the
+   first-move rule, none answerable from `AGENTS.md`. A name-only skill
+   (`disable-model-invocation: true`, as `release` is) has no eval file at all:
+   nothing can measure a trigger that only a human types, so an eval there would
+   be unrunnable rather than merely redundant. `verify:skills` enforces the
+   floor — fewer than five positives fails the gate, because at `RUNS=5` one
+   case is 20 points of that skill's reading and a two-case skill reports a rate
+   a single flake can move across the threshold.
 5. `npm run verify:skills` passes and the listing is under budget.
 6. `RUNS=5 npm run skills:eval` — the **whole** suite — is ≥80% on every case,
    including the skills you did not touch.

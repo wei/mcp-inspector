@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import {
   splitFrontmatter,
   parseSkill,
+  MIN_POSITIVE_CASES,
   validateEvalCases,
   listingCost,
   parseClaudeVersion,
@@ -175,15 +176,18 @@ test("listingCost counts only the skills that occupy the listing", () => {
 });
 
 test("validateEvalCases requires a positive and a negative", () => {
+  const positives = (n, expect = "testing") =>
+    Array.from({ length: n }, (_, i) => ({ prompt: `p${i}`, expect }));
+
   assert.deepEqual(
     validateEvalCases("testing", [
-      { prompt: "a", expect: "testing" },
+      ...positives(MIN_POSITIVE_CASES),
       { prompt: "b", expect: null },
     ]),
     [],
   );
   assert.match(
-    validateEvalCases("testing", [{ prompt: "a", expect: "testing" }]).join(),
+    validateEvalCases("testing", positives(MIN_POSITIVE_CASES)).join(),
     /no negative case/,
   );
   assert.match(
@@ -335,7 +339,10 @@ test("an eval file may only expect its own skill", () => {
   assert.match(
     validateEvalCases("testing", [
       { prompt: "a", expect: "local-dev" },
-      { prompt: "b", expect: "testing" },
+      ...Array.from({ length: MIN_POSITIVE_CASES }, (_, i) => ({
+        prompt: `p${i}`,
+        expect: "testing",
+      })),
       { prompt: "c", expect: null },
     ]).join(),
     /expects `local-dev`, but this file only measures `testing`/,
@@ -350,7 +357,10 @@ test("an eval file may only expect its own skill", () => {
   // Null and own-name cases are unaffected.
   assert.deepEqual(
     validateEvalCases("testing", [
-      { prompt: "a", expect: "testing" },
+      ...Array.from({ length: MIN_POSITIVE_CASES }, (_, i) => ({
+        prompt: `p${i}`,
+        expect: "testing",
+      })),
       { prompt: "b", expect: null },
     ]),
     [],
@@ -398,4 +408,38 @@ test("a `#` inside a quoted description is not treated as truncation", () => {
     "body",
   ].join("\n");
   assert.deepEqual(parseSkill("alpha", quoted).errors, []);
+});
+
+test("a model-invoked skill needs at least MIN_POSITIVE_CASES positives", () => {
+  // `positives === 0` alone let a skill regress to a single prompt and still
+  // pass the gate. At RUNS=5 one case is 20 points of that skill's reading, so
+  // a one- or two-case skill reports a rate a single flake can move across the
+  // threshold — well-formed to the checker, meaningless as a measurement.
+  const withPositives = (n) => [
+    ...Array.from({ length: n }, (_, i) => ({
+      prompt: `p${i}`,
+      expect: "alpha",
+    })),
+    { prompt: "n", expect: null },
+  ];
+
+  assert.match(
+    validateEvalCases("alpha", withPositives(1)).join(" "),
+    /only 1 positive case\(s\)/,
+  );
+  assert.match(
+    validateEvalCases("alpha", withPositives(MIN_POSITIVE_CASES - 1)).join(" "),
+    /needs at least 5/,
+  );
+  assert.deepEqual(
+    validateEvalCases("alpha", withPositives(MIN_POSITIVE_CASES)),
+    [],
+  );
+
+  // Zero still reports the clearer "no positive case" message rather than the
+  // count one, so the common mistake keeps its specific diagnosis.
+  assert.match(
+    validateEvalCases("alpha", [{ prompt: "n", expect: null }]).join(" "),
+    /no positive case expects/,
+  );
 });

@@ -222,7 +222,9 @@ that from happening:
    `evals/evals.json` — positives **and negatives**. Seeing a skill fire once tells
    you Claude found it, not that it finds it reliably, and a skill that fires on
    everything is a context regression that nobody notices by hand. `verify:skills`
-   requires both kinds; `npm run skills:eval` actually runs them (it needs the
+   requires both kinds — and at least **five** positives, since at `RUNS=5` a
+   skill measured by one or two prompts reports a rate a single flake can move
+   across the threshold; `npm run skills:eval` actually runs them (it needs the
    `claude` CLI and real model calls, so it is deliberately **not** in the gate —
    run it when adding a skill or editing a model-invoked description).
    Two things learned writing the first set, both of which make a case measure

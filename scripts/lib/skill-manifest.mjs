@@ -235,6 +235,12 @@ export function listingCost(skills) {
  * @param {unknown} cases Parsed JSON.
  * @returns {string[]} errors
  */
+/**
+ * The number of positive cases a model-invoked skill's eval file must carry.
+ * Raised from an implicit 3 to 5 so a single flake cannot cross the threshold.
+ */
+export const MIN_POSITIVE_CASES = 5;
+
 export function validateEvalCases(skillName, cases) {
   if (!Array.isArray(cases) || cases.length === 0) {
     return ["evals.json must be a non-empty array of cases"];
@@ -268,6 +274,15 @@ export function validateEvalCases(skillName, cases) {
   const negatives = cases.filter((c) => c && c.expect === null).length;
   if (positives === 0) {
     errors.push(`no positive case expects \`${skillName}\``);
+  } else if (positives < MIN_POSITIVE_CASES) {
+    // A non-zero floor is not enough. At RUNS=5 one case is worth 20 points of
+    // that skill's reading, so a skill measured by one or two prompts reports a
+    // rate that a single flake can move across the threshold — and the gate,
+    // seeing a positive, would call that well-formed. Five is the count every
+    // skill here was raised to for exactly that reason (Copilot).
+    errors.push(
+      `only ${positives} positive case(s); a model-invoked skill needs at least ${MIN_POSITIVE_CASES} for its rate to mean anything`,
+    );
   }
   if (negatives === 0) {
     errors.push(

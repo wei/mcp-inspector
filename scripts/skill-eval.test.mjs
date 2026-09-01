@@ -22,6 +22,7 @@ import {
   runPrompt,
   sampleHit,
 } from "./skill-eval.mjs";
+import { MIN_POSITIVE_CASES } from "./lib/skill-manifest.mjs";
 
 const assistant = (...blocks) =>
   JSON.stringify({ type: "assistant", message: { content: blocks } });
@@ -285,14 +286,17 @@ function skillsFixture() {
       );
     }
   };
-  write("alpha", "disable-model-invocation: false\n", [
-    { prompt: "a+", expect: "alpha" },
-    { prompt: "a-", expect: null },
-  ]);
-  write("beta", "disable-model-invocation: false\n", [
-    { prompt: "b+", expect: "beta" },
-    { prompt: "b-", expect: null },
-  ]);
+  // Enough positives to satisfy the same MIN_POSITIVE_CASES floor the real eval
+  // files must clear; the prompts stay predictable so assertions can name them.
+  const evalsFor = (letter, skill) => [
+    ...Array.from({ length: MIN_POSITIVE_CASES }, (_, i) => ({
+      prompt: `${letter}+${i}`,
+      expect: skill,
+    })),
+    { prompt: `${letter}-`, expect: null },
+  ];
+  write("alpha", "disable-model-invocation: false\n", evalsFor("a", "alpha"));
+  write("beta", "disable-model-invocation: false\n", evalsFor("b", "beta"));
   write("gamma", "disable-model-invocation: true\n");
   return root;
 }
@@ -305,13 +309,13 @@ test("focused mode narrows the cases but not the repo's own skill set", () => {
 
   const all = collectCases(undefined, root);
   assert.deepEqual([...all.ours].sort(), ["alpha", "beta"]);
-  assert.equal(all.cases.length, 4);
+  assert.equal(all.cases.length, (MIN_POSITIVE_CASES + 1) * 2);
 
   const focused = collectCases("alpha", root);
   assert.deepEqual([...focused.ours].sort(), ["alpha", "beta"]);
   assert.deepEqual(
     focused.cases.map((c) => c.prompt),
-    ["a+", "a-"],
+    ["a+0", "a+1", "a+2", "a+3", "a+4", "a-"],
   );
   // The consequence, stated as the assertion that matters:
   assert.equal(
@@ -326,12 +330,23 @@ test("focused mode accepts several skill names", () => {
   const root = skillsFixture();
 
   const focused = collectCases(["alpha", "beta"], root);
-  assert.deepEqual(focused.cases.map((c) => c.prompt).sort(), [
-    "a+",
-    "a-",
-    "b+",
-    "b-",
-  ]);
+  assert.deepEqual(
+    focused.cases.map((c) => c.prompt).sort(),
+    [
+      "a+0",
+      "a+1",
+      "a+2",
+      "a+3",
+      "a+4",
+      "a-",
+      "b+0",
+      "b+1",
+      "b+2",
+      "b+3",
+      "b+4",
+      "b-",
+    ].sort(),
+  );
   // Narrowing to every skill is still not the same as no filter — `ours` is
   // unchanged either way, which is what keeps negative scoring honest.
   assert.deepEqual([...focused.ours].sort(), ["alpha", "beta"]);
@@ -339,7 +354,7 @@ test("focused mode accepts several skill names", () => {
   // A single name keeps working, so the one-argument form is unaffected.
   assert.deepEqual(
     collectCases("beta", root).cases.map((c) => c.prompt),
-    ["b+", "b-"],
+    ["b+0", "b+1", "b+2", "b+3", "b+4", "b-"],
   );
 
   rmSync(root, { recursive: true, force: true });
