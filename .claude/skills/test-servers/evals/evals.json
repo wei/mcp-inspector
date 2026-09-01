@@ -8,7 +8,7 @@
     "expect": "test-servers"
   },
   {
-    "prompt": "I renamed a file under test-servers/src and the fixture is still running the old code. Why?",
+    "prompt": "I need a real server to exercise this change against by hand. What do I run?",
     "expect": "test-servers"
   },
   {

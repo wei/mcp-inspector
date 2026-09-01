@@ -233,7 +233,7 @@ that from happening:
    overflows, and drops the least-invoked entries **first** — which are exactly the
    model-invoked skills that must fire on their own. `verify:skills` prints the
    current cost against the budget recorded in `scripts/lib/skill-manifest.mjs`
-   (2,921/4,000 characters as of this writing) and fails when it is exceeded. Raise
+   (3,144/4,000 characters as of this writing) and fails when it is exceeded. Raise
    the budget deliberately, or tighten a description; each entry is capped at 1,536
    characters regardless, so **put the key use case first**.
 

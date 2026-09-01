@@ -4,7 +4,7 @@
     "expect": "local-dev"
   },
   {
-    "prompt": "I added a dependency and the TUI bundle broke at import time. Where should it have gone?",
+    "prompt": "I added a package and now one of the client bundles fails at run time. What do I check?",
     "expect": "local-dev"
   },
   {
@@ -16,7 +16,7 @@
     "expect": "local-dev"
   },
   {
-    "prompt": "I just pulled and a client's dependencies look out of sync. What do I need to run?",
+    "prompt": "Do I need to do anything special to set this repo up inside a git worktree?",
     "expect": "local-dev"
   },
   {

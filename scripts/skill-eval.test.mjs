@@ -322,6 +322,42 @@ test("focused mode narrows the cases but not the repo's own skill set", () => {
   rmSync(root, { recursive: true, force: true });
 });
 
+test("focused mode accepts several skill names", () => {
+  const root = skillsFixture();
+
+  const focused = collectCases(["alpha", "beta"], root);
+  assert.deepEqual(focused.cases.map((c) => c.prompt).sort(), [
+    "a+",
+    "a-",
+    "b+",
+    "b-",
+  ]);
+  // Narrowing to every skill is still not the same as no filter — `ours` is
+  // unchanged either way, which is what keeps negative scoring honest.
+  assert.deepEqual([...focused.ours].sort(), ["alpha", "beta"]);
+
+  // A single name keeps working, so the one-argument form is unaffected.
+  assert.deepEqual(
+    collectCases("beta", root).cases.map((c) => c.prompt),
+    ["b+", "b-"],
+  );
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("an unknown skill name is an error, not an empty run", () => {
+  // A typo would otherwise enqueue zero cases and report a green 0/0, which
+  // reads exactly like a clean pass of the skill that was meant.
+  const root = skillsFixture();
+  assert.throws(
+    () => collectCases(["alpha", "aplha"], root),
+    /no model-invoked skill named `aplha`/,
+  );
+  // A name-only skill is not model-invoked, so asking for it is the same error.
+  assert.throws(() => collectCases(["gamma"], root), /no model-invoked skill/);
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("a name-only skill is not part of the repo's model-invoked set", () => {
   const root = skillsFixture();
   const { ours } = collectCases(undefined, root);

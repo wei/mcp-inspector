@@ -104,6 +104,21 @@ retired here:
 | "In `…/Foo.test.tsx` I need to assert on a Mantine transition mid-flight. How?" | `AGENTS.md` names `renderWithMantineTransitions` and states the rule outright. Also named a concrete file — two faults at once.          |
 | "What should I run before I push?"                                              | `AGENTS.md` states `npm run local:gate` is the mandatory pre-push command. Scored 40%.                                                   |
 
+**Partial overlap reads as flakiness, not as a miss.** A case the rules file
+answers _outright_ sits at 0% and is easy to spot. A case it answers _half_ of
+oscillates — and looks like eval noise rather than a defect in the case. Two of
+`local-dev`'s cases behaved exactly this way before being retired:
+
+| Case                                                                                           | Scores across runs        | The overlap                                                                              |
+| ---------------------------------------------------------------------------------------------- | ------------------------- | ---------------------------------------------------------------------------------------- |
+| "I added a dependency and the TUI bundle broke at import time. **Where should it have gone?**" | 33 / 67 / 100 / 100 / 60% | Dependency placement is stated in full in `AGENTS.md`; only the diagnosis is the skill's |
+| "I just pulled and a client's dependencies look out of sync. **What do I need to run?**"       | 80 / 80 / 60%             | `AGENTS.md` says a single root `npm install` is all you need                             |
+
+Both stabilised at 100% once re-aimed at what only the skill holds — "what do I
+**check**" instead of "where should it have **gone**", and the worktree install
+trap instead of the install command. If a case keeps moving between runs while
+its neighbours hold steady, suspect the case before you suspect the noise.
+
 The test to apply before committing a case: **could a reader answer this from
 the rules file alone?** If yes, it measures `AGENTS.md`, not the skill. Aim the
 case at what only the skill body holds — a live ID, a command sequence, a
@@ -151,10 +166,21 @@ lucky one, and it is still far cheaper than a full suite run.
 Then the suite:
 
 ```sh
-npm run skills:eval                    # every model-invoked skill, RUNS=3
+npm run skills:eval                              # every model-invoked skill, RUNS=3
 RUNS=5 CONCURRENCY=6 npm run skills:eval
-npm run skills:eval -- testing         # one skill's cases (still scores negatives against all)
+npm run skills:eval -- testing                   # one skill's cases
+npm run skills:eval -- testing test-servers      # a set of skills
 ```
+
+Narrowing the run never narrows what a **negative** case is scored against — a
+focused run still fails a negative that fires any model-invoked skill in the
+repo, because "no skill of ours fired" is the property being asserted. An
+unknown name is a hard error rather than an empty run, since a typo would
+otherwise report a green 0/0 that reads exactly like a clean pass.
+
+⚠️ **A focused run cannot see displacement.** Adding or reshaping a description
+changes the trigger rate of skills you did not touch, and only the full suite
+observes that. Use the filter to iterate; take the full suite before you push.
 
 **Read the noise before reading the result.** At `RUNS=3` one sample is worth 33
 points, and an untouched skill was observed swinging 100 points across two runs
