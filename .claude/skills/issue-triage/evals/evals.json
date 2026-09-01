@@ -4,11 +4,19 @@
     "expect": "issue-triage"
   },
   {
-    "prompt": "What Priority should issue 2189 be given?",
+    "prompt": "How do I decide what Priority an incoming issue deserves?",
     "expect": "issue-triage"
   },
   {
     "prompt": "Audit the project board for anything that has drifted.",
+    "expect": "issue-triage"
+  },
+  {
+    "prompt": "How do I find the issues that aren't on either board yet?",
+    "expect": "issue-triage"
+  },
+  {
+    "prompt": "After scoring an issue against the rubric, what do I do with the score?",
     "expect": "issue-triage"
   },
   {

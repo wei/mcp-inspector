@@ -16,6 +16,10 @@
     "expect": "local-dev"
   },
   {
+    "prompt": "I just pulled and a client's dependencies look out of sync. What do I need to run?",
+    "expect": "local-dev"
+  },
+  {
     "prompt": "Write a haiku about autumn.",
     "expect": null
   },

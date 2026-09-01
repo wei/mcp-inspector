@@ -192,6 +192,9 @@ that from happening:
    a skill therefore has a cost paid by the *existing* ones, which only
    `skills:eval` can see. **Re-run the full eval after any flip _or description
    edit_**, not just the changed skill's own cases.
+   **How to write a description that fires, and cases that measure it, is
+   [`docs/skill-authoring.md`](./docs/skill-authoring.md)** — the case shapes
+   that work, the ones that can never pass, and the probe-then-measure loop.
    The lever that works is the description's *shape*. Leading with the actions
    and then enumerating concrete situations ("Use when … ; when … ; when …")
    beats a noun-phrase list of contents: it took `pre-push-gate` from 3/5 to 5/5
@@ -230,7 +233,7 @@ that from happening:
    overflows, and drops the least-invoked entries **first** — which are exactly the
    model-invoked skills that must fire on their own. `verify:skills` prints the
    current cost against the budget recorded in `scripts/lib/skill-manifest.mjs`
-   (2,834/4,000 characters as of this writing) and fails when it is exceeded. Raise
+   (2,921/4,000 characters as of this writing) and fails when it is exceeded. Raise
    the budget deliberately, or tighten a description; each entry is capped at 1,536
    characters regardless, so **put the key use case first**.
 

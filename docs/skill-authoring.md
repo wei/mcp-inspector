@@ -1,0 +1,181 @@
+# Writing a skill and its eval cases
+
+The **rules** for skill maintenance — the four numbered requirements, the
+invocation-mode policy, the listing budget — are in
+[`AGENTS.md`](../AGENTS.md#maintaining-the-skills). This page is the _how_: what
+makes a description fire, what makes an eval case measure the right thing, and
+the loop for tuning both. It exists because `verify:skills` can prove a skill is
+well-formed but cannot prove it is ever _reachable_, and the tool that measures
+reachability — `npm run skills:eval` — reports a hit rate rather than a verdict.
+
+## How the eval actually measures
+
+`scripts/skill-eval.mjs` runs every committed case in a **fresh headless
+session** (`claude -p`), `RUNS` times, and scores the fraction of runs in which
+the `Skill` tool fired with the expected name.
+
+Four properties of that harness drive everything below:
+
+- **`--max-turns 1`.** The skill must be the model's **first** tool call. If it
+  opens a file first — even on its way to a perfect answer — the sample is a
+  miss. This is the single most important fact about writing cases.
+- **The session is fresh, but not empty.** `CLAUDE.md` → `AGENTS.md` is loaded
+  in full on every turn, so anything the rules file already answers gets
+  answered without a skill.
+- **Negative cases are scored against every model-invoked skill in this repo**,
+  not just the one whose file they live in. A negative passes only if _none_ of
+  ours fired.
+- **Positive cases may only expect their own skill.** `verify:skills` rejects a
+  foreign name, because a case that passes when a _different_ skill fires
+  reports a measurement of something it does not describe.
+
+## Writing a description
+
+Lead with the **actions**, then enumerate concrete **situations**:
+
+```
+description: <verb phrase saying what this does>. Use when <situation>;
+when <situation>; when <situation>; or when <situation>.
+```
+
+This shape is what the measurements keep rewarding. Reshaping `pre-push-gate`
+into it took it from 3/5 to 5/5, and `testing`'s three cases from 25/50/25% to
+100% each. A noun-phrase list of contents ("Where things live, what is in core/,
+and what each directory is for") consistently underperforms it.
+
+Three further rules, each learned the expensive way:
+
+- **Put the key use case first.** Each listing entry is capped at 1,536
+  characters and the whole listing at 4,000; entries are dropped least-invoked
+  first when it overflows.
+- **Adding a skill costs the skills already there.** Going from three
+  model-invoked skills to nine measurably lowered the trigger rate of the
+  existing ones — the ceiling is attention, not characters. So **re-run the full
+  suite after any flip or description edit**, never just the changed skill's
+  cases.
+- **`paths` is not a free win.** It halved `testing`'s conversational trigger
+  rate, and a prompt-only eval can never exercise a path trigger, so shipping it
+  means shipping an untestable claim.
+
+## Writing an eval case
+
+### The first-move rule
+
+A case measures the description only if invoking a skill is the model's natural
+**first** move. Ask **"how do I …"**, not **"how does this work"** — the second
+invites a `Read` or a `Grep`, which spends the only turn the harness allows.
+
+Measured, one probe each, on this repo:
+
+| Prompt                                                                                   | First tool call |
+| ---------------------------------------------------------------------------------------- | --------------- |
+| "How do TUI components get mounted and keypresses driven in this repo's tests?"          | `Bash`          |
+| "How do I write a test for a TUI component in this repo?"                                | `Skill` ✅      |
+| "Which part of this repo owns the browser's HTTP transport and the backend it talks to?" | `Bash`          |
+| "Does browser-only transport code belong in core or in the web client?"                  | `Skill` ✅      |
+| "Which parts of the gate only ever run locally and never in CI?"                         | `Read`          |
+| "The gate failed at the lint stage. How do I work out what is wrong?"                    | `Skill` ✅      |
+
+Shapes that reliably fire:
+
+- **"How do I …"** — a procedure, not an explanation.
+- **"Does X belong in A or B?"** — a decision the repo has a convention for.
+- **"\<Stage\> failed. How do I diagnose it?"** — a symptom with a documented cause.
+- **"Which command runs …?"** — when the answer is a repo-specific script.
+- **A bare imperative** — "Triage the new issues.", "Move the card for issue 2189
+  to In Review."
+
+Shapes that reliably do not:
+
+- **"How does X work here?"** / **"Where is X implemented?"** — an invitation to
+  read the source, which is the _better_ answer and scores as a miss.
+- **Anything naming a concrete file, symbol, or helper.** Naming the mechanism
+  hands the model a grep target and removes the reason to load a procedure.
+
+### Do not write a case `AGENTS.md` already answers
+
+`AGENTS.md` is resident on every turn, so a prompt it answers is answered
+without the skill and the case reads as a permanent miss. Two that had to be
+retired here:
+
+| Retired case                                                                    | Why it could never pass                                                                                                                  |
+| ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| "Which package owns the OAuth secret storage backends?"                         | The directory tree in `AGENTS.md` says `auth/ — OAuth end to end + the per-server SecretStore backends`. Scored 0% across two full runs. |
+| "In `…/Foo.test.tsx` I need to assert on a Mantine transition mid-flight. How?" | `AGENTS.md` names `renderWithMantineTransitions` and states the rule outright. Also named a concrete file — two faults at once.          |
+| "What should I run before I push?"                                              | `AGENTS.md` states `npm run local:gate` is the mandatory pre-push command. Scored 40%.                                                   |
+
+The test to apply before committing a case: **could a reader answer this from
+the rules file alone?** If yes, it measures `AGENTS.md`, not the skill. Aim the
+case at what only the skill body holds — a live ID, a command sequence, a
+recovery recipe, a diagnosis.
+
+### When a neighbouring skill fires, the case is wrong
+
+A positive case may only expect its own skill, so a prompt that a _different_
+skill legitimately owns can never pass — and rewriting the description to win it
+would be the wrong fix, because it would broaden a skill onto another's ground.
+"How do I get an issue I already filed onto the project board with the right
+fields?" fired `board-ops` 3/3 as an `issue-create` case. `board-ops` is the
+right answer: adding a card and setting its fields is a board operation. The
+case was replaced, not the description.
+
+Before blaming a description for a miss, check **which** skill fired. If it is a
+neighbour and the neighbour is right, the case is aimed at the wrong skill.
+
+### Negative cases
+
+Every skill file needs at least one `"expect": null` case; a skill that fires on
+everything is a context regression nobody notices by hand. Keep them plainly
+unrelated to the repo (arithmetic, trivia, a one-line refactor). All 18 in this
+repo have held at 100% through every reshaping so far — if one starts firing, a
+description has grown too broad.
+
+## The tuning loop
+
+**Probe first, then measure.** A full suite run is ~63 cases × `RUNS` sessions
+of metered model calls; a single probe is one. Iterate with probes until a
+prompt fires at all, and only then spend a full run on its rate:
+
+```sh
+# One sample, printing which tool actually fired first.
+print -r -- "<prompt>" \
+  | claude -p --output-format stream-json --verbose --max-turns 1 --allowedTools "Skill" \
+  | grep -o '"name":"[^"]*"' | head -3
+```
+
+**Probe a marginal case more than once.** A prompt that fires on a single probe
+can still measure 60% over five runs — one sample cannot distinguish "reliable"
+from "coin flip". Three probes is enough to tell a solid replacement from a
+lucky one, and it is still far cheaper than a full suite run.
+
+Then the suite:
+
+```sh
+npm run skills:eval                    # every model-invoked skill, RUNS=3
+RUNS=5 CONCURRENCY=6 npm run skills:eval
+npm run skills:eval -- testing         # one skill's cases (still scores negatives against all)
+```
+
+**Read the noise before reading the result.** At `RUNS=3` one sample is worth 33
+points, and an untouched skill was observed swinging 100 points across two runs
+of the same suite. `RUNS=5` is the smallest setting where a single flake does
+not cross the 0.8 threshold on its own. A one-case move is not evidence; a skill
+whose cases move _together_ is.
+
+This is why the eval is **not** in `validate`, `local:gate`, or CI: it spends
+metered calls, it is non-deterministic by construction, and it goes red on a
+rate limit. A case below threshold is a signal to investigate, not a build
+break.
+
+## Checklist for a new or edited skill
+
+1. Frontmatter opens on line 1 (no BOM, no blank line), YAML is valid — an
+   unquoted colon in a description loads the body with an _empty_ description,
+   so `/name` still works while the skill can never auto-fire again.
+2. `disable-model-invocation` is declared explicitly; default it to `false`.
+3. Description is action-first, with `Use when …; when …; when …`.
+4. `evals/evals.json` has both positives and at least one negative, every
+   positive shaped by the first-move rule and none answerable from `AGENTS.md`.
+5. `npm run verify:skills` passes and the listing is under budget.
+6. `RUNS=5 npm run skills:eval` — the **whole** suite — is ≥80% on every case,
+   including the skills you did not touch.

@@ -12,6 +12,14 @@
     "expect": "pr-flow"
   },
   {
+    "prompt": "Copilot left a pile of review comments on my PR. How do I answer them so nothing gets lost?",
+    "expect": "pr-flow"
+  },
+  {
+    "prompt": "My PR is open and green. Walk me through getting it merged and closed out here.",
+    "expect": "pr-flow"
+  },
+  {
     "prompt": "What does this regex match? /^[a-z]+$/",
     "expect": null
   },

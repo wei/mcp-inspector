@@ -12,6 +12,14 @@
     "expect": "issue-create"
   },
   {
+    "prompt": "I found a bug while working on something else. How do I get it tracked in this repo?",
+    "expect": "issue-create"
+  },
+  {
+    "prompt": "What do I need to do beyond `gh issue create` for a new issue to be properly tracked here?",
+    "expect": "issue-create"
+  },
+  {
     "prompt": "What is the chemical symbol for potassium?",
     "expect": null
   },
