@@ -471,3 +471,36 @@ test("the truncation guard covers `when_to_use`, not just `description`", () => 
   assert.deepEqual(ok.errors, []);
   assert.equal(ok.whenToUse, "Use when filing against board #28 or board #11.");
 });
+
+test("the truncation guard spans a multiline plain scalar", () => {
+  // A plain scalar continues onto more-indented lines, so a first-line-only
+  // comparison sees `Covers boards` on both sides and reports no loss — passing
+  // the exact truncation this guard exists to reject.
+  const multiline = [
+    "---",
+    "name: alpha",
+    "description: Covers boards",
+    "  #28 and #11 and the hazard.",
+    "disable-model-invocation: false",
+    "---",
+    "body",
+  ].join("\n");
+  const parsed = parseSkill("alpha", multiline);
+  assert.equal(parsed.description, "Covers boards");
+  assert.match(parsed.errors.join(" "), /`description` is truncated/);
+
+  // A multiline plain scalar with no `#` folds to one line and must stay clean,
+  // so the fix cannot be "reject anything multiline".
+  const folded = [
+    "---",
+    "name: alpha",
+    "description: Covers boards",
+    "  and the option-deletion hazard.",
+    "disable-model-invocation: false",
+    "---",
+    "body",
+  ].join("\n");
+  const ok = parseSkill("alpha", folded);
+  assert.deepEqual(ok.errors, []);
+  assert.equal(ok.description, "Covers boards and the option-deletion hazard.");
+});

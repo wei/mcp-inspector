@@ -156,27 +156,50 @@ export function parseSkill(dirName, text) {
   // non-empty string. `board-ops` shipped for a while with its two board numbers
   // and the option-deletion hazard cut off this way. Compare the raw scalar
   // against what YAML actually kept and make any loss an error.
+  //
+  // The comparison has to span the WHOLE plain scalar, not its first physical
+  // line. A plain scalar continues onto more-indented lines, so
+  //
+  //     description: Covers boards
+  //       #28 and #11
+  //
+  // parses to `Covers boards` — and a first-line-only check compares that
+  // against `Covers boards` and sees no loss, passing the exact truncation this
+  // guard exists to reject (Copilot).
+  const lines = frontmatter.split("\n");
   for (const [field, parsed] of [
     ["description", description],
     ["when_to_use", whenToUse],
   ]) {
     if (typeof parsed !== "string") continue;
-    const raw = new RegExp("^" + field + ":[ \\t]*(.*)$", "m").exec(
-      frontmatter,
-    )?.[1];
-    if (raw === undefined) continue;
-    const trimmed = raw.trim();
+    const start = lines.findIndex((l) =>
+      new RegExp("^" + field + ":([ \\t]|$)").test(l),
+    );
+    if (start === -1) continue;
+    const head = lines[start].slice(field.length + 1).trim();
     // Only an unquoted scalar can lose text to a comment; a quoted one is safe,
-    // and a block scalar (`|`/`>`) puts nothing on this line to compare.
-    if (/^["'|>]/.test(trimmed)) continue;
-    if (trimmed.length > parsed.trim().length) {
+    // and a block scalar (`|`/`>`) is read literally rather than comment-stripped.
+    if (/^["'|>]/.test(head)) continue;
+    // Continuation lines are indented and are not the next `key:` of the map.
+    const parts = [head];
+    for (let i = start + 1; i < lines.length; i++) {
+      const l = lines[i];
+      if (!/^[ \t]/.test(l) || l.trim() === "") break;
+      parts.push(l.trim());
+    }
+    // YAML folds a plain scalar's newlines to single spaces, so compare on
+    // whitespace-collapsed text rather than on the raw characters.
+    const collapse = (s) => s.replace(/\s+/g, " ").trim();
+    const rawText = collapse(parts.join(" "));
+    const keptText = collapse(parsed);
+    if (rawText.length > keptText.length) {
       errors.push(
         "`" +
           field +
           "` is truncated by an unquoted `#` — YAML kept " +
-          parsed.trim().length +
+          keptText.length +
           " of " +
-          trimmed.length +
+          rawText.length +
           " characters; quote the value",
       );
     }
