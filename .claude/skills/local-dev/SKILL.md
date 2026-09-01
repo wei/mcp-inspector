@@ -98,11 +98,23 @@ transitive v1 `@modelcontextprotocol/sdk` (1.29.0 / 1.30.0) in the tree at once
 `server.deps.inline` workaround in `vitest.shared.mts` exists for.
 
 The same reasoning extends to anything reached only through root-owned code that
-has no manifest of its own (`test-servers/src`, `core/`) — hence the repo-root
-alias for those in `vitest.shared.mts`. That used to be `express` and `yaml`
-alone; #2195 made it the general case, moving `ajv`, `atomically`, `chokidar`,
-`commander`, `hono`, `@hono/node-server`, `@napi-rs/keyring`, `open`, `pino`,
-`react`, `undici` and `zod` to the root as well.
+has no manifest of its own (`test-servers/src`, `core/`). #2195 made that the
+general case: `ajv`, `atomically`, `chokidar`, `hono`, `@napi-rs/keyring`,
+`pino`, `react` and `zod` moved to the root, joining `proper-lockfile` and
+`undici`, which were already there.
+
+Keep two distinctions straight, because AGENTS.md's rules split on them:
+
+- **Root-declared is not the same as `core/`-imported.** `commander`, `open` and
+  `@hono/node-server` are root `dependencies` too, but they are reached only
+  from client code. Only the `core/` set has to appear in *all three* bundler
+  `external` lists.
+- **Root-declared is not the same as aliased.** The `vitest.shared.mts` pins and
+  the `clients/web/tsconfig.*.json` `paths` cover the packages whose resolution
+  is genuinely ambiguous — a transitive copy sits in the client install, or the
+  importer is `core/`, which has no manifest to resolve from. A package that
+  resolves unambiguously by walk-up (`ajv`, `commander`, `open`, `undici`,
+  `zod`) is deliberately absent from both.
 
 The point of deleting the client-side copies rather than merely keeping them in
 step is that **a package installs only into an install root that declares it**.

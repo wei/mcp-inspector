@@ -10,17 +10,17 @@
       "react-dom": ["./node_modules/@types/react-dom"],
       "react/jsx-runtime": ["./node_modules/@types/react/jsx-runtime"],
       "vitest": ["./node_modules/vitest"],
-      "pino": ["./node_modules/pino"],
-      "hono": ["./node_modules/hono"],
+      "pino": ["../../node_modules/pino"],
+      "hono": ["../../node_modules/hono"],
       "hono/streaming": [
-        "./node_modules/hono/dist/types/helper/streaming/index"
+        "../../node_modules/hono/dist/types/helper/streaming/index"
       ],
-      "@hono/node-server": ["./node_modules/@hono/node-server"],
-      "atomically": ["./node_modules/atomically"],
-      "chokidar": ["./node_modules/chokidar"],
+      "@hono/node-server": ["../../node_modules/@hono/node-server"],
+      "atomically": ["../../node_modules/atomically"],
+      "chokidar": ["../../node_modules/chokidar"],
       "express": ["./node_modules/@types/express"],
       "yaml": ["./node_modules/yaml"],
-      "@napi-rs/keyring": ["./node_modules/@napi-rs/keyring"],
+      "@napi-rs/keyring": ["../../node_modules/@napi-rs/keyring"],
       "react-syntax-highlighter/dist/esm/prism-light": [
         "./src/types/react-syntax-highlighter-prism-light"
       ],
