@@ -11,7 +11,7 @@
 // So every check here is deny-by-default: a file we cannot read the way Claude
 // Code reads it is an error, not a skip.
 
-import { parse as parseYaml } from "yaml";
+import { parseDocument } from "yaml";
 
 /**
  * Per-entry cap Claude Code applies to a skill listing entry. It covers
@@ -84,9 +84,15 @@ export function parseSkill(dirName, text) {
   const { frontmatter, error } = splitFrontmatter(text);
   if (error) return { errors: [error] };
 
+  let doc;
   let meta;
   try {
-    meta = parseYaml(frontmatter);
+    // `parseDocument` rather than `parse`: the truncation guard below needs the
+    // scalar NODES, not just their values, and parsing once keeps the two views
+    // of the frontmatter from ever disagreeing.
+    doc = parseDocument(frontmatter);
+    if (doc.errors.length > 0) throw new Error(doc.errors[0].message);
+    meta = doc.toJS();
   } catch (e) {
     // The whole point of the guard: this is what strips the description.
     return {
@@ -154,71 +160,33 @@ export function parseSkill(dirName, text) {
   // truncated at that point — silently, and *not* to empty, which is why the
   // "malformed YAML" checks sail past it: what survives still parses as a
   // non-empty string. `board-ops` shipped for a while with its two board numbers
-  // and the option-deletion hazard cut off this way. Compare the raw scalar
-  // against what YAML actually kept and make any loss an error.
+  // and the option-deletion hazard cut off this way.
   //
-  // The comparison has to span the WHOLE plain scalar, not its first physical
-  // line. A plain scalar continues onto more-indented lines, so
-  //
-  //     description: Covers boards
-  //       #28 and #11
-  //
-  // parses to `Covers boards` — and a first-line-only check compares that
-  // against `Covers boards` and sees no loss, passing the exact truncation this
-  // guard exists to reject (Copilot).
-  const lines = frontmatter.split("\n");
-  for (const [field, parsed] of [
-    ["description", description],
-    ["when_to_use", whenToUse],
-  ]) {
-    if (typeof parsed !== "string") continue;
-    const start = lines.findIndex((l) =>
-      new RegExp("^" + field + ":([ \\t]|$)").test(l),
+  // Ask the PARSER what it discarded rather than re-deriving it from the raw
+  // text. `yaml` hangs the comment it stripped on the scalar node itself, so a
+  // plain scalar with a `.comment` is exactly the truncation case, and a quoted
+  // or block scalar never has one. Three rounds of regex here each fixed one
+  // shape and missed the next — a tag or anchor before the value, a scalar
+  // continued onto indented lines, then a continuation across a blank line, and
+  // key forms (`"description":`, `description :`) that populate the mapping
+  // while matching no `^description:` line at all (Copilot). The node carries
+  // all of them for free, so none of that scanning survives.
+  for (const field of ["description", "when_to_use"]) {
+    const node = doc.get(field, true);
+    // `typeof node.value !== "string"` also covers the non-scalar cases: a map
+    // or list node has no `.value`, and its own checks above already report it.
+    if (!node || typeof node.value !== "string") continue;
+    const dropped = node.comment;
+    if (typeof dropped !== "string") continue;
+    errors.push(
+      "`" +
+        field +
+        "` is truncated by an unquoted `#` — YAML kept `" +
+        node.value +
+        "` and dropped `#" +
+        dropped +
+        "`; quote the value",
     );
-    if (start === -1) continue;
-    const head = lines[start].slice(field.length + 1).trim();
-    // A scalar may carry YAML properties — a tag, an anchor, or both, in either
-    // order — before its value. Testing the first character alone read
-    // `&copy "Counts # safely"` as unquoted and then rejected the `#` that the
-    // quotes make harmless, so strip the properties before deciding (Copilot).
-    const value = head.replace(
-      /^(?:(?:!(?:!?[\w:.-]*|<[^>]*>)|&[^\s]+)\s+)+/,
-      "",
-    );
-    // Only an unquoted scalar can lose text to a comment; a quoted one is safe,
-    // and a block scalar (`|`/`>`) is read literally rather than comment-stripped.
-    if (/^["'|>]/.test(value)) continue;
-    // Continuation lines are indented and are not the next `key:` of the map.
-    const parts = [value];
-    for (let i = start + 1; i < lines.length; i++) {
-      const l = lines[i];
-      if (!/^[ \t]/.test(l) || l.trim() === "") break;
-      parts.push(l.trim());
-    }
-    // YAML folds a plain scalar's newlines to single spaces, so compare on
-    // whitespace-collapsed text rather than on the raw characters.
-    const collapse = (s) => s.replace(/\s+/g, " ").trim();
-    const rawText = collapse(parts.join(" "));
-    const keptText = collapse(parsed);
-    // A raw scalar can legitimately be longer than the parsed value without any
-    // text being lost: YAML strips presentation syntax such as an anchor
-    // (`&name`) or a tag (`!!str`) from the value. Comparing lengths alone
-    // reported those as truncation, with a message blaming a `#` that is not
-    // there. Only look at the length when the scalar actually contains a comment
-    // marker — a `#` at the start or preceded by whitespace, which is precisely
-    // where YAML begins a comment (Copilot).
-    if (!/(^|\s)#/.test(rawText)) continue;
-    if (rawText.length > keptText.length) {
-      errors.push(
-        "`" +
-          field +
-          "` is truncated by an unquoted `#` — YAML kept " +
-          keptText.length +
-          " of " +
-          rawText.length +
-          " characters; quote the value",
-      );
-    }
   }
 
   // A skill nothing can reach is dead weight that still costs a directory.

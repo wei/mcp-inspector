@@ -601,3 +601,72 @@ test("the positive floor counts distinct prompts, not entries", () => {
     [],
   );
 });
+
+test("the truncation guard covers noncanonical key forms", () => {
+  // `"description":` and `description :` both populate the mapping, so a guard
+  // that located the field by matching a `^description:` LINE skipped them
+  // entirely and left `verify:skills` green on a truncated listing (Copilot).
+  const mk = (key) =>
+    [
+      "---",
+      "name: alpha",
+      `${key} Covers board #28 and the hazard.`,
+      "disable-model-invocation: false",
+      "---",
+      "body",
+    ].join("\n");
+
+  for (const key of ['"description":', "'description':", "description :"]) {
+    const parsed = parseSkill("alpha", mk(key));
+    assert.equal(parsed.description, "Covers board", `key form: ${key}`);
+    assert.match(
+      parsed.errors.join(" "),
+      /`description` is truncated/,
+      `key form: ${key}`,
+    );
+  }
+});
+
+test("the truncation guard spans a blank line inside a plain scalar", () => {
+  // A plain scalar continues across empty lines too, so a scan that stopped at
+  // the first blank one inspected only the opening paragraph and reported no
+  // loss (Copilot).
+  const parsed = parseSkill(
+    "alpha",
+    [
+      "---",
+      "name: alpha",
+      "description: Covers boards",
+      "",
+      "  #28 and #11 and the hazard.",
+      "disable-model-invocation: false",
+      "---",
+      "body",
+    ].join("\n"),
+  );
+  assert.equal(parsed.description, "Covers boards");
+  assert.match(parsed.errors.join(" "), /`description` is truncated/);
+});
+
+test("a standalone comment line is not read as truncation", () => {
+  // The guard keys on the comment the parser hung on the SCALAR. A comment on
+  // its own line belongs to the document, not to the description, and flagging
+  // it would fail a frontmatter that loses nothing.
+  for (const frontmatter of [
+    ["# leading", "name: alpha", "description: Covers boards"],
+    ["name: alpha", "description: Covers boards", "# standalone"],
+    ["name: alpha", "description: Issue#28 needs no quoting"],
+  ]) {
+    const parsed = parseSkill(
+      "alpha",
+      [
+        "---",
+        ...frontmatter,
+        "disable-model-invocation: false",
+        "---",
+        "body",
+      ].join("\n"),
+    );
+    assert.deepEqual(parsed.errors, [], frontmatter.join(" | "));
+  }
+});
