@@ -60,8 +60,10 @@ export function vitestSharedPaths(clientDir: string) {
     // client's resolution chain is guaranteed to find one — not that they are
     // all root `dependencies`: `express` is test-only and sits in the root
     // `devDependencies`. Nor is this the complete root runtime set; a package
-    // that resolves unambiguously without help (`ajv`, `commander`, `open`,
-    // `undici`, `zod`) needs no pin and has none.
+    // no client install carries a copy of (`ajv`, `commander`, `undici`)
+    // resolves to the root on its own and needs no pin. Absence from this list
+    // is a statement about the installed tree, not about the manifests — check
+    // the tree before adding or removing an entry.
     //
     // `express` and `yaml` are reached only through `test-servers/src` —
     // express by the http/oauth servers, yaml by `load-config.ts` — which is
@@ -92,11 +94,14 @@ export function vitestSharedPaths(clientDir: string) {
       find: /^proper-lockfile$/,
       replacement: path.resolve(repoRoot, "node_modules/proper-lockfile"),
     },
-    // The rest of `core/`'s runtime dependencies, consolidated into the root
-    // manifest by #2195. Each of these used to be declared by the clients that
-    // reached it and was pinned to `<client>/node_modules` accordingly; once
-    // the declarations went away those paths stopped existing, so the pin has
-    // to follow the package to the root. Left un-repointed they would resolve
+    // The rest of the root-owned aliases, consolidated into the root manifest
+    // by #2195. Mostly `core/`'s runtime dependencies, but not only —
+    // `@hono/node-server` is reached from web client code alone and is here for
+    // the same resolution reason rather than because `core/` imports it. Each
+    // used to be declared by the clients that reached it and was pinned to
+    // `<client>/node_modules` accordingly; once the declarations went away
+    // those paths stopped existing, so the pin has to follow the package to
+    // the root. Left un-repointed they would resolve
     // to a directory that is not there — or, worse, to a transitive copy some
     // unrelated dependency happened to drag in, which is the duplicate this
     // whole pin list exists to prevent.
