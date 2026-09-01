@@ -234,7 +234,10 @@ break.
    description containing `:` or `#` is **quoted**. An unquoted colon loads the
    body with an _empty_ description, so `/name` still works while the skill can
    never auto-fire again; an unquoted `#` is worse-behaved, truncating the
-   description from that point on so it stays non-empty and every check passes.
+   description from that point on so it stays *non-empty* — which is why it went
+   unnoticed until `board-ops` lost both its board numbers. `verify:skills` now
+   rejects that truncation, so the gate catches it; quote the value rather than
+   relying on the check to tell you.
 2. `disable-model-invocation` is declared explicitly; default it to `false`.
 3. Description is action-first, with `Use when …; when …; when …`.
 4. **If the skill is model-invoked**, `evals/evals.json` carries **at least

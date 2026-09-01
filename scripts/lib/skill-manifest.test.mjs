@@ -504,3 +504,32 @@ test("the truncation guard spans a multiline plain scalar", () => {
   assert.deepEqual(ok.errors, []);
   assert.equal(ok.description, "Covers boards and the option-deletion hazard.");
 });
+
+test("the truncation guard ignores anchors and tags, which are not `#`", () => {
+  // YAML strips presentation syntax from the parsed value, so `&anchor` and
+  // `!!tag` make the raw scalar legitimately longer than what it parses to.
+  // A bare length comparison called those truncation and blamed a `#` that was
+  // nowhere in the text.
+  const mk = (value) =>
+    [
+      "---",
+      "name: alpha",
+      `description: ${value}`,
+      "disable-model-invocation: false",
+      "---",
+      "body",
+    ].join("\n");
+
+  const anchored = parseSkill("alpha", mk("&copy Some valid text."));
+  assert.deepEqual(anchored.errors, []);
+  assert.equal(anchored.description, "Some valid text.");
+
+  const tagged = parseSkill("alpha", mk("!!str Some tagged text."));
+  assert.deepEqual(tagged.errors, []);
+
+  // The real case must still fail, so the gate is not simply disarmed.
+  assert.match(
+    parseSkill("alpha", mk("Covers board #28 (v2).")).errors.join(" "),
+    /`description` is truncated/,
+  );
+});

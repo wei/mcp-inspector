@@ -192,6 +192,14 @@ export function parseSkill(dirName, text) {
     const collapse = (s) => s.replace(/\s+/g, " ").trim();
     const rawText = collapse(parts.join(" "));
     const keptText = collapse(parsed);
+    // A raw scalar can legitimately be longer than the parsed value without any
+    // text being lost: YAML strips presentation syntax such as an anchor
+    // (`&name`) or a tag (`!!str`) from the value. Comparing lengths alone
+    // reported those as truncation, with a message blaming a `#` that is not
+    // there. Only look at the length when the scalar actually contains a comment
+    // marker — a `#` at the start or preceded by whitespace, which is precisely
+    // where YAML begins a comment (Copilot).
+    if (!/(^|\s)#/.test(rawText)) continue;
     if (rawText.length > keptText.length) {
       errors.push(
         "`" +
