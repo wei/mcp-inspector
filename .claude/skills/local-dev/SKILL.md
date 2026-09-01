@@ -1,6 +1,6 @@
 ---
 name: local-dev
-description: Getting the Inspector running locally, and the reasoning behind its dependency rules. Which install to run and which script starts each client (web, cli, tui, launcher); why v2 is not an npm workspace; how the @inspector/core alias works; and why the placement rules in AGENTS.md are what they are — what each one is defending against, what it looked like when it was violated, and how to tell you have hit one.
+description: Install, build and run the Inspector locally, and place a dependency correctly. Use when starting the web, cli, tui or launcher client; when asking whether a build or rebuild is needed before a run script works; when an install, an @inspector/core import or a client bundle fails at run time; when adding or bumping a dependency and choosing which package.json declares it; or when a bundler external, a version skew or a git worktree is the suspect.
 disable-model-invocation: false
 ---
 

@@ -8,7 +8,15 @@
     "expect": "test-servers"
   },
   {
-    "prompt": "I renamed a file under test-servers/src and the fixture is still running the old code. Why?",
+    "prompt": "I need to run a real MCP server locally to exercise this change by hand. Which one do I run, and how do I start it?",
+    "expect": "test-servers"
+  },
+  {
+    "prompt": "Which protocol era should I connect with when I run one of these fixtures by hand?",
+    "expect": "test-servers"
+  },
+  {
+    "prompt": "I need a fixture combination that doesn't exist yet. How do I add one?",
     "expect": "test-servers"
   },
   {

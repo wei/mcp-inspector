@@ -154,7 +154,14 @@ that from happening:
    Code does and fails on anything that would strip the metadata — most importantly
    **malformed YAML**, which loads the body with an *empty* description, so
    `/skill-name` still works and a manual spot check passes while the skill can
-   never auto-fire again. An unquoted colon in a description is enough. It also
+   never auto-fire again. An unquoted colon in a description is enough — and so
+   is an unquoted **`#`**, which YAML reads as a comment and which truncates the
+   description *silently* from that point on rather than emptying it. `board-ops`
+   shipped that way: `Covers board #28 (v2) and board #11 (v1), their
+   node/field/option IDs, and the option-deletion hazard` was cut at `#28`, so 90
+   characters — including both board numbers — were absent from the listing while
+   every check stayed green, because a truncated description is still a non-empty
+   one. **Quote any description containing `#` or `:`.** It also
    runs `claude plugin validate` — the authoritative schema — when the installed
    CLI is **exactly** the pinned version, and otherwise says so and moves on.
    That best-effort hand-off keeps `validate` fast and offline, but it also
@@ -180,7 +187,7 @@ that from happening:
    skill at all: it is absent from the listing and the Skill tool refuses it. The
    costs are asymmetric — a spurious load costs ~250 characters, a missed one
    costs a wrong base branch or an unsigned commit — and the budget is not tight
-   (nine of the ten are model-invoked today and total ~2.8k of 4k). Reserve
+   (nine of the ten are model-invoked today and total ~3.2k of 4k). Reserve
    `true` for a procedure that is genuinely only ever started deliberately —
    `release` is the only one left, because nobody cuts a release by implication.
    ⚠️ **A `true` skill cannot be reached by another skill either.** If a
@@ -191,10 +198,14 @@ that from happening:
    of the ones already there: `project-structure` fell from 100% to 0% on two
    cases (n=4) and `testing` from 3/5 to 2/5, while the six new skills all
    measured 100% and every negative case stayed clean. So the ceiling is
-   attention, not characters — we were at 2.8k of a 4k budget throughout. Adding
+   attention, not characters — we were at 2.8k of a 4k budget throughout *that
+   experiment* (it is ~3.2k now; the point is that nothing was near the cap). Adding
    a skill therefore has a cost paid by the *existing* ones, which only
    `skills:eval` can see. **Re-run the full eval after any flip _or description
    edit_**, not just the changed skill's own cases.
+   **How to write a description that fires, and cases that measure it, is
+   [`docs/skill-authoring.md`](./docs/skill-authoring.md)** — the case shapes
+   that work, the ones that can never pass, and the probe-then-measure loop.
    The lever that works is the description's *shape*. Leading with the actions
    and then enumerating concrete situations ("Use when … ; when … ; when …")
    beats a noun-phrase list of contents: it took `pre-push-gate` from 3/5 to 5/5
@@ -212,7 +223,10 @@ that from happening:
    `evals/evals.json` — positives **and negatives**. Seeing a skill fire once tells
    you Claude found it, not that it finds it reliably, and a skill that fires on
    everything is a context regression that nobody notices by hand. `verify:skills`
-   requires both kinds; `npm run skills:eval` actually runs them (it needs the
+   requires both kinds — and at least **five** positives, for breadth rather than
+   variance: each prompt is scored on its own `passes / RUNS`, so more prompts
+   steady nothing, they cover more of the ways someone might reach the skill and
+   expose a description that only fires on one narrow phrasing; `npm run skills:eval` actually runs them (it needs the
    `claude` CLI and real model calls, so it is deliberately **not** in the gate —
    run it when adding a skill or editing a model-invoked description).
    Two things learned writing the first set, both of which make a case measure
@@ -233,7 +247,7 @@ that from happening:
    overflows, and drops the least-invoked entries **first** — which are exactly the
    model-invoked skills that must fire on their own. `verify:skills` prints the
    current cost against the budget recorded in `scripts/lib/skill-manifest.mjs`
-   (2,834/4,000 characters as of this writing) and fails when it is exceeded. Raise
+   (3,234/4,000 characters as of this writing) and fails when it is exceeded. Raise
    the budget deliberately, or tighten a description; each entry is capped at 1,536
    characters regardless, so **put the key use case first**.
 

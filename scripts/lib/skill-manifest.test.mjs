@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import {
   splitFrontmatter,
   parseSkill,
+  MIN_POSITIVE_CASES,
   validateEvalCases,
   listingCost,
   parseClaudeVersion,
@@ -175,15 +176,18 @@ test("listingCost counts only the skills that occupy the listing", () => {
 });
 
 test("validateEvalCases requires a positive and a negative", () => {
+  const positives = (n, expect = "testing") =>
+    Array.from({ length: n }, (_, i) => ({ prompt: `p${i}`, expect }));
+
   assert.deepEqual(
     validateEvalCases("testing", [
-      { prompt: "a", expect: "testing" },
+      ...positives(MIN_POSITIVE_CASES),
       { prompt: "b", expect: null },
     ]),
     [],
   );
   assert.match(
-    validateEvalCases("testing", [{ prompt: "a", expect: "testing" }]).join(),
+    validateEvalCases("testing", positives(MIN_POSITIVE_CASES)).join(),
     /no negative case/,
   );
   assert.match(
@@ -335,7 +339,10 @@ test("an eval file may only expect its own skill", () => {
   assert.match(
     validateEvalCases("testing", [
       { prompt: "a", expect: "local-dev" },
-      { prompt: "b", expect: "testing" },
+      ...Array.from({ length: MIN_POSITIVE_CASES }, (_, i) => ({
+        prompt: `p${i}`,
+        expect: "testing",
+      })),
       { prompt: "c", expect: null },
     ]).join(),
     /expects `local-dev`, but this file only measures `testing`/,
@@ -350,9 +357,351 @@ test("an eval file may only expect its own skill", () => {
   // Null and own-name cases are unaffected.
   assert.deepEqual(
     validateEvalCases("testing", [
-      { prompt: "a", expect: "testing" },
+      ...Array.from({ length: MIN_POSITIVE_CASES }, (_, i) => ({
+        prompt: `p${i}`,
+        expect: "testing",
+      })),
       { prompt: "b", expect: null },
     ]),
     [],
   );
+});
+
+test("an unquoted `#` truncates a description, and that is an error", () => {
+  // The dangerous part is that YAML leaves a *non-empty* string behind, so the
+  // "description is required and non-empty" check passes and the skill keeps
+  // auto-firing — just with its most distinctive words missing from the
+  // listing. `board-ops` shipped this way, losing both board numbers.
+  const withHash = [
+    "---",
+    "name: board-ops",
+    "description: Recipes. Covers board #28 (v2) and board #11 (v1).",
+    "disable-model-invocation: false",
+    "---",
+    "body",
+  ].join("\n");
+  const parsed = parseSkill("board-ops", withHash);
+  assert.equal(parsed.description, "Recipes. Covers board");
+  assert.match(parsed.errors.join(" "), /truncated by an unquoted `#`/);
+
+  // Quoting is the fix, and it must come back clean.
+  const quoted = withHash.replace(
+    /^description: (.*)$/m,
+    (_m, d) => `description: "${d}"`,
+  );
+  const ok = parseSkill("board-ops", quoted);
+  assert.deepEqual(ok.errors, []);
+  assert.equal(
+    ok.description,
+    "Recipes. Covers board #28 (v2) and board #11 (v1).",
+  );
+});
+
+test("a `#` inside a quoted description is not treated as truncation", () => {
+  // Guard against the check firing on every legitimately quoted description.
+  const quoted = [
+    "---",
+    "name: alpha",
+    'description: "counts # and : safely"',
+    "disable-model-invocation: false",
+    "---",
+    "body",
+  ].join("\n");
+  assert.deepEqual(parseSkill("alpha", quoted).errors, []);
+});
+
+test("a model-invoked skill needs at least MIN_POSITIVE_CASES positives", () => {
+  // `positives === 0` alone let a skill regress to a single prompt and still
+  // pass the gate. The floor is about breadth, not variance: each prompt is
+  // scored on its own `passes / RUNS`, so extra prompts steady nothing — they
+  // cover more of the ways someone might reach the skill, so a description that
+  // fires on one narrow phrasing cannot pass on that single case alone.
+  const withPositives = (n) => [
+    ...Array.from({ length: n }, (_, i) => ({
+      prompt: `p${i}`,
+      expect: "alpha",
+    })),
+    { prompt: "n", expect: null },
+  ];
+
+  assert.match(
+    validateEvalCases("alpha", withPositives(1)).join(" "),
+    /only 1 distinct positive prompt\(s\)/,
+  );
+  assert.match(
+    validateEvalCases("alpha", withPositives(MIN_POSITIVE_CASES - 1)).join(" "),
+    /needs at least 5 to cover the range/,
+  );
+  assert.deepEqual(
+    validateEvalCases("alpha", withPositives(MIN_POSITIVE_CASES)),
+    [],
+  );
+
+  // Zero still reports the clearer "no positive case" message rather than the
+  // count one, so the common mistake keeps its specific diagnosis.
+  assert.match(
+    validateEvalCases("alpha", [{ prompt: "n", expect: null }]).join(" "),
+    /no positive case expects/,
+  );
+});
+
+test("the truncation guard covers `when_to_use`, not just `description`", () => {
+  // The guard loops over both fields, so a regression that dropped `when_to_use`
+  // from that list would be invisible to the description-only tests above.
+  const withHash = [
+    "---",
+    "name: alpha",
+    'description: "safe because quoted"',
+    "when_to_use: Use when filing against board #28 or board #11.",
+    "disable-model-invocation: false",
+    "---",
+    "body",
+  ].join("\n");
+  const parsed = parseSkill("alpha", withHash);
+  assert.equal(parsed.whenToUse, "Use when filing against board");
+  assert.match(parsed.errors.join(" "), /`when_to_use` is truncated/);
+  // The description is quoted, so it must not be implicated.
+  assert.doesNotMatch(parsed.errors.join(" "), /`description` is truncated/);
+
+  const quoted = withHash.replace(
+    /^when_to_use: (.*)$/m,
+    (_m, w) => `when_to_use: "${w}"`,
+  );
+  const ok = parseSkill("alpha", quoted);
+  assert.deepEqual(ok.errors, []);
+  assert.equal(ok.whenToUse, "Use when filing against board #28 or board #11.");
+});
+
+test("the truncation guard spans a multiline plain scalar", () => {
+  // A plain scalar continues onto more-indented lines, so a first-line-only
+  // comparison sees `Covers boards` on both sides and reports no loss — passing
+  // the exact truncation this guard exists to reject.
+  const multiline = [
+    "---",
+    "name: alpha",
+    "description: Covers boards",
+    "  #28 and #11 and the hazard.",
+    "disable-model-invocation: false",
+    "---",
+    "body",
+  ].join("\n");
+  const parsed = parseSkill("alpha", multiline);
+  assert.equal(parsed.description, "Covers boards");
+  assert.match(parsed.errors.join(" "), /`description` is truncated/);
+
+  // A multiline plain scalar with no `#` folds to one line and must stay clean,
+  // so the fix cannot be "reject anything multiline".
+  const folded = [
+    "---",
+    "name: alpha",
+    "description: Covers boards",
+    "  and the option-deletion hazard.",
+    "disable-model-invocation: false",
+    "---",
+    "body",
+  ].join("\n");
+  const ok = parseSkill("alpha", folded);
+  assert.deepEqual(ok.errors, []);
+  assert.equal(ok.description, "Covers boards and the option-deletion hazard.");
+});
+
+test("the truncation guard ignores anchors and tags, which are not `#`", () => {
+  // YAML strips presentation syntax from the parsed value, so `&anchor` and
+  // `!!tag` make the raw scalar legitimately longer than what it parses to.
+  // A bare length comparison called those truncation and blamed a `#` that was
+  // nowhere in the text.
+  const mk = (value) =>
+    [
+      "---",
+      "name: alpha",
+      `description: ${value}`,
+      "disable-model-invocation: false",
+      "---",
+      "body",
+    ].join("\n");
+
+  const anchored = parseSkill("alpha", mk("&copy Some valid text."));
+  assert.deepEqual(anchored.errors, []);
+  assert.equal(anchored.description, "Some valid text.");
+
+  const tagged = parseSkill("alpha", mk("!!str Some tagged text."));
+  assert.deepEqual(tagged.errors, []);
+
+  // The real case must still fail, so the gate is not simply disarmed.
+  assert.match(
+    parseSkill("alpha", mk("Covers board #28 (v2).")).errors.join(" "),
+    /`description` is truncated/,
+  );
+});
+
+test("a quoted scalar stays safe behind a tag or an anchor", () => {
+  // Properties may precede the value, in either order. Testing the first
+  // character alone read these as unquoted and then rejected the `#` that the
+  // quotes make harmless.
+  const mk = (value) =>
+    [
+      "---",
+      "name: alpha",
+      `description: ${value}`,
+      "disable-model-invocation: false",
+      "---",
+      "body",
+    ].join("\n");
+
+  for (const value of [
+    '&copy "Counts # safely"',
+    '!!str "Counts # safely"',
+    '!!str &a "Counts # safely"',
+  ]) {
+    const parsed = parseSkill("alpha", mk(value));
+    assert.deepEqual(parsed.errors, [], `rejected: ${value}`);
+    assert.equal(parsed.description, "Counts # safely");
+  }
+});
+
+test("the positive floor counts distinct prompts, not entries", () => {
+  // The floor exists for breadth, so repeating one prompt five times clears an
+  // entry count while exercising exactly the single trigger it looks past.
+  const duplicated = [
+    ...Array.from({ length: MIN_POSITIVE_CASES }, () => ({
+      prompt: "the same prompt",
+      expect: "alpha",
+    })),
+    { prompt: "n", expect: null },
+  ];
+  const errors = validateEvalCases("alpha", duplicated).join(" ");
+  assert.match(
+    errors,
+    /only 1 distinct positive prompt\(s\) across 5 case\(s\)/,
+  );
+
+  // Whitespace and casing are not a new situation either.
+  const nearDuplicates = [
+    { prompt: "How do I do the thing?", expect: "alpha" },
+    { prompt: "how do i   do the thing?", expect: "alpha" },
+    { prompt: "How do I do the thing?  ", expect: "alpha" },
+    { prompt: "b", expect: "alpha" },
+    { prompt: "c", expect: "alpha" },
+    { prompt: "n", expect: null },
+  ];
+  assert.match(
+    validateEvalCases("alpha", nearDuplicates).join(" "),
+    /only 3 distinct positive prompt\(s\)/,
+  );
+
+  // Five genuinely different prompts pass.
+  assert.deepEqual(
+    validateEvalCases("alpha", [
+      ...Array.from({ length: MIN_POSITIVE_CASES }, (_, i) => ({
+        prompt: `p${i}`,
+        expect: "alpha",
+      })),
+      { prompt: "n", expect: null },
+    ]),
+    [],
+  );
+});
+
+test("a quoted or block scalar may carry a trailing comment", () => {
+  // `yaml` attaches a legitimate trailing comment to these nodes too, so keying
+  // on `.comment` alone rejected valid frontmatter and told the author to quote
+  // a value that was already quoted. Only a PLAIN scalar can lose text to one.
+  for (const value of ['"Complete value" # note', "'Complete value' # note"]) {
+    const parsed = parseSkill(
+      "alpha",
+      [
+        "---",
+        "name: alpha",
+        `description: ${value}`,
+        "disable-model-invocation: false",
+        "---",
+        "body",
+      ].join("\n"),
+    );
+    assert.deepEqual(parsed.errors, [], value);
+    assert.equal(parsed.description, "Complete value");
+  }
+
+  const block = parseSkill(
+    "alpha",
+    [
+      "---",
+      "name: alpha",
+      "description: | # note",
+      "  Complete value",
+      "disable-model-invocation: false",
+      "---",
+      "body",
+    ].join("\n"),
+  );
+  assert.deepEqual(block.errors, []);
+});
+
+test("the truncation guard covers noncanonical key forms", () => {
+  // `"description":` and `description :` both populate the mapping, so a guard
+  // that located the field by matching a `^description:` LINE skipped them
+  // entirely and left `verify:skills` green on a truncated listing (Copilot).
+  const mk = (key) =>
+    [
+      "---",
+      "name: alpha",
+      `${key} Covers board #28 and the hazard.`,
+      "disable-model-invocation: false",
+      "---",
+      "body",
+    ].join("\n");
+
+  for (const key of ['"description":', "'description':", "description :"]) {
+    const parsed = parseSkill("alpha", mk(key));
+    assert.equal(parsed.description, "Covers board", `key form: ${key}`);
+    assert.match(
+      parsed.errors.join(" "),
+      /`description` is truncated/,
+      `key form: ${key}`,
+    );
+  }
+});
+
+test("the truncation guard spans a blank line inside a plain scalar", () => {
+  // A plain scalar continues across empty lines too, so a scan that stopped at
+  // the first blank one inspected only the opening paragraph and reported no
+  // loss (Copilot).
+  const parsed = parseSkill(
+    "alpha",
+    [
+      "---",
+      "name: alpha",
+      "description: Covers boards",
+      "",
+      "  #28 and #11 and the hazard.",
+      "disable-model-invocation: false",
+      "---",
+      "body",
+    ].join("\n"),
+  );
+  assert.equal(parsed.description, "Covers boards");
+  assert.match(parsed.errors.join(" "), /`description` is truncated/);
+});
+
+test("a standalone comment line is not read as truncation", () => {
+  // The guard keys on the comment the parser hung on the SCALAR. A comment on
+  // its own line belongs to the document, not to the description, and flagging
+  // it would fail a frontmatter that loses nothing.
+  for (const frontmatter of [
+    ["# leading", "name: alpha", "description: Covers boards"],
+    ["name: alpha", "description: Covers boards", "# standalone"],
+    ["name: alpha", "description: Issue#28 needs no quoting"],
+  ]) {
+    const parsed = parseSkill(
+      "alpha",
+      [
+        "---",
+        ...frontmatter,
+        "disable-model-invocation: false",
+        "---",
+        "body",
+      ].join("\n"),
+    );
+    assert.deepEqual(parsed.errors, [], frontmatter.join(" | "));
+  }
 });

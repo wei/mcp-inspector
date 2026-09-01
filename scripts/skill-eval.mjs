@@ -25,8 +25,9 @@
 // Closing that would need a deterministic trigger oracle, which does not exist.
 //
 // Usage:
-//   npm run skills:eval                  # every model-invoked skill's cases
-//   npm run skills:eval -- testing       # one skill's cases
+//   npm run skills:eval                        # every model-invoked skill's cases
+//   npm run skills:eval -- testing             # one skill's cases
+//   npm run skills:eval -- testing test-servers  # several skills' cases
 //   RUNS=5 THRESHOLD=0.8 npm run skills:eval
 
 import { spawn } from "node:child_process";
@@ -58,11 +59,19 @@ const CONCURRENCY = Number(process.env.CONCURRENCY ?? 4);
  * (Copilot). Every model-invoked skill is inspected; `only` is applied when
  * enqueueing.
  *
- * @param {string | undefined} only
+ * A name that matches no model-invoked skill is a hard error rather than an
+ * empty run: a typo would otherwise enqueue nothing and the eval would report a
+ * green 0/0, which reads exactly like a clean pass of the skill you meant.
+ *
+ * @param {string | string[] | undefined} only One or more skill names.
  * @param {string} [skillsDir]
  * @returns {{ cases: object[], ours: Set<string> }}
  */
 export function collectCases(only, skillsDir = SKILLS_DIR) {
+  const wanted =
+    only === undefined || only === null
+      ? null
+      : new Set(Array.isArray(only) ? only : [only]);
   const cases = [];
   const ours = new Set();
   for (const dir of readdirSync(skillsDir).sort()) {
@@ -103,8 +112,17 @@ export function collectCases(only, skillsDir = SKILLS_DIR) {
     if (invalid.length > 0) {
       throw new Error(`${dir}/evals/evals.json: ${invalid.join("; ")}`);
     }
-    if (only && dir !== only) continue;
+    if (wanted && !wanted.has(dir)) continue;
     for (const c of parsed) cases.push({ ...c, from: dir });
+  }
+  if (wanted) {
+    const unknown = [...wanted].filter((n) => !ours.has(n));
+    if (unknown.length > 0) {
+      throw new Error(
+        `no model-invoked skill named ${unknown.map((n) => `\`${n}\``).join(", ")} — ` +
+          `known: ${[...ours].sort().join(", ")}`,
+      );
+    }
   }
   return { cases, ours };
 }
@@ -310,7 +328,9 @@ async function main() {
     process.exit(1);
   }
 
-  const { cases, ours } = collectCases(process.argv[2]);
+  const { cases, ours } = collectCases(
+    process.argv.length > 2 ? process.argv.slice(2) : undefined,
+  );
   if (cases.length === 0) {
     console.error("skills:eval — no cases found.");
     process.exit(1);

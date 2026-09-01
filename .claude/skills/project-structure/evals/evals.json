@@ -1,14 +1,22 @@
 [
   {
-    "prompt": "What lives in clients/web versus @inspector/core?",
+    "prompt": "Something in the web client's Node backend needs changing but I do not know which piece handles what. How do I work that out?",
     "expect": "project-structure"
   },
   {
-    "prompt": "I'm adding a helper both the CLI and the web client need. Which directory does it belong in?",
+    "prompt": "I am adding a module that both the browser side and the Node side need to run. How do I decide where it goes in this repo?",
     "expect": "project-structure"
   },
   {
-    "prompt": "Which package owns the OAuth secret storage backends?",
+    "prompt": "Does browser-only transport code belong in core or in the web client?",
+    "expect": "project-structure"
+  },
+  {
+    "prompt": "I have a new file and I'm not sure where it goes. How do I decide in this repo?",
+    "expect": "project-structure"
+  },
+  {
+    "prompt": "I need to find where a feature is implemented but I do not know which client owns it. How do I work that out in this repo?",
     "expect": "project-structure"
   },
   {

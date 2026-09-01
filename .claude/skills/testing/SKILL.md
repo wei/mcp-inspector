@@ -11,6 +11,12 @@ statements, functions, and branches.** That rule and the React/Mantine
 conventions live in [`AGENTS.md`](../../../AGENTS.md); this skill is where a
 test goes, how to run it, and how to clear the gate.
 
+⚠️ **Anything that needs a real server to run against — an integration test, a
+smoke, reproducing a bug by hand — is `/test-servers`, and you have to load it.**
+Integration and smoke tests here drive a real server over a real transport
+rather than a mock, so picking, building and connecting to a fixture is a
+procedure of its own that this skill does not carry.
+
 ## Where the test file goes
 
 **Side-by-side by default; `src/test/` only for what can't be co-located; and

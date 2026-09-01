@@ -12,6 +12,14 @@
     "expect": "board-ops"
   },
   {
+    "prompt": "I'm about to edit the options on one of the board's single-select fields. Should I do anything first?",
+    "expect": "board-ops"
+  },
+  {
+    "prompt": "Several cards lost their Priority value after the field was edited. How do I put it back?",
+    "expect": "board-ops"
+  },
+  {
     "prompt": "Explain the difference between TCP and UDP.",
     "expect": null
   },

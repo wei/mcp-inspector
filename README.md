@@ -70,6 +70,7 @@ Each client has its own README with client-specific detail:
 | --- | --- |
 | [Architecture](./docs/architecture.md) | The `@inspector/core` shared package, and the web client's "dumb components" + Storybook approach |
 | [Testing and the quality gate](./docs/quality-gate.md) | What each `validate` / `coverage` / `smoke` / `verify:*` script covers, the GitHub-CI-vs-local-gate split, and the supported browsers |
+| [Writing a skill](./docs/skill-authoring.md) | How to write a skill description that actually fires, and eval cases that measure it — the case shapes that work, and the tuning loop |
 | [Test servers](./docs/test-servers.md) | The composable test servers and the showcase config for every feature — what to run, what to click, and what the broken build did |
 | [Publishing](./docs/publishing.md) | What ships in the tarball, the packaging invariants, and `pack:verify` |
 | [Docker](./docs/docker.md) | Running the container image — ports, volumes, and where secrets go |

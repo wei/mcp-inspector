@@ -1,6 +1,6 @@
 ---
 name: test-servers
-description: Run a composable MCP test server by hand — pick the showcase config that reproduces a given feature or bug, build test-servers, and connect with the right protocol era. Covers the stale-build hazard.
+description: Run a composable MCP test server by hand — pick the showcase config for a feature or bug, build it, and connect with the right protocol era. Use when a change, a PR or a smoke test needs a real server to exercise it; when reproducing a reported bug by hand; when choosing which fixture or protocol era to run; when a fixture keeps serving stale code after an edit; or when the config or preset you need does not exist yet.
 disable-model-invocation: false
 ---
 

@@ -11,7 +11,7 @@
 // So every check here is deny-by-default: a file we cannot read the way Claude
 // Code reads it is an error, not a skip.
 
-import { parse as parseYaml } from "yaml";
+import { parseDocument } from "yaml";
 
 /**
  * Per-entry cap Claude Code applies to a skill listing entry. It covers
@@ -84,9 +84,15 @@ export function parseSkill(dirName, text) {
   const { frontmatter, error } = splitFrontmatter(text);
   if (error) return { errors: [error] };
 
+  let doc;
   let meta;
   try {
-    meta = parseYaml(frontmatter);
+    // `parseDocument` rather than `parse`: the truncation guard below needs the
+    // scalar NODES, not just their values, and parsing once keeps the two views
+    // of the frontmatter from ever disagreeing.
+    doc = parseDocument(frontmatter);
+    if (doc.errors.length > 0) throw new Error(doc.errors[0].message);
+    meta = doc.toJS();
   } catch (e) {
     // The whole point of the guard: this is what strips the description.
     return {
@@ -150,6 +156,46 @@ export function parseSkill(dirName, text) {
       errors.push("`paths` must be a list of glob strings");
     }
   }
+  // An unquoted `#` is a YAML comment, so a description containing one is
+  // truncated at that point — silently, and *not* to empty, which is why the
+  // "malformed YAML" checks sail past it: what survives still parses as a
+  // non-empty string. `board-ops` shipped for a while with its two board numbers
+  // and the option-deletion hazard cut off this way.
+  //
+  // Ask the PARSER what it discarded rather than re-deriving it from the raw
+  // text. `yaml` hangs the comment it stripped on the scalar node itself, so a
+  // plain scalar with a `.comment` is exactly the truncation case, and a quoted
+  // or block scalar never has one. Three rounds of regex here each fixed one
+  // shape and missed the next — a tag or anchor before the value, a scalar
+  // continued onto indented lines, then a continuation across a blank line, and
+  // key forms (`"description":`, `description :`) that populate the mapping
+  // while matching no `^description:` line at all (Copilot). The node carries
+  // all of them for free, so none of that scanning survives.
+  for (const field of ["description", "when_to_use"]) {
+    const node = doc.get(field, true);
+    // `typeof node.value !== "string"` also covers the non-scalar cases: a map
+    // or list node has no `.value`, and its own checks above already report it.
+    if (!node || typeof node.value !== "string") continue;
+    // Only on a PLAIN scalar is a comment evidence of loss. A quoted or block
+    // scalar can carry a perfectly legitimate trailing one — `description:
+    // "Complete value" # note` keeps its whole value — and flagging that told
+    // the author to quote a value they had already quoted (Copilot). The regex
+    // this replaced tested the same thing by reading the first character; the
+    // node states it outright.
+    if (node.type !== "PLAIN") continue;
+    const dropped = node.comment;
+    if (typeof dropped !== "string") continue;
+    errors.push(
+      "`" +
+        field +
+        "` is truncated by an unquoted `#` — YAML kept `" +
+        node.value +
+        "` and dropped `#" +
+        dropped +
+        "`; quote the value",
+    );
+  }
+
   // A skill nothing can reach is dead weight that still costs a directory.
   if (!modelInvoked && meta["user-invocable"] === false) {
     errors.push(
@@ -193,6 +239,18 @@ export function listingCost(skills) {
 }
 
 /**
+ * The number of positive cases a model-invoked skill's eval file must carry.
+ *
+ * This is a **breadth** floor, not a statistical one. The evaluator scores each
+ * prompt independently — `passes / RUNS` for that prompt alone — so adding
+ * prompts does not steady any other prompt's rate; `RUNS` is the only knob that
+ * does. What five prompts buy is coverage of five different ways someone might
+ * arrive at the skill, which is what exposes a description that fires on one
+ * narrow phrasing and nothing else (Copilot).
+ */
+export const MIN_POSITIVE_CASES = 5;
+
+/**
  * Validate an `evals/evals.json` payload for a model-invoked skill.
  *
  * A skill that fires on everything is a context regression, not a win, and it
@@ -232,10 +290,32 @@ export function validateEvalCases(skillName, cases) {
       );
     }
   });
-  const positives = cases.filter((c) => c && c.expect === skillName).length;
+  const positiveCases = cases.filter((c) => c && c.expect === skillName);
+  const positives = positiveCases.length;
+  // The floor exists for breadth, so it has to count *phrasings*, not entries:
+  // five copies of one prompt clear an entry count while exercising exactly the
+  // one trigger the floor is meant to look past (Copilot). Compare on collapsed,
+  // case-folded text so trivial edits do not read as a new situation.
+  const distinctPositives = new Set(
+    positiveCases.map((c) =>
+      String(c.prompt ?? "")
+        .toLowerCase()
+        .replace(/\s+/g, " ")
+        .trim(),
+    ),
+  ).size;
   const negatives = cases.filter((c) => c && c.expect === null).length;
   if (positives === 0) {
     errors.push(`no positive case expects \`${skillName}\``);
+  } else if (distinctPositives < MIN_POSITIVE_CASES) {
+    // A non-zero floor is not enough: one prompt measures one phrasing. Since
+    // each prompt is scored on its own `passes / RUNS`, extra prompts do not
+    // make any single rate steadier — they cover more of the ways someone might
+    // reach the skill, so a description that only fires on one narrow shape is
+    // visible instead of passing on its single lucky case (Copilot).
+    errors.push(
+      `only ${distinctPositives} distinct positive prompt(s)${positives === distinctPositives ? "" : ` across ${positives} case(s)`}; a model-invoked skill needs at least ${MIN_POSITIVE_CASES} to cover the range of situations it should fire on`,
+    );
   }
   if (negatives === 0) {
     errors.push(

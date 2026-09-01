@@ -23,6 +23,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { MIN_POSITIVE_CASES } from "./lib/skill-manifest.mjs";
 
 import {
   checkWiring,
@@ -66,9 +67,14 @@ const byName = (name, extra = "") =>
 const modelInvoked = (name) =>
   `---\nname: ${name}\ndescription: A description.\ndisable-model-invocation: false\n---\n\nBody\n`;
 
+// Clears the same MIN_POSITIVE_CASES floor the real eval files must, so this
+// fixture keeps meaning "well-formed" as that floor moves.
 const goodEvals = (name) =>
   JSON.stringify([
-    { prompt: "fires", expect: name },
+    ...Array.from({ length: MIN_POSITIVE_CASES }, (_, i) => ({
+      prompt: `fires ${i}`,
+      expect: name,
+    })),
     { prompt: "does not", expect: null },
   ]);
 
@@ -135,7 +141,23 @@ test("fails a model-invoked skill with no eval cases", () => {
 test("fails eval cases that are unreadable, all-positive, or all-negative", () => {
   for (const [evals, pattern] of [
     ["{ not json", /not valid JSON/],
-    [JSON.stringify([{ prompt: "a", expect: "beta" }]), /no negative case/],
+    [
+      JSON.stringify(
+        Array.from({ length: MIN_POSITIVE_CASES }, (_, i) => ({
+          prompt: `a${i}`,
+          expect: "beta",
+        })),
+      ),
+      /no negative case/,
+    ],
+    // Below the floor is its own failure, distinct from having none at all.
+    [
+      JSON.stringify([
+        { prompt: "a", expect: "beta" },
+        { prompt: "b", expect: null },
+      ]),
+      /needs at least 5 to cover the range/,
+    ],
     [JSON.stringify([{ prompt: "a", expect: null }]), /no positive case/],
     [JSON.stringify([{ expect: null }]), /prompt/],
   ]) {
