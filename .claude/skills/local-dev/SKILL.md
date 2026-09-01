@@ -89,7 +89,7 @@ to tell you have hit one.
 Work the rules in order: which manifest declares it, then `dependencies` vs
 `devDependencies`, then whether the bundlers must also externalise it.
 
-### Why the SDK packages are root-only
+### Why `core/`'s runtime dependencies are root-only
 
 A per-client declaration installs a **second copy** that drifts from the root's.
 Not theoretical: it put two versions of `ext-apps` (1.7.4 / 1.7.5) and of the
@@ -98,8 +98,59 @@ transitive v1 `@modelcontextprotocol/sdk` (1.29.0 / 1.30.0) in the tree at once
 `server.deps.inline` workaround in `vitest.shared.mts` exists for.
 
 The same reasoning extends to anything reached only through root-owned code that
-has no manifest of its own (`test-servers/src`, `core/`) — hence the repo-root
-alias for those in `vitest.shared.mts`. `express` and `yaml` are the two today.
+has no manifest of its own (`test-servers/src`, `core/`). #2195 made that the
+general case: `ajv`, `atomically`, `chokidar`, `hono`, `@napi-rs/keyring`,
+`pino`, `react` and `zod` moved to the root, joining `proper-lockfile` and
+`undici`, which were already there.
+
+Keep two distinctions straight, because AGENTS.md's rules split on them:
+
+- **Root-declared is not the same as `core/`-imported.** `commander`, `open` and
+  `@hono/node-server` are root `dependencies` too, but they are reached only
+  from client code. Only the `core/` set has to appear in *all three* bundler
+  `external` lists.
+- **Root-declared is not the same as aliased.** The `vitest.shared.mts` pins and
+  the `clients/web/tsconfig.*.json` `paths` cover the packages whose resolution
+  is genuinely ambiguous, which is two different situations: the importer is
+  `core/`, which has no manifest to resolve from, **or** a copy still sits in
+  the client install and would win. The second case is the one that is easy to
+  get wrong — `chokidar` (under `vite`), `zod` (under
+  `eslint-plugin-react-hooks`), `open` (under Storybook) and `react` (a peer of
+  `react-dom` and `ink`) are all present in a client's `node_modules` without
+  being declared there, so "we deleted the declaration" is not the same as "it
+  resolves from the root now". **Check the install, don't reason from the
+  manifest.** `ajv`, `commander` and `undici` carry no pin because no client
+  install has a copy of them at all.
+
+The point of deleting the client-side copies rather than merely keeping them in
+step is that **a package installs only into an install root that declares it**.
+Aligned duplicate declarations still drift the next time someone bumps one of
+them; no declaration at all cannot. `npm run verify:dep-lockstep` is the detector
+for the skew, and consolidation is what removes the opportunity.
+
+Two consequences that read as bugs and are not:
+
+- **`clients/cli` and `clients/launcher` declare no runtime dependencies.** Their
+  manifests carry `devDependencies` only. Everything they import at runtime is
+  root-declared and resolves by walking up from the client directory.
+- **A client's `node_modules` still contains some of these names.** They arrive
+  transitively (`chokidar` under `vite`, `react` as a peer of `react-dom` and
+  `ink`). That is why the `vitest.shared.mts` pins matter: an unpinned specifier
+  would resolve the nearest copy, which is the transitive one, not the root's.
+
+When a package moves to the root, its `vitest.shared.mts` pin has to move with
+it — a `path.resolve(dirname, …)` pin left behind points at a directory that no
+longer exists, or (for the transitive cases above) at the duplicate the pin was
+supposed to rule out.
+
+**`react` and `react-dom` are the exception, and stay pinned per client.** They
+are a matched pair — `react-dom` reaches into React internals — and `react-dom`
+is still web-declared, so npm resolves it and its React peer together inside
+`clients/web/node_modules` (19.2.8 today, against the root's 19.2.7). Pointing
+`react` at the root while `react-dom` resolves from the client would pair a
+renderer with a React it was not installed against, which is the same split the
+pin exists to prevent, arrived at from the other side. `dedupe` still collapses
+each install to one copy, which is what actually has to hold.
 
 ### Why runtime consumption decides `dependencies`
 

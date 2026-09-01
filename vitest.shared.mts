@@ -24,6 +24,10 @@ export function vitestSharedPaths(clientDir: string) {
     "react-dom",
     "@modelcontextprotocol/client",
     "@modelcontextprotocol/core",
+    // Every SDK schema is a zod type, so a second copy breaks `instanceof`
+    // across the whole surface. The alias below picks the install; this keeps
+    // it to one copy within it.
+    "zod",
   ];
 
   const nodeModulesAliases = [
@@ -50,43 +54,21 @@ export function vitestSharedPaths(clientDir: string) {
       find: /^react-dom\/client$/,
       replacement: path.resolve(dirname, "node_modules/react-dom/client.js"),
     },
-    { find: /^pino$/, replacement: path.resolve(dirname, "node_modules/pino") },
-    {
-      find: /^pino\/browser\.js$/,
-      replacement: path.resolve(dirname, "node_modules/pino/browser.js"),
-    },
-    {
-      find: /^hono$/,
-      replacement: path.resolve(dirname, "node_modules/hono/dist/index.js"),
-    },
-    {
-      find: /^hono\/streaming$/,
-      replacement: path.resolve(
-        dirname,
-        "node_modules/hono/dist/helper/streaming/index.js",
-      ),
-    },
-    {
-      find: /^@hono\/node-server$/,
-      replacement: path.resolve(dirname, "node_modules/@hono/node-server"),
-    },
-    {
-      find: /^atomically$/,
-      replacement: path.resolve(dirname, "node_modules/atomically"),
-    },
-    {
-      find: /^chokidar$/,
-      replacement: path.resolve(dirname, "node_modules/chokidar"),
-    },
-    {
-      find: /^@napi-rs\/keyring$/,
-      replacement: path.resolve(dirname, "node_modules/@napi-rs/keyring"),
-    },
-    // `express` and `yaml` resolve from the **repo root**, unlike every pin
-    // above. Both are reached only through `test-servers/src` — express by the
-    // http/oauth servers, yaml by `load-config.ts` — which is root-owned code
-    // with no manifest of its own, so the root is where they are declared and
-    // the only place a client's resolution chain is guaranteed to find them.
+    // Everything below is **root-owned** and resolves from the repo root,
+    // unlike the `react` / `react-dom` pins above. What they have in common is
+    // that no client declares them, so the root install is the only place a
+    // client's resolution chain is guaranteed to find one — not that they are
+    // all root `dependencies`: `express` is test-only and sits in the root
+    // `devDependencies`. Nor is this the complete root runtime set; a package
+    // no client install carries a copy of (`ajv`, `commander`, `undici`)
+    // resolves to the root on its own and needs no pin. Absence from this list
+    // is a statement about the installed tree, not about the manifests — check
+    // the tree before adding or removing an entry.
+    //
+    // `express` and `yaml` are reached only through `test-servers/src` —
+    // express by the http/oauth servers, yaml by `load-config.ts` — which is
+    // root-owned code with no manifest of its own.
+    //
     // Pointing these at `<client>/node_modules` is what broke when the MCP
     // packages moved to the root (#1970): express was never declared by a client
     // at all, it arrived in `clients/cli` as a peer of `express-rate-limit`
@@ -111,6 +93,78 @@ export function vitestSharedPaths(clientDir: string) {
     {
       find: /^proper-lockfile$/,
       replacement: path.resolve(repoRoot, "node_modules/proper-lockfile"),
+    },
+    // The rest of the root-owned aliases, consolidated into the root manifest
+    // by #2195. Mostly `core/`'s runtime dependencies, but not only —
+    // `@hono/node-server` is reached from web client code alone and is here for
+    // the same resolution reason rather than because `core/` imports it. Each
+    // used to be declared by the clients that reached it and was pinned to
+    // `<client>/node_modules` accordingly; once the declarations went away
+    // those paths stopped existing, so the pin has to follow the package to
+    // the root. Left un-repointed they would resolve
+    // to a directory that is not there — or, worse, to a transitive copy some
+    // unrelated dependency happened to drag in, which is the duplicate this
+    // whole pin list exists to prevent.
+    {
+      find: /^pino$/,
+      replacement: path.resolve(repoRoot, "node_modules/pino"),
+    },
+    {
+      find: /^pino\/browser\.js$/,
+      replacement: path.resolve(repoRoot, "node_modules/pino/browser.js"),
+    },
+    {
+      find: /^hono$/,
+      replacement: path.resolve(repoRoot, "node_modules/hono/dist/index.js"),
+    },
+    {
+      find: /^hono\/streaming$/,
+      replacement: path.resolve(
+        repoRoot,
+        "node_modules/hono/dist/helper/streaming/index.js",
+      ),
+    },
+    {
+      find: /^@hono\/node-server$/,
+      replacement: path.resolve(repoRoot, "node_modules/@hono/node-server"),
+    },
+    {
+      find: /^atomically$/,
+      replacement: path.resolve(repoRoot, "node_modules/atomically"),
+    },
+    {
+      find: /^chokidar$/,
+      replacement: path.resolve(repoRoot, "node_modules/chokidar"),
+    },
+    {
+      find: /^@napi-rs\/keyring$/,
+      replacement: path.resolve(repoRoot, "node_modules/@napi-rs/keyring"),
+    },
+    // `zod` and `open` are pinned for a different reason from everything above:
+    // they resolve *somewhere* without help, and the somewhere is wrong. Both
+    // still sit at the top level of `clients/web/node_modules` as transitive
+    // copies — zod under `eslint-plugin-react-hooks`, open under Storybook —
+    // so an unpinned bare import from a web test resolves the client copy while
+    // `core/` and the SDK packages resolve the root's (Copilot).
+    //
+    // For `open` that is merely wasteful. For `zod` it is the hazard this file
+    // exists for: two copies in one process means a schema built by one and an
+    // `instanceof` check made by the other, across the entire
+    // `@modelcontextprotocol/*` surface. The versions are identical today and
+    // `verify:dep-lockstep` is what keeps them that way, but identical is not
+    // the same as single, and only a pin makes it single.
+    //
+    // `zod/v4` needs its own entry — first-party code imports both specifiers,
+    // and pinning only the bare one would split the package across two installs
+    // rather than collapse it.
+    { find: /^zod$/, replacement: path.resolve(repoRoot, "node_modules/zod") },
+    {
+      find: /^zod\/v4$/,
+      replacement: path.resolve(repoRoot, "node_modules/zod/v4/index.js"),
+    },
+    {
+      find: /^open$/,
+      replacement: path.resolve(repoRoot, "node_modules/open"),
     },
   ];
 
