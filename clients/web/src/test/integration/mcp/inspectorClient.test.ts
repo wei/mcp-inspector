@@ -108,7 +108,7 @@ async function getTool(client: InspectorClient, name: string): Promise<Tool> {
  * legitimate thing to exercise, but `disconnect()` closes the SDK client, which
  * rejects every pending request with "Connection closed" — and a floating
  * promise makes that an *unhandled* rejection, which vitest counts as a run
- * error and fails `npm run ci` even though every test passes (#1947).
+ * error and fails `npm run local:gate` even though every test passes (#1947).
  *
  * Attach the handler at call time (not after the assertions) so there is no
  * window in which the rejection can escape, then finish through
@@ -5447,8 +5447,12 @@ describe("InspectorClient", () => {
         expect(c.getOAuthFlowStep()).toBeUndefined();
         expect(c.getOAuthFlowState()).toBeUndefined();
         await expect(c.getOAuthState()).resolves.toBeUndefined();
-        // clearOAuthTokens is a no-op when there is no manager
-        await expect(c.clearOAuthTokens()).resolves.toBeUndefined();
+        // clearOAuthTokens is a no-op when there is no manager; it still
+        // reports an outcome so callers have one shape to read (#2144).
+        await expect(c.clearOAuthTokens()).resolves.toEqual({
+          status: "skipped",
+          reason: "no_tokens",
+        });
       });
 
       it("setOAuthConfig throws when oauthManager is unset", () => {

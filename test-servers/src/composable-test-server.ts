@@ -614,6 +614,21 @@ export interface ServerConfig {
     resourceMetadataPath?: string;
 
     /**
+     * Serve the RFC 8414 authorization-server metadata document from this
+     * non-default path *instead of* `/.well-known/oauth-authorization-server`
+     * (combined mode only).
+     *
+     * Set it to `/.well-known/openid-configuration` to reproduce #2172: a
+     * plain OAuth 2.0 authorization server — no `jwks_uri`, no
+     * `subject_types_supported`, no `id_token_signing_alg_values_supported` —
+     * publishing RFC 8414 metadata at the OIDC well-known path, which RFC 8414
+     * §5 permits. As with `resourceMetadataPath`, the default route is left
+     * unserved, so a client that cannot read the document where it actually
+     * lives fails outright rather than quietly succeeding elsewhere.
+     */
+    asMetadataPath?: string;
+
+    /**
      * OAuth authorization server issuer URL (combined mode AS metadata).
      * If not provided, defaults to the test server's base URL.
      */
@@ -670,6 +685,14 @@ export interface ServerConfig {
      * Whether to support refresh tokens (default: true)
      */
     supportRefreshTokens?: boolean;
+
+    /**
+     * Whether to advertise and serve the RFC 7009 `revocation_endpoint`
+     * (default: true). Set to `false` to reproduce an authorization server that
+     * offers no revocation, where the Inspector must send nothing and clear
+     * local state exactly as it always has. (#2144)
+     */
+    supportRevocation?: boolean;
   };
   /**
    * Serve the modern (2026-07-28) protocol era via the SDK's
@@ -699,6 +722,31 @@ export interface ServerConfig {
      * error rendering (a conformant server never produces these on demand).
      */
     injectSpecErrors?: boolean;
+    /**
+     * When true, the modern HTTP leg installs a middleware that answers every
+     * `subscriptions/listen` with a bare JSON-RPC `result` — the spec's
+     * graceful-closure marker — instead of acknowledging it. That is the
+     * non-conformant server shape from #2097: "acknowledged and closed in the
+     * same breath". Used by the `subscriptions-never-acknowledged-http`
+     * showcase; a conformant server never does this on an opening listen.
+     *
+     * `"after-first"` acknowledges the first listen that **subscribes to a
+     * resource** and refuses every resource-subscription listen after it — the
+     * *reconnect* shape, and the only way to reach the Inspector's
+     * never-acknowledged badge by hand (it is gated on a live subscription,
+     * which a server refusing from the outset never lets you hold).
+     *
+     * A listen carrying no `resourceSubscriptions` is always acknowledged under
+     * this mode and does not consume the allowance. That exemption is what makes
+     * the mode reproducible: the Inspector already opens a listen at connect
+     * time when a list-change opt-in is live (#1920), so counting listens rather
+     * than resource-subscription listens would spend the allowance before the
+     * user clicks anything, refusing the very first Subscribe.
+     *
+     * `true` refuses every listen unconditionally, list-change-only ones
+     * included — the literal shape in the report.
+     */
+    neverAcknowledgeSubscriptions?: boolean | "after-first";
   };
   /**
    * Optional server control for orderly shutdown (test HTTP server).

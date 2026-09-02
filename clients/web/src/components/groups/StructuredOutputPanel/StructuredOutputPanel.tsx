@@ -72,7 +72,10 @@ export function StructuredOutputPanel({
   const [expanded, setExpanded] = useState(defaultExpanded);
 
   return (
-    <StructuredBox>
+    // `data-testid` so the headless tab smoke (#2148) can assert this section
+    // rendered without matching on its heading copy. A `data-*` attribute is
+    // not part of a component's typed props, so it is passed at the call site.
+    <StructuredBox data-testid="structured-output">
       <StructuredInner>
         <HeaderRow>
           <StructuredHeader>Structured Output</StructuredHeader>

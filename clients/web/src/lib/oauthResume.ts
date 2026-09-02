@@ -57,6 +57,19 @@ export interface OAuthResumeSnapshot {
   authChallenge?: AuthChallenge;
   /** Command-scoped recovery source when redirect was triggered by a user action. */
   recoverySource?: OAuthRecoverySource;
+  /**
+   * Identifies the redirect attempt that wrote this snapshot (#2165).
+   *
+   * Stamped by {@link writeOAuthResumeSnapshot} and matched by
+   * {@link clearOwnOAuthResumeSnapshot}, so an attempt that fails before
+   * navigating cannot delete a *later* attempt's snapshot. Nothing else reads
+   * it: the callback identifies its server by `serverId`, as before.
+   *
+   * Optional because a snapshot written by an older build (across a redirect
+   * that spans an upgrade) has none, and dropping such a snapshot would strand
+   * a live callback.
+   */
+  attemptId?: string;
 }
 
 export interface LiftedTabUiState {
@@ -168,15 +181,49 @@ export function restoreTabUiFromSnapshot(
   }
 }
 
-export function writeOAuthResumeSnapshot(snapshot: OAuthResumeSnapshot): void {
+/**
+ * Persist the snapshot, returning the **`attemptId`** it was stored under —
+ * the identifier {@link clearOwnOAuthResumeSnapshot} matches on (#2165), not
+ * the serialized snapshot and not anything to compare bytes against.
+ *
+ * A fresh id is minted per write unless the caller supplied one, so two
+ * redirect attempts are always distinguishable even when their snapshots are
+ * byte-identical.
+ *
+ * `undefined` when nothing was stored (no `window`, privacy mode, quota), so a
+ * caller holding one knows a clear is meaningful.
+ */
+export function writeOAuthResumeSnapshot(
+  snapshot: OAuthResumeSnapshot,
+): string | undefined {
   if (typeof window === "undefined") {
-    return;
+    return undefined;
   }
+  const attemptId = snapshot.attemptId ?? newAttemptId();
   try {
-    window.sessionStorage.setItem(OAUTH_RESUME_KEY, JSON.stringify(snapshot));
+    window.sessionStorage.setItem(
+      OAUTH_RESUME_KEY,
+      JSON.stringify({ ...snapshot, attemptId }),
+    );
+    return attemptId;
   } catch {
     // Best-effort — privacy mode / quota.
+    return undefined;
   }
+}
+
+/**
+ * A per-attempt identifier. `randomUUID` where it exists (it needs a secure
+ * context, which a `file://` page or a plain-HTTP non-loopback host is not),
+ * and otherwise a value that only has to be unique among the handful of
+ * redirect attempts one page can have in flight — never a security token.
+ */
+function newAttemptId(): string {
+  const uuid = globalThis.crypto?.randomUUID?.bind(globalThis.crypto);
+  if (uuid) {
+    return uuid();
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
 export function readOAuthResumeSnapshot(): OAuthResumeSnapshot | undefined {
@@ -228,6 +275,45 @@ function readLegacyPendingServerSnapshot(): OAuthResumeSnapshot | undefined {
     };
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * Clear the snapshot **only if it is still the one this attempt wrote** (#2165).
+ *
+ * `prepareOAuthRedirect` has no single-flight guard, so a redirect that fails
+ * before navigating can reject after a *later* attempt has already written its
+ * own snapshot. An unconditional clear there would delete the newer attempt's
+ * callback-routing state — a worse failure than the stale snapshot it is
+ * trying to avoid, since that redirect is actually in flight.
+ *
+ * Matched on the snapshot's `attemptId` rather than on its bytes: two
+ * concurrent redirects for the same server with the same shell state serialize
+ * identically while carrying *different* authorization URLs, which the
+ * snapshot does not record — so a byte comparison would report them as the
+ * same attempt and delete the wrong one.
+ *
+ * Returns whether anything was removed.
+ */
+export function clearOwnOAuthResumeSnapshot(
+  attemptId: string | undefined,
+): boolean {
+  if (typeof window === "undefined" || attemptId === undefined) {
+    return false;
+  }
+  try {
+    const raw = window.sessionStorage.getItem(OAUTH_RESUME_KEY);
+    if (!raw) {
+      return false;
+    }
+    const stored = JSON.parse(raw) as Partial<OAuthResumeSnapshot>;
+    if (stored?.attemptId !== attemptId) {
+      return false;
+    }
+    window.sessionStorage.removeItem(OAUTH_RESUME_KEY);
+    return true;
+  } catch {
+    return false;
   }
 }
 

@@ -143,8 +143,12 @@ export default defineConfig(({ command }) => {
       // (#1244), the browser dep graph reached bare-module subpaths in core/
       // that Rolldown couldn't resolve against `core/`'s parent (it has no
       // node_modules of its own). Promote the same bare-module aliases the
-      // vitest projects use so `vite dev` / `vite build` can resolve them
-      // from `clients/web/node_modules`.
+      // vitest projects use so `vite dev` / `vite build` can resolve them.
+      //
+      // Which install each alias points at is `vitest.shared.mts`'s decision,
+      // not this file's, and since #2195 it is no longer one answer: `react`
+      // and `react-dom` resolve from `clients/web/node_modules`, everything
+      // root-declared resolves from the repo root.
       alias: [
         ...Object.entries(sharedAliases).map(([find, replacement]) => ({
           find,
@@ -153,9 +157,9 @@ export default defineConfig(({ command }) => {
         ...nodeModulesAliases,
       ],
       // Source files in core/ import bare modules (react, @testing-library/react,
-      // etc.) that only exist in clients/web/node_modules. Dedupe ensures Vite
-      // resolves them from this package rather than walking up from core/'s
-      // location (which has no node_modules of its own yet).
+      // etc.) that core/ cannot resolve for itself, having no node_modules of
+      // its own. Dedupe collapses each of these to a single copy per install,
+      // whichever install the alias above selected.
       dedupe: sharedDedupe,
     },
     // Pin the Vite dev server to the same port and host the Hono plugin
@@ -189,7 +193,7 @@ export default defineConfig(({ command }) => {
         reporter: ["text", "html", "json-summary"],
         // Whitelist of gated directories. Deliberate top-level-file omissions
         // (every src *directory* below is gated):
-        //   • `src/App.tsx` — a ~4.5k-line composition root at ~42% branch
+        //   • `src/App.tsx` — a ~3.2k-line composition root at ~42% branch
         //     coverage; gating it is a dedicated testing/decomposition effort,
         //     not a whitelist tweak.
         //   • `src/main.tsx` / `src/index.ts` — the browser and bin bootstraps
@@ -274,10 +278,11 @@ export default defineConfig(({ command }) => {
         {
           extends: true,
           // Vitest projects don't inherit `resolve` from the parent. The unit
-          // project runs from repoRoot (so vitest's coverage transformer can
-          // reach core/), but repoRoot has no node_modules of its own — the
-          // shared regex aliases redirect bare `react`/`pino`/etc. imports
-          // from core/ back into clients/web/node_modules.
+          // project runs from repoRoot so vitest's coverage transformer can
+          // reach core/, which leaves core/'s own bare imports with nothing to
+          // resolve against — the shared regex aliases are what answer them,
+          // sending `react` to clients/web/node_modules and the root-declared
+          // packages (`pino`, `hono`, …) to the repo root (#2195).
           resolve: projectResolve,
           test: {
             name: "unit",
@@ -331,8 +336,9 @@ export default defineConfig(({ command }) => {
           extends: true,
           // See note on the unit project: integration tests also run from
           // repoRoot and import core/ modules, so they need the same alias
-          // setup. The shared bare-module aliases keep `pino`, `hono`, etc.
-          // resolving against clients/web/node_modules.
+          // setup, with the same split — `react` from this client's install,
+          // `pino` / `hono` and the rest of the root-declared set from the
+          // repo root.
           resolve: projectResolve,
           test: {
             name: "integration",

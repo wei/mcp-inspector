@@ -59,9 +59,10 @@ const h = vi.hoisted(() => {
     authenticate: vi.fn<InspectorClient["authenticate"]>(
       async () => new URL("https://auth.example/start"),
     ),
-    clearOAuthTokens: vi.fn<InspectorClient["clearOAuthTokens"]>(
-      async () => {},
-    ),
+    clearOAuthTokens: vi.fn<InspectorClient["clearOAuthTokens"]>(async () => ({
+      status: "skipped" as const,
+      reason: "no_endpoint" as const,
+    })),
     completeOAuthFlow: vi.fn<InspectorClient["completeOAuthFlow"]>(
       async () => {},
     ),
@@ -356,6 +357,26 @@ function oneStdio(): Record<string, TuiServer> {
 function oneHttp(): Record<string, TuiServer> {
   return {
     web: { config: { type: "streamable-http", url: "http://x" } } as never,
+  };
+}
+
+/** An HTTP server that opted out of RFC 7009 revocation on clear (#2144). */
+function oneHttpNoRevoke(): Record<string, TuiServer> {
+  return {
+    web: {
+      config: { type: "streamable-http", url: "http://x" },
+      settings: {
+        requestTimeout: 0,
+        metadata: {},
+        headers: [],
+        env: [],
+        roots: [],
+        maxFetchRequests: 1000,
+        taskTtl: 0,
+        connectionTimeout: 0,
+        oauthRevokeOnClear: false,
+      },
+    } as never,
   };
 }
 
@@ -665,6 +686,12 @@ beforeEach(() => {
     new URL("https://auth.example/start"),
   );
   h.clientSpies.clearOAuthTokens.mockReset();
+  // #2144: the clear now reads the returned revocation outcome, so the reset
+  // default has to be an outcome rather than `undefined`.
+  h.clientSpies.clearOAuthTokens.mockResolvedValue({
+    status: "skipped",
+    reason: "no_endpoint",
+  });
   h.clientSpies.completeOAuthFlow.mockReset();
   h.clientSpies.completeOAuthFlow.mockResolvedValue(undefined);
   h.clientSpies.getOAuthState.mockReset();
@@ -1348,6 +1375,116 @@ describe("App (mid-session auth lifecycle events)", () => {
     await waitUntil(() => h.clientSpies.clearOAuthTokens.mock.calls.length > 0);
     expect(h.clientSpies.clearOAuthTokens).toHaveBeenCalled();
     expect(h.disconnect).toHaveBeenCalled();
+  });
+
+  // #2144 — revocation is on unless the entry opted out, and the opt-out has to
+  // reach the client, since that is where the RFC 7009 request is made.
+  it("asks for revocation by default when clearing", async () => {
+    const r = await mount(oneHttp());
+    await press(r, ["a", "s"]);
+    await waitUntil(() => h.clientSpies.clearOAuthTokens.mock.calls.length > 0);
+    expect(h.clientSpies.clearOAuthTokens).toHaveBeenCalledWith({
+      revoke: true,
+    });
+  });
+
+  it("forwards the per-server revocation opt-out", async () => {
+    const r = await mount(oneHttpNoRevoke());
+    await press(r, ["a", "s"]);
+    await waitUntil(() => h.clientSpies.clearOAuthTokens.mock.calls.length > 0);
+    expect(h.clientSpies.clearOAuthTokens).toHaveBeenCalledWith({
+      revoke: false,
+    });
+  });
+
+  // A failed revocation leaves the grant live at the authorization server, so
+  // it has to be visible rather than swallowed — the local clear succeeded and
+  // would otherwise look like the whole operation did.
+  it("reports a failed revocation without failing the clear", async () => {
+    h.clientSpies.clearOAuthTokens.mockResolvedValue({
+      status: "failed",
+      detail: "unreachable",
+    });
+    const r = await mount(oneHttp());
+    await press(r, ["a", "s"]);
+    // The detail is what identifies the failure; the tone the message renders
+    // in is asserted against `AuthTab` directly, where the branch lives.
+    await expectFrame(r, "unreachable");
+  });
+
+  // The wiring is the contract here, not just `AuthTab`'s own behavior: a
+  // `void`-ing arrow between them resolves instantly, which makes the pending
+  // state, the repeat lock and the rejection path all inert while revocation
+  // is still running. Driven through the real App so the arrow cannot come
+  // back (#2144).
+  it("holds the pending state until the clear actually settles", async () => {
+    let settle: () => void = () => {};
+    h.clientSpies.clearOAuthTokens.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          settle = () =>
+            resolve({ status: "skipped", reason: "no_endpoint" as const });
+        }),
+    );
+    const r = await mount(oneHttp());
+    await press(r, ["a", "s"]);
+    await waitUntil(() => h.clientSpies.clearOAuthTokens.mock.calls.length > 0);
+    await tick();
+
+    // Still running: the pending line is up and the confirmation is not.
+    expect(r.lastFrame() ?? "").toContain("Clearing OAuth state");
+    expect(r.lastFrame() ?? "").not.toContain("OAuth state cleared");
+
+    // And the repeat lock is live, so a second press does not start another.
+    await press(r, ["s"]);
+    expect(h.clientSpies.clearOAuthTokens).toHaveBeenCalledTimes(1);
+
+    settle();
+    await waitUntil(() =>
+      (r.lastFrame() ?? "").includes("OAuth state cleared"),
+    );
+  });
+
+  // The clear has already succeeded when the disconnect runs, so its failure
+  // must not propagate: `AuthTab` would report "Could not clear OAuth state",
+  // which is false. It goes to the disconnect error line, where the same
+  // failure from the `d` key already lands.
+  it("reports a post-clear disconnect failure as a disconnect failure", async () => {
+    h.ctrl.status = "connected";
+    h.disconnect.mockRejectedValue(new Error("disconnect-blew-up"));
+    const r = await mount(oneHttp());
+    await press(r, ["a", "s"]);
+
+    await expectFrame(r, "disconnect-blew-up");
+    expect(r.lastFrame() ?? "").not.toContain("Could not clear OAuth state");
+  });
+
+  // A transport can reject with something that is not an `Error`; the message
+  // line must still be readable rather than "[object Object]".
+  it("reports a non-Error disconnect failure from a clear", async () => {
+    h.ctrl.status = "connected";
+    h.disconnect.mockRejectedValue("plain-disconnect-string");
+    const r = await mount(oneHttp());
+    await press(r, ["a", "s"]);
+    await expectFrame(r, "plain-disconnect-string");
+  });
+
+  // A clear while still CONNECTING tears the attempt down too — the session is
+  // half-built, and leaving it up with its OAuth state gone is worse than not
+  // having it.
+  it("disconnects a connecting session when clearing", async () => {
+    h.ctrl.status = "connecting";
+    const r = await mount(oneHttp());
+    await press(r, ["a", "s"]);
+    await waitUntil(() => h.disconnect.mock.calls.length > 0);
+    expect(h.disconnect).toHaveBeenCalled();
+  });
+
+  it("says nothing when there was nothing to revoke", async () => {
+    const r = await mount(oneHttp());
+    await press(r, ["a", "s"]);
+    await waitUntil(() => h.clientSpies.clearOAuthTokens.mock.calls.length > 0);
+    expect(r.lastFrame() ?? "").not.toContain("authorization server failed");
   });
 
   const stepUpChallenge = {

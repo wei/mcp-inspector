@@ -1,4 +1,5 @@
 import type { Tool } from "@modelcontextprotocol/client";
+import { declaresAnyFields } from "@inspector/core/json/rootUnion.js";
 
 /**
  * Returns the display label for an MCP entity that follows the BaseMetadata
@@ -14,10 +15,18 @@ export function resolveDisplayLabel(name: string, title?: string): string {
  * True when the tool's input schema declares at least one property — used by
  * App-flow callers to decide whether to render a form or auto-launch. Kept in
  * one place so the definition of "has fields" stays consistent if it ever
- * grows to consider `additionalProperties`, `anyOf`, etc.
+ * grows to consider `additionalProperties` etc.
+ *
+ * Root composition counts, since a schema declaring its fields on a root
+ * `allOf`/`oneOf`/`anyOf` has none of its own (#2123) — an App tool with such a
+ * schema would otherwise launch with empty arguments rather than asking for
+ * them. Counted from the composition members directly rather than from a
+ * resolved union, so a schema whose composition the form declines to flatten
+ * still reports the fields it has: it renders fewer controls, not none, and
+ * auto-invoking it would be wrong either way.
  */
 export function hasInputFields(tool: Tool): boolean {
-  return Object.keys(tool.inputSchema.properties ?? {}).length > 0;
+  return declaresAnyFields(tool.inputSchema);
 }
 
 /**

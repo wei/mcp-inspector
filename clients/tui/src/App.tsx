@@ -65,6 +65,7 @@ import {
   NodeOAuthStorage,
   runRunnerInteractiveOAuth,
 } from "@inspector/core/auth/node/index.js";
+import { oauthMessageToneFor } from "./oauthMessageTone.js";
 import { getTuiLogger } from "./logger.js";
 import { openUrl } from "./utils/openUrl.js";
 import {
@@ -161,6 +162,13 @@ function App({
     "idle" | "authenticating" | "error"
   >("idle");
   const [oauthMessage, setOauthMessage] = useState<string | null>(null);
+  // The tone is derived from the message rather than stored beside it, so it
+  // cannot go stale — see `oauthMessageToneFor` for why that matters here.
+  // Both stay plain `useState` setters on purpose: wrapping `setOauthMessage`
+  // in a `useCallback` would make it a value `react-hooks/exhaustive-deps`
+  // demands in seven dependency arrays, for an identity that never changes.
+  const [oauthWarningText, setOauthWarningText] = useState<string | null>(null);
+  const oauthMessageTone = oauthMessageToneFor(oauthMessage, oauthWarningText);
   const [oauthRevision, setOauthRevision] = useState(0);
   const [pendingStepUp, setPendingStepUp] = useState<{
     serverName: string;
@@ -175,6 +183,8 @@ function App({
   const [connectError, setConnectError] = useState<string | null>(null);
   // Monotonic token for in-flight disconnects — see handleDisconnect.
   const disconnectAttemptRef = useRef(0);
+  /** Retires a superseded "clear OAuth state" the way disconnects are (#2144). */
+  const clearOAuthAttemptRef = useRef(0);
   // A failed disconnect is deliberately NOT folded into `connectError`. That
   // one is only rendered by InfoTab when the status is "error", which a
   // rejected disconnect leaves untouched (the status stays "connected"), so
@@ -454,6 +464,11 @@ function App({
     // server name matching again, so the stale rejection would land on the
     // re-selected A. Retiring the token on every switch is what closes that.
     disconnectAttemptRef.current++;
+    // Same reasoning for the clear (#2144): the A → B → A round trip would
+    // otherwise leave both its attempt token and the captured server name
+    // matching again, so a clear started on the first A could publish into the
+    // re-selected one.
+    clearOAuthAttemptRef.current++;
     setDisconnectError(null);
     const stepUp = pendingStepUpRef.current;
     if (stepUp && selectedServer && stepUp.serverName !== selectedServer) {
@@ -781,6 +796,11 @@ function App({
     // A connect attempt supersedes whatever the last disconnect reported —
     // including one still in flight, which is what the counter bump retires.
     disconnectAttemptRef.current++;
+    // And whatever a pending clear was going to do (#2144). The server-name
+    // check alone does not cover disconnect/reconnect to the SAME server: the
+    // name still matches on the other side of it, so a clear still in flight
+    // would tear down the session this connect just established.
+    clearOAuthAttemptRef.current++;
     setDisconnectError(null);
 
     const finishConnect = async () => {
@@ -941,15 +961,63 @@ function App({
 
   const handleClearOAuth = useCallback(async () => {
     if (!selectedInspectorClient) return;
-    await selectedInspectorClient.clearOAuthTokens();
+    // Claim this attempt before awaiting, exactly as `handleDisconnect` does.
+    // The RFC 7009 leg is a bounded network request, so this callback can now
+    // stay suspended for seconds — long enough for the user to switch servers,
+    // at which point publishing this result would put server A's outcome on
+    // server B (and would race a second clear over the same state). (#2144)
+    const attempt = ++clearOAuthAttemptRef.current;
+    const attemptServer = selectedServer;
+    // RFC 7009. Best-effort: the outcome is reported in the status line, never
+    // thrown, so clearing always completes. The per-server `oauthRevokeOnClear`
+    // opt-out is honored here the same way the web client honors it.
+    const revocation = await selectedInspectorClient.clearOAuthTokens({
+      revoke: selectedServerEntry?.settings?.oauthRevokeOnClear !== false,
+    });
+    // The local clear has happened either way — only the *reporting* is
+    // retired, so a superseded attempt leaves no trace on the new selection.
+    if (
+      clearOAuthAttemptRef.current !== attempt ||
+      selectedServerRef.current !== attemptServer
+    ) {
+      return;
+    }
     setOauthStatus("idle");
-    setOauthMessage(null);
+    if (revocation.status === "failed") {
+      const warning = `Cleared locally, but revoking the grant at the authorization server failed: ${revocation.detail}. It may still be valid there.`;
+      setOauthWarningText(warning);
+      setOauthMessage(warning);
+    } else {
+      setOauthMessage(null);
+    }
     setConnectError(null);
     if (inspectorStatus === "connected" || inspectorStatus === "connecting") {
-      await disconnectInspector();
+      // The clear has already succeeded by here, so a disconnect failure must
+      // not propagate as one: `AuthTab` would report "Could not clear OAuth
+      // state", which is false. It goes to the disconnect error line instead,
+      // where the same failure from the `d` key already lands.
+      try {
+        await disconnectInspector();
+      } catch (err) {
+        setDisconnectError(err instanceof Error ? err.message : String(err));
+      }
+      // Revalidate: the disconnect is a second await, and a switch during it
+      // would make the revision bump below land on the new selection.
+      if (
+        clearOAuthAttemptRef.current !== attempt ||
+        selectedServerRef.current !== attemptServer
+      ) {
+        return;
+      }
     }
     setOauthRevision((n) => n + 1);
-  }, [selectedInspectorClient, inspectorStatus, disconnectInspector]);
+  }, [
+    selectedInspectorClient,
+    selectedServer,
+    selectedServerEntry,
+    inspectorStatus,
+    disconnectInspector,
+  ]);
 
   // Build current server state from InspectorClient data (tools from ManagedToolsState)
   const currentServerState = useMemo(() => {
@@ -1741,6 +1809,7 @@ function App({
                 inspectorClient={selectedInspectorClient}
                 oauthStatus={oauthStatus}
                 oauthMessage={oauthMessage}
+                oauthMessageTone={oauthMessageTone}
                 oauthRevision={oauthRevision}
                 pendingStepUp={
                   pendingStepUp?.serverName === selectedServer
@@ -1843,9 +1912,12 @@ function App({
                 focused={
                   focus === "tabContentList" || focus === "tabContentDetails"
                 }
-                onClearOAuth={() => {
-                  void handleClearOAuth();
-                }}
+                // Passed directly, NOT wrapped in a `void`-ing arrow: AuthTab
+                // awaits this to hold its pending state, keep its repeat lock,
+                // and route a rejection to the failure line. Dropping the
+                // promise here would resolve it instantly and make all three
+                // inert while revocation was still running (#2144).
+                onClearOAuth={handleClearOAuth}
                 connectionStatus={inspectorStatus}
               />
             ) : null}

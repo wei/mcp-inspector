@@ -262,6 +262,25 @@ export class RemoteClientTransport implements Transport {
   private readonly config: import("../types.js").MCPServerConfig;
 
   /**
+   * Whether the upstream connection gives each request its own response stream
+   * (#2140). The SDK's `Protocol.request` reads this: on a 2026-era connection
+   * a transport advertising it has its per-request stream **aborted** as the
+   * spec's cancellation signal, and no `notifications/cancelled` is sent; a
+   * transport that does not gets the stdio mechanism instead.
+   *
+   * The real upstream transport lives on the backend, so this transport has to
+   * answer for it. Streamable HTTP opens one POST — and one SSE response
+   * stream — per request, so it qualifies; stdio and SSE multiplex every
+   * request over one shared channel and must keep sending the notification.
+   *
+   * Advertising it is only half the fix: `requestSend` applies the SDK's
+   * `requestSignal` to the browser-to-backend fetch, and `/api/mcp/send`
+   * forwards that disconnect to the upstream `transport.send`, which is what
+   * actually closes the stream the server is watching.
+   */
+  readonly hasPerRequestStream: boolean;
+
+  /**
    * Intentionally returns undefined. The MCP Client checks transport.sessionId to detect
    * reconnects and skip initialize. Our _sessionId is the remote server's session ID, not
    * the MCP protocol's initialization state. Exposing it would cause the MCP Client to
@@ -312,6 +331,7 @@ export class RemoteClientTransport implements Transport {
   ) {
     this.options = options;
     this.config = config;
+    this.hasPerRequestStream = config.type === "streamable-http";
   }
 
   setAuthRecovery(handlers: AuthRecoveryHandlers | undefined): void {
@@ -757,10 +777,17 @@ export class RemoteClientTransport implements Transport {
       }),
     };
 
+    // #2140: aborting this fetch is the cancellation signal for a
+    // per-request-stream upstream. The backend holds `/api/mcp/send` open for
+    // the whole call (it awaits the JSON-RPC response), so the disconnect
+    // reaches it mid-flight and it aborts the upstream request's SSE stream.
+    // For stdio/SSE `hasPerRequestStream` is false, so the SDK never supplies
+    // a `requestSignal` and this is undefined.
     const res = await this.fetchFn(`${this.baseUrl}/api/mcp/send`, {
       method: "POST",
       headers: this.headers,
       body: JSON.stringify(body),
+      ...(options?.requestSignal && { signal: options.requestSignal }),
     });
 
     if (!res.ok) {

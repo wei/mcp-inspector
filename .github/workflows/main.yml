@@ -1,4 +1,4 @@
-name: Run install, format, lint, build, and test on every push
+name: CI
 
 on:
   push:
@@ -38,31 +38,38 @@ jobs:
         run: npm install
 
       - name: Validate (coverage guards, format, lint, typecheck, build, fast tests)
-        # Runs the two coverage guards first (verify:format-coverage +
-        # verify:typecheck-coverage), then validate:core, then each client's
+        # Runs the four durable guards first (verify:format-coverage,
+        # verify:skills, verify:typecheck-coverage, verify:dep-lockstep), then
+        # test:scripts, then validate:core, then each client's
         # self-validation: format:check + lint + typecheck + build + test (no
         # coverage instrumentation — fast). This also builds every client bundle
         # (web dist, cli/tui/launcher) that the smokes below need. The heavier
-        # per-file coverage gate runs in its own step below. Unit tests run in
-        # both steps (fast here, instrumented under coverage); the double unit
-        # run is an accepted trade-off for keeping this fast build step intact.
-        # A future optimization could split coverage into per-client parallel
+        # per-file coverage gate runs in the parallel `coverage` job below
+        # (#2159), which consumes nothing this job produces — every client's
+        # `test:coverage` builds whatever it needs itself. Unit tests run in
+        # both jobs (fast here, instrumented there); now that the two run in
+        # parallel that duplication costs no wall clock at all.
+        # A future optimization could split `coverage` into per-client parallel
         # jobs, but that's a larger restructure and deliberately out of scope.
         run: npm run validate
 
-      - name: Enforce per-file coverage gate (≥90% on all four dimensions)
-        # CI-ENFORCED coverage gate (#1550): runs `npm run coverage`, which
-        # chains every client's `test:coverage` (v8-instrumented) and fails the
-        # job if ANY file drops below 90% on lines, statements, functions, or
-        # branches. This is the whole point of the step — a PR that regresses
-        # coverage below the threshold now blocks merge instead of relying on a
-        # contributor remembering to run the gate locally.
+      - name: Validate the skills with the authoritative CLI (#2163)
+        # `npm run validate` above already ran `verify:skills`, whose own parser
+        # reads each SKILL.md the way Claude Code does. This is the second
+        # opinion: `claude plugin validate` is the authoritative schema, and the
+        # guard skips it whenever the CLI is absent — which, without this step,
+        # would mean always, in CI. Installing it here is what makes the
+        # acceptance criterion true rather than aspirational.
         #
-        # This also covers the web integration project: web's `test:coverage`
-        # runs `--project=unit --project=integration --coverage`, so the former
-        # standalone `Run web integration tests` step was removed to avoid
-        # running the integration suite twice.
-        run: npm run coverage
+        # The script resolves the CLI itself — an installed one ONLY when it
+        # matches the pin exactly, otherwise the pinned package via `npx -y` —
+        # so this is the same command `npm run local:gate` runs, and the two
+        # cannot drift. Exact rather than a floor: a newer local CLI is a
+        # DIFFERENT schema, which is how a "reproducible" gate starts disagreeing
+        # across machines. Pinned
+        # rather than @latest: an unpinned validator can start failing a PR that
+        # changed nothing. It needs no authentication — verified with a clean HOME.
+        run: npm run verify:skills:cli
 
       - name: Verify the browser-externalized-builtin build gate (#1769)
         # Runs a real `vite build` with a Node built-in forced into the browser
@@ -100,6 +107,14 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Run cross-client smokes
+        # NOTE: this workflow runs GitHub CI's tier only. The LOCAL pre-push
+        # gate is `npm run local:gate`, and it is a strict superset — do not add
+        # it, a `local:*` script, `smoke:web:firefox`/`smoke:web:webkit`,
+        # `smoke:web:engine`, or a non-Chromium `SMOKE_BROWSER` to any workflow.
+        # `npm run test:scripts` fails if you do (scripts/lib/workflow-gate.mjs,
+        # #2146). `npm run smoke` and `smoke:web:chromium` belong here and are
+        # not affected. The canonical CI-vs-local table is in the root README.
+        #
         # End-to-end smokes through the built launcher (--help dispatch + prod
         # CLI/web). Not part of any client's `validate`: it needs the
         # cli/tui/launcher bundles, which `validate` above already built
@@ -115,6 +130,49 @@ jobs:
         working-directory: ./clients/web
         run: npm run test:storybook
 
+  # The per-file coverage gate, in its own job so it runs in PARALLEL with
+  # `build` rather than serially after it (#2159). The two together were 84% of
+  # a ~17m wall clock; split, the workflow finishes in roughly the length of
+  # `build` alone.
+  #
+  # This is safe because `coverage` consumes nothing `build` produces: every
+  # client's `test:coverage` is self-sufficient (web and cli build the test
+  # servers — and cli its own bin — themselves; tui and launcher run from
+  # source). The only consumers of `clients/*/build` are the smokes, which stay
+  # in `build` alongside the `validate` that produces them.
+  #
+  # Do NOT "optimize" this back into one job by backgrounding the two commands:
+  # that puts two vitest fleets on one 4-core runner, which is already known to
+  # time tests out at the 5s default. Separate jobs get separate runners.
+  coverage:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+
+      - name: Install dependencies (root + all clients)
+        run: npm install
+
+      - name: Enforce per-file coverage gate (≥90% on all four dimensions)
+        # CI-ENFORCED coverage gate (#1550): runs `npm run coverage`, which
+        # chains every client's `test:coverage` (v8-instrumented) and fails the
+        # job if ANY file drops below 90% on lines, statements, functions, or
+        # branches. This is the whole point of the job — a PR that regresses
+        # coverage below the threshold blocks merge instead of relying on a
+        # contributor remembering to run the gate locally.
+        #
+        # This also covers the web integration project: web's `test:coverage`
+        # runs `--project=unit --project=integration --coverage`, so there is no
+        # separate integration step anywhere in this workflow.
+        run: npm run coverage
+
   # Publish the single `@modelcontextprotocol/inspector` package to npm on a
   # published GitHub release. v2 is not an npm workspace, so there is no
   # `publish-all` / `--workspaces` (v1) — just one `npm publish`, whose `prepack`
@@ -127,7 +185,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'release'
     environment: release
-    needs: build
+    needs: [build, coverage]
     # Serialize publishes so two releases cut in quick succession can't run
     # overlapping `npm publish`es. Never cancel an in-flight publish.
     concurrency:
@@ -220,7 +278,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'release'
     environment: release
-    needs: build
+    needs: [build, coverage]
     permissions:
       contents: read
       packages: write

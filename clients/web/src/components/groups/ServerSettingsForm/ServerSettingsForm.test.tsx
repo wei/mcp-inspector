@@ -707,6 +707,7 @@ describe("ServerSettingsForm", () => {
       tokenUrl: "",
       enterpriseManaged: false,
       requestRefreshToken: true,
+      revokeOnClear: true,
     });
   });
 
@@ -748,6 +749,47 @@ describe("ServerSettingsForm", () => {
     await user.click(screen.getByLabelText("Request refresh token"));
     expect(onOAuthChange).toHaveBeenLastCalledWith(
       expect.objectContaining({ requestRefreshToken: false }),
+    );
+  });
+
+  // #2144 — the RFC 7009 opt-out. On by default: leaving it off silently is
+  // what leaves the authorization server holding a live grant.
+  it("renders Revoke tokens on clear checked by default", () => {
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={emptySettings}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(screen.getByLabelText("Revoke tokens on clear")).toBeChecked();
+  });
+
+  it("renders Revoke tokens on clear unchecked when the server opted out", () => {
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        settings={{ ...emptySettings, oauthRevokeOnClear: false }}
+        expandedSections={["oauth"]}
+      />,
+    );
+    expect(screen.getByLabelText("Revoke tokens on clear")).not.toBeChecked();
+  });
+
+  it("toggles Revoke tokens on clear through onOAuthChange", async () => {
+    const user = userEvent.setup();
+    const onOAuthChange = vi.fn();
+    renderWithMantine(
+      <ServerSettingsForm
+        {...baseHandlers}
+        onOAuthChange={onOAuthChange}
+        settings={emptySettings}
+        expandedSections={["oauth"]}
+      />,
+    );
+    await user.click(screen.getByLabelText("Revoke tokens on clear"));
+    expect(onOAuthChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ revokeOnClear: false }),
     );
   });
 
@@ -1255,6 +1297,7 @@ describe("ServerSettingsForm", () => {
       tokenUrl: "",
       enterpriseManaged: true,
       requestRefreshToken: true,
+      revokeOnClear: true,
     });
   });
 
@@ -1363,6 +1406,7 @@ describe("ServerSettingsForm", () => {
       tokenUrl: "",
       enterpriseManaged: false,
       requestRefreshToken: true,
+      revokeOnClear: true,
     });
   });
 

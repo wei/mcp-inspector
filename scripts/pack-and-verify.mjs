@@ -60,12 +60,11 @@ import {
   ensureTestServers,
   testServerEntryPath,
 } from "./lib/ensure-test-servers.mjs";
+import { attachPageDiagnostics, loadBrowser } from "./lib/headless-browser.mjs";
 import {
   APP_TOOL,
-  attachPageDiagnostics,
   buildAppDeepLink,
   driveAppFlow,
-  loadChromium,
   startMcpAppServer,
 } from "./lib/mcp-app-flow.mjs";
 import { winShellArgs } from "./lib/win-shell-args.mjs";
@@ -567,7 +566,11 @@ async function verifyAppRender(baseUrl, token, whenWebServerExits) {
       },
       label: LABEL,
     });
-    browser = await loadChromium(repoRoot);
+    // Chromium explicitly, not `resolveBrowserName()`: this is a *packaging*
+    // check, and the engine question (#2086) belongs to the smokes, where the
+    // sandbox surface is what is under test. Pinning it also means `pack:verify`
+    // cannot be pointed at an engine its npm script never installed.
+    browser = await loadBrowser(repoRoot, "chromium");
     const page = await browser.newPage();
     const diagnostics = attachPageDiagnostics(page);
 

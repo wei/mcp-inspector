@@ -1,11 +1,11 @@
 import {
   Checkbox,
   Group,
-  JsonInput,
   MultiSelect,
   NumberInput,
   Select,
   Stack,
+  Switch,
   Text,
   rem,
   Textarea,
@@ -23,7 +23,20 @@ import {
 } from "react";
 import { ClearButton } from "../../elements/ClearButton/ClearButton";
 import { EnlargeButton } from "../../elements/EnlargeButton/EnlargeButton";
+import { JsonEditor } from "../../elements/JsonEditor/JsonEditor";
+import {
+  duplicateKeyError,
+  findDuplicateObjectKey,
+  findUnsendableNumberLiteral,
+  isJsonObject,
+  unsendableNumberError,
+} from "../../../utils/jsonObjectDraft";
+import { isSerializableJson } from "@inspector/core/json/jsonUtils.js";
 import { useValueChange } from "../../../hooks/useValueChange";
+import {
+  coercedArgumentNames,
+  coercedArgumentsError,
+} from "@inspector/core/json/jsonUtils.js";
 import type {
   InspectorFormSchema,
   JsonSchemaConst,
@@ -32,6 +45,14 @@ import {
   isStringEnum,
   normalizeNullableUnion,
 } from "@inspector/core/json/nullableUnion.js";
+import {
+  resolveRootUnion,
+  selectBranchIndex,
+} from "@inspector/core/json/rootUnion.js";
+import {
+  applySchemaConstants,
+  collectSchemaDefaults,
+} from "../../../utils/jsonUtils";
 
 const FieldLabel = Text.withProps({
   fw: 500,
@@ -46,9 +67,21 @@ const FieldDescription = Text.withProps({
 // Indented column for a nested object's sub-fields.
 const IndentedStack = Stack.withProps({ gap: "sm", pl: "md" });
 
-const SchemaJsonInput = JsonInput.withProps({
-  formatOnBlur: true,
-  autosize: true,
+// The picker for a root `oneOf`/`anyOf` (#2123). Not clearable: one branch is
+// always in effect, so "no branch" is not a state the arguments can be in.
+const BranchSelect = Select.withProps({
+  label: "Variant",
+  description: "This tool accepts one of several argument shapes.",
+  allowDeselect: false,
+});
+
+// The "Edit as JSON" flip for the whole arguments object (#2151). Right-aligned
+// on its own row so it reads as a mode for the form rather than as its first
+// field.
+const RawJsonSwitch = Switch.withProps({
+  label: "Edit as JSON",
+  size: "sm",
+  labelPosition: "left",
 });
 
 // A string field after its enlarge button has been used (#2042). `autosize`
@@ -250,16 +283,67 @@ function toNumericValue(raw: string | number): number | undefined {
   return Number.isSafeInteger(Math.trunc(parsed)) ? parsed : undefined;
 }
 
-/** Parse editor text, reporting `undefined` for anything that is not JSON yet. */
+/**
+ * Parse editor text, reporting `undefined` for anything this client cannot
+ * send.
+ *
+ * That covers text that is not JSON *yet* — the mid-edit state this field's
+ * whole draft/value split exists for — and text that parses but does not
+ * survive being written back out: `JSON.parse("1e400")` yields `Infinity`,
+ * which `JSON.stringify` writes as `null`, and a whole number written out in
+ * full that cannot be represented exactly is rounded. All three report no
+ * value, so the field shows its error and `onValidityChange` blocks submission,
+ * rather than sending a number the user never typed. Same guards, same reason,
+ * as `parseJsonObjectDraft` and the raw-arguments editor above.
+ *
+ * The *reason* is `describeJsonDraftProblem`'s to give — this only answers
+ * whether there is a value.
+ */
 function parseJsonDraft(text: string): unknown {
-  if (text.trim() === "") {
+  // Empty text is not a *problem* — an untouched optional field is fine — but
+  // it is not a value either, so it is excluded before the reason check rather
+  // than by it. Missing that let `JSON.parse("")` throw.
+  if (text.trim() === "" || describeJsonDraftProblem(text) !== null) {
     return undefined;
   }
+  // Cannot throw: a reason of `null` means the text already parsed. Re-reading
+  // it here rather than having the reason function return the value keeps one
+  // set of rules, which is what stops the two from disagreeing.
+  return JSON.parse(text);
+}
+
+/**
+ * Why this draft cannot be sent, phrased for the field, or `null` when it can.
+ *
+ * Three different mistakes, and the field says which. Flattening them to "Not
+ * valid JSON" misdiagnoses a document that parses perfectly well and happens to
+ * hold a number this client cannot put on the wire — leaving the user reading a
+ * message about syntax while looking at syntactically fine JSON, with no clue
+ * what to change.
+ *
+ * Each ends with the same consequence, because it is the same one: an
+ * unsendable draft reports no value, so the argument is omitted.
+ */
+function describeJsonDraftProblem(text: string): string | null {
+  if (text.trim() === "") return null;
+  let parsed: unknown;
   try {
-    return JSON.parse(text);
+    parsed = JSON.parse(text);
   } catch {
-    return undefined;
+    return "Not valid JSON — this field will be omitted";
   }
+  if (!isSerializableJson(parsed)) {
+    return "Numbers must be finite — this field will be omitted";
+  }
+  const unsendable = findUnsendableNumberLiteral(text);
+  if (unsendable !== null) {
+    return `${unsendableNumberError(unsendable)} — this field will be omitted`;
+  }
+  const duplicate = findDuplicateObjectKey(text);
+  if (duplicate !== null) {
+    return `${duplicateKeyError(duplicate)} — this field will be omitted`;
+  }
+  return null;
 }
 
 /** Structural equality for the draft/value re-sync, via canonical JSON. */
@@ -391,23 +475,24 @@ function SchemaJsonField({
     }
   });
 
-  // Text that is present but does not parse yields no value, so the field would
-  // otherwise submit as absent while the user is still looking at what they
-  // typed. Saying so on the field keeps that from being silent; reporting it
-  // upward is what keeps it from being submittable.
-  const hasInvalidDraft =
-    draft.trim() !== "" && parseJsonDraft(draft) === undefined;
-  useDraftValidity(fieldName, !hasInvalidDraft, onValidityChange);
+  // Text that is present but yields no value would otherwise submit as absent
+  // while the user is still looking at what they typed. Saying so on the field
+  // keeps that from being silent; reporting it upward is what keeps it from
+  // being submittable. The *reason* is carried through rather than flattened —
+  // "not valid JSON" is a misdiagnosis of a document that parses fine and holds
+  // a number this client cannot send.
+  const draftProblem =
+    draft.trim() === "" ? null : describeJsonDraftProblem(draft);
+  useDraftValidity(fieldName, draftProblem === null, onValidityChange);
 
   return (
-    <SchemaJsonInput
+    <JsonEditor
       {...inputProps}
+      ariaLabel={inputProps.label}
       value={draft}
-      error={
-        hasInvalidDraft
-          ? "Not valid JSON — this field will be omitted"
-          : undefined
-      }
+      error={draftProblem ?? undefined}
+      minLines={4}
+      maxLines={16}
       onChange={(text) => {
         setDraft(text);
         onChange(parseJsonDraft(text));
@@ -532,6 +617,157 @@ function SchemaNumberInput({
   );
 }
 
+/**
+ * What the raw-JSON editor's draft text currently means: the arguments object
+ * to emit, or why it cannot be emitted.
+ *
+ * Empty text is `{}` rather than an error — clearing the box is how "send no
+ * arguments" is spelled, and an empty editor wearing a red error would read as
+ * broken. A non-object (`[1,2]`, `"a"`, `42`) is reported separately from text
+ * that is not JSON at all, because they are different mistakes: the second is
+ * usually mid-edit, the first is a shape the form cannot use however finished
+ * it is.
+ */
+function parseRawArgumentsDraft(
+  text: string,
+  coercionSchema?: InspectorFormSchema,
+): { ok: true; value: Record<string, unknown> } | { ok: false; error: string } {
+  if (text.trim() === "") return { ok: true, value: {} };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { ok: false, error: "Not valid JSON — this cannot be submitted" };
+  }
+  if (!isJsonObject(parsed)) {
+    return {
+      ok: false,
+      error: "Arguments must be a JSON object (`{ … }`)",
+    };
+  }
+  // `JSON.parse` accepts numeric literals it cannot represent: `1e400` parses to
+  // `Infinity`, which `JSON.stringify` then writes as `null`. Accepting it here
+  // would show the user one value and send another — the one thing an inspector
+  // must not do. Same guard, same reason, as `parseJsonObjectDraft`.
+  if (!isSerializableJson(parsed)) {
+    return {
+      ok: false,
+      error:
+        "Numbers must be finite — a value like `1e400` overflows and would be sent as null",
+    };
+  }
+  // The quieter half of the same defect: a whole number past 2^53−1 parses to
+  // the nearest double, so the draft shows digits the wire will not carry.
+  const unsendable = findUnsendableNumberLiteral(text);
+  if (unsendable !== null) {
+    return { ok: false, error: unsendableNumberError(unsendable) };
+  }
+  const duplicate = findDuplicateObjectKey(text);
+  if (duplicate !== null) {
+    return { ok: false, error: duplicateKeyError(duplicate) };
+  }
+  // Last, because it is the only check that needs a *valid* object to run
+  // against — and the only one that is about the schema rather than the JSON.
+  // `callTool` retypes every string-valued argument to what the schema
+  // declares, so a draft it would touch is one whose visible text is not what
+  // the wire would carry; refuse it here instead, and say which value to
+  // rewrite (#2171). Skipped entirely when no schema is supplied: only the
+  // Tools and Apps forms feed `tools/call`, and an elicitation's values are
+  // never converted, so imposing this there would block a submission for a
+  // reason that is not true of it.
+  if (coercionSchema) {
+    const coerced = coercedArgumentNames(coercionSchema, parsed);
+    if (coerced.length > 0) {
+      return { ok: false, error: coercedArgumentsError(coerced) };
+    }
+  }
+  return { ok: true, value: parsed };
+}
+
+interface RawArgumentsFieldProps {
+  values: Record<string, unknown>;
+  onChange: (values: Record<string, unknown>) => void;
+  disabled: boolean;
+  /** Mirrors {@link SchemaFormProps.onValidityChange} for this one editor. */
+  onInvalidChange: (hasInvalidDraft: boolean) => void;
+  /**
+   * The tool `inputSchema` this draft's values will be sent against, when they
+   * will be — see {@link SchemaFormProps.enforceToolArgumentTypes}. Undefined
+   * turns the type check off.
+   */
+  coercionSchema?: InspectorFormSchema;
+}
+
+/**
+ * The whole arguments object as one JSON document (#2151).
+ *
+ * v1 let a rendered form be flipped over to editing its arguments as JSON, and
+ * v2 shipped without the escape hatch — so a value the widgets cannot express,
+ * or a payload the user wants to paste in whole, had no route in.
+ *
+ * Same draft/value split as {@link SchemaJsonField}, and for the same reason:
+ * the text is the source of truth for what is displayed, the parent only ever
+ * sees a parsed object. Unlike `JsonObjectInput`, invalid text is **reported
+ * upward** rather than quietly dropped — this editor sits in front of a commit
+ * gesture (Execute / Open App / Submit), and #2020 says a draft that cannot be
+ * sent must disable it rather than silently submitting the last value that
+ * parsed.
+ *
+ * Note what this deliberately does *not* do: it never re-imposes the form's
+ * defaults or a branch's fields on the text. Switching a root union prunes the
+ * outgoing branch's values (#2123), and the pruned object is what arrives here
+ * — so a round trip through JSON cannot resurrect them.
+ */
+function RawArgumentsField({
+  values,
+  onChange,
+  disabled,
+  onInvalidChange,
+  coercionSchema,
+}: RawArgumentsFieldProps) {
+  const [draft, setDraft] = useState(() => serializeJson(values));
+  // Canonical JSON of the last object this editor emitted, so the re-sync below
+  // can tell an external change from the parent echoing back our own — the
+  // draft alone cannot, since invalid text parses to nothing and every parent
+  // change would then look external. See `JsonObjectInput` for the long form.
+  const [echoed, setEchoed] = useState(() => serializeJson(values));
+
+  const parsed = parseRawArgumentsDraft(draft, coercionSchema);
+
+  useValueChange(serializeJson(values), (next) => {
+    if (next === echoed) return;
+    setDraft(next);
+    setEchoed(next);
+  });
+
+  // An effect, not a render-time call: validity also moves when the *parent*
+  // replaces the values, and reporting during that render would update another
+  // component mid-render. The cleanup clears the block, so toggling back to the
+  // widgets cannot leave submission disabled on text no longer on screen.
+  useEffect(() => {
+    onInvalidChange(!parsed.ok);
+    return () => onInvalidChange(false);
+  }, [parsed.ok, onInvalidChange]);
+
+  return (
+    <JsonEditor
+      ariaLabel="Arguments JSON"
+      value={draft}
+      disabled={disabled}
+      error={parsed.ok ? undefined : parsed.error}
+      minLines={8}
+      maxLines={24}
+      onChange={(text) => {
+        setDraft(text);
+        const next = parseRawArgumentsDraft(text, coercionSchema);
+        if (!next.ok) return;
+        setEchoed(serializeJson(next.value));
+        onChange(next.value);
+      }}
+    />
+  );
+}
+
 export interface SchemaFormProps {
   schema: InspectorFormSchema;
   values: Record<string, unknown>;
@@ -571,6 +807,40 @@ export interface SchemaFormProps {
    * called when the answer changes, not on every render.
    */
   onValidityChange?: (hasInvalidDraft: boolean) => void;
+  /**
+   * Whether to offer the "Edit as JSON" switch that flips the whole arguments
+   * object over to a raw editor (#2151).
+   *
+   * Defaults to on. Passed `false` for a **nested** object field's form, where
+   * a per-field switch would offer to edit a fragment of the payload the outer
+   * switch already covers whole — and would put a second, narrower JSON editor
+   * inside the first the moment both were on.
+   */
+  allowRawJson?: boolean;
+  /**
+   * Whether these values become `tools/call` arguments, and so are subject to
+   * the string-to-declared-type conversion `InspectorClient.callTool` applies
+   * (#2171).
+   *
+   * That conversion exists for the widgets, which hand every value over as
+   * text: `"2"` against a numeric field has to become `2`. A **raw-JSON**
+   * draft already carries its own types, so a value the conversion would touch
+   * is one whose visible text is not what the wire would carry — and showing
+   * one payload while sending another is the one thing an inspector must not
+   * do. With this on, the raw editor refuses such a draft and names the value
+   * to rewrite, exactly as the Edit-and-replay modal does for the same
+   * conversion.
+   *
+   * Off by default, and deliberately opt-in rather than inferred from the
+   * schema: an elicitation renders through this same form and its values are
+   * never converted, so the check would be refusing those drafts for a reason
+   * that is not true of them. Only the Tools and Apps panels pass it.
+   *
+   * Read against {@link SchemaFormProps.schema} — the tool's own `inputSchema`,
+   * root composition included, which is what the client resolves the
+   * conversion against too.
+   */
+  enforceToolArgumentTypes?: boolean;
 }
 
 function getDefaultValue(fieldSchema: InspectorFormSchema): unknown {
@@ -597,9 +867,57 @@ export function SchemaForm({
   disabled = false,
   resetKey,
   onValidityChange,
+  allowRawJson = true,
+  enforceToolArgumentTypes = false,
 }: SchemaFormProps) {
-  const properties = schema.properties ?? {};
-  const requiredFields = schema.required ?? [];
+  // Composition at the root of the schema, flattened before anything is
+  // rendered (#2123). `allOf` is folded into `base`; a top-level `oneOf`/`anyOf`
+  // becomes the branches a picker chooses between. Both are empty for the
+  // ordinary object schema, where `base` is the schema itself.
+  const { base, branches } = resolveRootUnion(schema);
+
+  // Which alternative the form is currently showing. Held here because it is a
+  // property of this rendering, not of the arguments: `values` carries what the
+  // user typed, and nothing in it names a branch.
+  const [branchIndex, setBranchIndex] = useState(
+    () => selectBranchIndex(branches, values) ?? 0,
+  );
+  // The alternatives themselves, as a stable key. A tool refreshed in place
+  // keeps its `resetKey`, so nothing else notices that the union underneath was
+  // reordered or rewritten — and a numeric index then points at a different
+  // branch than the one whose values are held, showing SMS while submitting
+  // email. Re-derived from the values, which is where the answer actually is.
+  // The whole resolved alternative, not just its label and field names: two
+  // branches can share both while pinning different discriminators or typing a
+  // field differently, and a reorder of those would otherwise go unnoticed.
+  const branchesKey = serializeJson(
+    branches.map((branch) => [branch.label, branch.schema]),
+  );
+  useValueChange(branchesKey, () =>
+    setBranchIndex(selectBranchIndex(branches, values) ?? 0),
+  );
+
+  // A form reused for another entity can be handed a shorter union, so the
+  // index is clamped rather than trusted — `resetKey` resets it below, but a
+  // caller that omits it (the elicitation panels mount fresh) supplies none.
+  const activeBranch =
+    branches.length > 0
+      ? (branches[Math.min(branchIndex, branches.length - 1)] ?? null)
+      : null;
+  const effectiveSchema = activeBranch?.schema ?? base;
+
+  const properties = effectiveSchema.properties ?? {};
+  const requiredFields = effectiveSchema.required ?? [];
+
+  // The key the draft-holding fields are remounted by. Switching branches is a
+  // reset for them too: two alternatives may declare the same name with the
+  // same widget, and a half-typed `-` or an unparsed JSON draft would otherwise
+  // survive into a field the switch was supposed to clear — with both parent
+  // values `undefined`, nothing else tells them the entity changed.
+  const draftKey =
+    activeBranch === null
+      ? resetKey
+      : `${resetKey ?? ""}#${branches.indexOf(activeBranch)}`;
 
   // The names of fields currently holding unsendable text. Held here rather
   // than in each field because only the form sees them all, and only the form
@@ -607,6 +925,20 @@ export function SchemaForm({
   const [invalidFields, setInvalidFields] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+
+  // Whether the whole arguments object is being edited as JSON (#2151), and
+  // whether that editor's text can be sent. Kept apart from `invalidFields`
+  // rather than reported under a reserved name: field names come straight out
+  // of a server's schema, so any sentinel this form invented could collide with
+  // a real argument and clear a block the user cannot see.
+  const [rawJsonMode, setRawJsonMode] = useState(false);
+  const [rawJsonInvalid, setRawJsonInvalid] = useState(false);
+
+  // Stable so `RawArgumentsField`'s reporting effect subscribes once rather
+  // than per render — the same reason `reportFieldValidity` below is memoized.
+  const reportRawJsonValidity = useCallback((invalid: boolean) => {
+    setRawJsonInvalid(invalid);
+  }, []);
 
   // The names of string fields the user has enlarged into a multiline text area
   // (#2042). One-way by design — see EnlargeButton — so a name only ever enters
@@ -634,6 +966,11 @@ export function SchemaForm({
   useValueChange(resetKey, () => {
     setEnlargedFields(new Set());
     setEnlargeCarets(new Map());
+    // Which branch is selected belongs to the entity it was chosen for, for the
+    // same reason enlargement does — reset to whichever branch the new values
+    // identify, so the visible selection cannot disagree with what would be
+    // submitted, and to the first when they identify none.
+    setBranchIndex(selectBranchIndex(branches, values) ?? 0);
   });
 
   // Stable so a field's reporting effect subscribes once, not per render. The
@@ -657,6 +994,59 @@ export function SchemaForm({
     [],
   );
 
+  // Report the schema's own fixed values upward once per entity, for a caller
+  // that mounts the form with nothing seeded.
+  //
+  // A `const` field is rendered read-only, so the user cannot supply it — and a
+  // required one then leaves submit disabled forever, on a value that was never
+  // in doubt. Most callers seed through `collectSchemaDefaults` before mounting;
+  // this covers the ones that do not, rather than making every caller
+  // responsible for a value the form is already displaying.
+  //
+  // An effect, not a render-time update: `onChange` belongs to the parent, and
+  // calling it during our render would update another component mid-render.
+  // Only names absent from `values` are added, so a caller that has already
+  // seeded them sees no call at all, and re-running cannot loop.
+  // The fixed values themselves, as a stable key: callers rebuild the schema
+  // object every render, so its identity says nothing, while this changes
+  // exactly when what has to be seeded changes.
+  const seedKey = serializeJson(collectSchemaDefaults(effectiveSchema));
+
+  const latestSeed = useRef({ schema: effectiveSchema, values, onChange });
+  // Written in an effect, not during render — the same shape the validity
+  // reporter below uses, and what `react-hooks/refs` requires.
+  useEffect(() => {
+    latestSeed.current = { schema: effectiveSchema, values, onChange };
+  });
+  useEffect(() => {
+    const {
+      schema: current,
+      values: held,
+      onChange: report,
+    } = latestSeed.current;
+    const missing = Object.entries(collectSchemaDefaults(current)).filter(
+      ([name]) => !Object.hasOwn(held, name),
+    );
+    // Constants are re-applied as well as seeded: an in-place schema change can
+    // move a `const` the user cannot edit — the read-only field then displays
+    // the new value while `values` still holds the old one, which is what would
+    // be submitted. Ordinary defaults are only ever *added*, so an edited field
+    // keeps what the user put there.
+    const next = applySchemaConstants(
+      current,
+      missing.length > 0 ? { ...held, ...Object.fromEntries(missing) } : held,
+    );
+    const changed = Object.keys(next).some(
+      (name) =>
+        !Object.hasOwn(held, name) || !Object.is(next[name], held[name]),
+    );
+    if (changed) report(next);
+    // Keyed by the entity and branch being edited, and by the fixed values
+    // themselves: a tool refreshed in place keeps its `resetKey` and its branch
+    // while its schema changes underneath, and a newly pinned field would
+    // otherwise be rendered read-only and never seeded.
+  }, [draftKey, seedKey]);
+
   // Read through a ref so the callback's identity is not a dependency. It has
   // to be one or the other, and a *stable* dependency is what this needs: a
   // nested form is handed a fresh closure every render, and re-running the
@@ -671,7 +1061,7 @@ export function SchemaForm({
   // rendered holds no drafts, so an unmounted nested form must not leave the
   // outer one blocked. It runs in the same commit as the re-report, so the
   // transient `false` is never rendered.
-  const hasInvalidDraft = invalidFields.size > 0;
+  const hasInvalidDraft = invalidFields.size > 0 || rawJsonInvalid;
   useEffect(() => {
     notifyValidity.current?.(hasInvalidDraft);
     return () => notifyValidity.current?.(false);
@@ -679,6 +1069,79 @@ export function SchemaForm({
 
   function handleFieldChange(fieldName: string, fieldValue: unknown) {
     onChange({ ...values, [fieldName]: fieldValue });
+  }
+
+  /**
+   * Take the raw editor's object, and move the branch picker with it.
+   *
+   * Nothing in `values` names a branch, so the picker's index is held here and
+   * is only ever re-derived when something says the values changed underneath
+   * (`resetKey`, a rewritten union). Editing the discriminator in the raw
+   * document is exactly that, and it has no other signal: without this, turning
+   * `{"kind":"email"}` into `{"kind":"sms",…}` leaves the picker on Email, and
+   * switching back to the widgets renders the Email branch over SMS values —
+   * showing one shape while submitting another.
+   *
+   * The current branch is kept when the values identify none, rather than
+   * snapping to the first: the user passes through that state every time they
+   * clear the discriminator to retype it.
+   */
+  function handleRawArgumentsChange(next: Record<string, unknown>) {
+    onChange(next);
+    if (branches.length === 0) return;
+    setBranchIndex(selectBranchIndex(branches, next) ?? branchIndex);
+  }
+
+  /**
+   * Switch branches, and move `values` with the form.
+   *
+   * The fields the outgoing branch owned are dropped rather than left behind:
+   * they are no longer rendered, so the user cannot see or clear them, and
+   * submitting them would send the server arguments belonging to a shape the
+   * call is not making. Whatever the base contributes is kept — it applies to
+   * every branch — and the incoming branch's defaults (a discriminator `const`
+   * among them) are seeded the way the initial ones were.
+   */
+  function handleBranchChange(nextIndex: number) {
+    const nextBranch = branches[nextIndex];
+    /* v8 ignore next -- the Select's options are built from `branches` */
+    if (!nextBranch) return;
+    setBranchIndex(nextIndex);
+    const nextProperties = nextBranch.schema.properties ?? {};
+    // A value is carried unless it belonged to the outgoing branch's own shape:
+    // a name **both** branches declare may be typed differently by each, so a
+    // `3` typed into branch A's number field must not arrive in branch B's
+    // checkbox. A name only the outgoing branch specialized still survives when
+    // the incoming branch merely inherits the root's declaration — it is a root
+    // argument there, and dropping it would erase a valid value. A field the
+    // incoming branch pins to a `const` is never carried: the branches of a
+    // discriminated union share the discriminator's *name* and disagree about
+    // its value.
+    const incoming = new Set(nextBranch.declaredFields);
+    // `hasOwn` and `fromEntries`, never `values[name]` on its own or an
+    // assignment: `constructor` is a legal argument name whose inherited value
+    // would otherwise be read as one the user supplied, and `__proto__` is one
+    // an assignment would drop into the legacy prototype setter.
+    const carried = Object.fromEntries(
+      Object.entries(nextProperties)
+        .filter(
+          ([name, fieldSchema]) =>
+            // Own-property presence alone, `undefined` included: clearing a
+            // number or JSON field leaves the name present with no value, and
+            // that is the user's answer. Dropping it would let the defaults
+            // below put the field's default back and undo the clear.
+            Object.hasOwn(values, name) &&
+            fieldSchema.const === undefined &&
+            // Carried only where the incoming branch leaves the root's
+            // declaration as it found it. Anything the incoming branch declares
+            // itself is reset: it may type the name differently from wherever
+            // the value was typed, so a `3` from a number field would otherwise
+            // land in its checkbox.
+            !incoming.has(name),
+        )
+        .map(([name]) => [name, values[name]]),
+    );
+    onChange({ ...collectSchemaDefaults(nextBranch.schema), ...carried });
   }
 
   function renderField(fieldName: string, rawSchema: InspectorFormSchema) {
@@ -692,6 +1155,65 @@ export function SchemaForm({
     const label = fieldSchema.title ?? fieldName;
     const description = fieldSchema.description;
     const rawValue = resolveValue(values[fieldName], fieldSchema);
+
+    // A field pinned to a single value, checked **before** any type dispatch.
+    // `const` admits exactly one value, so every widget below it — the enum
+    // select, the number box, the checkbox — would offer values the schema
+    // forbids, and a schema carrying both `const` and `enum` would otherwise
+    // reach the select and submit a sibling of the one legal answer. Rendered
+    // read-only rather than editable for the same reason.
+    //
+    // Display only: the value that is *submitted* comes from `values`, seeded
+    // from the same `const` by `collectSchemaDefaults`, so a non-string
+    // constant keeps its type on the wire however it is shown here.
+    if (fieldSchema.const !== undefined) {
+      const constValue = fieldSchema.const;
+      const constText =
+        typeof constValue === "string" ? constValue : serializeJson(constValue);
+
+      // An OPTIONAL pinned field is a yes/no, not a fixed answer: `const`
+      // constrains the value if the property is there, and the schema is
+      // equally happy without it. So it gets the one choice it has, clearable —
+      // the user can opt in or leave it out, and cannot type anything else.
+      if (!isRequired) {
+        return (
+          <Select
+            key={fieldName}
+            label={label}
+            description={description}
+            disabled={disabled}
+            data={[{ value: constText, label: constText }]}
+            clearable
+            value={
+              Object.hasOwn(values, fieldName) &&
+              values[fieldName] !== undefined
+                ? constText
+                : null
+            }
+            onChange={(picked) =>
+              handleFieldChange(
+                fieldName,
+                picked === null ? undefined : constValue,
+              )
+            }
+          />
+        );
+      }
+
+      // Required: there is nothing to decide, so it is displayed and not
+      // editable. The value itself is seeded by `collectSchemaDefaults`.
+      return (
+        <TextInput
+          key={fieldName}
+          label={label}
+          description={description}
+          withAsterisk
+          readOnly
+          disabled={disabled}
+          value={constText}
+        />
+      );
+    }
 
     // string with enum
     if (fieldSchema.type === "string" && fieldSchema.enum) {
@@ -880,7 +1402,7 @@ export function SchemaForm({
         <SchemaNumberInput
           // The only field holding local state, so the only one that has to be
           // remounted when `resetKey` says the form moved to another entity.
-          key={resetKey === undefined ? fieldName : `${resetKey}:${fieldName}`}
+          key={draftKey === undefined ? fieldName : `${draftKey}:${fieldName}`}
           fieldName={fieldName}
           label={label}
           description={description}
@@ -975,13 +1497,20 @@ export function SchemaForm({
                 handleFieldChange(fieldName, nestedValues)
               }
               disabled={disabled}
-              // Sub-fields belong to the same entity, so they reset with it.
-              resetKey={resetKey}
+              // Sub-fields belong to the same entity, so they reset with it —
+              // and to the branch it is being edited under, since two outer
+              // alternatives can both carry this field and a nested form left
+              // mounted across the switch would keep displaying the nested
+              // branch chosen for the other one.
+              resetKey={draftKey}
               // A nested form's invalid draft is the outer form's invalid draft,
               // so it reports through the same channel under this field's name.
               onValidityChange={(nestedInvalid) =>
                 reportFieldValidity(fieldName, !nestedInvalid)
               }
+              // The outer switch already edits this object as part of the whole
+              // payload; a second one here would nest a JSON editor inside it.
+              allowRawJson={false}
             />
           </IndentedStack>
         </Stack>
@@ -993,7 +1522,7 @@ export function SchemaForm({
       <SchemaJsonField
         // Holds local draft state, so — like the number field — it has to be
         // remounted when `resetKey` says the form moved to another entity.
-        key={resetKey === undefined ? fieldName : `${resetKey}:${fieldName}`}
+        key={draftKey === undefined ? fieldName : `${draftKey}:${fieldName}`}
         fieldName={fieldName}
         label={label}
         description={description}
@@ -1010,8 +1539,53 @@ export function SchemaForm({
 
   return (
     <Stack gap="sm">
-      {Object.entries(properties).map(([fieldName, fieldSchema]) =>
-        renderField(fieldName, fieldSchema),
+      {allowRawJson && (
+        <Group justify="flex-end">
+          <RawJsonSwitch
+            checked={rawJsonMode}
+            disabled={disabled}
+            onChange={(event) => setRawJsonMode(event.currentTarget.checked)}
+          />
+        </Group>
+      )}
+      {activeBranch && branches.length > 1 && (
+        <BranchSelect
+          data={branches.map((branch, index) => ({
+            value: String(index),
+            label: branch.label,
+          }))}
+          value={String(branches.indexOf(activeBranch))}
+          disabled={disabled}
+          onChange={(value) =>
+            /* v8 ignore next -- Select only ever reports one of its own options */
+            value === null ? undefined : handleBranchChange(Number(value))
+          }
+        />
+      )}
+      {rawJsonMode ? (
+        // Keyed by the *entity* only, unlike the per-field editors, which are
+        // keyed by entity and branch. This editor holds the whole arguments
+        // object, which is not a per-branch thing: switching branches rewrites
+        // `values`, and the re-sync below picks that up without a remount.
+        // Keying it by branch too would remount it the moment an edit to the
+        // discriminator moved the picker — reformatting the text the user was
+        // typing and dropping their caret to the top.
+        <RawArgumentsField
+          key={resetKey ?? "raw-json"}
+          values={values}
+          onChange={handleRawArgumentsChange}
+          disabled={disabled}
+          onInvalidChange={reportRawJsonValidity}
+          // The schema as the CLIENT resolves it — the whole `inputSchema`,
+          // root composition and all — not the branch this form happens to be
+          // rendering. `coercedArgumentNames` does its own branch selection
+          // from the supplied values, the same way the conversion does.
+          coercionSchema={enforceToolArgumentTypes ? schema : undefined}
+        />
+      ) : (
+        Object.entries(properties).map(([fieldName, fieldSchema]) =>
+          renderField(fieldName, fieldSchema),
+        )
       )}
     </Stack>
   );

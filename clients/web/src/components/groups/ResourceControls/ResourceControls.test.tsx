@@ -6,6 +6,7 @@ import type {
   ResourceTemplateType as ResourceTemplate,
 } from "@modelcontextprotocol/client";
 import type { InspectorResourceSubscription } from "@inspector/core/mcp/types.js";
+import { NEVER_ACKNOWLEDGED_SUBSCRIPTION_MESSAGE } from "@inspector/core/mcp/subscriptionAck.js";
 import { renderWithMantine, screen } from "../../../test/renderWithMantine";
 import {
   ResourceControls,
@@ -393,6 +394,37 @@ describe("ResourceControls", () => {
       );
       expect(screen.getByText("Subscriptions (0)")).toBeInTheDocument();
       expect(screen.queryByText("Listening")).not.toBeInTheDocument();
+    });
+
+    // A badge tooltip is not enough for this one: the server broke the listen
+    // contract and the user has to be told without hovering (#2097).
+    it("spells out a never-acknowledged close in the panel", () => {
+      renderWithMantine(
+        <ControlledResourceControls
+          protocolEra="modern"
+          subscriptionStreamState={{
+            active: true,
+            status: "never-acknowledged",
+            honoredUris: [],
+          }}
+        />,
+      );
+      expect(screen.getByText("Not acknowledged")).toBeInTheDocument();
+      expect(
+        screen.getByText(NEVER_ACKNOWLEDGED_SUBSCRIPTION_MESSAGE),
+      ).toBeInTheDocument();
+    });
+
+    it("shows no such notice while the stream is healthy", () => {
+      renderWithMantine(
+        <ControlledResourceControls
+          protocolEra="modern"
+          subscriptionStreamState={activeAck}
+        />,
+      );
+      expect(
+        screen.queryByText(NEVER_ACKNOWLEDGED_SUBSCRIPTION_MESSAGE),
+      ).not.toBeInTheDocument();
     });
   });
 

@@ -873,3 +873,86 @@ describe("--wait-for-auth", () => {
     expect(result.stderr).toContain("positive number of seconds");
   });
 });
+
+/**
+ * The stored-token refresh path calls SDK discovery directly rather than
+ * through `InspectorClient.effectiveAuthFetch`, so it carries its own copy of
+ * the #2172 compatibility wrapper. This test injects no `discover`, because
+ * the wrapper lives in the *default* — injecting one would bypass exactly what
+ * is under test.
+ */
+describe("refreshStoredAuthToken discovery compatibility (#2172)", () => {
+  const REFRESHED = {
+    access_token: "refreshed-access-token",
+    token_type: "Bearer",
+    refresh_token: "rotated-refresh-token",
+    expires_in: 3600,
+  };
+
+  it("refreshes against an AS publishing RFC 8414 metadata at the OIDC path", async () => {
+    let base = "";
+    let rfc8414Probes = 0;
+    const server: Server = createServer((req, res) => {
+      const path = req.url ?? "";
+      if (path.startsWith("/.well-known/oauth-authorization-server")) {
+        rfc8414Probes += 1;
+        res.writeHead(404).end();
+        return;
+      }
+      // Plain OAuth 2.0: no jwks_uri, no subject_types_supported, no
+      // id_token_signing_alg_values_supported — the shape the SDK rejects when
+      // it finds it under this filename.
+      if (path === "/mcp/.well-known/openid-configuration") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            issuer: `${base}/mcp`,
+            authorization_endpoint: `${base}/oauth/authorize`,
+            token_endpoint: `${base}/oauth/token`,
+            response_types_supported: ["code"],
+            grant_types_supported: ["authorization_code", "refresh_token"],
+            token_endpoint_auth_methods_supported: ["client_secret_post"],
+          }),
+        );
+        return;
+      }
+      if (path === "/oauth/token") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(REFRESHED));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const addr = server.address();
+    base =
+      typeof addr === "object" && addr ? `http://127.0.0.1:${addr.port}` : "";
+    const serverUrl = `${base}/mcp`;
+    const fixture = writeOAuthFixture({
+      [serverUrl]: {
+        tokens: { refresh_token: "old-refresh", token_type: "Bearer" },
+        clientInformation: { client_id: "cid", client_secret: "sec" },
+      },
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await expect(refreshStoredAuthToken(serverUrl, fixture)).resolves.toBe(
+        "refreshed-access-token",
+      );
+      // The RFC 8414 location really was tried and really did 404, so the
+      // document could only have come from the OIDC path.
+      expect(rfc8414Probes).toBeGreaterThan(0);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("/mcp/.well-known/openid-configuration"),
+      );
+    } finally {
+      warn.mockRestore();
+      rmSync(dirname(fixture), { recursive: true, force: true });
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      });
+    }
+  });
+});

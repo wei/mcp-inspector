@@ -194,6 +194,14 @@ export type StoredMCPServer = MCPServerConfig & {
      */
     requestRefreshToken?: boolean;
     /**
+     * Whether clearing this server's OAuth state also revokes the grant at the
+     * authorization server (RFC 7009). Defaults to `true`; only `false` is
+     * written to disk, so an entry that never touched the setting keeps a
+     * minimal diff. See {@link InspectorServerSettings.oauthRevokeOnClear}.
+     * Inspector-specific. (#2144)
+     */
+    revokeOnClear?: boolean;
+    /**
      * Custom query parameters appended to the OAuth **authorization request**
      * (never the token request) — e.g. Keycloak's `kc_idp_hint`, OIDC's
      * `login_hint` / `prompt` / `acr_values`, Auth0's `audience`. Reserved,
@@ -490,12 +498,19 @@ export interface InspectorResourceSubscription {
  * - `"ended"` — the server tore the stream down deliberately (`closed` resolved
  *   `"graceful"`, e.g. on shutdown) or reconnection was abandoned; no automatic
  *   re-listen.
+ * - `"never-acknowledged"` — the server answered the `listen()` request itself
+ *   with a JSON-RPC `result` (the spec's graceful-closure marker) without ever
+ *   sending `notifications/subscriptions/acknowledged`, so the stream was closed
+ *   in the same breath it was opened (#2097). Distinct from `"ended"` because
+ *   the condition is deterministic rather than a shutdown of an established
+ *   stream: the Inspector does not retry it, and the UI says why.
  */
 export type ResourceSubscriptionStreamStatus =
   | "connecting"
   | "acknowledged"
   | "reconnecting"
-  | "ended";
+  | "ended"
+  | "never-acknowledged";
 
 /**
  * State of the modern-era resource-subscription listen stream (#1630).
@@ -606,6 +621,12 @@ export interface OAuthSettings {
    * reason as `authorizationParams`; `undefined` means the default, on.
    */
   requestRefreshToken?: boolean;
+  /**
+   * Whether clearing the stored OAuth state revokes the grant at the
+   * authorization server (#2144). Optional for the same reason as
+   * `authorizationParams`; `undefined` means the default, on.
+   */
+  revokeOnClear?: boolean;
 }
 
 /**
@@ -811,6 +832,28 @@ export interface InspectorServerSettings {
    * the stored OAuth state is cleared.
    */
   oauthRequestRefreshToken?: boolean;
+  /**
+   * Whether clearing this server's stored OAuth state also revokes the grant
+   * at the authorization server, per RFC 7009 (#2144). `undefined` (the
+   * default) means on; persisted as `oauth.revokeOnClear` only when explicitly
+   * off.
+   *
+   * The request is built from the stored state *before* the clear and sent
+   * *after* it, so the local delete never waits on the network — see
+   * `core/auth/revocation.ts`.
+   *
+   * On is the right default because the alternative is silent: the Inspector
+   * deletes its local copy and the access token — and the refresh token, which
+   * is long-lived by design — stay valid at the authorization server until they
+   * expire on their own, leaving it holding grants for sessions that ended
+   * hours ago.
+   *
+   * Turning it off is a testing affordance rather than only an escape hatch: a
+   * client that walks away still holding live tokens is a case a server author
+   * may want to reproduce on purpose. It is read at clear time, not at connect
+   * time, so toggling it takes effect on the next clear without reconnecting.
+   */
+  oauthRevokeOnClear?: boolean;
   /**
    * When true, connect via the configured enterprise IdP (EMA) instead of
    * interactive OAuth to the MCP authorization server. Per-server OAuth

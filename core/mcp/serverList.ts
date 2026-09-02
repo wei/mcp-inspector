@@ -617,6 +617,11 @@ export function storedFieldsToInspectorSettings(
   if (stored.oauth?.requestRefreshToken === false) {
     settings.oauthRequestRefreshToken = false;
   }
+  // Same inverted default as the flag above: revocation is on unless the entry
+  // explicitly opted out. (#2144)
+  if (stored.oauth?.revokeOnClear === false) {
+    settings.oauthRevokeOnClear = false;
+  }
   // Mirror the stdio working directory for the form. Like the OAuth fields, an
   // empty string coerces to absent so the form's "(inherit)" placeholder shows.
   if (stored.cwd) settings.cwd = stored.cwd;
@@ -749,6 +754,10 @@ export function inspectorSettingsToStoredFields(
   // set it and break byte-stable round-trips. (#2068)
   if (settings.oauthRequestRefreshToken === false) {
     oauthFields.requestRefreshToken = false;
+  }
+  // Same omit-the-default rule as the flag above. (#2144)
+  if (settings.oauthRevokeOnClear === false) {
+    oauthFields.revokeOnClear = false;
   }
   if (Object.keys(oauthFields).length > 0) {
     out.oauth = oauthFields;
