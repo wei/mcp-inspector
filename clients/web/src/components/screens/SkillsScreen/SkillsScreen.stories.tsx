@@ -440,6 +440,45 @@ export const LongSkillDocument: Story = {
     const geometry = () =>
       sections().map((s) => Math.round(s.getBoundingClientRect().height));
 
+    // Hold the first geometry sample until the Frontmatter section has settled
+    // on its final content. That section renders its YAML through
+    // `CodeHighlight`, which paints a plain `Code` block until the lazily
+    // imported Prism runtime and grammar land and then swaps the highlighter
+    // in — for this fixture a rendering 23px taller (the theme's `<pre>`
+    // padding against Mantine's). Whether the swap has happened by the time
+    // the story gets here depends on how long those dynamic imports take: on
+    // a quiet machine an earlier story in this file has already loaded them,
+    // and on a loaded one they land between the two samples below, so
+    // `before` measured the placeholder and the reopen measured the
+    // highlighter — `[…, 155, 285]` against `[…, 178, 262]`, one total
+    // redistributed (#2350). Neither sample was mid-layout; the section's
+    // content changed under the story. Waiting for the highlighted output
+    // makes both samples measure the same content, which is what the
+    // collapse-then-reopen comparison at the end assumes.
+    const frontmatterPanel = (
+      await canvas.findByRole("button", { name: /Frontmatter/ })
+    )
+      .closest(".mantine-Accordion-item")
+      ?.querySelector(".mantine-Accordion-panel");
+    if (!(frontmatterPanel instanceof HTMLElement)) {
+      throw new Error("Frontmatter panel not found");
+    }
+    await waitFor(
+      async () => {
+        // `<pre><code>` is the highlighter's output; the placeholder is a
+        // Mantine `Code` block, a bare `<pre>`.
+        await expect(frontmatterPanel.querySelector("pre code")).not.toBeNull();
+      },
+      // What this waits on is three dynamic imports served by the Vite dev
+      // server every story iframe in the run shares, not a React commit:
+      // 100-150ms cold on an idle server, and past Testing Library's 1000ms
+      // default under the gate's load, which is how the two samples came to
+      // straddle it. The same shape and budget as the Ace-worker wait in
+      // `JsonObjectInput.stories.tsx` (#2292), and for the same reason under
+      // the storybook project's 15s `testTimeout`.
+      { timeout: 10000 },
+    );
+
     // Every section keeps a usable height: none is crushed to nothing by the
     // viewer's content, which is exactly what a content-sized basis did.
     const before = geometry();
@@ -483,12 +522,16 @@ export const LongSkillDocument: Story = {
     // still not settled when the click resolves: `userEvent.click` returns once
     // the event is dispatched, ahead of React committing the `openSections`
     // update, remounting the panel's content, and the browser running the
-    // layout pass that redistributes height across the flex sections. Sampling
-    // once lands mid-redistribution under load and fails intermittently
-    // (#2278), so read the geometry under `waitFor` and let it retry until the
-    // panes stop moving. The reopened layout only ever converges ON `before`
-    // rather than passing through it, so retrying cannot mask a real
-    // regression.
+    // layout pass that redistributes height across the flex sections. So read
+    // the geometry under `waitFor` and let it retry until the panes stop
+    // moving. The reopened layout only ever converges ON `before` rather than
+    // passing through it, so retrying cannot mask a real regression.
+    //
+    // ⚠️ This retry is not what fixed the intermittent `[…, 178, 262]` failure
+    // (#2278, then #2350): that was the Frontmatter highlighter landing between
+    // the two samples — a settled second layout for changed content, which no
+    // amount of retrying converges — and it is removed by the wait above, not
+    // by this one.
     await userEvent.click(viewerControl);
     await userEvent.click(viewerControl);
     await waitFor(async () => {
