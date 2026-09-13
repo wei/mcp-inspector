@@ -27,11 +27,12 @@
 //  2. **Compare the INSTALLED version, not the declared range.** #1063 phrases
 //     the check as "is the current version > than the one we have in our
 //     package.json", which is exact today only because the four SDK packages
-//     are pinned exactly. `ext-apps` is a caret range (`^1.7.4`) whose lockfile
-//     already resolves higher, so comparing against the declared string would
-//     file an issue for a bump `npm install` has already taken. The declared
-//     range is still reported — it is what says whether the fix is a manifest
-//     edit or a lockfile refresh — but the comparison is against the lockfile.
+//     are pinned exactly. `ext-apps` is a caret range, so its lockfile can
+//     already resolve higher than the manifest's floor, and comparing against
+//     the declared string would file an issue for a bump `npm install` has
+//     already taken. The declared range is still reported — it is what says
+//     whether the fix is a manifest edit or a lockfile refresh — but the
+//     comparison is against the lockfile.
 //  3. **A new SDK package must not be watched silently by nobody.** The group
 //     table is a hardcoded list, so a fifth `@modelcontextprotocol/*` package
 //     added to the root manifest would never be checked and nothing would say
@@ -352,10 +353,10 @@ const cell = (value) => String(value).replace(/\|/g, "\\|");
  * ⚠️ Not every bump is a manifest edit, and saying so unconditionally was wrong
  * for the very case this script exists to handle separately (Copilot). The four
  * `typescript-sdk` packages are pinned **exactly**, so any new version needs the
- * manifest changed. `ext-apps` is a **range** (`^1.7.4`), so a 1.8.0 target is
- * already satisfied by what `package.json` says and only `npm install` is needed
- * — telling a maintainer to edit the manifest there sends them to change a line
- * that is already correct.
+ * manifest changed. `ext-apps` is a caret **range**, so a target that is only a
+ * patch or minor ahead within the same major is already satisfied by what
+ * `package.json` says and only `npm install` is needed — telling a maintainer to
+ * edit the manifest there sends them to change a line that is already correct.
  *
  * A row whose declared value is not a parseable range (an unparsed dependency,
  * or the `(undeclared)` placeholder) counts as needing the edit: that is the
