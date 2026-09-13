@@ -39,9 +39,7 @@ import type { AppRenderSource, BridgeFactory } from "./AppRenderer";
 function resolveSourceUri(source: AppRenderSource): string | undefined {
   return source.kind === "resource"
     ? source.resourceUri
-    : getToolUiResourceUri(
-        source.tool as Parameters<typeof getToolUiResourceUri>[0],
-      );
+    : getToolUiResourceUri(source.tool);
 }
 
 /**
@@ -324,7 +322,7 @@ export function createAppBridgeFactory(
     // declare its own csp/permissions.
     const hostCapabilities: McpUiHostCapabilities = {
       ...HOST_CAPABILITIES,
-      // `elicitation` is not part of ext-apps 1.7.5's `McpUiHostCapabilities`
+      // `elicitation` is not part of ext-apps 2.0.0's `McpUiHostCapabilities`
       // (ext-apps#733 adds it), so it is spread in as an extra key. The bridge
       // forwards the capabilities object verbatim in its `ui/initialize`
       // response, which is exactly what the app reads. TODO: drop the cast when
@@ -333,17 +331,9 @@ export function createAppBridgeFactory(
         ? ({ elicitation: {} } as Partial<McpUiHostCapabilities>)
         : {}),
     };
-    // ext-apps' `AppBridge` peers on SDK v1's `Client`/`Implementation`; both
-    // are runtime-compatible with v2's. Cast at this single construction
-    // boundary. TODO: drop when ext-apps#702 ships a v2 peer release.
-    const bridge = new AppBridge(
-      client as unknown as ConstructorParameters<typeof AppBridge>[0],
-      HOST_INFO as unknown as ConstructorParameters<typeof AppBridge>[1],
-      hostCapabilities,
-      {
-        hostContext: snapshotHostContext(iframe, HOST_AVAILABLE_DISPLAY_MODES),
-      },
-    );
+    const bridge = new AppBridge(client, HOST_INFO, hostCapabilities, {
+      hostContext: snapshotHostContext(iframe, HOST_AVAILABLE_DISPLAY_MODES),
+    });
 
     // The double-iframe proxy posts `sandboxready` once it can receive content.
     // Read the tool's UI resource and hand its HTML (plus any sandbox/permission

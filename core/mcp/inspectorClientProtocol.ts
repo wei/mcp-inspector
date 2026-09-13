@@ -25,6 +25,7 @@ import type {
 } from "./types.js";
 import type {
   CacheMode,
+  Client,
   ClientCapabilities,
   DiscoverResult,
   Implementation,
@@ -47,11 +48,13 @@ import type { SamplingCreateMessage } from "./samplingCreateMessage.js";
 import type { ElicitationCreateMessage } from "./elicitationCreateMessage.js";
 
 /**
- * Opaque type representing the AppRendererClient surface used by @mcp-ui.
- * v1.5 aliases this to the SDK `Client` type; v2 leaves it opaque until the
- * real InspectorClient (or a focused App-renderer port) lands.
+ * The SDK `Client` the MCP Apps host bridge is built over. ext-apps'
+ * `AppBridge` takes it directly and forwards a running app's
+ * tools/resources/prompts calls (and list-changed notifications) through it.
+ * Since ext-apps 2.0.0 peers on SDK v2 this is the real client with nothing in
+ * between — the v1-peer translation proxy it used to name is gone (#1745).
  */
-export type AppRendererClient = unknown;
+export type AppRendererClient = Client;
 
 /**
  * The contract every state manager and hook depends on. Anything that holds

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { act, renderHook } from "@testing-library/react";
+import { Client } from "@modelcontextprotocol/client";
 import type {
   ClientCapabilities,
   Implementation,
@@ -422,7 +423,9 @@ describe("useInspectorClient", () => {
     const { result, rerender } = renderHook(() => useInspectorClient(client));
     expect(result.current.appRendererClient).toBeNull();
 
-    const sentinel = { iam: "renderer" };
+    // A real (unconnected) SDK client: `AppRendererClient` is the SDK `Client`
+    // itself since ext-apps 2.0.0 (#1745), and this hook only relays it.
+    const sentinel = new Client({ name: "renderer-sentinel", version: "0" });
     client.setAppRendererClient(sentinel);
     rerender();
     expect(result.current.appRendererClient).toBe(sentinel);

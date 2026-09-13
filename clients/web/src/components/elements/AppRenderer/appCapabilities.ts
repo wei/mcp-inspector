@@ -5,7 +5,7 @@ import type { AppBridge } from "@modelcontextprotocol/ext-apps/app-bridge";
  * The app capabilities exactly as the view sent them, per bridge.
  *
  * `AppBridge.getAppCapabilities()` cannot be used for `elicitation` (#1854):
- * ext-apps 1.7.5 parses the view's `ui/initialize` params through
+ * ext-apps 2.0.0 parses the view's `ui/initialize` params through
  * `McpUiAppCapabilitiesSchema`, a plain Zod object, so any key that schema does
  * not declare is **stripped before the bridge stores it**. `elicitation` is
  * exactly such a key — it is what ext-apps#733 adds — so an app that correctly
@@ -25,10 +25,10 @@ const rawAppCapabilities = new WeakMap<AppBridge, Record<string, unknown>>();
 /**
  * The only part of a transport this needs: the inbound-message callback.
  *
- * Structural, and generic over the message type, on purpose. ext-apps'
- * `PostMessageTransport` implements the SDK *v1* `Transport` — a different
- * nominal type from the v2 client's, though runtime-identical — so naming
- * either would force a cast at the call site. Generic rather than
+ * Structural, and generic over the message type, on purpose. This helper
+ * touches one optional property, so naming the SDK `Transport` (which ext-apps'
+ * `PostMessageTransport` implements since 2.0.0) would only make every test
+ * fake carry `start`/`send`/`close` it never calls. Generic rather than
  * `(message: unknown)` because a handler typed for a narrower message is not
  * assignable to one typed for `unknown` (contravariance), which would put the
  * cast back; `rest` is `never[]` for the same reason, accepting any trailing
