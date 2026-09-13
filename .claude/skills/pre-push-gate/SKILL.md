@@ -176,8 +176,11 @@ OOM'd session — stops refreshing its lock and is taken over after 30s; nothing
 needs cleaning up by hand. The one exception is a dead holder's lock directory
 that cannot be removed (a stray file inside it, or permissions): the takeover
 fails, the waiter keeps waiting, and the wait runs to its 45-minute cap naming
-the path — remove that directory by hand. So the give-up happens against a
-live gate that has hung, or a stale lock that would not go away; never on its
+the path — remove that directory by hand. The cap is a total wait budget, counted
+from the waiter's first attempt and not reset as the queue ahead of it drains,
+so a queue of healthy gates deeper than it covers — about ten, at ~4.5 minutes
+each — reaches it too. So the give-up happens against a live gate that has
+hung, a stale lock that would not go away, or a queue that deep; never on its
 own.
 
 `INSPECTOR_SKIP_GATE_LEASE=1 npm run local:gate` runs without the lease. It is
