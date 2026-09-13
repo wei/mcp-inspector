@@ -130,7 +130,7 @@ jobs:
         # non-Chromium `SMOKE_BROWSER` to any workflow.
         # `npm run test:scripts` fails if you do (scripts/lib/workflow-gate.mjs,
         # #2146). `npm run smoke` and `smoke:web:chromium` belong here and are
-        # not affected. The canonical CI-vs-local table is in the root README.
+        # not affected. The canonical CI-vs-local split is docs/quality-gate.md.
         #
         # End-to-end smokes through the built launcher (--help dispatch + prod
         # CLI/web). Not part of any client's `validate`: it needs the
