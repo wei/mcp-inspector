@@ -22,10 +22,10 @@ import type {
   ResourceSubscriptionStreamState,
   ExcludedTool,
   RequestMetadata,
+  AppRendererClient,
 } from "./types.js";
 import type {
   CacheMode,
-  Client,
   ClientCapabilities,
   DiscoverResult,
   Implementation,
@@ -48,13 +48,11 @@ import type { SamplingCreateMessage } from "./samplingCreateMessage.js";
 import type { ElicitationCreateMessage } from "./elicitationCreateMessage.js";
 
 /**
- * The SDK `Client` the MCP Apps host bridge is built over. ext-apps'
- * `AppBridge` takes it directly and forwards a running app's
- * tools/resources/prompts calls (and list-changed notifications) through it.
- * Since ext-apps 2.0.0 peers on SDK v2 this is the real client with nothing in
- * between — the v1-peer translation proxy it used to name is gone (#1745).
+ * Re-exported from `./types.js`, where it is defined and documented, so hook
+ * code that types against this protocol (`core/react/useInspectorClient.ts`)
+ * can import it here without a second, drift-prone definition (#1745).
  */
-export type AppRendererClient = Client;
+export type { AppRendererClient } from "./types.js";
 
 /**
  * The contract every state manager and hook depends on. Anything that holds
