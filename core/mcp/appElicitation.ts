@@ -21,8 +21,9 @@ import { MCP_APP_MIME_TYPE, UI_EXTENSION_KEY } from "./extensions.js";
  *
  * The helpers here mirror the ext-apps draft (modelcontextprotocol/ext-apps#733,
  * SEP-3118) so the Inspector speaks exactly the proposed protocol. They are
- * declared locally only because the released `@modelcontextprotocol/ext-apps`
- * (1.7.5) predates that PR and exports none of them; replace
+ * declared locally only because #733 is not yet in a published release — the
+ * installed `@modelcontextprotocol/ext-apps` (2.0.0) does not include it and
+ * exports none of them; replace
  * {@link supportsAppElicitation} / {@link getElicitationUiResourceUri} with the
  * package's `/server` exports once a release containing #733 ships.
  */

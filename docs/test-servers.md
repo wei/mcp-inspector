@@ -243,7 +243,7 @@ Only the **web** client advertises the nested client-side setting, and only beca
 
 Everything else falls back to the built-in elicitation form, by design: metadata that is absent or not an absolute `ui://` URI, a resource that fails to load, a sandbox or bridge that fails to initialize, an app that did not advertise `elicitation`, a request that times out, and any result that is not a valid `ElicitResult` for the requested schema. An explicit `decline` or `cancel` is **not** a fallback — it is a completed elicitation and goes back to the server as-is.
 
-> The Inspector speaks the ext-apps#733 wire protocol but does not yet consume its helpers: the released `@modelcontextprotocol/ext-apps` (2.0.0) predates that PR. `core/mcp/appElicitation.ts` and `clients/web/src/components/elements/AppRenderer/requestAppElicitation.ts` mirror it exactly and are marked for deletion in favour of the package's own exports once a release containing it ships.
+> The Inspector speaks the ext-apps#733 wire protocol but does not yet consume its helpers: #733 is not yet in a published release — the installed `@modelcontextprotocol/ext-apps` (2.0.0) does not include it. `core/mcp/appElicitation.ts` and `clients/web/src/components/elements/AppRenderer/requestAppElicitation.ts` mirror it exactly and are marked for deletion in favour of the package's own exports once a release containing it ships.
 
 ## MRTR
 

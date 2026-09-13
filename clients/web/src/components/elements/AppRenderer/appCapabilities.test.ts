@@ -38,7 +38,7 @@ function initializeFrame(
 
 describe("appCapabilities (#1854)", () => {
   it("records the raw ui/initialize capabilities the bridge's schema strips", () => {
-    // The whole reason this module exists: ext-apps 1.7.5 parses away the
+    // The whole reason this module exists: ext-apps 2.0.0 parses away the
     // `elicitation` key, so an app that DID advertise it reads as one that did
     // not — and every negotiated elicitation silently becomes a fallback.
     const bridge = makeBridge({});
@@ -146,7 +146,7 @@ describe("appCapabilities (#1854)", () => {
   });
 
   it("takes the latest accepted handshake, in both directions", () => {
-    // Verified against ext-apps 1.7.5: a second `ui/initialize` is accepted —
+    // Verified against ext-apps 2.0.0: a second `ui/initialize` is accepted —
     // the bridge warns about the double-mount and the latest appInfo and
     // capabilities REPLACE the previous ones. Freezing this at the first frame
     // would leave the gate reporting capabilities the bridge no longer holds.

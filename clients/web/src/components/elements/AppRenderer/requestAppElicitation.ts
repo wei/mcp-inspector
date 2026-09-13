@@ -20,8 +20,9 @@ export const APP_ELICITATION_TIMEOUT_MS = 10 * 60 * 1000;
  *
  * This is ext-apps' own `AppBridge.requestElicitation` from
  * modelcontextprotocol/ext-apps#733 — same method, same params, same result —
- * implemented against the bridge's generic `request()` because the released
- * package (2.0.0) predates that PR. Replace the body with a call to
+ * implemented against the bridge's generic `request()` because #733 is not
+ * yet in a published release (2.0.0 does not include it). Replace the body
+ * with a call to
  * `bridge.requestElicitation(params)` once a release containing #733 ships;
  * nothing on the wire changes when that happens.
  *

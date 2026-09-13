@@ -1023,9 +1023,13 @@ export type CreateTransport = (
 ) => CreateTransportResult;
 
 /**
- * Type for the client-like object passed to AppRenderer / @mcp-ui.
- * Structurally compatible with the MCP SDK Client but denotes the app-renderer
- * proxy, not the raw client. Use this type when passing the client to the Apps tab.
+ * The SDK `Client` handed to the MCP Apps host bridge (`AppBridge` in
+ * `@modelcontextprotocol/ext-apps`), obtained through
+ * `InspectorClient.getAppRendererClient()`, which returns it only while the
+ * connection status is `connected` and `null` otherwise. It is the real client,
+ * not a wrapper: since ext-apps 2.0.0 peers on SDK v2 the bridge registers on
+ * it directly, and the v1-peer translation proxy this alias used to denote is
+ * gone (#1745). Use this type when passing the client to the Apps tab.
  */
 export type AppRendererClient = Client;
 
