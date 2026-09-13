@@ -31,8 +31,10 @@ import { cleanup, configure } from "@testing-library/react";
 // expiring-wait shape against Testing Library across the unit, `core/`,
 // integration and story files; no test at or above 2000ms in a full unit run;
 // and the same three-arm protocol re-run interleaved on a leased machine
-// (1000 / 5000 / reverted, three rounds) gave 0 failures in every arm and
-// 0 tests at or above 5000ms with the raise in place. Nothing on the passing
+// (1000 / 5000 / reverted, three rounds) gave 0 failures in every arm — the
+// one red test in each 5000 arm being `asyncUtilTimeout.test.ts` refusing the
+// raised value, which is the guard doing its job — and 0 tests at or above
+// 5000ms with the raise in place. Nothing on the passing
 // path spends this budget, so raising it buys nothing — and the #2323 reds
 // read as ambient load the arms did not share (an inference from that data,
 // not a re-measurement of the original run).

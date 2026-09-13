@@ -435,12 +435,16 @@ free to run a full `local:gate`). Raising a budget nobody chose hides no race.
   tool can be asked to resolve; assert at runtime when it is about behavior.
 - **A budget is stated, which is not the same as raised.** Testing Library's
   `asyncUtilTimeout` is pinned at its own default in both web setup files
-  because raising it was *measured worse*: a wait that is meant to expire —
-  a test asserting something never appears, a poll allowed to run out — spends
-  its whole budget on the happy path, so a raise is a proportional cost on
-  exactly those tests and starves the worker pool. Measure before raising a
-  budget that a passing test can spend in full; the call-site comment records
-  the three-arm run.
+  because raising it was *measured* and found to buy nothing: #2323's
+  three-arm run went red at 5000, and #2335's interleaved re-run on a leased
+  machine found no web test that lets a Testing Library wait expire on its
+  passing path and no difference between 1000 and 5000 beyond the guard
+  refusing the raised value. The hazard the rule guards against is still
+  real: a wait that is meant to expire — a test asserting something never
+  appears, a poll allowed to run out — spends its whole budget on the happy
+  path, so a raise is a proportional cost on exactly those tests. Measure
+  before raising a budget that a passing test can spend in full; the
+  call-site comment records both runs.
 - **An inner budget must be strictly smaller than the budget enclosing it.**
   `waitFor({ timeout: N })` inside a test whose own budget is `N` can never win:
   the test expires first and reports a timeout naming neither the wait nor its

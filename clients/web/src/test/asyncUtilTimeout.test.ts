@@ -26,8 +26,9 @@ import { getConfig } from "@testing-library/react";
  * to expire spends the whole budget on the happy path, so a 5x raise is a 5x
  * cost on those tests — was checked on #2335 and does not hold here: no web
  * test lets a Testing Library wait expire on its passing path, and the same
- * three-arm protocol re-run interleaved on a leased machine showed 0 failures
- * in every arm and 0 tests at or above 5000ms with the raise in place. Raising
+ * three-arm protocol re-run interleaved on a leased machine showed no failure
+ * in any arm beyond this very assertion refusing the raised value, and 0 tests
+ * at or above 5000ms with the raise in place. Raising
  * the budget buys nothing, so the pin stays at the default until a measurement
  * says otherwise. `setup.ts` carries the full record.
  *
