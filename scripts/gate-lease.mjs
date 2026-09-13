@@ -106,12 +106,16 @@ export const PROGRESS_MS = 60_000;
 /**
  * How long a waiter waits before giving up.
  *
- * A dead holder releases within {@link STALE_MS}, so this only ever expires
- * against a *live* holder that is still running after 45 minutes — four
- * queued quiet gates are ~18 minutes, so a holder that long is a hung gate, and
- * the right outcome is a loud failure naming it rather than a fifth process
- * joining the pile. An unbounded wait would be a task that looks like progress
- * and can never succeed.
+ * This is a *total queueing budget*: it counts from the waiter's first attempt
+ * and is not reset when the holder ahead releases and another queued gate
+ * takes the lease. A dead holder releases within {@link STALE_MS}, so it
+ * expires against a live gate that has hung, a dead holder's lock directory
+ * that could not be removed, or a queue of healthy gates deeper than the
+ * budget covers — about ten at ~4.5 minutes each. The right outcome in every
+ * case is a loud failure naming whichever gate holds the lease at that moment
+ * rather than another process joining the pile; an unbounded wait would be a
+ * task that looks like progress and can never succeed. Keep this in step with
+ * the lease section of docs/quality-gate.md (#2354), which owns the prose.
  */
 export const MAX_WAIT_MS = 45 * 60_000;
 
