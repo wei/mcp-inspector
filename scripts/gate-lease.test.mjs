@@ -5,7 +5,7 @@
 // behind (or block) a developer's actual gate. Run via `npm run test:scripts`
 // (node:test; the root has no vitest harness).
 
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
@@ -41,10 +41,26 @@ import {
 
 const SCRIPT = fileURLToPath(new URL("./gate-lease.mjs", import.meta.url));
 
-/** A fresh lease directory per test, so tests never contend with each other. */
+/**
+ * A fresh lease directory per test, so tests never contend with each other.
+ * Each one is recorded so the suite can remove it once every test is done
+ * (#2346): one hook, rather than a try/finally in each of the fourteen tests,
+ * and it runs whether a test passed, failed, or threw before its own cleanup.
+ */
+const createdDirs = [];
 function freshDir() {
-  return mkdtempSync(join(tmpdir(), "gate-lease-test-"));
+  const dir = mkdtempSync(join(tmpdir(), "gate-lease-test-"));
+  createdDirs.push(dir);
+  return dir;
 }
+
+// Runs once all tests in the file have finished. Every test that starts a
+// child (or the wrapper) awaits its exit before asserting, so by now nothing
+// is holding a lock inside any of these directories, and a stray lock or
+// holder record a test left on purpose is just a directory to remove.
+after(() => {
+  for (const dir of createdDirs) rmSync(dir, { recursive: true, force: true });
+});
 
 function collectLog() {
   const lines = [];
