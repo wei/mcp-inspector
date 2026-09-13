@@ -114,8 +114,8 @@ export const PROGRESS_MS = 60_000;
  * budget covers — about ten at ~4.5 minutes each. The right outcome in every
  * case is a loud failure naming whichever gate holds the lease at that moment
  * rather than another process joining the pile; an unbounded wait would be a
- * task that looks like progress and can never succeed. docs/quality-gate.md
- * describes the same budget; keep the two in step.
+ * task that looks like progress and can never succeed. Keep this in step with
+ * the lease section of docs/quality-gate.md (#2354), which owns the prose.
  */
 export const MAX_WAIT_MS = 45 * 60_000;
 
