@@ -1,10 +1,12 @@
 # Environment variables
 
-Every environment variable that changes how the Inspector behaves at runtime, in one place. Set them in the shell that launches `mcp-inspector` (or with `-e` for the [Docker image](./docker.md)).
+Every environment variable that changes how the Inspector behaves at runtime, in one place: the Inspector's own variables, plus the standard system and Node variables it reads (`HOME`, the proxy variables, the Node TLS variables). Set them in the shell that launches `mcp-inspector` (or with `-e` for the [Docker image](./docker.md)).
 
 The **Read by** column names the client whose process reads the variable: **web** is the Node backend that `--web` starts (the browser itself reads no environment), **CLI** and **TUI** are those clients, and **launcher** is the `mcp-inspector` bin that picks one of them. A variable read in shared `core/` code is marked with every client that reaches it.
 
 ⚠️ **Unset a variable rather than setting it to an empty string.** The two are not interchangeable: `HOST=""` is read as an all-interfaces bind and refused, and an empty path variable such as `MCP_STORAGE_DIR=` or `MCP_INSPECTOR_LOG_DIR=` can resolve relative to the working directory instead of falling back to the default. A row says so explicitly where an empty value is treated as unset.
+
+A `~` in a default below means the home directory as described under [Home directory](#home-directory).
 
 ## Authentication and network exposure
 
@@ -25,10 +27,10 @@ These guard the web backend, which spawns processes on request. Read [Host bindi
 | --------------------- | -------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `CLIENT_PORT`         | web, CLI | `6274`  | Web UI port. Must be a **fixed** integer in 1–65535: `0` (an OS-assigned port) is rejected at startup, because the origin allow-list and the MCP Apps sandbox CSP are derived from it.                                                                          |
 | `MCP_SANDBOX_PORT`    | web, CLI | `6275`  | Port of the MCP Apps sandbox server, 0–65535. `0` asks the OS for a free port. An invalid value is ignored with a warning.                                                                                                                                       |
-| `SERVER_PORT`         | web      | —       | v1's proxy port, now only a fallback for `MCP_SANDBOX_PORT` when that is unset.                                                                                                                                                                                   |
+| `SERVER_PORT`         | web      | —       | v1's proxy port, now only a fallback for the sandbox port: used whenever `MCP_SANDBOX_PORT` does not yield a valid port — unset, empty, **or invalid**.                                                                                                          |
 | `MCP_APP_ORIGIN_PORT` | web, CLI | `6278`  | Port of the dedicated app-origin server, used only by an MCP App whose UI resource declares `_meta.ui.domain`; 0–65535, where `0` asks the OS for a free port. An invalid value is ignored with a warning. Pin it if your app's backend allowlists that origin. |
 
-The CLI reads `CLIENT_PORT`, `MCP_SANDBOX_PORT`, `MCP_APP_ORIGIN_PORT` and `HOST` only to build the deep link and port list it hands to a web session; it binds none of them.
+The sandbox port resolves as: a valid `MCP_SANDBOX_PORT`, else a valid `SERVER_PORT`, else `6275`. The CLI reads `CLIENT_PORT`, `MCP_SANDBOX_PORT`, `MCP_APP_ORIGIN_PORT` and `HOST` only to build the deep link and port list it hands to a web session; it binds none of them, and it does not apply the `SERVER_PORT` fallback.
 
 ## Behavior
 
@@ -41,32 +43,41 @@ The CLI reads `CLIENT_PORT`, `MCP_SANDBOX_PORT`, `MCP_APP_ORIGIN_PORT` and `HOST
 
 ## Storage and state
 
-| Variable                         | Read by       | Default                                | Effect                                                                                                                                                                                                                                                                 |
-| -------------------------------- | ------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `MCP_STORAGE_DIR`                | web, CLI, TUI | `~/.mcp-inspector/storage`             | Storage directory. Relocates the OAuth state file (`oauth.json`) and the secrets file (`secrets.json`) for every client. For the **web** backend it also relocates `client.json`; the CLI and TUI find `client.json` through `MCP_CLIENT_CONFIG_PATH` instead.       |
-| `MCP_INSPECTOR_OAUTH_STATE_PATH` | web, CLI, TUI | `~/.mcp-inspector/storage/oauth.json`  | Names the OAuth state file outright. Lookup order: this variable, then `<MCP_STORAGE_DIR>/oauth.json`, then `~/.mcp-inspector/storage/oauth.json`. ⚠️ Setting `MCP_STORAGE_DIR` alone does not isolate a run if this variable is also exported.                    |
-| `MCP_CLIENT_CONFIG_PATH`         | CLI, TUI      | `~/.mcp-inspector/storage/client.json` | Install-level client config (CIMD, enterprise IdP). `--client-config` takes precedence.                                                                                                                                                                                |
+| Variable                         | Read by       | Default                                | Effect                                                                                                                                                                                                                                                                                                                  |
+| -------------------------------- | ------------- | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MCP_STORAGE_DIR`                | web, CLI, TUI | `~/.mcp-inspector/storage`             | Storage directory. Relocates the OAuth state file (`oauth.json`) and the secrets file (`secrets.json`) for every client. For the **web** backend it also relocates `client.json`; the CLI and TUI find `client.json` through `MCP_CLIENT_CONFIG_PATH` instead.                                                        |
+| `MCP_INSPECTOR_OAUTH_STATE_PATH` | CLI, TUI      | `~/.mcp-inspector/storage/oauth.json`  | Names the OAuth state file outright. Lookup order: this variable, then `<MCP_STORAGE_DIR>/oauth.json`, then `~/.mcp-inspector/storage/oauth.json`. ⚠️ Setting `MCP_STORAGE_DIR` alone does not isolate a CLI or TUI run if this variable is also exported. **The web backend does not read it** — it always uses `<MCP_STORAGE_DIR>/oauth.json`. |
+| `MCP_CLIENT_CONFIG_PATH`         | CLI, TUI      | `~/.mcp-inspector/storage/client.json` | Install-level client config (CIMD, enterprise IdP). `--client-config` takes precedence.                                                                                                                                                                                                                                 |
+
+### Home directory
+
+Every default above that starts with `~` is built from the home directory the process sees, not from the OS account database:
+
+| Variable      | Read by       | Effect                                                                                                                                                                                                                                                                   |
+| ------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `HOME`        | web, CLI, TUI | Base of `~/.mcp-inspector`: the default catalog, storage directory (`oauth.json`, `client.json`), secrets file, and TUI log directory.                                                                                                                                  |
+| `USERPROFILE` | web, CLI, TUI | Used in place of `HOME` when `HOME` is unset or empty — the normal case on Windows. ⚠️ If **neither** is set, as under some service managers, those defaults resolve against the **current working directory** instead. Set `HOME` or the specific path variables above. |
 
 ## Secret store
 
 Where server secrets (headers, client secrets) are kept. The details — the keychain probe, the file format, encryption and locking — are in the [Docker guide](./docker.md); these variables apply to every install, not only containers.
 
-| Variable                     | Read by       | Default                           | Effect                                                                                                                                                                                                                                           |
-| ---------------------------- | ------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `MCP_INSPECTOR_SECRET_STORE` | web, CLI, TUI | probe the OS keychain             | `keyring`, `file`, or `memory` (case-insensitive) picks the store outright and skips the probe. Any other value is ignored with a warning.                                                                                                        |
-| `MCP_INSPECTOR_SECRET_FILE`  | web, CLI, TUI | `~/.mcp-inspector/secrets.json`   | Path of the file store. Lookup order: this variable, then `secrets.json` in `MCP_STORAGE_DIR` when that is set, then `~/.mcp-inspector/secrets.json`. ⚠️ The default sits **beside** the storage directory, not inside it.                     |
-| `MCP_INSPECTOR_SECRET_KEY`   | web, CLI, TUI | unset (file is plaintext, `0600`) | Passphrase that encrypts the file store; an empty or whitespace-only value counts as unset. Use a generated, high-entropy value. ⚠️ Changing or losing it makes the existing file unreadable; see the Docker guide before rotating it.            |
+| Variable                     | Read by       | Default                           | Effect                                                                                                                                                                                                                                |
+| ---------------------------- | ------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MCP_INSPECTOR_SECRET_STORE` | web, CLI, TUI | probe the OS keychain             | `keyring`, `file`, or `memory` (case-insensitive) picks the store outright and skips the probe. Any other value is ignored with a warning.                                                                                             |
+| `MCP_INSPECTOR_SECRET_FILE`  | web, CLI, TUI | `~/.mcp-inspector/secrets.json`   | Path of the file store. Lookup order: this variable, then `secrets.json` in `MCP_STORAGE_DIR` when that is set, then `~/.mcp-inspector/secrets.json`. ⚠️ The default sits **beside** the storage directory, not inside it.          |
+| `MCP_INSPECTOR_SECRET_KEY`   | web, CLI, TUI | unset (file is plaintext, `0600`) | Passphrase that encrypts the file store; an empty or whitespace-only value counts as unset. Use a generated, high-entropy value. ⚠️ Changing or losing it makes the existing file unreadable; see the Docker guide before rotating it. |
 
 When no store is configured, the choice also depends on whether the Inspector is running in a container, which it detects from `KUBERNETES_SERVICE_HOST` (or Docker's and Podman's marker files). That variable is set by the orchestrator, not by you.
 
 ## Logging and debugging
 
-| Variable                | Read by  | Default            | Effect                                                                                                                                        |
-| ----------------------- | -------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `MCP_DEBUG` / `DEBUG`   | launcher | off                | Prints the full stack trace when the launcher exits on an error. Any value other than empty, `0` or `false` (case-insensitive) turns it on.  |
-| `MCP_LOG_FILE`          | web      | unset (no log)     | Appends the web backend's structured (pino, JSON lines) log to this file, creating its directory if needed. An empty value counts as unset.  |
-| `MCP_INSPECTOR_LOG_DIR` | TUI      | `~/.mcp-inspector` | Directory of the TUI's `auth.log`. The TUI logs to a file so its output does not corrupt the terminal UI.                                     |
-| `LOG_LEVEL`             | TUI      | `info`             | Level of the TUI's `auth.log`: one of `trace`, `debug`, `info`, `warn`, `error`, `fatal`, `silent`. An empty value is not replaced by `info`. |
+| Variable                | Read by       | Default            | Effect                                                                                                                                                                                                                              |
+| ----------------------- | ------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MCP_DEBUG` / `DEBUG`   | launcher, TUI | off                | Prints the full stack trace when the process exits on an error — the launcher for any `--web`/`--tui` failure, and the standalone TUI entry point for a startup failure. Any value other than empty, `0` or `false` (case-insensitive) turns it on. |
+| `MCP_LOG_FILE`          | web           | unset (no log)     | Appends the web backend's structured (pino, JSON lines) log to this file, creating its directory if needed. An empty value counts as unset.                                                                                        |
+| `MCP_INSPECTOR_LOG_DIR` | TUI           | `~/.mcp-inspector` | Directory of the TUI's `auth.log`. The TUI logs to a file so its output does not corrupt the terminal UI.                                                                                                                           |
+| `LOG_LEVEL`             | TUI           | `info`             | Level of the TUI's `auth.log`: one of `trace`, `debug`, `info`, `warn`, `error`, `fatal`, `silent`. An empty value is not replaced by `info`.                                                                                       |
 
 ## Outbound proxy
 
