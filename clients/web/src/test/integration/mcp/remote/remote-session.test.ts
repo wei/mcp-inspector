@@ -231,6 +231,74 @@ describe("RemoteSession", () => {
     await expect(wait).resolves.toBeUndefined();
   });
 
+  it("a matching progress notification re-arms the wait past its original deadline (#2028)", async () => {
+    vi.useFakeTimers();
+    const session = new RemoteSession("s-progress-reset");
+    const wait = session.waitForRequestResponse(5, 1000);
+    // Almost at the deadline, then a progress note for this request arrives.
+    await vi.advanceTimersByTimeAsync(900);
+    session.onMessage({
+      jsonrpc: "2.0",
+      method: "notifications/progress",
+      params: { progressToken: 5, progress: 1, total: 10 },
+    });
+    // Past the *original* 1000ms deadline: without the re-arm this would have
+    // already rejected, and the resolve below would be a no-op on a dead wait.
+    await vi.advanceTimersByTimeAsync(900);
+    session.onMessage({ jsonrpc: "2.0", id: 5, result: {} });
+    await expect(wait).resolves.toBeUndefined();
+    vi.useRealTimers();
+  });
+
+  it("a notifications/message does NOT re-arm the wait (log messages don't extend the deadline, #2028)", async () => {
+    vi.useFakeTimers();
+    const session = new RemoteSession("s-message-no-reset");
+    const wait = session.waitForRequestResponse(6, 1000);
+    const rejection = expect(wait).rejects.toThrow(/timed out/);
+    await vi.advanceTimersByTimeAsync(500);
+    session.onMessage({
+      jsonrpc: "2.0",
+      method: "notifications/message",
+      params: { level: "info", data: { msg: "tick" } },
+    });
+    await vi.advanceTimersByTimeAsync(500);
+    await rejection;
+    vi.useRealTimers();
+  });
+
+  it("noteRequestProgress is a no-op for an id with no pending wait", () => {
+    const session = new RemoteSession("s-progress-noop");
+    expect(() => session.noteRequestProgress(999)).not.toThrow();
+  });
+
+  it("a progress notification on a timeoutMs=0 wait leaves it timerless and it still resolves", async () => {
+    const session = new RemoteSession("s-progress-notimer");
+    const wait = session.waitForRequestResponse(7, 0);
+    session.onMessage({
+      jsonrpc: "2.0",
+      method: "notifications/progress",
+      params: { progressToken: 7, progress: 1 },
+    });
+    session.onMessage({ jsonrpc: "2.0", id: 7, result: {} });
+    await expect(wait).resolves.toBeUndefined();
+  });
+
+  it("a progress notification with a non-token progressToken re-arms nothing", async () => {
+    vi.useFakeTimers();
+    const session = new RemoteSession("s-progress-bad-token");
+    const wait = session.waitForRequestResponse(8, 1000);
+    const rejection = expect(wait).rejects.toThrow(/timed out/);
+    // A malformed token (object) must be ignored, not coerced to a key.
+    session.onMessage({
+      jsonrpc: "2.0",
+      method: "notifications/progress",
+      params: { progressToken: { bad: true }, progress: 1 },
+    } as unknown as Parameters<RemoteSession["onMessage"]>[0]);
+    await vi.advanceTimersByTimeAsync(1000);
+    await rejection;
+    vi.useRealTimers();
+  });
+
   it("endSend is a no-op when no send is active", () => {
     const session = new RemoteSession("s-endsend-noop");
     expect(session.hasActiveSend()).toBe(false);

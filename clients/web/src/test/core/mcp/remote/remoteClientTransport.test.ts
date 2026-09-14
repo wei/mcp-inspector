@@ -686,4 +686,115 @@ describe("RemoteClientTransport", () => {
       await transport.close();
     });
   });
+
+  describe("progress notifications keep the SSE response wait alive (#2028)", () => {
+    // A remote backend holds POST /api/mcp/send open until the JSON-RPC
+    // response, and the browser bounds that wait with `sseResponseTimeoutMs`.
+    // For a long tool that reports progress, that wait must re-arm on each
+    // `notifications/progress` — mirroring the SDK client's
+    // `resetTimeoutOnProgress` — or the web client alone times out a call that
+    // every other transport rides out. Log messages must NOT re-arm it.
+    function backendHoldingSend(): {
+      fetchFn: typeof fetch;
+      getSse: () => ReturnType<typeof createPushableSseStream>;
+      getSentId: () => string | number | undefined;
+    } {
+      let sse!: ReturnType<typeof createPushableSseStream>;
+      let sentId: string | number | undefined;
+      const fetchFn = vi
+        .fn<typeof fetch>()
+        .mockImplementation(async (input, init) => {
+          const url = String(input);
+          if (url.endsWith("/api/mcp/connect") && init?.method === "POST") {
+            return new Response(JSON.stringify({ sessionId: "s-progress" }), {
+              status: 200,
+            });
+          }
+          if (url.includes("/api/mcp/events")) {
+            sse = createPushableSseStream();
+            return sse.response;
+          }
+          if (url.endsWith("/api/mcp/send") && init?.method === "POST") {
+            const body = JSON.parse(String(init.body)) as {
+              message: { id?: string | number };
+            };
+            sentId = body.message.id;
+            // Backend accepted the request; the response arrives later over SSE.
+            return new Response(JSON.stringify({ ok: true }), { status: 200 });
+          }
+          return new Response("not found", { status: 404 });
+        }) as unknown as typeof fetch;
+      return { fetchFn, getSse: () => sse, getSentId: () => sentId };
+    }
+
+    const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    it("re-arms the wait on each progress note, so a call outliving the timeout still resolves", async () => {
+      const { fetchFn, getSse, getSentId } = backendHoldingSend();
+      const transport = new RemoteClientTransport(
+        { baseUrl, fetchFn, sseResponseTimeoutMs: 150 },
+        config,
+      );
+      await transport.start();
+
+      const sent = transport.send({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+      });
+
+      // Emit progress every 100ms (< the 150ms window) for ~400ms total, then
+      // the response. Without the re-arm the wait dies at 150ms.
+      for (let i = 0; i < 4; i++) {
+        await delay(100);
+        getSse().pushMessage({
+          jsonrpc: "2.0",
+          method: "notifications/progress",
+          params: { progressToken: getSentId(), progress: i, total: 4 },
+        });
+      }
+      getSse().pushMessage({
+        jsonrpc: "2.0",
+        id: getSentId(),
+        result: { ok: true },
+      });
+
+      await expect(sent).resolves.toBeUndefined();
+      await transport.close();
+    });
+
+    it("does not re-arm on notifications/message, so a log-only call still times out", async () => {
+      const { fetchFn, getSse, getSentId } = backendHoldingSend();
+      const transport = new RemoteClientTransport(
+        { baseUrl, fetchFn, sseResponseTimeoutMs: 150 },
+        config,
+      );
+      await transport.start();
+
+      const sent = transport.send({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+      });
+      void sent.catch(() => {});
+
+      // Only log messages — these must not extend the deadline.
+      for (let i = 0; i < 4; i++) {
+        await delay(50);
+        getSse().pushMessage({
+          jsonrpc: "2.0",
+          method: "notifications/message",
+          params: {
+            level: "info",
+            data: { msg: `tick ${i}`, token: getSentId() },
+          },
+        });
+      }
+
+      await expect(sent).rejects.toThrow(
+        /Timed out waiting for MCP response on SSE/,
+      );
+      await transport.close();
+    });
+  });
 });
