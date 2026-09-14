@@ -227,6 +227,38 @@ describe("CLI --stored-auth-only wiring", () => {
   });
 });
 
+describe("--protocol-era", () => {
+  it.each(["legacy", "auto"])(
+    "accepts %s on an ad-hoc target and connects",
+    async (era) => {
+      const { command, args } = getTestMcpServerCommand();
+      const result = await runCli([
+        command,
+        ...args,
+        "--protocol-era",
+        era,
+        "--method",
+        "tools/list",
+      ]);
+      expectCliSuccess(result);
+    },
+  );
+
+  it("rejects an unknown era before connecting", async () => {
+    const { command, args } = getTestMcpServerCommand();
+    const result = await runCli([
+      command,
+      ...args,
+      "--protocol-era",
+      "future",
+      "--method",
+      "tools/list",
+    ]);
+    expectCliFailure(result);
+    expect(result.stderr).toContain("Invalid protocol era: future");
+  });
+});
+
 describe("MCP_CATALOG_PATH with an ad-hoc target", () => {
   it("does not conflict with an ad-hoc target (env catalog is ignored)", async () => {
     const { command, args } = getTestMcpServerCommand();

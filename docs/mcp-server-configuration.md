@@ -11,7 +11,7 @@ Client-specific options (the web server port, the CLI method to invoke, TUI navi
 
 The two do not mix. `--catalog` and `--config` are mutually exclusive with each other, and neither combines with an ad-hoc target. All three clients apply the same **source-selection** rules — the CLI and TUI through the shared `serverSourceConflict` helper (`core/mcp/node/config.ts`), web through an equivalent inline matrix in `clients/web/server/run-web.ts`. The two implementations diverge on two narrow axes, in opposite directions:
 
-- **Web is stricter on `--header`:** it also rejects `--header` alongside `--catalog`/`--config`, because the CLI and TUI merge `--header` into per-server settings and web does not.
+- **Web is stricter on `--header` and `--protocol-era`:** it also rejects either alongside `--catalog`/`--config`, because the CLI and TUI merge them into per-server settings and web does not.
 - **Web is looser on `--transport stdio`:** the CLI and TUI treat _any_ `--transport` as an ad-hoc marker, so `--catalog c.json --transport stdio` is rejected as a catalog/ad-hoc conflict there; web excludes `stdio` from that test and accepts the same combination, silently ignoring the flag.
 
 ## From a file: `--catalog` vs. `--config`
@@ -125,6 +125,7 @@ Without a `--` on the line the target is only the leading run of **non-dash** to
 | `--cwd <path>`           | Working directory for a stdio server process        |                                                                                                                                                                                      |
 | `-e <KEY=VALUE>`         | Environment variable for a stdio server; repeatable |                                                                                                                                                                                      |
 | `--header "Name: Value"` | HTTP header for an HTTP/SSE server; repeatable      | On web, requires an ad-hoc HTTP/SSE server                                                                                                                                           |
+| `--protocol-era <era>`   | `legacy`, `auto`, or `modern` — the era to negotiate | Sets [`protocolEra`](#inspector-specific-per-server-fields) without a file, on any transport. CLI/TUI also override a file's `protocolEra` with it; web, like `--header`, requires an ad-hoc target |
 | `[target...]`            | Positional command or URL for one ad-hoc server     |                                                                                                                                                                                      |
 
 **`MCP_CATALOG_PATH` and ad-hoc targets differ by client.** The **CLI** ignores the env var when an ad-hoc target is given (a positional command, `--server-url`, or `--transport`), so a shell that exports it can still run one-off ad-hoc invocations without tripping the catalog/ad-hoc conflict. **Web and TUI read it unconditionally** — with it exported, an ad-hoc invocation such as `mcp-inspector --tui node build/index.js` is rejected as `--catalog cannot be combined with an ad-hoc server URL/command`. Unset the variable for that invocation on those two surfaces.

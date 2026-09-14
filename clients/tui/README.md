@@ -29,7 +29,7 @@ npx @modelcontextprotocol/inspector --tui --config mcp.json    # read-only sessi
 
 ### MCP server (which server(s) to connect to)
 
-Options that specify the MCP server(s) (catalog/config file, ad-hoc command/URL, env vars, headers) are shared by the Web, CLI, and TUI and are documented in [MCP server configuration](../../docs/mcp-server-configuration.md): `--catalog` (writable catalog, seeded **empty** if missing; default `~/.mcp-inspector/mcp.json` or `MCP_CATALOG_PATH`), `--config` (read-only session, errors if absent), `-e`, `--cwd`, `--header`, `--transport`, `--server-url`, and the positional `[target...]`. `--catalog` and `--config` are mutually exclusive, and neither combines with an ad-hoc target.
+Options that specify the MCP server(s) (catalog/config file, ad-hoc command/URL, env vars, headers) are shared by the Web, CLI, and TUI and are documented in [MCP server configuration](../../docs/mcp-server-configuration.md): `--catalog` (writable catalog, seeded **empty** if missing; default `~/.mcp-inspector/mcp.json` or `MCP_CATALOG_PATH`), `--config` (read-only session, errors if absent), `-e`, `--cwd`, `--header`, `--protocol-era` (`legacy`/`auto`/`modern`; sets the era an ad-hoc server negotiates, or overrides a file's `protocolEra`), `--transport`, `--server-url`, and the positional `[target...]`. `--catalog` and `--config` are mutually exclusive, and neither combines with an ad-hoc target.
 
 ### TUI-specific (OAuth for HTTP servers)
 
