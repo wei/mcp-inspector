@@ -367,24 +367,6 @@ async function closeSubscriptionBestEffort(
 }
 
 /**
- * Extract the method literal from an MCP notification Zod schema (e.g.
- * `ToolListChangedNotificationSchema`), or `undefined` if the shape isn't
- * recognized. Used by the App-renderer client proxy to translate the SDK-v1
- * schema-first `setNotificationHandler` API — which `@modelcontextprotocol/ext-apps`
- * still uses — into SDK v2's method-string form. Reads the `method` literal off
- * the notification schema's `shape` (the shape both the v1 SDK and v2 core
- * schemas expose).
- */
-function notificationMethodFromSchema(schema: unknown): string | undefined {
-  if (schema !== null && typeof schema === "object") {
-    const literal = (schema as { shape?: { method?: { value?: unknown } } })
-      .shape?.method?.value;
-    if (typeof literal === "string") return literal;
-  }
-  return undefined;
-}
-
-/**
  * The descriptor for a single tools/call, threaded through the retry loop and
  * each attempt. Bundled into one object so `callToolWithRetries`/`attemptToolCall`
  * don't take a long, transposition-prone positional parameter list.
@@ -488,7 +470,6 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   private static readonly MRTR_MAX_ROUNDS = 10;
   private client: Client | null = null;
-  private appRendererClientProxy: AppRendererClient | null = null;
   // Lazily-built validator used only on the skipOutputValidation path to detect
   // (non-fatally) when a delivered result violates the tool's outputSchema.
   private outputValidator: AjvJsonSchemaValidator | null = null;
@@ -1017,7 +998,6 @@ export class InspectorClient extends InspectorClientEventTarget {
     this.rootsListChangedCapabilityAdvertised =
       capabilities.roots?.listChanged === true;
 
-    this.appRendererClientProxy = null;
     this.clientInfo = options.clientIdentity ?? {
       name: corePackageJson.name.split("/")[1] ?? corePackageJson.name,
       version: corePackageJson.version,
@@ -2612,7 +2592,6 @@ export class InspectorClient extends InspectorClientEventTarget {
     this.activeToolCallAbortController?.abort("Disconnected");
     this.activeToolCallAbortController = undefined;
     this.clearReceiverTasks();
-    this.appRendererClientProxy = null;
     this.capabilities = undefined;
     this.serverInfo = undefined;
     this.instructions = undefined;
@@ -2644,44 +2623,19 @@ export class InspectorClient extends InspectorClientEventTarget {
   }
 
   /**
-   * Returns a client proxy for use by AppRenderer / @mcp-ui. Delegates to the
-   * internal MCP Client. Returns null when not connected. Use this instead of
-   * accessing the raw client so behavior can be adapted here later if needed.
+   * The SDK client for the MCP Apps host bridge, or null when not connected.
+   *
+   * ext-apps' `AppBridge` (2.0.0+, an SDK v2 peer) takes the v2 `Client`
+   * directly and registers its list-changed forwarding on it in the
+   * method-string form, so this hands out the real client. The Proxy that
+   * translated the 1.x peer's schema-first `setNotificationHandler(Schema,
+   * handler)` into that form is gone with it (#1745). Kept as the seam rather
+   * than exposing the field so the connected-status gate lives in one place
+   * and hooks, fakes and tests depend on the protocol, not the class.
    */
   getAppRendererClient(): AppRendererClient | null {
     if (!this.client || this.status !== "connected") return null;
-    if (this.appRendererClientProxy !== null)
-      return this.appRendererClientProxy;
-    const target = this.client;
-    this.appRendererClientProxy = new Proxy(this.client, {
-      get(proxyTarget, prop, receiver) {
-        const value = Reflect.get(proxyTarget, prop, receiver);
-        if (prop === "setNotificationHandler" && typeof value === "function") {
-          return (schemaOrMethod: unknown, ...rest: unknown[]) => {
-            // `@modelcontextprotocol/ext-apps` still peers on SDK v1 and
-            // subscribes to list-changed notifications with the v1 schema-first
-            // API `setNotificationHandler(NotificationSchema, handler)`. SDK v2
-            // requires a method STRING as the first argument and throws
-            // "'[object Object]' is not a spec notification method" on a schema —
-            // which broke App rendering during the initial connect handshake.
-            // Translate a schema-first call to the method-string form; native
-            // string-first calls (ours) pass through untouched. Remove when
-            // ext-apps#702 ships a v2 peer.
-            const method =
-              typeof schemaOrMethod === "string"
-                ? schemaOrMethod
-                : (notificationMethodFromSchema(schemaOrMethod) ??
-                  schemaOrMethod);
-            return (value as (...a: unknown[]) => unknown).apply(target, [
-              method,
-              ...rest,
-            ]);
-          };
-        }
-        return value;
-      },
-    }) as AppRendererClient;
-    return this.appRendererClientProxy;
+    return this.client;
   }
 
   /**

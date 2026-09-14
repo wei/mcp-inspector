@@ -22,6 +22,7 @@ import type {
   ResourceSubscriptionStreamState,
   ExcludedTool,
   RequestMetadata,
+  AppRendererClient,
 } from "./types.js";
 import type {
   CacheMode,
@@ -47,11 +48,11 @@ import type { SamplingCreateMessage } from "./samplingCreateMessage.js";
 import type { ElicitationCreateMessage } from "./elicitationCreateMessage.js";
 
 /**
- * Opaque type representing the AppRendererClient surface used by @mcp-ui.
- * v1.5 aliases this to the SDK `Client` type; v2 leaves it opaque until the
- * real InspectorClient (or a focused App-renderer port) lands.
+ * Re-exported from `./types.js`, where it is defined and documented, so hook
+ * code that types against this protocol (`core/react/useInspectorClient.ts`)
+ * can import it here without a second, drift-prone definition (#1745).
  */
-export type AppRendererClient = unknown;
+export type { AppRendererClient } from "./types.js";
 
 /**
  * The contract every state manager and hook depends on. Anything that holds

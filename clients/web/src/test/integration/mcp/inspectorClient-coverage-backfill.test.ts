@@ -24,7 +24,11 @@ import {
   createNumberedPrompts,
 } from "@modelcontextprotocol/inspector-test-server";
 import type { Tool } from "@modelcontextprotocol/client";
-import { ProtocolError, ProtocolErrorCode } from "@modelcontextprotocol/client";
+import {
+  Client,
+  ProtocolError,
+  ProtocolErrorCode,
+} from "@modelcontextprotocol/client";
 
 const serverCommand = getTestMcpServerCommand();
 
@@ -114,26 +118,17 @@ describe("InspectorClient coverage backfill", () => {
     });
   });
 
-  describe("getAppRendererClient proxy", () => {
-    it("returns null before connect and a memoized proxy after connect", async () => {
+  describe("getAppRendererClient", () => {
+    it("returns null before connect and the SDK client after connect", async () => {
       client = stdioClient();
       // Not connected yet → null.
       expect(client.getAppRendererClient()).toBeNull();
 
       await client.connect();
-      const proxy = client.getAppRendererClient();
-      expect(proxy).not.toBeNull();
-      // Second call returns the same memoized proxy.
-      expect(client.getAppRendererClient()).toBe(proxy);
-
-      // Accessing setNotificationHandler returns the wrapped function (covers
-      // the prop === "setNotificationHandler" branch), and accessing another
-      // prop returns the underlying value (covers the fall-through return).
-      const wrapped = (proxy as unknown as { setNotificationHandler: unknown })
-        .setNotificationHandler;
-      expect(typeof wrapped).toBe("function");
-      const other = (proxy as unknown as { request: unknown }).request;
-      expect(typeof other).toBe("function");
+      const appClient = client.getAppRendererClient();
+      expect(appClient).toBeInstanceOf(Client);
+      // Same instance on every call — it is the client, not a wrapper (#1745).
+      expect(client.getAppRendererClient()).toBe(appClient);
     });
   });
 
