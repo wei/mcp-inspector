@@ -260,14 +260,14 @@ describe("Transport", () => {
         });
 
       const fetchRequests: FetchRequestEntryBase[] = [];
-      const bodies = new Map<string, string>();
+      const onFetchResponseBody = vi.fn();
       const result = createTransportNode(
         { type: "streamable-http", url: "https://mcp.example/mcp" },
         {
           fetchFn,
           interceptAuthChallenges: true,
           onFetchRequest: (entry) => fetchRequests.push(entry),
-          onFetchResponseBody: (id, body) => bodies.set(id, body),
+          onFetchResponseBody,
         },
       );
 
@@ -279,12 +279,15 @@ describe("Transport", () => {
         "MCP auth challenge (401)",
       );
 
+      // The body is on the entry by the time the challenge is thrown — not a
+      // later update — so a caller that stops listening at the throw has it.
       expect(fetchRequests).toHaveLength(1);
       const [entry] = fetchRequests;
       expect(entry.error).toBeUndefined();
       expect(entry.responseStatus).toBe(401);
       expect(entry.responseHeaders?.["www-authenticate"]).toBe(wwwAuthenticate);
-      await vi.waitFor(() => expect(bodies.get(entry.id)).toBe(challengeBody));
+      expect(entry.responseBody).toBe(challengeBody);
+      expect(onFetchResponseBody).not.toHaveBeenCalled();
     });
 
     it("still throws an intercepted 401 whose body never ends (#2297)", async () => {
@@ -319,6 +322,8 @@ describe("Transport", () => {
         "MCP auth challenge (401)",
       );
       expect(fetchRequests[0]?.responseStatus).toBe(401);
+      // Cut off at the tracker's read deadline rather than buffered forever.
+      expect(fetchRequests[0]?.responseBody).toBe("partial\n[truncated]");
     });
 
     it("applies settings.headers to the outgoing streamable-http request", async () => {

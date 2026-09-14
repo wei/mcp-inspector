@@ -1,5 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import {
+  CHALLENGE_BODY_MAX_BYTES,
+  CHALLENGE_BODY_READ_MS,
+  TRUNCATED_BODY_SUFFIX,
   createFetchTracker,
   redactSensitiveHeaders,
   redactBody,
@@ -536,6 +539,123 @@ describe("createFetchTracker", () => {
       body: malformed,
     });
     expect(tracked[0]!.requestBody).toBe(malformed);
+  });
+});
+
+describe("createFetchTracker — 401/403 challenge bodies (#2297)", () => {
+  function track(response: Response) {
+    const tracked: FetchRequestEntryBase[] = [];
+    const updateResponseBody = vi.fn();
+    const fetcher = createFetchTracker((async () => response) as typeof fetch, {
+      trackRequest: (entry) => tracked.push(entry),
+      updateResponseBody,
+    });
+    return { fetcher, tracked, updateResponseBody };
+  }
+
+  it("records the body on the entry itself, before returning", async () => {
+    const body = JSON.stringify({ error: "invalid_token" });
+    const { fetcher, tracked, updateResponseBody } = track(
+      new Response(body, {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const res = await fetcher("https://mcp.example/mcp", { method: "POST" });
+
+    expect(tracked).toHaveLength(1);
+    expect(tracked[0]?.responseStatus).toBe(401);
+    expect(tracked[0]?.responseBody).toBe(body);
+    expect(updateResponseBody).not.toHaveBeenCalled();
+    // The caller still gets an unread body.
+    expect(await res.text()).toBe(body);
+  });
+
+  it("does the same for a 403", async () => {
+    const { fetcher, tracked } = track(
+      new Response("insufficient_scope", { status: 403 }),
+    );
+    await fetcher("https://mcp.example/mcp", { method: "POST" });
+    expect(tracked[0]?.responseBody).toBe("insufficient_scope");
+  });
+
+  it("stops at the byte cap and marks the body truncated", async () => {
+    const chunk = new Uint8Array(CHALLENGE_BODY_MAX_BYTES / 2).fill(97);
+    let pulls = 0;
+    const cancel = vi.fn();
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1;
+        controller.enqueue(chunk);
+      },
+      cancel,
+    });
+    const { fetcher, tracked } = track(new Response(stream, { status: 401 }));
+
+    const res = await fetcher("https://mcp.example/mcp", { method: "POST" });
+
+    const recorded = tracked[0]?.responseBody ?? "";
+    expect(recorded.endsWith(TRUNCATED_BODY_SUFFIX)).toBe(true);
+    expect(recorded.length - TRUNCATED_BODY_SUFFIX.length).toBe(
+      CHALLENGE_BODY_MAX_BYTES,
+    );
+    // With the clone released, cancelling the caller's branch reaches the source.
+    await res.body?.cancel();
+    expect(cancel).toHaveBeenCalled();
+    expect(pulls).toBeLessThan(10);
+  });
+
+  it("gives up on a stalled body at the deadline and releases the source", async () => {
+    vi.useFakeTimers();
+    try {
+      const cancel = vi.fn();
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("partial"));
+        },
+        cancel,
+      });
+      const { fetcher, tracked } = track(new Response(stream, { status: 401 }));
+
+      const pending = fetcher("https://mcp.example/mcp", { method: "POST" });
+      await vi.advanceTimersByTimeAsync(CHALLENGE_BODY_READ_MS);
+      const res = await pending;
+
+      expect(tracked[0]?.responseBody).toBe(`partial${TRUNCATED_BODY_SUFFIX}`);
+      await res.body?.cancel();
+      expect(cancel).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("records the entry with no body when the clone cannot be made", async () => {
+    const response = new Response("nope", { status: 401 });
+    vi.spyOn(response, "clone").mockImplementation(() => {
+      throw new Error("clone failed");
+    });
+    const { fetcher, tracked } = track(response);
+
+    await fetcher("https://mcp.example/mcp", { method: "POST" });
+
+    expect(tracked).toHaveLength(1);
+    expect(tracked[0]?.responseStatus).toBe(401);
+    expect(tracked[0]?.responseBody).toBeUndefined();
+  });
+
+  it("records the entry with no body when the read errors", async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.error(new Error("socket reset"));
+      },
+    });
+    const { fetcher, tracked } = track(new Response(stream, { status: 401 }));
+
+    await fetcher("https://mcp.example/mcp", { method: "POST" });
+
+    expect(tracked[0]?.responseStatus).toBe(401);
+    expect(tracked[0]?.responseBody).toBeUndefined();
   });
 });
 

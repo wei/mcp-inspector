@@ -223,6 +223,65 @@ export function isLongLivedStreamResponse(
   );
 }
 
+/** Most of a 401/403 body the tracker will buffer before it stops reading. */
+export const CHALLENGE_BODY_MAX_BYTES = 64 * 1024;
+/** How long the tracker waits for a 401/403 body before giving up on the rest. */
+export const CHALLENGE_BODY_READ_MS = 2_000;
+/** Appended to a 401/403 body the tracker stopped reading early. */
+export const TRUNCATED_BODY_SUFFIX = "\n[truncated]";
+
+/**
+ * Read a 401/403 response body from a clone, bounded by
+ * {@link CHALLENGE_BODY_MAX_BYTES} and {@link CHALLENGE_BODY_READ_MS}.
+ *
+ * Unlike every other status, a challenge body is read *before* the entry is
+ * recorded (#2297). An auth-challenge interceptor above the tracker cancels the
+ * response and throws as soon as the tracker returns, and on the web backend
+ * that ends the connect request — so a body delivered later, as a separate
+ * update, arrives after anything could still carry it to the log. The bound is
+ * what makes waiting safe: a body that never ends is cut off, and cancelling the
+ * clone's reader lets the interceptor's cancel of the original release the
+ * connection instead of leaving the clone draining it.
+ */
+async function readChallengeBody(
+  response: Response,
+): Promise<string | undefined> {
+  let reader: ReadableStreamDefaultReader<Uint8Array>;
+  try {
+    const body = response.clone().body;
+    /* v8 ignore next -- the caller checked response.body, and a clone of a response with a body has one */
+    if (!body) return undefined;
+    reader = body.getReader();
+  } catch {
+    return undefined;
+  }
+
+  const decoder = new TextDecoder();
+  let text = "";
+  let bytes = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), CHALLENGE_BODY_READ_MS);
+  });
+  try {
+    while (bytes < CHALLENGE_BODY_MAX_BYTES) {
+      const next = await Promise.race([reader.read(), deadline]);
+      if (next === "timeout") break;
+      if (next.done) return text + decoder.decode();
+      bytes += next.value.byteLength;
+      text += decoder.decode(next.value, { stream: true });
+    }
+    // Stopped early. Not awaited: cancel() adopts the source's promise, which a
+    // stalled body may never settle.
+    reader.cancel().catch(() => {});
+    return text + decoder.decode() + TRUNCATED_BODY_SUFFIX;
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export interface FetchTrackingCallbacks {
   trackRequest?: (entry: FetchRequestEntryBase) => void;
   /**
@@ -375,6 +434,21 @@ export function createFetchTracker(
       responseBody: undefined,
       duration,
     };
+
+    if (
+      (responseStatus === 401 || responseStatus === 403) &&
+      !isLongLivedStream &&
+      response.body &&
+      !response.bodyUsed
+    ) {
+      const body = await readChallengeBody(response);
+      entry.responseBody =
+        body === undefined
+          ? undefined
+          : (redactBody(body, response.headers.get("content-type")) ?? body);
+      callbacks.trackRequest?.(entry);
+      return response;
+    }
 
     callbacks.trackRequest?.(entry);
 

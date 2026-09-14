@@ -83,7 +83,8 @@ export function createTransportNode(
   // throws, so the entry was recorded from the thrown error alone — no status,
   // no `WWW-Authenticate`, and no response body, which is exactly the detail
   // someone debugging an OAuth challenge needs. Below it, the tracker records
-  // the real response and clones its body before the interceptor cancels it.
+  // the real response and reads its body (bounded) before the interceptor
+  // cancels it.
   const trackedBase = withTracking(withChallengeObserver(baseFetch));
   const fetchWithOptionalAuthIntercept = interceptAuthChallenges
     ? createAuthChallengeInterceptFetch(trackedBase)
