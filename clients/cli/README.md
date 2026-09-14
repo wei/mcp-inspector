@@ -102,7 +102,7 @@ Because undici's `Response` is a different class from `globalThis.Response`, the
 
 ### MCP server (which server to connect to)
 
-Options that specify the MCP server (catalog/config file, ad-hoc command/URL, env vars, headers) are shared by the Web, CLI, and TUI and are documented in [MCP server configuration](../../docs/mcp-server-configuration.md): `--catalog` (writable catalog, seeded **empty** if missing; default `~/.mcp-inspector/mcp.json` or `MCP_CATALOG_PATH`), `--config` (read-only session, errors if absent), `--server`, `-e`, `--cwd`, `--header`, `--transport`, `--server-url`, and the positional `[target...]`. `--catalog` and `--config` are mutually exclusive, and neither combines with an ad-hoc target.
+Options that specify the MCP server (catalog/config file, ad-hoc command/URL, env vars, headers) are shared by the Web, CLI, and TUI and are documented in [MCP server configuration](../../docs/mcp-server-configuration.md): `--catalog` (writable catalog, seeded **empty** if missing; default `~/.mcp-inspector/mcp.json` or `MCP_CATALOG_PATH`), `--config` (read-only session, errors if absent), `--server`, `-e`, `--cwd`, `--header`, `--protocol-era` (`legacy`/`auto`/`modern`; sets the era an ad-hoc run negotiates, or overrides a file's `protocolEra`), `--transport`, `--server-url`, and the positional `[target...]`. `--catalog` and `--config` are mutually exclusive, and neither combines with an ad-hoc target.
 
 ### CLI-specific (what to invoke)
 
@@ -391,7 +391,12 @@ not read has not been cleared of anything:
 | Per skill, on the wire | 16 MiB actually served | The declared sizes are server-controlled; this one cannot be lied past. |
 | Per run | 256 skills / 64 MiB | SEP-2640 bounds a skill and deliberately does not bound a *catalog*. Every entry costs at least one `resources/read`, so without this a large listing — hostile or merely big — is unbounded work against the tool inspecting it. |
 
-The run bound is this tool's, not the spec's. A skill past it is still reported,
+The run bound is this tool's, not the spec's, and it is configurable per server:
+set `skillCatalogMaxSkills` / `skillCatalogMaxBytes` on the server's entry in
+`mcp.json`, or edit them under **Skills** in the web client's Server Settings
+(see [the configuration reference](../../docs/mcp-server-configuration.md)).
+Both must be positive integers — there is no unlimited value, since the bound
+is what makes the run terminate. A skill past it is still reported,
 with its static conformance findings and an `incomplete` reason saying nothing
 about its files was checked; verify it on its own with `--method skills/get
 --uri <skill>` to get a verdict for it.

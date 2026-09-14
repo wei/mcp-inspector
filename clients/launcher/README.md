@@ -25,8 +25,11 @@ editable (see [specification/v2_catalog_launch_config.md](../../specification/v2
 | `mcp-inspector --web --server-url <url> --transport http --header "Name: Value"` (or a positional command) | One ad-hoc server held in memory, connectable with the given `--header`s                                        | No              |
 
 Rules: `--catalog` and `--config` are mutually exclusive; neither combines with
-an ad-hoc target or `--header`; `--header` requires an ad-hoc HTTP/SSE server
-and is applied to that connection (it is no longer a warn-only no-op).
+an ad-hoc target, `--header` or `--protocol-era`; `--header` requires an ad-hoc
+HTTP/SSE server and is applied to that connection (it is no longer a warn-only
+no-op). `--protocol-era <legacy|auto|modern>` requires an ad-hoc server of any
+transport and sets the era that connection negotiates, so a non-legacy era
+needs no `mcp.json` entry.
 
 **Seed contents are web-specific.** When the web backend creates a missing
 writable catalog it seeds `DEFAULT_SEED_CONFIG` (`core/mcp/serverList.ts`) — a

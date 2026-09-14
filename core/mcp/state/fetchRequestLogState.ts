@@ -151,6 +151,28 @@ export class FetchRequestLogState extends TypedEventTarget<FetchRequestLogStateE
       onFetchRequestBodyUpdate,
     );
 
+    // A long-lived stream's lifecycle arrives the same way its sibling's
+    // body does: asynchronously, patched onto the entry in place (#2318). A
+    // missing entry is left silent here, unlike the body path — a stream
+    // reports on every event, so after a clear the stragglers are many and
+    // none of them is data the user could have wanted retained.
+    const onFetchRequestStreamUpdate = (
+      event: TypedEventGeneric<
+        InspectorClientEventMap,
+        "fetchRequestStreamUpdate"
+      >,
+    ): void => {
+      const { id, stream } = event.detail;
+      const idx = this.fetchRequests.findIndex((e) => e.id === id);
+      if (idx === -1) return;
+      this.fetchRequests[idx] = { ...this.fetchRequests[idx]!, stream };
+      this.dispatchTypedEvent("fetchRequestsChange", this.getFetchRequests());
+    };
+    this.client.addEventListener(
+      "fetchRequestStreamUpdate",
+      onFetchRequestStreamUpdate,
+    );
+
     const sessionStorage = options.sessionStorage;
     const sessionId = options.sessionId;
 
@@ -194,6 +216,10 @@ export class FetchRequestLogState extends TypedEventTarget<FetchRequestLogStateE
             "fetchRequestBodyUpdate",
             onFetchRequestBodyUpdate,
           );
+          this.client.removeEventListener(
+            "fetchRequestStreamUpdate",
+            onFetchRequestStreamUpdate,
+          );
           this.client.removeEventListener("saveSession", onSaveSession);
         }
         this.client = null;
@@ -219,6 +245,10 @@ export class FetchRequestLogState extends TypedEventTarget<FetchRequestLogStateE
           this.client.removeEventListener(
             "fetchRequestBodyUpdate",
             onFetchRequestBodyUpdate,
+          );
+          this.client.removeEventListener(
+            "fetchRequestStreamUpdate",
+            onFetchRequestStreamUpdate,
           );
         }
         this.client = null;

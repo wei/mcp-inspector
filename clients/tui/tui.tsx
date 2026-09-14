@@ -5,7 +5,9 @@ import { render } from "ink";
 import {
   parseKeyValuePair,
   parseHeaderPair,
+  parseProtocolEra,
 } from "@inspector/core/mcp/node/index.js";
+import type { ServerProtocolEra } from "@inspector/core/mcp/types.js";
 import { loadRunnerClientConfig } from "@inspector/core/client/runner.js";
 import {
   parseRunnerOAuthCallbackUrl,
@@ -40,6 +42,11 @@ export async function runTui(args?: string[]): Promise<void> {
       'HTTP headers as "Name: Value"',
       parseHeaderPair,
       {},
+    )
+    .option(
+      "--protocol-era <era>",
+      "Protocol era to negotiate: legacy, auto, or modern (overrides the file's protocolEra; default legacy)",
+      parseProtocolEra,
     )
     .option(
       "--client-id <id>",
@@ -78,6 +85,7 @@ export async function runTui(args?: string[]): Promise<void> {
     e?: Record<string, string>;
     cwd?: string;
     header?: Record<string, string>;
+    protocolEra?: ServerProtocolEra;
     clientId?: string;
     clientSecret?: string;
     clientMetadataUrl?: string;
@@ -95,6 +103,7 @@ export async function runTui(args?: string[]): Promise<void> {
     cwd: options.cwd?.trim() || undefined,
     env: options.e,
     headers: options.header,
+    protocolEra: options.protocolEra,
     transport: options.transport,
     serverUrl: options.serverUrl?.trim() || undefined,
   };

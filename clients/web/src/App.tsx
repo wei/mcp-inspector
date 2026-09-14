@@ -401,6 +401,7 @@ function App() {
     discoverResult,
     excludedTools,
     malformedListItems,
+    connectionDiagnostics,
     lastError,
   } = useInspectorClient(inspectorClient);
   // What every settings write that landed on disk actually wrote, so a later
@@ -2028,6 +2029,7 @@ function App() {
           transport={connectionInfoTransport}
           protocolEra={protocolEra}
           discoverResult={discoverResult}
+          diagnostics={connectionDiagnostics}
           oauth={connectionInfoOAuth}
           onClearOAuth={
             connectionInfoCanClearOAuth ? handleClearConnectionOAuth : undefined

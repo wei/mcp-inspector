@@ -137,6 +137,7 @@ export type RemoteEventType =
   | "message"
   | "fetch_request"
   | "fetch_request_body_update"
+  | "fetch_stream_update"
   | "stdio_log"
   | "transport_error"
   | "auth_challenge";
@@ -154,6 +155,16 @@ export interface RemoteEventFetchRequest {
 export interface RemoteEventFetchRequestBodyUpdate {
   type: "fetch_request_body_update";
   data: { id: string; responseBody: string };
+}
+
+/**
+ * A long-lived stream's lifecycle, forwarded from the backend's fetch tracker
+ * (#2318). `closedAt` is an ISO string on the wire; the browser transport
+ * rebuilds the `Date` the way it does for `fetch_request`'s timestamp.
+ */
+export interface RemoteEventFetchStreamUpdate {
+  type: "fetch_stream_update";
+  data: { id: string; eventCount: number; closedAt?: string };
 }
 
 export interface RemoteEventStdioLog {
@@ -178,6 +189,7 @@ export type RemoteEvent =
   | RemoteEventMessage
   | RemoteEventFetchRequest
   | RemoteEventFetchRequestBodyUpdate
+  | RemoteEventFetchStreamUpdate
   | RemoteEventStdioLog
   | RemoteEventTransportError
   | RemoteEventAuthChallenge;

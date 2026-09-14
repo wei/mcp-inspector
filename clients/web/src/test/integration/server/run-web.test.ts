@@ -327,6 +327,83 @@ describe("runWeb", () => {
     expect(startHonoServer).not.toHaveBeenCalled();
   });
 
+  it("plumbs --protocol-era onto the seeded ad-hoc HTTP server", async () => {
+    void runWeb([
+      "node",
+      "run-web",
+      "--server-url",
+      "https://example.com/mcp",
+      "--transport",
+      "http",
+      "--header",
+      "Authorization: Bearer x",
+      "--protocol-era",
+      "modern",
+    ]);
+    await expectServerStarted(startHonoServer);
+
+    expect(soleSeededEntry()).toMatchObject({
+      type: "streamable-http",
+      url: "https://example.com/mcp",
+      headers: { Authorization: "Bearer x" },
+      protocolEra: "modern",
+    });
+  });
+
+  it("plumbs --protocol-era onto a seeded ad-hoc stdio server", async () => {
+    void runWeb([
+      "node",
+      "run-web",
+      "--protocol-era",
+      "auto",
+      "node",
+      "server.js",
+    ]);
+    await expectServerStarted(startHonoServer);
+
+    expect(soleSeededEntry()).toMatchObject({
+      command: "node",
+      args: ["server.js"],
+      protocolEra: "auto",
+    });
+  });
+
+  it("omits protocolEra from the seeded entry when the flag is absent", async () => {
+    void runWeb([
+      "node",
+      "run-web",
+      "https://example.com/mcp",
+      "--transport",
+      "http",
+    ]);
+    await expectServerStarted(startHonoServer);
+
+    expect(soleSeededEntry()).not.toHaveProperty("protocolEra");
+  });
+
+  it("rejects an unknown --protocol-era value", async () => {
+    await expect(
+      runWeb([
+        "node",
+        "run-web",
+        "https://example.com/mcp",
+        "--protocol-era",
+        "future",
+      ]),
+    ).rejects.toThrow();
+    expect(startHonoServer).not.toHaveBeenCalled();
+  });
+
+  it("rejects --protocol-era with no ad-hoc server to attach it to", async () => {
+    await expect(
+      runWeb(["node", "run-web", "--protocol-era", "modern"]),
+    ).rejects.toThrow("process.exit:1");
+    expect(
+      errorLines.some((l) => l.includes("--protocol-era requires an ad-hoc")),
+    ).toBe(true);
+    expect(startHonoServer).not.toHaveBeenCalled();
+  });
+
   it("exits when an ad-hoc config resolves to no entries", async () => {
     vi.spyOn(nodeConfig, "resolveServerConfigs").mockReturnValueOnce([]);
 
@@ -547,6 +624,16 @@ describe("runWeb", () => {
       name: "--config + --header",
       argv: ["--config", "/a.json", "--header", "Authorization: Bearer x"],
       match: "--header cannot be combined with --config",
+    },
+    {
+      name: "--catalog + --protocol-era",
+      argv: ["--catalog", "/a.json", "--protocol-era", "modern"],
+      match: "--protocol-era cannot be combined with --catalog",
+    },
+    {
+      name: "--config + --protocol-era",
+      argv: ["--config", "/a.json", "--protocol-era", "modern"],
+      match: "--protocol-era cannot be combined with --config",
     },
   ])("rejects $name", async ({ argv, match }) => {
     await expect(runWeb(["node", "run-web", ...argv])).rejects.toThrow(

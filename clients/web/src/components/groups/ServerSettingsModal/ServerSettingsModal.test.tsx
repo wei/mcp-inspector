@@ -679,6 +679,27 @@ describe("ServerSettingsModal", () => {
     expect(typeof call.maxFetchRequests).toBe("number");
   });
 
+  it("calls onSettingsChange when changing a skills catalog limit (#2294)", async () => {
+    const user = userEvent.setup();
+    const onSettingsChange = vi.fn();
+    renderWithMantine(
+      <ServerSettingsModal
+        opened
+        settings={{ ...emptySettings, skillCatalogMaxSkills: 3 }}
+        serverType="streamable-http"
+        isStdio={false}
+        onClose={vi.fn()}
+        onSettingsChange={onSettingsChange}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Skills" }));
+    await user.type(screen.getByLabelText(/Maximum Number of Skills/), "0");
+    expect(onSettingsChange).toHaveBeenLastCalledWith({
+      ...emptySettings,
+      skillCatalogMaxSkills: 30,
+    });
+  });
+
   it("preserves sibling rows when editing one of several headers", async () => {
     const user = userEvent.setup();
     const onSettingsChange = vi.fn();

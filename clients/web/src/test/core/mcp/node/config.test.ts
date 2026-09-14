@@ -12,6 +12,7 @@ import { join } from "node:path";
 import {
   parseKeyValuePair,
   parseHeaderPair,
+  parseProtocolEra,
   withDefaultCatalogPath,
   resolveServerConfigs,
   resolveServerSource,
@@ -41,6 +42,18 @@ describe("parseKeyValuePair", () => {
       /Invalid parameter format/,
     );
     expect(() => parseKeyValuePair("key=")).toThrow(/Invalid parameter format/);
+  });
+});
+
+describe("parseProtocolEra", () => {
+  it.each(["legacy", "auto", "modern"])("accepts %s", (era) => {
+    expect(parseProtocolEra(era)).toBe(era);
+  });
+
+  it("rejects an unknown era, naming the valid ones", () => {
+    expect(() => parseProtocolEra("Modern")).toThrow(
+      "Invalid protocol era: Modern. Valid eras are: legacy, auto, modern",
+    );
   });
 });
 
