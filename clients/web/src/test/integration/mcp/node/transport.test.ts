@@ -242,6 +242,85 @@ describe("Transport", () => {
       }
     });
 
+    it("records an intercepted 401's status, WWW-Authenticate and body (#2297)", async () => {
+      const challengeBody = JSON.stringify({
+        error: "invalid_token",
+        error_description: "token expired",
+      });
+      const wwwAuthenticate =
+        'Bearer resource_metadata="https://mcp.example/.well-known/oauth-protected-resource", scope="files:read"';
+      const fetchFn: typeof fetch = async () =>
+        new Response(challengeBody, {
+          status: 401,
+          statusText: "Unauthorized",
+          headers: {
+            "content-type": "application/json",
+            "www-authenticate": wwwAuthenticate,
+          },
+        });
+
+      const fetchRequests: FetchRequestEntryBase[] = [];
+      const bodies = new Map<string, string>();
+      const result = createTransportNode(
+        { type: "streamable-http", url: "https://mcp.example/mcp" },
+        {
+          fetchFn,
+          interceptAuthChallenges: true,
+          onFetchRequest: (entry) => fetchRequests.push(entry),
+          onFetchResponseBody: (id, body) => bodies.set(id, body),
+        },
+      );
+
+      const client = new Client(
+        { name: "test-client", version: "1.0.0" },
+        { capabilities: {} },
+      );
+      await expect(client.connect(result.transport)).rejects.toThrow(
+        "MCP auth challenge (401)",
+      );
+
+      expect(fetchRequests).toHaveLength(1);
+      const [entry] = fetchRequests;
+      expect(entry.error).toBeUndefined();
+      expect(entry.responseStatus).toBe(401);
+      expect(entry.responseHeaders?.["www-authenticate"]).toBe(wwwAuthenticate);
+      await vi.waitFor(() => expect(bodies.get(entry.id)).toBe(challengeBody));
+    });
+
+    it("still throws an intercepted 401 whose body never ends (#2297)", async () => {
+      const fetchFn: typeof fetch = async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode("partial"));
+            },
+          }),
+          {
+            status: 401,
+            headers: { "www-authenticate": 'Bearer error="invalid_token"' },
+          },
+        );
+
+      const fetchRequests: FetchRequestEntryBase[] = [];
+      const result = createTransportNode(
+        { type: "streamable-http", url: "https://mcp.example/mcp" },
+        {
+          fetchFn,
+          interceptAuthChallenges: true,
+          onFetchRequest: (entry) => fetchRequests.push(entry),
+        },
+      );
+
+      const client = new Client(
+        { name: "test-client", version: "1.0.0" },
+        { capabilities: {} },
+      );
+      await expect(client.connect(result.transport)).rejects.toThrow(
+        "MCP auth challenge (401)",
+      );
+      expect(fetchRequests[0]?.responseStatus).toBe(401);
+    });
+
     it("applies settings.headers to the outgoing streamable-http request", async () => {
       const server = createTestServerHttp({
         serverInfo: createTestServerInfo(),
