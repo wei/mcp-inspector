@@ -188,6 +188,35 @@ describe("Transport", () => {
       }
     });
 
+    it("tracks fetches when only onFetchResponseBody is supplied (#2318)", async () => {
+      // Any one of the tracking callbacks earns the tracker — a caller that
+      // wants only bodies (or only stream updates) must not be handed the
+      // bare fetch and silently receive nothing.
+      const server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createEchoTool()],
+        serverType: "streamable-http",
+      });
+      try {
+        await server.start();
+        const bodies: string[] = [];
+        const result = createTransportNode(
+          { type: "streamable-http", url: server.url },
+          { onFetchResponseBody: (_id, body) => bodies.push(body) },
+        );
+        const client = new Client(
+          { name: "test-client", version: "1.0.0" },
+          { capabilities: {} },
+        );
+        await client.connect(result.transport);
+        await client.listTools();
+        await client.close();
+        expect(bodies.some((body) => body.includes("tools"))).toBe(true);
+      } finally {
+        await server.stop();
+      }
+    });
+
     it("should call onFetchRequest callback for streamable-http transport", async () => {
       const server = createTestServerHttp({
         serverInfo: createTestServerInfo(),

@@ -6,6 +6,7 @@ import type {
   ProtocolEra,
 } from "@modelcontextprotocol/client";
 import type { ServerType } from "@inspector/core/mcp/types.js";
+import type { ConnectionDiagnostics } from "@inspector/core/mcp/connectionDiagnostics.js";
 import {
   ConnectionInfoContent,
   type OAuthDetails,
@@ -38,6 +39,8 @@ export interface ConnectionInfoModalProps {
   transport: ServerType;
   protocolEra?: ProtocolEra;
   discoverResult?: DiscoverResult;
+  /** Live connection activity for the Connection Activity section (#2318). */
+  diagnostics?: ConnectionDiagnostics;
   oauth?: OAuthDetails;
   onClearOAuth?: () => void;
 }
@@ -51,6 +54,7 @@ export function ConnectionInfoModal({
   transport,
   protocolEra,
   discoverResult,
+  diagnostics,
   oauth,
   onClearOAuth,
 }: ConnectionInfoModalProps) {
@@ -79,6 +83,7 @@ export function ConnectionInfoModal({
             transport={transport}
             protocolEra={protocolEra}
             discoverResult={discoverResult}
+            diagnostics={diagnostics}
             oauth={oauth}
             onClearOAuth={onClearOAuth}
           />
