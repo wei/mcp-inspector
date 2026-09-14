@@ -14,6 +14,18 @@ import {
   sandboxFrameAncestors,
 } from "../../../../server/sandbox-controller.js";
 
+/** A port that was free a moment ago, for tests that need a FIXED port. */
+async function freePort(): Promise<number> {
+  const probe: Server = createServer();
+  await new Promise<void>((resolve) =>
+    probe.listen(0, "127.0.0.1", () => resolve()),
+  );
+  const addr = probe.address();
+  const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+  return port;
+}
+
 const PROXY_PAGE = join(
   dirname(fileURLToPath(import.meta.url)),
   "../../../../static/sandbox_proxy.html",
@@ -276,8 +288,10 @@ describe("createSandboxController", () => {
 
   it("advertises a public URL in place of the bind-derived one (#1862)", async () => {
     const publicUrl = "https://sb.example.com/sandbox";
+    // A fixed port: a public URL is only advertised where a proxy can route.
+    const port = await freePort();
     const controller = createSandboxController({
-      port: 0,
+      port,
       host: "127.0.0.1",
       publicUrl,
     });
@@ -286,7 +300,7 @@ describe("createSandboxController", () => {
       expect(first.url).toBe(publicUrl);
       expect(controller.getUrl()).toBe(publicUrl);
       // The port is still the bound one — the public URL has none of its own.
-      expect(first.port).toBeGreaterThan(0);
+      expect(first.port).toBe(port);
       expect(
         (await fetch(`http://127.0.0.1:${first.port}/sandbox`)).status,
       ).toBe(200);
@@ -294,6 +308,26 @@ describe("createSandboxController", () => {
       // of the public URL (which would be NaN here).
       expect(await controller.start()).toEqual(first);
     } finally {
+      await controller.close();
+    }
+  });
+
+  it("does not advertise a public URL on an OS-assigned port (port 0)", async () => {
+    // MCP_SANDBOX_PORT=0 leaves no stable port for a reverse proxy to route to.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const controller = createSandboxController({
+      port: 0,
+      host: "127.0.0.1",
+      publicUrl: "https://sb.example.com/sandbox",
+    });
+    try {
+      const { url, port } = await controller.start();
+      expect(url).toBe(`http://127.0.0.1:${port}/sandbox`);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("not advertising MCP_SANDBOX_FULL_ADDRESS"),
+      );
+    } finally {
+      warnSpy.mockRestore();
       await controller.close();
     }
   });

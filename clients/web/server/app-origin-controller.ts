@@ -334,8 +334,10 @@ export function createAppOriginController(
          * (#1862) when it is still safe to use, else the bind-derived one.
          *
          * Two reasons to refuse it here rather than only at config time:
-         * - After the EADDRINUSE fallback the reverse proxy still routes the
-         *   public origin to the PINNED port, which someone else holds.
+         * - A reverse proxy routes the public origin to one stable port, so it
+         *   is only usable on a FIXED port: not an explicit `0`, not a
+         *   config-time collision resolved to `0`, and not the EADDRINUSE
+         *   fallback, where someone else holds the pinned port.
          * - It must differ from every trusted ancestor — the sandbox proxy and
          *   the Inspector page, i.e. `embedderOrigins`. The frame is granted
          *   `allow-same-origin` on this path, so sharing either origin hands
@@ -345,10 +347,10 @@ export function createAppOriginController(
          */
         const adoptedOrigin = (derived: string): string => {
           if (!publicOrigin) return derived;
-          if (retriedDynamic) {
+          if (port === 0 || retriedDynamic) {
             console.warn(
-              `App origin: not using MCP_APP_ORIGIN_FULL_ADDRESS, since it routes to port ${port}, ` +
-                `which is taken; serving app documents from ${derived} instead.`,
+              `App origin: not using MCP_APP_ORIGIN_FULL_ADDRESS, since the listener is not on a fixed ` +
+                `port for it to route to; serving app documents from ${derived} instead.`,
             );
             return derived;
           }

@@ -341,17 +341,20 @@ export function createSandboxController(
           const derivedUrl = `http://${urlHost}:${actualPort}/sandbox`;
           // An operator-supplied public URL (#1862) replaces the derived one
           // only now that the listener it routes to is actually up — and only
-          // on the port it was configured for. After the EADDRINUSE fallback
-          // the proxy still routes the public URL to the PINNED port, which
-          // someone else holds, so advertising it would send the browser to
-          // the wrong listener. The derived URL at least works locally.
-          if (publicUrl && retriedDynamic) {
+          // when that listener is on a FIXED port. A reverse proxy routes the
+          // public URL to one stable port; an OS-assigned port (an explicit
+          // `0`, a config-time collision resolved to `0`, or the EADDRINUSE
+          // fallback, where someone else holds the pinned port) is not it, so
+          // advertising the public URL would send the browser to the wrong
+          // listener or none. The derived URL at least works locally.
+          const onFixedPort = port !== 0 && !retriedDynamic;
+          if (publicUrl && !onFixedPort) {
             console.warn(
-              `Sandbox: not advertising MCP_SANDBOX_FULL_ADDRESS, since it routes to port ${port}, ` +
-                `which is taken; advertising ${derivedUrl} instead.`,
+              `Sandbox: not advertising MCP_SANDBOX_FULL_ADDRESS, since the sandbox is not on a fixed ` +
+                `port for it to route to; advertising ${derivedUrl} instead.`,
             );
           }
-          sandboxUrl = publicUrl && !retriedDynamic ? publicUrl : derivedUrl;
+          sandboxUrl = publicUrl && onFixedPort ? publicUrl : derivedUrl;
           boundPort = actualPort;
           settle({ port: actualPort, url: sandboxUrl });
         });

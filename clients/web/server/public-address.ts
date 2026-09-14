@@ -94,14 +94,15 @@ function parsePublicUrl(raw: string): Parsed {
 
 /**
  * The value as it may appear in a log line. Never the raw string: the values
- * refused for carrying credentials or a query are exactly the ones likely to
- * hold a secret, and echoing them would leak what the check refused. Userinfo,
- * query and fragment are dropped; an unparseable value is not echoed at all.
+ * refused for carrying credentials, a query or a path are exactly the ones
+ * likely to hold a secret, and echoing them would leak what the check refused.
+ * Only scheme and host are shown — that is enough to identify which address was
+ * refused — and an unparseable value is not echoed at all.
  */
 export function describeForLog(raw: string): string {
   try {
     const u = new URL(raw);
-    return `"${u.protocol}${u.host ? `//${u.host}` : ""}${u.pathname}"`;
+    return `"${u.protocol}${u.host ? `//${u.host}` : ""}"`;
   } catch {
     return "(unparseable value, not echoed)";
   }

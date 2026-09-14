@@ -83,6 +83,18 @@ describe("public addresses (#1862)", () => {
       expect(warned()).not.toContain(secret);
     });
 
+    it("never echoes a path, which can carry a secret too", () => {
+      expect(
+        resolveAppOriginPublicOrigin(
+          "https://apps.example.com/hunter2",
+          ["https://inspector.example.com"],
+          undefined,
+        ),
+      ).toBeUndefined();
+      expect(warned()).toContain('"https://apps.example.com"');
+      expect(warned()).not.toContain("hunter2");
+    });
+
     it("refuses an origin shared with the Inspector UI — the same-origin collapse", () => {
       // The natural reverse-proxy layout: one hostname, /sandbox routed to 6275.
       // The spec requires host != sandbox origin, so this must not be advertised.
