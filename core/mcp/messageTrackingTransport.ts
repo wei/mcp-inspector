@@ -29,7 +29,11 @@ export interface MessageTrackingCallbacks {
    * closed, the fetch failed before the frame reached the wire). Fires after
    * `trackRequest` already recorded it, so a consumer keeping "requests still
    * awaiting a response" can roll that entry back — a request that never went
-   * out is not unanswered (#2318).
+   * out is not unanswered (#2318). Not fired when the caller aborted the
+   * request through `requestSignal`: the modern transport aborts an in-flight
+   * request's own stream to cancel it (and the SDK does the same on a
+   * per-request timeout), and a request that was sent and then given up on
+   * is exactly the unanswered kind.
    */
   trackSendFailure?: (message: JSONRPCRequest, error: unknown) => void;
 }
@@ -106,7 +110,9 @@ export class MessageTrackingTransport implements Transport {
         const request = message as JSONRPCRequest;
         this.callbacks.trackRequest?.(request, "client");
         return this.baseTransport.send(message, options).catch((err) => {
-          this.callbacks.trackSendFailure?.(request, err);
+          if (!options?.requestSignal?.aborted) {
+            this.callbacks.trackSendFailure?.(request, err);
+          }
           throw err;
         });
       }

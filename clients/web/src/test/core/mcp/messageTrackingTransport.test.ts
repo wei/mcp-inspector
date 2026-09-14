@@ -48,6 +48,18 @@ describe("MessageTrackingTransport.send", () => {
     await expect(failing.send(request)).rejects.toBe(boom);
     expect(callbacks.trackRequest).toHaveBeenCalledWith(request, "client");
     expect(trackSendFailure).toHaveBeenCalledWith(request, boom);
+    // A caller's own abort is a cancellation, not a send failure: the
+    // request may well have reached the server, and stays unanswered.
+    trackSendFailure.mockClear();
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      failing.send(
+        { jsonrpc: "2.0", id: 2, method: "tools/call" },
+        { requestSignal: controller.signal },
+      ),
+    ).rejects.toBe(boom);
+    expect(trackSendFailure).not.toHaveBeenCalled();
     // Only requests roll back: a failed notification has no pending entry.
     trackSendFailure.mockClear();
     await expect(

@@ -222,11 +222,13 @@ export function isLongLivedStreamResponse(
   method: string,
   contentType: string | null | undefined,
 ): boolean {
-  if (method !== "GET") return false;
+  if (method.toUpperCase() !== "GET") return false;
   if (!contentType) return false;
+  // Media types are case-insensitive (RFC 9110 §8.3.1); a server may send
+  // `Text/Event-Stream` and still be sending an event stream.
+  const type = contentType.toLowerCase();
   return (
-    contentType.includes("text/event-stream") ||
-    contentType.includes("application/x-ndjson")
+    type.includes("text/event-stream") || type.includes("application/x-ndjson")
   );
 }
 
@@ -261,7 +263,9 @@ export type LongLivedStreamFraming = "sse" | "ndjson";
 export function longLivedStreamFraming(
   contentType: string | null | undefined,
 ): LongLivedStreamFraming {
-  return contentType?.includes("application/x-ndjson") ? "ndjson" : "sse";
+  return contentType?.toLowerCase().includes("application/x-ndjson")
+    ? "ndjson"
+    : "sse";
 }
 
 /**
@@ -314,8 +318,7 @@ function watchLongLivedStream(
   // stream with no state to show — the count only moves on an event.
   update(id, { eventCount });
 
-  const consumeLine = (rawLine: string): void => {
-    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+  const consumeLine = (line: string): void => {
     if (framing === "ndjson") {
       if (line.trim() === "") return;
       eventCount += 1;
@@ -335,18 +338,35 @@ function watchLongLivedStream(
     if (line === "data" || line.startsWith("data:")) blockHasData = true;
   };
 
+  // Split off every complete line in `pending`. The SSE grammar (and the
+  // SDK's parser) accept LF, CRLF and a bare CR as a line ending, so all three
+  // end a line here; a CR that is the last byte so far is held back, since
+  // the LF of a CRLF pair may still be in flight in the next chunk.
+  const consumeCompleteLines = (): void => {
+    for (;;) {
+      const cr = pending.indexOf("\r");
+      const lf = pending.indexOf("\n");
+      const end = cr === -1 ? lf : lf === -1 ? cr : Math.min(cr, lf);
+      if (end === -1) return;
+      if (pending[end] === "\r") {
+        if (end === pending.length - 1) return;
+        const width = pending[end + 1] === "\n" ? 2 : 1;
+        consumeLine(pending.slice(0, end));
+        pending = pending.slice(end + width);
+      } else {
+        consumeLine(pending.slice(0, end));
+        pending = pending.slice(end + 1);
+      }
+    }
+  };
+
   const pump = async (): Promise<void> => {
     try {
       for (;;) {
         const { value, done } = await reader.read();
         if (done) break;
         pending += decoder.decode(value, { stream: true });
-        let newline = pending.indexOf("\n");
-        while (newline !== -1) {
-          consumeLine(pending.slice(0, newline));
-          pending = pending.slice(newline + 1);
-          newline = pending.indexOf("\n");
-        }
+        consumeCompleteLines();
       }
     } catch {
       // An errored or aborted stream has still ended — fall through to report
@@ -384,7 +404,12 @@ export function createFetchTracker(
         : input instanceof URL
           ? input.toString()
           : input.url;
-    const method = init?.method || "GET";
+    // The method decides the long-lived-stream classification below, so it
+    // has to be the one the request actually carries: a `Request` input
+    // carries its own, and HTTP methods compare case-insensitively.
+    const method = (
+      init?.method ?? (input instanceof Request ? input.method : "GET")
+    ).toUpperCase();
 
     // Extract headers, redacting sensitive values BEFORE they reach any
     // downstream sink (logger, in-memory list, persisted session storage).

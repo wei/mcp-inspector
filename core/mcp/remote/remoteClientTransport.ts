@@ -11,6 +11,7 @@ import type {
   JSONRPCMessage,
   MessageExtraInfo,
 } from "@modelcontextprotocol/client";
+import { SdkError, SdkErrorCode } from "@modelcontextprotocol/client";
 import type { InspectorServerSettings, StderrLogEntry } from "../types.js";
 import type { FetchRequestEntryBase, FetchStreamState } from "../types.js";
 import type {
@@ -689,10 +690,17 @@ export class RemoteClientTransport implements Transport {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.sseResponseWaits.delete(requestId);
+        // The SDK's own per-request timeout shape, not a plain `Error`: this
+        // wait can expire before the SDK's timer does (its budget is the
+        // relay's, not the request's), and the rejection travels up through
+        // `Client.request`, where `InspectorClient` annotates a timeout of
+        // exactly this shape with the connection's state (#2318). A plain
+        // error would pass that decorator untouched and reach the user as a
+        // bare timeout on the web client alone.
         reject(
-          new Error(
-            `Timed out waiting for MCP response on SSE (${this.sseResponseTimeoutMs}ms)`,
-          ),
+          new SdkError(SdkErrorCode.RequestTimeout, "Request timed out", {
+            timeout: this.sseResponseTimeoutMs,
+          }),
         );
       }, this.sseResponseTimeoutMs);
       this.sseResponseWaits.set(requestId, {

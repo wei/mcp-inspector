@@ -826,6 +826,56 @@ describe("createFetchTracker long-lived stream watching (#2318)", () => {
     expect(last.closedAt).toBeInstanceOf(Date);
   });
 
+  it("accepts bare CR line endings, and a CRLF split across chunks", async () => {
+    const server = controlledStream();
+    const { updates } = await trackStream(server.stream);
+    server.push("data: a\r\rdata: b\r");
+    await flush();
+    // The trailing CR is held: it may be the first half of a CRLF.
+    expect(updates.map((u) => u.stream.eventCount)).toEqual([0, 1]);
+    server.push("\n\r\n");
+    await flush();
+    expect(updates.map((u) => u.stream.eventCount)).toEqual([0, 1, 2]);
+  });
+
+  it("classifies the content type and the method case-insensitively", async () => {
+    const server = controlledStream();
+    const updates: unknown[] = [];
+    const fetcher = createFetchTracker(
+      (async () =>
+        new Response(server.stream, {
+          headers: { "content-type": "Text/Event-Stream" },
+        })) as typeof fetch,
+      { updateStream: (id, state) => updates.push({ id, state }) },
+    );
+    await fetcher("https://example.com/mcp", { method: "get" });
+    expect(updates).toHaveLength(1);
+  });
+
+  it("takes the method from a Request input when init carries none", async () => {
+    // A bounded POST reply must go down the body-capture path, not the
+    // watcher, when the caller passed a `Request` rather than `init`.
+    const bodies: string[] = [];
+    const updates: unknown[] = [];
+    const tracked: FetchRequestEntryBase[] = [];
+    const fetcher = createFetchTracker(
+      (async () =>
+        new Response("data: x\n\n", {
+          headers: { "content-type": "text/event-stream" },
+        })) as typeof fetch,
+      {
+        trackRequest: (entry) => tracked.push(entry),
+        updateResponseBody: (_id, body) => bodies.push(body),
+        updateStream: (id, state) => updates.push({ id, state }),
+      },
+    );
+    await fetcher(new Request("https://example.com/mcp", { method: "POST" }));
+    await flush();
+    expect(tracked[0]?.method).toBe("POST");
+    expect(bodies).toEqual(["data: x\n\n"]);
+    expect(updates).toEqual([]);
+  });
+
   it("reports the close when the server ends the stream", async () => {
     const server = controlledStream();
     const { updates, id } = await trackStream(server.stream);

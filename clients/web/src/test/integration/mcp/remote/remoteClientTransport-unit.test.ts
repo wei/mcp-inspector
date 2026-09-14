@@ -16,6 +16,7 @@ import type { RemoteTransportOptions } from "@inspector/core/mcp/remote/remoteCl
 import type { MCPServerConfig } from "@inspector/core/mcp/types.js";
 import type { RemoteEvent } from "@inspector/core/mcp/remote/types.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/client";
+import { SdkErrorCode } from "@modelcontextprotocol/client";
 import {
   AuthChallengeError,
   AuthRecoveryRequiredError,
@@ -613,6 +614,27 @@ describe("RemoteClientTransport (focused branch coverage)", () => {
       await expect(
         t.send({ jsonrpc: "2.0", id: 1, method: "ping" }),
       ).rejects.toThrow(/Transport is closed/);
+    });
+
+    it("rejects an expired SSE response wait with the SDK's own timeout shape (#2318)", async () => {
+      // The relay's budget, not the request's, can be the one that expires;
+      // shaped as the SDK's timeout so InspectorClient annotates it the same.
+      const t = makeTransport(
+        {
+          events: () => openEventsResponse(),
+          send: () => jsonResponse({ ok: true }),
+        },
+        { sseResponseTimeoutMs: 50 },
+      );
+      await t.start();
+      await expect(
+        t.send({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+      ).rejects.toMatchObject({
+        code: SdkErrorCode.RequestTimeout,
+        message: "Request timed out",
+        data: { timeout: 50 },
+      });
+      await t.close();
     });
 
     it("does not wait for an SSE response on subscriptions/listen (long-lived stream)", async () => {

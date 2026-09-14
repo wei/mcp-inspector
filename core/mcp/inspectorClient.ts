@@ -273,6 +273,7 @@ import {
 import { SdkError, SdkErrorCode } from "@modelcontextprotocol/client";
 import {
   annotateRequestTimeout,
+  isRequestTimeoutError,
   type ConnectionDiagnostics,
   type LastResponse,
   type NotificationStreamState,
@@ -1131,11 +1132,16 @@ export class InspectorClient extends InspectorClientEventTarget {
         };
         this.dispatchTypedEvent("message", entry);
       },
-      trackSendFailure: (message: JSONRPCRequest) => {
-        // The frame never reached the wire, so it is not awaiting a response.
-        // Leaving it would report a request the server never saw as
-        // unanswered, in every timeout message and Connection Info row, until
-        // the session resets (#2318).
+      trackSendFailure: (message: JSONRPCRequest, error: unknown) => {
+        // A send that failed because the request timed out is not a send
+        // that failed: the browser's remote transport awaits the response
+        // inside `send`, so its relay timeout surfaces here — the request
+        // reached the server and went unanswered, which is the state to
+        // keep reporting. Every other failure means the frame never reached
+        // the wire, and leaving it would report a request the server never
+        // saw as unanswered, in every timeout message and Connection Info
+        // row, until the session resets (#2318).
+        if (isRequestTimeoutError(error)) return;
         if (this.outstandingRequests.delete(message.id)) {
           this.dispatchConnectionDiagnosticsChange();
         }
