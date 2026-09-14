@@ -790,6 +790,64 @@ describe("verifySkills (#2248)", () => {
     expect(reports[0].outcome).toBe("verified");
   });
 
+  it("honors the server's configured catalog budget (#2294)", async () => {
+    // Read through `getServerSettings()`, so neither caller has to pass it.
+    const enc = new TextEncoder();
+    const mdFor = (i: number) =>
+      `---\nname: c${i}\ndescription: A demo\n---\n\n# c${i}\n`;
+    const skills = await Promise.all(
+      Array.from({ length: 4 }, async (_, i): Promise<SkillEntry> => {
+        const bytes = enc.encode(mdFor(i));
+        return entry({
+          uri: `skill://c${i}/SKILL.md`,
+          frontmatter: { name: `c${i}`, description: "A demo" },
+          resources: [
+            {
+              uri: `skill://c${i}/SKILL.md`,
+              digest: await sha256Digest(bytes),
+              size: bytes.byteLength,
+            },
+          ],
+        });
+      }),
+    );
+    const readResource = vi.fn(async (uri: string) => ({
+      result: {
+        contents: [
+          { uri, text: mdFor(Number(/c(\d+)/.exec(uri)?.[1] ?? "0")) },
+        ],
+      },
+    }));
+    const client = {
+      readResource,
+      getServerSettings: () => ({ skillCatalogMaxSkills: 2 }),
+    } as unknown as InspectorClientProtocol;
+    const reports = await verifySkills(client, skills);
+    expect(readResource.mock.calls.length).toBe(2);
+    expect(reports.map((r) => r.outcome)).toEqual([
+      "verified",
+      "verified",
+      "incomplete",
+      "incomplete",
+    ]);
+    // The reason names the limit that actually applied, not the default.
+    expect(reports[2].incomplete).toMatch(/budget of 2 skills \/ 67108864/);
+  });
+
+  it("falls back to the default budget for an unusable configured limit", async () => {
+    const { skill, client } = await truncatable({ name: "fb", count: 2 });
+    const withSettings = {
+      ...client,
+      readResource: client.readResource,
+      getServerSettings: () => ({
+        skillCatalogMaxSkills: 0,
+        skillCatalogMaxBytes: -1,
+      }),
+    } as unknown as InspectorClientProtocol;
+    const [report] = await verifySkills(withSettings, [skill]);
+    expect(report.outcome).toBe("verified");
+  });
+
   it("is not incomplete when the budget is crossed by the LAST entry", async () => {
     // Crossing the line on the final row stopped nothing: every manifest entry
     // was fetched and checked. Reporting "Stopped after 4 of 4" there both

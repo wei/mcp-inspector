@@ -172,6 +172,18 @@ export type StoredMCPServer = MCPServerConfig & {
    */
   maxFetchRequests?: number;
   /**
+   * Most skills one skills verification run reads from (#2294). Omitted on
+   * disk when it equals `SKILL_MAX_CATALOG_SKILLS`. Must be a positive integer
+   * — there is no unlimited value, since the bound is what makes `--verify`
+   * terminate.
+   */
+  skillCatalogMaxSkills?: number;
+  /**
+   * Byte ceiling across one skills verification run (#2294). Omitted on disk
+   * when it equals `SKILL_MAX_CATALOG_BYTES`. Positive integer, as above.
+   */
+  skillCatalogMaxBytes?: number;
+  /**
    * Pre-configured OAuth client credentials for HTTP transports. Nested to
    * match Claude Code's `.mcp.json` shape; lifted into the flat `oauthClientId`
    * / `oauthClientSecret` / `oauthScopes` fields on `InspectorServerSettings`
@@ -900,6 +912,17 @@ export interface InspectorServerSettings {
    * render; defaults to `DEFAULT_MAX_FETCH_REQUESTS`. `0` means unlimited.
    */
   maxFetchRequests: number;
+  /**
+   * Catalog budget for skills verification (#2294): the most skills, and the
+   * most bytes, one run reads. Optional rather than concrete like
+   * `maxFetchRequests` — absent means `SKILL_MAX_CATALOG_SKILLS` /
+   * `SKILL_MAX_CATALOG_BYTES`, resolved by `resolveSkillCatalogBudget`, and
+   * the form renders those defaults itself. Read by `verifySkills` through
+   * `getServerSettings()`, so the CLI's `--verify` and the TUI's Skills pane
+   * both honor it.
+   */
+  skillCatalogMaxSkills?: number;
+  skillCatalogMaxBytes?: number;
   /**
    * Roots advertised to the server via the `roots` client capability. Each
    * root carries a required `uri` and an optional `name` (SDK `Root`). The

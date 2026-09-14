@@ -832,6 +832,13 @@ describe("server.ts supplemental coverage", () => {
       expect((await res.json()).error).toMatch(/maxFetchRequests/);
     });
 
+    it("rejects a non-positive skills catalog limit (#2294)", async () => {
+      const skills = await postSettings({ ...base, skillCatalogMaxSkills: 0 });
+      expect((await skills.json()).error).toMatch(/skillCatalogMaxSkills/);
+      const bytes = await postSettings({ ...base, skillCatalogMaxBytes: 1.5 });
+      expect((await bytes.json()).error).toMatch(/skillCatalogMaxBytes/);
+    });
+
     it("rejects a non-string OAuth field", async () => {
       const res = await postSettings({ ...base, oauthClientId: 7 });
       expect((await res.json()).error).toMatch(/oauthClientId/);
@@ -960,6 +967,8 @@ describe("server.ts supplemental coverage", () => {
         paginatedLists: true,
         advertisedExtensions: { "io.modelcontextprotocol/tasks": false },
         maxFetchRequests: 5,
+        skillCatalogMaxSkills: 10,
+        skillCatalogMaxBytes: 2048,
         protocolEra: "modern",
         modernLogLevel: "off",
         oauthClientId: "cid",
@@ -999,6 +1008,8 @@ describe("server.ts supplemental coverage", () => {
               requestTimeout: -1,
               taskTtl: "x",
               maxFetchRequests: -1,
+              skillCatalogMaxSkills: 0,
+              skillCatalogMaxBytes: "big",
               // unknown era literal → isProtocolEra branch
               protocolEra: "future",
               // unknown modern log level → isModernLogLevel branch (#1629)
@@ -1030,6 +1041,8 @@ describe("server.ts supplemental coverage", () => {
           "requestTimeout",
           "taskTtl",
           "maxFetchRequests",
+          "skillCatalogMaxSkills",
+          "skillCatalogMaxBytes",
           "protocolEra",
           "modernLogLevel",
           "oauth",

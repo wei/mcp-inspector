@@ -32,9 +32,8 @@ import {
   checkSkillConformance,
   checkSkillFrontmatterMatch,
   checkSkillNameCollisions,
+  resolveSkillCatalogBudget,
   skillDisplayName,
-  SKILL_MAX_CATALOG_BYTES,
-  SKILL_MAX_CATALOG_SKILLS,
   SKILL_MAX_RESOURCE_ENTRIES,
   SKILL_MAX_TOTAL_BYTES,
   skillFileBytes,
@@ -323,6 +322,13 @@ export async function verifySkills(
   // thousand skills, each individually conforming, made `--verify` run
   // indefinitely and transfer unboundedly (Copilot). See
   // {@link SKILL_MAX_CATALOG_SKILLS}.
+  //
+  // The limits are the server's configured ones when set (#2294). Read through
+  // `getServerSettings()` rather than taken as a parameter, so every caller —
+  // the CLI's `--verify` and the TUI pane — honors the setting without having
+  // to remember to pass it. Optional-chained because a test double need not
+  // implement the accessor.
+  const budget = resolveSkillCatalogBudget(client.getServerSettings?.());
   let walkedSkills = 0;
   let catalogBytes = 0;
   for (const entry of entries) {
@@ -330,8 +336,7 @@ export async function verifySkills(
     // past the budget is still reported on, just not read. What stops is the
     // reading.
     const withinBudget =
-      walkedSkills < SKILL_MAX_CATALOG_SKILLS &&
-      catalogBytes <= SKILL_MAX_CATALOG_BYTES;
+      walkedSkills < budget.maxSkills && catalogBytes <= budget.maxBytes;
     // The entry's own SKILL.md, read once and used twice — for its digest and
     // for the frontmatter cross-check. Reading it twice would double the load
     // on the server and, worse, could compare a digest against one snapshot
@@ -368,7 +373,7 @@ export async function verifySkills(
     // total, by definition) is never truncated.
     const manifest = withinBudget ? boundedManifest(declared) : [];
     let incomplete = !withinBudget
-      ? `Not read: this run already reached its catalog budget of ${SKILL_MAX_CATALOG_SKILLS} skills / ${SKILL_MAX_CATALOG_BYTES} bytes. Nothing about this skill's files has been checked — verify it on its own with \`--method skills/get --uri\` to get a verdict.`
+      ? `Not read: this run already reached its catalog budget of ${budget.maxSkills} skills / ${budget.maxBytes} bytes (raise it in the server's Skills settings). Nothing about this skill's files has been checked — verify it on its own with \`--method skills/get --uri\` to get a verdict.`
       : manifest.length < declared.length
         ? `Only ${manifest.length} of ${declared.length} manifest entries were read: the skill exceeds the ${SKILL_MAX_RESOURCE_ENTRIES}-entry / ${SKILL_MAX_TOTAL_BYTES}-byte interoperability limits, so the rest were not fetched and cannot be reported on.`
         : undefined;

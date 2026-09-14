@@ -38,6 +38,10 @@ import {
 } from "@inspector/core/auth/authorizationParams.js";
 import { oauthEndpointUrlError } from "@inspector/core/auth/endpointOverrides.js";
 import { ADVERTISABLE_EXTENSIONS } from "@inspector/core/mcp/extensions.js";
+import {
+  isSkillCatalogLimit,
+  resolveSkillCatalogBudget,
+} from "@inspector/core/mcp/skills.js";
 import type { Root } from "@modelcontextprotocol/client";
 
 /**
@@ -60,8 +64,14 @@ export type ServerSettingsSection =
   | "headers"
   | "metadata"
   | "timeouts"
+  | "skills"
   | "oauth"
   | "roots";
+
+/** The two per-server skills verification budget fields (#2294). */
+export type SkillCatalogLimitField =
+  | "skillCatalogMaxSkills"
+  | "skillCatalogMaxBytes";
 
 export interface ServerSettingsFormProps {
   settings: InspectorServerSettings;
@@ -101,6 +111,14 @@ export interface ServerSettingsFormProps {
    */
   onAdvertisedExtensionChange: (key: string, checked: boolean) => void;
   onMaxFetchRequestsChange: (value: number) => void;
+  /**
+   * Set one skills verification budget limit. Only ever called with a positive
+   * integer: a cleared or invalid entry re-emits the current value (#2294).
+   */
+  onSkillCatalogLimitChange: (
+    field: SkillCatalogLimitField,
+    value: number,
+  ) => void;
   onProtocolEraChange: (value: ServerProtocolEra) => void;
   onModernLogLevelChange: (value: ModernLogLevel) => void;
   /**
@@ -164,6 +182,22 @@ const LogSizeInput = NumberInput.withProps({
 
 const TimeoutInput = NumberInput.withProps({
   suffix: " ms",
+});
+
+// Positive integers only — `0` is not "unlimited" for a verification budget.
+const SkillCountInput = NumberInput.withProps({
+  min: 1,
+  allowDecimal: false,
+  allowNegative: false,
+  thousandSeparator: ",",
+});
+
+const SkillBytesInput = NumberInput.withProps({
+  min: 1,
+  allowDecimal: false,
+  allowNegative: false,
+  thousandSeparator: ",",
+  suffix: " bytes",
 });
 
 const ExtensionsHint = Text.withProps({
@@ -447,6 +481,7 @@ export function ServerSettingsForm({
   onPaginatedListsChange,
   onAdvertisedExtensionChange,
   onMaxFetchRequestsChange,
+  onSkillCatalogLimitChange,
   onProtocolEraChange,
   onModernLogLevelChange,
   negotiatedEra,
@@ -496,6 +531,20 @@ export function ServerSettingsForm({
       Number.isNaN(parsed) ? settings.maxFetchRequests : parsed,
     );
   };
+  // Absent settings render as the defaults `verifySkills` will actually apply.
+  const skillCatalogBudget = resolveSkillCatalogBudget(settings);
+  const handleSkillCatalogLimitChange =
+    (field: SkillCatalogLimitField, current: number) =>
+    (value: number | string) => {
+      // Mantine emits "" on a clear. Like the Network Log Size field, keep the
+      // current value rather than persisting something `verifySkills` would
+      // discard — a cleared or zero budget is not a meaningful setting here.
+      const parsed = typeof value === "number" ? value : parseInt(value, 10);
+      onSkillCatalogLimitChange(
+        field,
+        isSkillCatalogLimit(parsed) ? parsed : current,
+      );
+    };
   const handleTimeoutChange =
     (field: "connectionTimeout" | "requestTimeout" | "taskTtl") =>
     (value: number | string) => {
@@ -813,6 +862,32 @@ export function ServerSettingsForm({
               onChange={handleTimeoutChange("taskTtl")}
             />
           </Group>
+        </Accordion.Panel>
+      </Accordion.Item>
+
+      <Accordion.Item value="skills">
+        <Accordion.Control>Skills</Accordion.Control>
+        <Accordion.Panel>
+          <Stack gap="xs">
+            <SkillCountInput
+              label="Maximum Number of Skills"
+              description="Most skills one skills verification run (the CLI's --verify, or the TUI's Skills pane) reads files from. Skills past the limit are still listed, reported as incomplete rather than checked."
+              value={skillCatalogBudget.maxSkills}
+              onChange={handleSkillCatalogLimitChange(
+                "skillCatalogMaxSkills",
+                skillCatalogBudget.maxSkills,
+              )}
+            />
+            <SkillBytesInput
+              label="Maximum Catalog Size"
+              description="Most bytes one skills verification run reads across every skill. Reaching it stops the read, and the remaining skills are reported as incomplete."
+              value={skillCatalogBudget.maxBytes}
+              onChange={handleSkillCatalogLimitChange(
+                "skillCatalogMaxBytes",
+                skillCatalogBudget.maxBytes,
+              )}
+            />
+          </Stack>
         </Accordion.Panel>
       </Accordion.Item>
 

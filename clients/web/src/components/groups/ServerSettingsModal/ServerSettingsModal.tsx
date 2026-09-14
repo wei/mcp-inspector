@@ -17,6 +17,7 @@ import type { SecretStorageInfo } from "@inspector/core/auth/secret-storage-info
 import {
   ServerSettingsForm,
   type ServerSettingsSection,
+  type SkillCatalogLimitField,
 } from "../ServerSettingsForm/ServerSettingsForm";
 
 // The "environment" section only renders for stdio servers and the "oauth"
@@ -34,6 +35,7 @@ function allSectionsFor(
     "headers",
     "metadata",
     "timeouts",
+    "skills",
     ...(isOAuthCapableServerType(serverType) ? (["oauth"] as const) : []),
     "roots",
   ];
@@ -226,6 +228,13 @@ export function ServerSettingsModal({
     onSettingsChange({ ...settings, maxFetchRequests: value });
   }
 
+  function handleSkillCatalogLimitChange(
+    field: SkillCatalogLimitField,
+    value: number,
+  ) {
+    onSettingsChange({ ...settings, [field]: value });
+  }
+
   function handleProtocolEraChange(value: ServerProtocolEra) {
     onSettingsChange({ ...settings, protocolEra: value });
   }
@@ -299,6 +308,7 @@ export function ServerSettingsModal({
             onPaginatedListsChange={handlePaginatedListsChange}
             onAdvertisedExtensionChange={handleAdvertisedExtensionChange}
             onMaxFetchRequestsChange={handleMaxFetchRequestsChange}
+            onSkillCatalogLimitChange={handleSkillCatalogLimitChange}
             onProtocolEraChange={handleProtocolEraChange}
             onModernLogLevelChange={handleModernLogLevelChange}
             negotiatedEra={negotiatedEra}
