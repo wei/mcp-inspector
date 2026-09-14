@@ -10,12 +10,14 @@ import { Command } from "commander";
 import type {
   MCPConfig,
   MCPServerConfig,
+  ServerProtocolEra,
   StoredMCPServer,
 } from "../../../core/mcp/types.ts";
 import {
   resolveServerConfigs,
   parseKeyValuePair,
   parseHeaderPair,
+  parseProtocolEra,
   type ServerConfigOptions,
 } from "../../../core/mcp/node/config.ts";
 import {
@@ -89,6 +91,11 @@ export async function runWeb(argv: string[]): Promise<number> {
       parseHeaderPair,
       {},
     )
+    .option(
+      "--protocol-era <era>",
+      "protocol era for the ad-hoc server: legacy, auto, or modern (default legacy)",
+      parseProtocolEra,
+    )
     .option("--dev", "run in development mode (Vite)")
     .parse(preArgs);
 
@@ -101,6 +108,7 @@ export async function runWeb(argv: string[]): Promise<number> {
     serverUrl?: string;
     cwd?: string;
     header?: Record<string, string>;
+    protocolEra?: ServerProtocolEra;
     dev?: boolean;
   };
 
@@ -124,6 +132,10 @@ export async function runWeb(argv: string[]): Promise<number> {
   const hasCatalog = !!catalogPath;
   const hasConfig = !!opts.config;
   const hasHeaders = !!opts.header && Object.keys(opts.header).length > 0;
+  // Like `--header`, web applies `--protocol-era` only to an ad-hoc server: a
+  // catalog/config entry carries its own `protocolEra`, editable in Server
+  // Settings, and web never overlays launch flags onto a file's settings.
+  const hasProtocolEra = opts.protocolEra !== undefined;
   const hasAdHocServer =
     target.length > 0 ||
     !!opts.serverUrl ||
@@ -137,11 +149,15 @@ export async function runWeb(argv: string[]): Promise<number> {
         ? "--catalog cannot be combined with an ad-hoc server URL/command."
         : hasCatalog && hasHeaders
           ? "--header cannot be combined with --catalog. Set per-server headers in the catalog file."
-          : hasConfig && hasAdHocServer
-            ? "--config cannot be combined with an ad-hoc server URL/command. --config selects a read-only session file."
-            : hasConfig && hasHeaders
-              ? "--header cannot be combined with --config. Set per-server headers inside the config file instead."
-              : null;
+          : hasCatalog && hasProtocolEra
+            ? "--protocol-era cannot be combined with --catalog. Set protocolEra per server in the catalog file."
+            : hasConfig && hasAdHocServer
+              ? "--config cannot be combined with an ad-hoc server URL/command. --config selects a read-only session file."
+              : hasConfig && hasHeaders
+                ? "--header cannot be combined with --config. Set per-server headers inside the config file instead."
+                : hasConfig && hasProtocolEra
+                  ? "--protocol-era cannot be combined with --config. Set protocolEra per server inside the config file instead."
+                  : null;
   if (conflict) {
     console.error(`Error: ${conflict}`);
     process.exit(1);
@@ -217,13 +233,18 @@ export async function runWeb(argv: string[]): Promise<number> {
 
     initialMcpConfig = config;
 
-    // In-memory session entry: the SDK config plus the flat `headers` record,
-    // which the backend lifts into `settings.headers` on read. Nothing is
-    // written to disk — the ad-hoc server is a read-only session list.
+    // In-memory session entry: the SDK config plus the flat `headers` record
+    // and `protocolEra`, which the backend lifts into `settings` on read.
+    // Nothing is written to disk — the ad-hoc server is a read-only session
+    // list. The era is transport-agnostic, so unlike `--header` it applies to
+    // stdio too.
     const entry: StoredMCPServer =
       hasHeaders && config.type !== "stdio" && config.type !== undefined
         ? { ...config, headers: opts.header }
         : { ...config };
+    if (opts.protocolEra !== undefined) {
+      entry.protocolEra = opts.protocolEra;
+    }
     initialServers = {
       mcpServers: { [deriveSeedServerId(config)]: entry },
     };
@@ -231,6 +252,11 @@ export async function runWeb(argv: string[]): Promise<number> {
   } else if (hasHeaders) {
     console.error(
       "Error: --header requires an ad-hoc --server-url or command target.",
+    );
+    process.exit(1);
+  } else if (hasProtocolEra) {
+    console.error(
+      "Error: --protocol-era requires an ad-hoc --server-url or command target.",
     );
     process.exit(1);
   }
