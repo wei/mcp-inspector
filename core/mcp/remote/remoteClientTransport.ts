@@ -556,8 +556,11 @@ export class RemoteClientTransport implements Transport {
             const entry = parsed.data;
             // Stream bookkeeping runs whether or not the consumer logs
             // requests: `onFetchStreamUpdate` is documented to work on its
-            // own, and `close()` needs to know which streams are open.
+            // own, and `close()` needs to know which streams are open. It
+            // exists only to serve that callback, though — without one the
+            // set would only ever grow, one entry per reconnect.
             if (
+              this.options.onFetchStreamUpdate &&
               isLongLivedStreamResponse(
                 entry.method,
                 findHeader(entry.responseHeaders, "content-type"),
