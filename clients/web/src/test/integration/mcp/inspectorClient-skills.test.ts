@@ -158,13 +158,16 @@ describe("Skills extension over a real transport (#2234)", () => {
               },
             }
           : { code: -32601 };
+        // Thunks, not promises: starting all three up front leaves the later
+        // rejections unhandled while the first is awaited, which fails the
+        // run even though every assertion passes.
         const refusals = [
-          connected.listSkills(),
-          connected.getSkill("skill://data-analysis/SKILL.md"),
-          connected.readResourceDirectory("skill://data-analysis"),
+          () => connected.listSkills(),
+          () => connected.getSkill("skill://data-analysis/SKILL.md"),
+          () => connected.readResourceDirectory("skill://data-analysis"),
         ];
         for (const refusal of refusals) {
-          await expect(refusal).rejects.toMatchObject({
+          await expect(refusal()).rejects.toMatchObject({
             ...expected,
             message: expect.stringMatching(
               /requires the client to declare io\.modelcontextprotocol\/skills/,
