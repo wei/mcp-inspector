@@ -791,9 +791,7 @@ describe("RemoteClientTransport", () => {
       });
       // Hold the expected rejection now (as the RemoteSession timeout tests do)
       // so it is asserted rather than suppressed by an empty catch.
-      const rejection = expect(sent).rejects.toThrow(
-        /Timed out waiting for MCP response on SSE/,
-      );
+      const rejection = expect(sent).rejects.toThrow(/Request timed out/);
       await flushSse();
 
       // A log message before the deadline must not extend it.

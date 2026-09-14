@@ -49,11 +49,18 @@ export function createTransportNode(
     pipeStderr = false,
     onFetchRequest,
     onFetchResponseBody,
+    onFetchStreamUpdate,
     authProvider,
     settings,
     interceptAuthChallenges = false,
     onAuthChallengeObserved,
   } = options;
+  // Any of the three tracking callbacks earns a tracker: each is optional on
+  // the tracker itself, and a caller that wants only stream updates (or only
+  // bodies) must not be silently handed the bare fetch (#2318).
+  const wantsFetchTracking = Boolean(
+    onFetchRequest || onFetchResponseBody || onFetchStreamUpdate,
+  );
 
   // `optionsFetchFn` is the caller's whole fetch stack and already sits on top of
   // a proxy-aware base when one is needed — the Node clients install
@@ -68,10 +75,11 @@ export function createTransportNode(
       ? createAuthChallengeObserverFetch(inner, onAuthChallengeObserved)
       : inner;
   const withTracking = (inner: typeof fetch): typeof fetch =>
-    onFetchRequest
+    wantsFetchTracking
       ? createFetchTracker(inner, {
           trackRequest: onFetchRequest,
           updateResponseBody: onFetchResponseBody,
+          updateStream: onFetchStreamUpdate,
         })
       : inner;
   // The observer sits *under* the interceptor so it still reports the

@@ -8,7 +8,8 @@ import type {
   SseServerConfig,
   StreamableHttpServerConfig,
 } from "../types.js";
-import { normalizeServerType } from "../serverList.js";
+import { isProtocolEra, normalizeServerType } from "../serverList.js";
+import type { ServerProtocolEra } from "../types.js";
 import { toRecord } from "../../json/jsonUtils.js";
 
 /**
@@ -84,6 +85,20 @@ export function parseHeaderPair(
   }
 
   return { ...previous, [key]: val };
+}
+
+/**
+ * Validate a `--protocol-era` value. Used as the Commander option coerce for
+ * all three clients, so an ad-hoc launch can pick the era without writing an
+ * `mcp.json` entry for it (#2208). Pure function; no Commander dependency.
+ */
+export function parseProtocolEra(value: string): ServerProtocolEra {
+  if (!isProtocolEra(value)) {
+    throw new Error(
+      `Invalid protocol era: ${value}. Valid eras are: legacy, auto, modern`,
+    );
+  }
+  return value;
 }
 
 /** On-disk contents of a freshly seeded empty catalog (pretty-printed). */

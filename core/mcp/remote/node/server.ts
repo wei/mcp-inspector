@@ -65,6 +65,7 @@ import {
   stripInspectorFields,
 } from "../../serverList.js";
 import { toRecord } from "../../../json/jsonUtils.js";
+import { isSkillCatalogLimit } from "../../skills.js";
 import { resolveImportSource } from "../../import/resolveSource.js";
 import { RemoteSession } from "./remote-session.js";
 import { createRemoteAuthProvider } from "./tokenAuthProvider.js";
@@ -868,6 +869,8 @@ export function createRemoteApp(
         onFetchRequest: (entry) => session.onFetchRequest(entry),
         onFetchResponseBody: (id, body) =>
           session.onFetchResponseBody(id, body),
+        onFetchStreamUpdate: (id, stream) =>
+          session.onFetchStreamUpdate(id, stream),
         authProvider: authHandle?.provider,
         settings: body.settings,
         // Always intercept 401/403 on the node MCP transport. Without this, the
@@ -1681,6 +1684,19 @@ export function createRemoteApp(
         );
         delete valObj.maxFetchRequests;
       }
+      // #2294 — positive integers only; `0` is not "unlimited" for these.
+      for (const key of [
+        "skillCatalogMaxSkills",
+        "skillCatalogMaxBytes",
+      ] as const) {
+        if (key in valObj && !isSkillCatalogLimit(valObj[key])) {
+          logWarn(
+            { route: "/api/servers", id, droppedKey: key },
+            `Dropping malformed \`${key}\` field — expected a positive integer.`,
+          );
+          delete valObj[key];
+        }
+      }
       if ("oauth" in valObj && !isOauthObject(valObj.oauth)) {
         logWarn(
           { route: "/api/servers", id, droppedKey: "oauth" },
@@ -1953,6 +1969,18 @@ export function createRemoteApp(
         error: "settings.maxFetchRequests must be a non-negative number",
       };
     }
+    // #2294 — optional on the wire; absent means the default budget.
+    for (const key of [
+      "skillCatalogMaxSkills",
+      "skillCatalogMaxBytes",
+    ] as const) {
+      if (obj[key] !== undefined && !isSkillCatalogLimit(obj[key])) {
+        return {
+          ok: false,
+          error: `settings.${key} must be a positive integer`,
+        };
+      }
+    }
     for (const optional of [
       "oauthClientId",
       "oauthClientSecret",
@@ -2099,6 +2127,13 @@ export function createRemoteApp(
       // writes no spurious `roots` field.
       roots: isRootArray(obj.roots) ? obj.roots : [],
     };
+    // Validated above; absent stays absent (the default budget).
+    if (isSkillCatalogLimit(obj.skillCatalogMaxSkills)) {
+      value.skillCatalogMaxSkills = obj.skillCatalogMaxSkills;
+    }
+    if (isSkillCatalogLimit(obj.skillCatalogMaxBytes)) {
+      value.skillCatalogMaxBytes = obj.skillCatalogMaxBytes;
+    }
     if (typeof obj.oauthClientId === "string" && obj.oauthClientId !== "") {
       value.oauthClientId = obj.oauthClientId;
     }

@@ -199,6 +199,30 @@ describe("RemoteSession", () => {
     });
   });
 
+  it("onFetchStreamUpdate forwards the event count, serializing closedAt to ISO when present (#2318)", () => {
+    const session = new RemoteSession("s10a");
+    const received: { type: string; data: unknown }[] = [];
+    session.setEventConsumer((event) =>
+      received.push({ type: event.type, data: event.data }),
+    );
+    session.onFetchStreamUpdate("req-1", { eventCount: 2 });
+    session.onFetchStreamUpdate("req-1", {
+      eventCount: 3,
+      closedAt: new Date("2026-01-01T00:00:05Z"),
+    });
+    expect(received).toEqual([
+      { type: "fetch_stream_update", data: { id: "req-1", eventCount: 2 } },
+      {
+        type: "fetch_stream_update",
+        data: {
+          id: "req-1",
+          eventCount: 3,
+          closedAt: "2026-01-01T00:00:05.000Z",
+        },
+      },
+    ]);
+  });
+
   it("onFetchRequest serializes a Date timestamp to an ISO string", () => {
     const session = new RemoteSession("s11");
     const received: { type: string; data: unknown }[] = [];

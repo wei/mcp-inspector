@@ -172,6 +172,20 @@ export type StoredMCPServer = MCPServerConfig & {
    */
   maxFetchRequests?: number;
   /**
+   * The maximum number of skills whose files are read in one skills
+   * verification run (#2294). Omitted on disk when it equals
+   * `SKILL_MAX_CATALOG_SKILLS`. Must be a positive integer
+   * — there is no unlimited value, since the bound is what makes `--verify`
+   * terminate.
+   */
+  skillCatalogMaxSkills?: number;
+  /**
+   * The maximum number of bytes read across all skills in one skills
+   * verification run (#2294). Omitted on disk
+   * when it equals `SKILL_MAX_CATALOG_BYTES`. Positive integer, as above.
+   */
+  skillCatalogMaxBytes?: number;
+  /**
    * Pre-configured OAuth client credentials for HTTP transports. Nested to
    * match Claude Code's `.mcp.json` shape; lifted into the flat `oauthClientId`
    * / `oauthClientSecret` / `oauthScopes` fields on `InspectorServerSettings`
@@ -380,8 +394,30 @@ export interface FetchRequestEntry {
   responseBody?: string;
   duration?: number; // Time between request and response in ms
   error?: string;
+  /**
+   * Lifecycle of a long-lived stream response (the standalone `GET` on
+   * Streamable HTTP, the legacy SSE event stream), whose body is never
+   * captured. Filled in asynchronously via `fetchRequestStreamUpdate` as
+   * events arrive and when the stream ends; absent on every bounded response
+   * (#2318).
+   */
+  stream?: FetchStreamState;
   /** Distinguishes OAuth/auth fetches from MCP transport fetches */
   category: FetchRequestCategory;
+}
+
+/**
+ * What the fetch tracker knows about a long-lived stream it declined to
+ * buffer: how many SSE events have been delivered on it so far, and when it
+ * ended. `closedAt` is absent while the stream is still open. The Network
+ * tab renders it in place of the body, and `InspectorClient` folds the most
+ * recent transport stream into its connection diagnostics (#2318).
+ */
+export interface FetchStreamState {
+  /** SSE events delivered so far — dispatched events, not keepalive comments. */
+  eventCount: number;
+  /** When the stream ended (server close, network error, or abort), once it has. */
+  closedAt?: Date;
 }
 
 /** Entry shape from createFetchTracker before category is added by the caller */
@@ -901,6 +937,17 @@ export interface InspectorServerSettings {
    */
   maxFetchRequests: number;
   /**
+   * Catalog budget for skills verification (#2294): the most skills, and the
+   * most bytes, one run reads. Optional rather than concrete like
+   * `maxFetchRequests` — absent means `SKILL_MAX_CATALOG_SKILLS` /
+   * `SKILL_MAX_CATALOG_BYTES`, resolved by `resolveSkillCatalogBudget`, and
+   * the form renders those defaults itself. Read by `verifySkills` through
+   * `getServerSettings()`, so the CLI's `--verify` and the TUI's Skills pane
+   * both honor it.
+   */
+  skillCatalogMaxSkills?: number;
+  skillCatalogMaxBytes?: number;
+  /**
    * Roots advertised to the server via the `roots` client capability. Each
    * root carries a required `uri` and an optional `name` (SDK `Root`). The
    * form edits these as controlled rows; empty-uri rows are dropped on
@@ -985,6 +1032,14 @@ export interface CreateTransportOptions {
    * reading (critical for SSE responses that include progress events).
    */
   onFetchResponseBody?: (id: string, responseBody: string) => void;
+
+  /**
+   * Optional callback fired asynchronously as a previously tracked long-lived
+   * stream (GET + `text/event-stream`) delivers events and when it ends. The
+   * tracker never buffers such a body, so this is the only view the consumer
+   * gets of the stream's lifetime (#2318).
+   */
+  onFetchStreamUpdate?: (id: string, stream: FetchStreamState) => void;
 
   /**
    * Optional OAuth client provider for Bearer authentication (SSE, streamable-http).

@@ -84,7 +84,7 @@ When a server is loaded from a `--catalog`/`--config` file, its per-server setti
 
 The file is the only durable way to give a run its roots: there is no roots flag, and `--method roots/set` applies only to that one short-lived connection. Roots configured for a server (the same field the web UI's Server Settings writes) are advertised at connect, so a server that asks for `roots/list` — `@modelcontextprotocol/server-filesystem` does, to learn its allowed directories — gets them.
 
-**Environment-variable semantics.** `MCP_CATALOG_PATH` is honored only when no ad-hoc target is given (positional command, `--server-url`, or `--transport`) — so a shell that exports it can still run one-off ad-hoc invocations without hitting the catalog/ad-hoc conflict. `MCP_STORAGE_DIR` sets the storage directory used by the OAuth persist backend (`<MCP_STORAGE_DIR>/oauth.json`); the per-file `MCP_INSPECTOR_OAUTH_STATE_PATH` override still takes precedence over it.
+**Environment-variable semantics.** `MCP_CATALOG_PATH` is honored only when no ad-hoc target is given (positional command, `--server-url`, or `--transport`) — so a shell that exports it can still run one-off ad-hoc invocations without hitting the catalog/ad-hoc conflict. `MCP_STORAGE_DIR` sets the storage directory used by the OAuth persist backend (`<MCP_STORAGE_DIR>/oauth.json`); the per-file `MCP_INSPECTOR_OAUTH_STATE_PATH` override still takes precedence over it. Every variable the CLI reads is listed in [Environment variables](../../docs/environment-variables.md).
 
 ### HTTP proxy support
 
@@ -102,7 +102,7 @@ Because undici's `Response` is a different class from `globalThis.Response`, the
 
 ### MCP server (which server to connect to)
 
-Options that specify the MCP server (catalog/config file, ad-hoc command/URL, env vars, headers) are shared by the Web, CLI, and TUI and are documented in [MCP server configuration](../../docs/mcp-server-configuration.md): `--catalog` (writable catalog, seeded **empty** if missing; default `~/.mcp-inspector/mcp.json` or `MCP_CATALOG_PATH`), `--config` (read-only session, errors if absent), `--server`, `-e`, `--cwd`, `--header`, `--transport`, `--server-url`, and the positional `[target...]`. `--catalog` and `--config` are mutually exclusive, and neither combines with an ad-hoc target.
+Options that specify the MCP server (catalog/config file, ad-hoc command/URL, env vars, headers) are shared by the Web, CLI, and TUI and are documented in [MCP server configuration](../../docs/mcp-server-configuration.md): `--catalog` (writable catalog, seeded **empty** if missing; default `~/.mcp-inspector/mcp.json` or `MCP_CATALOG_PATH`), `--config` (read-only session, errors if absent), `--server`, `-e`, `--cwd`, `--header`, `--protocol-era` (`legacy`/`auto`/`modern`; sets the era an ad-hoc run negotiates, or overrides a file's `protocolEra`), `--transport`, `--server-url`, and the positional `[target...]`. `--catalog` and `--config` are mutually exclusive, and neither combines with an ad-hoc target.
 
 ### CLI-specific (what to invoke)
 
@@ -391,7 +391,12 @@ not read has not been cleared of anything:
 | Per skill, on the wire | 16 MiB actually served | The declared sizes are server-controlled; this one cannot be lied past. |
 | Per run | 256 skills / 64 MiB | SEP-2640 bounds a skill and deliberately does not bound a *catalog*. Every entry costs at least one `resources/read`, so without this a large listing — hostile or merely big — is unbounded work against the tool inspecting it. |
 
-The run bound is this tool's, not the spec's. A skill past it is still reported,
+The run bound is this tool's, not the spec's, and it is configurable per server:
+set `skillCatalogMaxSkills` / `skillCatalogMaxBytes` on the server's entry in
+`mcp.json`, or edit them under **Skills** in the web client's Server Settings
+(see [the configuration reference](../../docs/mcp-server-configuration.md)).
+Both must be positive integers — there is no unlimited value, since the bound
+is what makes the run terminate. A skill past it is still reported,
 with its static conformance findings and an `incomplete` reason saying nothing
 about its files was checked; verify it on its own with `--method skills/get
 --uri <skill>` to get a verdict for it.
