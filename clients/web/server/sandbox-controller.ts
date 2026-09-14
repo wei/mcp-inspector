@@ -338,9 +338,20 @@ export function createSandboxController(
           const urlHost = isAllInterfacesHost(canonicalHost)
             ? "localhost"
             : canonicalHost;
+          const derivedUrl = `http://${urlHost}:${actualPort}/sandbox`;
           // An operator-supplied public URL (#1862) replaces the derived one
-          // only now that the listener it routes to is actually up.
-          sandboxUrl = publicUrl ?? `http://${urlHost}:${actualPort}/sandbox`;
+          // only now that the listener it routes to is actually up — and only
+          // on the port it was configured for. After the EADDRINUSE fallback
+          // the proxy still routes the public URL to the PINNED port, which
+          // someone else holds, so advertising it would send the browser to
+          // the wrong listener. The derived URL at least works locally.
+          if (publicUrl && retriedDynamic) {
+            console.warn(
+              `Sandbox: not advertising MCP_SANDBOX_FULL_ADDRESS, since it routes to port ${port}, ` +
+                `which is taken; advertising ${derivedUrl} instead.`,
+            );
+          }
+          sandboxUrl = publicUrl && !retriedDynamic ? publicUrl : derivedUrl;
           boundPort = actualPort;
           settle({ port: actualPort, url: sandboxUrl });
         });

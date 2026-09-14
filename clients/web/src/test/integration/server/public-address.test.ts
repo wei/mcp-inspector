@@ -72,6 +72,17 @@ describe("public addresses (#1862)", () => {
       expect(warned()).toContain(reason);
     });
 
+    it.each([
+      ["https://user:hunter2@sb.example.com/sandbox", "hunter2"],
+      ["https://sb.example.com/sandbox?token=hunter2", "hunter2"],
+      ["https://sb.example.com/sandbox#hunter2", "hunter2"],
+      ["not a url hunter2", "hunter2"],
+    ])("never echoes a secret from a refused value (%s)", (raw, secret) => {
+      expect(resolveSandboxPublicUrl(raw, UI)).toBeUndefined();
+      expect(warned()).toContain("MCP_SANDBOX_FULL_ADDRESS");
+      expect(warned()).not.toContain(secret);
+    });
+
     it("refuses an origin shared with the Inspector UI — the same-origin collapse", () => {
       // The natural reverse-proxy layout: one hostname, /sandbox routed to 6275.
       // The spec requires host != sandbox origin, so this must not be advertised.

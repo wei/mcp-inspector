@@ -495,6 +495,31 @@ describe("createSandboxController", () => {
     }
   });
 
+  it("does not advertise a public URL after falling back off its pinned port (#1862)", async () => {
+    // The reverse proxy routes the public URL to the pinned port, which another
+    // process holds — so the public URL would reach the wrong listener.
+    const { port, release } = await claimPort();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const controller = createSandboxController({
+      port,
+      host: "127.0.0.1",
+      publicUrl: "https://sb.example.com/sandbox",
+    });
+    try {
+      const result = await controller.start();
+      expect(result.port).not.toBe(port);
+      expect(result.url).toBe(`http://127.0.0.1:${result.port}/sandbox`);
+      expect(controller.getUrl()).toBe(result.url);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("not advertising MCP_SANDBOX_FULL_ADDRESS"),
+      );
+    } finally {
+      warnSpy.mockRestore();
+      await controller.close();
+      await release();
+    }
+  });
+
   it("resolves with empty values when even the dynamic retry fails", async () => {
     // The Vite plugin awaits start() in configureServer; if start() ever stops
     // resolving, the entire dev backend hangs. This pins the resolve-on-error

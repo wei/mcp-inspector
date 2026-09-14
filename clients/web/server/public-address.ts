@@ -92,9 +92,24 @@ function parsePublicUrl(raw: string): Parsed {
   return { url };
 }
 
+/**
+ * The value as it may appear in a log line. Never the raw string: the values
+ * refused for carrying credentials or a query are exactly the ones likely to
+ * hold a secret, and echoing them would leak what the check refused. Userinfo,
+ * query and fragment are dropped; an unparseable value is not echoed at all.
+ */
+export function describeForLog(raw: string): string {
+  try {
+    const u = new URL(raw);
+    return `"${u.protocol}${u.host ? `//${u.host}` : ""}${u.pathname}"`;
+  } catch {
+    return "(unparseable value, not echoed)";
+  }
+}
+
 function warnIgnored(env: string, raw: string, reason: string): void {
   console.warn(
-    `Ignoring ${env}="${raw}": ${reason}. Advertising the bind-derived address instead.`,
+    `Ignoring ${env}=${describeForLog(raw)}: ${reason}. Advertising the bind-derived address instead.`,
   );
 }
 
@@ -157,8 +172,11 @@ export function resolveSandboxPublicUrl(
  * `undefined` when it is unset, blank, or refused (warned).
  *
  * @param allowedOrigins The resolved Inspector UI origins.
- * @param sandboxUrl The advertised sandbox URL when it is known at config time
- *   (i.e. overridden). A bind-derived one is on its own port and cannot match.
+ * @param sandboxUrl The overridden sandbox URL, when there is one. This is the
+ *   early, config-time check; a bind-derived sandbox origin is only known once
+ *   that listener binds (possibly on a fallback port), so the authoritative
+ *   comparison against it is made by the app-origin controller at start, which
+ *   receives the real sandbox and Inspector origins as `embedderOrigins`.
  */
 export function resolveAppOriginPublicOrigin(
   raw: string | undefined,

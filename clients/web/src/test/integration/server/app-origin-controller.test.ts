@@ -393,6 +393,54 @@ describe("createAppOriginController", () => {
     }
   });
 
+  it("does not use a public origin after falling back off its pinned port (#1862)", async () => {
+    const { port, release } = await claimPort();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      controller = createAppOriginController({
+        port,
+        host: "127.0.0.1",
+        publicOrigin: "https://apps.example.com",
+      });
+      const result = await controller.start();
+      expect(result.port).not.toBe(port);
+      expect(result.url).toBe(`http://127.0.0.1:${result.port}`);
+      expect(
+        controller.publish({ html: "<p>x</p>" })!.url.startsWith(result.url),
+      ).toBe(true);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("not using MCP_APP_ORIGIN_FULL_ADDRESS"),
+      );
+    } finally {
+      warnSpy.mockRestore();
+      await release();
+    }
+  });
+
+  it("refuses a public origin equal to a trusted ancestor, including a bind-derived sandbox (#1862)", async () => {
+    // Config time cannot see the bind-derived sandbox origin; the callers pass
+    // it in embedderOrigins, so the controller is where the collision is caught.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      controller = createAppOriginController({
+        port: 0,
+        host: "127.0.0.1",
+        publicOrigin: "http://127.0.0.1:6275",
+        embedderOrigins: appDocumentEmbedders("http://127.0.0.1:6275/sandbox", [
+          "http://localhost:6274",
+        ]),
+      });
+      const result = await controller.start();
+      expect(result.url).toBe(`http://127.0.0.1:${result.port}`);
+      expect(controller.getOrigin()).not.toBe("http://127.0.0.1:6275");
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("must differ from both"),
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it("degrades to publish()===null when listen fails for a non-EADDRINUSE reason", async () => {
     // The backends await start() during boot; if it ever stopped resolving the
     // whole web server would hang. Instead it resolves empty and every publish
