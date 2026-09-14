@@ -173,7 +173,8 @@ export function isSkillsExtensionSupported(
  *
  * A **path-less authority** URI (`skill://data-analysis`) is accepted, and is
  * not the opaque case above: RFC 3986 gives a URI with an authority an empty
- * path, and the parser reports that as `pathname === ""`. It has no segments,
+ * path, and the parser reports that as `pathname === ""`. The authority has to
+ * be non-empty — `skill:` parses to an empty path too, with no host. It has no segments,
  * so nothing survives unnormalized. It is what a skill's root directory looks
  * like once `/SKILL.md` is removed, so rejecting it made a server echoing that
  * root back in a directory read read as "outside this skill" when it is the
@@ -196,9 +197,10 @@ export function normalizeSkillUri(uri: string): string | undefined {
   } catch {
     return undefined;
   }
-  if (parsed.pathname !== "" && !parsed.pathname.startsWith("/")) {
-    return undefined;
-  }
+  // An empty path is only the root form when an authority carries the identity:
+  // `skill:` and `mailto:` also parse to `pathname === ""`, with no host.
+  const pathlessRoot = parsed.pathname === "" && parsed.host !== "";
+  if (!pathlessRoot && !parsed.pathname.startsWith("/")) return undefined;
   return canonicalizePercentEncoding(parsed.href);
 }
 

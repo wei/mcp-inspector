@@ -176,6 +176,11 @@ describe("normalizeSkillUri", () => {
     expect(normalizeSkillUri("skill:demo/SKILL.md")).toBeUndefined();
     // Path-less but still opaque: no authority, so it stays rejected.
     expect(normalizeSkillUri("skill:demo")).toBeUndefined();
+    // Empty path AND no authority — the parser reports `pathname === ""` for
+    // these too, so an empty path alone must not be read as the root form.
+    expect(normalizeSkillUri("skill:")).toBeUndefined();
+    expect(normalizeSkillUri("mailto:")).toBeUndefined();
+    expect(normalizeSkillUri("skill://")).toBeUndefined();
   });
 
   it("accepts a path-less authority URI — a skill's root directory (#2295)", () => {
