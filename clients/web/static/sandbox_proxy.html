@@ -115,7 +115,7 @@
           : LOOPBACK_EMBEDDER_PATTERN.test(referrerOrigin))
       ) {
         throw new Error(
-          `Embedding domain not allowed in referrer ${document.referrer}. (Consider updating the validation logic to allow your domain.)`,
+          `Embedding origin ${referrerOrigin} is not allowed to load the MCP Apps sandbox. Add it to the Inspector's ALLOWED_ORIGINS (e.g. ALLOWED_ORIGINS=https://inspector.example.com) and restart.`,
         );
       }
 
