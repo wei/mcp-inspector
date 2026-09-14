@@ -723,7 +723,7 @@ describe("RemoteClientTransport", () => {
             return new Response(JSON.stringify({ ok: true }), { status: 200 });
           }
           return new Response("not found", { status: 404 });
-        }) as unknown as typeof fetch;
+        });
       return { fetchFn, getSse: () => sse, getSentId: () => sentId };
     }
 
