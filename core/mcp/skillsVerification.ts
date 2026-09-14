@@ -335,8 +335,14 @@ export async function verifySkills(
     // Static checks still run for every entry — they cost no I/O, so a skill
     // past the budget is still reported on, just not read. What stops is the
     // reading.
+    //
+    // ⚠️ STRICT on bytes, like the count. A run whose charged bytes exactly
+    // equal the limit has REACHED it, and `<=` read one more skill past a
+    // budget that was already spent (Copilot, #2294). The skill whose reads
+    // cross the limit is still reported in full — that is decided by charging
+    // after the entry, below, not by this comparison.
     const withinBudget =
-      walkedSkills < budget.maxSkills && catalogBytes <= budget.maxBytes;
+      walkedSkills < budget.maxSkills && catalogBytes < budget.maxBytes;
     // The entry's own SKILL.md, read once and used twice — for its digest and
     // for the frontmatter cross-check. Reading it twice would double the load
     // on the server and, worse, could compare a digest against one snapshot
