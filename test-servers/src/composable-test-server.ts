@@ -615,11 +615,14 @@ export interface ServerConfig {
    */
   skills?: boolean;
   /**
-   * With {@link ServerConfig.skills}, answer `skills/list`, `skills/get` and
-   * `resources/directory/read` with `-32601` unless the client declared
+   * With {@link ServerConfig.skills}, refuse `skills/list`, `skills/get` and
+   * `resources/directory/read` unless the client declared
    * `io.modelcontextprotocol/skills` in its own capabilities — a strict
-   * SEP-2133 server (#2373). Off by default so the existing skills fixtures
-   * keep serving any client. Ignored without `skills`.
+   * SEP-2133 server (#2373). A modern request is refused with `-32021`
+   * MissingRequiredClientCapability carrying `data.requiredCapabilities`; a
+   * legacy one, whose era has no such code, with `-32601`. Off by default so
+   * the existing skills fixtures keep serving any client. Ignored without
+   * `skills`.
    */
   skillsRequireClientExtension?: boolean;
   /**

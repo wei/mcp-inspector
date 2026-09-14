@@ -11,12 +11,15 @@
  * shared by every client, and produce a structured finding list rather than a
  * boolean — a report is useful, "invalid" is not.
  *
- * ⚠️ Skills is a **server-declared** extension, read off the connecting server's
- * `capabilities.extensions`. It deliberately does NOT belong in
- * `ADVERTISABLE_EXTENSIONS` (`core/mcp/extensions.ts`), which is the catalog of
- * extensions the *Inspector* advertises and the user toggles in Server Settings.
- * The precedent is `appElicitation.ts`, which reads the server side the same
- * way; getting it backwards would put a meaningless toggle in Server Settings.
+ * ⚠️ Skills is negotiated from **both** sides (SEP-2133), and the two halves
+ * live in different places. This module reads the *server's* declaration off
+ * the connecting server's `capabilities.extensions` — that is what gates the
+ * Skills screen. The *Inspector's* own declaration is a separate entry in
+ * `ADVERTISABLE_EXTENSIONS` (`core/mcp/extensions.ts`): a strict server refuses
+ * `skills/*` to a client that did not declare it, and turning that toggle off
+ * in Server Settings is how to check a server's refusal path (#2373). An
+ * earlier revision of this comment said Skills must never be in that registry;
+ * that was the missing client declaration #2373 fixed.
  *
  * The Inspector is an inspector, not a host: a `resources/read` of a `SKILL.md`
  * is explicitly not a load and confers no standing, so none of the SEP's host

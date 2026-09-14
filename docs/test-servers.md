@@ -105,7 +105,9 @@ than one for both:
    `io.modelcontextprotocol/clientCapabilities` `_meta` entry (Modern).
 2. Open **Server Settings → Advertised Extensions**, uncheck
    **Skills (io.modelcontextprotocol/skills)**, and reconnect.
-3. `skills/list` now fails with `-32601` — the refusal a strict server sends.
+3. `skills/list` now fails — with `-32021` MissingRequiredClientCapability on
+   the modern file and `-32601` on the legacy one, the refusal a strict server
+   sends in each era.
 
 **Both `skills/*` results carry the full modern base envelope** (`resultType` /
 `ttlMs` / `cacheScope`). They are consumer-owned methods, so the SDK stamps
@@ -528,7 +530,7 @@ Requiredness is a property of the **expression**, not the variable: RFC 6570 dro
 
 1. Connect — the Inspector advertises the Tasks extension by default, so the Tools list shows both `echo` and `get_weather`.
 2. Open **Server Settings → Advertised Extensions**, uncheck **Tasks (io.modelcontextprotocol/tasks)**, and reconnect.
-3. The client now advertises no extensions, the server never enables `get_weather`, and the Tools list shows only `echo`.
+3. The client no longer advertises the Tasks extension (it still advertises the others, such as MCP Apps UI and Skills), the server never enables `get_weather`, and the Tools list shows only `echo`.
 
 This is the debugging knob for a server legitimately changing tool registration based on what the client advertises. Legacy stateful leg only — the modern per-request leg has no persistent `oninitialized`.
 

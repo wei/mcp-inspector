@@ -150,8 +150,9 @@ describe("InspectorClient skills methods (#2234)", () => {
 
   it("requires the modern list envelope on a modern connection", async () => {
     // SEP-2640: "In protocol versions 2026-07-28 and later, the result also
-    // carries … `ttlMs` and `cacheScope`." Nothing else validates it —
-    // `skills/*` is consumer-owned, so the SDK codec never sees it.
+    // carries … `ttlMs` and `cacheScope`." The SDK codec checks and removes
+    // `resultType` on every modern result, but for a consumer-owned method it
+    // checks neither caching attribute — so this schema is what does.
     const client = makeClient();
     internals(client).protocolEra = "modern";
     stubRequest(client, { skills: [] });

@@ -181,7 +181,10 @@ export const GetSkillEnvelopeSchema = z.looseObject({
 });
 
 /**
- * The `skills/get` result as the server sent it, envelope and all.
+ * The `skills/get` result envelope as the SDK decoded it: the `skill` wrapper
+ * plus any caching attributes the server sent. On a modern connection
+ * `resultType` is not in it — the codec checks it and removes it before this
+ * schema runs (#2373).
  *
  * Exported alongside the unwrapping schema below because the two callers want
  * different things: the UIs want the entry, while the CLI's job is to print

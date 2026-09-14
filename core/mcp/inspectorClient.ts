@@ -5739,11 +5739,13 @@ export class InspectorClient extends InspectorClientEventTarget {
       ...(cursor !== undefined ? { cursor } : {}),
     };
     // Era-aware: a modern (2026-07-28+) `skills/list` result also carries the
-    // base list envelope (`resultType` / `ttlMs` / `cacheScope`). `skills/*` is
-    // consumer-owned, so the SDK codec validates none of it — without picking
-    // the schema here a modern server could answer `{ skills: [] }` and the
-    // conformance UI would show a clean list. Legacy stays permissive: those
-    // are 2026-era attributes.
+    // base list envelope (`resultType` / `ttlMs` / `cacheScope`). The two halves
+    // are checked in different places: the SDK codec checks `resultType` on
+    // every modern result and removes it before this schema runs (#2373), but
+    // `skills/*` is consumer-owned, so it checks neither caching attribute —
+    // without picking the schema here a modern server could answer
+    // `{ skills: [] }` and the conformance UI would show a clean list. Legacy
+    // stays permissive: those are 2026-era attributes.
     const resultSchema = this.isModernEra()
       ? ModernListSkillsResultSchema
       : ListSkillsResultSchema;
@@ -5773,8 +5775,10 @@ export class InspectorClient extends InspectorClientEventTarget {
   }
 
   /**
-   * `skills/get` as the server sent it — the `{ skill }` envelope **and any
-   * other members it carried**.
+   * `skills/get` as the SDK decoded it — the `{ skill }` envelope **and any
+   * other members the server sent**, such as the caching attributes. On a
+   * modern connection `resultType` is not among them: the codec checks it and
+   * removes it before the result gets here (#2373).
    *
    * Separate from {@link getSkill} because the callers differ: the UIs want the
    * entry, while the CLI prints the result and must not reshape it. SEP-2640

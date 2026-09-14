@@ -729,7 +729,9 @@ function hasSkillsExtension(capabilities: unknown): boolean {
 }
 
 /**
- * Throw `-32601` when the client did not declare the Skills extension.
+ * Refuse the request when the client did not declare the Skills extension:
+ * `-32021` MissingRequiredClientCapability for a modern request, `-32601` for
+ * a legacy one.
  *
  * The two eras keep the declaration in different places. A modern
  * (2026-07-28) request carries it in its own `_meta` envelope, which the SDK
