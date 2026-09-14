@@ -117,7 +117,7 @@ describe("RemoteClientTransport send contract", () => {
     const started = Date.now();
     await expect(
       transport.send({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
-    ).rejects.toThrow(/Timed out waiting for MCP response on SSE/i);
+    ).rejects.toThrow(/Request timed out/);
     expect(Date.now() - started).toBeLessThan(5000);
 
     await transport.close();

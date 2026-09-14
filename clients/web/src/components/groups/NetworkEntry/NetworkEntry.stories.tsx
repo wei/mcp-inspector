@@ -86,6 +86,31 @@ const streamingEntry: FetchRequestEntry = {
   category: "transport",
 };
 
+/**
+ * The standalone `GET /mcp` notification stream, still open, as the tracker
+ * watches it: the body is never captured, so the placeholder reports what the
+ * stream has delivered instead (#2318).
+ */
+const notificationStreamEntry: FetchRequestEntry = {
+  id: "n-notify",
+  timestamp: new Date("2026-03-17T10:30:01Z"),
+  method: "GET",
+  url: "http://localhost:3000/mcp",
+  requestHeaders: {
+    accept: "text/event-stream",
+    "mcp-session-id": "0a0b0a5-fd27-4c95-a805-c0fba67e00fb",
+  },
+  responseStatus: 200,
+  responseStatusText: "OK",
+  responseHeaders: {
+    "cache-control": "no-cache",
+    "content-type": "text/event-stream",
+  },
+  duration: 12,
+  stream: { eventCount: 0 },
+  category: "transport",
+};
+
 const transportError: FetchRequestEntry = {
   id: "n-4",
   timestamp: new Date("2026-03-17T10:30:15Z"),
@@ -164,6 +189,18 @@ export const HttpError: Story = {
 
 export const StreamingResponse: Story = {
   args: { entry: streamingEntry, isListExpanded: true },
+};
+
+export const NotificationStreamOpen: Story = {
+  args: { entry: notificationStreamEntry, isListExpanded: true },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      canvas.getByText(
+        "Long-lived stream — 0 events delivered, still open; body not captured",
+      ),
+    ).toBeInTheDocument();
+  },
 };
 
 export const FetchError: Story = {

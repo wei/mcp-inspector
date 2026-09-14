@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { SdkError, SdkErrorCode } from "@modelcontextprotocol/client";
 import { InspectorClient } from "@inspector/core/mcp/inspectorClient.js";
 import { ModernGetTaskResultSchema } from "@inspector/core/mcp/modernTaskSchemas.js";
 
@@ -134,12 +135,60 @@ describe("InspectorClient raw-wire channel (#1631)", () => {
         {},
         ModernGetTaskResultSchema,
       );
-      const assertion = expect(promise).rejects.toThrow(/timed out/);
+      // The same annotated shape an SDK request's timeout carries (#2318):
+      // the SDK's code, the budget, the method, and the connection state.
+      const assertion = expect(promise).rejects.toMatchObject({
+        code: SdkErrorCode.RequestTimeout,
+        message: expect.stringMatching(
+          /^Request timed out after 10ms \(tasks\/get\)\. No requests are unanswered\./,
+        ),
+        data: expect.objectContaining({ timeout: 10, method: "tasks/get" }),
+      });
       await vi.advanceTimersByTimeAsync(20);
       await assertion;
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("annotates a request timeout the transport's send rejects with (#2318)", async () => {
+    // The browser's remote transport awaits the response inside `send`, so
+    // its relay wait can expire before the local timer; it arrives here as
+    // the SDK's timeout shape and gets the same annotation.
+    const client = makeClient();
+    internals(client).transport = {
+      send: vi.fn().mockRejectedValue(
+        new SdkError(SdkErrorCode.RequestTimeout, "Request timed out", {
+          timeout: 60_000,
+        }),
+      ),
+    };
+    await expect(
+      internals(client).rawWireRequest(
+        "tasks/get",
+        {},
+        ModernGetTaskResultSchema,
+      ),
+    ).rejects.toMatchObject({
+      code: SdkErrorCode.RequestTimeout,
+      message: expect.stringMatching(
+        /^Request timed out after 1m00s \(tasks\/get\)\. /,
+      ),
+      data: expect.objectContaining({ timeout: 60_000, method: "tasks/get" }),
+    });
+  });
+
+  it("leaves a non-timeout send failure untouched", async () => {
+    const client = makeClient();
+    const boom = new Error("connection closed");
+    internals(client).transport = { send: vi.fn().mockRejectedValue(boom) };
+    await expect(
+      internals(client).rawWireRequest(
+        "tasks/get",
+        {},
+        ModernGetTaskResultSchema,
+      ),
+    ).rejects.toBe(boom);
   });
 
   it("rejects all pending requests on teardown", async () => {

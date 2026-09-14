@@ -5,6 +5,13 @@ import type {
   InitializeResult,
 } from "@modelcontextprotocol/client";
 import { renderWithMantine, screen } from "../../../test/renderWithMantine";
+import type { ConnectionDiagnostics } from "@inspector/core/mcp/connectionDiagnostics.js";
+import {
+  NO_NOTIFICATION_STREAM_LABEL,
+  NO_OUTSTANDING_REQUESTS_LABEL,
+  NO_RESPONSE_YET_LABEL,
+  NO_STREAM_ON_STDIO_LABEL,
+} from "../../../utils/connectionActivity";
 import {
   CLEAR_OAUTH_STATE_AND_DISCONNECT_LABEL,
   ConnectionInfoContent,
@@ -932,5 +939,83 @@ describe("ConnectionInfoContent", () => {
       }),
     );
     expect(onClearOAuth).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("ConnectionInfoContent connection activity (#2318)", () => {
+  const NOW = 1_000_000;
+  const seconds = (n: number) => n * 1000;
+
+  it("omits the section when no diagnostics are supplied", () => {
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={fullResult}
+        clientCapabilities={fullClientCaps}
+        transport="streamable-http"
+      />,
+    );
+    expect(screen.queryByText("Connection Activity")).not.toBeInTheDocument();
+  });
+
+  it("renders the idle state: nothing unanswered, nothing received, stream not opened", () => {
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={fullResult}
+        clientCapabilities={fullClientCaps}
+        transport="streamable-http"
+        diagnostics={{ capturedAt: NOW, outstandingRequests: [] }}
+      />,
+    );
+    expect(screen.getByText("Connection Activity")).toBeInTheDocument();
+    expect(screen.getByText(NO_OUTSTANDING_REQUESTS_LABEL)).toBeInTheDocument();
+    expect(screen.getByText(NO_RESPONSE_YET_LABEL)).toBeInTheDocument();
+    expect(screen.getByText(NO_NOTIFICATION_STREAM_LABEL)).toBeInTheDocument();
+  });
+
+  it("lists each unanswered request on its own line, with the last response and the open stream", () => {
+    const diagnostics: ConnectionDiagnostics = {
+      capturedAt: NOW,
+      outstandingRequests: [
+        { id: 2, method: "tools/list", sentAt: NOW - seconds(60) },
+        { id: 3, method: "ping", sentAt: NOW - seconds(12) },
+      ],
+      lastResponse: { method: "initialize", receivedAt: NOW - seconds(61) },
+      notificationStream: {
+        url: "http://127.0.0.1:9779/mcp",
+        openedAt: NOW - seconds(252),
+        eventCount: 0,
+      },
+    };
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={fullResult}
+        clientCapabilities={fullClientCaps}
+        transport="streamable-http"
+        diagnostics={diagnostics}
+      />,
+    );
+    const outstanding = screen.getByTestId("connection-activity-outstanding");
+    expect(outstanding.children).toHaveLength(2);
+    expect(outstanding.children[0]?.textContent).toBe(
+      "tools/list — sent 1m00s ago",
+    );
+    expect(outstanding.children[1]?.textContent).toBe("ping — sent 12s ago");
+    expect(screen.getByText("initialize — 1m01s ago")).toBeInTheDocument();
+    expect(
+      screen.getByText("GET /mcp — open for 4m12s, 0 events delivered"),
+    ).toBeInTheDocument();
+  });
+
+  it("reports the stream row as not applicable on stdio", () => {
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={fullResult}
+        clientCapabilities={fullClientCaps}
+        transport="stdio"
+        diagnostics={{ capturedAt: NOW, outstandingRequests: [] }}
+      />,
+    );
+    // Both the Session row and the Notification stream row read N/A (stdio).
+    expect(screen.getAllByText(NO_STREAM_ON_STDIO_LABEL)).toHaveLength(2);
   });
 });

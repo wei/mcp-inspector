@@ -384,7 +384,7 @@ Storybook is first-class here because the components are presentational — each
 
 ## Auth token
 
-The dev/prod backend guards every `/api/*` route with `x-mcp-remote-auth: Bearer <MCP_INSPECTOR_API_TOKEN>`. The browser recovers the token, in priority order (see `App.tsx` `getAuthToken()`): the `window.__INSPECTOR_API_TOKEN__` global injected into `index.html` on every page load (`server/inject-auth-token.ts`), then a `?MCP_INSPECTOR_API_TOKEN=…` query param, then `sessionStorage`. Injection is a no-op when auth is disabled (`DANGEROUSLY_OMIT_AUTH`). See the root [AGENTS.md](../../AGENTS.md) for the full rationale.
+The dev/prod backend guards every `/api/*` route with `x-mcp-remote-auth: Bearer <MCP_INSPECTOR_API_TOKEN>`. The browser recovers the token, in priority order (see `App.tsx` `getAuthToken()`): the `window.__INSPECTOR_API_TOKEN__` global injected into `index.html` on every page load (`server/inject-auth-token.ts`), then a `?MCP_INSPECTOR_API_TOKEN=…` query param, then `sessionStorage`. Injection is a no-op when auth is disabled (`DANGEROUSLY_OMIT_AUTH`). See the root [AGENTS.md](../../AGENTS.md) for the full rationale, and [Environment variables](../../docs/environment-variables.md) for every variable the backend reads.
 
 ## Host binding & the origin allow-list
 

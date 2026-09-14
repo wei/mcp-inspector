@@ -16,6 +16,7 @@ import type { RemoteTransportOptions } from "@inspector/core/mcp/remote/remoteCl
 import type { MCPServerConfig } from "@inspector/core/mcp/types.js";
 import type { RemoteEvent } from "@inspector/core/mcp/remote/types.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/client";
+import { SdkErrorCode } from "@modelcontextprotocol/client";
 import {
   AuthChallengeError,
   AuthRecoveryRequiredError,
@@ -340,6 +341,148 @@ describe("RemoteClientTransport (focused branch coverage)", () => {
       expect(onFetchResponseBody).toHaveBeenCalledWith("f1", "BODY");
     });
 
+    it("delivers fetch_stream_update events, rebuilding closedAt as a Date (#2318)", async () => {
+      const onFetchStreamUpdate = vi.fn();
+      const t = makeTransport(
+        {
+          events: () =>
+            sseResponse([
+              sseFrame({
+                type: "fetch_stream_update",
+                data: { id: "f1", eventCount: 2 },
+              }),
+              sseFrame({
+                type: "fetch_stream_update",
+                data: {
+                  id: "f1",
+                  eventCount: 3,
+                  closedAt: "2026-01-01T00:00:05.000Z",
+                },
+              }),
+            ]),
+        },
+        { onFetchStreamUpdate },
+      );
+      await t.start();
+      await tick();
+      expect(onFetchStreamUpdate).toHaveBeenCalledTimes(2);
+      expect(onFetchStreamUpdate).toHaveBeenNthCalledWith(1, "f1", {
+        eventCount: 2,
+      });
+      expect(onFetchStreamUpdate).toHaveBeenNthCalledWith(2, "f1", {
+        eventCount: 3,
+        closedAt: new Date("2026-01-01T00:00:05.000Z"),
+      });
+    });
+
+    it("reports a still-open stream closed on close(), since the backend's own close cannot arrive (#2318)", async () => {
+      const onFetchStreamUpdate = vi.fn();
+      const { response, push } = createPushableEventStream();
+      const t = makeTransport(
+        { events: () => response },
+        { onFetchStreamUpdate, onFetchRequest: vi.fn() },
+      );
+      await t.start();
+      const entry = (id: string, method: string, contentType: string) =>
+        ({
+          id,
+          method,
+          url: "http://x/mcp",
+          timestamp: new Date().toISOString(),
+          requestHeaders: {},
+          responseStatus: 200,
+          responseHeaders: { "Content-Type": contentType },
+        }) as never;
+      push({
+        type: "fetch_request",
+        data: entry("stream", "GET", "text/event-stream"),
+      });
+      push({
+        type: "fetch_request",
+        data: entry("post", "POST", "text/event-stream"),
+      });
+      push({
+        type: "fetch_stream_update",
+        data: { id: "stream", eventCount: 2 },
+      });
+      push({
+        type: "fetch_request",
+        data: entry("earlier", "GET", "text/event-stream"),
+      });
+      push({
+        type: "fetch_stream_update",
+        data: {
+          id: "earlier",
+          eventCount: 1,
+          closedAt: new Date().toISOString(),
+        },
+      });
+      await tick();
+      onFetchStreamUpdate.mockClear();
+      await t.close();
+      // Only the stream still open is reported closed, with its last count;
+      // the bounded POST and the already-closed stream are not.
+      expect(onFetchStreamUpdate).toHaveBeenCalledTimes(1);
+      expect(onFetchStreamUpdate).toHaveBeenCalledWith("stream", {
+        eventCount: 2,
+        closedAt: expect.any(Date),
+      });
+      // A second close reports nothing more.
+      await t.close();
+      expect(onFetchStreamUpdate).toHaveBeenCalledTimes(1);
+    });
+
+    it("synthesizes the close on close() for a consumer that registered only onFetchStreamUpdate", async () => {
+      const onFetchStreamUpdate = vi.fn();
+      const { response, push } = createPushableEventStream();
+      const t = makeTransport(
+        { events: () => response },
+        { onFetchStreamUpdate },
+      );
+      await t.start();
+      push({
+        type: "fetch_request",
+        data: {
+          id: "stream",
+          method: "GET",
+          url: "http://x/mcp",
+          timestamp: new Date().toISOString(),
+          requestHeaders: {},
+          responseStatus: 200,
+          responseHeaders: { "content-type": "text/event-stream" },
+        } as never,
+      });
+      push({
+        type: "fetch_stream_update",
+        data: { id: "stream", eventCount: 3 },
+      });
+      await tick();
+      await t.close();
+      expect(onFetchStreamUpdate).toHaveBeenLastCalledWith("stream", {
+        eventCount: 3,
+        closedAt: expect.any(Date),
+      });
+    });
+
+    it("drops fetch_stream_update events when no handler is registered", async () => {
+      const onFetchRequest = vi.fn();
+      const t = makeTransport(
+        {
+          events: () =>
+            sseResponse([
+              sseFrame({
+                type: "fetch_stream_update",
+                data: { id: "f1", eventCount: 1 },
+              }),
+            ]),
+        },
+        { onFetchRequest },
+      );
+      await t.start();
+      await tick();
+      expect(onFetchRequest).not.toHaveBeenCalled();
+    });
+
     it("delivers stdio_log events to onStderr", async () => {
       const onStderr = vi.fn();
       const t = makeTransport(
@@ -560,6 +703,27 @@ describe("RemoteClientTransport (focused branch coverage)", () => {
       await expect(
         t.send({ jsonrpc: "2.0", id: 1, method: "ping" }),
       ).rejects.toThrow(/Transport is closed/);
+    });
+
+    it("rejects an expired SSE response wait with the SDK's own timeout shape (#2318)", async () => {
+      // The relay's budget, not the request's, can be the one that expires;
+      // shaped as the SDK's timeout so InspectorClient annotates it the same.
+      const t = makeTransport(
+        {
+          events: () => openEventsResponse(),
+          send: () => jsonResponse({ ok: true }),
+        },
+        { sseResponseTimeoutMs: 50 },
+      );
+      await t.start();
+      await expect(
+        t.send({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+      ).rejects.toMatchObject({
+        code: SdkErrorCode.RequestTimeout,
+        message: "Request timed out",
+        data: { timeout: 50 },
+      });
+      await t.close();
     });
 
     it("does not wait for an SSE response on subscriptions/listen (long-lived stream)", async () => {
