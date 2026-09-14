@@ -1,3 +1,16 @@
+/**
+ * Public addresses for the MCP Apps listeners (#1862): `MCP_SANDBOX_FULL_ADDRESS`
+ * and `MCP_APP_ORIGIN_FULL_ADDRESS`, as parsed by `server/public-address.ts`.
+ *
+ * Pinned here: what each accepts and how it is normalized (`/sandbox` appended
+ * to a bare origin, the app origin kept origin-only), every refusal reason, the
+ * same-origin refusals that keep the sandbox and a dedicated app origin off the
+ * Inspector's own origin, the mixed-content warning, and that a refused value
+ * never leaks a secret (credentials, query, fragment, path) into the log. The
+ * listener-side rules — fixed port only, no trusted-ancestor collision — are in
+ * the sandbox and app-origin controller suites, where the bound port is known.
+ */
+
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   resolveAppOriginPublicOrigin,
