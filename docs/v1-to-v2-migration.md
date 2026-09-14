@@ -268,6 +268,8 @@ Stdout is otherwise compatible: the default `text` format still pretty-prints th
 
 ## Environment variables
 
+This table maps v1 names to v2. Defaults, accepted values, and the variables with no v1 counterpart are in [Environment variables](./environment-variables.md).
+
 | v1                       | v2                                                                            | Notes                                                                                                                                                                                                                                                                                                                                                                                                 |
 | ------------------------ | ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `MCP_PROXY_AUTH_TOKEN`   | **`MCP_INSPECTOR_API_TOKEN`**                                                 | Renamed, but the **old name still works** as a deprecated fallback when the new one is unset — an existing deployment keeps running while you migrate. Guards `/api/*` via `x-mcp-remote-auth: Bearer <token>`; the browser also receives it injected into `index.html`, so a bare reload keeps working. (The `?MCP_PROXY_AUTH_TOKEN=` **query param** has no such fallback — see [Web UI](#web-ui).) |

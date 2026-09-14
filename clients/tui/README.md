@@ -52,6 +52,8 @@ OAuth redirect URIs must match **exactly** what you register on the authorizatio
 
 #### Flags
 
+Variables with no flag of their own — the secret store, `MCP_INSPECTOR_LOG_DIR`, `LOG_LEVEL`, proxies — are listed in [Environment variables](../../docs/environment-variables.md).
+
 | Option                        | Env                      | Description                                                                                                                                                                                                                                                           |
 | ----------------------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--client-config <path>`      | `MCP_CLIENT_CONFIG_PATH` | Install-level client config (default: `~/.mcp-inspector/storage/client.json`).                                                                                                                                                                                        |
