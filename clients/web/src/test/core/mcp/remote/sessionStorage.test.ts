@@ -110,6 +110,45 @@ describe("RemoteInspectorClientStorage", () => {
     );
   });
 
+  it("loadSession revives a stream's closedAt alongside the entry timestamp (#2318)", async () => {
+    const fetchFn = vi.fn<typeof fetch>(
+      async () =>
+        new Response(
+          JSON.stringify({
+            fetchRequests: [
+              {
+                id: "open",
+                timestamp: "2026-01-01T00:00:00.000Z",
+                method: "GET",
+                url: "http://example.com/mcp",
+                requestHeaders: {},
+                stream: { eventCount: 2 },
+              },
+              {
+                id: "closed",
+                timestamp: "2026-01-01T00:00:00.000Z",
+                method: "GET",
+                url: "http://example.com/mcp",
+                requestHeaders: {},
+                stream: { eventCount: 3, closedAt: "2026-01-01T00:00:05.000Z" },
+              },
+            ],
+            createdAt: 1735689600000,
+            updatedAt: 1735689600001,
+          }),
+          { status: 200 },
+        ),
+    );
+    const storage = makeStorage(fetchFn);
+    const state = await storage.loadSession("sid");
+    // An open stream's state passes through untouched.
+    expect(state?.fetchRequests[0]?.stream).toEqual({ eventCount: 2 });
+    const closed = state?.fetchRequests[1]?.stream;
+    expect(closed?.eventCount).toBe(3);
+    expect(closed?.closedAt).toBeInstanceOf(Date);
+    expect(closed?.closedAt?.toISOString()).toBe("2026-01-01T00:00:05.000Z");
+  });
+
   it("loadSession preserves Date timestamps already provided as Date instances", async () => {
     const fetchFn = vi.fn<typeof fetch>(
       async () =>

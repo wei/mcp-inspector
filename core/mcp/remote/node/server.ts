@@ -868,6 +868,8 @@ export function createRemoteApp(
         onFetchRequest: (entry) => session.onFetchRequest(entry),
         onFetchResponseBody: (id, body) =>
           session.onFetchResponseBody(id, body),
+        onFetchStreamUpdate: (id, stream) =>
+          session.onFetchStreamUpdate(id, stream),
         authProvider: authHandle?.provider,
         settings: body.settings,
         // Always intercept 401/403 on the node MCP transport. Without this, the

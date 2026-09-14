@@ -1,13 +1,17 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   createFetchTracker,
+  findHeader,
   redactSensitiveHeaders,
   redactBody,
   redactUrlQuery,
   REDACTED_HEADER_VALUE,
   REDACTED_VALUE,
 } from "@inspector/core/mcp/fetchTracking.js";
-import type { FetchRequestEntryBase } from "@inspector/core/mcp/types.js";
+import type {
+  FetchRequestEntryBase,
+  FetchStreamState,
+} from "@inspector/core/mcp/types.js";
 
 // The tracker fires `trackRequest` synchronously with an entry whose
 // responseBody is always undefined, then reads the body in the background
@@ -694,5 +698,391 @@ describe("redactSensitiveHeaders", () => {
     const out = redactSensitiveHeaders(input);
     expect(out).not.toBe(input);
     expect(input.authorization).toBe("Bearer x");
+  });
+});
+
+describe("findHeader", () => {
+  it("looks a header up case-insensitively and tolerates a missing record", () => {
+    expect(findHeader({ "Content-Type": "text/plain" }, "content-type")).toBe(
+      "text/plain",
+    );
+    expect(findHeader({ "content-type": "text/plain" }, "CONTENT-TYPE")).toBe(
+      "text/plain",
+    );
+    expect(findHeader({ accept: "*/*" }, "content-type")).toBeUndefined();
+    expect(findHeader(undefined, "content-type")).toBeUndefined();
+  });
+});
+
+describe("createFetchTracker long-lived stream watching (#2318)", () => {
+  const encoder = new TextEncoder();
+
+  /**
+   * A server-controlled SSE body: `push` writes a chunk, `end` closes it, and
+   * `fail` errors it — the three ways a real stream advances.
+   */
+  function controlledStream() {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) {
+        controller = c;
+      },
+    });
+    return {
+      stream,
+      push: (text: string) => controller.enqueue(encoder.encode(text)),
+      end: () => controller.close(),
+      fail: (err: Error) => controller.error(err),
+    };
+  }
+
+  /** Track a GET whose response is the given stream, collecting stream updates. */
+  async function trackStream(stream: ReadableStream<Uint8Array>) {
+    const updates: Array<{ id: string; stream: FetchStreamState }> = [];
+    const tracked: FetchRequestEntryBase[] = [];
+    const fetcher = createFetchTracker(
+      (async () =>
+        new Response(stream, {
+          headers: { "content-type": "text/event-stream" },
+        })) as typeof fetch,
+      {
+        trackRequest: (entry) => tracked.push(entry),
+        updateStream: (id, state) => updates.push({ id, stream: state }),
+        streamUpdateIntervalMs: 0,
+      },
+    );
+    const response = await fetcher("https://example.com/mcp", {
+      method: "GET",
+    });
+    return { response, updates, id: tracked[0]!.id };
+  }
+
+  it("announces the stream as open with zero events as soon as it is watched", async () => {
+    const server = controlledStream();
+    const { updates, id } = await trackStream(server.stream);
+    // Before a byte arrives — this is the state the #2187 stall shows.
+    expect(updates).toEqual([{ id, stream: { eventCount: 0 } }]);
+  });
+
+  it("counts each data-carrying SSE event as it is delivered", async () => {
+    const server = controlledStream();
+    const { updates, id } = await trackStream(server.stream);
+    server.push('event: message\ndata: {"jsonrpc":"2.0","method":"a"}\n\n');
+    await flush();
+    expect(updates.at(-1)).toEqual({ id, stream: { eventCount: 1 } });
+    // An event split across chunks is still one event.
+    server.push('data: {"jsonrpc"');
+    server.push(':"2.0","method":"b"}\n');
+    await flush();
+    expect(updates.map((u) => u.stream.eventCount)).toEqual([0, 1]);
+    server.push("\n");
+    await flush();
+    expect(updates.map((u) => u.stream.eventCount)).toEqual([0, 1, 2]);
+  });
+
+  it("ignores keepalive comments and blocks with no data field, and accepts a bare `data` line and CRLF framing", async () => {
+    const server = controlledStream();
+    const { updates } = await trackStream(server.stream);
+    // A comment-only block (the keepalive shape) and an id-only block are
+    // not events; a bare `data` (no colon) is; so is a CRLF-delimited block.
+    server.push(": keepalive\n\n");
+    server.push("id: 7\n\n");
+    server.push("data\n\n");
+    server.push("data: x\r\n\r\n");
+    await flush();
+    expect(updates.map((u) => u.stream.eventCount)).toEqual([0, 1, 2]);
+  });
+
+  it("counts every non-blank line on an NDJSON stream", async () => {
+    const server = controlledStream();
+    const updates: Array<{ id: string; stream: FetchStreamState }> = [];
+    const fetcher = createFetchTracker(
+      (async () =>
+        new Response(server.stream, {
+          headers: { "content-type": "application/x-ndjson" },
+        })) as typeof fetch,
+      {
+        updateStream: (id, state) => updates.push({ id, stream: state }),
+        streamUpdateIntervalMs: 0,
+      },
+    );
+    await fetcher("https://example.com/mcp", { method: "GET" });
+    server.push('{"jsonrpc":"2.0","method":"a"}\n\n');
+    server.push('{"jsonrpc":"2.0","method":"b"}\r\n');
+    // A partial line is not an event until its newline arrives.
+    server.push('{"jsonrpc":"2.0",');
+    await flush();
+    expect(updates.map((u) => u.stream.eventCount)).toEqual([0, 1, 2]);
+    server.push('"method":"c"}\n');
+    await flush();
+    expect(updates.at(-1)!.stream.eventCount).toBe(3);
+  });
+
+  it("drops a partial SSE block at end-of-stream, as the SDK's parser does", async () => {
+    const server = controlledStream();
+    const { updates } = await trackStream(server.stream);
+    // A data line with no dispatching blank line before the stream ends.
+    server.push("data: one\n\ndata: two\n");
+    server.end();
+    await flush();
+    const last = updates.at(-1)!.stream;
+    expect(last.eventCount).toBe(1);
+    expect(last.closedAt).toBeInstanceOf(Date);
+  });
+
+  it("accepts bare CR line endings, and a CRLF split across chunks", async () => {
+    const server = controlledStream();
+    const { updates } = await trackStream(server.stream);
+    server.push("data: a\r\rdata: b\r");
+    await flush();
+    // The trailing CR is held: it may be the first half of a CRLF.
+    expect(updates.map((u) => u.stream.eventCount)).toEqual([0, 1]);
+    server.push("\n\r\n");
+    await flush();
+    expect(updates.map((u) => u.stream.eventCount)).toEqual([0, 1, 2]);
+  });
+
+  it("classifies the content type and the method case-insensitively", async () => {
+    const server = controlledStream();
+    const updates: unknown[] = [];
+    const fetcher = createFetchTracker(
+      (async () =>
+        new Response(server.stream, {
+          headers: { "content-type": "Text/Event-Stream" },
+        })) as typeof fetch,
+      {
+        updateStream: (id, state) => updates.push({ id, state }),
+        streamUpdateIntervalMs: 0,
+      },
+    );
+    await fetcher("https://example.com/mcp", { method: "get" });
+    expect(updates).toHaveLength(1);
+  });
+
+  it("takes the method from a Request input when init carries none", async () => {
+    // A bounded POST reply must go down the body-capture path, not the
+    // watcher, when the caller passed a `Request` rather than `init`.
+    const bodies: string[] = [];
+    const updates: unknown[] = [];
+    const tracked: FetchRequestEntryBase[] = [];
+    const fetcher = createFetchTracker(
+      (async () =>
+        new Response("data: x\n\n", {
+          headers: { "content-type": "text/event-stream" },
+        })) as typeof fetch,
+      {
+        trackRequest: (entry) => tracked.push(entry),
+        updateResponseBody: (_id, body) => bodies.push(body),
+        updateStream: (id, state) => updates.push({ id, state }),
+        streamUpdateIntervalMs: 0,
+      },
+    );
+    await fetcher(new Request("https://example.com/mcp", { method: "POST" }));
+    await flush();
+    expect(tracked[0]?.method).toBe("POST");
+    expect(bodies).toEqual(["data: x\n\n"]);
+    expect(updates).toEqual([]);
+  });
+
+  it("coalesces a moving count to one report per interval, and reports the close at once", async () => {
+    vi.useFakeTimers();
+    try {
+      const server = controlledStream();
+      const updates: Array<{ id: string; stream: FetchStreamState }> = [];
+      const fetcher = createFetchTracker(
+        (async () =>
+          new Response(server.stream, {
+            headers: { "content-type": "text/event-stream" },
+          })) as typeof fetch,
+        {
+          updateStream: (id, state) => updates.push({ id, stream: state }),
+          streamUpdateIntervalMs: 100,
+        },
+      );
+      await fetcher("https://example.com/mcp", { method: "GET" });
+      // The open is immediate.
+      expect(updates.map((u) => u.stream.eventCount)).toEqual([0]);
+      server.push("data: a\n\ndata: b\n\ndata: c\n\n");
+      await vi.advanceTimersByTimeAsync(0);
+      // Three events, no report yet — they are inside one window.
+      expect(updates.map((u) => u.stream.eventCount)).toEqual([0]);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(updates.map((u) => u.stream.eventCount)).toEqual([0, 3]);
+      // A close cancels a pending window and reports immediately.
+      server.push("data: d\n\n");
+      server.end();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(updates.map((u) => u.stream.eventCount)).toEqual([0, 3, 4]);
+      expect(updates.at(-1)!.stream.closedAt).toBeInstanceOf(Date);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(updates).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("counts an event whose bare-CR terminator is the last byte of the stream", async () => {
+    const server = controlledStream();
+    const { updates } = await trackStream(server.stream);
+    server.push("data: x\r\r");
+    await flush();
+    // Held while the stream is open: the CR could be half of a CRLF.
+    expect(updates.map((u) => u.stream.eventCount)).toEqual([0]);
+    server.end();
+    await flush();
+    expect(updates.at(-1)!.stream).toMatchObject({ eventCount: 1 });
+    expect(updates.at(-1)!.stream.closedAt).toBeInstanceOf(Date);
+  });
+
+  it("returns the response even when the listener throws on the open report", async () => {
+    // The open is reported synchronously inside the fetch wrapper; a throw
+    // there must not turn a successful response into a rejected fetch.
+    const server = controlledStream();
+    const response = new Response(server.stream, {
+      headers: { "content-type": "text/event-stream" },
+    });
+    const fetcher = createFetchTracker((async () => response) as typeof fetch, {
+      updateStream: () => {
+        throw new Error("sink closed");
+      },
+      streamUpdateIntervalMs: 0,
+    });
+    await expect(
+      fetcher("https://example.com/mcp", { method: "GET" }),
+    ).resolves.toBe(response);
+    // ...and a throw from a coalesced count does not escape the timer either.
+    server.push("data: a\n\n");
+    server.end();
+    await flush();
+  });
+
+  it("survives a stream-update listener that throws on the close", async () => {
+    // The watcher's promise is discarded, so a throw from the final report
+    // would otherwise be an unhandled rejection — which fails the whole run.
+    const server = controlledStream();
+    let reports = 0;
+    const fetcher = createFetchTracker(
+      (async () =>
+        new Response(server.stream, {
+          headers: { "content-type": "text/event-stream" },
+        })) as typeof fetch,
+      {
+        updateStream: (_id, state) => {
+          reports += 1;
+          if (state.closedAt) throw new Error("listener exploded");
+        },
+        streamUpdateIntervalMs: 0,
+      },
+    );
+    await fetcher("https://example.com/mcp", { method: "GET" });
+    server.end();
+    await flush();
+    expect(reports).toBe(2);
+  });
+
+  it("reports the close when the server ends the stream", async () => {
+    const server = controlledStream();
+    const { updates, id } = await trackStream(server.stream);
+    server.push("data: one\n\n");
+    server.end();
+    await flush();
+    expect(updates).toHaveLength(3);
+    expect(updates[2]!.id).toBe(id);
+    expect(updates[2]!.stream.eventCount).toBe(1);
+    expect(updates[2]!.stream.closedAt).toBeInstanceOf(Date);
+    // Only the close carries `closedAt`.
+    expect(updates[0]!.stream.closedAt).toBeUndefined();
+    expect(updates[1]!.stream.closedAt).toBeUndefined();
+  });
+
+  it("reports the close when the stream errors, with the count so far", async () => {
+    const server = controlledStream();
+    const { updates } = await trackStream(server.stream);
+    server.push("data: one\n\n");
+    server.fail(new Error("connection reset"));
+    await flush();
+    expect(updates).toHaveLength(3);
+    expect(updates[2]!.stream).toMatchObject({ eventCount: 1 });
+    expect(updates[2]!.stream.closedAt).toBeInstanceOf(Date);
+  });
+
+  it("leaves the transport's own copy of the stream intact", async () => {
+    const server = controlledStream();
+    const { response, updates } = await trackStream(server.stream);
+    server.push("data: hello\n\n");
+    server.end();
+    // The transport reads the original; the watcher read a tee'd clone.
+    expect(await response.text()).toBe("data: hello\n\n");
+    await flush();
+    expect(updates.at(-1)!.stream).toMatchObject({ eventCount: 1 });
+  });
+
+  it("does not clone the response when nobody subscribed to stream updates", async () => {
+    const response = new Response(controlledStream().stream, {
+      headers: { "content-type": "text/event-stream" },
+    });
+    const clone = vi.spyOn(response, "clone");
+    const fetcher = createFetchTracker((async () => response) as typeof fetch, {
+      trackRequest: () => {},
+    });
+    await fetcher("https://example.com/mcp", { method: "GET" });
+    expect(clone).not.toHaveBeenCalled();
+  });
+
+  it("does not watch a bounded response", async () => {
+    const updates: unknown[] = [];
+    const fetcher = createFetchTracker(
+      (async () =>
+        new Response("data: x\n\n", {
+          headers: { "content-type": "text/event-stream" },
+        })) as typeof fetch,
+      {
+        updateStream: (id, state) => updates.push({ id, state }),
+        streamUpdateIntervalMs: 0,
+      },
+    );
+    // A POST SSE reply is bounded and goes down the body-capture path.
+    await fetcher("https://example.com/mcp", { method: "POST" });
+    await flush();
+    expect(updates).toEqual([]);
+  });
+
+  it("gives up quietly when the response cannot be cloned", async () => {
+    const response = new Response(controlledStream().stream, {
+      headers: { "content-type": "text/event-stream" },
+    });
+    vi.spyOn(response, "clone").mockImplementation(() => {
+      throw new TypeError("already consumed");
+    });
+    const updates: unknown[] = [];
+    const fetcher = createFetchTracker((async () => response) as typeof fetch, {
+      updateStream: (id, state) => updates.push({ id, state }),
+      streamUpdateIntervalMs: 0,
+    });
+    await expect(
+      fetcher("https://example.com/mcp", { method: "GET" }),
+    ).resolves.toBe(response);
+    await flush();
+    expect(updates).toEqual([]);
+  });
+
+  it("gives up quietly when the clone has no body", async () => {
+    const response = new Response(controlledStream().stream, {
+      headers: { "content-type": "text/event-stream" },
+    });
+    vi.spyOn(response, "clone").mockImplementation(
+      () =>
+        new Response(null, {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    );
+    const updates: unknown[] = [];
+    const fetcher = createFetchTracker((async () => response) as typeof fetch, {
+      updateStream: (id, state) => updates.push({ id, state }),
+      streamUpdateIntervalMs: 0,
+    });
+    await fetcher("https://example.com/mcp", { method: "GET" });
+    await flush();
+    expect(updates).toEqual([]);
   });
 });

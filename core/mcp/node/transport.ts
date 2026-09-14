@@ -49,11 +49,18 @@ export function createTransportNode(
     pipeStderr = false,
     onFetchRequest,
     onFetchResponseBody,
+    onFetchStreamUpdate,
     authProvider,
     settings,
     interceptAuthChallenges = false,
     onAuthChallengeObserved,
   } = options;
+  // Any of the three tracking callbacks earns a tracker: each is optional on
+  // the tracker itself, and a caller that wants only stream updates (or only
+  // bodies) must not be silently handed the bare fetch (#2318).
+  const wantsFetchTracking = Boolean(
+    onFetchRequest || onFetchResponseBody || onFetchStreamUpdate,
+  );
 
   // `optionsFetchFn` is the caller's whole fetch stack and already sits on top of
   // a proxy-aware base when one is needed — the Node clients install
@@ -114,10 +121,11 @@ export function createTransportNode(
     const sseFetch = configuredSseFetch
       ? withChallengeObserver(configuredSseFetch)
       : fetchWithOptionalAuthIntercept;
-    const trackedFetch = onFetchRequest
+    const trackedFetch = wantsFetchTracking
       ? createFetchTracker(sseFetch, {
           trackRequest: onFetchRequest,
           updateResponseBody: onFetchResponseBody,
+          updateStream: onFetchStreamUpdate,
         })
       : sseFetch;
 
@@ -134,10 +142,11 @@ export function createTransportNode(
       ...(headers && { headers }),
     };
 
-    const postFetch = onFetchRequest
+    const postFetch = wantsFetchTracking
       ? createFetchTracker(fetchWithOptionalAuthIntercept, {
           trackRequest: onFetchRequest,
           updateResponseBody: onFetchResponseBody,
+          updateStream: onFetchStreamUpdate,
         })
       : fetchWithOptionalAuthIntercept;
 
@@ -161,10 +170,11 @@ export function createTransportNode(
       ...(headers && { headers }),
     };
 
-    const transportFetch = onFetchRequest
+    const transportFetch = wantsFetchTracking
       ? createFetchTracker(fetchWithOptionalAuthIntercept, {
           trackRequest: onFetchRequest,
           updateResponseBody: onFetchResponseBody,
+          updateStream: onFetchStreamUpdate,
         })
       : fetchWithOptionalAuthIntercept;
 

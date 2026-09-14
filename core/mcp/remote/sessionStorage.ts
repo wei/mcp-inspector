@@ -119,7 +119,10 @@ export class RemoteInspectorClientStorage implements InspectorClientStorage {
 
     const data = (await res.json()) as InspectorClientSessionState;
 
-    // Deserialize state (convert ISO strings back to Date objects)
+    // Deserialize state (convert ISO strings back to Date objects). The
+    // nested `stream.closedAt` is a Date too, and `JSON.stringify` turned it
+    // into an ISO string on the way out; left as a string it would fail the
+    // `getTime()` every consumer of the type performs (#2318).
     return {
       ...data,
       fetchRequests: data.fetchRequests.map((req) => ({
@@ -130,6 +133,9 @@ export class RemoteInspectorClientStorage implements InspectorClientStorage {
             : req.timestamp instanceof Date
               ? req.timestamp
               : new Date(req.timestamp),
+        ...(req.stream?.closedAt !== undefined && {
+          stream: { ...req.stream, closedAt: new Date(req.stream.closedAt) },
+        }),
       })),
     };
   }
