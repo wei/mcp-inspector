@@ -1,7 +1,11 @@
 import type { SecretStore } from "../../auth/node/secret-store.js";
 import { defaultSecretStore } from "../../auth/node/secret-store-selection.js";
 import type { InspectorServerSettings, MCPServerConfig } from "../types.js";
-import { DEFAULT_MAX_FETCH_REQUESTS, DEFAULT_TASK_TTL_MS } from "../types.js";
+import {
+  DEFAULT_CONNECTION_TIMEOUT_MS,
+  DEFAULT_MAX_FETCH_REQUESTS,
+  DEFAULT_TASK_TTL_MS,
+} from "../types.js";
 import { mcpConfigToServerEntries } from "../serverList.js";
 import {
   applyOverrides,
@@ -50,7 +54,7 @@ export function headersToServerSettings(
     headers: Object.entries(headers).map(([key, value]) => ({ key, value })),
     env: [],
     metadata: {},
-    connectionTimeout: 0,
+    connectionTimeout: DEFAULT_CONNECTION_TIMEOUT_MS,
     requestTimeout: 0,
     taskTtl: DEFAULT_TASK_TTL_MS,
     maxFetchRequests: DEFAULT_MAX_FETCH_REQUESTS,

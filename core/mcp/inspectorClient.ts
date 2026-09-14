@@ -68,6 +68,7 @@ import type {
   CreateTransportOptions,
   ServerType,
 } from "./types.js";
+import { DEFAULT_CONNECTION_TIMEOUT_MS } from "./types.js";
 import {
   MessageTrackingTransport,
   type MessageTrackingCallbacks,
@@ -314,6 +315,20 @@ interface ReceiverTaskRecord {
  * returning the error.
  */
 const MAX_URL_ELICITATION_RETRIES = 5;
+
+/**
+ * The message `connect()` rejects with when the connect-time timeout fires.
+ * Names the bound that fired and, since the default is now a real value that
+ * a slow server on a slow link can legitimately hit, says where to raise it
+ * (#2320). All three clients surface this text as-is: the web client's
+ * "Failed to connect" toast, the TUI status line, and the CLI error envelope.
+ */
+export function connectionTimeoutMessage(timeoutMs: number): string {
+  return (
+    `Connection timed out after ${timeoutMs} ms. To accommodate a slower ` +
+    `server, you may increase the timeout value in Server Settings.`
+  );
+}
 
 /**
  * Error used to reject a pending sampling/elicitation request when the tool
@@ -2321,11 +2336,28 @@ export class InspectorClient extends InspectorClientEventTarget {
       this.registerPeerRequestHandlers();
       this.registerPeerNotificationHandlers();
 
-      // Optional connect-time timeout from per-server settings. The MCP SDK
-      // has no connect-time timeout option, so we wrap the handshake in a
+      // Connect-time timeout from per-server settings, defaulting to
+      // `DEFAULT_CONNECTION_TIMEOUT_MS` when the settings carry none. The MCP
+      // SDK has no connect-time timeout option, so we wrap the handshake in a
       // Promise.race. On timeout, tear the transport down so the next
       // connect() starts clean and the upstream socket isn't left hanging.
-      const connectTimeoutMs = this.serverSettings?.connectionTimeout ?? 0;
+      //
+      // The default is ours on purpose (#2320): without it the only bound on
+      // a connect attempt was the SDK's per-request timeout on `initialize`,
+      // which covers nothing outside that request (`transport.start()` for
+      // one), fires after 60 s, and reports `Request timed out` — a sentence
+      // about a JSON-RPC request, not a connection. An explicit `0` is still
+      // "no timeout": that is what the CLI's `--connect-timeout 0` documents
+      // and what a user who cleared the field asked for.
+      const connectTimeoutMs =
+        this.serverSettings?.connectionTimeout ?? DEFAULT_CONNECTION_TIMEOUT_MS;
+      // Set only by the timer below, so the teardown in the catch runs for a
+      // timeout and nothing else. Gating it on `connectTimeoutMs > 0` instead
+      // would tear down *every* failed connect once the default is non-zero —
+      // including a recoverable 401, whose transport the auth recovery needs
+      // held open and whose status must stay at "connecting" (see the outer
+      // catch and `transportHasAuthProvider`).
+      let connectTimedOut = false;
       // Unwrap here — the earliest point — so an auth error the SDK's
       // era-negotiation probe buried in its cause chain is surfaced before
       // anything downstream inspects it: `withDirectAuthRecovery` (whose
@@ -2369,15 +2401,10 @@ export class InspectorClient extends InspectorClientEventTarget {
           connectPromise.catch(() => {});
           let timer: ReturnType<typeof setTimeout> | undefined;
           const timeoutPromise = new Promise<never>((_, reject) => {
-            timer = setTimeout(
-              () =>
-                reject(
-                  new Error(
-                    `Connection timed out after ${connectTimeoutMs} ms`,
-                  ),
-                ),
-              connectTimeoutMs,
-            );
+            timer = setTimeout(() => {
+              connectTimedOut = true;
+              reject(new Error(connectionTimeoutMessage(connectTimeoutMs)));
+            }, connectTimeoutMs);
           });
           try {
             await Promise.race([connectPromise, timeoutPromise]);
@@ -2392,7 +2419,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       try {
         await this.invokeMcpClient(runConnect);
       } catch (err) {
-        if (connectTimeoutMs > 0) {
+        if (connectTimedOut) {
           await this.disconnect().catch(() => {});
         }
         throw err;

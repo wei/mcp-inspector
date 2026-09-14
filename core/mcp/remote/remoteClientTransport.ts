@@ -32,6 +32,7 @@ import type {
   RemoteSendResponse,
 } from "./types.js";
 import { oauthTokensToRemoteAuthState } from "./types.js";
+import { progressTokenOf } from "./progressToken.js";
 
 export interface AuthRecoveryHandlers {
   handleAuthChallenge(
@@ -89,6 +90,12 @@ const DEFAULT_SSE_RESPONSE_TIMEOUT_MS = 60_000;
 type SseResponseWait = {
   resolve: () => void;
   reject: (error: Error) => void;
+  /**
+   * Re-arm this wait's timeout for another full window when a
+   * `notifications/progress` for the request arrives, mirroring the SDK
+   * client's `resetTimeoutOnProgress` (#2028).
+   */
+  resetTimeout: () => void;
 };
 
 function requestIdForMessage(
@@ -528,6 +535,13 @@ export class RemoteClientTransport implements Transport {
           if (parsed.type === "message") {
             const msg = parsed.data as JSONRPCMessage;
             this.settleSseResponseWait(msg);
+            // Keep the SSE wait alive while progress flows for a long call
+            // (#2028) — the settle above never matches a notification, so this
+            // is the only place a progress note touches the wait.
+            const progressToken = progressTokenOf(msg);
+            if (progressToken !== undefined) {
+              this.resetSseResponseWait(progressToken);
+            }
             this.onmessage?.(msg, undefined);
           } else if (
             parsed.type === "fetch_request" &&
@@ -688,21 +702,25 @@ export class RemoteClientTransport implements Transport {
 
   private waitForSseResponse(requestId: string | number): Promise<void> {
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.sseResponseWaits.delete(requestId);
-        // The SDK's own per-request timeout shape, not a plain `Error`: this
-        // wait can expire before the SDK's timer does (its budget is the
-        // relay's, not the request's), and the rejection travels up through
-        // `Client.request`, where `InspectorClient` annotates a timeout of
-        // exactly this shape with the connection's state (#2318). A plain
-        // error would pass that decorator untouched and reach the user as a
-        // bare timeout on the web client alone.
-        reject(
-          new SdkError(SdkErrorCode.RequestTimeout, "Request timed out", {
-            timeout: this.sseResponseTimeoutMs,
-          }),
-        );
-      }, this.sseResponseTimeoutMs);
+      let timer: ReturnType<typeof setTimeout>;
+      const arm = () => {
+        timer = setTimeout(() => {
+          this.sseResponseWaits.delete(requestId);
+          // The SDK's own per-request timeout shape, not a plain `Error`:
+          // this wait can expire before the SDK's timer does (its budget is
+          // the relay's, not the request's), and the rejection travels up
+          // through `Client.request`, where `InspectorClient` annotates a
+          // timeout of exactly this shape with the connection's state
+          // (#2318). A plain error would pass that decorator untouched and
+          // reach the user as a bare timeout on the web client alone.
+          reject(
+            new SdkError(SdkErrorCode.RequestTimeout, "Request timed out", {
+              timeout: this.sseResponseTimeoutMs,
+            }),
+          );
+        }, this.sseResponseTimeoutMs);
+      };
+      arm();
       this.sseResponseWaits.set(requestId, {
         resolve: () => {
           clearTimeout(timer);
@@ -712,8 +730,20 @@ export class RemoteClientTransport implements Transport {
           clearTimeout(timer);
           reject(error);
         },
+        // A progress notification for this request re-arms the full window so
+        // the browser-side deadline tracks the SDK client's progress-aware one
+        // rather than firing at a flat 60s (#2028).
+        resetTimeout: () => {
+          clearTimeout(timer);
+          arm();
+        },
       });
     });
+  }
+
+  /** Re-arm a pending request's SSE wait timeout on a matching progress note. */
+  private resetSseResponseWait(requestId: string | number): void {
+    this.sseResponseWaits.get(requestId)?.resetTimeout();
   }
 
   private async postSend(

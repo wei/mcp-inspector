@@ -18,6 +18,7 @@ import {
   selectServerEntry,
   type ResolvedServer,
 } from "@inspector/core/mcp/node/servers.js";
+import { DEFAULT_CONNECTION_TIMEOUT_MS } from "@inspector/core/mcp/types.js";
 
 describe("headersToServerSettings", () => {
   it("returns undefined when no headers are given", () => {
@@ -32,6 +33,10 @@ describe("headersToServerSettings", () => {
     ]);
     expect(settings?.metadata).toEqual({});
     expect(settings?.roots).toEqual([]);
+    // The header-only shell is what the CLI/TUI hand the client when a file
+    // sets no timeout, so it must carry the product default — a regression
+    // back to 0 here would silently unbound every such connect (#2320).
+    expect(settings?.connectionTimeout).toBe(DEFAULT_CONNECTION_TIMEOUT_MS);
   });
 });
 
