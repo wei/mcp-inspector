@@ -8,6 +8,7 @@
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import nodeFs from "node:fs";
 import {
   existsSync,
   mkdirSync,
@@ -229,6 +230,28 @@ test("two concurrent runs serialize: the second starts after the first ends", as
   );
   assert.ok(!existsSync(lockPathOf(dir)), "the lock is released at the end");
   assert.ok(!existsSync(leaseTarget(dir)), "the holder record goes with it");
+});
+
+test("an uncontended run whose lock call is slow does not report a wait (#2369)", async () => {
+  const dir = freshDir();
+  const { lines, log } = collectLog();
+  const pollMs = 25;
+  // A loaded machine, made deterministic: the lock directory's creation
+  // alone outlasts several polls, though nobody else holds the lease.
+  const slowFs = {
+    ...nodeFs,
+    mkdir: (p, cb) => setTimeout(() => nodeFs.mkdir(p, cb), pollMs * 4),
+  };
+  assert.equal(await runNode("", { dir, log, pollMs, fs: slowFs }), 0);
+  assert.deepEqual(
+    lines.filter((l) => l.startsWith("gate-lease: acquired after")),
+    [],
+  );
+  const released = lines.filter((l) =>
+    l.startsWith("gate-lease: released after"),
+  );
+  assert.equal(released.length, 1);
+  assert.doesNotMatch(released[0], /waited/);
 });
 
 test("the child's exit code is the run's exit code", async () => {

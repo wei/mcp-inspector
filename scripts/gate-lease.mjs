@@ -214,8 +214,11 @@ function identify(lockPath) {
  * the `mkdir` callback, the moment the directory becomes ours; `owned.id`
  * stays `null` until then so a stale directory the library removes on the
  * way to acquiring passes through untouched.
+ *
+ * `base` is the filesystem the shim delegates to — `node:fs` in real runs, and
+ * a deliberately slow one in the test that pins #2369.
  */
-function guardedFs(lockPath, owned, onRefused) {
+function guardedFs(lockPath, owned, onRefused, base = nodeFs) {
   const mine = () => {
     if (owned.id === null) return true;
     const now = identify(lockPath);
@@ -231,9 +234,9 @@ function guardedFs(lockPath, owned, onRefused) {
   };
   return {
     fs: {
-      ...nodeFs,
+      ...base,
       mkdir: (p, cb) =>
-        nodeFs.mkdir(p, (err) => {
+        base.mkdir(p, (err) => {
           if (!err) owned.id = identify(lockPath);
           cb(err);
         }),
@@ -294,9 +297,14 @@ function signalTree(child, signal) {
 /**
  * Take the lease, waiting for a holder to release or go stale.
  *
- * Returns the release function, or `null` when a lock cannot be created here
- * at all — the caller then runs unleased. Throws only when the wait budget is
- * exhausted against a live holder.
+ * Resolves with `{ release, waited }`, or `null` when a lock cannot be created
+ * here at all — the caller then runs unleased. Throws only when the wait
+ * budget is exhausted against a live holder.
+ *
+ * `waited` is the time spent queued behind a holder, and is `0` whenever the
+ * first attempt succeeded — however long that attempt took. An uncontended
+ * lock call on a loaded machine can outlast `pollMs`, and measuring the whole
+ * call reported such a run as having waited (#2369).
  */
 async function acquireLease({ dir, fs, log, pollMs, progressMs, maxWaitMs }) {
   const target = leaseTarget(dir);
@@ -305,7 +313,7 @@ async function acquireLease({ dir, fs, log, pollMs, progressMs, maxWaitMs }) {
   let announced = false;
   for (;;) {
     try {
-      return await properLockfile.lock(target, {
+      const release = await properLockfile.lock(target, {
         realpath: false,
         stale: STALE_MS,
         retries: 0,
@@ -319,6 +327,9 @@ async function acquireLease({ dir, fs, log, pollMs, progressMs, maxWaitMs }) {
             `gate-lease: another process took the lease over while this gate was running (${err.message}); continuing without it.`,
           ),
       });
+      // `announced` is set on the first failed attempt, so it is exactly
+      // "this call looped".
+      return { release, waited: announced ? Date.now() - startedWaiting : 0 };
     } catch (err) {
       // `ELOCKED` is not the only "someone holds it": a stale directory the
       // library could not remove (`ENOTEMPTY`, `EACCES`, `EROFS`) surfaces as
@@ -372,6 +383,7 @@ async function acquireLease({ dir, fs, log, pollMs, progressMs, maxWaitMs }) {
  * @param {number} [opts.progressMs]
  * @param {number} [opts.maxWaitMs]
  * @param {number} [opts.graceMs]      SIGTERM → SIGKILL escalation on a signal
+ * @param {typeof nodeFs} [opts.fs]    filesystem the lock is taken through
  * @param {import("node:child_process").StdioOptions} [opts.stdio]
  * @returns {Promise<number>}
  */
@@ -385,16 +397,21 @@ export async function runUnderLease({
   progressMs = PROGRESS_MS,
   maxWaitMs = MAX_WAIT_MS,
   graceMs = 5_000,
+  fs = nodeFs,
   stdio = "inherit",
 }) {
   let release = null;
   let waited = 0;
   // Filled in by the shim the moment the lock directory is ours.
   const owned = { id: null };
-  const guarded = guardedFs(lockPathOf(dir), owned, () =>
-    log(
-      "gate-lease: the lease was taken over by another gate while this one ran, so its lock was left alone rather than removed.",
-    ),
+  const guarded = guardedFs(
+    lockPathOf(dir),
+    owned,
+    () =>
+      log(
+        "gate-lease: the lease was taken over by another gate while this one ran, so its lock was left alone rather than removed.",
+      ),
+    fs,
   );
   if (isSkipped(env)) {
     log(`gate-lease: ${SKIP_ENV} is set; running without the lease.`);
@@ -409,8 +426,7 @@ export async function runUnderLease({
       );
     }
     if (usable) {
-      const startedWaiting = Date.now();
-      release = await acquireLease({
+      const lease = await acquireLease({
         dir,
         fs: guarded.fs,
         log,
@@ -418,10 +434,10 @@ export async function runUnderLease({
         progressMs,
         maxWaitMs,
       });
-      waited = Date.now() - startedWaiting;
+      if (lease !== null) ({ release, waited } = lease);
     }
     if (release !== null) {
-      if (waited >= pollMs) {
+      if (waited > 0) {
         log(`gate-lease: acquired after ${formatDuration(waited)}.`);
       }
       try {
@@ -468,7 +484,7 @@ export async function runUnderLease({
       return;
     }
     log(
-      `gate-lease: released after ${formatDuration(Date.now() - startedRunning)}${waited >= pollMs ? ` (waited ${formatDuration(waited)} first)` : ""}.`,
+      `gate-lease: released after ${formatDuration(Date.now() - startedRunning)}${waited > 0 ? ` (waited ${formatDuration(waited)} first)` : ""}.`,
     );
   };
 
