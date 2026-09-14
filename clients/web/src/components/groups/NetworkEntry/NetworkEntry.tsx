@@ -15,7 +15,11 @@ import {
 } from "@mantine/core";
 import { RiErrorWarningLine } from "react-icons/ri";
 import type { FetchRequestEntry } from "@inspector/core/mcp/types.js";
-import { isLongLivedStreamResponse } from "@inspector/core/mcp/fetchTracking.js";
+import {
+  isLongLivedStreamEntry,
+  longLivedStreamLabel,
+  uncapturedBodyNote,
+} from "../../../utils/uncapturedBodyNote";
 import { ContentViewer } from "../../elements/ContentViewer/ContentViewer";
 import { getMimeKind } from "../../elements/ContentViewer/contentViewerUtils";
 import { CopyButton } from "../../elements/CopyButton/CopyButton";
@@ -158,13 +162,6 @@ function statusLabel(entry: FetchRequestEntry): string {
     : `${entry.responseStatus}`;
 }
 
-function isLongLivedStream(entry: FetchRequestEntry): boolean {
-  return isLongLivedStreamResponse(
-    entry.method,
-    entry.responseHeaders?.["content-type"],
-  );
-}
-
 // Header-table cell text. A modern MCP-mirrored header name gets a violet accent
 // so the spec headers (Mcp-Method / Mcp-Name / Mcp-Param-* / MCP-Protocol-Version)
 // stand out from ordinary ones; a value that disagrees with the request body is
@@ -215,6 +212,17 @@ const SentinelTooltip = Tooltip.withProps({
   withArrow: true,
   multiline: true,
   w: 280,
+});
+
+// The long-lived-stream marker on a GET entry, on the `status` variant like
+// the status chip beside it. Amber cannot clear WCAG AA as either a filled
+// (white on orange, 3.04:1) or a light (orange on tint, 3.03:1) badge at this
+// size; `ThemeBadge` pins `status` + orange to a mid amber fill with black
+// text for exactly that reason, which is what the a11y gate needs the moment a
+// story renders one (#2318 added the first).
+const StreamBadge = Badge.withProps({
+  color: "orange",
+  variant: "status",
 });
 
 const Base64Badge = Badge.withProps({
@@ -542,7 +550,9 @@ export function NetworkEntry({
       {entry.duration != null && (
         <DurationText>{formatDuration(entry.duration)}</DurationText>
       )}
-      {isLongLivedStream(entry) && <Badge color="orange">SSE</Badge>}
+      {isLongLivedStreamEntry(entry) && (
+        <StreamBadge>{longLivedStreamLabel(entry)}</StreamBadge>
+      )}
       <Badge color={statusColor(entry)} variant="status">
         {statusLabel(entry)}
       </Badge>
@@ -647,11 +657,7 @@ export function NetworkEntry({
                     label="Response body"
                   />
                 ) : (
-                  <DimmedNote>
-                    {isLongLivedStream(entry)
-                      ? "Long-lived stream — body not captured"
-                      : "(empty)"}
-                  </DimmedNote>
+                  <DimmedNote>{uncapturedBodyNote(entry)}</DimmedNote>
                 )}
               </Stack>
             )}

@@ -394,8 +394,30 @@ export interface FetchRequestEntry {
   responseBody?: string;
   duration?: number; // Time between request and response in ms
   error?: string;
+  /**
+   * Lifecycle of a long-lived stream response (the standalone `GET` on
+   * Streamable HTTP, the legacy SSE event stream), whose body is never
+   * captured. Filled in asynchronously via `fetchRequestStreamUpdate` as
+   * events arrive and when the stream ends; absent on every bounded response
+   * (#2318).
+   */
+  stream?: FetchStreamState;
   /** Distinguishes OAuth/auth fetches from MCP transport fetches */
   category: FetchRequestCategory;
+}
+
+/**
+ * What the fetch tracker knows about a long-lived stream it declined to
+ * buffer: how many SSE events have been delivered on it so far, and when it
+ * ended. `closedAt` is absent while the stream is still open. The Network
+ * tab renders it in place of the body, and `InspectorClient` folds the most
+ * recent transport stream into its connection diagnostics (#2318).
+ */
+export interface FetchStreamState {
+  /** SSE events delivered so far — dispatched events, not keepalive comments. */
+  eventCount: number;
+  /** When the stream ended (server close, network error, or abort), once it has. */
+  closedAt?: Date;
 }
 
 /** Entry shape from createFetchTracker before category is added by the caller */
@@ -1010,6 +1032,14 @@ export interface CreateTransportOptions {
    * reading (critical for SSE responses that include progress events).
    */
   onFetchResponseBody?: (id: string, responseBody: string) => void;
+
+  /**
+   * Optional callback fired asynchronously as a previously tracked long-lived
+   * stream (GET + `text/event-stream`) delivers events and when it ends. The
+   * tracker never buffers such a body, so this is the only view the consumer
+   * gets of the stream's lifetime (#2318).
+   */
+  onFetchStreamUpdate?: (id: string, stream: FetchStreamState) => void;
 
   /**
    * Optional OAuth client provider for Bearer authentication (SSE, streamable-http).

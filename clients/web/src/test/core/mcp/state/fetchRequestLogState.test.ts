@@ -146,6 +146,51 @@ describe("FetchRequestLogState", () => {
     expect(seen).toHaveLength(1);
   });
 
+  it("patches the matching entry's stream state and re-emits on fetchRequestStreamUpdate (#2318)", () => {
+    client.dispatchTypedEvent("fetchRequest", entry("a"));
+    client.dispatchTypedEvent("fetchRequest", entry("b"));
+    const seen: FetchRequestEntry[][] = [];
+    state.addEventListener("fetchRequestsChange", (e) => seen.push(e.detail));
+
+    client.dispatchTypedEvent("fetchRequestStreamUpdate", {
+      id: "b",
+      stream: { eventCount: 2 },
+    });
+    const closedAt = new Date(2026, 4, 13, 0, 1);
+    client.dispatchTypedEvent("fetchRequestStreamUpdate", {
+      id: "b",
+      stream: { eventCount: 3, closedAt },
+    });
+
+    const entries = state.getFetchRequests();
+    expect(entries[0]?.stream).toBeUndefined();
+    // Each update replaces the previous state wholesale.
+    expect(entries[1]?.stream).toEqual({ eventCount: 3, closedAt });
+    expect(seen).toHaveLength(2);
+  });
+
+  it("ignores a stream update for an unknown id without emitting", () => {
+    client.dispatchTypedEvent("fetchRequest", entry("a"));
+    const seen: FetchRequestEntry[][] = [];
+    state.addEventListener("fetchRequestsChange", (e) => seen.push(e.detail));
+    client.dispatchTypedEvent("fetchRequestStreamUpdate", {
+      id: "gone",
+      stream: { eventCount: 1 },
+    });
+    expect(seen).toHaveLength(0);
+    expect(state.getFetchRequests()[0]?.stream).toBeUndefined();
+  });
+
+  it("stops patching stream state after destroy", () => {
+    client.dispatchTypedEvent("fetchRequest", entry("a"));
+    state.destroy();
+    client.dispatchTypedEvent("fetchRequestStreamUpdate", {
+      id: "a",
+      stream: { eventCount: 1 },
+    });
+    expect(state.getFetchRequests()).toEqual([]);
+  });
+
   it("silently ignores a body update for an unknown id when the log is not full (benign straggler)", () => {
     // Below capacity, an idx === -1 means the entry was cleared or never
     // existed — not a rotation drop — so it must NOT warn or emit the dropped

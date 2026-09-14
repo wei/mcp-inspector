@@ -56,6 +56,27 @@ describe("ConnectionInfoModal", () => {
     expect(screen.getByText("Be excellent to each other.")).toBeInTheDocument();
   });
 
+  it("forwards connection diagnostics to ConnectionInfoContent (#2318)", () => {
+    renderWithMantine(
+      <ConnectionInfoModal
+        opened
+        onClose={vi.fn()}
+        initializeResult={initializeResult}
+        serverInfoReported
+        clientCapabilities={clientCapabilities}
+        transport="streamable-http"
+        diagnostics={{
+          capturedAt: 1_000_000,
+          outstandingRequests: [
+            { id: 2, method: "tools/list", sentAt: 1_000_000 - 60_000 },
+          ],
+        }}
+      />,
+    );
+    expect(screen.getByText("Connection Activity")).toBeInTheDocument();
+    expect(screen.getByText("tools/list — sent 1m00s ago")).toBeInTheDocument();
+  });
+
   it("forwards oauth details to ConnectionInfoContent", () => {
     renderWithMantine(
       <ConnectionInfoModal

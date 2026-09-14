@@ -174,6 +174,36 @@ describe("normalizeSkillUri", () => {
     // `skill:demo/../x.md` parses but keeps its `..` verbatim, so containment
     // could not be decided on it — accepting it would reopen the hole.
     expect(normalizeSkillUri("skill:demo/SKILL.md")).toBeUndefined();
+    // Path-less but still opaque: no authority, so it stays rejected.
+    expect(normalizeSkillUri("skill:demo")).toBeUndefined();
+    // Empty path AND no authority — the parser reports `pathname === ""` for
+    // these too, so an empty path alone must not be read as the root form.
+    expect(normalizeSkillUri("skill:")).toBeUndefined();
+    expect(normalizeSkillUri("mailto:")).toBeUndefined();
+    expect(normalizeSkillUri("skill://")).toBeUndefined();
+  });
+
+  it("accepts a path-less authority URI — a skill's root directory (#2295)", () => {
+    // RFC 3986 gives an authority URI an empty path, so `skill://data-analysis`
+    // is well-formed; rejecting it mislabelled a root echoed back by a
+    // directory read as "outside this skill".
+    expect(normalizeSkillUri("skill://data-analysis")).toBe(
+      "skill://data-analysis",
+    );
+    expect(normalizeSkillUri("skill://%64ata-analysis")).toBe(
+      "skill://data-analysis",
+    );
+  });
+
+  it("still treats a path-less root as naming no skill file", () => {
+    // Accepting the root must not let it pass a check that needs a file.
+    expect(skillNameFromUri("skill://data-analysis")).toBeUndefined();
+    const issues = checkSkillConformance({
+      uri: "skill://data-analysis",
+      frontmatter: { name: "data-analysis", description: "d" },
+      resources: [],
+    });
+    expect(issues.map((issue) => issue.code)).toContain("malformed-uri");
   });
 
   it("decodes escapes that stand for unreserved characters", () => {
