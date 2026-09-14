@@ -213,6 +213,17 @@ const SentinelTooltip = Tooltip.withProps({
   w: 280,
 });
 
+// The long-lived-stream marker on a GET entry, on the `status` variant like
+// the status chip beside it. Amber cannot clear WCAG AA as either a filled
+// (white on orange, 3.04:1) or a light (orange on tint, 3.03:1) badge at this
+// size; `ThemeBadge` pins `status` + orange to a mid amber fill with black
+// text for exactly that reason, which is what the a11y gate needs the moment a
+// story renders one (#2318 added the first).
+const StreamBadge = Badge.withProps({
+  color: "orange",
+  variant: "status",
+});
+
 const Base64Badge = Badge.withProps({
   size: "xs",
   color: "gray",
@@ -538,7 +549,7 @@ export function NetworkEntry({
       {entry.duration != null && (
         <DurationText>{formatDuration(entry.duration)}</DurationText>
       )}
-      {isLongLivedStreamEntry(entry) && <Badge color="orange">SSE</Badge>}
+      {isLongLivedStreamEntry(entry) && <StreamBadge>SSE</StreamBadge>}
       <Badge color={statusColor(entry)} variant="status">
         {statusLabel(entry)}
       </Badge>
