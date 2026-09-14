@@ -748,6 +748,7 @@ describe("createFetchTracker long-lived stream watching (#2318)", () => {
       {
         trackRequest: (entry) => tracked.push(entry),
         updateStream: (id, state) => updates.push({ id, stream: state }),
+        streamUpdateIntervalMs: 0,
       },
     );
     const response = await fetcher("https://example.com/mcp", {
@@ -800,7 +801,10 @@ describe("createFetchTracker long-lived stream watching (#2318)", () => {
         new Response(server.stream, {
           headers: { "content-type": "application/x-ndjson" },
         })) as typeof fetch,
-      { updateStream: (id, state) => updates.push({ id, stream: state }) },
+      {
+        updateStream: (id, state) => updates.push({ id, stream: state }),
+        streamUpdateIntervalMs: 0,
+      },
     );
     await fetcher("https://example.com/mcp", { method: "GET" });
     server.push('{"jsonrpc":"2.0","method":"a"}\n\n');
@@ -846,7 +850,10 @@ describe("createFetchTracker long-lived stream watching (#2318)", () => {
         new Response(server.stream, {
           headers: { "content-type": "Text/Event-Stream" },
         })) as typeof fetch,
-      { updateStream: (id, state) => updates.push({ id, state }) },
+      {
+        updateStream: (id, state) => updates.push({ id, state }),
+        streamUpdateIntervalMs: 0,
+      },
     );
     await fetcher("https://example.com/mcp", { method: "get" });
     expect(updates).toHaveLength(1);
@@ -867,6 +874,7 @@ describe("createFetchTracker long-lived stream watching (#2318)", () => {
         trackRequest: (entry) => tracked.push(entry),
         updateResponseBody: (_id, body) => bodies.push(body),
         updateStream: (id, state) => updates.push({ id, state }),
+        streamUpdateIntervalMs: 0,
       },
     );
     await fetcher(new Request("https://example.com/mcp", { method: "POST" }));
@@ -874,6 +882,80 @@ describe("createFetchTracker long-lived stream watching (#2318)", () => {
     expect(tracked[0]?.method).toBe("POST");
     expect(bodies).toEqual(["data: x\n\n"]);
     expect(updates).toEqual([]);
+  });
+
+  it("coalesces a moving count to one report per interval, and reports the close at once", async () => {
+    vi.useFakeTimers();
+    try {
+      const server = controlledStream();
+      const updates: Array<{ id: string; stream: FetchStreamState }> = [];
+      const fetcher = createFetchTracker(
+        (async () =>
+          new Response(server.stream, {
+            headers: { "content-type": "text/event-stream" },
+          })) as typeof fetch,
+        {
+          updateStream: (id, state) => updates.push({ id, stream: state }),
+          streamUpdateIntervalMs: 100,
+        },
+      );
+      await fetcher("https://example.com/mcp", { method: "GET" });
+      // The open is immediate.
+      expect(updates.map((u) => u.stream.eventCount)).toEqual([0]);
+      server.push("data: a\n\ndata: b\n\ndata: c\n\n");
+      await vi.advanceTimersByTimeAsync(0);
+      // Three events, no report yet — they are inside one window.
+      expect(updates.map((u) => u.stream.eventCount)).toEqual([0]);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(updates.map((u) => u.stream.eventCount)).toEqual([0, 3]);
+      // A close cancels a pending window and reports immediately.
+      server.push("data: d\n\n");
+      server.end();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(updates.map((u) => u.stream.eventCount)).toEqual([0, 3, 4]);
+      expect(updates.at(-1)!.stream.closedAt).toBeInstanceOf(Date);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(updates).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("counts an event whose bare-CR terminator is the last byte of the stream", async () => {
+    const server = controlledStream();
+    const { updates } = await trackStream(server.stream);
+    server.push("data: x\r\r");
+    await flush();
+    // Held while the stream is open: the CR could be half of a CRLF.
+    expect(updates.map((u) => u.stream.eventCount)).toEqual([0]);
+    server.end();
+    await flush();
+    expect(updates.at(-1)!.stream).toMatchObject({ eventCount: 1 });
+    expect(updates.at(-1)!.stream.closedAt).toBeInstanceOf(Date);
+  });
+
+  it("survives a stream-update listener that throws on the close", async () => {
+    // The watcher's promise is discarded, so a throw from the final report
+    // would otherwise be an unhandled rejection — which fails the whole run.
+    const server = controlledStream();
+    let reports = 0;
+    const fetcher = createFetchTracker(
+      (async () =>
+        new Response(server.stream, {
+          headers: { "content-type": "text/event-stream" },
+        })) as typeof fetch,
+      {
+        updateStream: (_id, state) => {
+          reports += 1;
+          if (state.closedAt) throw new Error("listener exploded");
+        },
+        streamUpdateIntervalMs: 0,
+      },
+    );
+    await fetcher("https://example.com/mcp", { method: "GET" });
+    server.end();
+    await flush();
+    expect(reports).toBe(2);
   });
 
   it("reports the close when the server ends the stream", async () => {
@@ -932,7 +1014,10 @@ describe("createFetchTracker long-lived stream watching (#2318)", () => {
         new Response("data: x\n\n", {
           headers: { "content-type": "text/event-stream" },
         })) as typeof fetch,
-      { updateStream: (id, state) => updates.push({ id, state }) },
+      {
+        updateStream: (id, state) => updates.push({ id, state }),
+        streamUpdateIntervalMs: 0,
+      },
     );
     // A POST SSE reply is bounded and goes down the body-capture path.
     await fetcher("https://example.com/mcp", { method: "POST" });
@@ -950,6 +1035,7 @@ describe("createFetchTracker long-lived stream watching (#2318)", () => {
     const updates: unknown[] = [];
     const fetcher = createFetchTracker((async () => response) as typeof fetch, {
       updateStream: (id, state) => updates.push({ id, state }),
+      streamUpdateIntervalMs: 0,
     });
     await expect(
       fetcher("https://example.com/mcp", { method: "GET" }),
@@ -971,6 +1057,7 @@ describe("createFetchTracker long-lived stream watching (#2318)", () => {
     const updates: unknown[] = [];
     const fetcher = createFetchTracker((async () => response) as typeof fetch, {
       updateStream: (id, state) => updates.push({ id, state }),
+      streamUpdateIntervalMs: 0,
     });
     await fetcher("https://example.com/mcp", { method: "GET" });
     await flush();

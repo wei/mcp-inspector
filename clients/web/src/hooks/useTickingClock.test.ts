@@ -47,6 +47,28 @@ describe("useTickingClock", () => {
     expect(result.current).toBe(5_002_500);
   });
 
+  it("installs no timer and returns the seed when disabled", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(5_000_000);
+    const setSpy = vi.spyOn(globalThis, "setInterval");
+    const { result, rerender } = renderHook(
+      ({ enabled }) => useTickingClock(1_000_000, 1000, enabled),
+      { initialProps: { enabled: false } },
+    );
+    expect(setSpy).not.toHaveBeenCalled();
+    act(() => {
+      vi.advanceTimersByTime(3000);
+    });
+    expect(result.current).toBe(1_000_000);
+    // Enabling later starts the clock.
+    rerender({ enabled: true });
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(result.current).toBe(5_004_000);
+    setSpy.mockRestore();
+  });
+
   it("stops ticking on unmount", () => {
     vi.useFakeTimers();
     const clearSpy = vi.spyOn(globalThis, "clearInterval");

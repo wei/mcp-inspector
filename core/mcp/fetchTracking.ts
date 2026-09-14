@@ -250,7 +250,20 @@ export interface FetchTrackingCallbacks {
    * server serializes requests behind it (#2318).
    */
   updateStream?: (id: string, stream: FetchStreamState) => void;
+  /**
+   * How often, at most, `updateStream` reports a moving event count, in ms.
+   * The first report (open, zero events) and the close are immediate; counts
+   * in between are coalesced so a server pushing hundreds of notifications a
+   * second costs one update per window rather than one per event — each
+   * update re-publishes the whole fetch log and, on the web client, crosses
+   * the backend-to-browser event stream. Defaults to
+   * `DEFAULT_STREAM_UPDATE_INTERVAL_MS`; `0` reports every event, for tests.
+   */
+  streamUpdateIntervalMs?: number;
 }
+
+/** See `FetchTrackingCallbacks.streamUpdateIntervalMs`. */
+export const DEFAULT_STREAM_UPDATE_INTERVAL_MS = 250;
 
 /**
  * The framing a long-lived stream's events arrive in — the two content types
@@ -297,8 +310,10 @@ function watchLongLivedStream(
   framing: LongLivedStreamFraming,
   callbacks: FetchTrackingCallbacks,
 ): void {
-  const update = callbacks.updateStream;
-  if (!update) return;
+  const report = callbacks.updateStream;
+  if (!report) return;
+  const intervalMs =
+    callbacks.streamUpdateIntervalMs ?? DEFAULT_STREAM_UPDATE_INTERVAL_MS;
   let body: ReadableStream<Uint8Array> | null;
   try {
     body = response.clone().body;
@@ -313,23 +328,37 @@ function watchLongLivedStream(
   let eventCount = 0;
   let pending = "";
   let blockHasData = false;
+  // A moving count is reported at most once per interval (see
+  // `streamUpdateIntervalMs`); the open and the close go out at once.
+  let reportTimer: ReturnType<typeof setTimeout> | null = null;
+  const reportCount = (): void => {
+    if (intervalMs <= 0) {
+      report(id, { eventCount });
+      return;
+    }
+    if (reportTimer !== null) return;
+    reportTimer = setTimeout(() => {
+      reportTimer = null;
+      report(id, { eventCount });
+    }, intervalMs);
+  };
   // Announce the stream as open before a byte arrives. A stream that never
   // delivers anything is the #2187 tell, and it would otherwise be the one
   // stream with no state to show — the count only moves on an event.
-  update(id, { eventCount });
+  report(id, { eventCount });
 
   const consumeLine = (line: string): void => {
     if (framing === "ndjson") {
       if (line.trim() === "") return;
       eventCount += 1;
-      update(id, { eventCount });
+      reportCount();
       return;
     }
     if (line === "") {
       if (blockHasData) {
         eventCount += 1;
         blockHasData = false;
-        update(id, { eventCount });
+        reportCount();
       }
       return;
     }
@@ -368,17 +397,30 @@ function watchLongLivedStream(
         pending += decoder.decode(value, { stream: true });
         consumeCompleteLines();
       }
+      // A CR held back as a possible half of a CRLF is, at end-of-stream, a
+      // whole line ending — `data: x\r\r` is a complete event. Anything after
+      // it is a partial block and is dropped, as above.
+      if (pending.endsWith("\r")) consumeLine(pending.slice(0, -1));
     } catch {
       // An errored or aborted stream has still ended — fall through to report
       // the close; the entry's `error` field is for a fetch that never got a
       // response, which this one did.
     }
-    update(id, { eventCount, closedAt: new Date() });
+    if (reportTimer !== null) {
+      clearTimeout(reportTimer);
+      reportTimer = null;
+    }
+    try {
+      report(id, { eventCount, closedAt: new Date() });
+    } catch {
+      // A listener that throws must not become an unhandled rejection off a
+      // promise nothing awaits; the stream is closed either way.
+    }
   };
   // Deliberately not awaited: the fetch wrapper has to return the response
   // now, and this watcher lives as long as the stream does. It owns its own
-  // failures — the read loop is wrapped in a `try` that treats an error as a
-  // close — so the promise cannot reject.
+  // failures — the read loop and the final report are each wrapped in a
+  // `try` — so the promise cannot reject.
   void pump();
 }
 

@@ -23,6 +23,12 @@ describe("InspectorClient diagnostics tracking callbacks", () => {
       // Never connects; the callbacks are exercised directly.
       { environment: { transport: () => ({}) as never } },
     );
+    // `createMessageTrackingCallbacks` is private: it is the seam the client
+    // hands its transport, and driving it directly is what lets this test
+    // exercise the bookkeeping without a connection. The double cast is the
+    // documented test-only exception for reaching a private member — the
+    // same one `inspectorClient-raw-wire.test.ts` uses — and `Internals`
+    // names exactly the one method it reaches.
     const callbacks = (
       client as unknown as Internals
     ).createMessageTrackingCallbacks();

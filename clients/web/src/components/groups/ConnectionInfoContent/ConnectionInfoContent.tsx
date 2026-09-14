@@ -337,8 +337,13 @@ export function ConnectionInfoContent({
     : SERVER_INFO_NOT_REPORTED_LABEL;
 
   // The activity rows' clock: the snapshot's own on first paint (pure), then
-  // the wall clock once a second so "sent 5s ago" keeps counting.
-  const now = useTickingClock(diagnostics?.capturedAt ?? 0);
+  // the wall clock once a second so "sent 5s ago" keeps counting. No timer
+  // at all when there is no activity section to tick.
+  const now = useTickingClock(
+    diagnostics?.capturedAt ?? 0,
+    1000,
+    diagnostics !== undefined,
+  );
 
   const serverCaps = getServerCapabilityEntries(capabilities, protocolEra);
   const clientCaps = getCapabilityEntries(

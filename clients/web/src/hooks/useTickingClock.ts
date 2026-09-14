@@ -16,12 +16,20 @@ import { useEffect, useState } from "react";
  * A timer is exactly the "synchronize with an external system" case an effect
  * exists for; the state is set only from the interval callback, never in the
  * effect body, so the first paint is not followed by a corrective re-render.
+ * `enabled: false` installs no timer at all and returns the seed.
  */
-export function useTickingClock(seed: number, intervalMs = 1000): number {
+export function useTickingClock(
+  seed: number,
+  intervalMs = 1000,
+  enabled = true,
+): number {
   const [now, setNow] = useState(seed);
   useEffect(() => {
+    // No timer for a consumer with nothing to tick — a component that
+    // renders no durations must not pay for a repeating interval.
+    if (!enabled) return;
     const id = setInterval(() => setNow(Date.now()), intervalMs);
     return () => clearInterval(id);
-  }, [intervalMs]);
+  }, [intervalMs, enabled]);
   return Math.max(now, seed);
 }

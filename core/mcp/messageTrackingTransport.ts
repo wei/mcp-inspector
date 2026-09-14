@@ -30,10 +30,11 @@ export interface MessageTrackingCallbacks {
    * `trackRequest` already recorded it, so a consumer keeping "requests still
    * awaiting a response" can roll that entry back — a request that never went
    * out is not unanswered (#2318). Not fired when the caller aborted the
-   * request through `requestSignal`: the modern transport aborts an in-flight
-   * request's own stream to cancel it (and the SDK does the same on a
-   * per-request timeout), and a request that was sent and then given up on
-   * is exactly the unanswered kind.
+   * request through `requestSignal` *during* the send: the modern transport
+   * aborts an in-flight request's own stream to cancel it (and the SDK does
+   * the same on a per-request timeout), and a request that was sent and then
+   * given up on is exactly the unanswered kind. A signal already aborted
+   * before the send began is a failed send like any other.
    */
   trackSendFailure?: (message: JSONRPCRequest, error: unknown) => void;
 }
@@ -109,8 +110,13 @@ export class MessageTrackingTransport implements Transport {
       } else if ("method" in message) {
         const request = message as JSONRPCRequest;
         this.callbacks.trackRequest?.(request, "client");
+        // A signal already aborted here means the frame will not go out at
+        // all — that is a failed send. One that becomes aborted while the
+        // send is in flight is a cancellation of a request that may well
+        // have reached the server, which stays unanswered.
+        const abortedBeforeSend = options?.requestSignal?.aborted === true;
         return this.baseTransport.send(message, options).catch((err) => {
-          if (!options?.requestSignal?.aborted) {
+          if (abortedBeforeSend || !options?.requestSignal?.aborted) {
             this.callbacks.trackSendFailure?.(request, err);
           }
           throw err;
