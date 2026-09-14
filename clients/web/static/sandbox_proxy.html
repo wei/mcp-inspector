@@ -76,8 +76,19 @@
         return allowList.join("; ");
       }
 
-      const ALLOWED_REFERRER_PATTERN =
-        /^http:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/;
+      // The exact embedder origins this proxy accepts, injected by the sandbox
+      // controller when it serves this page (see `embedderOriginsLiteral` in
+      // server/sandbox-controller.ts). It is the same list the served
+      // `frame-ancestors` header admits, so the two checks agree by
+      // construction — an https or public-hostname Inspector page is accepted
+      // exactly when the backend's ALLOWED_ORIGINS names it (#1862).
+      //
+      // `null` means the controller had no valid list (a hand-constructed
+      // caller or a test); the header then falls back to the loopback family,
+      // and so does this check.
+      const ALLOWED_EMBEDDER_ORIGINS = /*INSPECTOR_EMBEDDER_ORIGINS*/ null;
+      const LOOPBACK_EMBEDDER_PATTERN =
+        /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
 
       if (window.self === window.top) {
         throw new Error("This file is only to be used in an iframe sandbox.");
@@ -87,7 +98,22 @@
         throw new Error("No referrer, cannot validate embedding site.");
       }
 
-      if (!document.referrer.match(ALLOWED_REFERRER_PATTERN)) {
+      // Compare the referrer's parsed ORIGIN, never the raw string: a pattern
+      // over the full referrer is a prefix/substring match an attacker page's
+      // path or query can be shaped to satisfy.
+      let referrerOrigin = null;
+      try {
+        referrerOrigin = new URL(document.referrer).origin;
+      } catch (e) {
+        referrerOrigin = null;
+      }
+
+      if (
+        !referrerOrigin ||
+        !(Array.isArray(ALLOWED_EMBEDDER_ORIGINS)
+          ? ALLOWED_EMBEDDER_ORIGINS.includes(referrerOrigin)
+          : LOOPBACK_EMBEDDER_PATTERN.test(referrerOrigin))
+      ) {
         throw new Error(
           `Embedding domain not allowed in referrer ${document.referrer}. (Consider updating the validation logic to allow your domain.)`,
         );

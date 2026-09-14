@@ -29,6 +29,14 @@ export interface SandboxControllerOptions {
    * list (only a hand-constructed caller or a test) falls back to loopback-only.
    */
   allowedOrigins?: string[];
+  /**
+   * The URL to advertise instead of the bind-derived one — the operator's
+   * `MCP_SANDBOX_FULL_ADDRESS`, already validated by `public-address.ts`
+   * (#1862). It changes what {@link SandboxController.getUrl} returns, never
+   * what is bound; and it is only advertised once the listener is actually up,
+   * so a failed bind still reports no sandbox rather than a dead URL.
+   */
+  publicUrl?: string;
 }
 
 // Loopback fallback. NB: no `http://[::1]:*` — a **bracketed IPv6 literal is not
@@ -86,9 +94,57 @@ export function sandboxFrameAncestors(allowedOrigins?: string[]): string {
  * derive it here rather than each rolling one.
  */
 export function frameAncestorsDirective(origins?: string[]): string {
-  const valid = (origins ?? []).filter((o) => CSP_HOST_SOURCE.test(o));
+  const valid = validHostSources(origins);
   const sources = valid.length > 0 ? valid : LOOPBACK_FRAME_ANCESTORS;
   return `frame-ancestors ${sources.join(" ")}`;
+}
+
+/** The entries of `origins` that are well-formed CSP host-sources. */
+function validHostSources(origins?: string[]): string[] {
+  return (origins ?? []).filter((o) => CSP_HOST_SOURCE.test(o));
+}
+
+/**
+ * The marker in `static/sandbox_proxy.html` that {@link renderSandboxProxyHtml}
+ * replaces, together with the `null` it stands in front of. Matching the pair
+ * means an unrendered page is still valid JavaScript, and it falls back to the
+ * loopback check rather than to accepting anything.
+ */
+export const EMBEDDER_ORIGINS_PLACEHOLDER =
+  "/*INSPECTOR_EMBEDDER_ORIGINS*/ null";
+
+/**
+ * The JavaScript literal the proxy page's referrer check reads as its exact
+ * embedder allow-list (#1862).
+ *
+ * It is derived from the SAME filtered list as {@link sandboxFrameAncestors},
+ * so the referrer check and the `frame-ancestors` header admit one set. Before
+ * this the page hardcoded `http://localhost|127.0.0.1`, which no `https://`
+ * referrer can match — so the proxy threw on every HTTPS deployment regardless
+ * of `ALLOWED_ORIGINS`. When nothing valid remains the literal is `null`, and
+ * the page falls back to that loopback check, mirroring the header's own
+ * loopback fallback.
+ *
+ * The value lands inside a `<script>`, so `<` is escaped: `CSP_HOST_SOURCE`
+ * does not exclude it, and a `</script>` inside a string literal would close
+ * the element regardless of the quotes around it.
+ */
+export function embedderOriginsLiteral(origins?: string[]): string {
+  const valid = validHostSources(origins);
+  if (valid.length === 0) return "null";
+  return JSON.stringify(valid).replace(/</g, "\\u003c");
+}
+
+/** Substitute the embedder allow-list into the proxy page's source. */
+export function renderSandboxProxyHtml(
+  html: string,
+  origins?: string[],
+): string {
+  // Function-form replacement: a string replacement would interpret `$&` and
+  // friends, and the literal is operator-derived.
+  return html.replace(EMBEDDER_ORIGINS_PLACEHOLDER, () =>
+    embedderOriginsLiteral(origins),
+  );
 }
 
 export interface SandboxController {
@@ -156,9 +212,12 @@ export function createSandboxController(
   // `localhost` — a name resolves to one address family and would reintroduce
   // the #1951 split (web on IPv4, sandbox on IPv6) for any future call site
   // that omits `host`. Both call sites pass `config.sandboxHost` today.
-  const { port, host = DEFAULT_BIND_HOST, allowedOrigins } = options;
+  const { port, host = DEFAULT_BIND_HOST, allowedOrigins, publicUrl } = options;
   let server: Server | null = null;
   let sandboxUrl: string | null = null;
+  // Tracked separately from the URL: an advertised public URL carries the
+  // public port (or none at all), not the one this listener bound.
+  let boundPort = 0;
 
   // Defense-in-depth for the proxy page itself. Only `frame-ancestors` is set
   // here — fetch directives (`default-src`, `connect-src`, etc.) are
@@ -175,7 +234,10 @@ export function createSandboxController(
   let sandboxHtml: string;
   try {
     const sandboxHtmlPath = join(__dirname, "../static/sandbox_proxy.html");
-    sandboxHtml = readFileSync(sandboxHtmlPath, "utf-8");
+    sandboxHtml = renderSandboxProxyHtml(
+      readFileSync(sandboxHtmlPath, "utf-8"),
+      allowedOrigins,
+    );
   } catch (e) {
     sandboxHtml =
       "<!DOCTYPE html><html><body>Sandbox not loaded: " +
@@ -186,8 +248,7 @@ export function createSandboxController(
   return {
     async start(): Promise<{ port: number; url: string }> {
       if (server && sandboxUrl) {
-        const p = parseInt(new URL(sandboxUrl).port, 10);
-        return { port: p, url: sandboxUrl };
+        return { port: boundPort, url: sandboxUrl };
       }
       return new Promise((resolve) => {
         // Guard so a `listen` error followed by a (theoretically possible)
@@ -277,7 +338,10 @@ export function createSandboxController(
           const urlHost = isAllInterfacesHost(canonicalHost)
             ? "localhost"
             : canonicalHost;
-          sandboxUrl = `http://${urlHost}:${actualPort}/sandbox`;
+          // An operator-supplied public URL (#1862) replaces the derived one
+          // only now that the listener it routes to is actually up.
+          sandboxUrl = publicUrl ?? `http://${urlHost}:${actualPort}/sandbox`;
+          boundPort = actualPort;
           settle({ port: actualPort, url: sandboxUrl });
         });
       });

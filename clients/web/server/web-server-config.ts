@@ -22,6 +22,12 @@ import { resolveSandboxPort } from "./sandbox-controller.js";
 import { resolveAppOriginPort } from "./app-origin-controller.js";
 import { resolveBindHostname } from "./resolve-bind-host.js";
 import {
+  APP_ORIGIN_FULL_ADDRESS_ENV,
+  resolveAppOriginPublicOrigin,
+  resolveSandboxPublicUrl,
+  SANDBOX_FULL_ADDRESS_ENV,
+} from "./public-address.js";
+import {
   canonicalUrlHost,
   isAllInterfacesHost,
 } from "../../../core/node/hostUrl.ts";
@@ -74,6 +80,17 @@ export interface WebServerConfig {
    * address the sandbox uses.
    */
   appOriginPort: number;
+  /**
+   * Public sandbox proxy URL advertised in place of the bind-derived one
+   * (`MCP_SANDBOX_FULL_ADDRESS`, #1862), or undefined when unset or refused.
+   * See `public-address.ts` for what is refused and why.
+   */
+  sandboxPublicUrl?: string;
+  /**
+   * Public origin published app documents are served under
+   * (`MCP_APP_ORIGIN_FULL_ADDRESS`, #1862), or undefined when unset or refused.
+   */
+  appOriginPublicOrigin?: string;
   logger: Logger | undefined;
   /** When true, open browser after server starts. */
   autoOpen: boolean;
@@ -460,6 +477,22 @@ export function buildWebServerConfig(
       }
     })
     .filter((o): o is string => o !== null);
+  const allowedOrigins = configuredOrigins?.length
+    ? configuredOrigins
+    : defaultAllowedOrigins(hostname, port);
+
+  // Resolved after the allow-list because both are checked against it: neither
+  // listener may share an origin with the Inspector page (#1862). The sandbox
+  // goes first so the app origin can be checked against it too.
+  const sandboxPublicUrl = resolveSandboxPublicUrl(
+    process.env[SANDBOX_FULL_ADDRESS_ENV],
+    allowedOrigins,
+  );
+  const appOriginPublicOrigin = resolveAppOriginPublicOrigin(
+    process.env[APP_ORIGIN_FULL_ADDRESS_ENV],
+    allowedOrigins,
+    sandboxPublicUrl,
+  );
 
   return {
     port,
@@ -471,12 +504,12 @@ export function buildWebServerConfig(
     writable,
     initialServers,
     storageDir: process.env.MCP_STORAGE_DIR,
-    allowedOrigins: configuredOrigins?.length
-      ? configuredOrigins
-      : defaultAllowedOrigins(hostname, port),
+    allowedOrigins,
     sandboxPort,
     sandboxHost: hostname,
     appOriginPort,
+    sandboxPublicUrl,
+    appOriginPublicOrigin,
     logger,
     autoOpen: resolveAutoOpen(),
   };

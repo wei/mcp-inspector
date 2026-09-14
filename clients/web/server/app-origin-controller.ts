@@ -162,6 +162,14 @@ export interface AppOriginControllerOptions {
    * loopback, exactly as the sandbox proxy's own `frame-ancestors` does.
    */
   embedderOrigins?: string[];
+  /**
+   * The origin to serve published documents under instead of the bind-derived
+   * one — the operator's `MCP_APP_ORIGIN_FULL_ADDRESS`, already validated by
+   * `public-address.ts` (#1862). Only adopted once the listener is up, so a
+   * failed bind still makes {@link AppOriginController.publish} return null
+   * and the renderer keeps its srcdoc fallback.
+   */
+  publicOrigin?: string;
 }
 
 /** A document handed to {@link AppOriginController.publish}. */
@@ -237,9 +245,17 @@ export function createAppOriginController(
   // Same defaulting rationale as the sandbox controller: never the *name*
   // `localhost`, which resolves to a single address family and would put this
   // listener on a different family than the web server (#1951).
-  const { port, host = DEFAULT_BIND_HOST, embedderOrigins } = options;
+  const {
+    port,
+    host = DEFAULT_BIND_HOST,
+    embedderOrigins,
+    publicOrigin,
+  } = options;
   let server: Server | null = null;
   let origin: string | null = null;
+  // Tracked separately from `origin`: a public origin carries the public port
+  // (or none), not the one this listener bound.
+  let boundPort = 0;
 
   // Insertion-ordered, so the first key is the oldest entry.
   const documents = new Map<string, StoredDocument>();
@@ -268,7 +284,7 @@ export function createAppOriginController(
   return {
     async start(): Promise<{ port: number; url: string }> {
       if (server && origin) {
-        return { port: parseInt(new URL(origin).port, 10), url: origin };
+        return { port: boundPort, url: origin };
       }
       return new Promise((resolve) => {
         let settled = false;
@@ -364,7 +380,10 @@ export function createAppOriginController(
           const urlHost = isAllInterfacesHost(canonicalHost)
             ? "localhost"
             : canonicalHost;
-          origin = `http://${urlHost}:${actualPort}`;
+          // An operator-supplied public origin (#1862) replaces the derived one
+          // only now that the listener it routes to is actually up.
+          origin = publicOrigin ?? `http://${urlHost}:${actualPort}`;
+          boundPort = actualPort;
           settle({ port: actualPort, url: origin });
         });
       });
