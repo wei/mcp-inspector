@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { resolve } from "node:path";
+import type { Transport } from "@modelcontextprotocol/client";
 import * as z from "zod/v4";
 import {
   InspectorClient,
@@ -367,25 +368,40 @@ describe("InspectorClient", () => {
       messageLogState.destroy();
     });
 
+    /**
+     * A transport whose `start()` never resolves: the "server that accepts
+     * the TCP connection and never answers" from the #2320 measurement.
+     * Typed as the SDK's `Transport` rather than cast to it, so an interface
+     * change upstream is caught here instead of at runtime.
+     */
+    function hangingTransport(): Transport {
+      return {
+        start: () => new Promise<void>(() => {}),
+        send: async () => {},
+        close: async () => {},
+      };
+    }
+
+    /** A transport whose `start()` rejects with a recoverable 401. */
+    function unauthorizedTransport(): Transport {
+      return {
+        start: async () => {
+          const err = new Error("Unauthorized") as Error & { status?: number };
+          err.status = 401;
+          throw err;
+        },
+        send: async () => {},
+        close: async () => {},
+      };
+    }
+
     it("rejects connect() with a timeout error when serverSettings.connectionTimeout fires", async () => {
       // Stub transport whose start() never resolves — simulates a slow /
       // unreachable upstream. InspectorClient.connect() should race against
       // serverSettings.connectionTimeout and reject with a descriptive error;
       // status should end up in "error", and the client should have
       // internally torn down the transport (next connect() must rebuild).
-      const hangingTransport = {
-        start: () => new Promise<void>(() => {}),
-        send: async () => {},
-        close: async () => {},
-        onclose: undefined,
-        onerror: undefined,
-        onmessage: undefined,
-        sessionId: undefined,
-      };
-      const fakeFactory = () => ({
-        transport:
-          hangingTransport as unknown as import("@modelcontextprotocol/client").Transport,
-      });
+      const fakeFactory = () => ({ transport: hangingTransport() });
       client = new InspectorClient(
         { type: "streamable-http", url: "http://localhost:1/never" },
         {
@@ -417,19 +433,7 @@ describe("InspectorClient", () => {
     });
 
     it("names the bound that fired and where to raise it in the timeout message (#2320)", async () => {
-      const hangingTransport = {
-        start: () => new Promise<void>(() => {}),
-        send: async () => {},
-        close: async () => {},
-        onclose: undefined,
-        onerror: undefined,
-        onmessage: undefined,
-        sessionId: undefined,
-      };
-      const fakeFactory = () => ({
-        transport:
-          hangingTransport as unknown as import("@modelcontextprotocol/client").Transport,
-      });
+      const fakeFactory = () => ({ transport: hangingTransport() });
       client = new InspectorClient(
         { type: "streamable-http", url: "http://localhost:1/never" },
         {
@@ -464,19 +468,7 @@ describe("InspectorClient", () => {
       // Fake timers so the 30 s default can fire without waiting it out.
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
       try {
-        const hangingTransport = {
-          start: () => new Promise<void>(() => {}),
-          send: async () => {},
-          close: async () => {},
-          onclose: undefined,
-          onerror: undefined,
-          onmessage: undefined,
-          sessionId: undefined,
-        };
-        const fakeFactory = () => ({
-          transport:
-            hangingTransport as unknown as import("@modelcontextprotocol/client").Transport,
-        });
+        const fakeFactory = () => ({ transport: hangingTransport() });
         client = new InspectorClient(
           { type: "streamable-http", url: "http://localhost:1/never" },
           { environment: { transport: fakeFactory } },
@@ -504,19 +496,7 @@ describe("InspectorClient", () => {
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
       try {
         let settled = false;
-        const hangingTransport = {
-          start: () => new Promise<void>(() => {}),
-          send: async () => {},
-          close: async () => {},
-          onclose: undefined,
-          onerror: undefined,
-          onmessage: undefined,
-          sessionId: undefined,
-        };
-        const fakeFactory = () => ({
-          transport:
-            hangingTransport as unknown as import("@modelcontextprotocol/client").Transport,
-        });
+        const fakeFactory = () => ({ transport: hangingTransport() });
         client = new InspectorClient(
           { type: "streamable-http", url: "http://localhost:1/never" },
           {
@@ -551,23 +531,7 @@ describe("InspectorClient", () => {
     });
 
     it("holds status at connecting when connect fails with a recoverable 401", async () => {
-      const unauthorizedTransport = {
-        start: async () => {
-          const err = new Error("Unauthorized") as Error & { status?: number };
-          err.status = 401;
-          throw err;
-        },
-        send: async () => {},
-        close: async () => {},
-        onclose: undefined,
-        onerror: undefined,
-        onmessage: undefined,
-        sessionId: undefined,
-      };
-      const fakeFactory = () => ({
-        transport:
-          unauthorizedTransport as unknown as import("@modelcontextprotocol/client").Transport,
-      });
+      const fakeFactory = () => ({ transport: unauthorizedTransport() });
       client = new InspectorClient(
         { type: "streamable-http", url: "http://localhost:8081/mcp" },
         { environment: { transport: fakeFactory } },
@@ -584,23 +548,7 @@ describe("InspectorClient", () => {
       // recovery. With a non-zero default that gate would have fired for
       // every user, so the teardown is now keyed to the timer actually
       // winning the race, and this is the case that proves it.
-      const unauthorizedTransport = {
-        start: async () => {
-          const err = new Error("Unauthorized") as Error & { status?: number };
-          err.status = 401;
-          throw err;
-        },
-        send: async () => {},
-        close: async () => {},
-        onclose: undefined,
-        onerror: undefined,
-        onmessage: undefined,
-        sessionId: undefined,
-      };
-      const fakeFactory = () => ({
-        transport:
-          unauthorizedTransport as unknown as import("@modelcontextprotocol/client").Transport,
-      });
+      const fakeFactory = () => ({ transport: unauthorizedTransport() });
       client = new InspectorClient(
         { type: "streamable-http", url: "http://localhost:8081/mcp" },
         {

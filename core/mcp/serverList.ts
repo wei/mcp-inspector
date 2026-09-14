@@ -491,8 +491,11 @@ export function oauthEndpointOverridesFromSettings(
  *
  * `headers` becomes a pair-array preserving the object's key insertion order;
  * `oauth.*` becomes the flat `oauthClientId` / `oauthClientSecret` /
- * `oauthScopes` fields. Numeric timeouts default to 0 when absent — the form
- * needs concrete values to render and 0 is the SDK's "no timeout" signal.
+ * `oauthScopes` fields. The numeric timeouts get concrete values when absent
+ * because the form needs them to render: `connectionTimeout` reads back as
+ * `DEFAULT_CONNECTION_TIMEOUT_MS` (30 s), while `requestTimeout` reads back as
+ * 0, the SDK's "use your own default" signal. An explicit `connectionTimeout`
+ * of 0 is preserved — it is the user's "no timeout" opt-out (#2320).
  *
  * `env` / `cwd` are SDK config fields (not Inspector-extension keys), but they
  * are mirrored into the settings here so the Server Settings modal can edit
@@ -637,8 +640,10 @@ export function storedFieldsToInspectorSettings(
  * Splat the form-shape `InspectorServerSettings` back into the on-disk
  * Inspector-extension fields (object-form `headers`, nested `oauth`, etc.).
  * Empty-key rows are dropped — the form lets users leave new rows blank
- * mid-edit and those shouldn't reach disk. Numeric timeouts at 0 are omitted
- * so the file diff stays minimal for entries that never touched them.
+ * mid-edit and those shouldn't reach disk. Timeouts at their default are
+ * omitted so the file diff stays minimal for entries that never touched them:
+ * that is `DEFAULT_CONNECTION_TIMEOUT_MS` for `connectionTimeout` (an explicit
+ * 0 is a chosen opt-out and is written) and 0 for `requestTimeout`.
  *
  * Returns the field deltas to merge onto a `StoredMCPServer`; callers can
  * spread the result.
@@ -723,10 +728,11 @@ export function inspectorSettingsToStoredFields(
     out.modernLogLevel = settings.modernLogLevel;
   }
 
-  // Persist only when it differs from the default. Unlike the timeouts, 0 is a
-  // meaningful value here (unlimited), so the omit-sentinel is the default
-  // itself rather than 0 — writing the default would inject the field into
-  // hand-edited files that never had it and break byte-stable round-trips.
+  // Persist only when it differs from the default. Like connectionTimeout and
+  // unlike requestTimeout, 0 is a meaningful value here (unlimited), so the
+  // omit-sentinel is the default itself rather than 0 — writing the default
+  // would inject the field into hand-edited files that never had it and break
+  // byte-stable round-trips.
   if (settings.maxFetchRequests !== DEFAULT_MAX_FETCH_REQUESTS) {
     out.maxFetchRequests = settings.maxFetchRequests;
   }
