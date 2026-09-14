@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { SdkErrorCode } from "@modelcontextprotocol/client";
 import { InspectorClient } from "@inspector/core/mcp/inspectorClient.js";
 import { ModernGetTaskResultSchema } from "@inspector/core/mcp/modernTaskSchemas.js";
 
@@ -134,7 +135,15 @@ describe("InspectorClient raw-wire channel (#1631)", () => {
         {},
         ModernGetTaskResultSchema,
       );
-      const assertion = expect(promise).rejects.toThrow(/timed out/);
+      // The same annotated shape an SDK request's timeout carries (#2318):
+      // the SDK's code, the budget, the method, and the connection state.
+      const assertion = expect(promise).rejects.toMatchObject({
+        code: SdkErrorCode.RequestTimeout,
+        message: expect.stringMatching(
+          /^Request timed out after 10ms \(tasks\/get\)\. No requests are unanswered\./,
+        ),
+        data: expect.objectContaining({ timeout: 10, method: "tasks/get" }),
+      });
       await vi.advanceTimersByTimeAsync(20);
       await assertion;
     } finally {

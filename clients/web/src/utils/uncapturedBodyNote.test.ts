@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { FetchRequestEntry } from "@inspector/core/mcp/types.js";
 import {
   isLongLivedStreamEntry,
+  longLivedStreamLabel,
   uncapturedBodyNote,
 } from "./uncapturedBodyNote";
 
@@ -25,6 +26,27 @@ describe("isLongLivedStreamEntry", () => {
     expect(
       isLongLivedStreamEntry({ ...streamEntry, responseHeaders: undefined }),
     ).toBe(false);
+  });
+
+  it("reads the content type whatever casing the entry recorded it with", () => {
+    expect(
+      isLongLivedStreamEntry({
+        ...streamEntry,
+        responseHeaders: { "Content-Type": "text/event-stream" },
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("longLivedStreamLabel", () => {
+  it("names the framing the stream uses", () => {
+    expect(longLivedStreamLabel(streamEntry)).toBe("SSE");
+    expect(
+      longLivedStreamLabel({
+        ...streamEntry,
+        responseHeaders: { "Content-Type": "application/x-ndjson" },
+      }),
+    ).toBe("NDJSON");
   });
 });
 

@@ -271,6 +271,21 @@ describe("InspectorClient request-timeout diagnostics (#2318)", () => {
       const stream = c.getConnectionDiagnostics().notificationStream!;
       expect(stream.url).toBe(server.url);
       expect(stream.closedAt).toBeUndefined();
+      // Open from when the headers arrived, not from when the GET went out.
+      const getEntryAtOpen = log
+        .getFetchRequests()
+        .find((entry) => entry.method === "GET")!;
+      expect(stream.openedAt).toBe(
+        getEntryAtOpen.timestamp.getTime() + (getEntryAtOpen.duration ?? 0),
+      );
+      // The snapshot is a copy: mutating it does not reach the client.
+      const snapshot = c.getConnectionDiagnostics();
+      snapshot.outstandingRequests.push({
+        id: "x",
+        method: "bogus",
+        sentAt: 0,
+      });
+      expect(c.getConnectionDiagnostics().outstandingRequests).toEqual([]);
 
       // A server push on the notification stream is an event.
       server.pushEvent({

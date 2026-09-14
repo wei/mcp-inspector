@@ -251,15 +251,32 @@ export interface FetchTrackingCallbacks {
 }
 
 /**
- * Count the SSE events on a long-lived stream without buffering it, and
- * report when it ends.
+ * The framing a long-lived stream's events arrive in — the two content types
+ * `isLongLivedStreamResponse` accepts. SSE dispatches on a blank line;
+ * NDJSON dispatches on every line.
+ */
+export type LongLivedStreamFraming = "sse" | "ndjson";
+
+/** The framing for a long-lived stream's content type. */
+export function longLivedStreamFraming(
+  contentType: string | null | undefined,
+): LongLivedStreamFraming {
+  return contentType?.includes("application/x-ndjson") ? "ndjson" : "sse";
+}
+
+/**
+ * Count the events on a long-lived stream without buffering it, and report
+ * when it ends.
  *
  * Reads a `clone()` of the response through a reader and discards the bytes,
  * so the transport keeps consuming the original at its own pace (the same
- * tee the bounded-body path relies on). Counting follows the SSE framing the
- * transport's own parser applies: a blank line dispatches the block before
- * it, and only a block carrying a `data` field is an event — keepalive
- * comments (`: ping`) and bare `event:`/`id:` lines are not.
+ * tee the bounded-body path relies on). Counting follows the framing the
+ * transport's own parser applies. For SSE a blank line dispatches the block
+ * before it, and only a block carrying a `data` field is an event —
+ * keepalive comments (`: ping`) and bare `event:`/`id:` lines are not; a
+ * partial block at end-of-stream is dropped, exactly as the SSE spec and the
+ * SDK's `EventSourceParserStream` (which has no flush) drop it. For NDJSON
+ * every non-blank line is one event.
  *
  * Reports once as soon as watching starts (zero events, open), once per event,
  * and once more on every exit from the read loop — a clean end-of-stream, a
@@ -273,6 +290,7 @@ export interface FetchTrackingCallbacks {
 function watchLongLivedStream(
   response: Response,
   id: string,
+  framing: LongLivedStreamFraming,
   callbacks: FetchTrackingCallbacks,
 ): void {
   const update = callbacks.updateStream;
@@ -298,6 +316,12 @@ function watchLongLivedStream(
 
   const consumeLine = (rawLine: string): void => {
     const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    if (framing === "ndjson") {
+      if (line.trim() === "") return;
+      eventCount += 1;
+      update(id, { eventCount });
+      return;
+    }
     if (line === "") {
       if (blockHasData) {
         eventCount += 1;
@@ -331,6 +355,10 @@ function watchLongLivedStream(
     }
     update(id, { eventCount, closedAt: new Date() });
   };
+  // Deliberately not awaited: the fetch wrapper has to return the response
+  // now, and this watcher lives as long as the stream does. It owns its own
+  // failures — the read loop is wrapped in a `try` that treats an error as a
+  // close — so the promise cannot reject.
   void pump();
 }
 
@@ -481,7 +509,12 @@ export function createFetchTracker(
     // but its event count and its eventual close are exactly the state a
     // stalled connection is diagnosed from (#2318).
     if (isLongLivedStream && response.body && !response.bodyUsed) {
-      watchLongLivedStream(response, id, callbacks);
+      watchLongLivedStream(
+        response,
+        id,
+        longLivedStreamFraming(response.headers.get("content-type")),
+        callbacks,
+      );
     }
 
     // Kick off a fire-and-forget read of the cloned body. The clone is an

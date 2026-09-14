@@ -1,15 +1,36 @@
 // The Network entry's body placeholder for a response whose body was not
 // captured (#2318). Pure: a string from the entry alone.
 
-import { isLongLivedStreamResponse } from "@inspector/core/mcp/fetchTracking.js";
+import {
+  findHeader,
+  isLongLivedStreamResponse,
+  longLivedStreamFraming,
+} from "@inspector/core/mcp/fetchTracking.js";
 import type { FetchRequestEntry } from "@inspector/core/mcp/types.js";
 
-/** Whether the entry is an unbounded server-to-client stream (never buffered). */
+/**
+ * Whether the entry is an unbounded server-to-client stream (never
+ * buffered). The header lookup is case-insensitive: a recorded entry keeps
+ * the wire casing (`Content-Type` on some hosts, and in a restored session),
+ * and a miss here would silently reclassify the stream as a bounded body.
+ */
 export function isLongLivedStreamEntry(entry: FetchRequestEntry): boolean {
   return isLongLivedStreamResponse(
     entry.method,
-    entry.responseHeaders?.["content-type"],
+    findHeader(entry.responseHeaders, "content-type"),
   );
+}
+
+/**
+ * The badge label for a long-lived stream entry — `SSE` or `NDJSON`, by the
+ * same content-type split the tracker counts events with.
+ */
+export function longLivedStreamLabel(entry: FetchRequestEntry): string {
+  return longLivedStreamFraming(
+    findHeader(entry.responseHeaders, "content-type"),
+  ) === "ndjson"
+    ? "NDJSON"
+    : "SSE";
 }
 
 /**

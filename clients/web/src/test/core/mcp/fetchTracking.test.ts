@@ -792,6 +792,40 @@ describe("createFetchTracker long-lived stream watching (#2318)", () => {
     expect(updates.map((u) => u.stream.eventCount)).toEqual([0, 1, 2]);
   });
 
+  it("counts every non-blank line on an NDJSON stream", async () => {
+    const server = controlledStream();
+    const updates: Array<{ id: string; stream: FetchStreamState }> = [];
+    const fetcher = createFetchTracker(
+      (async () =>
+        new Response(server.stream, {
+          headers: { "content-type": "application/x-ndjson" },
+        })) as typeof fetch,
+      { updateStream: (id, state) => updates.push({ id, stream: state }) },
+    );
+    await fetcher("https://example.com/mcp", { method: "GET" });
+    server.push('{"jsonrpc":"2.0","method":"a"}\n\n');
+    server.push('{"jsonrpc":"2.0","method":"b"}\r\n');
+    // A partial line is not an event until its newline arrives.
+    server.push('{"jsonrpc":"2.0",');
+    await flush();
+    expect(updates.map((u) => u.stream.eventCount)).toEqual([0, 1, 2]);
+    server.push('"method":"c"}\n');
+    await flush();
+    expect(updates.at(-1)!.stream.eventCount).toBe(3);
+  });
+
+  it("drops a partial SSE block at end-of-stream, as the SDK's parser does", async () => {
+    const server = controlledStream();
+    const { updates } = await trackStream(server.stream);
+    // A data line with no dispatching blank line before the stream ends.
+    server.push("data: one\n\ndata: two\n");
+    server.end();
+    await flush();
+    const last = updates.at(-1)!.stream;
+    expect(last.eventCount).toBe(1);
+    expect(last.closedAt).toBeInstanceOf(Date);
+  });
+
   it("reports the close when the server ends the stream", async () => {
     const server = controlledStream();
     const { updates, id } = await trackStream(server.stream);

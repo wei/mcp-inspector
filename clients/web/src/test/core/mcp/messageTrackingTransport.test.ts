@@ -33,6 +33,30 @@ function makeTracked() {
 }
 
 describe("MessageTrackingTransport.send", () => {
+  it("reports a request the base transport failed to send, after tracking it (#2318)", async () => {
+    const { callbacks, base, tracked } = makeTracked();
+    const trackSendFailure = vi.fn();
+    const failing = new MessageTrackingTransport(base, {
+      ...callbacks,
+      trackSendFailure,
+    });
+    const boom = new Error("connection closed");
+    base.send = async () => {
+      throw boom;
+    };
+    const request = { jsonrpc: "2.0", id: 1, method: "tools/list" } as const;
+    await expect(failing.send(request)).rejects.toBe(boom);
+    expect(callbacks.trackRequest).toHaveBeenCalledWith(request, "client");
+    expect(trackSendFailure).toHaveBeenCalledWith(request, boom);
+    // Only requests roll back: a failed notification has no pending entry.
+    trackSendFailure.mockClear();
+    await expect(
+      failing.send({ jsonrpc: "2.0", method: "notifications/initialized" }),
+    ).rejects.toBe(boom);
+    expect(trackSendFailure).not.toHaveBeenCalled();
+    void tracked;
+  });
+
   it("tracks an outgoing request", async () => {
     const { callbacks, tracked } = makeTracked();
     const request = { jsonrpc: "2.0", id: 1, method: "tools/list" } as const;

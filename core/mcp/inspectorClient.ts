@@ -270,6 +270,7 @@ import {
   findHeader,
   isLongLivedStreamResponse,
 } from "./fetchTracking.js";
+import { SdkError, SdkErrorCode } from "@modelcontextprotocol/client";
 import {
   annotateRequestTimeout,
   type ConnectionDiagnostics,
@@ -1129,6 +1130,15 @@ export class InspectorClient extends InspectorClientEventTarget {
           message,
         };
         this.dispatchTypedEvent("message", entry);
+      },
+      trackSendFailure: (message: JSONRPCRequest) => {
+        // The frame never reached the wire, so it is not awaiting a response.
+        // Leaving it would report a request the server never saw as
+        // unanswered, in every timeout message and Connection Info row, until
+        // the session resets (#2318).
+        if (this.outstandingRequests.delete(message.id)) {
+          this.dispatchConnectionDiagnosticsChange();
+        }
       },
       trackResponse: (
         message: JSONRPCResultResponse | JSONRPCErrorResponse,
@@ -2915,8 +2925,19 @@ export class InspectorClient extends InspectorClientEventTarget {
     const raw = await new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingRawWireRequests.delete(id);
+        // The same error, with the same annotation, as an SDK request that
+        // times out: this path bypasses `Protocol.request`, so it builds the
+        // SDK's own timeout shape and runs it through the decorator's
+        // annotation by hand — a raw-wire caller sees one kind of timeout,
+        // not two (#2318).
         reject(
-          new Error(`Raw request "${method}" timed out after ${timeoutMs} ms`),
+          annotateRequestTimeout(
+            new SdkError(SdkErrorCode.RequestTimeout, "Request timed out", {
+              timeout: timeoutMs,
+            }),
+            method,
+            this.getConnectionDiagnostics(),
+          ),
         );
       }, timeoutMs);
       this.pendingRawWireRequests.set(id, { resolve, reject, timer });
@@ -6083,7 +6104,9 @@ export class InspectorClient extends InspectorClientEventTarget {
     this.notificationStream = {
       id: entry.id,
       url: entry.url,
-      openedAt: entry.timestamp.getTime(),
+      // The entry's `timestamp` is when the request went out; the stream is
+      // open from when the response headers arrived, `duration` later.
+      openedAt: entry.timestamp.getTime() + (entry.duration ?? 0),
       eventCount: 0,
     };
     this.dispatchConnectionDiagnosticsChange();
@@ -6098,7 +6121,12 @@ export class InspectorClient extends InspectorClientEventTarget {
   getConnectionDiagnostics(): ConnectionDiagnostics {
     return {
       capturedAt: Date.now(),
-      outstandingRequests: [...this.outstandingRequests.values()],
+      // Copies, not the tracked records: the snapshot is handed to callers
+      // and carried on errors, and a mutation there must not reach the
+      // correlation state.
+      outstandingRequests: [...this.outstandingRequests.values()].map(
+        (request) => ({ ...request }),
+      ),
       ...(this.lastResponse && { lastResponse: { ...this.lastResponse } }),
       ...(this.notificationStream && {
         notificationStream: this.publicStreamState(this.notificationStream),

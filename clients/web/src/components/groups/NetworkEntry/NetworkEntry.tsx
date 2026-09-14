@@ -17,6 +17,7 @@ import { RiErrorWarningLine } from "react-icons/ri";
 import type { FetchRequestEntry } from "@inspector/core/mcp/types.js";
 import {
   isLongLivedStreamEntry,
+  longLivedStreamLabel,
   uncapturedBodyNote,
 } from "../../../utils/uncapturedBodyNote";
 import { ContentViewer } from "../../elements/ContentViewer/ContentViewer";
@@ -549,7 +550,9 @@ export function NetworkEntry({
       {entry.duration != null && (
         <DurationText>{formatDuration(entry.duration)}</DurationText>
       )}
-      {isLongLivedStreamEntry(entry) && <StreamBadge>SSE</StreamBadge>}
+      {isLongLivedStreamEntry(entry) && (
+        <StreamBadge>{longLivedStreamLabel(entry)}</StreamBadge>
+      )}
       <Badge color={statusColor(entry)} variant="status">
         {statusLabel(entry)}
       </Badge>

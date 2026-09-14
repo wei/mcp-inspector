@@ -90,9 +90,9 @@ describe("useInspectorClient", () => {
     const client = new FakeInspectorClient();
     // `getConnectionDiagnostics` is optional on the protocol; a double that
     // predates it must still yield the one shape consumers expect.
-    (
-      client as unknown as { getConnectionDiagnostics?: unknown }
-    ).getConnectionDiagnostics = undefined;
+    Object.defineProperty(client, "getConnectionDiagnostics", {
+      value: undefined,
+    });
     const { result } = renderHook(() => useInspectorClient(client));
     expect(result.current.connectionDiagnostics).toEqual({
       capturedAt: 0,

@@ -24,6 +24,14 @@ export interface MessageTrackingCallbacks {
     message: JSONRPCNotification,
     origin: MessageOrigin,
   ) => void;
+  /**
+   * An outgoing request the base transport failed to send (the connection
+   * closed, the fetch failed before the frame reached the wire). Fires after
+   * `trackRequest` already recorded it, so a consumer keeping "requests still
+   * awaiting a response" can roll that entry back — a request that never went
+   * out is not unanswered (#2318).
+   */
+  trackSendFailure?: (message: JSONRPCRequest, error: unknown) => void;
 }
 
 /**
@@ -95,7 +103,12 @@ export class MessageTrackingTransport implements Transport {
           "client",
         );
       } else if ("method" in message) {
-        this.callbacks.trackRequest?.(message as JSONRPCRequest, "client");
+        const request = message as JSONRPCRequest;
+        this.callbacks.trackRequest?.(request, "client");
+        return this.baseTransport.send(message, options).catch((err) => {
+          this.callbacks.trackSendFailure?.(request, err);
+          throw err;
+        });
       }
     } else if ("method" in message) {
       this.callbacks.trackNotification?.(
