@@ -516,7 +516,9 @@ describe("useServers", () => {
       headers: [{ key: "X-Keep", value: "yes" }],
       env: [],
       metadata: {},
-      connectionTimeout: 0,
+      // Absent connectionTimeout on disk reads back as the 30 s product
+      // default for the form (#2320).
+      connectionTimeout: 30000,
       requestTimeout: 0,
       // Absent taskTtl on disk reads back as the product default for the form.
       taskTtl: 60000,

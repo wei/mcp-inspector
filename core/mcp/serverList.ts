@@ -6,6 +6,7 @@
  */
 
 import {
+  DEFAULT_CONNECTION_TIMEOUT_MS,
   DEFAULT_MAX_FETCH_REQUESTS,
   DEFAULT_MODERN_LOG_LEVEL,
   DEFAULT_PROTOCOL_ERA,
@@ -533,9 +534,13 @@ export function storedFieldsToInspectorSettings(
     headers: headersPairs,
     env: envRecordToPairs(stored.env),
     metadata: normalizeStoredMetadata(stored.metadata),
-    connectionTimeout: stored.connectionTimeout ?? 0,
+    // Concrete product default, like taskTtl below: an absent field reads back
+    // as 30 s so the form shows the bound that will actually apply. An explicit
+    // 0 is preserved as-is — it is the user's opt-out, not a sentinel (#2320).
+    connectionTimeout:
+      stored.connectionTimeout ?? DEFAULT_CONNECTION_TIMEOUT_MS,
     requestTimeout: stored.requestTimeout ?? 0,
-    // Unlike the timeouts (0 = "SDK default"), task TTL has a concrete product
+    // Unlike requestTimeout (0 = "SDK default"), task TTL has a concrete product
     // default so the form shows it and "Run as task" has a value to send.
     taskTtl: stored.taskTtl ?? DEFAULT_TASK_TTL_MS,
     autoRefreshOnListChanged: stored.autoRefreshOnListChanged ?? false,
@@ -659,7 +664,11 @@ export function inspectorSettingsToStoredFields(
     out.metadata = settings.metadata;
   }
 
-  if (settings.connectionTimeout > 0) {
+  // The product default is the omit-sentinel (as for taskTtl below), so a file
+  // that never named a timeout stays byte-stable. Anything else persists —
+  // including 0, which is now a non-default the user chose (no timeout) and
+  // would otherwise silently read back as 30 s on the next load (#2320).
+  if (settings.connectionTimeout !== DEFAULT_CONNECTION_TIMEOUT_MS) {
     out.connectionTimeout = settings.connectionTimeout;
   }
   if (settings.requestTimeout > 0) {
