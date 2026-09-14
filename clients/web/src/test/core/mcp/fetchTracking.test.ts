@@ -1,5 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 import {
+  CHALLENGE_BODY_MAX_BYTES,
+  CHALLENGE_BODY_READ_MS,
+  TRUNCATED_BODY_SUFFIX,
+  WITHHELD_TRUNCATED_JSON_BODY,
   createFetchTracker,
   findHeader,
   redactSensitiveHeaders,
@@ -540,6 +544,281 @@ describe("createFetchTracker", () => {
       body: malformed,
     });
     expect(tracked[0]!.requestBody).toBe(malformed);
+  });
+});
+
+describe("createFetchTracker — 401/403 challenge bodies (#2297)", () => {
+  function track(response: Response) {
+    const tracked: FetchRequestEntryBase[] = [];
+    const updateResponseBody = vi.fn();
+    const fetcher = createFetchTracker((async () => response) as typeof fetch, {
+      trackRequest: (entry) => tracked.push(entry),
+      updateResponseBody,
+    });
+    return { fetcher, tracked, updateResponseBody };
+  }
+
+  it("records the body on the entry itself, before returning", async () => {
+    const body = JSON.stringify({ error: "invalid_token" });
+    const { fetcher, tracked, updateResponseBody } = track(
+      new Response(body, {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const res = await fetcher("https://mcp.example/mcp", { method: "POST" });
+
+    expect(tracked).toHaveLength(1);
+    expect(tracked[0]?.responseStatus).toBe(401);
+    expect(tracked[0]?.responseBody).toBe(body);
+    expect(updateResponseBody).not.toHaveBeenCalled();
+    // The caller still gets an unread body.
+    expect(await res.text()).toBe(body);
+  });
+
+  it("does the same for a 403", async () => {
+    const { fetcher, tracked } = track(
+      new Response("insufficient_scope", { status: 403 }),
+    );
+    await fetcher("https://mcp.example/mcp", { method: "POST" });
+    expect(tracked[0]?.responseBody).toBe("insufficient_scope");
+  });
+
+  it("stops at the byte cap and marks the body truncated", async () => {
+    const chunk = new Uint8Array(CHALLENGE_BODY_MAX_BYTES / 2).fill(97);
+    let pulls = 0;
+    const cancel = vi.fn();
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1;
+        controller.enqueue(chunk);
+      },
+      cancel,
+    });
+    const { fetcher, tracked } = track(new Response(stream, { status: 401 }));
+
+    const res = await fetcher("https://mcp.example/mcp", { method: "POST" });
+
+    const recorded = tracked[0]?.responseBody ?? "";
+    expect(recorded.endsWith(TRUNCATED_BODY_SUFFIX)).toBe(true);
+    expect(recorded.length - TRUNCATED_BODY_SUFFIX.length).toBe(
+      CHALLENGE_BODY_MAX_BYTES,
+    );
+    // With the clone released, cancelling the caller's branch reaches the source.
+    await res.body?.cancel();
+    expect(cancel).toHaveBeenCalled();
+    expect(pulls).toBeLessThan(10);
+  });
+
+  it("gives up on a stalled body at the deadline and releases the source", async () => {
+    vi.useFakeTimers();
+    try {
+      const cancel = vi.fn();
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("partial"));
+        },
+        cancel,
+      });
+      const { fetcher, tracked } = track(new Response(stream, { status: 401 }));
+
+      const pending = fetcher("https://mcp.example/mcp", { method: "POST" });
+      await vi.advanceTimersByTimeAsync(CHALLENGE_BODY_READ_MS);
+      const res = await pending;
+
+      expect(tracked[0]?.responseBody).toBe(`partial${TRUNCATED_BODY_SUFFIX}`);
+      await res.body?.cancel();
+      expect(cancel).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("records the entry with no body when the clone cannot be made", async () => {
+    const response = new Response("nope", { status: 401 });
+    vi.spyOn(response, "clone").mockImplementation(() => {
+      throw new Error("clone failed");
+    });
+    const { fetcher, tracked } = track(response);
+
+    await fetcher("https://mcp.example/mcp", { method: "POST" });
+
+    expect(tracked).toHaveLength(1);
+    expect(tracked[0]?.responseStatus).toBe(401);
+    expect(tracked[0]?.responseBody).toBeUndefined();
+  });
+
+  it("records the entry with no body when the read errors", async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.error(new Error("socket reset"));
+      },
+    });
+    const { fetcher, tracked } = track(new Response(stream, { status: 401 }));
+
+    await fetcher("https://mcp.example/mcp", { method: "POST" });
+
+    expect(tracked[0]?.responseStatus).toBe(401);
+    expect(tracked[0]?.responseBody).toBeUndefined();
+  });
+});
+
+describe("createFetchTracker — challenge body bounds and redaction (#2297)", () => {
+  function trackOne(response: Response) {
+    const tracked: FetchRequestEntryBase[] = [];
+    const fetcher = createFetchTracker((async () => response) as typeof fetch, {
+      trackRequest: (entry) => tracked.push(entry),
+    });
+    return { fetcher, tracked };
+  }
+
+  /** A body that delivers `prefix` and then never ends. */
+  function stalledBody(prefix: string): ReadableStream<Uint8Array> {
+    return new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(prefix));
+      },
+    });
+  }
+
+  async function withDeadlineElapsed<T>(run: () => Promise<T>): Promise<T> {
+    vi.useFakeTimers();
+    try {
+      const pending = run();
+      await vi.advanceTimersByTimeAsync(CHALLENGE_BODY_READ_MS);
+      return await pending;
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  it("caps a single chunk larger than the budget at the byte limit", async () => {
+    const oversized = new Uint8Array(1024 * 1024).fill(97);
+    const { fetcher, tracked } = trackOne(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(oversized);
+            controller.close();
+          },
+        }),
+        { status: 401 },
+      ),
+    );
+
+    await fetcher("https://mcp.example/mcp", { method: "POST" });
+
+    const recorded = tracked[0]?.responseBody ?? "";
+    expect(recorded.endsWith(TRUNCATED_BODY_SUFFIX)).toBe(true);
+    expect(recorded.length - TRUNCATED_BODY_SUFFIX.length).toBe(
+      CHALLENGE_BODY_MAX_BYTES,
+    );
+  });
+
+  it("records the body of a 401 to a long-lived-stream GET", async () => {
+    const { fetcher, tracked } = trackOne(
+      new Response("unauthorized", {
+        status: 401,
+        headers: { "content-type": "text/event-stream" },
+      }),
+    );
+
+    await fetcher("https://mcp.example/mcp", { method: "GET" });
+
+    expect(tracked[0]?.responseBody).toBe("unauthorized");
+  });
+
+  it("withholds a cut-off JSON body rather than logging an unredacted prefix", async () => {
+    const { fetcher, tracked } = trackOne(
+      new Response(stalledBody('{"access_token":"live-access","token_type'), {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    await withDeadlineElapsed(() =>
+      fetcher("https://mcp.example/token", { method: "POST" }),
+    );
+
+    expect(tracked[0]?.responseBody).toBe(WITHHELD_TRUNCATED_JSON_BODY);
+    expect(serializedWithoutId(tracked[0]!)).not.toContain("live-access");
+  });
+
+  it("withholds a cut-off body that sniffs as JSON with no content-type", async () => {
+    const { fetcher, tracked } = trackOne(
+      new Response(stalledBody('  [{"refresh_token":"live-refresh"'), {
+        status: 403,
+      }),
+    );
+
+    await withDeadlineElapsed(() =>
+      fetcher("https://mcp.example/token", { method: "POST" }),
+    );
+
+    expect(tracked[0]?.responseBody).toBe(WITHHELD_TRUNCATED_JSON_BODY);
+  });
+
+  it("still redacts a complete JSON challenge body", async () => {
+    const { fetcher, tracked } = trackOne(
+      new Response(JSON.stringify({ error: "x", access_token: "live" }), {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    await fetcher("https://mcp.example/token", { method: "POST" });
+
+    expect(tracked[0]?.responseBody).toBe(
+      JSON.stringify({ error: "x", access_token: REDACTED_VALUE }),
+    );
+  });
+
+  it("redacts a cut-off form body field by field", async () => {
+    const { fetcher, tracked } = trackOne(
+      new Response(stalledBody("error=invalid&access_token=live&scope=re"), {
+        status: 401,
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+      }),
+    );
+
+    await withDeadlineElapsed(() =>
+      fetcher("https://mcp.example/token", { method: "POST" }),
+    );
+
+    const recorded = tracked[0]?.responseBody ?? "";
+    expect(recorded).not.toContain("live");
+    expect(recorded.endsWith(TRUNCATED_BODY_SUFFIX)).toBe(true);
+  });
+});
+
+describe("createFetchTracker — challenge body cancel rejection (#2297)", () => {
+  it("swallows the source's cancel() rejection after stopping early", async () => {
+    const chunk = new Uint8Array(CHALLENGE_BODY_MAX_BYTES).fill(97);
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(chunk);
+      },
+      cancel() {
+        throw new Error("cancel failed");
+      },
+    });
+    const tracked: FetchRequestEntryBase[] = [];
+    const fetcher = createFetchTracker(
+      (async () => new Response(stream, { status: 401 })) as typeof fetch,
+      { trackRequest: (entry) => tracked.push(entry) },
+    );
+
+    const res = await fetcher("https://mcp.example/mcp", { method: "POST" });
+    // Cancelling the caller's branch cancels the source, whose rejection then
+    // reaches the tracker's own cancel of its clone — which must swallow it.
+    await res.body?.cancel().catch(() => undefined);
+    await flush();
+
+    expect(tracked[0]?.responseStatus).toBe(401);
+    expect(tracked[0]?.responseBody?.endsWith(TRUNCATED_BODY_SUFFIX)).toBe(
+      true,
+    );
   });
 });
 

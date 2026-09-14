@@ -74,12 +74,29 @@ export function createTransportNode(
     onAuthChallengeObserved
       ? createAuthChallengeObserverFetch(inner, onAuthChallengeObserved)
       : inner;
+  const withTracking = (inner: typeof fetch): typeof fetch =>
+    wantsFetchTracking
+      ? createFetchTracker(inner, {
+          trackRequest: onFetchRequest,
+          updateResponseBody: onFetchResponseBody,
+          updateStream: onFetchStreamUpdate,
+        })
+      : inner;
   // The observer sits *under* the interceptor so it still reports the
   // challenge on the path where interception throws — and, more to the point,
   // on the legacy first-auth path where interception is off entirely.
+  //
+  // The network tracker sits under the interceptor too (#2297). Above it, the
+  // tracker never saw the 401/403 at all: the interceptor cancels the body and
+  // throws, so the entry was recorded from the thrown error alone — no status,
+  // no `WWW-Authenticate`, and no response body, which is exactly the detail
+  // someone debugging an OAuth challenge needs. Below it, the tracker records
+  // the real response and reads its body (bounded) before the interceptor
+  // cancels it.
+  const trackedBase = withTracking(withChallengeObserver(baseFetch));
   const fetchWithOptionalAuthIntercept = interceptAuthChallenges
-    ? createAuthChallengeInterceptFetch(withChallengeObserver(baseFetch))
-    : withChallengeObserver(baseFetch);
+    ? createAuthChallengeInterceptFetch(trackedBase)
+    : trackedBase;
 
   if (serverType === "stdio") {
     const stdioConfig = config as StdioServerConfig;
@@ -118,16 +135,9 @@ export function createTransportNode(
     const configuredSseFetch = sseConfig.eventSourceInit?.fetch as
       | typeof fetch
       | undefined;
-    const sseFetch = configuredSseFetch
-      ? withChallengeObserver(configuredSseFetch)
+    const trackedFetch = configuredSseFetch
+      ? withTracking(withChallengeObserver(configuredSseFetch))
       : fetchWithOptionalAuthIntercept;
-    const trackedFetch = wantsFetchTracking
-      ? createFetchTracker(sseFetch, {
-          trackRequest: onFetchRequest,
-          updateResponseBody: onFetchResponseBody,
-          updateStream: onFetchStreamUpdate,
-        })
-      : sseFetch;
 
     const headers = headersFromSettings(settings);
 
@@ -142,19 +152,11 @@ export function createTransportNode(
       ...(headers && { headers }),
     };
 
-    const postFetch = wantsFetchTracking
-      ? createFetchTracker(fetchWithOptionalAuthIntercept, {
-          trackRequest: onFetchRequest,
-          updateResponseBody: onFetchResponseBody,
-          updateStream: onFetchStreamUpdate,
-        })
-      : fetchWithOptionalAuthIntercept;
-
     const transport = new SSEClientTransport(url, {
       authProvider,
       eventSourceInit,
       requestInit,
-      fetch: postFetch,
+      fetch: fetchWithOptionalAuthIntercept,
     });
 
     return { transport };
@@ -170,18 +172,10 @@ export function createTransportNode(
       ...(headers && { headers }),
     };
 
-    const transportFetch = wantsFetchTracking
-      ? createFetchTracker(fetchWithOptionalAuthIntercept, {
-          trackRequest: onFetchRequest,
-          updateResponseBody: onFetchResponseBody,
-          updateStream: onFetchStreamUpdate,
-        })
-      : fetchWithOptionalAuthIntercept;
-
     const transport = new StreamableHTTPClientTransport(url, {
       authProvider,
       requestInit,
-      fetch: transportFetch,
+      fetch: fetchWithOptionalAuthIntercept,
       // SEP-2350: how the transport reacts to a `403 insufficient_scope`
       // challenge. Defaults to the SDK's `reauthorize` when unset.
       ...(settings?.oauthOnInsufficientScope && {

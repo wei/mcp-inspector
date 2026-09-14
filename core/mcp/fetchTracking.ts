@@ -151,6 +151,14 @@ function redactJsonValue(value: unknown): unknown {
  * multipart, so the risk is low; revisit if a multipart secret path appears.
  */
 export function redactBody(
+  body: string,
+  contentType: string | null | undefined,
+): string;
+export function redactBody(
+  body: string | undefined,
+  contentType: string | null | undefined,
+): string | undefined;
+export function redactBody(
   body: string | undefined,
   contentType: string | null | undefined,
 ): string | undefined {
@@ -230,6 +238,98 @@ export function isLongLivedStreamResponse(
   return (
     type.includes("text/event-stream") || type.includes("application/x-ndjson")
   );
+}
+
+/** Most of a 401/403 body the tracker will buffer before it stops reading. */
+export const CHALLENGE_BODY_MAX_BYTES = 64 * 1024;
+/** How long the tracker waits for a 401/403 body before giving up on the rest. */
+export const CHALLENGE_BODY_READ_MS = 2_000;
+/** Appended to a 401/403 body the tracker stopped reading early. */
+export const TRUNCATED_BODY_SUFFIX = "\n[truncated]";
+/**
+ * Recorded in place of a 401/403 body that was cut off and looks like JSON.
+ * {@link redactBody} can only mask fields in JSON that parses, so a cut-off
+ * prefix such as `{"access_token":"…",` would otherwise reach the log verbatim.
+ */
+export const WITHHELD_TRUNCATED_JSON_BODY =
+  "[truncated JSON body withheld: an incomplete body cannot be redacted]";
+
+interface ChallengeBodyRead {
+  text: string;
+  truncated: boolean;
+}
+
+/**
+ * The recorded form of a 401/403 body: redacted, marked when cut off, and never
+ * a cut-off JSON prefix. Form-encoded bodies still redact when cut, since each
+ * surviving `key=value` pair is parsed on its own; plain text has nothing to
+ * redact either way.
+ */
+function recordableChallengeBody(
+  read: ChallengeBodyRead,
+  contentType: string | null,
+): string {
+  if (!read.truncated) return redactBody(read.text, contentType);
+  const looksLikeJson =
+    (contentType ?? "").toLowerCase().includes("json") ||
+    /^\s*[{[]/.test(read.text);
+  if (looksLikeJson) return WITHHELD_TRUNCATED_JSON_BODY;
+  return redactBody(read.text, contentType) + TRUNCATED_BODY_SUFFIX;
+}
+
+/**
+ * Read a 401/403 response body from a clone, bounded by
+ * {@link CHALLENGE_BODY_MAX_BYTES} and {@link CHALLENGE_BODY_READ_MS}.
+ *
+ * Unlike every other status, a challenge body is read *before* the entry is
+ * recorded (#2297). An auth-challenge interceptor above the tracker cancels the
+ * response and throws as soon as the tracker returns, and on the web backend
+ * that ends the connect request — so a body delivered later, as a separate
+ * update, arrives after anything could still carry it to the log. The bound is
+ * what makes waiting safe: a body that never ends is cut off, and cancelling the
+ * clone's reader lets the interceptor's cancel of the original release the
+ * connection instead of leaving the clone draining it.
+ */
+async function readChallengeBody(
+  response: Response,
+): Promise<ChallengeBodyRead | undefined> {
+  let reader: ReadableStreamDefaultReader<Uint8Array>;
+  try {
+    const body = response.clone().body;
+    /* v8 ignore next -- the caller checked response.body, and a clone of a response with a body has one */
+    if (!body) return undefined;
+    reader = body.getReader();
+  } catch {
+    return undefined;
+  }
+
+  const decoder = new TextDecoder();
+  let text = "";
+  let bytes = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), CHALLENGE_BODY_READ_MS);
+  });
+  try {
+    while (bytes < CHALLENGE_BODY_MAX_BYTES) {
+      const next = await Promise.race([reader.read(), deadline]);
+      if (next === "timeout") break;
+      if (next.done) return { text: text + decoder.decode(), truncated: false };
+      // A stream may hand back one chunk far larger than the budget, so the cap
+      // is applied to the bytes, not to the chunk count.
+      const chunk = next.value.subarray(0, CHALLENGE_BODY_MAX_BYTES - bytes);
+      bytes += chunk.byteLength;
+      text += decoder.decode(chunk, { stream: true });
+    }
+    // Stopped early. Not awaited: cancel() adopts the source's promise, which a
+    // stalled body may never settle.
+    reader.cancel().catch(() => {});
+    return { text: text + decoder.decode(), truncated: true };
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export interface FetchTrackingCallbacks {
@@ -577,6 +677,22 @@ export function createFetchTracker(
       responseBody: undefined,
       duration,
     };
+
+    // Not gated on isLongLivedStream: that exclusion guards an unbounded read,
+    // and this one is bounded — so a challenge to an SSE GET is recorded too.
+    if (
+      (responseStatus === 401 || responseStatus === 403) &&
+      response.body &&
+      !response.bodyUsed
+    ) {
+      const read = await readChallengeBody(response);
+      entry.responseBody =
+        read === undefined
+          ? undefined
+          : recordableChallengeBody(read, response.headers.get("content-type"));
+      callbacks.trackRequest?.(entry);
+      return response;
+    }
 
     callbacks.trackRequest?.(entry);
 
