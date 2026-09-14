@@ -310,8 +310,21 @@ function watchLongLivedStream(
   framing: LongLivedStreamFraming,
   callbacks: FetchTrackingCallbacks,
 ): void {
-  const report = callbacks.updateStream;
-  if (!report) return;
+  const listener = callbacks.updateStream;
+  if (!listener) return;
+  // Every report goes through here: the listener is consumer code (a relay
+  // sink that may already be closed, a state store), and it runs from three
+  // places none of which may throw outward — synchronously inside the fetch
+  // wrapper (the open), from a timer (a coalesced count), and off the
+  // discarded watcher promise (the close). A throw is the listener's
+  // problem; the stream's bookkeeping carries on.
+  const report = (state: FetchStreamState): void => {
+    try {
+      listener(id, state);
+    } catch {
+      // See above.
+    }
+  };
   const intervalMs =
     callbacks.streamUpdateIntervalMs ?? DEFAULT_STREAM_UPDATE_INTERVAL_MS;
   let body: ReadableStream<Uint8Array> | null;
@@ -333,19 +346,19 @@ function watchLongLivedStream(
   let reportTimer: ReturnType<typeof setTimeout> | null = null;
   const reportCount = (): void => {
     if (intervalMs <= 0) {
-      report(id, { eventCount });
+      report({ eventCount });
       return;
     }
     if (reportTimer !== null) return;
     reportTimer = setTimeout(() => {
       reportTimer = null;
-      report(id, { eventCount });
+      report({ eventCount });
     }, intervalMs);
   };
   // Announce the stream as open before a byte arrives. A stream that never
   // delivers anything is the #2187 tell, and it would otherwise be the one
   // stream with no state to show — the count only moves on an event.
-  report(id, { eventCount });
+  report({ eventCount });
 
   const consumeLine = (line: string): void => {
     if (framing === "ndjson") {
@@ -410,17 +423,12 @@ function watchLongLivedStream(
       clearTimeout(reportTimer);
       reportTimer = null;
     }
-    try {
-      report(id, { eventCount, closedAt: new Date() });
-    } catch {
-      // A listener that throws must not become an unhandled rejection off a
-      // promise nothing awaits; the stream is closed either way.
-    }
+    report({ eventCount, closedAt: new Date() });
   };
   // Deliberately not awaited: the fetch wrapper has to return the response
   // now, and this watcher lives as long as the stream does. It owns its own
-  // failures — the read loop and the final report are each wrapped in a
-  // `try` — so the promise cannot reject.
+  // failures — the read loop is wrapped in a `try`, and every report goes
+  // through the non-throwing `report` above — so the promise cannot reject.
   void pump();
 }
 

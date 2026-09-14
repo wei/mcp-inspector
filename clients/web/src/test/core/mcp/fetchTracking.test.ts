@@ -934,6 +934,28 @@ describe("createFetchTracker long-lived stream watching (#2318)", () => {
     expect(updates.at(-1)!.stream.closedAt).toBeInstanceOf(Date);
   });
 
+  it("returns the response even when the listener throws on the open report", async () => {
+    // The open is reported synchronously inside the fetch wrapper; a throw
+    // there must not turn a successful response into a rejected fetch.
+    const server = controlledStream();
+    const response = new Response(server.stream, {
+      headers: { "content-type": "text/event-stream" },
+    });
+    const fetcher = createFetchTracker((async () => response) as typeof fetch, {
+      updateStream: () => {
+        throw new Error("sink closed");
+      },
+      streamUpdateIntervalMs: 0,
+    });
+    await expect(
+      fetcher("https://example.com/mcp", { method: "GET" }),
+    ).resolves.toBe(response);
+    // ...and a throw from a coalesced count does not escape the timer either.
+    server.push("data: a\n\n");
+    server.end();
+    await flush();
+  });
+
   it("survives a stream-update listener that throws on the close", async () => {
     // The watcher's promise is discarded, so a throw from the final report
     // would otherwise be an unhandled rejection — which fails the whole run.

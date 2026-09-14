@@ -375,6 +375,63 @@ describe("RemoteClientTransport (focused branch coverage)", () => {
       });
     });
 
+    it("reports a still-open stream closed on close(), since the backend's own close cannot arrive (#2318)", async () => {
+      const onFetchStreamUpdate = vi.fn();
+      const { response, push } = createPushableEventStream();
+      const t = makeTransport(
+        { events: () => response },
+        { onFetchStreamUpdate, onFetchRequest: vi.fn() },
+      );
+      await t.start();
+      const entry = (id: string, method: string, contentType: string) =>
+        ({
+          id,
+          method,
+          url: "http://x/mcp",
+          timestamp: new Date().toISOString(),
+          requestHeaders: {},
+          responseStatus: 200,
+          responseHeaders: { "Content-Type": contentType },
+        }) as never;
+      push({
+        type: "fetch_request",
+        data: entry("stream", "GET", "text/event-stream"),
+      });
+      push({
+        type: "fetch_request",
+        data: entry("post", "POST", "text/event-stream"),
+      });
+      push({
+        type: "fetch_stream_update",
+        data: { id: "stream", eventCount: 2 },
+      });
+      push({
+        type: "fetch_request",
+        data: entry("earlier", "GET", "text/event-stream"),
+      });
+      push({
+        type: "fetch_stream_update",
+        data: {
+          id: "earlier",
+          eventCount: 1,
+          closedAt: new Date().toISOString(),
+        },
+      });
+      await tick();
+      onFetchStreamUpdate.mockClear();
+      await t.close();
+      // Only the stream still open is reported closed, with its last count;
+      // the bounded POST and the already-closed stream are not.
+      expect(onFetchStreamUpdate).toHaveBeenCalledTimes(1);
+      expect(onFetchStreamUpdate).toHaveBeenCalledWith("stream", {
+        eventCount: 2,
+        closedAt: expect.any(Date),
+      });
+      // A second close reports nothing more.
+      await t.close();
+      expect(onFetchStreamUpdate).toHaveBeenCalledTimes(1);
+    });
+
     it("drops fetch_stream_update events when no handler is registered", async () => {
       const onFetchRequest = vi.fn();
       const t = makeTransport(

@@ -2980,7 +2980,17 @@ export class InspectorClient extends InspectorClientEventTarget {
           clearTimeout(pending.timer);
           this.pendingRawWireRequests.delete(id);
         }
-        reject(err instanceof Error ? err : new Error(String(err)));
+        // The browser's remote transport awaits the response inside `send`,
+        // so its relay wait can expire here first, as the SDK's timeout
+        // shape; annotate it exactly as the local timer above does (a
+        // non-timeout error passes through untouched).
+        reject(
+          annotateRequestTimeout(
+            err instanceof Error ? err : new Error(String(err)),
+            method,
+            this.getConnectionDiagnostics(),
+          ),
+        );
       });
     });
     return resultSchema.parse(raw);

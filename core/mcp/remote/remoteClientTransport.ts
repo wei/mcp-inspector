@@ -12,6 +12,7 @@ import type {
   MessageExtraInfo,
 } from "@modelcontextprotocol/client";
 import { SdkError, SdkErrorCode } from "@modelcontextprotocol/client";
+import { findHeader, isLongLivedStreamResponse } from "../fetchTracking.js";
 import type { InspectorServerSettings, StderrLogEntry } from "../types.js";
 import type { FetchRequestEntryBase, FetchStreamState } from "../types.js";
 import type {
@@ -265,6 +266,14 @@ export class RemoteClientTransport implements Transport {
   private eventStreamConsumeTask: Promise<void> | null = null;
   private restartingEventStream = false;
   private closed = false;
+  /**
+   * Long-lived streams the backend has reported open, by fetch entry id, with
+   * the last event count seen for each. `close()` reports them closed
+   * itself: it aborts the event channel before asking the backend to
+   * disconnect, so the backend watcher's own close report lands on an
+   * unconsumed queue and is lost with the session (#2318).
+   */
+  private openStreams = new Map<string, number>();
   private readonly sseResponseWaits = new Map<
     string | number,
     SseResponseWait
@@ -548,6 +557,14 @@ export class RemoteClientTransport implements Transport {
             this.options.onFetchRequest
           ) {
             const entry = parsed.data;
+            if (
+              isLongLivedStreamResponse(
+                entry.method,
+                findHeader(entry.responseHeaders, "content-type"),
+              )
+            ) {
+              this.openStreams.set(entry.id, 0);
+            }
             this.options.onFetchRequest({
               ...entry,
               timestamp:
@@ -568,6 +585,10 @@ export class RemoteClientTransport implements Transport {
             this.options.onFetchStreamUpdate
           ) {
             const { id, eventCount, closedAt } = parsed.data;
+            if (closedAt !== undefined) this.openStreams.delete(id);
+            else if (this.openStreams.has(id)) {
+              this.openStreams.set(id, eventCount);
+            }
             this.options.onFetchStreamUpdate(id, {
               eventCount,
               ...(closedAt !== undefined && { closedAt: new Date(closedAt) }),
@@ -856,6 +877,13 @@ export class RemoteClientTransport implements Transport {
     this.closed = true;
     this.cancelAllSseWaits(new Error("Transport closed"));
     await this.stopEventStream();
+    // The disconnect below ends every stream the backend still holds open,
+    // and its close reports cannot reach us any more (see `openStreams`).
+    const closedAt = new Date();
+    for (const [id, eventCount] of this.openStreams) {
+      this.options.onFetchStreamUpdate?.(id, { eventCount, closedAt });
+    }
+    this.openStreams.clear();
 
     if (this._sessionId) {
       try {
