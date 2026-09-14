@@ -235,8 +235,10 @@ export type GetSkillResult = SkillEntry;
 export const DirectoryChildSchema = ResourceSchema;
 
 /**
- * `resources/directory/read` result on a **legacy** connection: the directory's
- * direct children plus the opaque cursor.
+ * `resources/directory/read` result on **either** era: the directory's direct
+ * children plus the opaque cursor. On a modern connection this is the shape
+ * after the SDK codec has checked and removed `resultType`, which is why no
+ * modern variant exists — see the note below (#2373).
  *
  * `looseObject`, matching every other result schema here: a server that also
  * sends the caching attributes is not wrong for doing so, and a schema is not
