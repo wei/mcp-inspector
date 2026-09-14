@@ -1,8 +1,16 @@
 import { describe, it, expect } from "vitest";
-import { getTestMcpServerCommand } from "@modelcontextprotocol/inspector-test-server";
+import {
+  createEchoTool,
+  createTestServerHttp,
+  createTestServerInfo,
+  getTestMcpServerCommand,
+} from "@modelcontextprotocol/inspector-test-server";
 import { runCli } from "./helpers/cli-runner.js";
 import { DEFAULT_CONNECT_TIMEOUT_MS, withConnectTimeout } from "../src/cli.js";
-import type { InspectorServerSettings } from "@inspector/core/mcp/types.js";
+import {
+  MODERN_PROTOCOL_VERSION,
+  type InspectorServerSettings,
+} from "@inspector/core/mcp/types.js";
 import {
   expectCliFailure,
   expectCliSuccess,
@@ -228,6 +236,38 @@ describe("CLI --stored-auth-only wiring", () => {
 });
 
 describe("--protocol-era", () => {
+  // The discriminating case: `legacy` and `auto` both connect to a legacy
+  // fixture whether or not the flag is wired, since `auto` falls back. A
+  // modern-only server rejects the default legacy handshake, so only a flag
+  // that actually reaches negotiation turns the failure into a modern session.
+  it("negotiates the modern era against a modern-only server", async () => {
+    const server = createTestServerHttp({
+      serverInfo: createTestServerInfo(),
+      tools: [createEchoTool()],
+      modern: { legacy: "reject" },
+    });
+    try {
+      await server.start();
+      const adHoc = [server.url, "--transport", "http"];
+
+      const withoutFlag = await runCli([...adHoc, "--method", "initialize"]);
+      expectCliFailure(withoutFlag);
+
+      const withFlag = await runCli([
+        ...adHoc,
+        "--protocol-era",
+        "modern",
+        "--method",
+        "initialize",
+      ]);
+      expectCliSuccess(withFlag);
+      const json = JSON.parse(withFlag.stdout) as { protocolVersion: string };
+      expect(json.protocolVersion).toBe(MODERN_PROTOCOL_VERSION);
+    } finally {
+      await server.stop();
+    }
+  });
+
   it.each(["legacy", "auto"])(
     "accepts %s on an ad-hoc target and connects",
     async (era) => {
