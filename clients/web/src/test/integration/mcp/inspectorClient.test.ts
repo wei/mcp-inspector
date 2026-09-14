@@ -1,7 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { resolve } from "node:path";
+import type { Transport } from "@modelcontextprotocol/client";
 import * as z from "zod/v4";
-import { InspectorClient } from "@inspector/core/mcp/inspectorClient.js";
+import {
+  InspectorClient,
+  connectionTimeoutMessage,
+} from "@inspector/core/mcp/inspectorClient.js";
+import { DEFAULT_CONNECTION_TIMEOUT_MS } from "@inspector/core/mcp/types.js";
 import {
   MessageLogState,
   FetchRequestLogState,
@@ -363,25 +368,40 @@ describe("InspectorClient", () => {
       messageLogState.destroy();
     });
 
+    /**
+     * A transport whose `start()` never resolves: the "server that accepts
+     * the TCP connection and never answers" from the #2320 measurement.
+     * Typed as the SDK's `Transport` rather than cast to it, so an interface
+     * change upstream is caught here instead of at runtime.
+     */
+    function hangingTransport(): Transport {
+      return {
+        start: () => new Promise<void>(() => {}),
+        send: async () => {},
+        close: async () => {},
+      };
+    }
+
+    /** A transport whose `start()` rejects with a recoverable 401. */
+    function unauthorizedTransport(): Transport {
+      return {
+        start: async () => {
+          const err = new Error("Unauthorized") as Error & { status?: number };
+          err.status = 401;
+          throw err;
+        },
+        send: async () => {},
+        close: async () => {},
+      };
+    }
+
     it("rejects connect() with a timeout error when serverSettings.connectionTimeout fires", async () => {
       // Stub transport whose start() never resolves — simulates a slow /
       // unreachable upstream. InspectorClient.connect() should race against
       // serverSettings.connectionTimeout and reject with a descriptive error;
       // status should end up in "error", and the client should have
       // internally torn down the transport (next connect() must rebuild).
-      const hangingTransport = {
-        start: () => new Promise<void>(() => {}),
-        send: async () => {},
-        close: async () => {},
-        onclose: undefined,
-        onerror: undefined,
-        onmessage: undefined,
-        sessionId: undefined,
-      };
-      const fakeFactory = () => ({
-        transport:
-          hangingTransport as unknown as import("@modelcontextprotocol/client").Transport,
-      });
+      const fakeFactory = () => ({ transport: hangingTransport() });
       client = new InspectorClient(
         { type: "streamable-http", url: "http://localhost:1/never" },
         {
@@ -412,27 +432,138 @@ describe("InspectorClient", () => {
       expect(client.getStatus()).toBe("error");
     });
 
-    it("holds status at connecting when connect fails with a recoverable 401", async () => {
-      const unauthorizedTransport = {
-        start: async () => {
-          const err = new Error("Unauthorized") as Error & { status?: number };
-          err.status = 401;
-          throw err;
+    it("names the bound that fired and where to raise it in the timeout message (#2320)", async () => {
+      const fakeFactory = () => ({ transport: hangingTransport() });
+      client = new InspectorClient(
+        { type: "streamable-http", url: "http://localhost:1/never" },
+        {
+          environment: { transport: fakeFactory },
+          serverSettings: {
+            headers: [],
+            env: [],
+            metadata: {},
+            connectionTimeout: 50,
+            requestTimeout: 0,
+            taskTtl: 0,
+            maxFetchRequests: 1000,
+            roots: [],
+          },
         },
-        send: async () => {},
-        close: async () => {},
-        onclose: undefined,
-        onerror: undefined,
-        onmessage: undefined,
-        sessionId: undefined,
-      };
-      const fakeFactory = () => ({
-        transport:
-          unauthorizedTransport as unknown as import("@modelcontextprotocol/client").Transport,
-      });
+      );
+      await expect(client.connect()).rejects.toThrow(
+        connectionTimeoutMessage(50),
+      );
+      // The sentence a user reads on the toast: the bound, then the remedy.
+      expect(connectionTimeoutMessage(50)).toBe(
+        "Connection timed out after 50 ms. To accommodate a slower server, " +
+          "you may increase the timeout value in Server Settings.",
+      );
+    });
+
+    it("bounds connect() with DEFAULT_CONNECTION_TIMEOUT_MS when the settings carry no timeout (#2320)", async () => {
+      // No serverSettings at all — the shape every consumer that never opened
+      // Server Settings hands the client. Before #2320 that meant "no bound",
+      // and the only thing ending a hung handshake was the SDK's 60 s
+      // per-request timeout on `initialize`, reporting `Request timed out`.
+      // Fake timers so the 30 s default can fire without waiting it out.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const fakeFactory = () => ({ transport: hangingTransport() });
+        client = new InspectorClient(
+          { type: "streamable-http", url: "http://localhost:1/never" },
+          { environment: { transport: fakeFactory } },
+        );
+        const pending = client.connect();
+        // Hold the rejection so it cannot surface as unhandled while the clock
+        // is advanced; the assertion below re-awaits the same promise.
+        pending.catch(() => {});
+        // One ms short of the default: still connecting, nothing has fired.
+        await vi.advanceTimersByTimeAsync(DEFAULT_CONNECTION_TIMEOUT_MS - 1);
+        expect(client.getStatus()).toBe("connecting");
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(pending).rejects.toThrow(
+          connectionTimeoutMessage(DEFAULT_CONNECTION_TIMEOUT_MS),
+        );
+        expect(client.getStatus()).toBe("error");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("leaves connect() unbounded when connectionTimeout is an explicit 0 (#2320)", async () => {
+      // 0 is the documented opt-out (`--connect-timeout 0`, a cleared field),
+      // so it must not be read as "absent" and replaced with the default.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        let settled = false;
+        const fakeFactory = () => ({ transport: hangingTransport() });
+        client = new InspectorClient(
+          { type: "streamable-http", url: "http://localhost:1/never" },
+          {
+            environment: { transport: fakeFactory },
+            serverSettings: {
+              headers: [],
+              env: [],
+              metadata: {},
+              connectionTimeout: 0,
+              requestTimeout: 0,
+              taskTtl: 0,
+              maxFetchRequests: 1000,
+              roots: [],
+            },
+          },
+        );
+        const pending = client.connect().finally(() => {
+          settled = true;
+        });
+        pending.catch(() => {});
+        await vi.advanceTimersByTimeAsync(DEFAULT_CONNECTION_TIMEOUT_MS * 2);
+        expect(settled).toBe(false);
+        expect(client.getStatus()).toBe("connecting");
+        // Tear down by hand so the hung attempt does not outlive the test;
+        // disconnect() rejects the pending connect, which `pending.catch`
+        // above already absorbs.
+        await client.disconnect();
+        client = null;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("holds status at connecting when connect fails with a recoverable 401", async () => {
+      const fakeFactory = () => ({ transport: unauthorizedTransport() });
       client = new InspectorClient(
         { type: "streamable-http", url: "http://localhost:8081/mcp" },
         { environment: { transport: fakeFactory } },
+      );
+
+      await expect(client.connect()).rejects.toMatchObject({ status: 401 });
+      expect(client.getStatus()).toBe("connecting");
+    });
+
+    it("holds status at connecting on a recoverable 401 even with a connect timeout armed (#2320)", async () => {
+      // The timeout teardown used to be gated on `connectionTimeout > 0`, so
+      // it ran for *every* failed connect once a timeout was set — including
+      // this 401, whose status must stay at "connecting" for the auth
+      // recovery. With a non-zero default that gate would have fired for
+      // every user, so the teardown is now keyed to the timer actually
+      // winning the race, and this is the case that proves it.
+      const fakeFactory = () => ({ transport: unauthorizedTransport() });
+      client = new InspectorClient(
+        { type: "streamable-http", url: "http://localhost:8081/mcp" },
+        {
+          environment: { transport: fakeFactory },
+          serverSettings: {
+            headers: [],
+            env: [],
+            metadata: {},
+            connectionTimeout: 5000,
+            requestTimeout: 0,
+            taskTtl: 0,
+            maxFetchRequests: 1000,
+            roots: [],
+          },
+        },
       );
 
       await expect(client.connect()).rejects.toMatchObject({ status: 401 });

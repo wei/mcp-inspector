@@ -132,7 +132,11 @@ export type StoredMCPServer = MCPServerConfig & {
    * (#1629)
    */
   modernLogLevel?: ModernLogLevel;
-  /** Inspector-specific connect-time timeout (ms). */
+  /**
+   * Inspector-specific connect-time timeout (ms). Absent reads back as
+   * `DEFAULT_CONNECTION_TIMEOUT_MS`; an explicit `0` disables the timeout and
+   * is persisted so it round-trips (#2320).
+   */
   connectionTimeout?: number;
   /** Inspector-specific request timeout (ms). */
   requestTimeout?: number;
@@ -644,6 +648,18 @@ export type OnInsufficientScopePolicy = "reauthorize" | "throw";
 export const DEFAULT_TASK_TTL_MS = 60000;
 
 /**
+ * Default connect-time timeout (ms) applied when a server has no explicit
+ * `connectionTimeout` — on disk, in the form, or on the client. The SDK has no
+ * connect-time timeout of its own; without this, the only thing bounding a
+ * connect attempt was the SDK's per-request timeout on `initialize`, which
+ * fires after 60 s with a message that describes a JSON-RPC request rather
+ * than a connection (#2320). `0` remains the explicit opt-out ("no timeout"),
+ * so a stored `connectionTimeout: 0` and the CLI's `--connect-timeout 0` keep
+ * their documented meaning; only an *absent* value resolves to this.
+ */
+export const DEFAULT_CONNECTION_TIMEOUT_MS = 30000;
+
+/**
  * Default maximum number of HTTP fetch requests retained in the Network log
  * (per server). When exceeded, the oldest entries rotate out. A larger value
  * keeps more history at the cost of memory; `0` means unlimited (not
@@ -781,6 +797,10 @@ export interface InspectorServerSettings {
    * empty/unset means "inherit". Only meaningful for stdio transports.
    */
   cwd?: string;
+  /**
+   * Connect-time timeout (ms). Defaults to `DEFAULT_CONNECTION_TIMEOUT_MS`
+   * (30000) when the server has no explicit value; `0` means no timeout.
+   */
   connectionTimeout: number;
   requestTimeout: number;
   /** TTL (ms) for tasks created via "Run as task". Defaults to 60000. */
