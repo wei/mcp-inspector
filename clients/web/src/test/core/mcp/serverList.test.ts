@@ -456,6 +456,55 @@ describe("serverEntriesToMcpConfig", () => {
     expect(round).toEqual(original);
   });
 
+  it("round-trips the skills catalog budget (#2294)", () => {
+    const original: MCPConfig = {
+      mcpServers: {
+        sk: {
+          type: "streamable-http",
+          url: "https://x.test/mcp",
+          skillCatalogMaxSkills: 10,
+          skillCatalogMaxBytes: 2048,
+        },
+      },
+    };
+    const [entry] = mcpConfigToServerEntries(original);
+    expect(entry?.settings?.skillCatalogMaxSkills).toBe(10);
+    expect(entry?.settings?.skillCatalogMaxBytes).toBe(2048);
+    const round = serverEntriesToMcpConfig(mcpConfigToServerEntries(original));
+    expect(round).toEqual(original);
+  });
+
+  it("drops an unusable skills catalog limit on read and omits the default on write", () => {
+    const [entry] = mcpConfigToServerEntries({
+      mcpServers: {
+        sk: {
+          type: "streamable-http",
+          url: "https://x.test/mcp",
+          skillCatalogMaxSkills: 0,
+          skillCatalogMaxBytes: 1.5,
+        },
+      },
+    });
+    // Present on disk still materializes a settings node, but neither value
+    // is usable, so both read back as absent (the default budget).
+    expect(entry?.settings).toBeDefined();
+    expect(entry?.settings?.skillCatalogMaxSkills).toBeUndefined();
+    expect(entry?.settings?.skillCatalogMaxBytes).toBeUndefined();
+
+    const round = serverEntriesToMcpConfig([
+      {
+        ...entry!,
+        settings: {
+          ...entry!.settings!,
+          skillCatalogMaxSkills: 256,
+          skillCatalogMaxBytes: 64 * 1024 * 1024,
+        },
+      },
+    ]);
+    expect("skillCatalogMaxSkills" in (round.mcpServers.sk ?? {})).toBe(false);
+    expect("skillCatalogMaxBytes" in (round.mcpServers.sk ?? {})).toBe(false);
+  });
+
   it("round-trips protocolEra: lifts a non-default value to settings and back to disk", () => {
     const original: MCPConfig = {
       mcpServers: {

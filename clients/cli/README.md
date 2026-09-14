@@ -391,7 +391,12 @@ not read has not been cleared of anything:
 | Per skill, on the wire | 16 MiB actually served | The declared sizes are server-controlled; this one cannot be lied past. |
 | Per run | 256 skills / 64 MiB | SEP-2640 bounds a skill and deliberately does not bound a *catalog*. Every entry costs at least one `resources/read`, so without this a large listing — hostile or merely big — is unbounded work against the tool inspecting it. |
 
-The run bound is this tool's, not the spec's. A skill past it is still reported,
+The run bound is this tool's, not the spec's, and it is configurable per server:
+set `skillCatalogMaxSkills` / `skillCatalogMaxBytes` on the server's entry in
+`mcp.json`, or edit them under **Skills** in the web client's Server Settings
+(see [the configuration reference](../../docs/mcp-server-configuration.md)).
+Both must be positive integers — there is no unlimited value, since the bound
+is what makes the run terminate. A skill past it is still reported,
 with its static conformance findings and an `incomplete` reason saying nothing
 about its files was checked; verify it on its own with `--method skills/get
 --uri <skill>` to get a verdict for it.

@@ -13,6 +13,11 @@ import {
   DEFAULT_TASK_TTL_MS,
   isModernLogLevel,
 } from "./types.js";
+import {
+  isSkillCatalogLimit,
+  SKILL_MAX_CATALOG_BYTES,
+  SKILL_MAX_CATALOG_SKILLS,
+} from "./skills.js";
 import type { Root } from "@modelcontextprotocol/client";
 import type {
   InspectorServerSettings,
@@ -160,6 +165,8 @@ type StoredInspectorFields = Pick<
   | "paginatedLists"
   | "advertisedExtensions"
   | "maxFetchRequests"
+  | "skillCatalogMaxSkills"
+  | "skillCatalogMaxBytes"
   | "oauth"
   | "roots"
 >;
@@ -521,6 +528,8 @@ export function storedFieldsToInspectorSettings(
     stored.paginatedLists !== undefined ||
     stored.advertisedExtensions !== undefined ||
     stored.maxFetchRequests !== undefined ||
+    stored.skillCatalogMaxSkills !== undefined ||
+    stored.skillCatalogMaxBytes !== undefined ||
     stored.oauth !== undefined ||
     stored.roots !== undefined ||
     stored.protocolEra !== undefined ||
@@ -557,6 +566,16 @@ export function storedFieldsToInspectorSettings(
     // `[]`, which `inspectorSettingsToStoredFields` then omits on write.
     roots: stored.roots ?? [],
   };
+  // Lifted only when usable (#2294). Unlike maxFetchRequests these stay
+  // optional in memory — absent means the default, which
+  // `resolveSkillCatalogBudget` supplies — and a hand-edited `0` or `-1` is
+  // dropped here rather than carried into a form that would re-persist it.
+  if (isSkillCatalogLimit(stored.skillCatalogMaxSkills)) {
+    settings.skillCatalogMaxSkills = stored.skillCatalogMaxSkills;
+  }
+  if (isSkillCatalogLimit(stored.skillCatalogMaxBytes)) {
+    settings.skillCatalogMaxBytes = stored.skillCatalogMaxBytes;
+  }
   // Absent on disk reads back as the default era; the write side then omits the
   // default so a byte-stable round-trip never injects `protocolEra` into files
   // that never set it. An unknown literal from a hand-edited file is dropped
@@ -737,6 +756,22 @@ export function inspectorSettingsToStoredFields(
     out.maxFetchRequests = settings.maxFetchRequests;
   }
 
+  // Same omit-the-default rule (#2294). An unusable value writes nothing, so
+  // it reads back as the default rather than being persisted and then
+  // rejected on the next load.
+  if (
+    isSkillCatalogLimit(settings.skillCatalogMaxSkills) &&
+    settings.skillCatalogMaxSkills !== SKILL_MAX_CATALOG_SKILLS
+  ) {
+    out.skillCatalogMaxSkills = settings.skillCatalogMaxSkills;
+  }
+  if (
+    isSkillCatalogLimit(settings.skillCatalogMaxBytes) &&
+    settings.skillCatalogMaxBytes !== SKILL_MAX_CATALOG_BYTES
+  ) {
+    out.skillCatalogMaxBytes = settings.skillCatalogMaxBytes;
+  }
+
   const oauthFields: NonNullable<StoredMCPServer["oauth"]> = {};
   if (settings.oauthClientId) oauthFields.clientId = settings.oauthClientId;
   if (settings.oauthClientSecret)
@@ -815,6 +850,8 @@ const INSPECTOR_FIELD_KEY_MAP = {
   paginatedLists: true,
   advertisedExtensions: true,
   maxFetchRequests: true,
+  skillCatalogMaxSkills: true,
+  skillCatalogMaxBytes: true,
   oauth: true,
   roots: true,
 } as const satisfies Record<keyof StoredInspectorFields, true>;

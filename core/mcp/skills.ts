@@ -76,6 +76,47 @@ export const SKILL_MAX_CATALOG_SKILLS = 256;
 /** @see {@link SKILL_MAX_CATALOG_SKILLS} — 64 MiB across the whole run. */
 export const SKILL_MAX_CATALOG_BYTES = 64 * 1024 * 1024;
 
+/**
+ * Whether `value` is usable as a per-server catalog budget override (#2294):
+ * a positive safe integer.
+ *
+ * ⚠️ **`0` is deliberately not "unlimited"**, unlike `maxFetchRequests`. The
+ * budget exists so a `--verify` against a huge catalog terminates; an
+ * unlimited setting would reintroduce exactly the unbounded run it closed. A
+ * user who wants more raises the number.
+ */
+export function isSkillCatalogLimit(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+/** A verification run's catalog budget, resolved from per-server settings. */
+export interface SkillCatalogBudget {
+  maxSkills: number;
+  maxBytes: number;
+}
+
+/**
+ * The catalog budget for a run: the server's configured limits where they are
+ * usable, else {@link SKILL_MAX_CATALOG_SKILLS} / {@link SKILL_MAX_CATALOG_BYTES}.
+ *
+ * A malformed value falls back to the default rather than throwing — settings
+ * can arrive from a hand-edited `mcp.json`, and a verification that refused to
+ * run over a typo would be a worse outcome than one that ran at the default.
+ */
+export function resolveSkillCatalogBudget(settings?: {
+  skillCatalogMaxSkills?: number;
+  skillCatalogMaxBytes?: number;
+}): SkillCatalogBudget {
+  return {
+    maxSkills: isSkillCatalogLimit(settings?.skillCatalogMaxSkills)
+      ? settings.skillCatalogMaxSkills
+      : SKILL_MAX_CATALOG_SKILLS,
+    maxBytes: isSkillCatalogLimit(settings?.skillCatalogMaxBytes)
+      ? settings.skillCatalogMaxBytes
+      : SKILL_MAX_CATALOG_BYTES,
+  };
+}
+
 /** The suffix every skill URI ends with; the segment before it is the name. */
 export const SKILL_FILE_SUFFIX = "/SKILL.md";
 
