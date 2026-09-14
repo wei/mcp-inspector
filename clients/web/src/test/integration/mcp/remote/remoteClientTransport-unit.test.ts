@@ -432,6 +432,38 @@ describe("RemoteClientTransport (focused branch coverage)", () => {
       expect(onFetchStreamUpdate).toHaveBeenCalledTimes(1);
     });
 
+    it("synthesizes the close on close() for a consumer that registered only onFetchStreamUpdate", async () => {
+      const onFetchStreamUpdate = vi.fn();
+      const { response, push } = createPushableEventStream();
+      const t = makeTransport(
+        { events: () => response },
+        { onFetchStreamUpdate },
+      );
+      await t.start();
+      push({
+        type: "fetch_request",
+        data: {
+          id: "stream",
+          method: "GET",
+          url: "http://x/mcp",
+          timestamp: new Date().toISOString(),
+          requestHeaders: {},
+          responseStatus: 200,
+          responseHeaders: { "content-type": "text/event-stream" },
+        } as never,
+      });
+      push({
+        type: "fetch_stream_update",
+        data: { id: "stream", eventCount: 3 },
+      });
+      await tick();
+      await t.close();
+      expect(onFetchStreamUpdate).toHaveBeenLastCalledWith("stream", {
+        eventCount: 3,
+        closedAt: expect.any(Date),
+      });
+    });
+
     it("drops fetch_stream_update events when no handler is registered", async () => {
       const onFetchRequest = vi.fn();
       const t = makeTransport(

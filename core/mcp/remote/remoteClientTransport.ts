@@ -552,11 +552,11 @@ export class RemoteClientTransport implements Transport {
               this.resetSseResponseWait(progressToken);
             }
             this.onmessage?.(msg, undefined);
-          } else if (
-            parsed.type === "fetch_request" &&
-            this.options.onFetchRequest
-          ) {
+          } else if (parsed.type === "fetch_request") {
             const entry = parsed.data;
+            // Stream bookkeeping runs whether or not the consumer logs
+            // requests: `onFetchStreamUpdate` is documented to work on its
+            // own, and `close()` needs to know which streams are open.
             if (
               isLongLivedStreamResponse(
                 entry.method,
@@ -565,7 +565,7 @@ export class RemoteClientTransport implements Transport {
             ) {
               this.openStreams.set(entry.id, 0);
             }
-            this.options.onFetchRequest({
+            this.options.onFetchRequest?.({
               ...entry,
               timestamp:
                 typeof entry.timestamp === "string"
