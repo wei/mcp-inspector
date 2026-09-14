@@ -59,6 +59,8 @@
 import { createHash } from "node:crypto";
 import * as z from "zod/v4";
 import {
+  CLIENT_CAPABILITIES_META_KEY,
+  MissingRequiredClientCapabilityError,
   ProtocolError,
   ProtocolErrorCode,
   type McpServer,
@@ -698,29 +700,117 @@ const DirectoryReadResultShape = z.object({
   nextCursor: z.string().optional(),
 });
 
+export interface WireSkillsOptions {
+  /**
+   * Refuse the extension's own methods to a client that did not declare
+   * `io.modelcontextprotocol/skills` in its capabilities (#2373). SEP-2133
+   * negotiates an extension from both sides, and a strict server enforces the
+   * client's half; without this the fixture served every client, which is how
+   * an Inspector that never declared the extension passed against it.
+   */
+  requireClientExtension?: boolean;
+}
+
+/**
+ * The request's `_meta` envelope as a handler receives it. The SDK types the
+ * envelope's keys as an empty object, so it is read as a plain record and each
+ * value is narrowed where it is used.
+ */
+type ReceivedEnvelope = Record<string, unknown> | undefined;
+
+function hasSkillsExtension(capabilities: unknown): boolean {
+  if (typeof capabilities !== "object" || capabilities === null) return false;
+  const extensions = (capabilities as { extensions?: unknown }).extensions;
+  return (
+    typeof extensions === "object" &&
+    extensions !== null &&
+    SKILLS_EXTENSION_KEY in extensions
+  );
+}
+
+/**
+ * Refuse the request when the client did not declare the Skills extension:
+ * `-32021` MissingRequiredClientCapability for a modern request, `-32601` for
+ * a legacy one.
+ *
+ * The two eras keep the declaration in different places. A modern
+ * (2026-07-28) request carries it in its own `_meta` envelope, which the SDK
+ * hands the handler as `ctx.mcpReq.envelope` — read first, because that is the
+ * per-request source of truth the SDK points handlers at. A legacy connection
+ * has no envelope, so the value `initialize` declared is the fallback.
+ *
+ * ⚠️ That fallback only exists on a **stateful** legacy connection. A legacy
+ * client reaching a server started with `modern` is served statelessly — a
+ * fresh instance per request that never saw `initialize` — so it has no
+ * declaration to read and is refused. That is why the strict showcase configs
+ * come one per era.
+ */
+function assertClientDeclaredSkills(
+  mcpServer: McpServer,
+  method: string,
+  envelope: ReceivedEnvelope,
+): void {
+  const modernCapabilities = envelope?.[CLIENT_CAPABILITIES_META_KEY];
+  const capabilities =
+    modernCapabilities ?? mcpServer.server.getClientCapabilities();
+  if (hasSkillsExtension(capabilities)) return;
+  const message = `${method} requires the client to declare ${SKILLS_EXTENSION_KEY} in its capabilities`;
+  // The two eras name this refusal differently. SEP-2575 gives a modern
+  // request that needs an undeclared capability its own code, `-32021`
+  // MissingRequiredClientCapability (HTTP 400), carrying the missing
+  // capabilities in `data.requiredCapabilities` so the client can see what to
+  // declare. `-32601` there would claim the method does not exist. The legacy
+  // era has no such code, so a legacy refusal stays `-32601`.
+  if (modernCapabilities !== undefined) {
+    throw new MissingRequiredClientCapabilityError(
+      { requiredCapabilities: { extensions: { [SKILLS_EXTENSION_KEY]: {} } } },
+      message,
+    );
+  }
+  throw new ProtocolError(ProtocolErrorCode.MethodNotFound, message);
+}
+
 /**
  * Wire `skills/list`, `skills/get` and the `skill://` half of `resources/read`
  * onto an `McpServer`.
  */
-export function wireSkillsHandlers(mcpServer: McpServer): void {
+export function wireSkillsHandlers(
+  mcpServer: McpServer,
+  options: WireSkillsOptions = {},
+): void {
   const lowLevel = mcpServer.server;
+  // Only the extension's own methods are gated. A `skill://` file is read
+  // through ordinary `resources/read`, a core method the client needs no
+  // extension to call.
+  const gate = (method: string, envelope: ReceivedEnvelope): void => {
+    if (options.requireClientExtension) {
+      assertClientDeclaredSkills(mcpServer, method, envelope);
+    }
+  };
 
   lowLevel.setRequestHandler(
     "skills/list",
     { params: ListSkillsParamsSchema, result: ListSkillsResultShape },
-    async (params) => listSkillsPage(params.cursor),
+    async (params, ctx) => {
+      gate("skills/list", ctx.mcpReq.envelope);
+      return listSkillsPage(params.cursor);
+    },
   );
 
   lowLevel.setRequestHandler(
     "skills/get",
     { params: GetSkillParamsSchema, result: GetSkillResultShape },
-    async (params) => getSkillEntry(params.uri),
+    async (params, ctx) => {
+      gate("skills/get", ctx.mcpReq.envelope);
+      return getSkillEntry(params.uri);
+    },
   );
 
   lowLevel.setRequestHandler(
     "resources/directory/read",
     { params: DirectoryReadParamsSchema, result: DirectoryReadResultShape },
-    async (params) => {
+    async (params, ctx) => {
+      gate("resources/directory/read", ctx.mcpReq.envelope);
       const page = readDirectoryPage(params.uri, params.cursor);
       // `-32602` for both "no such URI" and "exists but is not a directory",
       // which is what SEP-2640 specifies — the same code `resources/read` uses

@@ -880,10 +880,11 @@ describe("InspectorClient coverage backfill", () => {
   });
 
   describe("constructor capability branches and createReceiverTask options", () => {
-    it("advertises only the tasks extension when no other capabilities are set", async () => {
+    it("still advertises the registry extensions when no other capabilities are set", async () => {
       // sample:false + elicit:false + no roots + no receiverTasks → the only
-      // advertised capability is the always-on Tasks extension (#1631), so
-      // `capabilities` is non-empty and is always attached.
+      // advertised capabilities are the default-on registry extensions (Tasks
+      // since #1631, Skills since #2373), so `capabilities` is non-empty and
+      // is always attached.
       client = new InspectorClient(
         {
           type: "stdio",
@@ -901,6 +902,7 @@ describe("InspectorClient coverage backfill", () => {
       expect(caps.elicitation).toBeUndefined();
       expect(caps.roots).toBeUndefined();
       expect(caps.extensions?.["io.modelcontextprotocol/tasks"]).toBeDefined();
+      expect(caps.extensions?.["io.modelcontextprotocol/skills"]).toBeDefined();
       await client.connect();
       expect(client.getStatus()).toBe("connected");
     });

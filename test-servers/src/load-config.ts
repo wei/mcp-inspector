@@ -87,6 +87,9 @@ export interface ConfigFile {
   /** Advertise the Skills extension (SEP-2640) and serve its fixture skills,
    * including `directoryRead` — see {@link ServerConfig.skills}. */
   skills?: boolean;
+  /** With `skills`, refuse the skills methods to a client that did not declare
+   * the extension — see {@link ServerConfig.skillsRequireClientExtension}. */
+  skillsRequireClientExtension?: boolean;
   /** Advertise the MCP Apps `io.modelcontextprotocol/ui` extension with the nested
    * `elicitation` setting — the server half of app-rendered form elicitation
    * (#1854). Pair with the `app_choose_option` tool + `choose_option_app` resource. */

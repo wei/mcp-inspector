@@ -1,6 +1,7 @@
 import type { ClientCapabilities } from "@modelcontextprotocol/client";
 import { RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/app-bridge";
 import { TASKS_EXTENSION_KEY } from "./modernTaskSchemas.js";
+import { SKILLS_EXTENSION_KEY } from "./skillsSchemas.js";
 
 /**
  * Extension identifier for SEP-2350 enterprise-managed authorization. Advertised
@@ -90,6 +91,18 @@ export const ADVERTISABLE_EXTENSIONS: readonly AdvertisableExtension[] = [
     // a conforming server checks the `mimeTypes` before serving a UI resource.
     defaultAdvertised: true,
     advertisement: { mimeTypes: [MCP_APP_MIME_TYPE] },
+  },
+  {
+    key: SKILLS_EXTENSION_KEY,
+    label: "Skills (io.modelcontextprotocol/skills)",
+    // The Skills extension (SEP-2640). SEP-2133 negotiates an extension from
+    // both sides, so a server may refuse `skills/list`, `skills/get` and
+    // `resources/directory/read` to a client that did not declare it — and the
+    // Inspector calls all three once the server declares its half. Advertised
+    // by default for that reason; turning it off is how to check a server's
+    // refusal path. Declared with no settings: SEP-2640 defines none for the
+    // client side. (#2373)
+    defaultAdvertised: true,
   },
 ];
 
