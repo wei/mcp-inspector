@@ -832,7 +832,7 @@ describe("server.ts supplemental coverage", () => {
       expect((await res.json()).error).toMatch(/maxFetchRequests/);
     });
 
-    it("rejects a non-positive skills catalog limit (#2294)", async () => {
+    it("rejects invalid skills catalog limits (#2294)", async () => {
       const skills = await postSettings({ ...base, skillCatalogMaxSkills: 0 });
       expect((await skills.json()).error).toMatch(/skillCatalogMaxSkills/);
       const bytes = await postSettings({ ...base, skillCatalogMaxBytes: 1.5 });

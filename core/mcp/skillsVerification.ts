@@ -504,6 +504,12 @@ export async function verifySkills(
         files.push({ uri: entry.uri, status: "read-error", reason });
       try {
         const invocation = await client.readResource(entry.uri, metadata);
+        // ⚠️ Charged like a manifest read — raw response, or the decoded
+        // length when larger. Uncharged, a catalog of `"dynamic"` skills (whose
+        // ONLY read is this one) left `catalogBytes` at zero, so the run's byte
+        // budget bounded nothing for it and even a configured limit of 1 read
+        // every skill up to the count limit (Copilot, #2294).
+        let charged = responseBytes(invocation.result);
         const contents = contentsFor(invocation.result, entry.uri);
         if (!contents) {
           fail(
@@ -512,10 +518,12 @@ export async function verifySkills(
         } else {
           try {
             entryBytes = skillFileBytes(contents);
+            charged = Math.max(charged, entryBytes.byteLength);
           } catch (err) {
             fail(reasonOf(err));
           }
         }
+        receivedBytes += charged;
         // If the DECLARED manifest lists this file but the read bounds
         // excluded it, verify it here too. The fallback exists for the
         // frontmatter check, but reading a file and then not checking the

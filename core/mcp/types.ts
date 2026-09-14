@@ -172,14 +172,16 @@ export type StoredMCPServer = MCPServerConfig & {
    */
   maxFetchRequests?: number;
   /**
-   * Most skills one skills verification run reads from (#2294). Omitted on
-   * disk when it equals `SKILL_MAX_CATALOG_SKILLS`. Must be a positive integer
+   * The maximum number of skills whose files are read in one skills
+   * verification run (#2294). Omitted on disk when it equals
+   * `SKILL_MAX_CATALOG_SKILLS`. Must be a positive integer
    * — there is no unlimited value, since the bound is what makes `--verify`
    * terminate.
    */
   skillCatalogMaxSkills?: number;
   /**
-   * Byte ceiling across one skills verification run (#2294). Omitted on disk
+   * The maximum number of bytes read across all skills in one skills
+   * verification run (#2294). Omitted on disk
    * when it equals `SKILL_MAX_CATALOG_BYTES`. Positive integer, as above.
    */
   skillCatalogMaxBytes?: number;

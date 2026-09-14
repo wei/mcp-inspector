@@ -871,7 +871,7 @@ export function ServerSettingsForm({
           <Stack gap="xs">
             <SkillCountInput
               label="Maximum Number of Skills"
-              description="Most skills one skills verification run (the CLI's --verify, or the TUI's Skills pane) reads files from. Skills past the limit are still listed, reported as incomplete rather than checked."
+              description="The maximum number of skills whose files are read in one verification run (the CLI's --verify, or the TUI's Skills pane). Skills past the limit are still listed, and reported as incomplete rather than checked."
               value={skillCatalogBudget.maxSkills}
               onChange={handleSkillCatalogLimitChange(
                 "skillCatalogMaxSkills",
@@ -880,7 +880,7 @@ export function ServerSettingsForm({
             />
             <SkillBytesInput
               label="Maximum Catalog Size"
-              description="Most bytes one skills verification run reads across every skill. Reaching it stops the read, and the remaining skills are reported as incomplete."
+              description="The maximum number of bytes read across all skills in one verification run. Once it is reached, no further skills are read, and the remaining ones are reported as incomplete."
               value={skillCatalogBudget.maxBytes}
               onChange={handleSkillCatalogLimitChange(
                 "skillCatalogMaxBytes",
