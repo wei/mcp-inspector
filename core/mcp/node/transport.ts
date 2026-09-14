@@ -49,6 +49,7 @@ export function createTransportNode(
     pipeStderr = false,
     onFetchRequest,
     onFetchResponseBody,
+    onFetchStreamUpdate,
     authProvider,
     settings,
     interceptAuthChallenges = false,
@@ -118,6 +119,7 @@ export function createTransportNode(
       ? createFetchTracker(sseFetch, {
           trackRequest: onFetchRequest,
           updateResponseBody: onFetchResponseBody,
+          updateStream: onFetchStreamUpdate,
         })
       : sseFetch;
 
@@ -138,6 +140,7 @@ export function createTransportNode(
       ? createFetchTracker(fetchWithOptionalAuthIntercept, {
           trackRequest: onFetchRequest,
           updateResponseBody: onFetchResponseBody,
+          updateStream: onFetchStreamUpdate,
         })
       : fetchWithOptionalAuthIntercept;
 
@@ -165,6 +168,7 @@ export function createTransportNode(
       ? createFetchTracker(fetchWithOptionalAuthIntercept, {
           trackRequest: onFetchRequest,
           updateResponseBody: onFetchResponseBody,
+          updateStream: onFetchStreamUpdate,
         })
       : fetchWithOptionalAuthIntercept;
 

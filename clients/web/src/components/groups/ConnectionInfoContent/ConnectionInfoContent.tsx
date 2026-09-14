@@ -18,6 +18,14 @@ import type {
   ServerCapabilities,
 } from "@modelcontextprotocol/client";
 import type { ServerType } from "@inspector/core/mcp/types.js";
+import type { ConnectionDiagnostics } from "@inspector/core/mcp/connectionDiagnostics.js";
+import {
+  formatLastResponse,
+  formatNotificationStream,
+  formatOutstandingRequests,
+  NO_OUTSTANDING_REQUESTS_LABEL,
+} from "../../../utils/connectionActivity";
+import { useTickingClock } from "../../../hooks/useTickingClock";
 import { TASKS_EXTENSION_KEY } from "@inspector/core/mcp/modernTaskSchemas.js";
 import { getSkillsExtension } from "@inspector/core/mcp/skills.js";
 import type { OAuthClientRegistrationKind } from "@inspector/core/auth/types.js";
@@ -75,6 +83,16 @@ export interface ConnectionInfoContentProps {
    * capabilities, and extensions learned up front. Undefined on legacy. (#1626)
    */
   discoverResult?: DiscoverResult;
+  /**
+   * What the client is still waiting on, when it last heard back, and the
+   * state of the notification stream (#2318). Renders the Connection Activity
+   * section when present — the same facts a request timeout reports, shown
+   * here while the request is still in flight. Durations first read against
+   * the snapshot's own `capturedAt` and then tick once a second while the
+   * panel is open (`useTickingClock`), so an in-flight request's age keeps
+   * moving rather than freezing at the moment it went out.
+   */
+  diagnostics?: ConnectionDiagnostics;
   oauth?: OAuthDetails;
   onClearOAuth?: () => void;
 }
@@ -291,6 +309,7 @@ export function ConnectionInfoContent({
   transport,
   protocolEra,
   discoverResult,
+  diagnostics,
   oauth,
   onClearOAuth,
 }: ConnectionInfoContentProps) {
@@ -316,6 +335,10 @@ export function ConnectionInfoContent({
   const displayVersion = serverInfoReported
     ? serverInfo.version?.trim() || "—"
     : SERVER_INFO_NOT_REPORTED_LABEL;
+
+  // The activity rows' clock: the snapshot's own on first paint (pure), then
+  // the wall clock once a second so "sent 5s ago" keeps counting.
+  const now = useTickingClock(diagnostics?.capturedAt ?? 0);
 
   const serverCaps = getServerCapabilityEntries(capabilities, protocolEra);
   const clientCaps = getCapabilityEntries(
@@ -347,6 +370,42 @@ export function ConnectionInfoContent({
           <ValueText>{formatSession(protocolEra, transport)}</ValueText>
         </SimpleGrid>
       </Stack>
+
+      {diagnostics && (
+        <Stack gap="xs">
+          <SectionHeading>Connection Activity</SectionHeading>
+          <SimpleGrid cols={2}>
+            <FieldLabel>Unanswered requests</FieldLabel>
+            {/* A `Stack` so several in-flight requests read as a list, the
+                way the extension sections do; one line per request. */}
+            <Stack gap={2} data-testid="connection-activity-outstanding">
+              {diagnostics.outstandingRequests.length === 0 ? (
+                <ValueText>{NO_OUTSTANDING_REQUESTS_LABEL}</ValueText>
+              ) : (
+                formatOutstandingRequests(diagnostics, now).map(
+                  (line, index) => (
+                    <ValueText key={diagnostics.outstandingRequests[index]!.id}>
+                      {line}
+                    </ValueText>
+                  ),
+                )
+              )}
+            </Stack>
+
+            <FieldLabel>Last response</FieldLabel>
+            <ValueText>{formatLastResponse(diagnostics, now)}</ValueText>
+
+            <FieldLabel>Notification stream</FieldLabel>
+            <ValueText>
+              {formatNotificationStream(
+                diagnostics.notificationStream,
+                transport,
+                now,
+              )}
+            </ValueText>
+          </SimpleGrid>
+        </Stack>
+      )}
 
       {discoverResult && (
         <Stack gap="xs">

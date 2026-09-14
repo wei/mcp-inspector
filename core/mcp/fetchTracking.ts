@@ -1,4 +1,4 @@
-import type { FetchRequestEntryBase } from "./types.js";
+import type { FetchRequestEntryBase, FetchStreamState } from "./types.js";
 
 /**
  * Header names whose values are replaced with `REDACTED_HEADER_VALUE` before a
@@ -190,11 +190,18 @@ export function redactBody(
   return body;
 }
 
-/** Case-insensitive lookup of a header value from a plain header record. */
-function findHeader(
-  headers: Record<string, string>,
+/**
+ * Case-insensitive lookup of a header value from a plain header record.
+ * Exported because a recorded entry's header casing is host-dependent (Node
+ * lowercases, happy-dom preserves the wire casing), so any consumer reading
+ * one back — the Network UI, the connection diagnostics — needs the same
+ * tolerance the tracker itself has.
+ */
+export function findHeader(
+  headers: Record<string, string> | undefined,
   name: string,
 ): string | undefined {
+  if (!headers) return undefined;
   const target = name.toLowerCase();
   for (const [key, value] of Object.entries(headers)) {
     if (key.toLowerCase() === target) return value;
@@ -233,6 +240,98 @@ export interface FetchTrackingCallbacks {
    * never invoked and the entry's responseBody stays undefined.
    */
   updateResponseBody?: (id: string, responseBody: string) => void;
+  /**
+   * Called for a long-lived stream response — the one case `updateResponseBody`
+   * never covers — each time an SSE event is delivered on it, and once more
+   * when it ends (with `closedAt` set). Lets the consumer show that the stream
+   * is open and what it has carried, which is the whole diagnostic when a
+   * server serializes requests behind it (#2318).
+   */
+  updateStream?: (id: string, stream: FetchStreamState) => void;
+}
+
+/**
+ * Count the SSE events on a long-lived stream without buffering it, and
+ * report when it ends.
+ *
+ * Reads a `clone()` of the response through a reader and discards the bytes,
+ * so the transport keeps consuming the original at its own pace (the same
+ * tee the bounded-body path relies on). Counting follows the SSE framing the
+ * transport's own parser applies: a blank line dispatches the block before
+ * it, and only a block carrying a `data` field is an event — keepalive
+ * comments (`: ping`) and bare `event:`/`id:` lines are not.
+ *
+ * Reports once as soon as watching starts (zero events, open), once per event,
+ * and once more on every exit from the read loop — a clean end-of-stream, a
+ * network error, or the transport aborting the fetch on disconnect (which
+ * errors both tee branches) — with `closedAt` set. The reader is never cancelled from here:
+ * cancelling one branch of a tee does not release the source, and
+ * `ReadableStream.cancel()` adopts the source's promise, which on a teardown
+ * path may never settle (the same hazard `core/mcp/remote/node/server.ts`
+ * documents at its own `cancel()` call).
+ */
+function watchLongLivedStream(
+  response: Response,
+  id: string,
+  callbacks: FetchTrackingCallbacks,
+): void {
+  const update = callbacks.updateStream;
+  if (!update) return;
+  let body: ReadableStream<Uint8Array> | null;
+  try {
+    body = response.clone().body;
+  } catch {
+    // Clone failed (consumed body, transport quirks) — there is nothing to
+    // watch; the entry stays as tracked with no stream state.
+    return;
+  }
+  if (!body) return;
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let eventCount = 0;
+  let pending = "";
+  let blockHasData = false;
+  // Announce the stream as open before a byte arrives. A stream that never
+  // delivers anything is the #2187 tell, and it would otherwise be the one
+  // stream with no state to show — the count only moves on an event.
+  update(id, { eventCount });
+
+  const consumeLine = (rawLine: string): void => {
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    if (line === "") {
+      if (blockHasData) {
+        eventCount += 1;
+        blockHasData = false;
+        update(id, { eventCount });
+      }
+      return;
+    }
+    // A field line is `name[:value]`; `data` with no colon is still a data
+    // field per the spec, so match the name rather than the `data:` prefix.
+    if (line === "data" || line.startsWith("data:")) blockHasData = true;
+  };
+
+  const pump = async (): Promise<void> => {
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        pending += decoder.decode(value, { stream: true });
+        let newline = pending.indexOf("\n");
+        while (newline !== -1) {
+          consumeLine(pending.slice(0, newline));
+          pending = pending.slice(newline + 1);
+          newline = pending.indexOf("\n");
+        }
+      }
+    } catch {
+      // An errored or aborted stream has still ended — fall through to report
+      // the close; the entry's `error` field is for a fetch that never got a
+      // response, which this one did.
+    }
+    update(id, { eventCount, closedAt: new Date() });
+  };
+  void pump();
 }
 
 /**
@@ -377,6 +476,13 @@ export function createFetchTracker(
     };
 
     callbacks.trackRequest?.(entry);
+
+    // A long-lived stream is watched instead of read: its body never ends,
+    // but its event count and its eventual close are exactly the state a
+    // stalled connection is diagnosed from (#2318).
+    if (isLongLivedStream && response.body && !response.bodyUsed) {
+      watchLongLivedStream(response, id, callbacks);
+    }
 
     // Kick off a fire-and-forget read of the cloned body. The clone is an
     // independent tee'd stream so the transport keeps consuming the

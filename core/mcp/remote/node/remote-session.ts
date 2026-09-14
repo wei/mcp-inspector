@@ -4,7 +4,7 @@
 
 import type { Transport } from "@modelcontextprotocol/client";
 import type { JSONRPCMessage } from "@modelcontextprotocol/client";
-import type { FetchRequestEntryBase } from "../../types.js";
+import type { FetchRequestEntryBase, FetchStreamState } from "../../types.js";
 import type { RemoteEvent } from "../types.js";
 import type { AuthChallenge } from "../../../auth/challenge.js";
 import { AuthChallengeError } from "../../../auth/challenge.js";
@@ -285,6 +285,17 @@ export class RemoteSession {
     this.pushEvent({
       type: "fetch_request_body_update",
       data: { id, responseBody },
+    });
+  }
+
+  onFetchStreamUpdate(id: string, stream: FetchStreamState): void {
+    this.pushEvent({
+      type: "fetch_stream_update",
+      data: {
+        id,
+        eventCount: stream.eventCount,
+        ...(stream.closedAt && { closedAt: stream.closedAt.toISOString() }),
+      },
     });
   }
 

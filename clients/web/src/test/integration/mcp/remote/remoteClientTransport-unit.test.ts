@@ -340,6 +340,59 @@ describe("RemoteClientTransport (focused branch coverage)", () => {
       expect(onFetchResponseBody).toHaveBeenCalledWith("f1", "BODY");
     });
 
+    it("delivers fetch_stream_update events, rebuilding closedAt as a Date (#2318)", async () => {
+      const onFetchStreamUpdate = vi.fn();
+      const t = makeTransport(
+        {
+          events: () =>
+            sseResponse([
+              sseFrame({
+                type: "fetch_stream_update",
+                data: { id: "f1", eventCount: 2 },
+              }),
+              sseFrame({
+                type: "fetch_stream_update",
+                data: {
+                  id: "f1",
+                  eventCount: 3,
+                  closedAt: "2026-01-01T00:00:05.000Z",
+                },
+              }),
+            ]),
+        },
+        { onFetchStreamUpdate },
+      );
+      await t.start();
+      await tick();
+      expect(onFetchStreamUpdate).toHaveBeenCalledTimes(2);
+      expect(onFetchStreamUpdate).toHaveBeenNthCalledWith(1, "f1", {
+        eventCount: 2,
+      });
+      expect(onFetchStreamUpdate).toHaveBeenNthCalledWith(2, "f1", {
+        eventCount: 3,
+        closedAt: new Date("2026-01-01T00:00:05.000Z"),
+      });
+    });
+
+    it("drops fetch_stream_update events when no handler is registered", async () => {
+      const onFetchRequest = vi.fn();
+      const t = makeTransport(
+        {
+          events: () =>
+            sseResponse([
+              sseFrame({
+                type: "fetch_stream_update",
+                data: { id: "f1", eventCount: 1 },
+              }),
+            ]),
+        },
+        { onFetchRequest },
+      );
+      await t.start();
+      await tick();
+      expect(onFetchRequest).not.toHaveBeenCalled();
+    });
+
     it("delivers stdio_log events to onStderr", async () => {
       const onStderr = vi.fn();
       const t = makeTransport(

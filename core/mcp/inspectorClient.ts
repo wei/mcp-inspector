@@ -13,6 +13,7 @@ import type {
   MessageOrigin,
   FetchRequestEntry,
   FetchRequestEntryBase,
+  FetchStreamState,
   InspectorServerSettings,
   ResourceReadInvocation,
   ResourceTemplateReadInvocation,
@@ -264,9 +265,28 @@ import {
 import type { TokenRevocationOutcome } from "../auth/revocation.js";
 import type { OAuthTokens } from "@modelcontextprotocol/client";
 import { silentLogger, type InspectorLogger } from "../logging/logger.js";
-import { createFetchTracker } from "./fetchTracking.js";
+import {
+  createFetchTracker,
+  findHeader,
+  isLongLivedStreamResponse,
+} from "./fetchTracking.js";
+import {
+  annotateRequestTimeout,
+  type ConnectionDiagnostics,
+  type LastResponse,
+  type NotificationStreamState,
+  type OutstandingRequest,
+} from "./connectionDiagnostics.js";
 import { OAuthManager, type OAuthManagerConfig } from "./oauthManager.js";
 import { RemoteClientTransport } from "./remote/remoteClientTransport.js";
+
+/**
+ * The notification stream the diagnostics are following, plus the fetch entry
+ * id that ties later `fetchRequestStreamUpdate`s back to it (#2318).
+ */
+interface TrackedNotificationStream extends NotificationStreamState {
+  id: string;
+}
 
 /** Internal record for a receiver task (server polls us for status/result). */
 interface ReceiverTaskRecord {
@@ -475,13 +495,23 @@ export class InspectorClient extends InspectorClientEventTarget {
   private outputValidator: AjvJsonSchemaValidator | null = null;
   private transport: Transport | MessageTrackingTransport | null = null;
   private baseTransport: Transport | null = null;
-  // Correlation for `markResponseRejected` (#1953): the method of each
-  // outbound request still awaiting a response, and — once one is answered —
-  // the id of the most recently answered request per method. Entries are
-  // dropped as responses arrive, so this holds at most one id per method
-  // rather than growing with the session.
-  private outboundRequestMethods = new Map<string | number, string>();
+  // Every outbound request still awaiting a response, keyed by JSON-RPC id.
+  // Serves two readers: the `markResponseRejected` correlation (#1953), which
+  // needs the method, and the connection diagnostics (#2318), which need the
+  // method and when it went out. Entries are dropped as responses arrive; a
+  // request the SDK gave up on (a timeout, a cancel) stays until the session
+  // resets, because it is still unanswered and that is what the diagnostics
+  // report.
+  private outstandingRequests = new Map<string | number, OutstandingRequest>();
+  // The id of the most recently answered request per method, for
+  // `markResponseRejected` (#1953). At most one id per method, so it does not
+  // grow with the session.
   private lastAnsweredRequestByMethod = new Map<string, string | number>();
+  // Connection diagnostics (#2318): the most recent response to one of our
+  // requests, and the most recent long-lived transport stream (the standalone
+  // `GET` on Streamable HTTP). Both per-session, reset with the maps above.
+  private lastResponse: LastResponse | undefined;
+  private notificationStream: TrackedNotificationStream | undefined;
   /** True when the cached transport was built with an OAuth authProvider attached. */
   private transportHasAuthProvider = false;
   /** Dedupes concurrent ambient auth challenges (reason + scopes). */
@@ -1006,6 +1036,47 @@ export class InspectorClient extends InspectorClientEventTarget {
       this.clientInfo,
       Object.keys(clientOptions).length > 0 ? clientOptions : undefined,
     );
+    this.annotateSdkRequestTimeouts(this.client);
+  }
+
+  /**
+   * Decorate the SDK Client's `request` so a per-request timeout rejects with
+   * the connection's state at that moment instead of a bare `Request timed
+   * out` (#2318).
+   *
+   * `Protocol.request` is the one funnel every SDK verb goes through —
+   * `listTools`, `callTool`, `readResource`, the handshake's `initialize`,
+   * and this class's own raw `client.request` calls all reach the wire
+   * through it — so decorating it here covers the whole surface without a
+   * `catch` at each of the several dozen call sites, and covers the next
+   * verb added without anyone remembering to. The SDK offers no hook on the
+   * rejection path: the timeout error is constructed and thrown inside
+   * `request()` itself.
+   *
+   * Replaced on the instance rather than through a subclass because
+   * `request` is declared with two overloads (spec method with a keyed
+   * result, custom method with an explicit schema), and an `override` would
+   * have to restate both against types that move with every SDK release. One
+   * implementation signature serves both at runtime; the single cast on the
+   * way back is what the overloads cost.
+   */
+  private annotateSdkRequestTimeouts(client: Client): void {
+    type SdkRequest = Client["request"];
+    const sdkRequest: SdkRequest = client.request.bind(client);
+    const decorated = async (
+      ...args: Parameters<SdkRequest>
+    ): Promise<unknown> => {
+      try {
+        return await sdkRequest(...args);
+      } catch (err) {
+        throw annotateRequestTimeout(
+          err,
+          args[0].method,
+          this.getConnectionDiagnostics(),
+        );
+      }
+    };
+    client.request = decorated as SdkRequest;
   }
 
   /**
@@ -1043,7 +1114,12 @@ export class InspectorClient extends InspectorClientEventTarget {
     return {
       trackRequest: (message: JSONRPCRequest, origin: MessageOrigin) => {
         if (origin === "client") {
-          this.outboundRequestMethods.set(message.id, message.method);
+          this.outstandingRequests.set(message.id, {
+            id: message.id,
+            method: message.method,
+            sentAt: Date.now(),
+          });
+          this.dispatchConnectionDiagnosticsChange();
         }
         const entry: MessageEntry = {
           id: crypto.randomUUID(),
@@ -1065,11 +1141,13 @@ export class InspectorClient extends InspectorClientEventTarget {
         // frame answers no specific request, so it is skipped.
         const responseId = message.id;
         if (origin === "server" && responseId !== undefined) {
-          const method = this.outboundRequestMethods.get(responseId);
-          this.outboundRequestMethods.delete(responseId);
+          const method = this.outstandingRequests.get(responseId)?.method;
+          this.outstandingRequests.delete(responseId);
           if (method !== undefined) {
             this.lastAnsweredRequestByMethod.set(method, responseId);
+            this.lastResponse = { method, receivedAt: Date.now() };
           }
+          this.dispatchConnectionDiagnosticsChange();
         }
         const entry: MessageEntry = {
           id: crypto.randomUUID(),
@@ -1928,8 +2006,11 @@ export class InspectorClient extends InspectorClientEventTarget {
     // start-clean path rather than in `disconnect()` for the reason documented
     // above: one route out (`onerror` with no `onclose`) tears down nothing
     // (#1953).
-    this.outboundRequestMethods.clear();
+    this.outstandingRequests.clear();
     this.lastAnsweredRequestByMethod.clear();
+    this.lastResponse = undefined;
+    this.notificationStream = undefined;
+    this.dispatchConnectionDiagnosticsChange();
     // Per-session for the same reason: both name entries of the PREVIOUS
     // server's list. Cleared here as well as in `disconnect()` because the
     // route out that tears down nothing (`onerror` with no `onclose`) would
@@ -2098,9 +2179,13 @@ export class InspectorClient extends InspectorClientEventTarget {
         },
         onFetchRequest: (entry: FetchRequestEntryBase) => {
           this.dispatchFetchRequest({ ...entry, category: "transport" });
+          this.noteTransportStream(entry);
         },
         onFetchResponseBody: (id: string, body: string) => {
           this.dispatchFetchRequestBodyUpdate(id, body);
+        },
+        onFetchStreamUpdate: (id: string, stream: FetchStreamState) => {
+          this.dispatchFetchRequestStreamUpdate(id, stream);
         },
         ...(this.serverSettings && { settings: this.serverSettings }),
       };
@@ -5960,6 +6045,80 @@ export class InspectorClient extends InspectorClientEventTarget {
     responseBody: string,
   ): void {
     this.dispatchTypedEvent("fetchRequestBodyUpdate", { id, responseBody });
+  }
+
+  private dispatchFetchRequestStreamUpdate(
+    id: string,
+    stream: FetchStreamState,
+  ): void {
+    this.dispatchTypedEvent("fetchRequestStreamUpdate", { id, stream });
+    // The diagnostics follow only the stream they are currently watching;
+    // an update for an older one (a reconnected stream's predecessor
+    // closing late) changes nothing they report.
+    if (this.notificationStream?.id !== id) return;
+    this.notificationStream = {
+      ...this.notificationStream,
+      eventCount: stream.eventCount,
+      ...(stream.closedAt && { closedAt: stream.closedAt.getTime() }),
+    };
+    this.dispatchConnectionDiagnosticsChange();
+  }
+
+  /**
+   * Adopt a transport fetch as the notification stream when it is one — a
+   * `GET` answered with an unbounded event stream — so the diagnostics can
+   * say how long it has been open and what it has delivered (#2318). The
+   * newest such stream wins: the SDK reopens the standalone `GET` after a
+   * drop, and the current one is the one a stalled request is queued behind.
+   */
+  private noteTransportStream(entry: FetchRequestEntryBase): void {
+    if (
+      !isLongLivedStreamResponse(
+        entry.method,
+        findHeader(entry.responseHeaders, "content-type"),
+      )
+    ) {
+      return;
+    }
+    this.notificationStream = {
+      id: entry.id,
+      url: entry.url,
+      openedAt: entry.timestamp.getTime(),
+      eventCount: 0,
+    };
+    this.dispatchConnectionDiagnosticsChange();
+  }
+
+  /**
+   * What this client is still waiting on, when it last heard back, and the
+   * state of the notification stream (#2318). A fresh snapshot per call —
+   * the same one `annotateRequestTimeout` writes a timeout message from, and
+   * the one `connectionDiagnosticsChange` carries.
+   */
+  getConnectionDiagnostics(): ConnectionDiagnostics {
+    return {
+      capturedAt: Date.now(),
+      outstandingRequests: [...this.outstandingRequests.values()],
+      ...(this.lastResponse && { lastResponse: { ...this.lastResponse } }),
+      ...(this.notificationStream && {
+        notificationStream: this.publicStreamState(this.notificationStream),
+      }),
+    };
+  }
+
+  /** The stream state minus the entry id, which is bookkeeping, not a fact. */
+  private publicStreamState(
+    stream: TrackedNotificationStream,
+  ): NotificationStreamState {
+    const { id: _id, ...state } = stream;
+    return state;
+  }
+
+  private dispatchConnectionDiagnosticsChange(): void {
+    this.dispatchTypedEvent(
+      "connectionDiagnosticsChange",
+      this.getConnectionDiagnostics(),
+    );
   }
 
   /**

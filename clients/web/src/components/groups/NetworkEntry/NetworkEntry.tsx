@@ -15,7 +15,10 @@ import {
 } from "@mantine/core";
 import { RiErrorWarningLine } from "react-icons/ri";
 import type { FetchRequestEntry } from "@inspector/core/mcp/types.js";
-import { isLongLivedStreamResponse } from "@inspector/core/mcp/fetchTracking.js";
+import {
+  isLongLivedStreamEntry,
+  uncapturedBodyNote,
+} from "../../../utils/uncapturedBodyNote";
 import { ContentViewer } from "../../elements/ContentViewer/ContentViewer";
 import { getMimeKind } from "../../elements/ContentViewer/contentViewerUtils";
 import { CopyButton } from "../../elements/CopyButton/CopyButton";
@@ -156,13 +159,6 @@ function statusLabel(entry: FetchRequestEntry): string {
   return entry.responseStatusText
     ? `${entry.responseStatus} ${entry.responseStatusText}`
     : `${entry.responseStatus}`;
-}
-
-function isLongLivedStream(entry: FetchRequestEntry): boolean {
-  return isLongLivedStreamResponse(
-    entry.method,
-    entry.responseHeaders?.["content-type"],
-  );
 }
 
 // Header-table cell text. A modern MCP-mirrored header name gets a violet accent
@@ -542,7 +538,7 @@ export function NetworkEntry({
       {entry.duration != null && (
         <DurationText>{formatDuration(entry.duration)}</DurationText>
       )}
-      {isLongLivedStream(entry) && <Badge color="orange">SSE</Badge>}
+      {isLongLivedStreamEntry(entry) && <Badge color="orange">SSE</Badge>}
       <Badge color={statusColor(entry)} variant="status">
         {statusLabel(entry)}
       </Badge>
@@ -647,11 +643,7 @@ export function NetworkEntry({
                     label="Response body"
                   />
                 ) : (
-                  <DimmedNote>
-                    {isLongLivedStream(entry)
-                      ? "Long-lived stream — body not captured"
-                      : "(empty)"}
-                  </DimmedNote>
+                  <DimmedNote>{uncapturedBodyNote(entry)}</DimmedNote>
                 )}
               </Stack>
             )}

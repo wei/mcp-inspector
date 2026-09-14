@@ -12,6 +12,7 @@ import type {
 } from "@modelcontextprotocol/client";
 import type { ExcludedTool } from "../mcp/types.js";
 import type { MalformedListItem } from "../mcp/listSalvage.js";
+import type { ConnectionDiagnostics } from "../mcp/connectionDiagnostics.js";
 import { useStoreSnapshot } from "./useStoreSnapshot.js";
 
 // Module-scope frozen object so the `?? EMPTY_CLIENT_CAPABILITIES`
@@ -27,6 +28,13 @@ const EMPTY_CLIENT_CAPABILITIES: ClientCapabilities = Object.freeze({});
  */
 const NO_EXCLUDED_TOOLS: ExcludedTool[] = [];
 const NO_MALFORMED_LIST_ITEMS: MalformedListItem[] = [];
+// Also the fallback for a client that does not implement the optional
+// accessor (a test double), so the field is always a snapshot and never
+// `undefined` — one shape for consumers, whatever client is attached.
+const NO_CONNECTION_DIAGNOSTICS: ConnectionDiagnostics = Object.freeze({
+  capturedAt: 0,
+  outstandingRequests: [],
+});
 
 const readStatus = (client: InspectorClientProtocol): ConnectionStatus =>
   client.getStatus();
@@ -53,6 +61,10 @@ const readExcludedTools = (client: InspectorClientProtocol): ExcludedTool[] =>
 const readMalformedListItems = (
   client: InspectorClientProtocol,
 ): MalformedListItem[] => client.getMalformedListItems();
+const readConnectionDiagnostics = (
+  client: InspectorClientProtocol,
+): ConnectionDiagnostics =>
+  client.getConnectionDiagnostics?.() ?? NO_CONNECTION_DIAGNOSTICS;
 
 export interface UseInspectorClientResult {
   status: ConnectionStatus;
@@ -86,6 +98,13 @@ export interface UseInspectorClientResult {
    * non-empty set means that list rendered without them (#1909).
    */
   malformedListItems: MalformedListItem[];
+  /**
+   * What the client is still waiting on, when it last heard back, and the
+   * state of the notification stream — re-read on every request, response
+   * and stream event. The Connection Info modal renders it; a request
+   * timeout's message is written from the same snapshot (#2318).
+   */
+  connectionDiagnostics: ConnectionDiagnostics;
   /**
    * Message from the most recent mid-session transport failure (the client's
    * `error` event — stdio crash, SSE drop, HTTP 5xx). Stays set until the next
@@ -174,6 +193,12 @@ export function useInspectorClient(
     readMalformedListItems,
     NO_MALFORMED_LIST_ITEMS,
   );
+  const connectionDiagnostics = useStoreSnapshot(
+    inspectorClient,
+    "connectionDiagnosticsChange",
+    readConnectionDiagnostics,
+    NO_CONNECTION_DIAGNOSTICS,
+  );
 
   // `lastError` is the one value here that is NOT a snapshot of something the
   // client stores: there is no `getLastError()`, because the client emits the
@@ -243,6 +268,7 @@ export function useInspectorClient(
     discoverResult,
     excludedTools,
     malformedListItems,
+    connectionDiagnostics,
     lastError,
     appRendererClient: inspectorClient?.getAppRendererClient() ?? null,
     connect,

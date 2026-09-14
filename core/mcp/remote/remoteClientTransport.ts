@@ -12,7 +12,7 @@ import type {
   MessageExtraInfo,
 } from "@modelcontextprotocol/client";
 import type { InspectorServerSettings, StderrLogEntry } from "../types.js";
-import type { FetchRequestEntryBase } from "../types.js";
+import type { FetchRequestEntryBase, FetchStreamState } from "../types.js";
 import type {
   AuthChallenge,
   AuthChallengeOutcome,
@@ -59,6 +59,9 @@ export interface RemoteTransportOptions {
 
   /** Callback for async response-body updates to a previously tracked fetch. */
   onFetchResponseBody?: (id: string, responseBody: string) => void;
+
+  /** Callback for a previously tracked long-lived stream's events and close (#2318). */
+  onFetchStreamUpdate?: (id: string, stream: FetchStreamState) => void;
 
   /** Optional OAuth client provider for Bearer authentication */
   authProvider?: import("@modelcontextprotocol/client").OAuthClientProvider;
@@ -545,6 +548,15 @@ export class RemoteClientTransport implements Transport {
               parsed.data.id,
               parsed.data.responseBody,
             );
+          } else if (
+            parsed.type === "fetch_stream_update" &&
+            this.options.onFetchStreamUpdate
+          ) {
+            const { id, eventCount, closedAt } = parsed.data;
+            this.options.onFetchStreamUpdate(id, {
+              eventCount,
+              ...(closedAt !== undefined && { closedAt: new Date(closedAt) }),
+            });
           } else if (parsed.type === "stdio_log" && this.options.onStderr) {
             this.options.onStderr({
               timestamp: new Date(parsed.data.timestamp),

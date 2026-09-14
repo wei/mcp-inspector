@@ -40,6 +40,7 @@ import type {
 } from "../types.js";
 import { INACTIVE_SUBSCRIPTION_STREAM_STATE } from "../types.js";
 import type { MalformedListItem } from "../listSalvage.js";
+import type { ConnectionDiagnostics } from "../connectionDiagnostics.js";
 import type { SkillEntry, SkillResource } from "../skillsSchemas.js";
 import type { SkillsExtensionSupport } from "../skills.js";
 import type { JsonValue } from "../../json/jsonUtils.js";
@@ -319,6 +320,21 @@ export class FakeInspectorClient
 
   getDiscoverResult(): DiscoverResult | undefined {
     return this.discoverResult;
+  }
+
+  private connectionDiagnostics: ConnectionDiagnostics = {
+    capturedAt: 0,
+    outstandingRequests: [],
+  };
+
+  getConnectionDiagnostics(): ConnectionDiagnostics {
+    return this.connectionDiagnostics;
+  }
+
+  /** Test helper: set the diagnostics snapshot and emit the change (#2318). */
+  setConnectionDiagnostics(diagnostics: ConnectionDiagnostics): void {
+    this.connectionDiagnostics = diagnostics;
+    this.dispatchTypedEvent("connectionDiagnosticsChange", diagnostics);
   }
 
   resourceSubscriptionStreamState: ResourceSubscriptionStreamState =
