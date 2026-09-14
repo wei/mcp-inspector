@@ -171,6 +171,16 @@ export function isSkillsExtensionSupported(
  * rejected too: containment could not be decided on it, and silently accepting
  * one would reintroduce exactly the hole this function closes.
  *
+ * A **path-less authority** URI (`skill://data-analysis`) is accepted, and is
+ * not the opaque case above: RFC 3986 gives a URI with an authority an empty
+ * path, and the parser reports that as `pathname === ""`. It has no segments,
+ * so nothing survives unnormalized. It is what a skill's root directory looks
+ * like once `/SKILL.md` is removed, so rejecting it made a server echoing that
+ * root back in a directory read read as "outside this skill" when it is the
+ * skill itself (#2295). It names no file, so it still fails every check that
+ * needs one — `skillNameFromUri` wants the `/SKILL.md` suffix, and a manifest
+ * entry spelled this way does not start with `<root>/`.
+ *
  * The scheme is deliberately **not** constrained. `skill://` is what SEP-2640
  * recommends and what this repo's fixture serves, but the SEP only says servers
  * SHOULD use it and explicitly allows a domain-native scheme (`github://…`), so
@@ -186,7 +196,9 @@ export function normalizeSkillUri(uri: string): string | undefined {
   } catch {
     return undefined;
   }
-  if (!parsed.pathname.startsWith("/")) return undefined;
+  if (parsed.pathname !== "" && !parsed.pathname.startsWith("/")) {
+    return undefined;
+  }
   return canonicalizePercentEncoding(parsed.href);
 }
 

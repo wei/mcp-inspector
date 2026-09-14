@@ -2184,6 +2184,31 @@ describe("SkillsScreen directory browsing (#2248)", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("names a skill root echoed back among its own children as not a direct child (#2295)", async () => {
+    // The root is path-less (`skill://data-analysis`), which
+    // `normalizeSkillUri` used to reject — so the containment check failed and
+    // the row read "outside this skill" while being the skill itself.
+    const user = userEvent.setup();
+    const ROOT_SELF = {
+      uri: ROOT,
+      name: "data-analysis",
+      mimeType: "inode/directory",
+    };
+    await openRoot(
+      user,
+      directoryReader({ [ROOT]: { resources: [CHILD_FILE, ROOT_SELF] } }),
+    );
+    const table = within(screen.getByTestId("skill-directory"));
+    expect(table.getByText(/not a direct child/)).toBeInTheDocument();
+    expect(table.queryByText(/outside this skill/)).not.toBeInTheDocument();
+    expect(
+      table.queryByRole("button", { name: `Open directory ${ROOT}` }),
+    ).not.toBeInTheDocument();
+    expect(
+      table.getByRole("button", { name: `View ${CHILD_FILE.uri}` }),
+    ).toBeInTheDocument();
+  });
+
   it("navigates on the normalized URI, so Up cannot walk into a `..` segment", async () => {
     // Containment was decided on the normalized URI while navigation sent and
     // stored the raw one, so for `skill://root/a/../templates` the first Up
