@@ -86,10 +86,13 @@ declaration and passed against this fixture regardless
 ([#2373](https://github.com/modelcontextprotocol/inspector/issues/2373)).
 `skills-strict-legacy-http.json` (port 3232) and
 `skills-strict-modern-http.json` (port 3233) add
-`"skillsRequireClientExtension": true`, which answers `skills/list`,
-`skills/get` and `resources/directory/read` with `-32601` unless the client
-declared it (skill files still come through ordinary `resources/read`, which
-needs no extension). ⚠️ **Connect each with its own era.** A modern request
+`"skillsRequireClientExtension": true`, which refuses `skills/list`,
+`skills/get` and `resources/directory/read` unless the client declared it
+(skill files still come through ordinary `resources/read`, which needs no
+extension). The refusal differs by era: a **modern** request gets SEP-2575's
+`-32021` MissingRequiredClientCapability (HTTP 400) with the Skills extension
+under `data.requiredCapabilities`; a **legacy** one, whose era has no such code,
+gets `-32601`. ⚠️ **Connect each with its own era.** A modern request
 carries the declaration in its `_meta` envelope; a legacy one relies on what
 `initialize` declared, which only a stateful legacy server keeps. A legacy
 client reaching the modern file is served statelessly, holds no declaration,

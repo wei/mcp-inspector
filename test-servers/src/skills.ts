@@ -60,6 +60,7 @@ import { createHash } from "node:crypto";
 import * as z from "zod/v4";
 import {
   CLIENT_CAPABILITIES_META_KEY,
+  MissingRequiredClientCapabilityError,
   ProtocolError,
   ProtocolErrorCode,
   type McpServer,
@@ -747,15 +748,24 @@ function assertClientDeclaredSkills(
   method: string,
   envelope: ReceivedEnvelope,
 ): void {
+  const modernCapabilities = envelope?.[CLIENT_CAPABILITIES_META_KEY];
   const capabilities =
-    envelope?.[CLIENT_CAPABILITIES_META_KEY] ??
-    mcpServer.server.getClientCapabilities();
-  if (!hasSkillsExtension(capabilities)) {
-    throw new ProtocolError(
-      ProtocolErrorCode.MethodNotFound,
-      `${method} requires the client to declare ${SKILLS_EXTENSION_KEY} in its capabilities`,
+    modernCapabilities ?? mcpServer.server.getClientCapabilities();
+  if (hasSkillsExtension(capabilities)) return;
+  const message = `${method} requires the client to declare ${SKILLS_EXTENSION_KEY} in its capabilities`;
+  // The two eras name this refusal differently. SEP-2575 gives a modern
+  // request that needs an undeclared capability its own code, `-32021`
+  // MissingRequiredClientCapability (HTTP 400), carrying the missing
+  // capabilities in `data.requiredCapabilities` so the client can see what to
+  // declare. `-32601` there would claim the method does not exist. The legacy
+  // era has no such code, so a legacy refusal stays `-32601`.
+  if (modernCapabilities !== undefined) {
+    throw new MissingRequiredClientCapabilityError(
+      { requiredCapabilities: { extensions: { [SKILLS_EXTENSION_KEY]: {} } } },
+      message,
     );
   }
+  throw new ProtocolError(ProtocolErrorCode.MethodNotFound, message);
 }
 
 /**

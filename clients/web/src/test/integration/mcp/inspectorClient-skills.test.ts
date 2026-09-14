@@ -143,15 +143,34 @@ describe("Skills extension over a real transport (#2234)", () => {
         const connected = await connect(started.url, modern, {
           "io.modelcontextprotocol/skills": false,
         });
-        await expect(connected.listSkills()).rejects.toThrow(
-          /requires the client to declare io\.modelcontextprotocol\/skills/,
-        );
-        await expect(
+        // The wire code is the assertion, not just the message: the two eras
+        // name this refusal differently, and a fixture sliding back to a
+        // semantically different error must fail here. Modern is SEP-2575's
+        // `-32021` MissingRequiredClientCapability listing the missing
+        // extension; legacy has no such code and stays `-32601`.
+        const expected = modern
+          ? {
+              code: -32021,
+              data: {
+                requiredCapabilities: {
+                  extensions: { "io.modelcontextprotocol/skills": {} },
+                },
+              },
+            }
+          : { code: -32601 };
+        const refusals = [
+          connected.listSkills(),
           connected.getSkill("skill://data-analysis/SKILL.md"),
-        ).rejects.toThrow(/requires the client to declare/);
-        await expect(
           connected.readResourceDirectory("skill://data-analysis"),
-        ).rejects.toThrow(/requires the client to declare/);
+        ];
+        for (const refusal of refusals) {
+          await expect(refusal).rejects.toMatchObject({
+            ...expected,
+            message: expect.stringMatching(
+              /requires the client to declare io\.modelcontextprotocol\/skills/,
+            ),
+          });
+        }
         // A skill file is an ordinary resource and stays readable.
         const read = await connected.readResource(
           "skill://data-analysis/reference.md",
