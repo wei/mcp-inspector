@@ -4,15 +4,20 @@
  * and the Node `RemoteSession` import it rather than each carrying a copy.
  */
 
+import { ProgressTokenSchema } from "@modelcontextprotocol/core";
 import type { JSONRPCMessage } from "@modelcontextprotocol/client";
 
 /**
- * The id of the request a `notifications/progress` belongs to, or `undefined`
- * for any other message. The SDK stamps `progressToken: messageId` on the
- * outbound request, so a progress notification's `progressToken` is the id of
- * the request whose wait should be re-armed. A JSON-RPC progress token is a
- * string or a number; anything else is ignored so a malformed token can't be
- * coerced into a map key.
+ * The token identifying the request a `notifications/progress` belongs to, or
+ * `undefined` for any other message. The SDK stamps `progressToken: messageId`
+ * on the outbound request, so a progress notification's `progressToken` is the
+ * id of the request whose wait should be re-armed.
+ *
+ * Validation is delegated to the SDK's own `ProgressTokenSchema` rather than a
+ * hand-rolled `typeof` check — the protocol allows only a string or a *safe*
+ * integer, and zod's `.int()` rejects a fractional or past-`MAX_SAFE_INTEGER`
+ * value that a bare `typeof token === "number"` would wave through (the same
+ * drift `isProgressToken` in `core/mcp/inspectorClient.ts` exists to avoid).
  */
 export function progressTokenOf(
   message: JSONRPCMessage,
@@ -24,9 +29,11 @@ export function progressTokenOf(
     typeof message.params === "object" &&
     message.params !== null
   ) {
-    const token = (message.params as { progressToken?: unknown }).progressToken;
-    if (typeof token === "string" || typeof token === "number") {
-      return token;
+    const parsed = ProgressTokenSchema.safeParse(
+      (message.params as { progressToken?: unknown }).progressToken,
+    );
+    if (parsed.success) {
+      return parsed.data;
     }
   }
   return undefined;

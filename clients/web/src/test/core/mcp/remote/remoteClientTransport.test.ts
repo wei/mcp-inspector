@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { RemoteClientTransport } from "@inspector/core/mcp/remote/remoteClientTransport.js";
 import type { MCPServerConfig } from "@inspector/core/mcp/types.js";
 
@@ -727,12 +727,22 @@ describe("RemoteClientTransport", () => {
       return { fetchFn, getSse: () => sse, getSentId: () => sentId };
     }
 
-    const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    // Fake timers so the deadline is driven deterministically rather than
+    // raced against a real `setTimeout` — a real-sleep test can let the timeout
+    // fire before a loaded runner processes the enqueued SSE frame (#1596: a
+    // race is fixed with fake timers, never with headroom). Each push is
+    // followed by a 0ms async advance to flush the SSE consumer's stream read
+    // so the frame is parsed before time moves.
+    const TIMEOUT_MS = 1000;
+    const flushSse = () => vi.advanceTimersByTimeAsync(0);
+
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
 
     it("re-arms the wait on each progress note, so a call outliving the timeout still resolves", async () => {
       const { fetchFn, getSse, getSentId } = backendHoldingSend();
       const transport = new RemoteClientTransport(
-        { baseUrl, fetchFn, sseResponseTimeoutMs: 150 },
+        { baseUrl, fetchFn, sseResponseTimeoutMs: TIMEOUT_MS },
         config,
       );
       await transport.start();
@@ -742,22 +752,25 @@ describe("RemoteClientTransport", () => {
         id: 1,
         method: "tools/call",
       });
+      await flushSse();
 
-      // Emit progress every 100ms (< the 150ms window) for ~400ms total, then
-      // the response. Without the re-arm the wait dies at 150ms.
-      for (let i = 0; i < 4; i++) {
-        await delay(100);
+      // Three progress notes, each after 900ms (< the 1000ms window): without
+      // the re-arm the wait dies at 1000ms, well before the third lands.
+      for (let i = 0; i < 3; i++) {
         getSse().pushMessage({
           jsonrpc: "2.0",
           method: "notifications/progress",
-          params: { progressToken: getSentId(), progress: i, total: 4 },
+          params: { progressToken: getSentId(), progress: i, total: 3 },
         });
+        await flushSse();
+        await vi.advanceTimersByTimeAsync(900);
       }
       getSse().pushMessage({
         jsonrpc: "2.0",
         id: getSentId(),
         result: { ok: true },
       });
+      await flushSse();
 
       await expect(sent).resolves.toBeUndefined();
       await transport.close();
@@ -766,7 +779,7 @@ describe("RemoteClientTransport", () => {
     it("does not re-arm on notifications/message, so a log-only call still times out", async () => {
       const { fetchFn, getSse, getSentId } = backendHoldingSend();
       const transport = new RemoteClientTransport(
-        { baseUrl, fetchFn, sseResponseTimeoutMs: 150 },
+        { baseUrl, fetchFn, sseResponseTimeoutMs: TIMEOUT_MS },
         config,
       );
       await transport.start();
@@ -776,24 +789,23 @@ describe("RemoteClientTransport", () => {
         id: 1,
         method: "tools/call",
       });
-      void sent.catch(() => {});
-
-      // Only log messages — these must not extend the deadline.
-      for (let i = 0; i < 4; i++) {
-        await delay(50);
-        getSse().pushMessage({
-          jsonrpc: "2.0",
-          method: "notifications/message",
-          params: {
-            level: "info",
-            data: { msg: `tick ${i}`, token: getSentId() },
-          },
-        });
-      }
-
-      await expect(sent).rejects.toThrow(
+      // Hold the expected rejection now (as the RemoteSession timeout tests do)
+      // so it is asserted rather than suppressed by an empty catch.
+      const rejection = expect(sent).rejects.toThrow(
         /Timed out waiting for MCP response on SSE/,
       );
+      await flushSse();
+
+      // A log message before the deadline must not extend it.
+      getSse().pushMessage({
+        jsonrpc: "2.0",
+        method: "notifications/message",
+        params: { level: "info", data: { msg: "tick", token: getSentId() } },
+      });
+      await flushSse();
+      await vi.advanceTimersByTimeAsync(TIMEOUT_MS);
+
+      await rejection;
       await transport.close();
     });
   });

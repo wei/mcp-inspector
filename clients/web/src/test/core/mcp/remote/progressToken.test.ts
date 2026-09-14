@@ -1,3 +1,11 @@
+/**
+ * Unit tests for the shared `progressTokenOf` guard (#2028) — the string/safe
+ * integer extractor both relay waits (browser `RemoteClientTransport` and Node
+ * `RemoteSession`) use to correlate a `notifications/progress` with the request
+ * whose timeout it should re-arm. Covers the protocol's accept set and, since
+ * the guard delegates to the SDK's `ProgressTokenSchema`, the fractional and
+ * past-`MAX_SAFE_INTEGER` values a bare `typeof` check would have let through.
+ */
 import { describe, it, expect } from "vitest";
 import { progressTokenOf } from "@inspector/core/mcp/remote/progressToken.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/client";
@@ -69,5 +77,39 @@ describe("progressTokenOf (#2028)", () => {
         }),
       ),
     ).toBeUndefined();
+  });
+
+  it("rejects a fractional numeric token (the protocol allows only integers)", () => {
+    expect(
+      progressTokenOf(
+        msg({
+          jsonrpc: "2.0",
+          method: "notifications/progress",
+          params: { progressToken: 1.5, progress: 1 },
+        }),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("rejects an integer past MAX_SAFE_INTEGER", () => {
+    expect(
+      progressTokenOf(
+        msg({
+          jsonrpc: "2.0",
+          method: "notifications/progress",
+          params: { progressToken: Number.MAX_SAFE_INTEGER + 1, progress: 1 },
+        }),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("accepts a safe integer at the boundary", () => {
+    expect(
+      progressTokenOf({
+        jsonrpc: "2.0",
+        method: "notifications/progress",
+        params: { progressToken: Number.MAX_SAFE_INTEGER, progress: 1 },
+      }),
+    ).toBe(Number.MAX_SAFE_INTEGER);
   });
 });

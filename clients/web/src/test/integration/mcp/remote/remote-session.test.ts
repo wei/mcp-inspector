@@ -7,10 +7,15 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import type { Transport } from "@modelcontextprotocol/client";
+import type { Transport, JSONRPCMessage } from "@modelcontextprotocol/client";
 import { RemoteSession } from "@inspector/core/mcp/remote/node/remote-session.js";
 import type { FetchRequestEntryBase } from "@inspector/core/mcp/types.js";
 import { AuthChallengeError } from "@inspector/core/auth/challenge.js";
+
+// Stage a deliberately off-spec message as `unknown` and narrow with a single
+// cast — the guard branches these fixtures exercise are ones the typed
+// `JSONRPCMessage` shape forbids, and `unknown` is the safe top type to pass in.
+const asMsg = (m: unknown): JSONRPCMessage => m as JSONRPCMessage;
 
 function makeFetchEntry(
   overrides: Partial<FetchRequestEntryBase> = {},
@@ -289,11 +294,13 @@ describe("RemoteSession", () => {
     const wait = session.waitForRequestResponse(8, 1000);
     const rejection = expect(wait).rejects.toThrow(/timed out/);
     // A malformed token (object) must be ignored, not coerced to a key.
-    session.onMessage({
-      jsonrpc: "2.0",
-      method: "notifications/progress",
-      params: { progressToken: { bad: true }, progress: 1 },
-    } as unknown as Parameters<RemoteSession["onMessage"]>[0]);
+    session.onMessage(
+      asMsg({
+        jsonrpc: "2.0",
+        method: "notifications/progress",
+        params: { progressToken: { bad: true }, progress: 1 },
+      }),
+    );
     await vi.advanceTimersByTimeAsync(1000);
     await rejection;
     vi.useRealTimers();
