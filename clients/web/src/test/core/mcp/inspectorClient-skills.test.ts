@@ -159,10 +159,12 @@ describe("InspectorClient skills methods (#2234)", () => {
   });
 
   it("accepts a modern result that carries the envelope", async () => {
+    // No `resultType` in the stub: the SDK codec lifts it off before the
+    // client's schema runs, so this is the shape a real modern page arrives
+    // in (#2373).
     const client = makeClient();
     internals(client).protocolEra = "modern";
     stubRequest(client, {
-      resultType: "complete",
       ttlMs: 0,
       cacheScope: "public",
       skills: [ENTRY],
@@ -317,14 +319,18 @@ describe("InspectorClient skills methods (#2234)", () => {
       });
     });
 
-    it("requires resultType on a modern connection", async () => {
+    it("accepts a modern result as the SDK codec delivers it, without resultType (#2373)", async () => {
+      // The codec checks `resultType` and lifts it off before this schema
+      // runs, so a stub returning the lifted shape is what a real modern
+      // connection hands the client. Requiring it here failed every conforming
+      // server; the live check is in the integration suite.
       const client = makeClient();
       internals(client).protocolEra = "modern";
-      stubRequest(client, { resources: [] });
+      stubRequest(client, { resources: [CHILD] });
       declareSkills(client, true);
       await expect(
         client.readResourceDirectory("skill://demo"),
-      ).rejects.toBeDefined();
+      ).resolves.toMatchObject({ resources: [CHILD] });
     });
 
     it("accepts a legacy result without resultType", async () => {
@@ -388,21 +394,14 @@ describe("InspectorClient skills methods (#2234)", () => {
     });
   });
 
-  it("requires resultType on a modern skills/get", async () => {
-    // Base-protocol (SEP-2322) and present in SEP-2640's own example, unlike
-    // the caching attributes the SEP leaves open.
+  it("accepts a modern skills/get as the SDK codec delivers it, without resultType (#2373)", async () => {
+    // `resultType` is base-protocol (SEP-2322), so the codec enforces it and
+    // lifts it off before this schema runs — requiring it here rejected every
+    // conforming modern server. The caching attributes SEP-2640 leaves open
+    // stay optional too.
     const client = makeClient();
     internals(client).protocolEra = "modern";
     stubRequest(client, { skill: ENTRY });
-    await expect(
-      client.getSkill("skill://demo/SKILL.md"),
-    ).rejects.toBeDefined();
-  });
-
-  it("accepts a modern skills/get without the caching attributes", async () => {
-    const client = makeClient();
-    internals(client).protocolEra = "modern";
-    stubRequest(client, { skill: ENTRY, resultType: "complete" });
     await expect(client.getSkill("skill://demo/SKILL.md")).resolves.toEqual(
       ENTRY,
     );

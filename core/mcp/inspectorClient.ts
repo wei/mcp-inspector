@@ -150,8 +150,6 @@ import {
   DirectoryReadResultSchema,
   GetSkillEnvelopeSchema,
   ListSkillsResultSchema,
-  ModernGetSkillEnvelopeSchema,
-  ModernDirectoryReadResultSchema,
   ModernListSkillsResultSchema,
   RESOURCES_DIRECTORY_READ_METHOD,
   SKILLS_EXTENSION_KEY,
@@ -5796,21 +5794,16 @@ export class InspectorClient extends InspectorClientEventTarget {
       uri,
       ...(effectiveMeta ? { _meta: effectiveMeta } : {}),
     };
-    // Era-aware for the same reason `skills/list` is: the method is
-    // consumer-owned, so no SDK codec stamps or checks its envelope. The modern
-    // variant requires `resultType` — a base-protocol member SEP-2322 puts on
-    // every modern result — and still not the caching attributes, which
-    // SEP-2640 leaves open. The envelope is returned whole; `getSkill`
-    // unwraps.
-    const resultSchema = this.isModernEra()
-      ? ModernGetSkillEnvelopeSchema
-      : GetSkillEnvelopeSchema;
+    // One schema for both eras (#2373): on a modern connection the SDK codec
+    // has already enforced `resultType` and lifted it off, and the caching
+    // attributes are left open by SEP-2640, so there is nothing era-specific
+    // left to require. The envelope is returned whole; `getSkill` unwraps.
     try {
       return await this.invokeMcpClient(
         () =>
           this.client!.request(
             { method: SKILLS_GET_METHOD, params },
-            resultSchema,
+            GetSkillEnvelopeSchema,
             this.getRequestOptions(this.progressTokenOf(metadata)),
           ),
         { method: SKILLS_GET_METHOD },
@@ -5872,19 +5865,16 @@ export class InspectorClient extends InspectorClientEventTarget {
       // for page one.
       ...(cursor !== undefined ? { cursor } : {}),
     };
-    // Era-aware for the same reason `skills/list` is — the method is
-    // consumer-owned, so no SDK codec stamps or checks its envelope. The modern
-    // variant requires only `resultType`; see the schema for why it stops
-    // short of the caching attributes that `skills/list` requires.
-    const resultSchema = this.isModernEra()
-      ? ModernDirectoryReadResultSchema
-      : DirectoryReadResultSchema;
+    // One schema for both eras (#2373): the SDK codec enforces and lifts
+    // `resultType` on a modern connection, and SEP-2640 requires no caching
+    // attributes of this method — see `skillsSchemas.ts` for why that differs
+    // from `skills/list`.
     try {
       return await this.invokeMcpClient(
         () =>
           this.client!.request(
             { method: RESOURCES_DIRECTORY_READ_METHOD, params },
-            resultSchema,
+            DirectoryReadResultSchema,
             this.getRequestOptions(this.progressTokenOf(metadata)),
           ),
         { method: RESOURCES_DIRECTORY_READ_METHOD },

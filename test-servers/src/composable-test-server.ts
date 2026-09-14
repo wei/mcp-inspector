@@ -615,6 +615,14 @@ export interface ServerConfig {
    */
   skills?: boolean;
   /**
+   * With {@link ServerConfig.skills}, answer `skills/list`, `skills/get` and
+   * `resources/directory/read` with `-32601` unless the client declared
+   * `io.modelcontextprotocol/skills` in its own capabilities — a strict
+   * SEP-2133 server (#2373). Off by default so the existing skills fixtures
+   * keep serving any client. Ignored without `skills`.
+   */
+  skillsRequireClientExtension?: boolean;
+  /**
    * Advertise the MCP Apps `io.modelcontextprotocol/ui` extension with the
    * nested `elicitation` setting — the server-side half of the app-rendered
    * form elicitation negotiation (#1854, ext-apps#733).
@@ -1675,7 +1683,9 @@ export function createMcpServer(config: ServerConfig): McpServer {
   // `skill://` half of resources/read. Wired after the SDK's own handlers so
   // the resources/read wrapper can delegate non-skill URIs to them.
   if (config.skills) {
-    wireSkillsHandlers(mcpServer);
+    wireSkillsHandlers(mcpServer, {
+      requireClientExtension: config.skillsRequireClientExtension,
+    });
   }
 
   // Extension-gated tools (#1739): start each gated tool disabled, then enable

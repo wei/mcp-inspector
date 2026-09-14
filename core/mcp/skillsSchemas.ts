@@ -131,9 +131,18 @@ export type ListSkillsResult = z.infer<typeof ListSkillsResultSchema>;
  *
  * ⚠️ Picked by `InspectorClient.listSkills` from the negotiated era — a schema
  * cannot know it on its own.
+ *
+ * ⚠️ **No `resultType` member, and that is not an omission (#2373).** The
+ * SDK's 2026-07-28 codec checks `resultType` on every result — missing is
+ * `InvalidResult`, anything but `"complete"` is `UnsupportedResultType` — and
+ * then **deletes it** before the result reaches the caller's schema. Requiring
+ * it here therefore rejected every conforming modern page, and did so unseen
+ * only because the integration suite's "modern" cases were connecting on
+ * legacy. The caching attributes are different: the codec neither checks nor
+ * lifts them for a consumer-owned method, so this schema is still the only
+ * thing that does.
  */
 export const ModernListSkillsResultSchema = ListSkillsResultSchema.extend({
-  resultType: z.literal("complete"),
   // A non-negative INTEGER, matching the codec: `ttlMs: -1` or `0.5` is an
   // envelope violation, and accepting it here would hide exactly the kind of
   // defect this schema exists to surface.
@@ -182,21 +191,6 @@ export const GetSkillEnvelopeSchema = z.looseObject({
  * anything (Copilot).
  */
 export type GetSkillEnvelope = z.infer<typeof GetSkillEnvelopeSchema>;
-
-/**
- * `skills/get` on a **modern** (2026-07-28+) connection: the envelope plus
- * `resultType`, and deliberately still not the caching attributes.
- *
- * The "left open" quote above covers `ttlMs` / `cacheScope` and **only** those.
- * `resultType` is a different thing: SEP-2322 makes it a member of every modern
- * result, and SEP-2640's own `skills/get` example carries
- * `"resultType": "complete"`. Leaving it optional here while requiring it of
- * `resources/directory/read` was an inconsistency in this module rather than a
- * distinction the spec draws (Copilot).
- */
-export const ModernGetSkillEnvelopeSchema = GetSkillEnvelopeSchema.extend({
-  resultType: z.literal("complete"),
-});
 
 /**
  * `skills/get` result, unwrapped to the entry it carries.
@@ -252,29 +246,28 @@ export const DirectoryReadResultSchema = z.looseObject({
 
 export type DirectoryReadResult = z.infer<typeof DirectoryReadResultSchema>;
 
-/**
- * `resources/directory/read` result on a **modern** (2026-07-28+) connection:
- * the page plus `resultType`, and deliberately **not** `ttlMs` / `cacheScope`.
+/*
+ * There is deliberately **no modern variant** of the `resources/directory/read`
+ * or `skills/get` schemas, though `skills/list` has one (#2373).
  *
- * That asymmetry with {@link ModernListSkillsResultSchema} is the one judgement
- * call in this module, so it is written down rather than left to be re-derived:
+ * On a modern (2026-07-28+) connection the SDK codec already enforces
+ * `resultType` — the base-protocol member SEP-2322 puts on every modern result
+ * — and lifts it off before any caller schema runs. What remains is the
+ * caching attributes, and only `skills/list` is required to carry those:
  *
- *  - For `skills/list` the SEP states the requirement outright — *"In protocol
- *    versions 2026-07-28 and later, the result also carries … `ttlMs` and
- *    `cacheScope`"* — so requiring them is quoting the spec.
+ *  - For `skills/list` the SEP states it outright — *"In protocol versions
+ *    2026-07-28 and later, the result also carries … `ttlMs` and
+ *    `cacheScope`"* — so {@link ModernListSkillsResultSchema} requiring them is
+ *    quoting the spec.
  *  - For `resources/directory/read` it states **nothing of the kind**, and its
- *    one worked example of the result carries `resultType: "complete"` and no
- *    caching attributes at all. Requiring them here would fail a server that
- *    matched the SEP's own example, which is the failure direction this module
- *    works hardest to avoid.
+ *    one worked example carries `resultType: "complete"` and no caching
+ *    attributes at all. Requiring them would fail a server that matched the
+ *    SEP's own example, the failure direction this module works hardest to
+ *    avoid.
+ *  - For `skills/get` the SEP leaves the question open in as many words (see
+ *    {@link GetSkillEnvelopeSchema}).
  *
- * `resultType` is required because it is the base protocol's, not this
- * extension's: SEP-2322 makes it a member of every modern result, the SEP's
- * example carries it, and `skills/*` being consumer-owned means the SDK codec
- * validates none of it — so if this schema does not, nothing does.
- *
- * ⚠️ Picked by `InspectorClient.readResourceDirectory` from the negotiated era.
+ * So both eras parse those two results with one schema each. An earlier
+ * revision required `resultType` on "modern" variants of both; since the codec
+ * lifts it, they could never pass on a real modern connection.
  */
-export const ModernDirectoryReadResultSchema = DirectoryReadResultSchema.extend(
-  { resultType: z.literal("complete") },
-);

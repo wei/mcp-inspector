@@ -2,12 +2,10 @@ import { describe, it, expect } from "vitest";
 import {
   DIRECTORY_MIME_TYPE,
   DirectoryReadResultSchema,
-  ModernDirectoryReadResultSchema,
   RESOURCES_DIRECTORY_READ_METHOD,
   DYNAMIC_RESOURCES,
   GetSkillEnvelopeSchema,
   GetSkillResultSchema,
-  ModernGetSkillEnvelopeSchema,
   ListSkillsResultSchema,
   ModernListSkillsResultSchema,
   SKILLS_EXTENSION_KEY,
@@ -95,9 +93,11 @@ describe("ListSkillsResultSchema", () => {
 });
 
 describe("ModernListSkillsResultSchema", () => {
-  const envelope = { resultType: "complete", ttlMs: 0, cacheScope: "public" };
+  // What the schema actually receives on a modern connection: the SDK codec
+  // has already checked `resultType` and lifted it off the result (#2373).
+  const envelope = { ttlMs: 0, cacheScope: "public" };
 
-  it("accepts a modern page carrying the base list envelope", () => {
+  it("accepts a modern page carrying the caching attributes", () => {
     const parsed = ModernListSkillsResultSchema.parse({
       ...envelope,
       skills: [ENTRY],
@@ -105,10 +105,20 @@ describe("ModernListSkillsResultSchema", () => {
     expect(parsed.skills).toHaveLength(1);
   });
 
+  it("does not require resultType, which the SDK codec lifts before this schema runs (#2373)", () => {
+    // Requiring it rejected every conforming modern page: the codec checks
+    // `resultType` itself, then deletes it. An integration test proves the
+    // lift against a real connection; this pins the schema's side of it.
+    expect(
+      ModernListSkillsResultSchema.safeParse({ ...envelope, skills: [] })
+        .success,
+    ).toBe(true);
+  });
+
   it("rejects a modern page that omits the caching attributes", () => {
     // The whole reason for the era split: `skills/*` is consumer-owned, so the
-    // SDK codec validates none of it, and `{ skills: [] }` would otherwise
-    // reach the conformance UI as a clean list.
+    // SDK codec checks none of the caching attributes, and `{ skills: [] }`
+    // would otherwise reach the conformance UI as a clean list.
     expect(() => ModernListSkillsResultSchema.parse({ skills: [] })).toThrow();
     expect(() =>
       ModernListSkillsResultSchema.parse({
@@ -195,9 +205,6 @@ describe("directory read schemas (#2248)", () => {
       ],
     };
     expect(DirectoryReadResultSchema.safeParse(example).success).toBe(true);
-    expect(ModernDirectoryReadResultSchema.safeParse(example).success).toBe(
-      true,
-    );
   });
 
   it("accepts an empty directory", () => {
@@ -230,39 +237,24 @@ describe("directory read schemas (#2248)", () => {
     ).toBe(false);
   });
 
-  it("requires resultType on the modern variant only", () => {
-    const legacyShape = { resources: [CHILD] };
-    expect(DirectoryReadResultSchema.safeParse(legacyShape).success).toBe(true);
-    expect(ModernDirectoryReadResultSchema.safeParse(legacyShape).success).toBe(
-      false,
-    );
-  });
-
-  it("does NOT require the caching attributes on the modern variant", () => {
+  it("does NOT require the caching attributes, unlike a modern skills/list page", () => {
     // The deliberate asymmetry with `ModernListSkillsResultSchema`: SEP-2640
     // states `ttlMs`/`cacheScope` for a modern `skills/list` and says nothing
     // of the kind for this method, whose only worked example omits them.
     // Requiring them would fail a server that matched the spec's own example.
-    expect(
-      ModernDirectoryReadResultSchema.safeParse({
-        resultType: "complete",
-        resources: [],
-      }).success,
-    ).toBe(true);
-    expect(
-      ModernListSkillsResultSchema.safeParse({
-        resultType: "complete",
-        skills: [],
-      }).success,
-    ).toBe(false);
+    expect(DirectoryReadResultSchema.safeParse({ resources: [] }).success).toBe(
+      true,
+    );
+    expect(ModernListSkillsResultSchema.safeParse({ skills: [] }).success).toBe(
+      false,
+    );
   });
 
   it("still accepts the caching attributes when a server sends them", () => {
     // Permitted, not mandated — a schema is not the place to reject an extra
     // member the spec leaves open.
     expect(
-      ModernDirectoryReadResultSchema.safeParse({
-        resultType: "complete",
+      DirectoryReadResultSchema.safeParse({
         resources: [],
         ttlMs: 60,
         cacheScope: "public",
@@ -286,25 +278,10 @@ describe("GetSkillResultSchema caching attributes (#2248)", () => {
     ).toBe(true);
   });
 
-  it("requires resultType on the modern envelope, but still not the caching fields", () => {
-    // "Left open" covers `ttlMs` / `cacheScope` and only those. `resultType` is
-    // base-protocol (SEP-2322) and appears in SEP-2640's own `skills/get`
-    // example, so leaving it optional here while requiring it of
-    // `resources/directory/read` was an inconsistency in this module rather
-    // than a distinction the spec draws (Copilot).
-    expect(
-      ModernGetSkillEnvelopeSchema.safeParse({ skill: ENTRY }).success,
-    ).toBe(false);
-    expect(
-      ModernGetSkillEnvelopeSchema.safeParse({
-        skill: ENTRY,
-        resultType: "complete",
-      }).success,
-    ).toBe(true);
-  });
-
-  it("keeps the legacy envelope permissive about resultType", () => {
-    // A 2026-era member a legacy server has no business sending.
+  it("serves both eras with one envelope schema (#2373)", () => {
+    // The modern variant used to add a required `resultType`, which the SDK
+    // codec lifts before any caller schema runs — so it could never pass on a
+    // real modern connection. With that gone the two eras want the same shape.
     expect(GetSkillEnvelopeSchema.safeParse({ skill: ENTRY }).success).toBe(
       true,
     );

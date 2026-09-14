@@ -62,6 +62,7 @@ as a missing capability rather than an error.
 | `tasks-{legacy,modern}-http.json` **(era per file)** | Tasks, both eras                                    | [#1631](https://github.com/modelcontextprotocol/inspector/issues/1631) |
 | `cancellation-modern-http.json` **(modern era)**           | Cancelling a call by closing its response stream    | [#2140](https://github.com/modelcontextprotocol/inspector/issues/2140) |
 | `skills-http.json` **(either era)** | Skills tab: `skills/list`, `resources/directory/read`, digest verification, the frontmatter cross-check, and the non-conforming cases | [#2234](https://github.com/modelcontextprotocol/inspector/issues/2234), [#2248](https://github.com/modelcontextprotocol/inspector/issues/2248) |
+| `skills-strict-{legacy,modern}-http.json` **(era per file)** | The same skills, served only to a client that **declared** `io.modelcontextprotocol/skills` itself (SEP-2133) | [#2373](https://github.com/modelcontextprotocol/inspector/issues/2373) |
 
 ## Skills (SEP-2640)
 
@@ -77,6 +78,32 @@ handler cannot reach it. To exercise the *undeclared* case, connect to any
 config **without** `"skills"`, where the Inspector must refuse to send the call
 locally rather than letting the server answer it.
 
+⚠️ **`skills-http.json` serves any client, including one that never declared the
+extension.** SEP-2133 negotiates an extension from both sides, and a strict
+server refuses `skills/*` to a client that did not declare
+`io.modelcontextprotocol/skills` itself. The Inspector shipped without that
+declaration and passed against this fixture regardless
+([#2373](https://github.com/modelcontextprotocol/inspector/issues/2373)).
+`skills-strict-legacy-http.json` (port 3232) and
+`skills-strict-modern-http.json` (port 3233) add
+`"skillsRequireClientExtension": true`, which answers `skills/list`,
+`skills/get` and `resources/directory/read` with `-32601` unless the client
+declared it (skill files still come through ordinary `resources/read`, which
+needs no extension). ⚠️ **Connect each with its own era.** A modern request
+carries the declaration in its `_meta` envelope; a legacy one relies on what
+`initialize` declared, which only a stateful legacy server keeps. A legacy
+client reaching the modern file is served statelessly, holds no declaration,
+and is refused however it is configured — so there is one file per era rather
+than one for both:
+
+1. Connect — the Inspector declares the Skills extension by default, so the
+   Skills tab lists the same eight skills. The client's declaration is visible
+   in the `initialize` request (Legacy) or in each request's
+   `io.modelcontextprotocol/clientCapabilities` `_meta` entry (Modern).
+2. Open **Server Settings → Advertised Extensions**, uncheck
+   **Skills (io.modelcontextprotocol/skills)**, and reconnect.
+3. `skills/list` now fails with `-32601` — the refusal a strict server sends.
+
 **Both `skills/*` results carry the full modern base envelope** (`resultType` /
 `ttlMs` / `cacheScope`). They are consumer-owned methods, so the SDK stamps
 nothing for them; without it a 2026-era connection would receive a result
@@ -91,8 +118,10 @@ words and says nothing of the kind for this method, whose one worked example
 carries `resultType` and nothing else. A fixture sending more than the SEP shows
 would make a client that wrongly *required* them look correct, which is the
 opposite of what a conformance fixture is for — so `readDirectoryPage` stops
-where the spec does, and `ModernDirectoryReadResultSchema` requires exactly as
-much.
+where the spec does. On the client, the SDK's modern codec enforces
+`resultType` and lifts it off before the Inspector's own schema runs, so
+`DirectoryReadResultSchema` serves both eras and requires no caching attributes
+([#2373](https://github.com/modelcontextprotocol/inspector/issues/2373)).
 
 It works on **either era**: `skills/list`, `skills/get` and
 `resources/directory/read` are consumer-owned extension methods that neither
