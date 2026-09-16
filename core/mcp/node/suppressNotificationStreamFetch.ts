@@ -14,16 +14,27 @@
  * reuses the SDK's own spec-conformant path (the client MAY open the stream;
  * it is never required to).
  *
- * Only the *standalone* stream is suppressed. A `GET` carrying
- * `Last-Event-ID` is the transport resuming a POST response stream that
- * dropped mid-request, which is part of request/response traffic and has to
- * keep reaching the server.
+ * Only the *standalone* stream is suppressed, and the match is deliberately
+ * narrow because the SDK routes more than MCP traffic through this fetch:
+ *
+ * - **OAuth discovery.** The transport hands the same fetch to protected
+ *   resource and authorization server metadata discovery, which are plain
+ *   `GET`s to other URLs. Suppressing those would break SDK-managed auth.
+ *   So the request must target the MCP endpoint itself and ask for
+ *   `text/event-stream`.
+ * - **Resumption.** A `GET` carrying `Last-Event-ID` is the transport resuming
+ *   a POST response stream that dropped mid-request. That belongs to
+ *   request/response traffic and must keep reaching the server.
+ *
+ * Only the legacy (initialize-handshake) era opens this stream. A modern-era
+ * connection never sends it, so the wrapper is inert there.
  */
 export function createSuppressNotificationStreamFetch(
   baseFetch: typeof fetch,
+  endpoint: URL,
 ): typeof fetch {
   return async (input, init) => {
-    if (isStandaloneStreamRequest(input, init)) {
+    if (isStandaloneStreamRequest(input, init, endpoint)) {
       return new Response(null, {
         status: 405,
         statusText: "Method Not Allowed",
@@ -33,13 +44,38 @@ export function createSuppressNotificationStreamFetch(
   };
 }
 
+function requestUrl(input: Parameters<typeof fetch>[0]): URL | undefined {
+  const raw =
+    input instanceof Request
+      ? input.url
+      : input instanceof URL
+        ? input.href
+        : input;
+  try {
+    return new URL(raw);
+  } catch {
+    return undefined;
+  }
+}
+
 function isStandaloneStreamRequest(
   input: Parameters<typeof fetch>[0],
   init: Parameters<typeof fetch>[1],
+  endpoint: URL,
 ): boolean {
   const request = input instanceof Request ? input : undefined;
   const method = (init?.method ?? request?.method ?? "GET").toUpperCase();
   if (method !== "GET") return false;
+  const url = requestUrl(input);
+  if (
+    !url ||
+    url.origin !== endpoint.origin ||
+    url.pathname !== endpoint.pathname ||
+    url.search !== endpoint.search
+  ) {
+    return false;
+  }
   const headers = new Headers(init?.headers ?? request?.headers);
-  return !headers.has("last-event-id");
+  const accept = headers.get("accept")?.toLowerCase() ?? "";
+  return accept.includes("text/event-stream") && !headers.has("last-event-id");
 }

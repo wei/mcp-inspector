@@ -492,6 +492,28 @@ describe("ServerSettingsForm", () => {
       expect(onSuppressNotificationStreamChange).toHaveBeenCalledWith(true);
     });
 
+    it("is hidden for a server pinned to the modern era, which never opens the stream", () => {
+      renderWithMantine(
+        <ServerSettingsForm
+          {...baseHandlers}
+          settings={{ ...emptySettings, protocolEra: "modern" }}
+          expandedSections={["options"]}
+        />,
+      );
+      expect(screen.queryByRole("checkbox", { name })).not.toBeInTheDocument();
+    });
+
+    it("stays visible for an auto-era server, which may resolve to legacy", () => {
+      renderWithMantine(
+        <ServerSettingsForm
+          {...baseHandlers}
+          settings={{ ...emptySettings, protocolEra: "auto" }}
+          expandedSections={["options"]}
+        />,
+      );
+      expect(screen.getByRole("checkbox", { name })).toBeInTheDocument();
+    });
+
     it.each(["sse", "stdio"] as const)(
       "is hidden for a %s server, which has no standalone GET stream",
       (serverType) => {

@@ -178,7 +178,10 @@ export function createTransportNode(
     // request the server never saw (#2317).
     const httpFetch =
       settings?.suppressNotificationStream === true
-        ? createSuppressNotificationStreamFetch(fetchWithOptionalAuthIntercept)
+        ? createSuppressNotificationStreamFetch(
+            fetchWithOptionalAuthIntercept,
+            url,
+          )
         : fetchWithOptionalAuthIntercept;
 
     const transport = new StreamableHTTPClientTransport(url, {

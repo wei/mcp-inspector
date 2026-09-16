@@ -158,9 +158,9 @@ export type StoredMCPServer = MCPServerConfig & {
    */
   paginatedLists?: boolean;
   /**
-   * When true, the Streamable HTTP transport does not open the standalone
-   * `GET` notification stream, so traffic is POST-only and server-initiated
-   * messages outside a request's own response stream do not arrive.
+   * When true, a legacy-era Streamable HTTP connection does not open the
+   * standalone `GET` notification stream. See
+   * {@link InspectorServerSettings.suppressNotificationStream}.
    * Inspector-specific. Omitted on disk when false (the default). (#2317)
    */
   suppressNotificationStream?: boolean;
@@ -936,15 +936,22 @@ export interface InspectorServerSettings {
    */
   paginatedLists?: boolean;
   /**
-   * When true, a Streamable HTTP connection does not open the standalone `GET`
-   * notification stream (the client MAY open it; it is never required), so
-   * request/response traffic is POST-only (#2317). Two uses: a one-click
-   * diagnostic for a server that cannot serve a second concurrent request —
-   * which the long-lived stream otherwise occupies, hanging every request
-   * after `initialize` (#2187) — and an escape hatch that makes such a server
-   * inspectable. The cost is that server→client messages not tied to a request
-   * (list_changed, resource updates, standalone logs) do not arrive. Read at
-   * connect time; no effect on stdio or legacy SSE. Default false.
+   * When true, a Streamable HTTP connection on the **legacy** (initialize
+   * handshake) era does not open the standalone `GET` notification stream,
+   * which the client MAY open but is never required to (#2317). Two uses: a
+   * one-click diagnostic for a server that cannot serve a second concurrent
+   * request — which the long-lived stream otherwise occupies, hanging every
+   * request after `initialize` (#2187) — and an escape hatch that makes such a
+   * server inspectable. The cost is that server→client messages not carried on
+   * a request's own response stream (list_changed, resource updates,
+   * standalone logs) do not arrive.
+   *
+   * Two things it does not change. A `Last-Event-ID` `GET` resuming a dropped
+   * POST response stream is part of request/response traffic and still goes
+   * out. And a modern-era connection never opens the standalone stream (its
+   * notifications arrive over POST `subscriptions/listen`), so the setting has
+   * no effect there. Read at connect time; no effect on stdio or legacy SSE
+   * transports. Default false.
    */
   suppressNotificationStream?: boolean;
   /**
