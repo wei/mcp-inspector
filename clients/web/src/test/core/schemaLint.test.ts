@@ -303,10 +303,35 @@ describe("lintToolSchemas — type-union", () => {
       }),
     );
     expect(rules(findings)).toEqual(["type-union"]);
+    // A warning, not an error: `--strict` exits 6 only on error findings, and
+    // the array form is provider-recommended, so it must not fail CI (#2286).
     expect(findings[0]!.severity).toBe("warning");
+    // Framed as a portability trade that acknowledges the provider guidance.
+    expect(findings[0]!.issue).toContain("some model providers recommend it");
+    expect(findings[0]!.issue).toContain("less portable");
+    // A weaker-class rule must name its dialect, not a generic "some clients".
+    expect(findings[0]!.issue).toContain(
+      "OpenAPI subset used for Gemini function declarations",
+    );
     expect(findings[0]!.suggestion).toContain(
       '{"anyOf": [{"type": "null"}, {"type": "boolean"}]}',
     );
+    // The `null` branch is not expressible in the named OpenAPI 3.0 dialect,
+    // so a null union's suggestion must say so rather than overclaim.
+    expect(findings[0]!.suggestion).toContain("nullable: true");
+  });
+
+  it("omits the null-branch caveat when the union has no null", () => {
+    const findings = lintToolSchemas(
+      tool({
+        inputSchema: {
+          type: "object",
+          properties: { a: { type: ["string", "number"] } },
+        },
+      }),
+    );
+    expect(rules(findings)).toEqual(["type-union"]);
+    expect(findings[0]!.suggestion).not.toContain("nullable");
   });
 
   it("never suggests un-requiring the property as the equivalent fix", () => {
