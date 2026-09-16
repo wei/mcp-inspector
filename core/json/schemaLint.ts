@@ -470,6 +470,17 @@ function walk(
   });
 }
 
+/**
+ * Appended to the `type-union` suggestion when the union includes `null`.
+ * `anyOf` fixes the single-`type` problem, but OpenAPI 3.0 — the dialect the
+ * warning names — has no `null` type at all and spells nullability
+ * `nullable: true`, so the `{"type": "null"}` branch is not itself portable
+ * there (#2395 review). The suggestion stays JSON Schema rather than
+ * recommending `nullable`, which is not a JSON Schema keyword, and says so.
+ */
+const NULL_BRANCH_CAVEAT =
+  " A dialect with no `null` type, such as OpenAPI 3.0, still cannot express the `null` branch directly; there nullability is written `nullable: true`, which is not JSON Schema, so no single spelling is portable to both.";
+
 /** Rules that apply to a single schema object, ignoring its children. */
 function lintNode(
   node: SchemaRecord,
@@ -507,7 +518,9 @@ function lintNode(
         .map((t) => `{"type": "${t}"}`)
         .join(
           ", ",
-        )}]}\`. (Making the property optional instead is a different contract: absent is not the same as \`null\`.)`,
+        )}]}\`. (Making the property optional instead is a different contract: absent is not the same as \`null\`.)${
+        type.includes("null") ? NULL_BRANCH_CAVEAT : ""
+      }`,
     );
   }
 
