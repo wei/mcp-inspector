@@ -513,7 +513,10 @@ test("a single-kind selection reports only that kind, and says so", () => {
     new Set(["test-servers"]),
     OPTS,
   );
-  assert.match(only.lines.join("\n"), /No hand-off cases in this selection\./);
+  assert.match(
+    only.lines.join("\n"),
+    /No claude hand-off cases in this selection\./,
+  );
   assert.doesNotMatch(only.lines.join("\n"), /Hand-off \(14 turns\)/);
   assert.equal(only.failed, 0);
 
@@ -814,6 +817,7 @@ test("a Copilot run bounds availability, not just approval", () => {
   assert.deepEqual(denied, ["shell", "write", "url"]);
   for (const flag of [
     "--disable-builtin-mcps",
+    "--disallow-temp-dir",
     "--no-ask-user",
     "--no-auto-update",
   ]) {
@@ -906,12 +910,12 @@ test("runPrompt rejects a Copilot run that never observed anything", async () =>
   });
   await assert.rejects(
     runPrompt("p", { agent: "copilot", spawnFn, killFn }),
-    /`copilot` produced no terminal `result` event \(exit 1\)/,
+    /`copilot` produced no terminal `result` event \(exit 1\) — if it is not signed in, run `copilot` and `\/login`/,
   );
   const failed = fakeCopilot([copilotResult(2)], { code: 2 });
   await assert.rejects(
     runPrompt("p", { agent: "copilot", ...failed }),
-    /ended `exit_2`/,
+    (e) => /ended `exit_2`/.test(e.message) && !/signed in/.test(e.message),
   );
 });
 
@@ -936,6 +940,7 @@ test("the report names the agent it measured", () => {
   ).lines.join("\n");
   assert.match(text, /First move \(1 turn\) — copilot/);
   assert.match(text, /1\/1 copilot first-move cases at or above 80%\./);
+  assert.match(text, /No copilot hand-off cases in this selection\./);
   assert.doesNotMatch(text, /claude/);
 });
 

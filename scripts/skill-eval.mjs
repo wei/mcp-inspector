@@ -687,7 +687,16 @@ export function runPrompt(
     p.on("close", (code) => {
       const rejection = runRejection({ result, code });
       if (rejection !== null) {
-        reject(new Error(`\`${agent}\` ${rejection} for prompt: ${prompt}`));
+        // An unauthenticated `copilot` answers `--version` fine, then prints
+        // its login hint to the stdout this run captures and exits with no
+        // events — so the one actionable fact would otherwise be swallowed.
+        const hint =
+          agent === "copilot" && result === null
+            ? " — if it is not signed in, run `copilot` and `/login`, or export COPILOT_GITHUB_TOKEN"
+            : "";
+        reject(
+          new Error(`\`${agent}\` ${rejection}${hint} for prompt: ${prompt}`),
+        );
         return;
       }
       resolve(invoked);
@@ -809,7 +818,7 @@ export function formatReport(cases, results, ours, opts) {
   }
   lines.push(
     chained.length === 0
-      ? "No hand-off cases in this selection."
+      ? `No ${agent} hand-off cases in this selection.`
       : `${chained.length - chainedShort}/${chained.length} ${agent} hand-off cases above ${opts.chainThreshold * 100}%.`,
   );
   return { lines, failed };
