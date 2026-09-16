@@ -5,23 +5,27 @@ import { MODERN_PROTOCOL_VERSION } from "../types.js";
  * Wrap fetch so a modern-era JSON-RPC **notification** POST carries the
  * SEP-2243 standard headers the SDK only stamps on requests (#2385).
  *
- * The 2026-07-28 Streamable HTTP transport requires `Mcp-Method` on every
- * POSTed message — "Notifications also require the `Mcp-Method` header" — but
- * the SDK's `_applyBodyDerivedHeaders` returns early for anything that is not
- * a request. So the `notifications/cancelled` the SDK sends when a
- * `subscriptions/listen` stream closes (every resource unsubscribe re-listens)
- * reached a strict server with no `Mcp-Method` and was refused `400 Header
- * mismatch: Mcp-Method is required`.
+ * This is a compatibility workaround, not a protocol mandate. The 2026-07-28
+ * Streamable HTTP spec defines no client-to-server notifications — closing the
+ * SSE stream is the cancellation signal, and "header requirements for
+ * notification POSTs are not defined by this revision". The SDK nonetheless
+ * POSTs a `notifications/cancelled` whenever a `subscriptions/listen` stream
+ * closes (every resource unsubscribe re-listens), and its
+ * `_applyBodyDerivedHeaders` stamps nothing on a non-request. Servers that
+ * apply their request-header validation to every POST — as SEP-2243's draft
+ * example did for notifications — refused it `400 Header mismatch: Mcp-Method
+ * is required`, failing the unsubscribe. Stamping the headers is harmless to a
+ * server that ignores them.
  *
  * This mirrors the SDK's own request rule exactly, so the two cannot disagree
  * about era: the message's `_meta` protocol-version claim is the signal, and a
  * message without a modern claim is passed through untouched — a legacy
  * exchange never gains a 2026 header. `Mcp-Name` is not added: the spec
- * requires it only for `tools/call`, `resources/read` and `prompts/get`
+ * defines it only for `tools/call`, `resources/read` and `prompts/get`
  * requests.
  *
- * Remove once the SDK stamps notifications itself; this wrapper then sets the
- * same values the SDK already did.
+ * Remove once the SDK stops POSTing that notification on Streamable HTTP, or
+ * stamps it itself.
  */
 export function createNotificationHeadersFetch(
   baseFetch: typeof fetch,
