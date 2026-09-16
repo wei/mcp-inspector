@@ -865,6 +865,23 @@ test("runPrompt stops a Copilot run once it has made its budgeted moves", async 
   );
 });
 
+test("runPrompt never scores a Copilot turn past the budget, however the pipe splits it", async () => {
+  // Both calls and the result in ONE chunk: stopping the process is too late
+  // to keep turn 2 out, and the result event alone would skip the stop.
+  const { spawnFn, killFn } = fakeCopilot([
+    copilotMessage() +
+      copilotMessage(copilotSkill("board-ops")) +
+      copilotResult(0),
+  ]);
+  const invoked = await runPrompt("p", {
+    agent: "copilot",
+    spawnFn,
+    killFn,
+  });
+  assert.deepEqual(invoked, []);
+  assert.equal(sampleHit(null, invoked, new Set(["board-ops"])), true);
+});
+
 test("runPrompt accepts a Copilot run that finished inside its budget", async () => {
   const { state, spawnFn, killFn } = fakeCopilot([
     copilotMessage(copilotSkill("testing")),

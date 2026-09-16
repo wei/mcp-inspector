@@ -667,7 +667,15 @@ export function runPrompt(
       const parsed = collect(buf + chunk.toString(), turnOffset);
       buf = parsed.rest;
       turnOffset = parsed.nextTurn;
-      for (const entry of parsed.invoked) invoked.push(entry);
+      for (const entry of parsed.invoked) {
+        // A pipe does not preserve event boundaries, so one chunk can carry a
+        // model call past the budget — even the whole rest of the run, result
+        // included. Scoring is bounded by turn number rather than by when the
+        // stop happened to land (Copilot). Claude's own `--max-turns` already
+        // bounds its stream.
+        if (agent === "copilot" && entry.turn > maxTurns) continue;
+        invoked.push(entry);
+      }
       if (parsed.result !== null) result = parsed.result;
       if (agent === "copilot" && turnOffset >= maxTurns && result === null) {
         stopped = true;
