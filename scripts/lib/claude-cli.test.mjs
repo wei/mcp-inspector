@@ -7,7 +7,12 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { claudeSpawnArgs, probeClaudeVersion } from "./claude-cli.mjs";
+import {
+  claudeSpawnArgs,
+  cliSpawnArgs,
+  probeClaudeVersion,
+  probeCliVersion,
+} from "./claude-cli.mjs";
 
 test("spawns without a shell off Windows", () => {
   const { command, args, options } = claudeSpawnArgs(
@@ -73,4 +78,29 @@ test("probeClaudeVersion asks for the shell on Windows", () => {
   });
   assert.equal(seen.shell, true);
   assert.equal(seen.encoding, "utf8");
+});
+
+test("the generic helpers name the command they were given (#2397)", () => {
+  // `copilot` is an npm `.cmd` shim on Windows as well, so it takes the same
+  // shell-and-quoting decision rather than a second copy of it.
+  const { command, options, args } = cliSpawnArgs(
+    "copilot",
+    ["--prompt", "a & b"],
+    {},
+    "win32",
+  );
+  assert.equal(command, "copilot");
+  assert.equal(options.shell, true);
+  assert.deepEqual(args, ["--prompt", '"a & b"']);
+
+  let spawned;
+  const version = probeCliVersion("copilot", (t) => t.trim(), {
+    spawn: (c) => {
+      spawned = c;
+      return { status: 0, stdout: "GitHub Copilot CLI 1.0.85.\n" };
+    },
+    platform: "linux",
+  });
+  assert.equal(spawned, "copilot");
+  assert.equal(version, "GitHub Copilot CLI 1.0.85.");
 });
