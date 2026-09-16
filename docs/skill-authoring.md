@@ -524,9 +524,29 @@ coarse to read a chain:
 | `testing → test-servers`, "Write an integration test that exercises tool listing end to end." | 100% | 100% |
 | `testing → test-servers`, "Add end-to-end coverage for the tool-list pagination path." | **40%** | 100% |
 
-So the pagination prompt is a **Copilot-specific shortfall**, not noise: it held
-below the 50% bar at both sample sizes, while the same case clears 100% under
-Claude. First moves transfer; this one hand-off does not yet (#2399).
+So the pagination prompt was a **Copilot-specific shortfall**, not noise: it
+held below the 50% bar at both sample sizes, while the same case cleared 100%
+under Claude.
+
+**Where it stopped** (#2399), from five recorded Copilot runs of that prompt:
+two loaded `testing` and then went straight to `grep`, never following its
+pointer; two opened with `grep` and loaded no skill at all. The pointer was
+conditional on "does this test use a `test-servers/` fixture?", and a prompt
+about pagination does not say so, so the model went to the code to find out and
+did not come back once it found `pagination-http.json`. The fix is in
+`testing`'s body only (the description, and so the listing, is unchanged): the
+pointer now names end-to-end or integration coverage of an MCP operation as the
+signal to load `test-servers` **before** searching the code.
+
+| Hand-off case | Copilot, `RUNS=5`, after | Claude, `RUNS=5`, after |
+| --- | --- | --- |
+| `testing → test-servers`, "Write an integration test that exercises tool listing end to end." | 100%, 100% | 100% |
+| `testing → test-servers`, "Add end-to-end coverage for the tool-list pagination path." | **60%, 60%** | 100% |
+
+Two independent Copilot runs are shown because 3/5 sits one run above the bar.
+It clears it without lowering the Claude rate, but it is the weakest hand-off
+measured under either agent, and the first case to re-check when a Copilot
+release changes the default model.
 
 ## Checklist for a new or edited skill
 
