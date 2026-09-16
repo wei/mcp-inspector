@@ -18,10 +18,13 @@ export const BIND_ALL_INTERFACES_ENV = "DANGEROUSLY_BIND_ALL_INTERFACES";
 
 /**
  * An explicit, unambiguous opt-in. Unlike a bare `!!value` (which treats the
- * string `"false"` as truthy), only `"true"`/`"1"` (case-insensitive) enable
- * the override, so `DANGEROUSLY_BIND_ALL_INTERFACES=false` reads as "off".
+ * string `"false"` as truthy), only `"true"`/`"1"` (trimmed, case-insensitive)
+ * enable the override, so `DANGEROUSLY_BIND_ALL_INTERFACES=false` reads as
+ * "off". Exported so every `DANGEROUSLY_*` safety flag parses the same way —
+ * `DANGEROUSLY_OMIT_AUTH` once used `!!value`, and `=false` turned auth off
+ * (#2331). Anything unrecognized fails closed.
  */
-function isEnabled(value: string | undefined): boolean {
+export function isEnvFlagEnabled(value: string | undefined): boolean {
   const v = value?.trim().toLowerCase();
   return v === "true" || v === "1";
 }
@@ -66,7 +69,10 @@ export function resolveBindHostname(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
   const host = (env.HOST ?? DEFAULT_BIND_HOST).trim();
-  if (isAllInterfacesHost(host) && !isEnabled(env[BIND_ALL_INTERFACES_ENV])) {
+  if (
+    isAllInterfacesHost(host) &&
+    !isEnvFlagEnabled(env[BIND_ALL_INTERFACES_ENV])
+  ) {
     // Show the resolved address when it differs from the typed spelling — the
     // guard now catches forms the resolver folds to the wildcard (a fullwidth
     // `HOST="０"` renders like `0`, `HOST=0` / `0x0` / `::0` bind `0.0.0.0`), and

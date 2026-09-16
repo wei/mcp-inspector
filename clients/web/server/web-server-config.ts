@@ -20,7 +20,7 @@ import { secretStorageSummary } from "../../../core/auth/secret-storage-info.ts"
 import { readInspectorVersionSafe } from "../../../core/node/version.ts";
 import { resolveSandboxPort } from "./sandbox-controller.js";
 import { resolveAppOriginPort } from "./app-origin-controller.js";
-import { resolveBindHostname } from "./resolve-bind-host.js";
+import { isEnvFlagEnabled, resolveBindHostname } from "./resolve-bind-host.js";
 import {
   APP_ORIGIN_FULL_ADDRESS_ENV,
   resolveAppOriginPublicOrigin,
@@ -386,7 +386,11 @@ export function buildWebServerConfig(
     );
   }
   const hostname = resolveBindHostname();
-  const dangerouslyOmitAuth = !!process.env.DANGEROUSLY_OMIT_AUTH;
+  // Only an explicit `true`/`1` omits auth — `!!value` read `=false` as "on"
+  // and silently disabled the /api/* bearer gate (#2331).
+  const dangerouslyOmitAuth = isEnvFlagEnabled(
+    process.env.DANGEROUSLY_OMIT_AUTH,
+  );
   const authToken = dangerouslyOmitAuth
     ? ""
     : ((process.env[API_SERVER_ENV_VARS.AUTH_TOKEN] as string | undefined) ??

@@ -154,6 +154,30 @@ describe("buildWebServerConfigFromEnv", () => {
     expect(cfg.authToken).toBe("");
   });
 
+  // #2331: `!!value` read every non-empty string as "on", so a deployment that
+  // set DANGEROUSLY_OMIT_AUTH=false to keep auth on silently turned it off.
+  it.each(["true", "TRUE", " True ", "1", " 1 "])(
+    "omits auth for the explicit opt-in DANGEROUSLY_OMIT_AUTH=%j",
+    (value) => {
+      process.env.DANGEROUSLY_OMIT_AUTH = value;
+      process.env[API_SERVER_ENV_VARS.AUTH_TOKEN] = "ignored";
+      const cfg = buildWebServerConfigFromEnv();
+      expect(cfg.dangerouslyOmitAuth).toBe(true);
+      expect(cfg.authToken).toBe("");
+    },
+  );
+
+  it.each(["false", "FALSE", "0", "", "  ", "no", "yes", "on", "2"])(
+    "keeps auth on for DANGEROUSLY_OMIT_AUTH=%j",
+    (value) => {
+      process.env.DANGEROUSLY_OMIT_AUTH = value;
+      process.env[API_SERVER_ENV_VARS.AUTH_TOKEN] = "kept";
+      const cfg = buildWebServerConfigFromEnv();
+      expect(cfg.dangerouslyOmitAuth).toBe(false);
+      expect(cfg.authToken).toBe("kept");
+    },
+  );
+
   it("uses API_SERVER_ENV_VARS.AUTH_TOKEN when present", () => {
     process.env[API_SERVER_ENV_VARS.AUTH_TOKEN] = "primary";
     const cfg = buildWebServerConfigFromEnv();
