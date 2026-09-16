@@ -309,6 +309,10 @@ describe("lintToolSchemas — type-union", () => {
     // Framed as a portability trade that acknowledges the provider guidance.
     expect(findings[0]!.issue).toContain("some model providers recommend it");
     expect(findings[0]!.issue).toContain("less portable");
+    // A weaker-class rule must name its dialect, not a generic "some clients".
+    expect(findings[0]!.issue).toContain(
+      "OpenAPI subset used for Gemini function declarations",
+    );
     expect(findings[0]!.suggestion).toContain(
       '{"anyOf": [{"type": "null"}, {"type": "boolean"}]}',
     );
