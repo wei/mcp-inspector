@@ -176,9 +176,10 @@ async function releaseBody(response: Response): Promise<void> {
  * ⚠️ `ReadableStream.cancel()` adopts the underlying source's cancel promise,
  * which is permitted never to settle — so awaiting it on a path that is
  * *propagating a cancellation* can hang the very thing that was meant to end
- * (Copilot). Every exceptional exit below uses this: the release is a courtesy
- * to the connection pool, and the caller's abort or timeout must reach it
- * regardless. The `void` is the documented case where the callee owns its
+ * (Copilot), and awaiting it on the normal path leaves the caller's abort
+ * unable to end a stalled release (#2389). Every release below uses this: the
+ * release is a courtesy to the connection pool, and neither progress nor the
+ * caller's abort or timeout may wait on it. The `void` is the documented case where the callee owns its
  * failures — `releaseBody` swallows its own — and the caller genuinely cannot
  * await.
  */
@@ -334,12 +335,16 @@ export function withRfc8414OidcCompat(fetchFn: typeof fetch): typeof fetch {
         // Node/undici, and this loop can run on every OAuth attempt — so
         // release it rather than letting repeated discovery against a 404
         // candidate exhaust the origin's pool (Copilot). Same discipline as
-        // `core/mcp/node/authChallengeFetch.ts`.
-        await releaseBody(probe);
-        // Rechecked after the release, which awaits: an abort that lands while
-        // the body is being discarded must not be answered with the preceding
-        // response either, and `continue` would otherwise carry on probing for
-        // a caller that has stopped waiting.
+        // `core/mcp/node/authChallengeFetch.ts`. Detached, not awaited
+        // (#2389): the next step — the abort check, the next candidate — must
+        // not depend on a cancel that is permitted never to settle, or a
+        // stalled release would hang discovery with the caller's abort unable
+        // to end it.
+        releaseBodyDetached(probe);
+        // Rechecked before moving on: an abort that landed while the probe was
+        // answering must not be met with the preceding response either, and
+        // `continue` would otherwise carry on probing for a caller that has
+        // stopped waiting.
         if (callerSignal?.aborted) {
           releaseBodyDetached(response);
           throw callerSignal.reason;
@@ -386,8 +391,10 @@ export function withRfc8414OidcCompat(fetchFn: typeof fetch): typeof fetch {
       // (Copilot).
       const source = probe.url || candidate;
       // The original failed response is about to be dropped in favour of the
-      // substitution, so release its connection too.
-      await releaseBody(response);
+      // substitution, so release its connection too — detached, for the same
+      // reason as the non-OK probe above (#2389): the substitution must not
+      // wait on a cancel that may never settle.
+      releaseBodyDetached(response);
       console.warn(
         `[oauth] ${source} returned RFC 8414 OAuth 2.0 authorization server ` +
           `metadata, not an OpenID provider document. The MCP TypeScript SDK ` +
