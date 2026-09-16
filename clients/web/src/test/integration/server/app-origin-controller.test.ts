@@ -23,6 +23,18 @@ import {
 } from "../../../../server/app-origin-controller.js";
 import { RUNNER_OAUTH_CALLBACK_DEFAULT_PORT } from "@inspector/core/auth/node/runner-oauth-callback.js";
 
+/** A port that was free a moment ago, for tests that need a FIXED port. */
+async function freePort(): Promise<number> {
+  const probe: Server = createServer();
+  await new Promise<void>((resolve) =>
+    probe.listen(0, "127.0.0.1", () => resolve()),
+  );
+  const addr = probe.address();
+  const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+  return port;
+}
+
 describe("resolveAppOriginPort", () => {
   const saved = process.env.MCP_APP_ORIGIN_PORT;
   afterEach(() => {
@@ -176,6 +188,73 @@ describe("createAppOriginController", () => {
       "default-src 'none'; connect-src https://api.example.com; frame-ancestors http://127.0.0.1:6275",
     );
     await expect(res.text()).resolves.toBe("<!doctype html><p>app</p>");
+  });
+
+  it("publishes under a public origin while still serving the bound listener (#1862)", async () => {
+    const publicOrigin = "https://apps.example.com";
+    // A fixed port: a public origin is only used where a proxy can route.
+    const port = await freePort();
+    controller = createAppOriginController({
+      port,
+      host: "127.0.0.1",
+      publicOrigin,
+    });
+    const first = await controller.start();
+    expect(first.port).toBe(port);
+    expect(first.url).toBe(publicOrigin);
+    expect(controller.getOrigin()).toBe(publicOrigin);
+    // The cached start reports the BOUND port; parsing one out of a public
+    // origin with no explicit port would yield NaN.
+    expect(await controller.start()).toEqual(first);
+
+    const published = controller.publish({ html: "<p>proxied</p>" })!;
+    expect(published.url.startsWith(`${publicOrigin}/app-document/`)).toBe(
+      true,
+    );
+    // The reverse proxy's job is routing the public path to this listener;
+    // simulate it by fetching the same path on the bound port.
+    const path = new URL(published.url).pathname;
+    const res = await fetch(`http://127.0.0.1:${first.port}${path}`);
+    expect(res.status).toBe(200);
+    await expect(res.text()).resolves.toBe("<p>proxied</p>");
+  });
+
+  it("does not use a public origin on an OS-assigned port (port 0)", async () => {
+    // Both an explicit MCP_APP_ORIGIN_PORT=0 and a config-time collision with
+    // CLIENT_PORT / MCP_SANDBOX_PORT (which buildWebServerConfig resolves to 0)
+    // land here: there is no stable port for a reverse proxy to route to.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      controller = createAppOriginController({
+        port: 0,
+        host: "127.0.0.1",
+        publicOrigin: "https://apps.example.com",
+      });
+      const { url, port } = await controller.start();
+      expect(url).toBe(`http://127.0.0.1:${port}`);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("not using MCP_APP_ORIGIN_FULL_ADDRESS"),
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("does not adopt a public origin when the listener never bound", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      controller = createAppOriginController({
+        port: 0,
+        host: "203.0.113.1", // TEST-NET-3: not assigned to any local interface
+        publicOrigin: "https://apps.example.com",
+      });
+      expect(await controller.start()).toEqual({ port: 0, url: "" });
+      expect(controller.getOrigin()).toBeNull();
+      // So the renderer takes its srcdoc fallback instead of a dead URL.
+      expect(controller.publish({ html: "<p>x</p>" })).toBeNull();
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it("serves only frame-ancestors when the document carries no csp", async () => {
@@ -347,6 +426,54 @@ describe("createAppOriginController", () => {
     } finally {
       warnSpy.mockRestore();
       await release();
+    }
+  });
+
+  it("does not use a public origin after falling back off its pinned port (#1862)", async () => {
+    const { port, release } = await claimPort();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      controller = createAppOriginController({
+        port,
+        host: "127.0.0.1",
+        publicOrigin: "https://apps.example.com",
+      });
+      const result = await controller.start();
+      expect(result.port).not.toBe(port);
+      expect(result.url).toBe(`http://127.0.0.1:${result.port}`);
+      expect(
+        controller.publish({ html: "<p>x</p>" })!.url.startsWith(result.url),
+      ).toBe(true);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("not using MCP_APP_ORIGIN_FULL_ADDRESS"),
+      );
+    } finally {
+      warnSpy.mockRestore();
+      await release();
+    }
+  });
+
+  it("refuses a public origin equal to a trusted ancestor, including a bind-derived sandbox (#1862)", async () => {
+    // Config time cannot see the bind-derived sandbox origin; the callers pass
+    // it in embedderOrigins, so the controller is where the collision is caught.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      controller = createAppOriginController({
+        port: await freePort(),
+        host: "127.0.0.1",
+        publicOrigin: "http://127.0.0.1:6275",
+        embedderOrigins: appDocumentEmbedders("http://127.0.0.1:6275/sandbox", [
+          "http://localhost:6274",
+        ]),
+      });
+      const result = await controller.start();
+      expect(result.url).toBe(`http://127.0.0.1:${result.port}`);
+      expect(controller.getOrigin()).not.toBe("http://127.0.0.1:6275");
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("must differ from both"),
+      );
+    } finally {
+      warnSpy.mockRestore();
     }
   });
 

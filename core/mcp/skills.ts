@@ -11,12 +11,15 @@
  * shared by every client, and produce a structured finding list rather than a
  * boolean — a report is useful, "invalid" is not.
  *
- * ⚠️ Skills is a **server-declared** extension, read off the connecting server's
- * `capabilities.extensions`. It deliberately does NOT belong in
- * `ADVERTISABLE_EXTENSIONS` (`core/mcp/extensions.ts`), which is the catalog of
- * extensions the *Inspector* advertises and the user toggles in Server Settings.
- * The precedent is `appElicitation.ts`, which reads the server side the same
- * way; getting it backwards would put a meaningless toggle in Server Settings.
+ * ⚠️ Skills is negotiated from **both** sides (SEP-2133), and the two halves
+ * live in different places. This module reads the *server's* declaration off
+ * the connecting server's `capabilities.extensions` — that is what gates the
+ * Skills screen. The *Inspector's* own declaration is a separate entry in
+ * `ADVERTISABLE_EXTENSIONS` (`core/mcp/extensions.ts`): a strict server refuses
+ * `skills/*` to a client that did not declare it, and turning that toggle off
+ * in Server Settings is how to check a server's refusal path (#2373). An
+ * earlier revision of this comment said Skills must never be in that registry;
+ * that was the missing client declaration #2373 fixed.
  *
  * The Inspector is an inspector, not a host: a `resources/read` of a `SKILL.md`
  * is explicitly not a load and confers no standing, so none of the SEP's host
@@ -75,6 +78,47 @@ export const SKILL_MAX_CATALOG_SKILLS = 256;
 
 /** @see {@link SKILL_MAX_CATALOG_SKILLS} — 64 MiB across the whole run. */
 export const SKILL_MAX_CATALOG_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Whether `value` is usable as a per-server catalog budget override (#2294):
+ * a positive safe integer.
+ *
+ * ⚠️ **`0` is deliberately not "unlimited"**, unlike `maxFetchRequests`. The
+ * budget exists so a `--verify` against a huge catalog terminates; an
+ * unlimited setting would reintroduce exactly the unbounded run it closed. A
+ * user who wants more raises the number.
+ */
+export function isSkillCatalogLimit(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+/** A verification run's catalog budget, resolved from per-server settings. */
+export interface SkillCatalogBudget {
+  maxSkills: number;
+  maxBytes: number;
+}
+
+/**
+ * The catalog budget for a run: the server's configured limits where they are
+ * usable, else {@link SKILL_MAX_CATALOG_SKILLS} / {@link SKILL_MAX_CATALOG_BYTES}.
+ *
+ * A malformed value falls back to the default rather than throwing — settings
+ * can arrive from a hand-edited `mcp.json`, and a verification that refused to
+ * run over a typo would be a worse outcome than one that ran at the default.
+ */
+export function resolveSkillCatalogBudget(settings?: {
+  skillCatalogMaxSkills?: number;
+  skillCatalogMaxBytes?: number;
+}): SkillCatalogBudget {
+  return {
+    maxSkills: isSkillCatalogLimit(settings?.skillCatalogMaxSkills)
+      ? settings.skillCatalogMaxSkills
+      : SKILL_MAX_CATALOG_SKILLS,
+    maxBytes: isSkillCatalogLimit(settings?.skillCatalogMaxBytes)
+      ? settings.skillCatalogMaxBytes
+      : SKILL_MAX_CATALOG_BYTES,
+  };
+}
 
 /** The suffix every skill URI ends with; the segment before it is the name. */
 export const SKILL_FILE_SUFFIX = "/SKILL.md";
@@ -171,6 +215,17 @@ export function isSkillsExtensionSupported(
  * rejected too: containment could not be decided on it, and silently accepting
  * one would reintroduce exactly the hole this function closes.
  *
+ * A **path-less authority** URI (`skill://data-analysis`) is accepted, and is
+ * not the opaque case above: RFC 3986 gives a URI with an authority an empty
+ * path, and the parser reports that as `pathname === ""`. The authority has to
+ * be non-empty — `skill:` parses to an empty path too, with no host. It has no segments,
+ * so nothing survives unnormalized. It is what a skill's root directory looks
+ * like once `/SKILL.md` is removed, so rejecting it made a server echoing that
+ * root back in a directory read read as "outside this skill" when it is the
+ * skill itself (#2295). It names no file, so it still fails every check that
+ * needs one — `skillNameFromUri` wants the `/SKILL.md` suffix, and a manifest
+ * entry spelled this way does not start with `<root>/`.
+ *
  * The scheme is deliberately **not** constrained. `skill://` is what SEP-2640
  * recommends and what this repo's fixture serves, but the SEP only says servers
  * SHOULD use it and explicitly allows a domain-native scheme (`github://…`), so
@@ -186,7 +241,10 @@ export function normalizeSkillUri(uri: string): string | undefined {
   } catch {
     return undefined;
   }
-  if (!parsed.pathname.startsWith("/")) return undefined;
+  // An empty path is only the root form when an authority carries the identity:
+  // `skill:` and `mailto:` also parse to `pathname === ""`, with no host.
+  const pathlessRoot = parsed.pathname === "" && parsed.host !== "";
+  if (!pathlessRoot && !parsed.pathname.startsWith("/")) return undefined;
   return canonicalizePercentEncoding(parsed.href);
 }
 

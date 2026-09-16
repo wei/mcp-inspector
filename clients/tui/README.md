@@ -29,7 +29,7 @@ npx @modelcontextprotocol/inspector --tui --config mcp.json    # read-only sessi
 
 ### MCP server (which server(s) to connect to)
 
-Options that specify the MCP server(s) (catalog/config file, ad-hoc command/URL, env vars, headers) are shared by the Web, CLI, and TUI and are documented in [MCP server configuration](../../docs/mcp-server-configuration.md): `--catalog` (writable catalog, seeded **empty** if missing; default `~/.mcp-inspector/mcp.json` or `MCP_CATALOG_PATH`), `--config` (read-only session, errors if absent), `-e`, `--cwd`, `--header`, `--transport`, `--server-url`, and the positional `[target...]`. `--catalog` and `--config` are mutually exclusive, and neither combines with an ad-hoc target.
+Options that specify the MCP server(s) (catalog/config file, ad-hoc command/URL, env vars, headers) are shared by the Web, CLI, and TUI and are documented in [MCP server configuration](../../docs/mcp-server-configuration.md): `--catalog` (writable catalog, seeded **empty** if missing; default `~/.mcp-inspector/mcp.json` or `MCP_CATALOG_PATH`), `--config` (read-only session, errors if absent), `-e`, `--cwd`, `--header`, `--protocol-era` (`legacy`/`auto`/`modern`; sets the era an ad-hoc server negotiates, or overrides a file's `protocolEra`), `--transport`, `--server-url`, and the positional `[target...]`. `--catalog` and `--config` are mutually exclusive, and neither combines with an ad-hoc target.
 
 ### TUI-specific (OAuth for HTTP servers)
 
@@ -51,6 +51,8 @@ The TUI starts a small loopback HTTP server to receive the authorization redirec
 OAuth redirect URIs must match **exactly** what you register on the authorization server — `localhost` and `127.0.0.1` are different URIs. Register the TUI default on your OAuth app / IdP when using pre-registered (static), CIMD, or enterprise-managed clients. Override the listener with `--callback-url` or `MCP_OAUTH_CALLBACK_URL`; use `http://127.0.0.1:0/oauth/callback` for an OS-assigned ephemeral port when the authorization server registers redirect URIs dynamically (DCR).
 
 #### Flags
+
+Variables with no flag of their own — the secret store, `MCP_INSPECTOR_LOG_DIR`, `LOG_LEVEL`, proxies — are listed in [Environment variables](../../docs/environment-variables.md).
 
 | Option                        | Env                      | Description                                                                                                                                                                                                                                                           |
 | ----------------------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -93,12 +95,15 @@ The TUI provides terminal-native tabs and panes for interacting with your MCP se
 Like the other clients, the TUI self-validates from its own folder:
 
 ```bash
-npm run validate       # format:check && lint && build && test:coverage
+npm run check          # format:check && lint && typecheck && build  (no tests)
+npm run validate       # check && test
 npm test               # run all tests
 npm run test:coverage  # run tests under the per-file coverage gate
 ```
 
-The repo-root `validate:tui` just delegates here. `eslint.config.js` registers
+The repo-root `validate:tui` just delegates here; the root `local:validate`
+(the first stage of `npm run local:gate`) runs `check` instead, so the gate
+runs the suite once, under `coverage:tui` (#2341). `eslint.config.js` registers
 `react-hooks` for the classic rules only (rules-of-hooks + exhaustive-deps); the
 stricter react-hooks@7 rules are not enforced on the interim component surface
 (#1501).

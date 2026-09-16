@@ -130,6 +130,12 @@ function InteractiveRender(args: ServerSettingsFormProps) {
           settings: { ...args.settings, maxFetchRequests: value },
         });
       }}
+      onSkillCatalogLimitChange={(field, value) => {
+        args.onSkillCatalogLimitChange(field, value);
+        updateArgs({
+          settings: { ...args.settings, [field]: value },
+        });
+      }}
       onProtocolEraChange={(value) => {
         args.onProtocolEraChange(value);
         updateArgs({
@@ -178,6 +184,7 @@ const meta: Meta<typeof ServerSettingsForm> = {
     onPaginatedListsChange: fn(),
     onAdvertisedExtensionChange: fn(),
     onMaxFetchRequestsChange: fn(),
+    onSkillCatalogLimitChange: fn(),
     onProtocolEraChange: fn(),
     onModernLogLevelChange: fn(),
     onOAuthChange: fn(),

@@ -50,6 +50,7 @@ import {
   wireModernTaskHandlers,
 } from "./modern-tasks.js";
 import { SKILLS_EXTENSION_KEY, wireSkillsHandlers } from "./skills.js";
+import type { StallableOAuthEndpoint } from "./test-server-oauth.js";
 
 /**
  * MCP Apps extension id. Hardcoded for the same reason the Inspector's
@@ -615,6 +616,17 @@ export interface ServerConfig {
    */
   skills?: boolean;
   /**
+   * With {@link ServerConfig.skills}, refuse `skills/list`, `skills/get` and
+   * `resources/directory/read` unless the client declared
+   * `io.modelcontextprotocol/skills` in its own capabilities — a strict
+   * SEP-2133 server (#2373). A modern request is refused with `-32021`
+   * MissingRequiredClientCapability carrying `data.requiredCapabilities`; a
+   * legacy one, whose era has no such code, with `-32601`. Off by default so
+   * the existing skills fixtures keep serving any client. Ignored without
+   * `skills`.
+   */
+  skillsRequireClientExtension?: boolean;
+  /**
    * Advertise the MCP Apps `io.modelcontextprotocol/ui` extension with the
    * nested `elicitation` setting — the server-side half of the app-rendered
    * form elicitation negotiation (#1854, ext-apps#733).
@@ -735,6 +747,43 @@ export interface ServerConfig {
     supportCIMD?: boolean;
 
     /**
+     * Serve a CIMD client metadata document from this server, so a CIMD
+     * fixture is self-contained.
+     *
+     * CIMD makes the `client_id` a URL that the authorization server fetches
+     * to learn the client's metadata (SEP-991). Nothing in this repo served
+     * such a document, so exercising CIMD meant standing up a second host by
+     * hand — which is why #2242 shipped verified only by its tests. With this
+     * set, the server hosts the document at `clientMetadataPath` (default
+     * `/client-metadata.json`) and that URL is a usable `client_id`.
+     *
+     * `redirectUris` MUST list the Inspector's callback for the port you run
+     * it on (`<web origin>/oauth/callback`) — the authorization server checks
+     * the incoming `redirect_uri` against this list, and a mismatch fails the
+     * flow with `Invalid redirect_uri` rather than anything CIMD-specific.
+     *
+     * Only served when `supportCIMD` is true: a document advertising a client
+     * the server would then refuse is a worse fixture than none.
+     */
+    clientMetadata?: {
+      redirectUris: string[];
+      clientName?: string;
+      scope?: string;
+    };
+
+    /**
+     * Where to serve `clientMetadata` (default `/client-metadata.json`).
+     *
+     * Must be origin-relative with no query or fragment, and is validated as
+     * such — both by `loadConfig` and again at server setup for a config built
+     * in code. Unlike the other metadata paths this one is not merely
+     * advertised: it becomes the document's own `client_id`, so an off-origin
+     * or query-bearing value would publish a client id this server cannot
+     * honour (Copilot).
+     */
+    clientMetadataPath?: string;
+
+    /**
      * Token expiration time in seconds (default: 3600)
      */
     tokenExpirationSeconds?: number;
@@ -743,6 +792,29 @@ export interface ServerConfig {
      * Whether to support refresh tokens (default: true)
      */
     supportRefreshTokens?: boolean;
+
+    /**
+     * Endpoints that accept the request and then withhold the response, so the
+     * `AbortSignal.timeout` #2319 put on the OAuth path can be driven against a
+     * real, established, idle socket (#2382).
+     *
+     * A `fetch` stub cannot reproduce that state — it settles on the client
+     * side — which is why the five timeouts shipped covered only by unit tests.
+     * Name the *call*, not the path: exchange and refresh share `/oauth/token`,
+     * and two of the documents sit at configurable paths.
+     *
+     * Per endpoint rather than global, so a test can tell "discovery timed out"
+     * from "token exchange timed out" — the distinction the five separate
+     * timeouts exist to make.
+     */
+    stallEndpoints?: StallableOAuthEndpoint[];
+
+    /**
+     * Answer a stalled endpoint after this many ms instead of never
+     * (default: 0, never). Lets one fixture cover both "slower than the
+     * client's budget" and "no answer at all".
+     */
+    stallMs?: number;
 
     /**
      * Whether to advertise and serve the RFC 7009 `revocation_endpoint`
@@ -1638,7 +1710,9 @@ export function createMcpServer(config: ServerConfig): McpServer {
   // `skill://` half of resources/read. Wired after the SDK's own handlers so
   // the resources/read wrapper can delegate non-skill URIs to them.
   if (config.skills) {
-    wireSkillsHandlers(mcpServer);
+    wireSkillsHandlers(mcpServer, {
+      requireClientExtension: config.skillsRequireClientExtension,
+    });
   }
 
   // Extension-gated tools (#1739): start each gated tool disabled, then enable

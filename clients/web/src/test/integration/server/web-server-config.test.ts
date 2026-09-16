@@ -27,6 +27,8 @@ const MUTATED_ENV_KEYS = [
   "ALLOWED_ORIGINS",
   "MCP_SANDBOX_PORT",
   "MCP_APP_ORIGIN_PORT",
+  "MCP_SANDBOX_FULL_ADDRESS",
+  "MCP_APP_ORIGIN_FULL_ADDRESS",
   "SERVER_PORT",
   "MCP_LOG_FILE",
   "MCP_AUTO_OPEN_ENABLED",
@@ -341,6 +343,40 @@ describe("buildWebServerConfigFromEnv", () => {
       }
     },
   );
+
+  it("leaves the public addresses unset by default (#1862)", () => {
+    const cfg = buildWebServerConfigFromEnv();
+    expect(cfg.sandboxPublicUrl).toBeUndefined();
+    expect(cfg.appOriginPublicOrigin).toBeUndefined();
+  });
+
+  it("resolves both public addresses against the resolved allow-list", () => {
+    process.env.ALLOWED_ORIGINS = "https://inspector.example.com";
+    process.env.MCP_SANDBOX_FULL_ADDRESS = "https://sb.example.com";
+    process.env.MCP_APP_ORIGIN_FULL_ADDRESS = "https://apps.example.com";
+    const cfg = buildWebServerConfigFromEnv();
+    expect(cfg.sandboxPublicUrl).toBe("https://sb.example.com/sandbox");
+    expect(cfg.appOriginPublicOrigin).toBe("https://apps.example.com");
+  });
+
+  it("refuses public addresses that collapse onto the Inspector or sandbox origin", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // The DEFAULT allow-list is what the sandbox is checked against when
+      // ALLOWED_ORIGINS is unset — so the loopback UI origin is refused too.
+      process.env.MCP_SANDBOX_FULL_ADDRESS = "http://localhost:6274/sandbox";
+      expect(buildWebServerConfigFromEnv().sandboxPublicUrl).toBeUndefined();
+
+      // The app origin is checked against the overridden sandbox's origin.
+      process.env.MCP_SANDBOX_FULL_ADDRESS = "https://sb.example.com/sandbox";
+      process.env.MCP_APP_ORIGIN_FULL_ADDRESS = "https://sb.example.com";
+      const cfg = buildWebServerConfigFromEnv();
+      expect(cfg.sandboxPublicUrl).toBe("https://sb.example.com/sandbox");
+      expect(cfg.appOriginPublicOrigin).toBeUndefined();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
 
   it("leaves an explicit dynamic app-origin port alone", () => {
     // 0 means "OS-assigned" for both, so two zeros are not a collision.

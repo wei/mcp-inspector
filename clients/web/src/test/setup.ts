@@ -1,6 +1,49 @@
 import "@testing-library/jest-dom/vitest";
 import { afterEach } from "vitest";
-import { cleanup } from "@testing-library/react";
+import { cleanup, configure } from "@testing-library/react";
+
+// Testing Library's `asyncUtilTimeout` governs every `waitFor` and `findBy*` in
+// this project — 788 call sites — and is the tighter of the two bounds on any
+// async assertion here, so it is stated rather than inherited (#2323). Pinning
+// it also means a Testing Library upgrade that changes its default cannot move
+// every one of those sites silently.
+//
+// ⚠️ The value is 1000 — Testing Library's own default — and that is a
+// MEASURED decision, not a shrug. #2323 proposed 5000 on the reasoning that a
+// contended happy-dom render is the worst case and that this becomes the
+// binding constraint once the project's `testTimeout` rises. Measured on this
+// machine, 5000 made the suite WORSE: three arms of three full unit runs each,
+// same worktree, comparable load —
+//
+//   • unmodified `v2/main`:            3/3 green
+//   • this change with 5000:           1, 4 and 0 files timing out at 15000ms
+//   • this change with the default:    3/3 green
+//
+// The failures were a different, unrelated set each time and every one passed
+// in about a second in isolation, which is the shape of CPU starvation rather
+// than of a slow assertion. The mechanism proposed at the time was that
+// `asyncUtilTimeout` is not only a ceiling: a wait that is *meant* to expire —
+// a test asserting something never appears, a poll allowed to run out — spends
+// the whole budget on the happy path, so a 5x raise would be a 5x cost on
+// those tests, saturating the worker pool.
+//
+// #2335 went looking for those tests and found none. Zero hits for every
+// expiring-wait shape against Testing Library across the unit, `core/`,
+// integration and story files; no test at or above 2000ms in a full unit run;
+// and the same three-arm protocol re-run interleaved on a leased machine
+// (1000 / 5000 / reverted, three rounds) gave 0 failures in every arm — the
+// one red test in each 5000 arm being `asyncUtilTimeout.test.ts` refusing the
+// raised value, which is the guard doing its job — and 0 tests at or above
+// 5000ms with the raise in place. Nothing on the passing
+// path spends this budget, so raising it buys nothing — and the #2323 reds
+// read as ambient load the arms did not share (an inference from that data,
+// not a re-measurement of the original run).
+//
+// So the general rule this repo now follows — a budget must be a value someone
+// chose — is satisfied by choosing it, not by raising it. The pin stays at the
+// default until a measurement says otherwise; `asyncUtilTimeout.test.ts`
+// asserts the effective value, so moving it is deliberate by construction.
+configure({ asyncUtilTimeout: 1000 });
 
 // Node 22+ exposes an experimental `localStorage` placeholder that overrides
 // happy-dom's implementation. Without `--localstorage-file`, it's an empty

@@ -5,6 +5,13 @@ import type {
   InitializeResult,
 } from "@modelcontextprotocol/client";
 import { renderWithMantine, screen } from "../../../test/renderWithMantine";
+import type { ConnectionDiagnostics } from "@inspector/core/mcp/connectionDiagnostics.js";
+import {
+  NO_NOTIFICATION_STREAM_LABEL,
+  NO_OUTSTANDING_REQUESTS_LABEL,
+  NO_RESPONSE_YET_LABEL,
+  NO_STREAM_ON_STDIO_LABEL,
+} from "../../../utils/connectionActivity";
 import {
   CLEAR_OAUTH_STATE_AND_DISCONNECT_LABEL,
   ConnectionInfoContent,
@@ -567,6 +574,168 @@ describe("ConnectionInfoContent", () => {
     expect(screen.getByText("token-123")).toBeInTheDocument();
   });
 
+  it("weights labels bold and values normal, in both halves of the modal", () => {
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={fullResult}
+        clientCapabilities={fullClientCaps}
+        transport="streamable-http"
+        oauth={{
+          protocol: "standard",
+          authorized: true,
+          clientId: "client-abc",
+          scopes: ["read"],
+        }}
+      />,
+    );
+
+    // The convention is the whole point of #2328: the label is the fixed
+    // scaffolding a reader scans down, the value is what differs. Asserted in
+    // Server Implementation *and* OAuth Details, because the defect being
+    // guarded against is the two halves disagreeing — checking one alone would
+    // pass on a modal that is internally inconsistent.
+    for (const label of ["Name", "Protocol", "Client ID", "Scopes"]) {
+      expect(screen.getAllByText(label)[0]).toHaveStyle({ fontWeight: "600" });
+    }
+    // `getByText`, not `queryByText` + `?? ""`: an absent value would make the
+    // optional form pass vacuously (undefined → "" → not "600"), so the test
+    // would go green on a row that had stopped rendering at all.
+    for (const value of ["Everything Server", "read"]) {
+      expect(screen.getByText(value).style.fontWeight).not.toBe("600");
+    }
+
+    // Badge values count too. `ThemeBadge` defaults to `fw: 600`, so Status,
+    // Transport and Era read bold-label/bold-value unless overridden — the
+    // whole-modal claim is false without this.
+    for (const badge of ["streamable-http", "Legacy", "Authorized"]) {
+      // `getByText` lands on the Badge's inner label span; `fw` is applied to
+      // the root, so walk up to it or the assertion reads an empty string and
+      // passes against anything.
+      const root = screen.getByText(badge).closest('[class*="Badge-root"]');
+      expect((root as HTMLElement | null)?.style.fontWeight).toBe("400");
+    }
+  });
+
+  it("gives Client ID and Auth URL the full width, with no inset surface", () => {
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={fullResult}
+        clientCapabilities={fullClientCaps}
+        transport="streamable-http"
+        oauth={{
+          protocol: "standard",
+          authorized: true,
+          clientId:
+            "http://127.0.0.1:8093/client-metadata.json?profile=long-enough-to-wrap",
+          authUrl: "https://auth.example.com/authorize",
+        }}
+      />,
+    );
+
+    // A CIMD client id IS a URL, so it is long by construction. In the
+    // two-column grid it got half the modal and broke mid-token
+    // (`…/client-metadata.` / `json`), which reads as a rendering fault rather
+    // than as one value.
+    for (const value of [
+      "http://127.0.0.1:8093/client-metadata.json?profile=long-enough-to-wrap",
+      "https://auth.example.com/authorize",
+    ]) {
+      expect(screen.getByText(value)).toHaveStyle({
+        backgroundColor: "transparent",
+      });
+    }
+
+    // The background alone does not pin the *layout*: swapping FullWidthField
+    // back for the two-column SimpleGrid would keep it transparent and still
+    // pass. Assert the structure that makes the value full width — label and
+    // value are siblings in a column, and neither sits in a SimpleGrid.
+    for (const [label, value] of [
+      [
+        "Client ID",
+        "http://127.0.0.1:8093/client-metadata.json?profile=long-enough-to-wrap",
+      ],
+      ["Auth URL", "https://auth.example.com/authorize"],
+    ]) {
+      const labelNode = screen.getByText(label);
+      const valueNode = screen.getByText(value);
+      expect(valueNode.parentElement).toBe(labelNode.parentElement);
+      expect(valueNode.closest('[class*="SimpleGrid"]')).toBeNull();
+    }
+  });
+
+  it("bolds the token captions, which are field labels in the same list", () => {
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={fullResult}
+        clientCapabilities={fullClientCaps}
+        transport="streamable-http"
+        oauth={{
+          protocol: "standard",
+          authorized: true,
+          accessToken: "token-123",
+          idToken: "id-token-456",
+        }}
+      />,
+    );
+
+    // OAuthTokenField renders its own caption, so the weight convention has to
+    // be asserted through it — the other weight test renders no token at all.
+    for (const caption of ["Access Token", "ID Token"]) {
+      expect(screen.getByText(caption).style.fontWeight).toBe("600");
+    }
+  });
+
+  it("groups the full-width fields at the end, Client ID directly above Access Token", () => {
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={fullResult}
+        clientCapabilities={fullClientCaps}
+        transport="streamable-http"
+        oauth={{
+          protocol: "standard",
+          authorized: true,
+          clientId: "http://127.0.0.1:8093/client-metadata.json",
+          clientRegistrationKind: "cimd",
+          authUrl: "https://auth.example.com/authorize",
+          scopes: ["mcp"],
+          accessToken: "token-123",
+        }}
+      />,
+    );
+
+    // Order is the assertion, so read the labels off the DOM rather than
+    // checking each is merely present: the inline two-column rows come first,
+    // then every label-over-value field together. Interleaving them is what
+    // this guards against — it broke the scan down the label column, and the
+    // tokens already used the full-width layout at the bottom.
+    const order = [
+      "Client registration",
+      "Scopes",
+      "Auth URL",
+      "Client ID",
+      "Access Token",
+    ];
+    const positions = order.map((label) => {
+      const node = screen.getAllByText(label)[0];
+      expect(node).toBeInTheDocument();
+      return (
+        node.compareDocumentPosition(screen.getAllByText("Protocol")[0]) &
+        Node.DOCUMENT_POSITION_PRECEDING
+      );
+    });
+    expect(positions.every(Boolean)).toBe(true);
+
+    const labelNode = (label: string) => screen.getAllByText(label)[0];
+    for (let i = 0; i < order.length - 1; i++) {
+      const earlier = labelNode(order[i]);
+      const later = labelNode(order[i + 1]);
+      expect(
+        earlier.compareDocumentPosition(later) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    }
+  });
+
   it("renders EMA idp session when provided", () => {
     renderWithMantine(
       <ConnectionInfoContent
@@ -770,5 +939,83 @@ describe("ConnectionInfoContent", () => {
       }),
     );
     expect(onClearOAuth).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("ConnectionInfoContent connection activity (#2318)", () => {
+  const NOW = 1_000_000;
+  const seconds = (n: number) => n * 1000;
+
+  it("omits the section when no diagnostics are supplied", () => {
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={fullResult}
+        clientCapabilities={fullClientCaps}
+        transport="streamable-http"
+      />,
+    );
+    expect(screen.queryByText("Connection Activity")).not.toBeInTheDocument();
+  });
+
+  it("renders the idle state: nothing unanswered, nothing received, stream not opened", () => {
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={fullResult}
+        clientCapabilities={fullClientCaps}
+        transport="streamable-http"
+        diagnostics={{ capturedAt: NOW, outstandingRequests: [] }}
+      />,
+    );
+    expect(screen.getByText("Connection Activity")).toBeInTheDocument();
+    expect(screen.getByText(NO_OUTSTANDING_REQUESTS_LABEL)).toBeInTheDocument();
+    expect(screen.getByText(NO_RESPONSE_YET_LABEL)).toBeInTheDocument();
+    expect(screen.getByText(NO_NOTIFICATION_STREAM_LABEL)).toBeInTheDocument();
+  });
+
+  it("lists each unanswered request on its own line, with the last response and the open stream", () => {
+    const diagnostics: ConnectionDiagnostics = {
+      capturedAt: NOW,
+      outstandingRequests: [
+        { id: 2, method: "tools/list", sentAt: NOW - seconds(60) },
+        { id: 3, method: "ping", sentAt: NOW - seconds(12) },
+      ],
+      lastResponse: { method: "initialize", receivedAt: NOW - seconds(61) },
+      notificationStream: {
+        url: "http://127.0.0.1:9779/mcp",
+        openedAt: NOW - seconds(252),
+        eventCount: 0,
+      },
+    };
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={fullResult}
+        clientCapabilities={fullClientCaps}
+        transport="streamable-http"
+        diagnostics={diagnostics}
+      />,
+    );
+    const outstanding = screen.getByTestId("connection-activity-outstanding");
+    expect(outstanding.children).toHaveLength(2);
+    expect(outstanding.children[0]?.textContent).toBe(
+      "tools/list — sent 1m00s ago",
+    );
+    expect(outstanding.children[1]?.textContent).toBe("ping — sent 12s ago");
+    expect(screen.getByText("initialize — 1m01s ago")).toBeInTheDocument();
+    expect(
+      screen.getByText("GET /mcp — open for 4m12s, 0 events delivered"),
+    ).toBeInTheDocument();
+  });
+
+  it("reports the stream row as not applicable on stdio", () => {
+    renderWithMantine(
+      <ConnectionInfoContent
+        initializeResult={fullResult}
+        clientCapabilities={fullClientCaps}
+        transport="stdio"
+        diagnostics={{ capturedAt: NOW, outstandingRequests: [] }}
+      />,
+    );
+    // Both the Session row and the Notification stream row read N/A (stdio).
+    expect(screen.getAllByText(NO_STREAM_ON_STDIO_LABEL)).toHaveLength(2);
   });
 });

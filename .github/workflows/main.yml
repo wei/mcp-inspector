@@ -17,9 +17,22 @@ on:
 permissions:
   contents: read
 
+# Every job below declares `timeout-minutes` (#2333). It is a HUNG-JOB GUARD,
+# not a flake remedy: GitHub runners are not the contended machine the local
+# gate runs on, and nothing measured implicates them — so no value here is
+# sized for load. The rule, for every job in this file, is roughly TWICE the
+# slowest run observed, rounded up to the next five minutes: real headroom for
+# a slow runner, and a hang cut off in minutes instead of at GitHub's
+# 360-minute default. Each job states the range it was read from; when one
+# legitimately outgrows its number, raise it here with the new range.
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Observed 7.6–11.8 min across the 40 push runs before this landed
+    # (2026-09-11 → 09-13), all since the coverage split (#2159). A release run
+    # before that split reached 15.6 min, with the coverage gate still inside
+    # this job — that shape no longer exists.
+    timeout-minutes: 25
 
     steps:
       - name: Checkout code
@@ -38,8 +51,9 @@ jobs:
         run: npm install
 
       - name: Validate (coverage guards, format, lint, typecheck, build, fast tests)
-        # Runs the four durable guards first (verify:format-coverage,
-        # verify:skills, verify:typecheck-coverage, verify:dep-lockstep), then
+        # Runs the five durable guards first (verify:format-coverage,
+        # verify:skills, verify:typecheck-coverage, verify:dep-lockstep,
+        # verify:test-timeouts), then
         # test:scripts, then validate:core, then each client's
         # self-validation: format:check + lint + typecheck + build + test (no
         # coverage instrumentation — fast). This also builds every client bundle
@@ -48,7 +62,9 @@ jobs:
         # (#2159), which consumes nothing this job produces — every client's
         # `test:coverage` builds whatever it needs itself. Unit tests run in
         # both jobs (fast here, instrumented there); now that the two run in
-        # parallel that duplication costs no wall clock at all.
+        # parallel that duplication costs no wall clock at all. (The local gate,
+        # which runs serially, calls `local:validate` instead and runs them once
+        # — #2341. Keep `validate` here: this job IS the fast inner loop.)
         # A future optimization could split `coverage` into per-client parallel
         # jobs, but that's a larger restructure and deliberately out of scope.
         run: npm run validate
@@ -108,12 +124,13 @@ jobs:
 
       - name: Run cross-client smokes
         # NOTE: this workflow runs GitHub CI's tier only. The LOCAL pre-push
-        # gate is `npm run local:gate`, and it is a strict superset — do not add
-        # it, a `local:*` script, `smoke:web:firefox`/`smoke:web:webkit`,
-        # `smoke:web:engine`, or a non-Chromium `SMOKE_BROWSER` to any workflow.
+        # gate is `npm run local:gate`, and it runs every check here plus the
+        # local-only ones — do not add it, a `local:*` script,
+        # `smoke:web:firefox`/`smoke:web:webkit`, `smoke:web:engine`, or a
+        # non-Chromium `SMOKE_BROWSER` to any workflow.
         # `npm run test:scripts` fails if you do (scripts/lib/workflow-gate.mjs,
         # #2146). `npm run smoke` and `smoke:web:chromium` belong here and are
-        # not affected. The canonical CI-vs-local table is in the root README.
+        # not affected. The canonical CI-vs-local split is docs/quality-gate.md.
         #
         # End-to-end smokes through the built launcher (--help dispatch + prod
         # CLI/web). Not part of any client's `validate`: it needs the
@@ -146,6 +163,8 @@ jobs:
   # time tests out at the 5s default. Separate jobs get separate runners.
   coverage:
     runs-on: ubuntu-latest
+    # Observed 5.9–8.5 min across the same 40 push runs as `build`.
+    timeout-minutes: 20
 
     steps:
       - name: Checkout code
@@ -191,6 +210,11 @@ jobs:
     concurrency:
       group: publish-npm
       cancel-in-progress: false
+    # Observed 2.3–2.8 min across the last three releases (2.4.0–2.6.0), of
+    # which `pack:verify` is about half and the only step that reaches the
+    # registry. The publish itself is atomic on npm's side, so a cut-off here
+    # leaves nothing half-published.
+    timeout-minutes: 10
     permissions:
       contents: read
       # Required for npm provenance (`--provenance` mints a signed attestation
@@ -279,6 +303,9 @@ jobs:
     if: github.event_name == 'release'
     environment: release
     needs: [build, coverage]
+    # Observed 14.5–15.4 min across the last three releases (2.4.0–2.6.0);
+    # the linux/arm64 half of the build runs under QEMU and is most of it.
+    timeout-minutes: 35
     permissions:
       contents: read
       packages: write

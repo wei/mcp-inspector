@@ -25,14 +25,17 @@ export function tokenize(command) {
  * <name>` references within a single manifest's `scripts`, plus npm's implicit
  * `pre<name>`/`post<name>` lifecycle hooks (npm runs those around `<name>`
  * without an explicit `npm run`, so a gate moved into e.g. `prevalidate` is
- * still reached). A gate harvested from a script that nothing reachable from
+ * still reached). Every spelling npm accepts for `run` is followed —
+ * `run-script` is the canonical command and `run`, `rum` and `urn` are its
+ * aliases — so a chain written as `npm run-script validate:web` reaches the
+ * same scripts as `npm run validate:web` (Copilot, #2341). A gate harvested from a script that nothing reachable from
  * `entry` invokes gates nothing, so callers restrict to this set to assert "CI
  * actually runs this", not merely "the script exists".
  */
 export function reachableScripts(scripts, entry = "validate") {
   const reached = new Set();
   const queue = [entry];
-  const runRef = /npm run ([\w:-]+)/g;
+  const runRef = /npm (?:run-script|run|rum|urn) ([\w:-]+)/g;
   while (queue.length > 0) {
     const name = queue.shift();
     if (reached.has(name)) continue;
@@ -45,6 +48,16 @@ export function reachableScripts(scripts, entry = "validate") {
     for (const m of cmd.matchAll(runRef)) queue.push(m[1]);
   }
   return reached;
+}
+
+/** The lease wrapper `local:gate` runs under (#2339); see `scripts/gate-lease.mjs`. */
+export const GATE_LEASE_WRAPPER = "node scripts/gate-lease.mjs ";
+
+/** `node scripts/gate-lease.mjs npm run X` → `npm run X`; anything else unchanged. */
+function unwrapGateLease(segment) {
+  return segment.startsWith(GATE_LEASE_WRAPPER)
+    ? segment.slice(GATE_LEASE_WRAPPER.length).trim()
+    : segment;
 }
 
 /** The command strings of every script reachable from the root `validate`. */
@@ -105,6 +118,12 @@ export function rootReachesScript(rootScripts, scriptName) {
  * flags, as are npm's implicit `pre`/`post` hooks. Only the target is matched
  * exactly, which suits the argument-less scripts a vouch asks about.
  *
+ * One wrapper is transparent: `node scripts/gate-lease.mjs npm run X` runs
+ * `npm run X` under the local:gate lease (#2339) and nothing else, so a vouch
+ * about what `local:gate` runs looks through it. It is matched by its exact
+ * leading tokens — a wrapper with flags, or any other wrapper, still hides the
+ * invocation, because this helper cannot know what an arbitrary wrapper does.
+ *
  * @param {Record<string, string>} scripts
  * @param {string} entry
  * @param {string} target
@@ -121,7 +140,9 @@ export function scriptChainRuns(scripts, entry, target) {
       if (typeof scripts?.[hook] === "string") queue.push(hook);
     const body = scripts?.[name];
     if (typeof body !== "string") continue;
-    for (const segment of body.split(/\n|;|&&/).map((part) => part.trim())) {
+    for (const segment of body
+      .split(/\n|;|&&/)
+      .map((part) => unwrapGateLease(part.trim()))) {
       if (segment === `npm run ${target}`) return true;
       const tokens = segment.split(/\s+/);
       if (tokens[0] === "npm" && tokens[1] === "run" && tokens[2]) {

@@ -18,6 +18,14 @@ import type {
   ServerCapabilities,
 } from "@modelcontextprotocol/client";
 import type { ServerType } from "@inspector/core/mcp/types.js";
+import type { ConnectionDiagnostics } from "@inspector/core/mcp/connectionDiagnostics.js";
+import {
+  formatLastResponse,
+  formatNotificationStream,
+  formatOutstandingRequests,
+  NO_OUTSTANDING_REQUESTS_LABEL,
+} from "../../../utils/connectionActivity";
+import { useTickingClock } from "../../../hooks/useTickingClock";
 import { TASKS_EXTENSION_KEY } from "@inspector/core/mcp/modernTaskSchemas.js";
 import { getSkillsExtension } from "@inspector/core/mcp/skills.js";
 import type { OAuthClientRegistrationKind } from "@inspector/core/auth/types.js";
@@ -75,14 +83,39 @@ export interface ConnectionInfoContentProps {
    * capabilities, and extensions learned up front. Undefined on legacy. (#1626)
    */
   discoverResult?: DiscoverResult;
+  /**
+   * What the client is still waiting on, when it last heard back, and the
+   * state of the notification stream (#2318). Renders the Connection Activity
+   * section when present — the same facts a request timeout reports, shown
+   * here while the request is still in flight. Durations first read against
+   * the snapshot's own `capturedAt` and then tick once a second while the
+   * panel is open (`useTickingClock`), so an in-flight request's age keeps
+   * moving rather than freezing at the moment it went out.
+   */
+  diagnostics?: ConnectionDiagnostics;
   oauth?: OAuthDetails;
   onClearOAuth?: () => void;
 }
 
-const ValueText = Text.withProps({
+// Label/value pairs in this modal read label-bold, value-normal: the label is
+// the fixed scaffolding a reader scans down, and the value is the thing that
+// differs per connection. The reverse (which this was until #2328) bolded every
+// answer, so nothing stood out and the two columns fought each other.
+const FieldLabel = Text.withProps({
   size: "sm",
   fw: 600,
 });
+
+const ValueText = Text.withProps({
+  size: "sm",
+});
+
+// A badge standing in as the *value* half of a label/value row. The app-wide
+// `ThemeBadge` defaults to `fw: 600`, which is right for a standalone chip but
+// makes these rows read bold-label/bold-value — the one convention this modal
+// is not supposed to have. The chip still reads as a chip: its emphasis comes
+// from the outline and colour, not the font weight (#2328).
+const ValueBadge = Badge.withProps({ variant: "outline", fw: 400 });
 
 // Shown for Name/Version when the server didn't report `serverInfo` — an em dash
 // plus an explicit note so the client-side catalog fallback is never mistaken
@@ -104,7 +137,14 @@ const SectionHeading = Title.withProps({
 // `Code` block — that keeps the whole value visible and removes a scroll region
 // that would otherwise need its own keyboard access (axe
 // `scrollable-region-focusable`).
-const ValueCode = Code.withProps({ variant: "wrapping" });
+const ValueCode = Code.withProps({ variant: "wrapping-plain" });
+
+// A long OAuth value (client id, auth URL) gets its label on its own line and
+// the value across the full modal width beneath it, the way `OAuthTokenField`
+// already lays out a token. In the two-column grid these values had roughly
+// half the width and wrapped mid-token — `…/client-metadata.` / `json` — which
+// reads as a rendering fault rather than as one URL (#2328).
+const FullWidthField = Stack.withProps({ gap: 4 });
 
 // One declared sub-option of an extension. Mirrors `CapabilityItem`'s ✓/✗ row
 // rather than reusing it: that element's `capability` prop is the closed union
@@ -269,6 +309,7 @@ export function ConnectionInfoContent({
   transport,
   protocolEra,
   discoverResult,
+  diagnostics,
   oauth,
   onClearOAuth,
 }: ConnectionInfoContentProps) {
@@ -295,6 +336,15 @@ export function ConnectionInfoContent({
     ? serverInfo.version?.trim() || "—"
     : SERVER_INFO_NOT_REPORTED_LABEL;
 
+  // The activity rows' clock: the snapshot's own on first paint (pure), then
+  // the wall clock once a second so "sent 5s ago" keeps counting. No timer
+  // at all when there is no activity section to tick.
+  const now = useTickingClock(
+    diagnostics?.capturedAt ?? 0,
+    1000,
+    diagnostics !== undefined,
+  );
+
   const serverCaps = getServerCapabilityEntries(capabilities, protocolEra);
   const clientCaps = getCapabilityEntries(
     clientCapabilities,
@@ -306,31 +356,67 @@ export function ConnectionInfoContent({
       <Stack gap="xs">
         <SectionHeading>Server Implementation</SectionHeading>
         <SimpleGrid cols={2}>
-          <Text size="sm">Name</Text>
+          <FieldLabel>Name</FieldLabel>
           <ValueText>{displayName}</ValueText>
 
-          <Text size="sm">Version</Text>
+          <FieldLabel>Version</FieldLabel>
           <ValueText>{displayVersion}</ValueText>
 
-          <Text size="sm">Protocol</Text>
+          <FieldLabel>Protocol</FieldLabel>
           <ValueText>{protocolVersion || "—"}</ValueText>
 
-          <Text size="sm">Transport</Text>
-          <Badge variant="outline">{transport}</Badge>
+          <FieldLabel>Transport</FieldLabel>
+          <ValueBadge>{transport}</ValueBadge>
 
-          <Text size="sm">Era</Text>
-          <EraBadge era={protocolEra} />
+          <FieldLabel>Era</FieldLabel>
+          <EraBadge era={protocolEra} fw={400} />
 
-          <Text size="sm">Session</Text>
+          <FieldLabel>Session</FieldLabel>
           <ValueText>{formatSession(protocolEra, transport)}</ValueText>
         </SimpleGrid>
       </Stack>
+
+      {diagnostics && (
+        <Stack gap="xs">
+          <SectionHeading>Connection Activity</SectionHeading>
+          <SimpleGrid cols={2}>
+            <FieldLabel>Unanswered requests</FieldLabel>
+            {/* A `Stack` so several in-flight requests read as a list, the
+                way the extension sections do; one line per request. */}
+            <Stack gap={2} data-testid="connection-activity-outstanding">
+              {diagnostics.outstandingRequests.length === 0 ? (
+                <ValueText>{NO_OUTSTANDING_REQUESTS_LABEL}</ValueText>
+              ) : (
+                formatOutstandingRequests(diagnostics, now).map(
+                  (line, index) => (
+                    <ValueText key={diagnostics.outstandingRequests[index]!.id}>
+                      {line}
+                    </ValueText>
+                  ),
+                )
+              )}
+            </Stack>
+
+            <FieldLabel>Last response</FieldLabel>
+            <ValueText>{formatLastResponse(diagnostics, now)}</ValueText>
+
+            <FieldLabel>Notification stream</FieldLabel>
+            <ValueText>
+              {formatNotificationStream(
+                diagnostics.notificationStream,
+                transport,
+                now,
+              )}
+            </ValueText>
+          </SimpleGrid>
+        </Stack>
+      )}
 
       {discoverResult && (
         <Stack gap="xs">
           <SectionHeading>Discovery</SectionHeading>
           <SimpleGrid cols={2}>
-            <Text size="sm">Supported versions</Text>
+            <FieldLabel>Supported versions</FieldLabel>
             <ValueText>
               {discoverResult.supportedVersions.length > 0
                 ? discoverResult.supportedVersions.join(", ")
@@ -433,26 +519,17 @@ export function ConnectionInfoContent({
           <SectionHeading>OAuth Details</SectionHeading>
           <Stack gap="xs">
             <SimpleGrid cols={2}>
-              <Text size="sm">Protocol</Text>
+              <FieldLabel>Protocol</FieldLabel>
               <ValueText>{formatProtocol(oauth.protocol)}</ValueText>
 
-              <Text size="sm">Status</Text>
-              <Badge
-                variant="outline"
-                color={oauth.authorized ? "green" : "gray"}
-              >
+              <FieldLabel>Status</FieldLabel>
+              <ValueBadge color={oauth.authorized ? "green" : "gray"}>
                 {oauth.authorized ? "Authorized" : "Not authorized"}
-              </Badge>
+              </ValueBadge>
             </SimpleGrid>
-            {oauth.clientId && (
-              <SimpleGrid cols={2}>
-                <Text size="sm">Client ID</Text>
-                <ValueCode>{oauth.clientId}</ValueCode>
-              </SimpleGrid>
-            )}
             {oauth.clientRegistrationKind && (
               <SimpleGrid cols={2}>
-                <Text size="sm">Client registration</Text>
+                <FieldLabel>Client registration</FieldLabel>
                 <ValueText>
                   {formatClientRegistrationKind(oauth.clientRegistrationKind)}
                 </ValueText>
@@ -460,21 +537,33 @@ export function ConnectionInfoContent({
             )}
             {oauth.protocol === "ema" && oauth.idpSession && (
               <SimpleGrid cols={2}>
-                <Text size="sm">IdP session</Text>
+                <FieldLabel>IdP session</FieldLabel>
                 <ValueText>{formatIdpSession(oauth.idpSession)}</ValueText>
-              </SimpleGrid>
-            )}
-            {oauth.authUrl && (
-              <SimpleGrid cols={2}>
-                <Text size="sm">Auth URL</Text>
-                <ValueCode>{oauth.authUrl}</ValueCode>
               </SimpleGrid>
             )}
             {oauth.scopes && oauth.scopes.length > 0 && (
               <SimpleGrid cols={2}>
-                <Text size="sm">Scopes</Text>
+                <FieldLabel>Scopes</FieldLabel>
                 <ValueText>{formatScopes(oauth.scopes)}</ValueText>
               </SimpleGrid>
+            )}
+            {/* The full-width fields are kept together at the end of the
+                section, directly above the token rows, which use the same
+                label-over-value layout. Interleaved with the inline two-column
+                rows they broke the scan down the label column for every row
+                after them, and Client ID — the one most likely to be long —
+                was the worst offender (#2328). */}
+            {oauth.authUrl && (
+              <FullWidthField>
+                <FieldLabel>Auth URL</FieldLabel>
+                <ValueCode>{oauth.authUrl}</ValueCode>
+              </FullWidthField>
+            )}
+            {oauth.clientId && (
+              <FullWidthField>
+                <FieldLabel>Client ID</FieldLabel>
+                <ValueCode>{oauth.clientId}</ValueCode>
+              </FullWidthField>
             )}
             {oauth.accessToken && (
               <OAuthTokenField

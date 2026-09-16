@@ -22,6 +22,7 @@ import type {
   ResourceSubscriptionStreamState,
   ExcludedTool,
   RequestMetadata,
+  AppRendererClient,
 } from "./types.js";
 import type {
   CacheMode,
@@ -39,6 +40,7 @@ import type {
 } from "@modelcontextprotocol/client";
 import type { JsonValue } from "../json/jsonUtils.js";
 import type { MalformedListItem } from "./listSalvage.js";
+import type { ConnectionDiagnostics } from "./connectionDiagnostics.js";
 import type { InspectorClientEventTarget } from "./inspectorClientEventTarget.js";
 import type { SkillEntry } from "./skillsSchemas.js";
 import type { SkillsExtensionSupport } from "./skills.js";
@@ -47,11 +49,11 @@ import type { SamplingCreateMessage } from "./samplingCreateMessage.js";
 import type { ElicitationCreateMessage } from "./elicitationCreateMessage.js";
 
 /**
- * Opaque type representing the AppRendererClient surface used by @mcp-ui.
- * v1.5 aliases this to the SDK `Client` type; v2 leaves it opaque until the
- * real InspectorClient (or a focused App-renderer port) lands.
+ * Re-exported from `./types.js`, where it is defined and documented, so hook
+ * code that types against this protocol (`core/react/useInspectorClient.ts`)
+ * can import it here without a second, drift-prone definition (#1745).
  */
-export type AppRendererClient = unknown;
+export type { AppRendererClient } from "./types.js";
 
 /**
  * The contract every state manager and hook depends on. Anything that holds
@@ -77,6 +79,14 @@ export interface InspectorClientProtocol extends InspectorClientEventTarget {
   getDiscoverResult(): DiscoverResult | undefined;
   getServerSettings(): InspectorServerSettings | undefined;
   setServerSettings(settings: InspectorServerSettings): void;
+  /**
+   * What the client is still waiting on, when it last heard back, and the
+   * state of the notification stream — the snapshot a request timeout is
+   * annotated with (#2318). Optional so existing test doubles satisfy the
+   * interface without implementing it; `connectionDiagnosticsChange` fires
+   * whenever it changes.
+   */
+  getConnectionDiagnostics?(): ConnectionDiagnostics;
   getAppRendererClient(): AppRendererClient | null;
 
   // Connection control

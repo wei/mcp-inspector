@@ -1,11 +1,143 @@
 /**
- * Vitest/Vite resolve aliases shared between clients/web and node clients
- * (cli, tui). Pass each client's directory so bare-module pins resolve against
- * that client's node_modules.
+ * The two things every Vitest project in this repo shares.
+ *
+ * 1. Resolve aliases and dedupe pins, for `clients/web` and the node clients
+ *    (cli, tui). Pass each client's directory so bare-module pins resolve
+ *    against that client's node_modules.
+ * 2. The wall-clock budgets below (`TIMEOUTS` / `INTEGRATION_TIMEOUTS`), which
+ *    every one of the six projects spreads in — `clients/launcher` included,
+ *    which imports this module for them and nothing else.
  */
 
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+/**
+ * Wall-clock budgets shared by every Vitest project in this repo (#2323).
+ *
+ * These are values somebody chose. Before this existed, three of the six
+ * projects ran on Vitest's own `testTimeout: 5000` and five on its
+ * `hookTimeout`/`teardownTimeout: 10000` — numbers sized for an idle machine,
+ * not for the one this team works on (8 logical cores, three or four
+ * concurrent agent sessions in separate worktrees each free to run the full
+ * `npm run local:gate`, sustained load averages of 50-70). A correct,
+ * deterministic test cut off mid-flight by an unchosen budget fails a gate it
+ * did not break, which trains people to re-run rather than read.
+ *
+ * This is NOT a licence to hide races. #1596 settled that stance and every fix
+ * it produced stands; what a raised ceiling buys is only that a test which
+ * *would* have passed is allowed to finish. A poll or a `waitFor` exits the
+ * instant its predicate holds, so a passing run pays nothing for the headroom —
+ * only a genuinely hung test spends the whole budget, and 15s over 342 files is
+ * still a diagnosis measured in seconds.
+ *
+ * One object rather than six hand-written triples, because six independent
+ * answers to the same question is exactly how five of the projects came to have
+ * no answer at all. `retry` is deliberately absent and must stay unset: a retry
+ * converts a load-induced red into a silent green on the only pre-push gate
+ * this repo has. `scripts/verify-test-timeouts.mjs` enforces both halves.
+ */
+/**
+ * Absolute path to the setup file every project loads, which asserts at runtime
+ * that no test declares a `retry` (#2323). Exported from here so the six
+ * projects name one path rather than six copies of a relative one.
+ */
+export const NO_RETRY_SETUP = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "vitest.setup.shared.mts",
+);
+
+export const TIMEOUTS = Object.freeze({
+  /**
+   * 3x Vitest's default. Covers the measured load; past this a genuinely hung
+   * unit test costs the whole budget to discover. Both projects that had
+   * already answered this question by hand — `clients/cli` and web's
+   * `storybook` (#2292) — independently arrived at 15000, which is why it is
+   * the shared value rather than a new one.
+   */
+  testTimeout: 15_000,
+  /**
+   * Hooks do the setup and teardown a test's own budget never covers —
+   * spawning servers, provisioning temp dirs, unlinking filesystem-backed
+   * storage. They are also where the real-transitions auto-settle in
+   * `clients/web/src/test/renderWithMantine.tsx` awaits, so this is the one
+   * budget in the repo that actually governs a deliberate wait.
+   */
+  hookTimeout: 30_000,
+  teardownTimeout: 30_000,
+});
+
+/**
+ * Web's `integration` project: same hook budgets, a longer per-test one. These
+ * suites spawn real HTTP/stdio servers, bind sockets and run end-to-end OAuth
+ * flows, so 30s is the work rather than the slack — it predates this change
+ * (matching the v1.5 `core/vitest.config.ts`) and is carried forward unchanged.
+ */
+export const INTEGRATION_TIMEOUTS = Object.freeze({
+  ...TIMEOUTS,
+  testTimeout: 30_000,
+});
+
+/**
+ * `maxWorkers` is deliberately unset, here and in every project (#2336).
+ *
+ * The five forks-pool projects — web `unit` and `integration`, `cli`, `tui`,
+ * `launcher` — therefore inherit Vitest's non-watch default,
+ * `max(availableParallelism() - 1, 1)`: 7 on the eight-logical-core M3 this
+ * team works on. Web's `storybook` project is the exception: it runs the
+ * browser pool, whose default is a different expression,
+ * `max(min(12, availableParallelism() - 1), 1)` — also 7 here, but capped on
+ * larger machines because the main thread chokes past ~12 browser workers
+ * (vitest#7871) — and a single worker unless the run is headless, file
+ * parallelism is on, and the provider supports it. A
+ * `maxWorkers` set on that project *would* apply to it (`getThreadsCount`
+ * reads it before falling back), so it is not exempt from this decision;
+ * but nothing below measured it. The numbers are the forks pool's, and a cap
+ * for Storybook would need its own measurement.
+ *
+ * Keeping the default is a choice, not an omission, and this is the
+ * measurement it rests on. On `v2/main` @ `f16a51d4` — after the gate lease
+ * (#2339) — with the arms interleaved (default / `--maxWorkers=4` / default),
+ * three rounds, one worktree, nothing else of ours running:
+ *
+ *   web `unit`, 345 files       default  54.9s wall   378s CPU
+ *                                4        62.4s wall   294s CPU   +14% wall, -22% CPU
+ *   web `test:coverage`, 422    default  88.0s wall   461s CPU
+ *                                4       122.5s wall   376s CPU   +39% wall, -18% CPU
+ *   failures across all 18 runs  0
+ *
+ * So a cap is a permanent solo-run cost — ~35s on every `coverage:web`, a
+ * tenth of the whole gate — bought against a flake that did not occur once
+ * at the baseline every other #2338 number is tuned to. The CPU a cap gives
+ * back matters only when something else wants the cycles, and since #2339
+ * that is no longer another gate: gates serialize under
+ * `scripts/gate-lease.mjs`. What remains is non-gate work in a sibling
+ * session. Measured against a concurrent bare `vitest run --project=unit`
+ * in the same worktree (5 / 3 / 3 pairings): with the sibling at the
+ * default, capping our run cost us +8% and gave the sibling 14% back; with
+ * both capped, both sides ran at ~100s — the same total throughput as both
+ * at the default (99s + 92s), because eight cores are saturated either way.
+ * The one thing a cap moved was failures: two of the ten 7-vs-7 runs lost
+ * `AppRenderer.test.tsx`'s theme-flip case to its 5s inner `waitFor` at 14
+ * workers; none of the twelve runs with a cap on either side did. That is a
+ * single test's inner budget starving under two sessions' worth of workers
+ * — #2338's aspect 3, fixable at that site — not a case for taxing every
+ * solo run.
+ *
+ * Why not cap only locally, via an env var this file reads and `local:gate`
+ * sets? CI never runs `local:gate`, so CI would pay nothing — but every
+ * budget above is wall-clock, so a purely scheduling difference between the
+ * local gate and CI can flip an outcome, and the gate's whole promise is
+ * that passing it here means CI passes. One configuration in both places is
+ * the property worth keeping. CI's runners resolve the same expression
+ * against their own core count, so leaving it unset costs CI nothing.
+ *
+ * Reopen this if the lease goes away, or if `Test timed out` recurs on a run
+ * whose only contention is a sibling session — the 4-vs-4 figures above are
+ * the starting point. Whatever is committed then is a *chosen* number: macOS
+ * exposes no CPU affinity API, so no cap pins a worker to a performance core
+ * and none is "one per P-core".
+ */
 
 export function vitestSharedPaths(clientDir: string) {
   const dirname = path.resolve(clientDir);

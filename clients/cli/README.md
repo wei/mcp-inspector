@@ -84,7 +84,7 @@ When a server is loaded from a `--catalog`/`--config` file, its per-server setti
 
 The file is the only durable way to give a run its roots: there is no roots flag, and `--method roots/set` applies only to that one short-lived connection. Roots configured for a server (the same field the web UI's Server Settings writes) are advertised at connect, so a server that asks for `roots/list` — `@modelcontextprotocol/server-filesystem` does, to learn its allowed directories — gets them.
 
-**Environment-variable semantics.** `MCP_CATALOG_PATH` is honored only when no ad-hoc target is given (positional command, `--server-url`, or `--transport`) — so a shell that exports it can still run one-off ad-hoc invocations without hitting the catalog/ad-hoc conflict. `MCP_STORAGE_DIR` sets the storage directory used by the OAuth persist backend (`<MCP_STORAGE_DIR>/oauth.json`); the per-file `MCP_INSPECTOR_OAUTH_STATE_PATH` override still takes precedence over it.
+**Environment-variable semantics.** `MCP_CATALOG_PATH` is honored only when no ad-hoc target is given (positional command, `--server-url`, or `--transport`) — so a shell that exports it can still run one-off ad-hoc invocations without hitting the catalog/ad-hoc conflict. `MCP_STORAGE_DIR` sets the storage directory used by the OAuth persist backend (`<MCP_STORAGE_DIR>/oauth.json`); the per-file `MCP_INSPECTOR_OAUTH_STATE_PATH` override still takes precedence over it. Every variable the CLI reads is listed in [Environment variables](../../docs/environment-variables.md).
 
 ### HTTP proxy support
 
@@ -102,7 +102,7 @@ Because undici's `Response` is a different class from `globalThis.Response`, the
 
 ### MCP server (which server to connect to)
 
-Options that specify the MCP server (catalog/config file, ad-hoc command/URL, env vars, headers) are shared by the Web, CLI, and TUI and are documented in [MCP server configuration](../../docs/mcp-server-configuration.md): `--catalog` (writable catalog, seeded **empty** if missing; default `~/.mcp-inspector/mcp.json` or `MCP_CATALOG_PATH`), `--config` (read-only session, errors if absent), `--server`, `-e`, `--cwd`, `--header`, `--transport`, `--server-url`, and the positional `[target...]`. `--catalog` and `--config` are mutually exclusive, and neither combines with an ad-hoc target.
+Options that specify the MCP server (catalog/config file, ad-hoc command/URL, env vars, headers) are shared by the Web, CLI, and TUI and are documented in [MCP server configuration](../../docs/mcp-server-configuration.md): `--catalog` (writable catalog, seeded **empty** if missing; default `~/.mcp-inspector/mcp.json` or `MCP_CATALOG_PATH`), `--config` (read-only session, errors if absent), `--server`, `-e`, `--cwd`, `--header`, `--protocol-era` (`legacy`/`auto`/`modern`; sets the era an ad-hoc run negotiates, or overrides a file's `protocolEra`), `--transport`, `--server-url`, and the positional `[target...]`. `--catalog` and `--config` are mutually exclusive, and neither combines with an ad-hoc target.
 
 ### CLI-specific (what to invoke)
 
@@ -119,7 +119,7 @@ Options that specify the MCP server (catalog/config file, ad-hoc command/URL, en
 | `--log-level <level>`         | Logging level for `logging/setLevel` (e.g. `debug`, `info`).                                                                                                                                                                                                                                                                                                                                                         |
 | `--metadata <key=value>`      | General `_meta` entries (key=value); applied to all methods. The value is JSON-parsed when it parses, so `trace={"id":"abc"}` sends a real object and `n=3` a number; anything that is not valid JSON is sent as the literal string. Merged **over** the server's persisted `metadata` from `mcp.json`, which is sent on every request without this flag (#2093). |
 | `--tool-metadata <key=value>` | Tool-specific `_meta` entries for `tools/call`. Same JSON-parsed value handling as `--metadata`. |
-| `--connect-timeout <ms>`      | Connection timeout in ms. Defaults to `15000` for ad-hoc `--server-url`/target runs (so a black-holed host fails fast) and to the file-level timeout for `--catalog`/`--config` runs. `0` disables the timeout.                                                                                                                                                                                                      |
+| `--connect-timeout <ms>`      | Connection timeout in ms. Defaults to `15000` for ad-hoc `--server-url`/target runs (so a black-holed host fails fast) and to the file-level `connectionTimeout` for `--catalog`/`--config` runs — `30000` when the file sets none. `0` disables the timeout.                                                                                                                                                       |
 | `--app-info`                  | Probe a tool's MCP App UI metadata without invoking it. With `--method tools/call --tool-name <name>`: prints one JSON line (`hasApp`, `resourceUri`, `csp`, `permissions`, `domain`, …) and exits `0` if the tool has an app or `2` (`no_app`) if not. With `--method tools/list`: emits NDJSON — one app-info line per tool over a single connection.                                                              |
 | `--strict`                    | With `--method tools/list`: report tool-schema portability problems in full (path, issue, suggested fix) on stderr, and exit `6` if any is error-severity. Without it, a one-line count is printed instead. See [Schema portability](#schema-portability---strict). |
 | `--verify`                    | With `--method skills/list` or `--method skills/get`: run the SEP-2640 conformance, digest and frontmatter checks over the skills returned, emit one JSON report per skill on stdout, and exit `7` if any fails. See [Skill verification](#skill-verification---verify). |
@@ -391,7 +391,12 @@ not read has not been cleared of anything:
 | Per skill, on the wire | 16 MiB actually served | The declared sizes are server-controlled; this one cannot be lied past. |
 | Per run | 256 skills / 64 MiB | SEP-2640 bounds a skill and deliberately does not bound a *catalog*. Every entry costs at least one `resources/read`, so without this a large listing — hostile or merely big — is unbounded work against the tool inspecting it. |
 
-The run bound is this tool's, not the spec's. A skill past it is still reported,
+The run bound is this tool's, not the spec's, and it is configurable per server:
+set `skillCatalogMaxSkills` / `skillCatalogMaxBytes` on the server's entry in
+`mcp.json`, or edit them under **Skills** in the web client's Server Settings
+(see [the configuration reference](../../docs/mcp-server-configuration.md)).
+Both must be positive integers — there is no unlimited value, since the bound
+is what makes the run terminate. A skill past it is still reported,
 with its static conformance findings and an `incomplete` reason saying nothing
 about its files was checked; verify it on its own with `--method skills/get
 --uri <skill>` to get a verdict for it.
@@ -472,16 +477,19 @@ While the Web Client provides a rich visual interface, the CLI is designed for:
 Like the other clients, the CLI self-validates from its own folder:
 
 ```bash
-npm run validate       # format:check && lint && typecheck && test  (fast; no coverage gate)
+npm run check          # format:check && lint && typecheck  (no tests)
+npm run validate       # check && test  (fast; no coverage gate)
 npm test               # build test-servers + binary, then run all tests
 npm run test:coverage  # build + tests under the per-file ≥90 coverage gate
 ```
 
 The CLI's `test` / `test:coverage` **build the binary first** (out-of-process
-`e2e.test.ts` spawns it). `validate` is `format:check && lint && typecheck && test`
-with no separate `build` step (`pretest` builds). Repo-root `validate:cli`
-delegates here; the coverage gate is `npm run coverage` / `coverage:cli` (also in
-`npm run local:gate`), matching AGENTS.md.
+`e2e.test.ts` spawns it). `check` is `format:check && lint && typecheck` and
+`validate` is `check && test`, with no separate `build` step (`pretest` builds).
+Repo-root `validate:cli` delegates to `validate`, and the root `local:validate`
+— the first stage of `npm run local:gate` — runs `check` instead, so the gate
+runs the suite once, under `coverage` / `coverage:cli` (#2341), matching
+AGENTS.md.
 
 Tests run the CLI **in-process** (importing `runCli()`) so `src/` is measured
 under coverage, with a thin out-of-process spawn layer for the real binary. See

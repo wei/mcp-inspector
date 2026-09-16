@@ -29,6 +29,9 @@ import {
   hasAnalysis,
   installedVersion,
   isSweepAuthored,
+  hasSweepAuthor,
+  hasSweepLabels,
+  warnOnUnrecognizedAuthors,
   main,
   needsManifestEdit,
   parseMarker,
@@ -147,11 +150,36 @@ test("isSweepAuthored requires both the automation author and the sweep's labels
     labels: SWEEP_LABELS.map((name) => ({ name })),
   };
   assert.equal(isSweepAuthored(owned), true);
-  // gh reports a bot with the suffix stripped; the REST API keeps it. Both spellings.
-  assert.equal(
-    isSweepAuthored({ ...owned, author: { login: "github-actions[bot]" } }),
-    true,
-  );
+  // The SAME account has three spellings; all three must be accepted, or
+  // suppression silently stops working (#2377). See `AUTOMATION_LOGIN`.
+  for (const login of [
+    "github-actions", // older `gh issue list --json author`
+    "github-actions[bot]", // REST comments endpoint
+    "app/github-actions", // newer `gh issue list --json author` — the #2377 miss
+    "App/GitHub-Actions[bot]", // nothing promises a casing or one form at a time
+  ]) {
+    assert.equal(
+      isSweepAuthored({ ...owned, author: { login } }),
+      true,
+      `login spelling ${JSON.stringify(login)} must be recognized as the sweep's own`,
+    );
+  }
+  // The prefix strip must not become a way in for an account that is NOT ours.
+  // `/` is not legal in a GitHub username, so these cannot exist — but the
+  // predicate should not be the reason we believe that.
+  for (const login of [
+    "app/someone",
+    "notapp/github-actions",
+    "app/github-actions-nightly",
+    "github-actions-nightly",
+    "app//github-actions",
+  ]) {
+    assert.equal(
+      isSweepAuthored({ ...owned, author: { login } }),
+      false,
+      `login spelling ${JSON.stringify(login)} must NOT be accepted`,
+    );
+  }
   // An outsider's issue carrying a forged marker: right shape, wrong provenance.
   assert.equal(
     isSweepAuthored({ ...owned, author: { login: "someone", is_bot: false } }),
@@ -172,6 +200,75 @@ test("isSweepAuthored requires both the automation author and the sweep's labels
   );
   assert.equal(isSweepAuthored({ ...owned, labels: [] }), false);
   assert.equal(isSweepAuthored({}), false);
+});
+
+test("hasSweepAuthor and hasSweepLabels are the two independent halves", () => {
+  const owned = {
+    author: { login: "app/github-actions", is_bot: true },
+    labels: SWEEP_LABELS.map((name) => ({ name })),
+  };
+  assert.equal(hasSweepAuthor(owned), true);
+  assert.equal(hasSweepLabels(owned), true);
+  // Each half ignores the other's input entirely.
+  assert.equal(hasSweepAuthor({ ...owned, labels: [] }), true);
+  assert.equal(
+    hasSweepLabels({ ...owned, author: { login: "someone" } }),
+    true,
+  );
+  assert.equal(
+    hasSweepLabels({ ...owned, labels: [{ name: "chore" }] }),
+    false,
+  );
+  assert.equal(hasSweepAuthor({}), false);
+  assert.equal(hasSweepLabels({}), false);
+});
+
+test("warnOnUnrecognizedAuthors reports an author spelling that stops normalizing", () => {
+  // The #2377 signature: our own marker, our own write-access-only labels, and
+  // an author this script cannot read. Silent before; loud now.
+  const marked = `<!-- sdk-watch: group=ext-apps; target=2.0.0 -->\nbody`;
+  const labels = SWEEP_LABELS.map((name) => ({ name }));
+  const warnings = [];
+  const found = warnOnUnrecognizedAuthors(
+    [
+      { author: { login: "apps/github-actions" }, body: marked, labels },
+      // Same unreadable spelling twice — reported once.
+      { author: { login: "apps/github-actions" }, body: marked, labels },
+      // Readable: the whole point is that these are NOT reported.
+      { author: { login: "app/github-actions" }, body: marked, labels },
+      { author: { login: "github-actions[bot]" }, body: marked, labels },
+      // An outsider's issue quoting the marker has no labels to go with it, so
+      // it is an ordinary miss rather than a spelling defect — and reporting it
+      // would hand any commenter a way to spam the sweep's log.
+      { author: { login: "someone" }, body: marked, labels: [] },
+      // Right author-shape and labels, but no marker of ours: not our issue.
+      { author: { login: "apps/github-actions" }, body: "no marker", labels },
+    ],
+    (m) => warnings.push(m),
+  );
+  assert.deepEqual(found, ["apps/github-actions"]);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /apps\/github-actions/);
+  assert.match(warnings[0], /#2377/);
+});
+
+test("warnOnUnrecognizedAuthors stays silent when every author is readable", () => {
+  const marked = `<!-- sdk-watch: group=ext-apps; target=2.0.0 -->\nbody`;
+  const labels = SWEEP_LABELS.map((name) => ({ name }));
+  const warnings = [];
+  assert.deepEqual(
+    warnOnUnrecognizedAuthors(
+      [{ author: { login: "app/github-actions" }, body: marked, labels }],
+      (m) => warnings.push(m),
+    ),
+    [],
+  );
+  assert.deepEqual(warnings, []);
+  assert.deepEqual(
+    warnOnUnrecognizedAuthors([], (m) => warnings.push(m)),
+    [],
+  );
+  assert.deepEqual(warnings, []);
 });
 
 /** The parsed workflow, read from disk so the tests assert the shipped file. */
@@ -1057,6 +1154,85 @@ test("main ignores an outsider's issue carrying the current target's marker", ()
     readFiled(output).map((f) => f.to),
     ["2.1.0"],
   );
+});
+
+/** Run `fn` with `console.warn` captured, restoring it whatever happens. */
+function capturingWarnings(fn) {
+  const warnings = [];
+  const original = console.warn;
+  console.warn = (...args) => warnings.push(args.join(" "));
+  try {
+    fn();
+  } finally {
+    console.warn = original;
+  }
+  return warnings;
+}
+
+test("main warns when a sweep-shaped issue's author does not normalize", () => {
+  // ⚠️ This is the PRODUCTION wiring, not the helper. Unit-testing
+  // `warnOnUnrecognizedAuthors` alone left `sweepIssues`' call to it deletable
+  // with the whole suite still green — so the guard against a silent
+  // normalization drift could itself have gone silent (#2379 review).
+  const spawn = fakeSpawn({
+    latest: latestAt(SDK, "2.1.0"),
+    issues: [
+      {
+        ...existingIssue(400, "2.1.0"),
+        // Labels an outsider cannot set, our own marker, and a spelling
+        // `normalizeLogin` has never seen: the #2377 signature exactly.
+        author: { login: "apps/github-actions", is_bot: true },
+      },
+    ],
+  });
+
+  const warnings = capturingWarnings(() =>
+    main("o/r", spawn, noAmbientOutput()),
+  );
+
+  const drift = warnings.filter((w) => w.includes("apps/github-actions"));
+  assert.equal(
+    drift.length > 0,
+    true,
+    `expected a drift warning naming the unreadable author; got ${JSON.stringify(warnings)}`,
+  );
+  assert.match(drift[0], /#2377/);
+  // And the consequence is real: unable to read its own issue, the sweep
+  // refiles. The warning is what makes that visible instead of silent.
+  assert.ok(
+    spawn.calls.some((c) => c.args[0] === "issue" && c.args[1] === "create"),
+  );
+});
+
+test("main stays silent when every sweep issue's author is readable", () => {
+  // The other side of the guard: a warning that fires on the ordinary path is
+  // noise, and a channel nobody trusts is one people learn to skim.
+  for (const login of [
+    "github-actions",
+    "github-actions[bot]",
+    "app/github-actions",
+  ]) {
+    const spawn = fakeSpawn({
+      latest: latestAt(SDK, "2.1.0"),
+      issues: [
+        { ...existingIssue(400, "2.1.0"), author: { login, is_bot: true } },
+      ],
+    });
+    const warnings = capturingWarnings(() =>
+      main("o/r", spawn, noAmbientOutput()),
+    );
+    assert.deepEqual(
+      warnings.filter((w) => w.includes("normalize")),
+      [],
+      `login ${JSON.stringify(login)} must not be reported as a drift`,
+    );
+    // Readable author ⇒ the marker is trusted ⇒ no refile.
+    assert.equal(
+      spawn.calls.some((c) => c.args[0] === "issue" && c.args[1] === "create"),
+      false,
+      `login ${JSON.stringify(login)} must suppress the refile`,
+    );
+  }
 });
 
 test("main ignores an issue that lacks the labels only write access can set", () => {

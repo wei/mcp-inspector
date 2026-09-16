@@ -193,6 +193,69 @@ describe("server.ts /api/mcp/* branch coverage", () => {
         await new Promise<void>((r) => upstream.server.close(() => r()));
       }
     });
+
+    it("relays a streamable-http 401's status and body over the event stream (#2297)", async () => {
+      const upstream = await startUnauthorizedUpstream();
+      const events = new AbortController();
+      try {
+        const connected = (await (
+          await connect(h, { type: "streamable-http", url: upstream.url })
+        ).json()) as { sessionId?: string };
+        expect(connected.sessionId).toBeDefined();
+
+        const stream = await fetch(
+          `${h.baseUrl}/api/mcp/events?sessionId=${connected.sessionId}`,
+          { signal: events.signal },
+        );
+        const sent = await fetch(`${h.baseUrl}/api/mcp/send`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sessionId: connected.sessionId,
+            message: {
+              jsonrpc: "2.0",
+              id: 1,
+              method: "initialize",
+              params: {
+                protocolVersion: "2025-06-18",
+                capabilities: {},
+                clientInfo: { name: "test", version: "1.0.0" },
+              },
+            },
+          }),
+        });
+        expect(await sent.json()).toMatchObject({
+          ok: false,
+          kind: "auth_challenge",
+        });
+
+        const reader = stream.body!.getReader();
+        const decoder = new TextDecoder();
+        const pattern = /data: (\{"type":"fetch_request",.*?\})\n/;
+        let text = "";
+        let match: RegExpMatchArray | null = null;
+        while (!(match = text.match(pattern))) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          text += decoder.decode(value, { stream: true });
+        }
+        const event = JSON.parse(match![1]!) as {
+          data: {
+            responseStatus?: number;
+            responseBody?: string;
+            error?: string;
+          };
+        };
+        expect(event.data.error).toBeUndefined();
+        expect(event.data.responseStatus).toBe(401);
+        expect(event.data.responseBody).toBe(
+          JSON.stringify({ error: "unauthorized" }),
+        );
+      } finally {
+        events.abort();
+        await new Promise<void>((r) => upstream.server.close(() => r()));
+      }
+    });
   });
 
   describe("POST /api/mcp/send", () => {

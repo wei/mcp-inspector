@@ -6,7 +6,10 @@
 import { readFileSync } from "fs";
 import path from "path";
 import YAML from "yaml";
-import { isOriginRelativePath } from "./test-server-oauth.js";
+import {
+  isOriginRelativePath,
+  type StallableOAuthEndpoint,
+} from "./test-server-oauth.js";
 
 export interface PresetRef {
   preset: string;
@@ -37,10 +40,39 @@ export interface ConfigFileOAuth {
   }>;
   supportDCR?: boolean;
   supportCIMD?: boolean;
+  /**
+   * Serve a CIMD client metadata document, making a CIMD fixture
+   * self-contained. `redirectUris` must list the Inspector callback for the
+   * web port under test. See the field's doc comment in
+   * `composable-test-server.ts`.
+   */
+  clientMetadata?: {
+    redirectUris: string[];
+    clientName?: string;
+    scope?: string;
+  };
+  /**
+   * Where to serve `clientMetadata` (default `/client-metadata.json`);
+   * validated as an origin-relative path, since it becomes the document's own
+   * `client_id`. See `composable-test-server.ts`.
+   */
+  clientMetadataPath?: string;
   tokenExpirationSeconds?: number;
   supportRefreshTokens?: boolean;
   /** RFC 7009 revocation endpoint; default true (#2144). */
   supportRevocation?: boolean;
+  /**
+   * Endpoints that accept the request and withhold the response, to drive the
+   * OAuth-path request timeouts against a real socket (#2382). One of
+   * `protected-resource-metadata`, `as-metadata`, `authorize`, `token`,
+   * `revoke`, `register`. An unrecognized name throws at setup.
+   */
+  stallEndpoints?: StallableOAuthEndpoint[];
+  /**
+   * Answer a stalled endpoint after this many ms instead of never (default 0 =
+   * never). Use it for "slower than the budget"; leave it out for "no answer".
+   */
+  stallMs?: number;
 }
 
 export interface ConfigFile {
@@ -70,6 +102,9 @@ export interface ConfigFile {
   /** Advertise the Skills extension (SEP-2640) and serve its fixture skills,
    * including `directoryRead` — see {@link ServerConfig.skills}. */
   skills?: boolean;
+  /** With `skills`, refuse the skills methods to a client that did not declare
+   * the extension — see {@link ServerConfig.skillsRequireClientExtension}. */
+  skillsRequireClientExtension?: boolean;
   /** Advertise the MCP Apps `io.modelcontextprotocol/ui` extension with the nested
    * `elicitation` setting — the server half of app-rendered form elicitation
    * (#1854). Pair with the `app_choose_option` tool + `choose_option_app` resource. */
@@ -246,6 +281,12 @@ function validateConfig(
     if (asPath !== undefined && !isOriginRelativePath(asPath)) {
       throw new Error(
         `Invalid config in ${filePath}: oauth.asMetadataPath must be an origin-relative path (e.g. "/.well-known/openid-configuration") — a value such as "//host/doc" would move the document off this server entirely`,
+      );
+    }
+    const cimdPath = oauth.clientMetadataPath;
+    if (cimdPath !== undefined && !isOriginRelativePath(cimdPath)) {
+      throw new Error(
+        `Invalid config in ${filePath}: oauth.clientMetadataPath must be an origin-relative path (e.g. "/client-metadata.json") — this path becomes the document's own client_id, so a value such as "//host/doc" would publish a client id naming a host this server does not serve`,
       );
     }
     if (transportType === "stdio" && oauth.enabled === true) {

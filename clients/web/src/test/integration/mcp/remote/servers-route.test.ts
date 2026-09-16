@@ -430,7 +430,9 @@ describe("/api/servers routes", () => {
           settings: {
             headers: [{ key: "Authorization", value: "Bearer xyz" }],
             metadata: { tenant: "acme", limits: { rps: 10 } },
-            connectionTimeout: 30000,
+            // Non-default on purpose: 30000 is DEFAULT_CONNECTION_TIMEOUT_MS,
+            // which the write side omits from disk (#2320).
+            connectionTimeout: 45000,
             requestTimeout: 60000,
             oauthClientId: "client-abc",
             oauthScopes: "read:tools",
@@ -444,7 +446,7 @@ describe("/api/servers routes", () => {
       expect(stored).not.toHaveProperty("settings");
       expect(stored.headers).toEqual({ Authorization: "Bearer xyz" });
       expect(stored.metadata).toEqual({ tenant: "acme", limits: { rps: 10 } });
-      expect(stored.connectionTimeout).toBe(30000);
+      expect(stored.connectionTimeout).toBe(45000);
       expect(stored.requestTimeout).toBe(60000);
       expect(stored.oauth).toEqual({
         clientId: "client-abc",
@@ -596,9 +598,12 @@ describe("/api/servers routes", () => {
       expect(stored).not.toHaveProperty("settings");
       expect(stored.headers).toEqual({ "X-Tenant": "acme" });
       expect(stored.requestTimeout).toBe(45000);
-      // Zero/empty values are suppressed on disk to keep the diff minimal.
+      // Empty values are suppressed on disk to keep the diff minimal.
       expect(stored).not.toHaveProperty("metadata");
-      expect(stored).not.toHaveProperty("connectionTimeout");
+      // A connectionTimeout of 0 is the explicit "no timeout" opt-out, not the
+      // default (30 s) — so it must reach disk, or the next load would
+      // silently read it back as 30 s (#2320).
+      expect(stored.connectionTimeout).toBe(0);
     });
 
     it("persists autoRefreshOnListChanged: true through the PUT write path", async () => {

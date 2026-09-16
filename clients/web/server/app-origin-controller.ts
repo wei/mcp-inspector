@@ -162,6 +162,14 @@ export interface AppOriginControllerOptions {
    * loopback, exactly as the sandbox proxy's own `frame-ancestors` does.
    */
   embedderOrigins?: string[];
+  /**
+   * The origin to serve published documents under instead of the bind-derived
+   * one — the operator's `MCP_APP_ORIGIN_FULL_ADDRESS`, already validated by
+   * `public-address.ts` (#1862). Only adopted once the listener is up, so a
+   * failed bind still makes {@link AppOriginController.publish} return null
+   * and the renderer keeps its srcdoc fallback.
+   */
+  publicOrigin?: string;
 }
 
 /** A document handed to {@link AppOriginController.publish}. */
@@ -237,9 +245,17 @@ export function createAppOriginController(
   // Same defaulting rationale as the sandbox controller: never the *name*
   // `localhost`, which resolves to a single address family and would put this
   // listener on a different family than the web server (#1951).
-  const { port, host = DEFAULT_BIND_HOST, embedderOrigins } = options;
+  const {
+    port,
+    host = DEFAULT_BIND_HOST,
+    embedderOrigins,
+    publicOrigin,
+  } = options;
   let server: Server | null = null;
   let origin: string | null = null;
+  // Tracked separately from `origin`: a public origin carries the public port
+  // (or none), not the one this listener bound.
+  let boundPort = 0;
 
   // Insertion-ordered, so the first key is the oldest entry.
   const documents = new Map<string, StoredDocument>();
@@ -268,7 +284,7 @@ export function createAppOriginController(
   return {
     async start(): Promise<{ port: number; url: string }> {
       if (server && origin) {
-        return { port: parseInt(new URL(origin).port, 10), url: origin };
+        return { port: boundPort, url: origin };
       }
       return new Promise((resolve) => {
         let settled = false;
@@ -312,6 +328,43 @@ export function createAppOriginController(
         // dedicated-origin rendering down. Retry once on an OS-assigned port,
         // loudly — whoever pinned the port to forward it needs to know.
         let retriedDynamic = false;
+
+        /**
+         * The origin to publish under once bound: the operator's public origin
+         * (#1862) when it is still safe to use, else the bind-derived one.
+         *
+         * Two reasons to refuse it here rather than only at config time:
+         * - A reverse proxy routes the public origin to one stable port, so it
+         *   is only usable on a FIXED port: not an explicit `0`, not a
+         *   config-time collision resolved to `0`, and not the EADDRINUSE
+         *   fallback, where someone else holds the pinned port.
+         * - It must differ from every trusted ancestor — the sandbox proxy and
+         *   the Inspector page, i.e. `embedderOrigins`. The frame is granted
+         *   `allow-same-origin` on this path, so sharing either origin hands
+         *   the app that realm. Config time cannot see a bind-derived sandbox
+         *   origin (it is known only once that listener binds, possibly on a
+         *   fallback port); the callers pass the real one here.
+         */
+        const adoptedOrigin = (derived: string): string => {
+          if (!publicOrigin) return derived;
+          if (port === 0 || retriedDynamic) {
+            console.warn(
+              `App origin: not using MCP_APP_ORIGIN_FULL_ADDRESS, since the listener is not on a fixed ` +
+                `port for it to route to; serving app documents from ${derived} instead.`,
+            );
+            return derived;
+          }
+          if (embedderOrigins?.includes(publicOrigin)) {
+            console.warn(
+              `App origin: not using MCP_APP_ORIGIN_FULL_ADDRESS=${publicOrigin}: it is the sandbox's or ` +
+                `the Inspector UI's origin, and a dedicated app origin must differ from both; ` +
+                `serving app documents from ${derived} instead.`,
+            );
+            return derived;
+          }
+          return publicOrigin;
+        };
+
         server.on("error", (err: NodeJS.ErrnoException) => {
           if (err.code === "EADDRINUSE") {
             if (!retriedDynamic && port !== 0) {
@@ -364,7 +417,8 @@ export function createAppOriginController(
           const urlHost = isAllInterfacesHost(canonicalHost)
             ? "localhost"
             : canonicalHost;
-          origin = `http://${urlHost}:${actualPort}`;
+          origin = adoptedOrigin(`http://${urlHost}:${actualPort}`);
+          boundPort = actualPort;
           settle({ port: actualPort, url: origin });
         });
       });

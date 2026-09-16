@@ -8,9 +8,9 @@ The launcher is the package that provides the global `mcp-inspector` binary (e.g
 - Forward all following arguments unchanged (including tokens that look like mode flags).
 - Dynamically import that app’s runner from `clients/{web,cli,tui}/build/index.js` (relative to the launcher build output) and call it **in-process** (no `spawn()`).
 
-All configuration parsing, config-file loading, and server setup are handled by the app runners and by **core**; the launcher does not interpret config or env vars.
+All configuration parsing, config-file loading, and server setup are handled by the app runners and by **core**; the launcher does not interpret server or client configuration, from files or from env vars. Its one exception is the debug switch described below.
 
-**Error reporting.** A `--cli` failure is routed through the CLI's own error sink, so `mcp-inspector --cli` preserves the CLI exit-code map (`1` usage, `2` no-app, `3` auth-required, `4` unreachable, `5` tool-error) and its machine-readable `{"error":{…}}` stderr envelope — the same as invoking the CLI bin directly. `--web` / `--tui` failures print a human-readable `Error: <message>` and exit `1` (append `MCP_DEBUG=1` for the stack).
+**Error reporting.** A `--cli` failure is routed through the CLI's own error sink, so `mcp-inspector --cli` preserves the CLI exit-code map (`1` usage, `2` no-app, `3` auth-required, `4` unreachable, `5` tool-error) and its machine-readable `{"error":{…}}` stderr envelope — the same as invoking the CLI bin directly. `--web` / `--tui` failures print a human-readable `Error: <message>` and exit `1` (append `MCP_DEBUG=1` for the stack). `MCP_DEBUG` (or `DEBUG`) is the only variable the launcher reads itself; the rest are listed in [Environment variables](../../docs/environment-variables.md).
 
 ## Web server-list flags (`--web`)
 
@@ -25,8 +25,11 @@ editable (see [specification/v2_catalog_launch_config.md](../../specification/v2
 | `mcp-inspector --web --server-url <url> --transport http --header "Name: Value"` (or a positional command) | One ad-hoc server held in memory, connectable with the given `--header`s                                        | No              |
 
 Rules: `--catalog` and `--config` are mutually exclusive; neither combines with
-an ad-hoc target or `--header`; `--header` requires an ad-hoc HTTP/SSE server
-and is applied to that connection (it is no longer a warn-only no-op).
+an ad-hoc target, `--header` or `--protocol-era`; `--header` requires an ad-hoc
+HTTP/SSE server and is applied to that connection (it is no longer a warn-only
+no-op). `--protocol-era <legacy|auto|modern>` requires an ad-hoc server of any
+transport and sets the era that connection negotiates, so a non-legacy era
+needs no `mcp.json` entry.
 
 **Seed contents are web-specific.** When the web backend creates a missing
 writable catalog it seeds `DEFAULT_SEED_CONFIG` (`core/mcp/serverList.ts`) — a
@@ -110,7 +113,8 @@ stale fixture reports a product failure rather than a staleness one.
 Like the web client, the launcher self-validates from its own folder:
 
 ```bash
-npm run validate  # format:check && lint && build && test:coverage
+npm run check     # format:check && lint && typecheck && build  (no tests)
+npm run validate  # check && test
 ```
 
 This has **no** dependency on the other clients being built — it only checks the
@@ -118,7 +122,9 @@ launcher's own source. `eslint.config.js` is a Node-only flat config (the web
 client's React/Storybook plugins stripped out), and the per-file coverage gate
 covers `parse-launcher-argv.ts` (the pure arg-parsing logic); `src/index.ts` is
 excluded as binary bootstrap and is instead exercised by the smokes above. The
-repo-root `validate:launcher` simply delegates here (`cd clients/launcher && npm run validate`).
+repo-root `validate:launcher` simply delegates here (`cd clients/launcher && npm run validate`),
+and the root `local:validate` — the first stage of `npm run local:gate` — runs
+`check` instead, so the gate runs the suite once, under `coverage:launcher` (#2341).
 
 ## Publishing
 

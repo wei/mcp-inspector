@@ -76,6 +76,7 @@ Each client has its own README with client-specific detail:
 | [Publishing](./docs/publishing.md) | What ships in the tarball, the packaging invariants, and `pack:verify` |
 | [Docker](./docs/docker.md) | Running the container image — ports, volumes, and where secrets go |
 | [Migrating from v1 to v2](./docs/v1-to-v2-migration.md) | CLI flag mapping, `--config` vs. `--catalog`, the Node engine bump, env-var renames |
+| [Environment variables](./docs/environment-variables.md) | Every variable that changes runtime behavior — auth, ports, storage, the secret store, logging, proxies — plus the Node TLS variables for a self-signed server |
 | [MCP server configuration](./docs/mcp-server-configuration.md) | Which server(s) the Inspector connects to, and the config file format |
 | [Reviewing an MCP App](./docs/mcp-app-review.md) | The CLI-first → one-shot-web recipe for automated App-tool review |
 | [Smoke-testing an MCP server](./docs/cli-smoke-testing.md) | The connect → list → call → assert workflow for a shell or CI job: `--format json` + `jq`, the exit-code map, and keeping OAuth non-interactive |
@@ -88,7 +89,7 @@ Each client self-validates from its own folder; the root scripts chain them. The
 ```bash
 npm run validate     # fast inner loop: format:check + lint + typecheck + build + unit tests
 npm run coverage     # the per-file ≥90% gate (lines/statements/functions/branches)
-npm run local:gate   # MANDATORY before pushing — a strict superset of GitHub CI
+npm run local:gate   # MANDATORY before pushing — every GitHub CI check, plus two local-only ones
 ```
 
 `npm run local:gate` chains every check below, plus the smokes and the Storybook tests. [Testing and the quality gate](./docs/quality-gate.md) owns the stage list and says what each one covers and why two are local-only; [`AGENTS.md`](./AGENTS.md) holds the testing rules themselves.

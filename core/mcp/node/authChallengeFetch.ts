@@ -24,8 +24,11 @@ export function createAuthChallengeInterceptFetch(
     }
 
     // Release the connection before throwing so the SDK transport is not left
-    // with a half-read 401/403 body on streamable HTTP.
-    await response.body?.cancel().catch(() => {});
+    // with a half-read 401/403 body on streamable HTTP. Not awaited: when the
+    // network tracker sits below this wrapper (#2297) the body is one branch of
+    // a tee, and cancel() adopts the source's promise, which a stalled body may
+    // never settle — so awaiting it could hang the throw.
+    void response.body?.cancel().catch(() => {});
 
     throw new AuthChallengeError(
       challenge,

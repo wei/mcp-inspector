@@ -132,7 +132,11 @@ export type StoredMCPServer = MCPServerConfig & {
    * (#1629)
    */
   modernLogLevel?: ModernLogLevel;
-  /** Inspector-specific connect-time timeout (ms). */
+  /**
+   * Inspector-specific connect-time timeout (ms). Absent reads back as
+   * `DEFAULT_CONNECTION_TIMEOUT_MS`; an explicit `0` disables the timeout and
+   * is persisted so it round-trips (#2320).
+   */
   connectionTimeout?: number;
   /** Inspector-specific request timeout (ms). */
   requestTimeout?: number;
@@ -167,6 +171,20 @@ export type StoredMCPServer = MCPServerConfig & {
    * file diff minimal for servers that never tuned it. `0` means unlimited.
    */
   maxFetchRequests?: number;
+  /**
+   * The maximum number of skills whose files are read in one skills
+   * verification run (#2294). Omitted on disk when it equals
+   * `SKILL_MAX_CATALOG_SKILLS`. Must be a positive integer
+   * — there is no unlimited value, since the bound is what makes `--verify`
+   * terminate.
+   */
+  skillCatalogMaxSkills?: number;
+  /**
+   * The maximum number of bytes read across all skills in one skills
+   * verification run (#2294). Omitted on disk
+   * when it equals `SKILL_MAX_CATALOG_BYTES`. Positive integer, as above.
+   */
+  skillCatalogMaxBytes?: number;
   /**
    * Pre-configured OAuth client credentials for HTTP transports. Nested to
    * match Claude Code's `.mcp.json` shape; lifted into the flat `oauthClientId`
@@ -376,8 +394,30 @@ export interface FetchRequestEntry {
   responseBody?: string;
   duration?: number; // Time between request and response in ms
   error?: string;
+  /**
+   * Lifecycle of a long-lived stream response (the standalone `GET` on
+   * Streamable HTTP, the legacy SSE event stream), whose body is never
+   * captured. Filled in asynchronously via `fetchRequestStreamUpdate` as
+   * events arrive and when the stream ends; absent on every bounded response
+   * (#2318).
+   */
+  stream?: FetchStreamState;
   /** Distinguishes OAuth/auth fetches from MCP transport fetches */
   category: FetchRequestCategory;
+}
+
+/**
+ * What the fetch tracker knows about a long-lived stream it declined to
+ * buffer: how many SSE events have been delivered on it so far, and when it
+ * ended. `closedAt` is absent while the stream is still open. The Network
+ * tab renders it in place of the body, and `InspectorClient` folds the most
+ * recent transport stream into its connection diagnostics (#2318).
+ */
+export interface FetchStreamState {
+  /** SSE events delivered so far — dispatched events, not keepalive comments. */
+  eventCount: number;
+  /** When the stream ended (server close, network error, or abort), once it has. */
+  closedAt?: Date;
 }
 
 /** Entry shape from createFetchTracker before category is added by the caller */
@@ -644,6 +684,18 @@ export type OnInsufficientScopePolicy = "reauthorize" | "throw";
 export const DEFAULT_TASK_TTL_MS = 60000;
 
 /**
+ * Default connect-time timeout (ms) applied when a server has no explicit
+ * `connectionTimeout` — on disk, in the form, or on the client. The SDK has no
+ * connect-time timeout of its own; without this, the only thing bounding a
+ * connect attempt was the SDK's per-request timeout on `initialize`, which
+ * fires after 60 s with a message that describes a JSON-RPC request rather
+ * than a connection (#2320). `0` remains the explicit opt-out ("no timeout"),
+ * so a stored `connectionTimeout: 0` and the CLI's `--connect-timeout 0` keep
+ * their documented meaning; only an *absent* value resolves to this.
+ */
+export const DEFAULT_CONNECTION_TIMEOUT_MS = 30000;
+
+/**
  * Default maximum number of HTTP fetch requests retained in the Network log
  * (per server). When exceeded, the oldest entries rotate out. A larger value
  * keeps more history at the cost of memory; `0` means unlimited (not
@@ -781,6 +833,10 @@ export interface InspectorServerSettings {
    * empty/unset means "inherit". Only meaningful for stdio transports.
    */
   cwd?: string;
+  /**
+   * Connect-time timeout (ms). Defaults to `DEFAULT_CONNECTION_TIMEOUT_MS`
+   * (30000) when the server has no explicit value; `0` means no timeout.
+   */
   connectionTimeout: number;
   requestTimeout: number;
   /** TTL (ms) for tasks created via "Run as task". Defaults to 60000. */
@@ -881,6 +937,17 @@ export interface InspectorServerSettings {
    */
   maxFetchRequests: number;
   /**
+   * Catalog budget for skills verification (#2294): the most skills, and the
+   * most bytes, one run reads. Optional rather than concrete like
+   * `maxFetchRequests` — absent means `SKILL_MAX_CATALOG_SKILLS` /
+   * `SKILL_MAX_CATALOG_BYTES`, resolved by `resolveSkillCatalogBudget`, and
+   * the form renders those defaults itself. Read by `verifySkills` through
+   * `getServerSettings()`, so the CLI's `--verify` and the TUI's Skills pane
+   * both honor it.
+   */
+  skillCatalogMaxSkills?: number;
+  skillCatalogMaxBytes?: number;
+  /**
    * Roots advertised to the server via the `roots` client capability. Each
    * root carries a required `uri` and an optional `name` (SDK `Root`). The
    * form edits these as controlled rows; empty-uri rows are dropped on
@@ -967,6 +1034,14 @@ export interface CreateTransportOptions {
   onFetchResponseBody?: (id: string, responseBody: string) => void;
 
   /**
+   * Optional callback fired asynchronously as a previously tracked long-lived
+   * stream (GET + `text/event-stream`) delivers events and when it ends. The
+   * tracker never buffers such a body, so this is the only view the consumer
+   * gets of the stream's lifetime (#2318).
+   */
+  onFetchStreamUpdate?: (id: string, stream: FetchStreamState) => void;
+
+  /**
    * Optional OAuth client provider for Bearer authentication (SSE, streamable-http).
    * When set, the SDK injects tokens and handles 401 via the provider.
    */
@@ -1023,9 +1098,13 @@ export type CreateTransport = (
 ) => CreateTransportResult;
 
 /**
- * Type for the client-like object passed to AppRenderer / @mcp-ui.
- * Structurally compatible with the MCP SDK Client but denotes the app-renderer
- * proxy, not the raw client. Use this type when passing the client to the Apps tab.
+ * The SDK `Client` handed to the MCP Apps host bridge (`AppBridge` in
+ * `@modelcontextprotocol/ext-apps`), obtained through
+ * `InspectorClient.getAppRendererClient()`, which returns it only while the
+ * connection status is `connected` and `null` otherwise. It is the real client,
+ * not a wrapper: since ext-apps 2.0.0 peers on SDK v2 the bridge registers on
+ * it directly, and the v1-peer translation proxy this alias used to denote is
+ * gone (#1745). Use this type when passing the client to the Apps tab.
  */
 export type AppRendererClient = Client;
 

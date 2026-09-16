@@ -5,6 +5,7 @@ import type {
   InspectorServerSettings,
   MCPServerConfig,
   InspectorClientEnvironment,
+  ServerProtocolEra,
 } from "@inspector/core/mcp/types.js";
 import { eraToVersionNegotiation } from "@inspector/core/mcp/types.js";
 import {
@@ -23,6 +24,7 @@ import {
   selectServerEntry,
   parseKeyValuePair as parseEnvPair,
   parseHeaderPair,
+  parseProtocolEra,
 } from "@inspector/core/mcp/node/index.js";
 import type { JsonValue } from "@inspector/core/mcp/index.js";
 import type { StrictJsonValue } from "@inspector/core/json/jsonUtils.js";
@@ -53,6 +55,7 @@ import {
   getAuthorizationServerUrlCandidates,
 } from "@inspector/core/auth/discovery.js";
 import { withRfc8414OidcCompat } from "@inspector/core/auth/oidcDiscoveryCompat.js";
+import { withOAuthRequestTimeout } from "@inspector/core/auth/requestTimeout.js";
 import { writeStoreFile } from "@inspector/core/storage/store-io.js";
 import {
   refreshAuthorization,
@@ -353,7 +356,14 @@ export async function refreshStoredAuthToken(
   // else puts a proxy under it, and a server reachable only through
   // `HTTPS_PROXY` would otherwise be probed directly. The same fetch is handed
   // to the token request below, so neither leg bypasses the proxy (Copilot).
-  const storedAuthFetch = withRfc8414OidcCompat(createProxyFetch() ?? fetch);
+  // #2319: this path runs outside `InspectorClient`, so nothing else bounds it
+  // — the discovery and the token request below would otherwise hang forever
+  // against an authorization server that accepts the connection and never
+  // answers. Innermost, so the compat wrapper's own probe requests inherit the
+  // deadline too.
+  const storedAuthFetch = withRfc8414OidcCompat(
+    withOAuthRequestTimeout(createProxyFetch() ?? fetch),
+  );
   const discover: typeof discoverAuthorizationServerMetadata =
     deps.discover ??
     ((authorizationServerUrl, options) =>
@@ -766,6 +776,11 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
       },
     )
     .option(
+      "--protocol-era <era>",
+      "Protocol era to negotiate: legacy, auto, or modern. Overrides the file-level protocolEra for --catalog/--config runs; ad-hoc --server-url / target runs otherwise default to legacy.",
+      parseProtocolEra,
+    )
+    .option(
       "--format <format>",
       "Output format: text (default; pretty-printed) or json (one JSON object on stdout, no banners).",
       (v: string): OutputFormat => {
@@ -862,6 +877,7 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
     verify?: boolean;
     cursor?: string;
     connectTimeout?: number;
+    protocolEra?: ServerProtocolEra;
     format?: OutputFormat;
     toolArgsJson?: string;
     clientConfig?: string;
@@ -1009,6 +1025,9 @@ async function parseArgs(argv?: string[]): Promise<ParseResult> {
     // `--header` is merged into the resolved server's settings (overriding any
     // file-level headers); file timeouts/OAuth are preserved. See #1482.
     headers: options.header as Record<string, string> | undefined,
+    // `--protocol-era` feeds `settings.protocolEra` the same way, so an ad-hoc
+    // launch can pick a non-legacy era without an mcp.json entry (#2208).
+    protocolEra: options.protocolEra,
   };
 
   // Catalog list / show — no MCP connection. Run before stored-auth refresh so

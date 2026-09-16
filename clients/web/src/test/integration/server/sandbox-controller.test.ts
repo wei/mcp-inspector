@@ -1,12 +1,83 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createServer, type Server } from "node:http";
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   createSandboxController,
   DEFAULT_SANDBOX_PORT,
+  EMBEDDER_ORIGINS_PLACEHOLDER,
+  embedderOriginsLiteral,
+  renderSandboxProxyHtml,
   resolveSandboxPort,
   sandboxFrameAncestors,
 } from "../../../../server/sandbox-controller.js";
+
+/** A port that was free a moment ago, for tests that need a FIXED port. */
+async function freePort(): Promise<number> {
+  const probe: Server = createServer();
+  await new Promise<void>((resolve) =>
+    probe.listen(0, "127.0.0.1", () => resolve()),
+  );
+  const addr = probe.address();
+  const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+  return port;
+}
+
+const PROXY_PAGE = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../../static/sandbox_proxy.html",
+);
+
+describe("embedder allow-list injection (#1862)", () => {
+  it("emits the same filtered list frame-ancestors admits", () => {
+    const origins = [
+      "https://inspector.example.com",
+      "http://[::1]:6274", // dropped by both
+      "http://a:1; sandbox", // dropped by both
+    ];
+    expect(embedderOriginsLiteral(origins)).toBe(
+      '["https://inspector.example.com"]',
+    );
+    expect(sandboxFrameAncestors(origins)).toBe(
+      "frame-ancestors https://inspector.example.com",
+    );
+  });
+
+  it.each([[undefined], [[]], [["http://[::1]:6274"]]])(
+    "is null — the page's loopback fallback — when nothing valid remains (%j)",
+    (origins) => {
+      expect(embedderOriginsLiteral(origins as string[] | undefined)).toBe(
+        "null",
+      );
+    },
+  );
+
+  it("escapes < so a value cannot close the <script> element", () => {
+    const literal = embedderOriginsLiteral(["http://x</script><b>:1"]);
+    expect(literal).not.toContain("<");
+    // Still the same value once parsed back as JavaScript/JSON.
+    expect(JSON.parse(literal)).toEqual(["http://x</script><b>:1"]);
+  });
+
+  it("does not interpret replacement patterns in the literal", () => {
+    expect(
+      renderSandboxProxyHtml(`a ${EMBEDDER_ORIGINS_PLACEHOLDER} b`, [
+        "http://$&.example:1",
+      ]),
+    ).toBe('a ["http://$&.example:1"] b');
+  });
+
+  it("finds exactly one placeholder in the shipped proxy page", () => {
+    // If the page's marker drifts from the constant, the substitution silently
+    // no-ops and every non-loopback deployment is refused again.
+    const page = readFileSync(PROXY_PAGE, "utf-8");
+    expect(page.split(EMBEDDER_ORIGINS_PLACEHOLDER)).toHaveLength(2);
+    expect(page).not.toContain("ALLOWED_REFERRER_PATTERN");
+  });
+});
 
 describe("sandboxFrameAncestors", () => {
   it("derives the directive from the provided allow-list", () => {
@@ -198,6 +269,85 @@ describe("createSandboxController", () => {
     }
   });
 
+  it("serves the proxy page with the allow-list injected", async () => {
+    const controller = createSandboxController({
+      port: 0,
+      allowedOrigins: ["https://inspector.example.com"],
+    });
+    try {
+      const { url } = await controller.start();
+      const body = await (await fetch(url)).text();
+      expect(body).toContain(
+        'const ALLOWED_EMBEDDER_ORIGINS = ["https://inspector.example.com"];',
+      );
+      expect(body).not.toContain(EMBEDDER_ORIGINS_PLACEHOLDER);
+    } finally {
+      await controller.close();
+    }
+  });
+
+  it("advertises a public URL in place of the bind-derived one (#1862)", async () => {
+    const publicUrl = "https://sb.example.com/sandbox";
+    // A fixed port: a public URL is only advertised where a proxy can route.
+    const port = await freePort();
+    const controller = createSandboxController({
+      port,
+      host: "127.0.0.1",
+      publicUrl,
+    });
+    try {
+      const first = await controller.start();
+      expect(first.url).toBe(publicUrl);
+      expect(controller.getUrl()).toBe(publicUrl);
+      // The port is still the bound one — the public URL has none of its own.
+      expect(first.port).toBe(port);
+      expect(
+        (await fetch(`http://127.0.0.1:${first.port}/sandbox`)).status,
+      ).toBe(200);
+      // The cached second start must report the bound port, not parse one out
+      // of the public URL (which would be NaN here).
+      expect(await controller.start()).toEqual(first);
+    } finally {
+      await controller.close();
+    }
+  });
+
+  it("does not advertise a public URL on an OS-assigned port (port 0)", async () => {
+    // MCP_SANDBOX_PORT=0 leaves no stable port for a reverse proxy to route to.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const controller = createSandboxController({
+      port: 0,
+      host: "127.0.0.1",
+      publicUrl: "https://sb.example.com/sandbox",
+    });
+    try {
+      const { url, port } = await controller.start();
+      expect(url).toBe(`http://127.0.0.1:${port}/sandbox`);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("not advertising MCP_SANDBOX_FULL_ADDRESS"),
+      );
+    } finally {
+      warnSpy.mockRestore();
+      await controller.close();
+    }
+  });
+
+  it("does not advertise a public URL when the listener never bound", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const controller = createSandboxController({
+      port: 0,
+      host: "203.0.113.1", // TEST-NET-3: not assigned to any local interface
+      publicUrl: "https://sb.example.com/sandbox",
+    });
+    try {
+      expect(await controller.start()).toEqual({ port: 0, url: "" });
+      expect(controller.getUrl()).toBeNull();
+    } finally {
+      errorSpy.mockRestore();
+      await controller.close();
+    }
+  });
+
   it("advertises localhost in the sandbox URL for a wildcard bind", async () => {
     // 0.0.0.0 isn't reachable from the browser, but a wildcard bind serves
     // loopback — so the URL handed to the client (and printed in the banner)
@@ -371,6 +521,31 @@ describe("createSandboxController", () => {
       );
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining("MCP_SANDBOX_PORT"),
+      );
+    } finally {
+      warnSpy.mockRestore();
+      await controller.close();
+      await release();
+    }
+  });
+
+  it("does not advertise a public URL after falling back off its pinned port (#1862)", async () => {
+    // The reverse proxy routes the public URL to the pinned port, which another
+    // process holds — so the public URL would reach the wrong listener.
+    const { port, release } = await claimPort();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const controller = createSandboxController({
+      port,
+      host: "127.0.0.1",
+      publicUrl: "https://sb.example.com/sandbox",
+    });
+    try {
+      const result = await controller.start();
+      expect(result.port).not.toBe(port);
+      expect(result.url).toBe(`http://127.0.0.1:${result.port}/sandbox`);
+      expect(controller.getUrl()).toBe(result.url);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("not advertising MCP_SANDBOX_FULL_ADDRESS"),
       );
     } finally {
       warnSpy.mockRestore();
