@@ -1,5 +1,7 @@
 import type { ClientCapabilities } from "@modelcontextprotocol/client";
+import { RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/app-bridge";
 import { TASKS_EXTENSION_KEY } from "./modernTaskSchemas.js";
+import { SKILLS_EXTENSION_KEY } from "./skillsSchemas.js";
 
 /**
  * Extension identifier for SEP-2350 enterprise-managed authorization. Advertised
@@ -13,21 +15,24 @@ export const EMA_EXTENSION_KEY =
 /**
  * Extension identifier for the MCP Apps UI extension (SEP-ext-apps). Mirrors
  * `EXTENSION_ID` from `@modelcontextprotocol/ext-apps`. Hardcoded rather than
- * imported: that constant lives on the package's `/server` subpath, which would
- * pull server-only code into the browser bundle. The Inspector always renders
- * MCP Apps, so this is advertised by default (#1740).
+ * imported: as of ext-apps 2.0.0 that constant is still exported only from the
+ * package's `/server` subpath, which would pull server-only code (and the
+ * optional `@modelcontextprotocol/server` peer) into the browser bundle. The
+ * node integration test `extensions-mimetype.test.ts` pins the two together.
+ * The Inspector always renders MCP Apps, so this is advertised by default
+ * (#1740).
  */
 export const UI_EXTENSION_KEY = "io.modelcontextprotocol/ui";
 
 /**
- * The MCP Apps UI resource MIME type the Inspector renders. Mirrors
- * `RESOURCE_MIME_TYPE` from `@modelcontextprotocol/ext-apps`; a server checks
- * for it in the client's advertised `io.modelcontextprotocol/ui` `mimeTypes` to
- * decide whether to serve an App. Hardcoded (stable spec string) because
- * ext-apps re-exports it through an extensionless path that doesn't resolve
- * cleanly under NodeNext — see the same note in `core/mcp/apps.ts`.
+ * The MCP Apps UI resource MIME type the Inspector renders. A server checks for
+ * it in the client's advertised `io.modelcontextprotocol/ui` `mimeTypes` to
+ * decide whether to serve an App. Re-exported from ext-apps' `/app-bridge`
+ * subpath — the one the Inspector already imports everywhere — rather than
+ * restated: the extensionless re-export that once kept this a hardcoded copy
+ * was fixed upstream (ext-apps#705) and shipped in 2.0.0 (#1745).
  */
-export const MCP_APP_MIME_TYPE = "text/html;profile=mcp-app";
+export const MCP_APP_MIME_TYPE = RESOURCE_MIME_TYPE;
 
 /**
  * The value the client stamps for each advertised extension. The wire shape is
@@ -86,6 +91,18 @@ export const ADVERTISABLE_EXTENSIONS: readonly AdvertisableExtension[] = [
     // a conforming server checks the `mimeTypes` before serving a UI resource.
     defaultAdvertised: true,
     advertisement: { mimeTypes: [MCP_APP_MIME_TYPE] },
+  },
+  {
+    key: SKILLS_EXTENSION_KEY,
+    label: "Skills (io.modelcontextprotocol/skills)",
+    // The Skills extension (SEP-2640). SEP-2133 negotiates an extension from
+    // both sides, so a server may refuse `skills/list`, `skills/get` and
+    // `resources/directory/read` to a client that did not declare it — and the
+    // Inspector calls all three once the server declares its half. Advertised
+    // by default for that reason; turning it off is how to check a server's
+    // refusal path. Declared with no settings: SEP-2640 defines none for the
+    // client side. (#2373)
+    defaultAdvertised: true,
   },
 ];
 

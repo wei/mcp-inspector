@@ -1,0 +1,19 @@
+{
+  "serverInfo": {
+    "name": "skills-strict-modern",
+    "version": "1.0.0"
+  },
+  "tools": [
+    {
+      "preset": "echo"
+    }
+  ],
+  "resources": [],
+  "skills": true,
+  "skillsRequireClientExtension": true,
+  "transport": {
+    "type": "streamable-http",
+    "port": 3233,
+    "modern": true
+  }
+}

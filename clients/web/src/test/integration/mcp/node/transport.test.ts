@@ -188,6 +188,35 @@ describe("Transport", () => {
       }
     });
 
+    it("tracks fetches when only onFetchResponseBody is supplied (#2318)", async () => {
+      // Any one of the tracking callbacks earns the tracker — a caller that
+      // wants only bodies (or only stream updates) must not be handed the
+      // bare fetch and silently receive nothing.
+      const server = createTestServerHttp({
+        serverInfo: createTestServerInfo(),
+        tools: [createEchoTool()],
+        serverType: "streamable-http",
+      });
+      try {
+        await server.start();
+        const bodies: string[] = [];
+        const result = createTransportNode(
+          { type: "streamable-http", url: server.url },
+          { onFetchResponseBody: (_id, body) => bodies.push(body) },
+        );
+        const client = new Client(
+          { name: "test-client", version: "1.0.0" },
+          { capabilities: {} },
+        );
+        await client.connect(result.transport);
+        await client.listTools();
+        await client.close();
+        expect(bodies.some((body) => body.includes("tools"))).toBe(true);
+      } finally {
+        await server.stop();
+      }
+    });
+
     it("should call onFetchRequest callback for streamable-http transport", async () => {
       const server = createTestServerHttp({
         serverInfo: createTestServerInfo(),
@@ -240,6 +269,90 @@ describe("Transport", () => {
       } finally {
         await server.stop();
       }
+    });
+
+    it("records an intercepted 401's status, WWW-Authenticate and body (#2297)", async () => {
+      const challengeBody = JSON.stringify({
+        error: "invalid_token",
+        error_description: "token expired",
+      });
+      const wwwAuthenticate =
+        'Bearer resource_metadata="https://mcp.example/.well-known/oauth-protected-resource", scope="files:read"';
+      const fetchFn: typeof fetch = async () =>
+        new Response(challengeBody, {
+          status: 401,
+          statusText: "Unauthorized",
+          headers: {
+            "content-type": "application/json",
+            "www-authenticate": wwwAuthenticate,
+          },
+        });
+
+      const fetchRequests: FetchRequestEntryBase[] = [];
+      const onFetchResponseBody = vi.fn();
+      const result = createTransportNode(
+        { type: "streamable-http", url: "https://mcp.example/mcp" },
+        {
+          fetchFn,
+          interceptAuthChallenges: true,
+          onFetchRequest: (entry) => fetchRequests.push(entry),
+          onFetchResponseBody,
+        },
+      );
+
+      const client = new Client(
+        { name: "test-client", version: "1.0.0" },
+        { capabilities: {} },
+      );
+      await expect(client.connect(result.transport)).rejects.toThrow(
+        "MCP auth challenge (401)",
+      );
+
+      // The body is on the entry by the time the challenge is thrown — not a
+      // later update — so a caller that stops listening at the throw has it.
+      expect(fetchRequests).toHaveLength(1);
+      const [entry] = fetchRequests;
+      expect(entry.error).toBeUndefined();
+      expect(entry.responseStatus).toBe(401);
+      expect(entry.responseHeaders?.["www-authenticate"]).toBe(wwwAuthenticate);
+      expect(entry.responseBody).toBe(challengeBody);
+      expect(onFetchResponseBody).not.toHaveBeenCalled();
+    });
+
+    it("still throws an intercepted 401 whose body never ends (#2297)", async () => {
+      const fetchFn: typeof fetch = async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode("partial"));
+            },
+          }),
+          {
+            status: 401,
+            headers: { "www-authenticate": 'Bearer error="invalid_token"' },
+          },
+        );
+
+      const fetchRequests: FetchRequestEntryBase[] = [];
+      const result = createTransportNode(
+        { type: "streamable-http", url: "https://mcp.example/mcp" },
+        {
+          fetchFn,
+          interceptAuthChallenges: true,
+          onFetchRequest: (entry) => fetchRequests.push(entry),
+        },
+      );
+
+      const client = new Client(
+        { name: "test-client", version: "1.0.0" },
+        { capabilities: {} },
+      );
+      await expect(client.connect(result.transport)).rejects.toThrow(
+        "MCP auth challenge (401)",
+      );
+      expect(fetchRequests[0]?.responseStatus).toBe(401);
+      // Cut off at the tracker's read deadline rather than buffered forever.
+      expect(fetchRequests[0]?.responseBody).toBe("partial\n[truncated]");
     });
 
     it("applies settings.headers to the outgoing streamable-http request", async () => {

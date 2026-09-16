@@ -27,11 +27,12 @@
 //  2. **Compare the INSTALLED version, not the declared range.** #1063 phrases
 //     the check as "is the current version > than the one we have in our
 //     package.json", which is exact today only because the four SDK packages
-//     are pinned exactly. `ext-apps` is a caret range (`^1.7.4`) whose lockfile
-//     already resolves higher, so comparing against the declared string would
-//     file an issue for a bump `npm install` has already taken. The declared
-//     range is still reported — it is what says whether the fix is a manifest
-//     edit or a lockfile refresh — but the comparison is against the lockfile.
+//     are pinned exactly. `ext-apps` is a caret range, so its lockfile can
+//     already resolve higher than the manifest's floor, and comparing against
+//     the declared string would file an issue for a bump `npm install` has
+//     already taken. The declared range is still reported — it is what says
+//     whether the fix is a manifest edit or a lockfile refresh — but the
+//     comparison is against the lockfile.
 //  3. **A new SDK package must not be watched silently by nobody.** The group
 //     table is a hardcoded list, so a fifth `@modelcontextprotocol/*` package
 //     added to the root manifest would never be checked and nothing would say
@@ -136,10 +137,27 @@ export const ANALYSIS_MARKER = "<!-- sdk-watch:analysis -->";
  *  * forge a supersession marker so the genuine note is never posted.
  *
  * So a marker counts only when the thing carrying it was written by this
- * automation. `gh issue list --json author` reports a bot with the `[bot]`
- * suffix stripped and `is_bot: true`, while the REST comments endpoint reports
- * `github-actions[bot]` with `type: "Bot"` — hence the normalization in both
- * predicates rather than one spelling assumed.
+ * automation.
+ *
+ * ⚠️ **The same account has THREE spellings, and normalizing only some of them
+ * disables suppression silently.** That is not hypothetical — it shipped, and
+ * cost three identical issues on three consecutive nights (#2377):
+ *
+ * | Source | Spelling |
+ * | --- | --- |
+ * | REST comments endpoint | `github-actions[bot]`, `type: "Bot"` |
+ * | older `gh issue list --json author` | `github-actions`, `is_bot: true` |
+ * | newer `gh issue list --json author` | **`app/github-actions`** |
+ *
+ * `normalizeLogin` therefore strips an `app/` **prefix** as well as a `[bot]`
+ * suffix. Stripping the prefix widens nothing an outsider can claim: `/` is not
+ * a legal character in a GitHub username, so no human account can normalize
+ * onto `github-actions` — and the labels half of `isSweepAuthored` is an
+ * independent check regardless.
+ *
+ * A fourth spelling would break it again, and the failure mode is silence. So
+ * `sweepIssues` also reports any issue that carries this sweep's marker and its
+ * labels but fails the author check — see `warnOnUnrecognizedAuthors`.
  */
 export const AUTOMATION_LOGIN = "github-actions";
 
@@ -149,6 +167,7 @@ export const SWEEP_LABELS = ["chore", "dependencies"];
 const normalizeLogin = (login) =>
   String(login ?? "")
     .toLowerCase()
+    .replace(/^app\//, "")
     .replace(/\[bot\]$/, "");
 
 /**
@@ -164,12 +183,88 @@ const normalizeLogin = (login) =>
  * @returns {boolean}
  */
 export function isSweepAuthored(issue) {
+  return hasSweepAuthor(issue) && hasSweepLabels(issue);
+}
+
+/**
+ * The author half of `isSweepAuthored`, on its own.
+ *
+ * Split out so `warnOnUnrecognizedAuthors` can distinguish the two ways an
+ * issue fails the check. "Wrong labels" is the ordinary case — somebody else's
+ * issue that mentions the sweep. "Right labels, unrecognized author" is the
+ * signature of a login spelling this script does not know about, which is a
+ * defect in `normalizeLogin` rather than anything about the issue.
+ *
+ * @param {{author?: {login?: string, is_bot?: boolean}}} issue
+ * @returns {boolean}
+ */
+export function hasSweepAuthor(issue) {
   if (normalizeLogin(issue?.author?.login) !== AUTOMATION_LOGIN) return false;
   // `is_bot` is absent on some `gh` versions; only an explicit `false` — a human
   // account that happens to carry the name — is disqualifying.
-  if (issue?.author?.is_bot === false) return false;
+  return issue?.author?.is_bot !== false;
+}
+
+/**
+ * The labels half of `isSweepAuthored`, on its own.
+ *
+ * This is the half an outsider cannot forge: `chore` and `dependencies` both
+ * need write access on the repo.
+ *
+ * @param {{labels?: Array<{name?: string}>}} issue
+ * @returns {boolean}
+ */
+export function hasSweepLabels(issue) {
   const names = new Set((issue?.labels ?? []).map((l) => l?.name));
   return SWEEP_LABELS.every((label) => names.has(label));
+}
+
+/**
+ * Report issues that look like this sweep's own but whose author it does not
+ * recognize.
+ *
+ * ⚠️ **This is the guard against the whole class of #2377, not just its
+ * instance.** Suppression, analysis-retry suppression and supersession notes
+ * all gate on `isSweepAuthored`, and when a login spelling stops normalizing
+ * they do not fail — they quietly decide the sweep has never filed anything,
+ * and the sweep refiles the same issue every night forever. Nothing goes red,
+ * so the only way anyone finds out is by noticing the duplicates by hand, which
+ * took three nights last time.
+ *
+ * An issue carrying a valid marker **and** both write-access-only labels, whose
+ * author does not normalize onto `AUTOMATION_LOGIN`, is that signature. It
+ * cannot be produced by an outsider, because it needs the labels.
+ *
+ * Reporting rather than throwing is deliberate: a hard failure here would take
+ * the nightly sweep down over a cosmetic upstream rename, and the sweep's job —
+ * noticing an SDK release — is still worth doing while the spelling is fixed.
+ *
+ * @param {Array<{author?: {login?: string}, body?: string, labels?: Array<{name?: string}>}>} issues
+ * @param {(msg: string) => void} [warn]
+ * @returns {string[]} the unrecognized logins, deduplicated
+ */
+export function warnOnUnrecognizedAuthors(issues, warn = console.warn) {
+  const unrecognized = [
+    ...new Set(
+      (issues ?? [])
+        .filter(
+          (issue) =>
+            !hasSweepAuthor(issue) &&
+            hasSweepLabels(issue) &&
+            parseMarker(issue?.body) !== null,
+        )
+        .map((issue) => String(issue?.author?.login ?? "")),
+    ),
+  ];
+  if (unrecognized.length > 0) {
+    warn(
+      `sdk-watch: ⚠️ ${unrecognized.length} author spelling(s) carry this sweep's marker AND its ` +
+        `labels but do not normalize onto "${AUTOMATION_LOGIN}": ${unrecognized.map((l) => JSON.stringify(l)).join(", ")}. ` +
+        "Suppression, analysis retries and supersession notes are all disabled for those issues — " +
+        "teach `normalizeLogin` the spelling (see #2377).",
+    );
+  }
+  return unrecognized;
 }
 
 /**
@@ -352,10 +447,10 @@ const cell = (value) => String(value).replace(/\|/g, "\\|");
  * ⚠️ Not every bump is a manifest edit, and saying so unconditionally was wrong
  * for the very case this script exists to handle separately (Copilot). The four
  * `typescript-sdk` packages are pinned **exactly**, so any new version needs the
- * manifest changed. `ext-apps` is a **range** (`^1.7.4`), so a 1.8.0 target is
- * already satisfied by what `package.json` says and only `npm install` is needed
- * — telling a maintainer to edit the manifest there sends them to change a line
- * that is already correct.
+ * manifest changed. `ext-apps` is a caret **range**, so a target that is only a
+ * patch or minor ahead within the same major is already satisfied by what
+ * `package.json` says and only `npm install` is needed — telling a maintainer to
+ * edit the manifest there sends them to change a line that is already correct.
  *
  * A row whose declared value is not a parseable range (an unparsed dependency,
  * or the `(undeclared)` placeholder) counts as needing the edit: that is the
@@ -561,7 +656,10 @@ function sweepIssues(repo, spawn) {
   if (result.status !== 0) {
     throw new Error(`gh issue list failed: ${(result.stderr ?? "").trim()}`);
   }
-  return JSON.parse(result.stdout || "[]")
+  const issues = JSON.parse(result.stdout || "[]");
+  // Before filtering them away: say so if any of them are ours but unreadable.
+  warnOnUnrecognizedAuthors(issues);
+  return issues
     .filter(isSweepAuthored)
     .map((issue) => ({ ...issue, marker: parseMarker(issue.body) }))
     .filter((issue) => issue.marker && semver.valid(issue.marker.target));

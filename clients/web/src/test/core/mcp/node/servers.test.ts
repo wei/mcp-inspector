@@ -18,6 +18,7 @@ import {
   selectServerEntry,
   type ResolvedServer,
 } from "@inspector/core/mcp/node/servers.js";
+import { DEFAULT_CONNECTION_TIMEOUT_MS } from "@inspector/core/mcp/types.js";
 
 describe("headersToServerSettings", () => {
   it("returns undefined when no headers are given", () => {
@@ -32,6 +33,10 @@ describe("headersToServerSettings", () => {
     ]);
     expect(settings?.metadata).toEqual({});
     expect(settings?.roots).toEqual([]);
+    // The header-only shell is what the CLI/TUI hand the client when a file
+    // sets no timeout, so it must carry the product default — a regression
+    // back to 0 here would silently unbound every such connect (#2320).
+    expect(settings?.connectionTimeout).toBe(DEFAULT_CONNECTION_TIMEOUT_MS);
   });
 });
 
@@ -227,6 +232,74 @@ describe("loadServerEntries", () => {
     await expect(
       loadServerEntries({ catalogPath, target: ["my-server"] }),
     ).rejects.toThrow(/--catalog cannot be combined/);
+  });
+
+  it("overrides the disk protocolEra with --protocol-era, preserving the rest", async () => {
+    const configPath = join(tempDir, "mcp.json");
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        mcpServers: {
+          web: {
+            type: "streamable-http",
+            url: "http://x/mcp",
+            headers: { Authorization: "Bearer disk" },
+            protocolEra: "auto",
+            requestTimeout: 9000,
+          },
+        },
+      }),
+    );
+
+    const servers = await loadServerEntries({
+      configPath,
+      protocolEra: "modern",
+    });
+    expect(servers.web?.settings?.protocolEra).toBe("modern");
+    expect(servers.web?.settings?.requestTimeout).toBe(9000);
+    expect(servers.web?.settings?.headers).toEqual([
+      { key: "Authorization", value: "Bearer disk" },
+    ]);
+  });
+
+  it("applies --protocol-era to a server that has no disk settings", async () => {
+    const configPath = join(tempDir, "mcp.json");
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        mcpServers: {
+          web: { type: "streamable-http", url: "http://x/mcp" },
+        },
+      }),
+    );
+
+    const servers = await loadServerEntries({
+      configPath,
+      protocolEra: "auto",
+    });
+    expect(servers.web?.settings).toMatchObject({
+      protocolEra: "auto",
+      headers: [],
+      connectionTimeout: DEFAULT_CONNECTION_TIMEOUT_MS,
+    });
+  });
+
+  it("applies --protocol-era and --header together to an ad-hoc URL", async () => {
+    const servers = await loadServerEntries({
+      serverUrl: "http://x/mcp",
+      transport: "http",
+      headers: { Authorization: "Bearer t" },
+      protocolEra: "modern",
+    });
+    expect(servers.default?.settings).toMatchObject({
+      protocolEra: "modern",
+      headers: [{ key: "Authorization", value: "Bearer t" }],
+    });
+  });
+
+  it("gives an ad-hoc target with neither flag no settings (legacy default)", async () => {
+    const servers = await loadServerEntries({ target: ["my-server"] });
+    expect(servers.default?.settings).toBeUndefined();
   });
 
   it("builds a single ad-hoc server from a positional target", async () => {

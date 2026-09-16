@@ -117,8 +117,9 @@ describe("advertised-extension gating (#1739)", () => {
 
   it("omits the gated tool when the extension is not advertised", async () => {
     const started = await startGatedServer();
-    // Disable the only registry extension → the client sends no extensions,
-    // so the server never enables the gated tool.
+    // Disable the Tasks extension → the client still sends the other registry
+    // extensions (MCP Apps UI, Skills), but not the one this tool is gated on,
+    // so the server never enables it.
     const connected = await connect(started.url, {
       [TASKS_EXTENSION_KEY]: false,
     });

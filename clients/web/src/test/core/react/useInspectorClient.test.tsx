@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { act, renderHook } from "@testing-library/react";
+import { Client } from "@modelcontextprotocol/client";
 import type {
   ClientCapabilities,
   Implementation,
@@ -65,6 +66,42 @@ describe("useInspectorClient", () => {
     expect(result.current.capabilities).toEqual(CAPABILITIES);
     expect(result.current.serverInfo).toEqual(SERVER_INFO);
     expect(result.current.instructions).toBe("after");
+  });
+
+  it("returns the client's connection diagnostics and re-reads them on change (#2318)", () => {
+    const client = new FakeInspectorClient();
+    const { result } = renderHook(() => useInspectorClient(client));
+    expect(result.current.connectionDiagnostics).toEqual({
+      capturedAt: 0,
+      outstandingRequests: [],
+    });
+    const next = {
+      capturedAt: 10,
+      outstandingRequests: [{ id: 1, method: "tools/list", sentAt: 5 }],
+      lastResponse: { method: "initialize", receivedAt: 4 },
+    };
+    act(() => {
+      client.setConnectionDiagnostics(next);
+    });
+    expect(result.current.connectionDiagnostics).toBe(next);
+  });
+
+  it("falls back to an empty snapshot for a client without the optional accessor", () => {
+    const client = new FakeInspectorClient();
+    // `getConnectionDiagnostics` is optional on the protocol; a double that
+    // predates it must still yield the one shape consumers expect.
+    Object.defineProperty(client, "getConnectionDiagnostics", {
+      value: undefined,
+    });
+    const { result } = renderHook(() => useInspectorClient(client));
+    expect(result.current.connectionDiagnostics).toEqual({
+      capturedAt: 0,
+      outstandingRequests: [],
+    });
+    const { result: absent } = renderHook(() => useInspectorClient(null));
+    expect(absent.current.connectionDiagnostics).toBe(
+      result.current.connectionDiagnostics,
+    );
   });
 
   it("subscribes to protocolVersionChange and updates", () => {
@@ -422,7 +459,9 @@ describe("useInspectorClient", () => {
     const { result, rerender } = renderHook(() => useInspectorClient(client));
     expect(result.current.appRendererClient).toBeNull();
 
-    const sentinel = { iam: "renderer" };
+    // A real (unconnected) SDK client: `AppRendererClient` is the SDK `Client`
+    // itself since ext-apps 2.0.0 (#1745), and this hook only relays it.
+    const sentinel = new Client({ name: "renderer-sentinel", version: "0" });
     client.setAppRendererClient(sentinel);
     rerender();
     expect(result.current.appRendererClient).toBe(sentinel);

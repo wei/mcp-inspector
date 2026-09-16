@@ -69,6 +69,7 @@ export function honoMiddlewarePlugin(config: WebServerConfig): Plugin {
         port: config.sandboxPort,
         host: config.sandboxHost,
         allowedOrigins: config.allowedOrigins,
+        publicUrl: config.sandboxPublicUrl,
       });
       await sandboxController.start();
       // The dedicated origin apps declaring `_meta.ui.domain` are served from
@@ -77,6 +78,7 @@ export function honoMiddlewarePlugin(config: WebServerConfig): Plugin {
       const appOriginController = createAppOriginController({
         port: config.appOriginPort,
         host: config.sandboxHost,
+        publicOrigin: config.appOriginPublicOrigin,
         embedderOrigins: appDocumentEmbedders(
           sandboxController.getUrl(),
           config.allowedOrigins,

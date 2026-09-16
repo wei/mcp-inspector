@@ -714,6 +714,7 @@ const DEFAULT_USE_INSPECTOR_CLIENT: ReturnType<typeof useInspectorClient> = {
   instructions: undefined,
   excludedTools: [],
   malformedListItems: [],
+  connectionDiagnostics: { capturedAt: 0, outstandingRequests: [] },
   appRendererClient: null,
   connect: vi.fn().mockResolvedValue(undefined),
   disconnect: vi.fn().mockResolvedValue(undefined),
@@ -4295,11 +4296,18 @@ describe("App dedupes concurrent OAuth clears that share a storage key (#2217)",
     );
   }
 
-  // Three full modal interaction sequences against the whole App tree, so this
-  // one runs long enough to trip the 5s default when the suite is under load.
+  // Three full modal interaction sequences against the whole App tree — three
+  // times the work of any other test in this file, and the only one here that
+  // ever tripped the old 5s default under load. It keeps its own budget after
+  // #2323 rather than folding into the shared 15000: this is the "genuinely
+  // different work" exception that change establishes, and the 20000 was a
+  // value somebody had already chosen against an observed failure. Lowering it
+  // to the shared ceiling would trade a measured number for a general one and
+  // could reintroduce the flake (Copilot).
+  const THREE_MODAL_SEQUENCE_MS = 20_000;
+
   it(
     "suppresses a second clear for another entry with the same URL, and allows one after it settles",
-    { timeout: 20000 },
     async () => {
       // `delay: null` drops userEvent's inter-event waits, which dominate here.
       const user = userEvent.setup({ delay: null });
@@ -4349,5 +4357,6 @@ describe("App dedupes concurrent OAuth clears that share a storage key (#2217)",
         expect(client.clearOAuthTokens).toHaveBeenCalledTimes(2),
       );
     },
+    THREE_MODAL_SEQUENCE_MS,
   );
 });

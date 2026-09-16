@@ -1,7 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { resolve } from "node:path";
+import type { Transport } from "@modelcontextprotocol/client";
 import * as z from "zod/v4";
-import { InspectorClient } from "@inspector/core/mcp/inspectorClient.js";
+import {
+  InspectorClient,
+  connectionTimeoutMessage,
+} from "@inspector/core/mcp/inspectorClient.js";
+import { DEFAULT_CONNECTION_TIMEOUT_MS } from "@inspector/core/mcp/types.js";
 import {
   MessageLogState,
   FetchRequestLogState,
@@ -74,6 +79,7 @@ import type {
   ContentBlock,
 } from "@modelcontextprotocol/client";
 import {
+  Client,
   LOG_LEVEL_META_KEY,
   RELATED_TASK_META_KEY,
   SdkError,
@@ -362,25 +368,40 @@ describe("InspectorClient", () => {
       messageLogState.destroy();
     });
 
+    /**
+     * A transport whose `start()` never resolves: the "server that accepts
+     * the TCP connection and never answers" from the #2320 measurement.
+     * Typed as the SDK's `Transport` rather than cast to it, so an interface
+     * change upstream is caught here instead of at runtime.
+     */
+    function hangingTransport(): Transport {
+      return {
+        start: () => new Promise<void>(() => {}),
+        send: async () => {},
+        close: async () => {},
+      };
+    }
+
+    /** A transport whose `start()` rejects with a recoverable 401. */
+    function unauthorizedTransport(): Transport {
+      return {
+        start: async () => {
+          const err = new Error("Unauthorized") as Error & { status?: number };
+          err.status = 401;
+          throw err;
+        },
+        send: async () => {},
+        close: async () => {},
+      };
+    }
+
     it("rejects connect() with a timeout error when serverSettings.connectionTimeout fires", async () => {
       // Stub transport whose start() never resolves — simulates a slow /
       // unreachable upstream. InspectorClient.connect() should race against
       // serverSettings.connectionTimeout and reject with a descriptive error;
       // status should end up in "error", and the client should have
       // internally torn down the transport (next connect() must rebuild).
-      const hangingTransport = {
-        start: () => new Promise<void>(() => {}),
-        send: async () => {},
-        close: async () => {},
-        onclose: undefined,
-        onerror: undefined,
-        onmessage: undefined,
-        sessionId: undefined,
-      };
-      const fakeFactory = () => ({
-        transport:
-          hangingTransport as unknown as import("@modelcontextprotocol/client").Transport,
-      });
+      const fakeFactory = () => ({ transport: hangingTransport() });
       client = new InspectorClient(
         { type: "streamable-http", url: "http://localhost:1/never" },
         {
@@ -411,27 +432,138 @@ describe("InspectorClient", () => {
       expect(client.getStatus()).toBe("error");
     });
 
-    it("holds status at connecting when connect fails with a recoverable 401", async () => {
-      const unauthorizedTransport = {
-        start: async () => {
-          const err = new Error("Unauthorized") as Error & { status?: number };
-          err.status = 401;
-          throw err;
+    it("names the bound that fired and where to raise it in the timeout message (#2320)", async () => {
+      const fakeFactory = () => ({ transport: hangingTransport() });
+      client = new InspectorClient(
+        { type: "streamable-http", url: "http://localhost:1/never" },
+        {
+          environment: { transport: fakeFactory },
+          serverSettings: {
+            headers: [],
+            env: [],
+            metadata: {},
+            connectionTimeout: 50,
+            requestTimeout: 0,
+            taskTtl: 0,
+            maxFetchRequests: 1000,
+            roots: [],
+          },
         },
-        send: async () => {},
-        close: async () => {},
-        onclose: undefined,
-        onerror: undefined,
-        onmessage: undefined,
-        sessionId: undefined,
-      };
-      const fakeFactory = () => ({
-        transport:
-          unauthorizedTransport as unknown as import("@modelcontextprotocol/client").Transport,
-      });
+      );
+      await expect(client.connect()).rejects.toThrow(
+        connectionTimeoutMessage(50),
+      );
+      // The sentence a user reads on the toast: the bound, then the remedy.
+      expect(connectionTimeoutMessage(50)).toBe(
+        "Connection timed out after 50 ms. To accommodate a slower server, " +
+          "you may increase the timeout value in Server Settings.",
+      );
+    });
+
+    it("bounds connect() with DEFAULT_CONNECTION_TIMEOUT_MS when the settings carry no timeout (#2320)", async () => {
+      // No serverSettings at all — the shape every consumer that never opened
+      // Server Settings hands the client. Before #2320 that meant "no bound",
+      // and the only thing ending a hung handshake was the SDK's 60 s
+      // per-request timeout on `initialize`, reporting `Request timed out`.
+      // Fake timers so the 30 s default can fire without waiting it out.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const fakeFactory = () => ({ transport: hangingTransport() });
+        client = new InspectorClient(
+          { type: "streamable-http", url: "http://localhost:1/never" },
+          { environment: { transport: fakeFactory } },
+        );
+        const pending = client.connect();
+        // Hold the rejection so it cannot surface as unhandled while the clock
+        // is advanced; the assertion below re-awaits the same promise.
+        pending.catch(() => {});
+        // One ms short of the default: still connecting, nothing has fired.
+        await vi.advanceTimersByTimeAsync(DEFAULT_CONNECTION_TIMEOUT_MS - 1);
+        expect(client.getStatus()).toBe("connecting");
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(pending).rejects.toThrow(
+          connectionTimeoutMessage(DEFAULT_CONNECTION_TIMEOUT_MS),
+        );
+        expect(client.getStatus()).toBe("error");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("leaves connect() unbounded when connectionTimeout is an explicit 0 (#2320)", async () => {
+      // 0 is the documented opt-out (`--connect-timeout 0`, a cleared field),
+      // so it must not be read as "absent" and replaced with the default.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        let settled = false;
+        const fakeFactory = () => ({ transport: hangingTransport() });
+        client = new InspectorClient(
+          { type: "streamable-http", url: "http://localhost:1/never" },
+          {
+            environment: { transport: fakeFactory },
+            serverSettings: {
+              headers: [],
+              env: [],
+              metadata: {},
+              connectionTimeout: 0,
+              requestTimeout: 0,
+              taskTtl: 0,
+              maxFetchRequests: 1000,
+              roots: [],
+            },
+          },
+        );
+        const pending = client.connect().finally(() => {
+          settled = true;
+        });
+        pending.catch(() => {});
+        await vi.advanceTimersByTimeAsync(DEFAULT_CONNECTION_TIMEOUT_MS * 2);
+        expect(settled).toBe(false);
+        expect(client.getStatus()).toBe("connecting");
+        // Tear down by hand so the hung attempt does not outlive the test;
+        // disconnect() rejects the pending connect, which `pending.catch`
+        // above already absorbs.
+        await client.disconnect();
+        client = null;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("holds status at connecting when connect fails with a recoverable 401", async () => {
+      const fakeFactory = () => ({ transport: unauthorizedTransport() });
       client = new InspectorClient(
         { type: "streamable-http", url: "http://localhost:8081/mcp" },
         { environment: { transport: fakeFactory } },
+      );
+
+      await expect(client.connect()).rejects.toMatchObject({ status: 401 });
+      expect(client.getStatus()).toBe("connecting");
+    });
+
+    it("holds status at connecting on a recoverable 401 even with a connect timeout armed (#2320)", async () => {
+      // The timeout teardown used to be gated on `connectionTimeout > 0`, so
+      // it ran for *every* failed connect once a timeout was set — including
+      // this 401, whose status must stay at "connecting" for the auth
+      // recovery. With a non-zero default that gate would have fired for
+      // every user, so the teardown is now keyed to the timer actually
+      // winning the race, and this is the case that proves it.
+      const fakeFactory = () => ({ transport: unauthorizedTransport() });
+      client = new InspectorClient(
+        { type: "streamable-http", url: "http://localhost:8081/mcp" },
+        {
+          environment: { transport: fakeFactory },
+          serverSettings: {
+            headers: [],
+            env: [],
+            metadata: {},
+            connectionTimeout: 5000,
+            requestTimeout: 0,
+            taskTtl: 0,
+            maxFetchRequests: 1000,
+            roots: [],
+          },
+        },
       );
 
       await expect(client.connect()).rejects.toMatchObject({ status: 401 });
@@ -5661,7 +5793,7 @@ describe("InspectorClient", () => {
     });
 
     describe("getAppRendererClient", () => {
-      it("returns null before connect, and a cached proxy after connect", async () => {
+      it("returns null before connect, and the SDK client itself after connect", async () => {
         server = createTestServerHttp({
           serverInfo: createTestServerInfo(),
           tools: [createEchoTool()],
@@ -5677,79 +5809,26 @@ describe("InspectorClient", () => {
         client = c;
         await c.connect();
 
-        const proxy1 = c.getAppRendererClient();
-        expect(proxy1).not.toBeNull();
-        // Second call returns the cached proxy
-        expect(c.getAppRendererClient()).toBe(proxy1);
-        expect(
-          typeof (proxy1 as unknown as { setNotificationHandler?: unknown })
-            .setNotificationHandler,
-        ).toBe("function");
-      });
-
-      it("translates the ext-apps v1 schema-first setNotificationHandler call to v2's method-string form", async () => {
-        // Regression: `@modelcontextprotocol/ext-apps` (SDK v1 peer) subscribes
-        // with `setNotificationHandler(NotificationSchema, handler)`. On SDK v2
-        // that throws "'[object Object]' is not a spec notification method",
-        // breaking App rendering at connect. The proxy must translate the
-        // schema (whose `.shape.method.value` is the method literal) to the
-        // method string so the handler still fires on the real notification.
-        server = createTestServerHttp({
-          serverInfo: createTestServerInfo(),
-          tools: [createAddToolTool()],
-          listChanged: { tools: true },
-        });
-        await server.start();
-        const c = new InspectorClient(
-          { type: "streamable-http", url: server.url },
-          { environment: { transport: createTransportNode } },
-        );
-        client = c;
-        await c.connect();
-
-        const proxy = c.getAppRendererClient() as unknown as {
-          setNotificationHandler: (
-            schema: unknown,
-            handler: () => void,
-          ) => void;
-        };
-        // A v1-style Zod notification schema, as ext-apps passes it (NOT a
-        // string): its `.shape.method.value` carries the method literal.
-        const v1StyleSchema = {
-          shape: { method: { value: "notifications/tools/list_changed" } },
-        };
-        let handlerFired = false;
+        const appClient = c.getAppRendererClient();
+        expect(appClient).not.toBeNull();
+        // The same instance on every call — no per-call wrapper. ext-apps 2.x
+        // peers on SDK v2 and its `AppBridge` registers list-changed forwarding
+        // with `setNotificationHandler("notifications/…", handler)`, so the
+        // v1-peer translation proxy is gone (#1745).
+        expect(c.getAppRendererClient()).toBe(appClient);
+        expect(appClient).toBeInstanceOf(Client);
+        // The string-first registration the bridge performs must land on it
+        // directly and fire on the real notification.
         expect(() =>
-          proxy.setNotificationHandler(v1StyleSchema, () => {
-            handlerFired = true;
-          }),
-        ).not.toThrow();
-
-        // The registration must land under the extracted method string: trigger
-        // a real tools/list_changed and confirm the schema-first handler runs.
-        const addToolTool = await getTool(c, "add_tool");
-        await c.callTool(addToolTool, {
-          name: "added_via_schema_first",
-          description: "added at runtime",
-        });
-        await vi.waitFor(() => expect(handlerFired).toBe(true), {
-          timeout: 5000,
-        });
-
-        // A native string-first call (ours) passes through unchanged.
-        expect(() =>
-          proxy.setNotificationHandler(
+          appClient?.setNotificationHandler(
             "notifications/prompts/list_changed",
             () => {},
           ),
         ).not.toThrow();
 
-        // An unrecognized first arg (no `.shape.method.value`) can't be
-        // translated and falls through to the SDK, which rejects it clearly —
-        // we don't silently swallow a genuinely-malformed registration.
-        expect(() =>
-          proxy.setNotificationHandler({} as unknown, () => {}),
-        ).toThrow(/not a spec notification method/);
+        // Disconnecting withdraws it again.
+        await c.disconnect();
+        expect(c.getAppRendererClient()).toBeNull();
       });
     });
 

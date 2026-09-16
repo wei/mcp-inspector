@@ -120,7 +120,7 @@ function statusOf(error: unknown): number | undefined {
 }
 
 const UNREACHABLE_PATTERN =
-  /ENOTFOUND|ECONNREFUSED|ECONNRESET|EAI_AGAIN|ETIMEDOUT|fetch failed|getaddrinfo|connect timed out|aborted/i;
+  /ENOTFOUND|ECONNREFUSED|ECONNRESET|EAI_AGAIN|ETIMEDOUT|fetch failed|getaddrinfo|connect(?:ion)? timed out|aborted/i;
 
 /**
  * Classify an arbitrary error into an exit code and envelope. Used both by the

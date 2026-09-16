@@ -20,6 +20,7 @@ import type {
   MessageEntry,
   StderrLogEntry,
   FetchRequestEntry,
+  FetchStreamState,
   PromptGetInvocation,
   ResourceReadInvocation,
   ResourceTemplateReadInvocation,
@@ -28,6 +29,7 @@ import type {
   RequestMetadata,
 } from "./types.js";
 import type { MalformedListItem } from "./listSalvage.js";
+import type { ConnectionDiagnostics } from "./connectionDiagnostics.js";
 import type {
   Tool,
   ServerCapabilities,
@@ -92,6 +94,20 @@ export interface InspectorClientEventMap {
   fetchRequest: FetchRequestEntry;
   /** Fired when an in-flight fetch's response body is read asynchronously. */
   fetchRequestBodyUpdate: { id: string; responseBody: string };
+  /**
+   * Fired as a tracked long-lived stream (the standalone `GET` on Streamable
+   * HTTP, the legacy SSE event stream) delivers events and when it ends. The
+   * body of such a stream is never captured, so this is the log's only view
+   * of its lifetime (#2318).
+   */
+  fetchRequestStreamUpdate: { id: string; stream: FetchStreamState };
+  /**
+   * Fired whenever the connection diagnostics snapshot changes — a request
+   * goes out, a response comes back, the notification stream opens, delivers
+   * an event or closes, or a new session resets it. Carries the fresh
+   * snapshot; `getConnectionDiagnostics()` returns the same one (#2318).
+   */
+  connectionDiagnosticsChange: ConnectionDiagnostics;
   /**
    * Fired whenever the client transitions `status` to `"error"` from a path
    * that is NOT an awaited promise — i.e. a mid-session transport failure

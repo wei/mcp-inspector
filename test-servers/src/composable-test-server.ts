@@ -615,6 +615,17 @@ export interface ServerConfig {
    */
   skills?: boolean;
   /**
+   * With {@link ServerConfig.skills}, refuse `skills/list`, `skills/get` and
+   * `resources/directory/read` unless the client declared
+   * `io.modelcontextprotocol/skills` in its own capabilities — a strict
+   * SEP-2133 server (#2373). A modern request is refused with `-32021`
+   * MissingRequiredClientCapability carrying `data.requiredCapabilities`; a
+   * legacy one, whose era has no such code, with `-32601`. Off by default so
+   * the existing skills fixtures keep serving any client. Ignored without
+   * `skills`.
+   */
+  skillsRequireClientExtension?: boolean;
+  /**
    * Advertise the MCP Apps `io.modelcontextprotocol/ui` extension with the
    * nested `elicitation` setting — the server-side half of the app-rendered
    * form elicitation negotiation (#1854, ext-apps#733).
@@ -733,6 +744,43 @@ export interface ServerConfig {
      * If true, server will fetch client metadata from clientMetadataUrl
      */
     supportCIMD?: boolean;
+
+    /**
+     * Serve a CIMD client metadata document from this server, so a CIMD
+     * fixture is self-contained.
+     *
+     * CIMD makes the `client_id` a URL that the authorization server fetches
+     * to learn the client's metadata (SEP-991). Nothing in this repo served
+     * such a document, so exercising CIMD meant standing up a second host by
+     * hand — which is why #2242 shipped verified only by its tests. With this
+     * set, the server hosts the document at `clientMetadataPath` (default
+     * `/client-metadata.json`) and that URL is a usable `client_id`.
+     *
+     * `redirectUris` MUST list the Inspector's callback for the port you run
+     * it on (`<web origin>/oauth/callback`) — the authorization server checks
+     * the incoming `redirect_uri` against this list, and a mismatch fails the
+     * flow with `Invalid redirect_uri` rather than anything CIMD-specific.
+     *
+     * Only served when `supportCIMD` is true: a document advertising a client
+     * the server would then refuse is a worse fixture than none.
+     */
+    clientMetadata?: {
+      redirectUris: string[];
+      clientName?: string;
+      scope?: string;
+    };
+
+    /**
+     * Where to serve `clientMetadata` (default `/client-metadata.json`).
+     *
+     * Must be origin-relative with no query or fragment, and is validated as
+     * such — both by `loadConfig` and again at server setup for a config built
+     * in code. Unlike the other metadata paths this one is not merely
+     * advertised: it becomes the document's own `client_id`, so an off-origin
+     * or query-bearing value would publish a client id this server cannot
+     * honour (Copilot).
+     */
+    clientMetadataPath?: string;
 
     /**
      * Token expiration time in seconds (default: 3600)
@@ -1638,7 +1686,9 @@ export function createMcpServer(config: ServerConfig): McpServer {
   // `skill://` half of resources/read. Wired after the SDK's own handlers so
   // the resources/read wrapper can delegate non-skill URIs to them.
   if (config.skills) {
-    wireSkillsHandlers(mcpServer);
+    wireSkillsHandlers(mcpServer, {
+      requireClientExtension: config.skillsRequireClientExtension,
+    });
   }
 
   // Extension-gated tools (#1739): start each gated tool disabled, then enable

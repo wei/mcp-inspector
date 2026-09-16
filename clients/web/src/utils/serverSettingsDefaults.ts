@@ -1,5 +1,6 @@
 import type { InspectorServerSettings } from "@inspector/core/mcp/types.js";
 import {
+  DEFAULT_CONNECTION_TIMEOUT_MS,
   DEFAULT_MAX_FETCH_REQUESTS,
   DEFAULT_TASK_TTL_MS,
 } from "@inspector/core/mcp/types.js";
@@ -14,7 +15,7 @@ export const EMPTY_SETTINGS: InspectorServerSettings = {
   headers: [],
   env: [],
   metadata: {},
-  connectionTimeout: 0,
+  connectionTimeout: DEFAULT_CONNECTION_TIMEOUT_MS,
   requestTimeout: 0,
   taskTtl: DEFAULT_TASK_TTL_MS,
   autoRefreshOnListChanged: false,

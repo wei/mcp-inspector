@@ -46,6 +46,51 @@ export const FullCapabilities: Story = {
   },
 };
 
+// The snapshot clock, read once when the stories load. The rows start from it
+// and then tick against the wall clock, so the fixture has to be "now" — a
+// fixed historical date would read as months ago a second after mounting.
+const STORY_NOW = Date.now();
+
+/**
+ * The Connection Activity section, in the #2187 shape: the notification
+ * stream has been open the whole session and delivered nothing, `tools/list`
+ * has been outstanding for a minute, and nothing has been answered since
+ * `initialize`. The same facts a request timeout's message reports, shown
+ * while the request is still in flight (#2318).
+ */
+export const WithConnectionActivity: Story = {
+  args: {
+    initializeResult: fullResult,
+    clientCapabilities: fullClientCaps,
+    transport: "streamable-http",
+    diagnostics: {
+      capturedAt: STORY_NOW,
+      outstandingRequests: [
+        { id: 2, method: "tools/list", sentAt: STORY_NOW - 60_000 },
+        { id: 3, method: "ping", sentAt: STORY_NOW - 12_000 },
+      ],
+      lastResponse: { method: "initialize", receivedAt: STORY_NOW - 61_000 },
+      notificationStream: {
+        url: "http://127.0.0.1:9779/mcp",
+        openedAt: STORY_NOW - 252_000,
+        eventCount: 0,
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText("Connection Activity")).toBeInTheDocument();
+    // Ticking: the rows may have advanced a second or two since the fixture
+    // was stamped, so match the shape rather than the exact second.
+    await expect(
+      canvas.getByText(/^tools\/list — sent 1m0\ds ago$/),
+    ).toBeInTheDocument();
+    await expect(
+      canvas.getByText(/^GET \/mcp — open for 4m1\ds, 0 events delivered$/),
+    ).toBeInTheDocument();
+  },
+};
+
 export const ModernEra: Story = {
   args: {
     initializeResult: {

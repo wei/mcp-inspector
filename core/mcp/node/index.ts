@@ -1,6 +1,7 @@
 export {
   parseKeyValuePair,
   parseHeaderPair,
+  parseProtocolEra,
   withDefaultCatalogPath,
   resolveServerConfigs,
   getNamedServerConfigs,

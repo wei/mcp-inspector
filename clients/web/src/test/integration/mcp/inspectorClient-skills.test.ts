@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { InspectorClient } from "@inspector/core/mcp/inspectorClient.js";
 import { createTransportNode } from "@inspector/core/mcp/node/transport.js";
+import { eraToVersionNegotiation } from "@inspector/core/mcp/types.js";
 import { getSkillsExtension } from "@inspector/core/mcp/skills.js";
 import { ManagedSkillsState } from "@inspector/core/mcp/state/managedSkillsState.js";
 import {
@@ -55,7 +56,10 @@ describe("Skills extension over a real transport (#2234)", () => {
     }
   });
 
-  async function startSkillsServer(modern: boolean): Promise<TestServerHttp> {
+  async function startSkillsServer(
+    modern: boolean,
+    requireClientExtension = false,
+  ): Promise<TestServerHttp> {
     const started = createTestServerHttp({
       serverInfo: createTestServerInfo("skills-integration", "1.0.0"),
       // An ordinary resource alongside the skills, so the fixture's
@@ -69,6 +73,7 @@ describe("Skills extension over a real transport (#2234)", () => {
         },
       ],
       skills: true,
+      ...(requireClientExtension && { skillsRequireClientExtension: true }),
       ...(modern && { modern: {} }),
     });
     await started.start();
@@ -79,18 +84,105 @@ describe("Skills extension over a real transport (#2234)", () => {
   async function connect(
     url: string,
     modern: boolean,
+    advertisedExtensions?: Record<string, boolean>,
   ): Promise<InspectorClient> {
+    // The era is chosen by `versionNegotiation`. This helper used to set
+    // `protocolEra` on the transport config instead, which `InspectorClient`
+    // does not read — so every "modern" case below connected on legacy and
+    // passed without exercising the modern leg at all (#2373). The assertion
+    // after connect is what keeps that from recurring silently.
     const connected = new InspectorClient(
+      { type: "streamable-http", url },
       {
-        type: "streamable-http",
-        url,
-        ...(modern && { protocolEra: "modern" as const }),
+        environment: { transport: createTransportNode },
+        versionNegotiation: eraToVersionNegotiation(
+          modern ? "modern" : "legacy",
+        ),
+        advertisedExtensions,
       },
-      { environment: { transport: createTransportNode } },
     );
     await connected.connect();
     client = connected;
+    expect(connected.getProtocolEra()).toBe(modern ? "modern" : "legacy");
     return connected;
+  }
+
+  /**
+   * #2373: SEP-2133 negotiates an extension from both sides, and a strict
+   * server refuses `skills/*` to a client that did not declare
+   * `io.modelcontextprotocol/skills` itself. The Inspector never declared it,
+   * and every test above passed anyway because the default fixture serves any
+   * client. These run against the strict fixture on both eras — the legacy leg
+   * reads the declaration from `initialize`, the modern leg from each
+   * request's `_meta` envelope, so each is a separate path to prove.
+   */
+  for (const modern of [false, true]) {
+    const era = modern ? "modern" : "legacy";
+
+    describe(`against a server that requires the client's declaration (${era})`, () => {
+      it("is served, because the Inspector declares the extension by default", async () => {
+        const started = await startSkillsServer(modern, true);
+        const connected = await connect(started.url, modern);
+        const first = await connected.listSkills();
+        expect(first.skills).toHaveLength(2);
+        const entry = await connected.getSkill(
+          "skill://data-analysis/SKILL.md",
+        );
+        expect(entry.frontmatter.name).toBe("data-analysis");
+        const page = await connected.readResourceDirectory(
+          "skill://data-analysis",
+        );
+        expect(page.resources).toHaveLength(1);
+      });
+
+      it("is refused once the declaration is turned off", async () => {
+        // The negative control: without it the test above could pass against
+        // a fixture that stopped checking. It is also the Server Settings
+        // toggle's whole purpose — reproducing a strict server's refusal.
+        const started = await startSkillsServer(modern, true);
+        const connected = await connect(started.url, modern, {
+          "io.modelcontextprotocol/skills": false,
+        });
+        // The wire code is the assertion, not just the message: the two eras
+        // name this refusal differently, and a fixture sliding back to a
+        // semantically different error must fail here. Modern is SEP-2575's
+        // `-32021` MissingRequiredClientCapability listing the missing
+        // extension; legacy has no such code and stays `-32601`.
+        const expected = modern
+          ? {
+              code: -32021,
+              data: {
+                requiredCapabilities: {
+                  extensions: { "io.modelcontextprotocol/skills": {} },
+                },
+              },
+            }
+          : { code: -32601 };
+        // Thunks, not promises: starting all three up front leaves the later
+        // rejections unhandled while the first is awaited, which fails the
+        // run even though every assertion passes.
+        const refusals = [
+          () => connected.listSkills(),
+          () => connected.getSkill("skill://data-analysis/SKILL.md"),
+          () => connected.readResourceDirectory("skill://data-analysis"),
+        ];
+        for (const refusal of refusals) {
+          await expect(refusal()).rejects.toMatchObject({
+            ...expected,
+            message: expect.stringMatching(
+              /requires the client to declare io\.modelcontextprotocol\/skills/,
+            ),
+          });
+        }
+        // A skill file is an ordinary resource and stays readable.
+        const read = await connected.readResource(
+          "skill://data-analysis/reference.md",
+        );
+        expect(read.result.contents[0].uri).toBe(
+          "skill://data-analysis/reference.md",
+        );
+      });
+    });
   }
 
   for (const modern of [false, true]) {
@@ -114,12 +206,13 @@ describe("Skills extension over a real transport (#2234)", () => {
 
         const first = await connected.listSkills();
         // On the modern leg this call resolving is itself the envelope
-        // assertion: `listSkills` selects `ModernListSkillsResultSchema` from
-        // the negotiated era, and that schema rejects a page without
-        // `resultType` / `ttlMs` / `cacheScope`. It cannot be asserted on the
-        // returned value — `listSkills` narrows its result to the two fields
-        // below — so a modern page missing the envelope surfaces here as a
-        // rejection rather than as a missing property.
+        // assertion, in two halves: the SDK codec rejects a result without
+        // `resultType` (and lifts it off), and `listSkills` then selects
+        // `ModernListSkillsResultSchema`, which rejects a page without
+        // `ttlMs` / `cacheScope`. It cannot be asserted on the returned value
+        // — `listSkills` narrows its result to the two fields below — so a
+        // modern page missing the envelope surfaces here as a rejection
+        // rather than as a missing property.
         //
         // The fixture pages at two over eight skills, so a client that stops
         // here sees a quarter of the catalog.

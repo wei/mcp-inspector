@@ -70,6 +70,7 @@ const baseHandlers = {
   onPaginatedListsChange: vi.fn(),
   onAdvertisedExtensionChange: vi.fn(),
   onMaxFetchRequestsChange: vi.fn(),
+  onSkillCatalogLimitChange: vi.fn(),
   onProtocolEraChange: vi.fn(),
   onModernLogLevelChange: vi.fn(),
   onOAuthChange: vi.fn(),
@@ -557,6 +558,96 @@ describe("ServerSettingsForm", () => {
     );
     await user.clear(screen.getByLabelText(/Network Log Size/));
     expect(onMaxFetchRequestsChange).toHaveBeenLastCalledWith(2500);
+  });
+
+  describe("Skills section (#2294)", () => {
+    it("renders the default catalog budget when the server sets none", () => {
+      renderWithMantine(
+        <ServerSettingsForm
+          {...baseHandlers}
+          settings={emptySettings}
+          expandedSections={["skills"]}
+        />,
+      );
+      expect(screen.getByText("Skills")).toBeInTheDocument();
+      expect(screen.getByLabelText(/Maximum Number of Skills/)).toHaveValue(
+        "256",
+      );
+      expect(screen.getByLabelText(/Maximum Catalog Size/)).toHaveValue(
+        "67,108,864 bytes",
+      );
+    });
+
+    it("renders configured limits", () => {
+      renderWithMantine(
+        <ServerSettingsForm
+          {...baseHandlers}
+          settings={{
+            ...emptySettings,
+            skillCatalogMaxSkills: 10,
+            skillCatalogMaxBytes: 2048,
+          }}
+          expandedSections={["skills"]}
+        />,
+      );
+      expect(screen.getByLabelText(/Maximum Number of Skills/)).toHaveValue(
+        "10",
+      );
+      expect(screen.getByLabelText(/Maximum Catalog Size/)).toHaveValue(
+        "2,048 bytes",
+      );
+    });
+
+    it("emits the typed number for each field", async () => {
+      const user = userEvent.setup();
+      const onSkillCatalogLimitChange = vi.fn();
+      renderWithMantine(
+        <ServerSettingsForm
+          {...baseHandlers}
+          onSkillCatalogLimitChange={onSkillCatalogLimitChange}
+          settings={{
+            ...emptySettings,
+            skillCatalogMaxSkills: 1,
+            skillCatalogMaxBytes: 1,
+          }}
+          expandedSections={["skills"]}
+        />,
+      );
+      await user.type(screen.getByLabelText(/Maximum Number of Skills/), "2");
+      expect(onSkillCatalogLimitChange).toHaveBeenLastCalledWith(
+        "skillCatalogMaxSkills",
+        12,
+      );
+      await user.type(screen.getByLabelText(/Maximum Catalog Size/), "5");
+      expect(onSkillCatalogLimitChange).toHaveBeenLastCalledWith(
+        "skillCatalogMaxBytes",
+        15,
+      );
+    });
+
+    it("keeps the current limit when a field is cleared", async () => {
+      // A cleared budget is not a usable setting, so it must not persist as 0.
+      const user = userEvent.setup();
+      const onSkillCatalogLimitChange = vi.fn();
+      renderWithMantine(
+        <ServerSettingsForm
+          {...baseHandlers}
+          onSkillCatalogLimitChange={onSkillCatalogLimitChange}
+          settings={{ ...emptySettings, skillCatalogMaxBytes: 4096 }}
+          expandedSections={["skills"]}
+        />,
+      );
+      await user.clear(screen.getByLabelText(/Maximum Number of Skills/));
+      expect(onSkillCatalogLimitChange).toHaveBeenLastCalledWith(
+        "skillCatalogMaxSkills",
+        256,
+      );
+      await user.clear(screen.getByLabelText(/Maximum Catalog Size/));
+      expect(onSkillCatalogLimitChange).toHaveBeenLastCalledWith(
+        "skillCatalogMaxBytes",
+        4096,
+      );
+    });
   });
 
   describe("stdio Working Directory (Options) / Environment Variables section", () => {

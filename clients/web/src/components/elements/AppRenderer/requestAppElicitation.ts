@@ -20,8 +20,9 @@ export const APP_ELICITATION_TIMEOUT_MS = 10 * 60 * 1000;
  *
  * This is ext-apps' own `AppBridge.requestElicitation` from
  * modelcontextprotocol/ext-apps#733 — same method, same params, same result —
- * implemented against the bridge's generic `request()` because the released
- * package (1.7.5) predates that PR. Replace the body with a call to
+ * implemented against the bridge's generic `request()` because #733 is not
+ * yet in a published release (2.0.0 does not include it). Replace the body
+ * with a call to
  * `bridge.requestElicitation(params)` once a release containing #733 ships;
  * nothing on the wire changes when that happens.
  *
@@ -37,23 +38,20 @@ export async function requestAppElicitation(
   // Fail closed on the app's own advertisement rather than discovering it as a
   // "-32601 method not found" ten minutes later: an app that never registered
   // an elicitation handler is a fallback case, not an error case.
-  // NOT `bridge.getAppCapabilities()` directly: ext-apps 1.7.5 strips the
+  // NOT `bridge.getAppCapabilities()` directly: ext-apps 2.0.0 strips the
   // `elicitation` key when it parses `ui/initialize`. See appCapabilities.ts.
   if (!appAdvertisesElicitation(bridge)) {
     throw new Error("App does not support elicitation");
   }
-  // ext-apps 1.7.5's send union (`AppRequest`) has no `ElicitRequest` member —
-  // that is precisely what #733 adds — so TypeScript sees no overlap with the
-  // existing members and a single `as` is rejected. The double cast is the
-  // documented-gap case: the runtime is a plain JSON-RPC send of the standard
-  // method with its standard params, verified against the app-side handler in
-  // the fixture and the bridge tests. Confined to this one line and removed
-  // with the ext-apps bump, when `bridge.requestElicitation(params)` replaces it.
-  const request = {
-    method: "elicitation/create",
-    params,
-  } as unknown as Parameters<AppBridge["request"]>[0];
-  return (await bridge.request(request, ElicitResultSchema, {
+  // Since ext-apps 2.0.0 `AppBridge` extends the SDK v2 `Protocol`, whose
+  // `request()` takes the standard `Request` shape — `ElicitRequest` is one —
+  // so the send needs no cast (the 1.x peer's `AppRequest` union had no
+  // `ElicitRequest` member, which is what forced a double cast here; #1745).
+  // The runtime is a plain JSON-RPC send of the standard method with its
+  // standard params, verified against the app-side handler in the fixture and
+  // the bridge tests.
+  const request: ElicitRequest = { method: "elicitation/create", params };
+  return await bridge.request(request, ElicitResultSchema, {
     timeout: timeoutMs,
-  })) as ElicitResult;
+  });
 }

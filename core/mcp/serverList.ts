@@ -6,12 +6,18 @@
  */
 
 import {
+  DEFAULT_CONNECTION_TIMEOUT_MS,
   DEFAULT_MAX_FETCH_REQUESTS,
   DEFAULT_MODERN_LOG_LEVEL,
   DEFAULT_PROTOCOL_ERA,
   DEFAULT_TASK_TTL_MS,
   isModernLogLevel,
 } from "./types.js";
+import {
+  isSkillCatalogLimit,
+  SKILL_MAX_CATALOG_BYTES,
+  SKILL_MAX_CATALOG_SKILLS,
+} from "./skills.js";
 import type { Root } from "@modelcontextprotocol/client";
 import type {
   InspectorServerSettings,
@@ -159,6 +165,8 @@ type StoredInspectorFields = Pick<
   | "paginatedLists"
   | "advertisedExtensions"
   | "maxFetchRequests"
+  | "skillCatalogMaxSkills"
+  | "skillCatalogMaxBytes"
   | "oauth"
   | "roots"
 >;
@@ -490,8 +498,11 @@ export function oauthEndpointOverridesFromSettings(
  *
  * `headers` becomes a pair-array preserving the object's key insertion order;
  * `oauth.*` becomes the flat `oauthClientId` / `oauthClientSecret` /
- * `oauthScopes` fields. Numeric timeouts default to 0 when absent — the form
- * needs concrete values to render and 0 is the SDK's "no timeout" signal.
+ * `oauthScopes` fields. The numeric timeouts get concrete values when absent
+ * because the form needs them to render: `connectionTimeout` reads back as
+ * `DEFAULT_CONNECTION_TIMEOUT_MS` (30 s), while `requestTimeout` reads back as
+ * 0, the SDK's "use your own default" signal. An explicit `connectionTimeout`
+ * of 0 is preserved — it is the user's "no timeout" opt-out (#2320).
  *
  * `env` / `cwd` are SDK config fields (not Inspector-extension keys), but they
  * are mirrored into the settings here so the Server Settings modal can edit
@@ -517,6 +528,8 @@ export function storedFieldsToInspectorSettings(
     stored.paginatedLists !== undefined ||
     stored.advertisedExtensions !== undefined ||
     stored.maxFetchRequests !== undefined ||
+    stored.skillCatalogMaxSkills !== undefined ||
+    stored.skillCatalogMaxBytes !== undefined ||
     stored.oauth !== undefined ||
     stored.roots !== undefined ||
     stored.protocolEra !== undefined ||
@@ -533,9 +546,13 @@ export function storedFieldsToInspectorSettings(
     headers: headersPairs,
     env: envRecordToPairs(stored.env),
     metadata: normalizeStoredMetadata(stored.metadata),
-    connectionTimeout: stored.connectionTimeout ?? 0,
+    // Concrete product default, like taskTtl below: an absent field reads back
+    // as 30 s so the form shows the bound that will actually apply. An explicit
+    // 0 is preserved as-is — it is the user's opt-out, not a sentinel (#2320).
+    connectionTimeout:
+      stored.connectionTimeout ?? DEFAULT_CONNECTION_TIMEOUT_MS,
     requestTimeout: stored.requestTimeout ?? 0,
-    // Unlike the timeouts (0 = "SDK default"), task TTL has a concrete product
+    // Unlike requestTimeout (0 = "SDK default"), task TTL has a concrete product
     // default so the form shows it and "Run as task" has a value to send.
     taskTtl: stored.taskTtl ?? DEFAULT_TASK_TTL_MS,
     autoRefreshOnListChanged: stored.autoRefreshOnListChanged ?? false,
@@ -549,6 +566,16 @@ export function storedFieldsToInspectorSettings(
     // `[]`, which `inspectorSettingsToStoredFields` then omits on write.
     roots: stored.roots ?? [],
   };
+  // Lifted only when usable (#2294). Unlike maxFetchRequests these stay
+  // optional in memory — absent means the default, which
+  // `resolveSkillCatalogBudget` supplies — and a hand-edited `0` or `-1` is
+  // dropped here rather than carried into a form that would re-persist it.
+  if (isSkillCatalogLimit(stored.skillCatalogMaxSkills)) {
+    settings.skillCatalogMaxSkills = stored.skillCatalogMaxSkills;
+  }
+  if (isSkillCatalogLimit(stored.skillCatalogMaxBytes)) {
+    settings.skillCatalogMaxBytes = stored.skillCatalogMaxBytes;
+  }
   // Absent on disk reads back as the default era; the write side then omits the
   // default so a byte-stable round-trip never injects `protocolEra` into files
   // that never set it. An unknown literal from a hand-edited file is dropped
@@ -632,8 +659,10 @@ export function storedFieldsToInspectorSettings(
  * Splat the form-shape `InspectorServerSettings` back into the on-disk
  * Inspector-extension fields (object-form `headers`, nested `oauth`, etc.).
  * Empty-key rows are dropped — the form lets users leave new rows blank
- * mid-edit and those shouldn't reach disk. Numeric timeouts at 0 are omitted
- * so the file diff stays minimal for entries that never touched them.
+ * mid-edit and those shouldn't reach disk. Timeouts at their default are
+ * omitted so the file diff stays minimal for entries that never touched them:
+ * that is `DEFAULT_CONNECTION_TIMEOUT_MS` for `connectionTimeout` (an explicit
+ * 0 is a chosen opt-out and is written) and 0 for `requestTimeout`.
  *
  * Returns the field deltas to merge onto a `StoredMCPServer`; callers can
  * spread the result.
@@ -659,7 +688,11 @@ export function inspectorSettingsToStoredFields(
     out.metadata = settings.metadata;
   }
 
-  if (settings.connectionTimeout > 0) {
+  // The product default is the omit-sentinel (as for taskTtl below), so a file
+  // that never named a timeout stays byte-stable. Anything else persists —
+  // including 0, which is now a non-default the user chose (no timeout) and
+  // would otherwise silently read back as 30 s on the next load (#2320).
+  if (settings.connectionTimeout !== DEFAULT_CONNECTION_TIMEOUT_MS) {
     out.connectionTimeout = settings.connectionTimeout;
   }
   if (settings.requestTimeout > 0) {
@@ -714,12 +747,29 @@ export function inspectorSettingsToStoredFields(
     out.modernLogLevel = settings.modernLogLevel;
   }
 
-  // Persist only when it differs from the default. Unlike the timeouts, 0 is a
-  // meaningful value here (unlimited), so the omit-sentinel is the default
-  // itself rather than 0 — writing the default would inject the field into
-  // hand-edited files that never had it and break byte-stable round-trips.
+  // Persist only when it differs from the default. Like connectionTimeout and
+  // unlike requestTimeout, 0 is a meaningful value here (unlimited), so the
+  // omit-sentinel is the default itself rather than 0 — writing the default
+  // would inject the field into hand-edited files that never had it and break
+  // byte-stable round-trips.
   if (settings.maxFetchRequests !== DEFAULT_MAX_FETCH_REQUESTS) {
     out.maxFetchRequests = settings.maxFetchRequests;
+  }
+
+  // Same omit-the-default rule (#2294). An unusable value writes nothing, so
+  // it reads back as the default rather than being persisted and then
+  // rejected on the next load.
+  if (
+    isSkillCatalogLimit(settings.skillCatalogMaxSkills) &&
+    settings.skillCatalogMaxSkills !== SKILL_MAX_CATALOG_SKILLS
+  ) {
+    out.skillCatalogMaxSkills = settings.skillCatalogMaxSkills;
+  }
+  if (
+    isSkillCatalogLimit(settings.skillCatalogMaxBytes) &&
+    settings.skillCatalogMaxBytes !== SKILL_MAX_CATALOG_BYTES
+  ) {
+    out.skillCatalogMaxBytes = settings.skillCatalogMaxBytes;
   }
 
   const oauthFields: NonNullable<StoredMCPServer["oauth"]> = {};
@@ -800,6 +850,8 @@ const INSPECTOR_FIELD_KEY_MAP = {
   paginatedLists: true,
   advertisedExtensions: true,
   maxFetchRequests: true,
+  skillCatalogMaxSkills: true,
+  skillCatalogMaxBytes: true,
   oauth: true,
   roots: true,
 } as const satisfies Record<keyof StoredInspectorFields, true>;

@@ -1,7 +1,15 @@
 import type { SecretStore } from "../../auth/node/secret-store.js";
 import { defaultSecretStore } from "../../auth/node/secret-store-selection.js";
-import type { InspectorServerSettings, MCPServerConfig } from "../types.js";
-import { DEFAULT_MAX_FETCH_REQUESTS, DEFAULT_TASK_TTL_MS } from "../types.js";
+import type {
+  InspectorServerSettings,
+  MCPServerConfig,
+  ServerProtocolEra,
+} from "../types.js";
+import {
+  DEFAULT_CONNECTION_TIMEOUT_MS,
+  DEFAULT_MAX_FETCH_REQUESTS,
+  DEFAULT_TASK_TTL_MS,
+} from "../types.js";
 import { mcpConfigToServerEntries } from "../serverList.js";
 import {
   applyOverrides,
@@ -26,10 +34,14 @@ export type ResolvedServer = {
   settings?: InspectorServerSettings;
 };
 
-/** Loader options: the shared source flags plus a single `--header` set that is
- * broadcast into every resolved server's settings. */
+/** Loader options: the shared source flags plus a single `--header` set and an
+ * optional `--protocol-era`, both broadcast into every resolved server's
+ * settings. */
 export type ServerLoadOptions = ServerConfigOptions & {
   headers?: Record<string, string>;
+  /** `--protocol-era`: overrides the file's `protocolEra` (or the legacy
+   * default) the way `--header` overrides its headers (#2208). */
+  protocolEra?: ServerProtocolEra;
   /** Test injection; defaults to the selected store (see
    * `secret-store-selection.ts`) for catalog/config loads. */
   secretStore?: SecretStore;
@@ -47,10 +59,18 @@ export function headersToServerSettings(
     return undefined;
   }
   return {
+    ...defaultServerSettings(),
     headers: Object.entries(headers).map(([key, value]) => ({ key, value })),
+  };
+}
+
+/** A settings node with every field at its product default. */
+function defaultServerSettings(): InspectorServerSettings {
+  return {
+    headers: [],
     env: [],
     metadata: {},
-    connectionTimeout: 0,
+    connectionTimeout: DEFAULT_CONNECTION_TIMEOUT_MS,
     requestTimeout: 0,
     taskTtl: DEFAULT_TASK_TTL_MS,
     maxFetchRequests: DEFAULT_MAX_FETCH_REQUESTS,
@@ -61,18 +81,29 @@ export function headersToServerSettings(
 }
 
 /**
- * Overlay CLI `--header` values onto the settings lifted from the file. Only the
- * `headers` field is overridden — timeouts, OAuth, and the rest of the file's
- * settings are preserved.
+ * Overlay `--header` / `--protocol-era` onto the settings lifted from the file
+ * (or onto nothing, for an ad-hoc target). Only those two fields are overridden
+ * — timeouts, OAuth, and the rest of the file's settings are preserved. Returns
+ * `base` untouched when neither flag was given.
  */
 function mergeSettings(
   base: InspectorServerSettings | undefined,
-  headers?: Record<string, string>,
+  overrides: Pick<ServerLoadOptions, "headers" | "protocolEra">,
 ): InspectorServerSettings | undefined {
-  const fromHeaders = headersToServerSettings(headers);
-  if (!fromHeaders) return base;
-  if (!base) return fromHeaders;
-  return { ...base, headers: fromHeaders.headers };
+  let settings = base;
+  const fromHeaders = headersToServerSettings(overrides.headers);
+  if (fromHeaders) {
+    settings = settings
+      ? { ...settings, headers: fromHeaders.headers }
+      : fromHeaders;
+  }
+  if (overrides.protocolEra) {
+    settings = {
+      ...(settings ?? defaultServerSettings()),
+      protocolEra: overrides.protocolEra,
+    };
+  }
+  return settings;
 }
 
 /**
@@ -113,10 +144,11 @@ export async function loadServerEntries(
           env: serverOptions.env,
           cwd: serverOptions.cwd,
         }),
-        // Deliberate broadcast: a single `--header` set is merged into EVERY
-        // server in the catalog/config (fine for the common single-server case;
-        // for multi-server files, prefer per-server headers in the file itself).
-        settings: mergeSettings(entry.settings, serverOptions.headers),
+        // Deliberate broadcast: a single `--header` set (and `--protocol-era`)
+        // is merged into EVERY server in the catalog/config (fine for the
+        // common single-server case; for multi-server files, prefer per-server
+        // settings in the file itself).
+        settings: mergeSettings(entry.settings, serverOptions),
       };
     }
     return result;
@@ -131,7 +163,7 @@ export async function loadServerEntries(
   return {
     default: {
       config: configs[0]!,
-      settings: headersToServerSettings(serverOptions.headers),
+      settings: mergeSettings(undefined, serverOptions),
     },
   };
 }

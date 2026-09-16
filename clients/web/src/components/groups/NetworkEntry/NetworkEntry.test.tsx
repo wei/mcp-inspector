@@ -150,6 +150,24 @@ describe("NetworkEntry", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows the watched stream's event count and open state in place of the body (#2318)", async () => {
+    const user = userEvent.setup();
+    const open: FetchRequestEntry = {
+      ...baseEntry,
+      method: "GET",
+      responseHeaders: { "content-type": "text/event-stream" },
+      responseBody: undefined,
+      stream: { eventCount: 3 },
+    };
+    renderWithMantine(<NetworkEntry entry={open} isListExpanded={false} />);
+    await user.click(screen.getByRole("button", { name: "Expand" }));
+    expect(
+      screen.getByText(
+        "Long-lived stream — 3 events delivered, still open; body not captured",
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("shows an SSE badge on long-lived GET event-stream entries", () => {
     const sse: FetchRequestEntry = {
       ...baseEntry,

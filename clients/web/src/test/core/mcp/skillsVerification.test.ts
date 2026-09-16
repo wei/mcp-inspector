@@ -1,6 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 import type { InspectorClientProtocol } from "@inspector/core/mcp/inspectorClientProtocol.js";
-import type { SkillEntry } from "@inspector/core/mcp/skillsSchemas.js";
+import {
+  DYNAMIC_RESOURCES,
+  type SkillEntry,
+} from "@inspector/core/mcp/skillsSchemas.js";
 import {
   SKILL_MAX_CATALOG_SKILLS,
   sha256Digest,
@@ -788,6 +791,181 @@ describe("verifySkills (#2248)", () => {
       expect(report.files).toHaveLength(0);
     }
     expect(reports[0].outcome).toBe("verified");
+  });
+
+  it("honors the server's configured catalog budget (#2294)", async () => {
+    // Read through `getServerSettings()`, so neither caller has to pass it.
+    const enc = new TextEncoder();
+    const mdFor = (i: number) =>
+      `---\nname: c${i}\ndescription: A demo\n---\n\n# c${i}\n`;
+    const skills = await Promise.all(
+      Array.from({ length: 4 }, async (_, i): Promise<SkillEntry> => {
+        const bytes = enc.encode(mdFor(i));
+        return entry({
+          uri: `skill://c${i}/SKILL.md`,
+          frontmatter: { name: `c${i}`, description: "A demo" },
+          resources: [
+            {
+              uri: `skill://c${i}/SKILL.md`,
+              digest: await sha256Digest(bytes),
+              size: bytes.byteLength,
+            },
+          ],
+        });
+      }),
+    );
+    const readResource = vi.fn(async (uri: string) => ({
+      result: {
+        contents: [
+          { uri, text: mdFor(Number(/c(\d+)/.exec(uri)?.[1] ?? "0")) },
+        ],
+      },
+    }));
+    const client = {
+      readResource,
+      getServerSettings: () => ({ skillCatalogMaxSkills: 2 }),
+    } as unknown as InspectorClientProtocol;
+    const reports = await verifySkills(client, skills);
+    expect(readResource.mock.calls.length).toBe(2);
+    expect(reports.map((r) => r.outcome)).toEqual([
+      "verified",
+      "verified",
+      "incomplete",
+      "incomplete",
+    ]);
+    // The reason names the limit that actually applied, not the default.
+    expect(reports[2].incomplete).toMatch(/budget of 2 skills \/ 67108864/);
+  });
+
+  it("honors a configured catalog BYTE budget (#2294)", async () => {
+    // Each skill's SKILL.md is ~50 bytes, so a 60-byte budget is spent by the
+    // second skill: the third is where reading stops.
+    const enc = new TextEncoder();
+    const mdFor = (i: number) =>
+      `---\nname: b${i}\ndescription: A demo\n---\n\n# b${i}\n`;
+    const skills = await Promise.all(
+      Array.from({ length: 4 }, async (_, i): Promise<SkillEntry> => {
+        const bytes = enc.encode(mdFor(i));
+        return entry({
+          uri: `skill://b${i}/SKILL.md`,
+          frontmatter: { name: `b${i}`, description: "A demo" },
+          resources: [
+            {
+              uri: `skill://b${i}/SKILL.md`,
+              digest: await sha256Digest(bytes),
+              size: bytes.byteLength,
+            },
+          ],
+        });
+      }),
+    );
+    const readResource = vi.fn(async (uri: string) => ({
+      result: {
+        contents: [
+          { uri, text: mdFor(Number(/b(\d+)/.exec(uri)?.[1] ?? "0")) },
+        ],
+      },
+    }));
+    const client = {
+      readResource,
+      getServerSettings: () => ({ skillCatalogMaxBytes: 60 }),
+    } as unknown as InspectorClientProtocol;
+    const reports = await verifySkills(client, skills);
+    expect(readResource.mock.calls.length).toBe(2);
+    expect(reports.map((r) => r.outcome)).toEqual([
+      "verified",
+      "verified",
+      "incomplete",
+      "incomplete",
+    ]);
+    expect(reports[2].incomplete).toMatch(/256 skills \/ 60 bytes/);
+  });
+
+  it("stops reading once the byte budget is exactly REACHED, not only exceeded", async () => {
+    // Every name is one digit, so every SKILL.md has the same length. With the
+    // budget set to exactly one file's charge, the first skill spends it and
+    // the second must not be read (Copilot, #2294).
+    const enc = new TextEncoder();
+    const mdFor = (i: number) =>
+      `---\nname: e${i}\ndescription: A demo\n---\n\n# e${i}\n`;
+    const oneFile = enc.encode(mdFor(0)).byteLength;
+    const skills = await Promise.all(
+      Array.from({ length: 3 }, async (_, i): Promise<SkillEntry> => {
+        const bytes = enc.encode(mdFor(i));
+        return entry({
+          uri: `skill://e${i}/SKILL.md`,
+          frontmatter: { name: `e${i}`, description: "A demo" },
+          resources: [
+            {
+              uri: `skill://e${i}/SKILL.md`,
+              digest: await sha256Digest(bytes),
+              size: bytes.byteLength,
+            },
+          ],
+        });
+      }),
+    );
+    const readResource = vi.fn(async (uri: string) => ({
+      result: {
+        contents: [
+          { uri, text: mdFor(Number(/e(\d+)/.exec(uri)?.[1] ?? "0")) },
+        ],
+      },
+    }));
+    const client = {
+      readResource,
+      getServerSettings: () => ({ skillCatalogMaxBytes: oneFile }),
+    } as unknown as InspectorClientProtocol;
+    const reports = await verifySkills(client, skills);
+    expect(readResource.mock.calls.length).toBe(1);
+    expect(reports.map((r) => r.outcome)).toEqual([
+      "verified",
+      "incomplete",
+      "incomplete",
+    ]);
+  });
+
+  it("charges a dynamic skill's SKILL.md read to the byte budget", async () => {
+    // A `"dynamic"` skill has no manifest, so its only read is the fallback
+    // SKILL.md fetch. Uncharged, `catalogBytes` stayed 0 and a byte budget of
+    // 1 read every dynamic skill in the catalog (Copilot).
+    const mdFor = (i: number) =>
+      `---\nname: d${i}\ndescription: A demo\n---\n\n# d${i}\n`;
+    const skills: SkillEntry[] = Array.from({ length: 3 }, (_, i) => ({
+      uri: `skill://d${i}/SKILL.md`,
+      frontmatter: { name: `d${i}`, description: "A demo" },
+      resources: DYNAMIC_RESOURCES,
+    }));
+    const readResource = vi.fn(async (uri: string) => ({
+      result: {
+        contents: [
+          { uri, text: mdFor(Number(/d(\d+)/.exec(uri)?.[1] ?? "0")) },
+        ],
+      },
+    }));
+    const client = {
+      readResource,
+      getServerSettings: () => ({ skillCatalogMaxBytes: 1 }),
+    } as unknown as InspectorClientProtocol;
+    const reports = await verifySkills(client, skills);
+    expect(readResource.mock.calls.length).toBe(1);
+    expect(reports[0].outcome).not.toBe("incomplete");
+    expect(reports[1].outcome).toBe("incomplete");
+    expect(reports[2].outcome).toBe("incomplete");
+  });
+
+  it("falls back to the default budget for an unusable configured limit", async () => {
+    const { skill, client } = await truncatable({ name: "fb", count: 2 });
+    const withSettings = {
+      ...client,
+      readResource: client.readResource,
+      getServerSettings: () => ({
+        skillCatalogMaxSkills: 0,
+        skillCatalogMaxBytes: -1,
+      }),
+    } as unknown as InspectorClientProtocol;
+    const [report] = await verifySkills(withSettings, [skill]);
+    expect(report.outcome).toBe("verified");
   });
 
   it("is not incomplete when the budget is crossed by the LAST entry", async () => {

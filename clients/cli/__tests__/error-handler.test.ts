@@ -133,6 +133,21 @@ describe("classifyError", () => {
     expect(classifyError(err).exitCode).toBe(EXIT_CODES.UNREACHABLE);
   });
 
+  it("classifies InspectorClient's connect-time timeout as UNREACHABLE (#2320)", () => {
+    // The core's Promise.race rejection reads "Connection timed out after …",
+    // which the older `connect timed out` alternation never matched — so the
+    // one timeout the Inspector itself owns fell through to the generic exit
+    // code. Now that it fires by default (30 s), it has to classify with the
+    // rest of the network-layer failures.
+    const err = new Error(
+      "Connection timed out after 30000 ms. To accommodate a slower server, " +
+        "you may increase the timeout value in Server Settings.",
+    );
+    const { exitCode, envelope } = classifyError(err);
+    expect(exitCode).toBe(EXIT_CODES.UNREACHABLE);
+    expect(envelope.code).toBe("unreachable");
+  });
+
   it("falls back to USAGE for an unrecognized Error", () => {
     expect(classifyError(new Error("something else")).exitCode).toBe(
       EXIT_CODES.USAGE,

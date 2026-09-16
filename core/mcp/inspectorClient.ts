@@ -13,6 +13,7 @@ import type {
   MessageOrigin,
   FetchRequestEntry,
   FetchRequestEntryBase,
+  FetchStreamState,
   InspectorServerSettings,
   ResourceReadInvocation,
   ResourceTemplateReadInvocation,
@@ -67,6 +68,7 @@ import type {
   CreateTransportOptions,
   ServerType,
 } from "./types.js";
+import { DEFAULT_CONNECTION_TIMEOUT_MS } from "./types.js";
 import {
   MessageTrackingTransport,
   type MessageTrackingCallbacks,
@@ -148,8 +150,6 @@ import {
   DirectoryReadResultSchema,
   GetSkillEnvelopeSchema,
   ListSkillsResultSchema,
-  ModernGetSkillEnvelopeSchema,
-  ModernDirectoryReadResultSchema,
   ModernListSkillsResultSchema,
   RESOURCES_DIRECTORY_READ_METHOD,
   SKILLS_EXTENSION_KEY,
@@ -256,12 +256,38 @@ import {
 } from "../auth/challenge.js";
 import { withOAuthEndpointOverrides } from "../auth/endpointOverrides.js";
 import { withRfc8414OidcCompat } from "../auth/oidcDiscoveryCompat.js";
+import {
+  DEFAULT_OAUTH_REQUEST_TIMEOUT_MS,
+  exemptMcpEndpoint,
+  withOAuthRequestTimeout,
+} from "../auth/requestTimeout.js";
 import type { TokenRevocationOutcome } from "../auth/revocation.js";
 import type { OAuthTokens } from "@modelcontextprotocol/client";
 import { silentLogger, type InspectorLogger } from "../logging/logger.js";
-import { createFetchTracker } from "./fetchTracking.js";
+import {
+  createFetchTracker,
+  findHeader,
+  isLongLivedStreamResponse,
+} from "./fetchTracking.js";
+import { SdkError, SdkErrorCode } from "@modelcontextprotocol/client";
+import {
+  annotateRequestTimeout,
+  isRequestTimeoutError,
+  type ConnectionDiagnostics,
+  type LastResponse,
+  type NotificationStreamState,
+  type OutstandingRequest,
+} from "./connectionDiagnostics.js";
 import { OAuthManager, type OAuthManagerConfig } from "./oauthManager.js";
 import { RemoteClientTransport } from "./remote/remoteClientTransport.js";
+
+/**
+ * The notification stream the diagnostics are following, plus the fetch entry
+ * id that ties later `fetchRequestStreamUpdate`s back to it (#2318).
+ */
+interface TrackedNotificationStream extends NotificationStreamState {
+  id: string;
+}
 
 /** Internal record for a receiver task (server polls us for status/result). */
 interface ReceiverTaskRecord {
@@ -287,6 +313,20 @@ interface ReceiverTaskRecord {
  * returning the error.
  */
 const MAX_URL_ELICITATION_RETRIES = 5;
+
+/**
+ * The message `connect()` rejects with when the connect-time timeout fires.
+ * Names the bound that fired and, since the default is now a real value that
+ * a slow server on a slow link can legitimately hit, says where to raise it
+ * (#2320). All three clients surface this text as-is: the web client's
+ * "Failed to connect" toast, the TUI status line, and the CLI error envelope.
+ */
+export function connectionTimeoutMessage(timeoutMs: number): string {
+  return (
+    `Connection timed out after ${timeoutMs} ms. To accommodate a slower ` +
+    `server, you may increase the timeout value in Server Settings.`
+  );
+}
 
 /**
  * Error used to reject a pending sampling/elicitation request when the tool
@@ -359,24 +399,6 @@ async function closeSubscriptionBestEffort(
   } catch {
     // Best-effort: there is nothing to do about a stream that won't close.
   }
-}
-
-/**
- * Extract the method literal from an MCP notification Zod schema (e.g.
- * `ToolListChangedNotificationSchema`), or `undefined` if the shape isn't
- * recognized. Used by the App-renderer client proxy to translate the SDK-v1
- * schema-first `setNotificationHandler` API — which `@modelcontextprotocol/ext-apps`
- * still uses — into SDK v2's method-string form. Reads the `method` literal off
- * the notification schema's `shape` (the shape both the v1 SDK and v2 core
- * schemas expose).
- */
-function notificationMethodFromSchema(schema: unknown): string | undefined {
-  if (schema !== null && typeof schema === "object") {
-    const literal = (schema as { shape?: { method?: { value?: unknown } } })
-      .shape?.method?.value;
-    if (typeof literal === "string") return literal;
-  }
-  return undefined;
 }
 
 /**
@@ -483,19 +505,28 @@ export class InspectorClient extends InspectorClientEventTarget {
    */
   private static readonly MRTR_MAX_ROUNDS = 10;
   private client: Client | null = null;
-  private appRendererClientProxy: AppRendererClient | null = null;
   // Lazily-built validator used only on the skipOutputValidation path to detect
   // (non-fatally) when a delivered result violates the tool's outputSchema.
   private outputValidator: AjvJsonSchemaValidator | null = null;
   private transport: Transport | MessageTrackingTransport | null = null;
   private baseTransport: Transport | null = null;
-  // Correlation for `markResponseRejected` (#1953): the method of each
-  // outbound request still awaiting a response, and — once one is answered —
-  // the id of the most recently answered request per method. Entries are
-  // dropped as responses arrive, so this holds at most one id per method
-  // rather than growing with the session.
-  private outboundRequestMethods = new Map<string | number, string>();
+  // Every outbound request still awaiting a response, keyed by JSON-RPC id.
+  // Serves two readers: the `markResponseRejected` correlation (#1953), which
+  // needs the method, and the connection diagnostics (#2318), which need the
+  // method and when it went out. Entries are dropped as responses arrive; a
+  // request the SDK gave up on (a timeout, a cancel) stays until the session
+  // resets, because it is still unanswered and that is what the diagnostics
+  // report.
+  private outstandingRequests = new Map<string | number, OutstandingRequest>();
+  // The id of the most recently answered request per method, for
+  // `markResponseRejected` (#1953). At most one id per method, so it does not
+  // grow with the session.
   private lastAnsweredRequestByMethod = new Map<string, string | number>();
+  // Connection diagnostics (#2318): the most recent response to one of our
+  // requests, and the most recent long-lived transport stream (the standalone
+  // `GET` on Streamable HTTP). Both per-session, reset with the maps above.
+  private lastResponse: LastResponse | undefined;
+  private notificationStream: TrackedNotificationStream | undefined;
   /** True when the cached transport was built with an OAuth authProvider attached. */
   private transportHasAuthProvider = false;
   /** Dedupes concurrent ambient auth challenges (reason + scopes). */
@@ -810,8 +841,9 @@ export class InspectorClient extends InspectorClientEventTarget {
     // `this.fetchFn` directly. The overrides are read lazily — `oauthManager` is
     // created a few lines below, and `setOAuthConfig` can change them later — so
     // the wrapper is inert until a server actually configures one.
-    this.fetchFn = withOAuthEndpointOverrides(this.fetchFn ?? fetch, () =>
-      this.oauthManager?.getEndpointOverrides(),
+    const withOverrides = withOAuthEndpointOverrides(
+      this.fetchFn ?? fetch,
+      () => this.oauthManager?.getEndpointOverrides(),
     );
     // #2172: recover discovery when a plain OAuth 2.0 authorization server
     // publishes RFC 8414 metadata at `/.well-known/openid-configuration`, which
@@ -822,8 +854,40 @@ export class InspectorClient extends InspectorClientEventTarget {
     // still hit the upstream failure. The substituted response is stamped with
     // `COMPAT_SOURCE_HEADER` so a captured entry names the URL its body came
     // from rather than appearing to be a 200 from the RFC 8414 path.
-    this.fetchFn = withRfc8414OidcCompat(this.fetchFn);
-    this.effectiveAuthFetch = this.buildEffectiveAuthFetch();
+    // The transport chain is bounded too, but only for the requests on it that
+    // are *not* MCP traffic — the OAuth work the SDK runs from inside the
+    // transport on the 401/refresh path, which otherwise waits out the SDK's
+    // incidental per-request timeout and reports a bare `Request timed out`
+    // naming no endpoint (Copilot). The MCP endpoint itself is exempt, and the
+    // predicate fails open: a long-running tool call withholding its response
+    // headers for minutes, or an SSE body that stays open, must never be timed
+    // here. Deadline innermost, for the same reason as the auth chain below.
+    this.fetchFn = withRfc8414OidcCompat(
+      withOAuthRequestTimeout(
+        withOverrides,
+        DEFAULT_OAUTH_REQUEST_TIMEOUT_MS,
+        exemptMcpEndpoint(
+          () => this.getServerUrl(),
+          // Legacy SSE negotiates its message endpoint inside the stream, so
+          // its path is unknowable here and the exemption has to widen to the
+          // origin. Streamable HTTP sends everything to the configured URL, so
+          // the path rule is exact there and same-origin OAuth stays bounded.
+          () => this.transportConfig?.type === "sse",
+        ),
+      ),
+    );
+    // #2319: the auth chain is composed separately so the deadline sits
+    // *inside* the compat wrapper. Reusing `this.fetchFn` as the base would put
+    // it outside, and then a stalled OIDC probe would be reported under the
+    // URL of the RFC 8414 request that preceded it — defeating the whole point
+    // of naming the endpoint — while every probe in the loop shared that one
+    // request's budget (Copilot). Innermost here matches the CLI's
+    // `storedAuthFetch`. It also passes no `isExempt`, unlike the transport
+    // chain above: every request on this chain is OAuth work, so there is
+    // nothing here to exempt.
+    this.effectiveAuthFetch = this.buildEffectiveAuthFetch(
+      withRfc8414OidcCompat(withOAuthRequestTimeout(withOverrides)),
+    );
 
     this.sessionId = options.sessionId;
 
@@ -979,7 +1043,6 @@ export class InspectorClient extends InspectorClientEventTarget {
     this.rootsListChangedCapabilityAdvertised =
       capabilities.roots?.listChanged === true;
 
-    this.appRendererClientProxy = null;
     this.clientInfo = options.clientIdentity ?? {
       name: corePackageJson.name.split("/")[1] ?? corePackageJson.name,
       version: corePackageJson.version,
@@ -988,10 +1051,65 @@ export class InspectorClient extends InspectorClientEventTarget {
       this.clientInfo,
       Object.keys(clientOptions).length > 0 ? clientOptions : undefined,
     );
+    this.annotateSdkRequestTimeouts(this.client);
   }
 
-  private buildEffectiveAuthFetch(): typeof fetch {
-    const base = this.fetchFn ?? fetch;
+  /**
+   * Decorate the SDK Client's `request` so a per-request timeout rejects with
+   * the connection's state at that moment instead of a bare `Request timed
+   * out` (#2318).
+   *
+   * `Protocol.request` is the one funnel every SDK verb goes through —
+   * `listTools`, `callTool`, `readResource`, the handshake's `initialize`,
+   * and this class's own raw `client.request` calls all reach the wire
+   * through it — so decorating it here covers the whole surface without a
+   * `catch` at each of the several dozen call sites, and covers the next
+   * verb added without anyone remembering to. The SDK offers no hook on the
+   * rejection path: the timeout error is constructed and thrown inside
+   * `request()` itself.
+   *
+   * Replaced on the instance rather than through a subclass because
+   * `request` is declared with two overloads (spec method with a keyed
+   * result, custom method with an explicit schema), and an `override` would
+   * have to restate both against types that move with every SDK release. One
+   * implementation signature serves both at runtime; the single cast on the
+   * way back is what the overloads cost.
+   */
+  private annotateSdkRequestTimeouts(client: Client): void {
+    type SdkRequest = Client["request"];
+    const sdkRequest: SdkRequest = client.request.bind(client);
+    const decorated = async (
+      ...args: Parameters<SdkRequest>
+    ): Promise<unknown> => {
+      try {
+        return await sdkRequest(...args);
+      } catch (err) {
+        throw annotateRequestTimeout(
+          err,
+          args[0].method,
+          this.getConnectionDiagnostics(),
+        );
+      }
+    };
+    client.request = decorated as SdkRequest;
+  }
+
+  /**
+   * @param base - the composed OAuth-path fetch, deadline innermost (#2319).
+   *
+   * Passed in rather than read off `this.fetchFn` because the two chains are
+   * bounded on different terms, not because one of them is unbounded. Both
+   * carry a deadline; the transport chain additionally exempts the MCP endpoint
+   * (`exemptMcpEndpoint`), since its bodies are streams meant to stay open and
+   * a long-running tool call may withhold its headers for minutes. Reusing it
+   * here would extend that exemption to the OAuth manager's own requests — and
+   * an authorization server published at the MCP endpoint's path would then go
+   * unbounded on the one chain that exists to bound it.
+   *
+   * The SDK's transport-internal discovery (the 401/refresh path) is covered by
+   * the transport chain's own deadline, not by this one.
+   */
+  private buildEffectiveAuthFetch(base: typeof fetch): typeof fetch {
     // Capture auth response bodies (OAuth discovery, DCR, token exchange) so
     // they're inspectable in the Network tab. Token-exchange responses carry
     // `access_token` / `refresh_token`; the Network UI masks those (and other
@@ -1011,7 +1129,12 @@ export class InspectorClient extends InspectorClientEventTarget {
     return {
       trackRequest: (message: JSONRPCRequest, origin: MessageOrigin) => {
         if (origin === "client") {
-          this.outboundRequestMethods.set(message.id, message.method);
+          this.outstandingRequests.set(message.id, {
+            id: message.id,
+            method: message.method,
+            sentAt: Date.now(),
+          });
+          this.dispatchConnectionDiagnosticsChange();
         }
         const entry: MessageEntry = {
           id: crypto.randomUUID(),
@@ -1021,6 +1144,20 @@ export class InspectorClient extends InspectorClientEventTarget {
           message,
         };
         this.dispatchTypedEvent("message", entry);
+      },
+      trackSendFailure: (message: JSONRPCRequest, error: unknown) => {
+        // A send that failed because the request timed out is not a send
+        // that failed: the browser's remote transport awaits the response
+        // inside `send`, so its relay timeout surfaces here — the request
+        // reached the server and went unanswered, which is the state to
+        // keep reporting. Every other failure means the frame never reached
+        // the wire, and leaving it would report a request the server never
+        // saw as unanswered, in every timeout message and Connection Info
+        // row, until the session resets (#2318).
+        if (isRequestTimeoutError(error)) return;
+        if (this.outstandingRequests.delete(message.id)) {
+          this.dispatchConnectionDiagnosticsChange();
+        }
       },
       trackResponse: (
         message: JSONRPCResultResponse | JSONRPCErrorResponse,
@@ -1033,11 +1170,13 @@ export class InspectorClient extends InspectorClientEventTarget {
         // frame answers no specific request, so it is skipped.
         const responseId = message.id;
         if (origin === "server" && responseId !== undefined) {
-          const method = this.outboundRequestMethods.get(responseId);
-          this.outboundRequestMethods.delete(responseId);
+          const method = this.outstandingRequests.get(responseId)?.method;
+          this.outstandingRequests.delete(responseId);
           if (method !== undefined) {
             this.lastAnsweredRequestByMethod.set(method, responseId);
+            this.lastResponse = { method, receivedAt: Date.now() };
           }
+          this.dispatchConnectionDiagnosticsChange();
         }
         const entry: MessageEntry = {
           id: crypto.randomUUID(),
@@ -1896,8 +2035,11 @@ export class InspectorClient extends InspectorClientEventTarget {
     // start-clean path rather than in `disconnect()` for the reason documented
     // above: one route out (`onerror` with no `onclose`) tears down nothing
     // (#1953).
-    this.outboundRequestMethods.clear();
+    this.outstandingRequests.clear();
     this.lastAnsweredRequestByMethod.clear();
+    this.lastResponse = undefined;
+    this.notificationStream = undefined;
+    this.dispatchConnectionDiagnosticsChange();
     // Per-session for the same reason: both name entries of the PREVIOUS
     // server's list. Cleared here as well as in `disconnect()` because the
     // route out that tears down nothing (`onerror` with no `onclose`) would
@@ -2066,9 +2208,13 @@ export class InspectorClient extends InspectorClientEventTarget {
         },
         onFetchRequest: (entry: FetchRequestEntryBase) => {
           this.dispatchFetchRequest({ ...entry, category: "transport" });
+          this.noteTransportStream(entry);
         },
         onFetchResponseBody: (id: string, body: string) => {
           this.dispatchFetchRequestBodyUpdate(id, body);
+        },
+        onFetchStreamUpdate: (id: string, stream: FetchStreamState) => {
+          this.dispatchFetchRequestStreamUpdate(id, stream);
         },
         ...(this.serverSettings && { settings: this.serverSettings }),
       };
@@ -2188,11 +2334,28 @@ export class InspectorClient extends InspectorClientEventTarget {
       this.registerPeerRequestHandlers();
       this.registerPeerNotificationHandlers();
 
-      // Optional connect-time timeout from per-server settings. The MCP SDK
-      // has no connect-time timeout option, so we wrap the handshake in a
+      // Connect-time timeout from per-server settings, defaulting to
+      // `DEFAULT_CONNECTION_TIMEOUT_MS` when the settings carry none. The MCP
+      // SDK has no connect-time timeout option, so we wrap the handshake in a
       // Promise.race. On timeout, tear the transport down so the next
       // connect() starts clean and the upstream socket isn't left hanging.
-      const connectTimeoutMs = this.serverSettings?.connectionTimeout ?? 0;
+      //
+      // The default is ours on purpose (#2320): without it the only bound on
+      // a connect attempt was the SDK's per-request timeout on `initialize`,
+      // which covers nothing outside that request (`transport.start()` for
+      // one), fires after 60 s, and reports `Request timed out` — a sentence
+      // about a JSON-RPC request, not a connection. An explicit `0` is still
+      // "no timeout": that is what the CLI's `--connect-timeout 0` documents
+      // and what a user who cleared the field asked for.
+      const connectTimeoutMs =
+        this.serverSettings?.connectionTimeout ?? DEFAULT_CONNECTION_TIMEOUT_MS;
+      // Set only by the timer below, so the teardown in the catch runs for a
+      // timeout and nothing else. Gating it on `connectTimeoutMs > 0` instead
+      // would tear down *every* failed connect once the default is non-zero —
+      // including a recoverable 401, whose transport the auth recovery needs
+      // held open and whose status must stay at "connecting" (see the outer
+      // catch and `transportHasAuthProvider`).
+      let connectTimedOut = false;
       // Unwrap here — the earliest point — so an auth error the SDK's
       // era-negotiation probe buried in its cause chain is surfaced before
       // anything downstream inspects it: `withDirectAuthRecovery` (whose
@@ -2236,15 +2399,10 @@ export class InspectorClient extends InspectorClientEventTarget {
           connectPromise.catch(() => {});
           let timer: ReturnType<typeof setTimeout> | undefined;
           const timeoutPromise = new Promise<never>((_, reject) => {
-            timer = setTimeout(
-              () =>
-                reject(
-                  new Error(
-                    `Connection timed out after ${connectTimeoutMs} ms`,
-                  ),
-                ),
-              connectTimeoutMs,
-            );
+            timer = setTimeout(() => {
+              connectTimedOut = true;
+              reject(new Error(connectionTimeoutMessage(connectTimeoutMs)));
+            }, connectTimeoutMs);
           });
           try {
             await Promise.race([connectPromise, timeoutPromise]);
@@ -2259,7 +2417,7 @@ export class InspectorClient extends InspectorClientEventTarget {
       try {
         await this.invokeMcpClient(runConnect);
       } catch (err) {
-        if (connectTimeoutMs > 0) {
+        if (connectTimedOut) {
           await this.disconnect().catch(() => {});
         }
         throw err;
@@ -2560,7 +2718,6 @@ export class InspectorClient extends InspectorClientEventTarget {
     this.activeToolCallAbortController?.abort("Disconnected");
     this.activeToolCallAbortController = undefined;
     this.clearReceiverTasks();
-    this.appRendererClientProxy = null;
     this.capabilities = undefined;
     this.serverInfo = undefined;
     this.instructions = undefined;
@@ -2592,44 +2749,19 @@ export class InspectorClient extends InspectorClientEventTarget {
   }
 
   /**
-   * Returns a client proxy for use by AppRenderer / @mcp-ui. Delegates to the
-   * internal MCP Client. Returns null when not connected. Use this instead of
-   * accessing the raw client so behavior can be adapted here later if needed.
+   * The SDK client for the MCP Apps host bridge, or null when not connected.
+   *
+   * ext-apps' `AppBridge` (2.0.0+, an SDK v2 peer) takes the v2 `Client`
+   * directly and registers its list-changed forwarding on it in the
+   * method-string form, so this hands out the real client. The Proxy that
+   * translated the 1.x peer's schema-first `setNotificationHandler(Schema,
+   * handler)` into that form is gone with it (#1745). Kept as the seam rather
+   * than exposing the field so the connected-status gate lives in one place
+   * and hooks, fakes and tests depend on the protocol, not the class.
    */
   getAppRendererClient(): AppRendererClient | null {
     if (!this.client || this.status !== "connected") return null;
-    if (this.appRendererClientProxy !== null)
-      return this.appRendererClientProxy;
-    const target = this.client;
-    this.appRendererClientProxy = new Proxy(this.client, {
-      get(proxyTarget, prop, receiver) {
-        const value = Reflect.get(proxyTarget, prop, receiver);
-        if (prop === "setNotificationHandler" && typeof value === "function") {
-          return (schemaOrMethod: unknown, ...rest: unknown[]) => {
-            // `@modelcontextprotocol/ext-apps` still peers on SDK v1 and
-            // subscribes to list-changed notifications with the v1 schema-first
-            // API `setNotificationHandler(NotificationSchema, handler)`. SDK v2
-            // requires a method STRING as the first argument and throws
-            // "'[object Object]' is not a spec notification method" on a schema —
-            // which broke App rendering during the initial connect handshake.
-            // Translate a schema-first call to the method-string form; native
-            // string-first calls (ours) pass through untouched. Remove when
-            // ext-apps#702 ships a v2 peer.
-            const method =
-              typeof schemaOrMethod === "string"
-                ? schemaOrMethod
-                : (notificationMethodFromSchema(schemaOrMethod) ??
-                  schemaOrMethod);
-            return (value as (...a: unknown[]) => unknown).apply(target, [
-              method,
-              ...rest,
-            ]);
-          };
-        }
-        return value;
-      },
-    }) as AppRendererClient;
-    return this.appRendererClientProxy;
+    return this.client;
   }
 
   /**
@@ -2824,8 +2956,19 @@ export class InspectorClient extends InspectorClientEventTarget {
     const raw = await new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingRawWireRequests.delete(id);
+        // The same error, with the same annotation, as an SDK request that
+        // times out: this path bypasses `Protocol.request`, so it builds the
+        // SDK's own timeout shape and runs it through the decorator's
+        // annotation by hand — a raw-wire caller sees one kind of timeout,
+        // not two (#2318).
         reject(
-          new Error(`Raw request "${method}" timed out after ${timeoutMs} ms`),
+          annotateRequestTimeout(
+            new SdkError(SdkErrorCode.RequestTimeout, "Request timed out", {
+              timeout: timeoutMs,
+            }),
+            method,
+            this.getConnectionDiagnostics(),
+          ),
         );
       }, timeoutMs);
       this.pendingRawWireRequests.set(id, { resolve, reject, timer });
@@ -2835,7 +2978,17 @@ export class InspectorClient extends InspectorClientEventTarget {
           clearTimeout(pending.timer);
           this.pendingRawWireRequests.delete(id);
         }
-        reject(err instanceof Error ? err : new Error(String(err)));
+        // The browser's remote transport awaits the response inside `send`,
+        // so its relay wait can expire here first, as the SDK's timeout
+        // shape; annotate it exactly as the local timer above does (a
+        // non-timeout error passes through untouched).
+        reject(
+          annotateRequestTimeout(
+            err instanceof Error ? err : new Error(String(err)),
+            method,
+            this.getConnectionDiagnostics(),
+          ),
+        );
       });
     });
     return resultSchema.parse(raw);
@@ -5586,11 +5739,13 @@ export class InspectorClient extends InspectorClientEventTarget {
       ...(cursor !== undefined ? { cursor } : {}),
     };
     // Era-aware: a modern (2026-07-28+) `skills/list` result also carries the
-    // base list envelope (`resultType` / `ttlMs` / `cacheScope`). `skills/*` is
-    // consumer-owned, so the SDK codec validates none of it — without picking
-    // the schema here a modern server could answer `{ skills: [] }` and the
-    // conformance UI would show a clean list. Legacy stays permissive: those
-    // are 2026-era attributes.
+    // base list envelope (`resultType` / `ttlMs` / `cacheScope`). The two halves
+    // are checked in different places: the SDK codec checks `resultType` on
+    // every modern result and removes it before this schema runs (#2373), but
+    // `skills/*` is consumer-owned, so it checks neither caching attribute —
+    // without picking the schema here a modern server could answer
+    // `{ skills: [] }` and the conformance UI would show a clean list. Legacy
+    // stays permissive: those are 2026-era attributes.
     const resultSchema = this.isModernEra()
       ? ModernListSkillsResultSchema
       : ListSkillsResultSchema;
@@ -5620,8 +5775,10 @@ export class InspectorClient extends InspectorClientEventTarget {
   }
 
   /**
-   * `skills/get` as the server sent it — the `{ skill }` envelope **and any
-   * other members it carried**.
+   * `skills/get` as the SDK decoded it — the `{ skill }` envelope **and any
+   * other members the server sent**, such as the caching attributes. On a
+   * modern connection `resultType` is not among them: the codec checks it and
+   * removes it before the result gets here (#2373).
    *
    * Separate from {@link getSkill} because the callers differ: the UIs want the
    * entry, while the CLI prints the result and must not reshape it. SEP-2640
@@ -5641,21 +5798,16 @@ export class InspectorClient extends InspectorClientEventTarget {
       uri,
       ...(effectiveMeta ? { _meta: effectiveMeta } : {}),
     };
-    // Era-aware for the same reason `skills/list` is: the method is
-    // consumer-owned, so no SDK codec stamps or checks its envelope. The modern
-    // variant requires `resultType` — a base-protocol member SEP-2322 puts on
-    // every modern result — and still not the caching attributes, which
-    // SEP-2640 leaves open. The envelope is returned whole; `getSkill`
-    // unwraps.
-    const resultSchema = this.isModernEra()
-      ? ModernGetSkillEnvelopeSchema
-      : GetSkillEnvelopeSchema;
+    // One schema for both eras (#2373): on a modern connection the SDK codec
+    // has already enforced `resultType` and lifted it off, and the caching
+    // attributes are left open by SEP-2640, so there is nothing era-specific
+    // left to require. The envelope is returned whole; `getSkill` unwraps.
     try {
       return await this.invokeMcpClient(
         () =>
           this.client!.request(
             { method: SKILLS_GET_METHOD, params },
-            resultSchema,
+            GetSkillEnvelopeSchema,
             this.getRequestOptions(this.progressTokenOf(metadata)),
           ),
         { method: SKILLS_GET_METHOD },
@@ -5717,19 +5869,16 @@ export class InspectorClient extends InspectorClientEventTarget {
       // for page one.
       ...(cursor !== undefined ? { cursor } : {}),
     };
-    // Era-aware for the same reason `skills/list` is — the method is
-    // consumer-owned, so no SDK codec stamps or checks its envelope. The modern
-    // variant requires only `resultType`; see the schema for why it stops
-    // short of the caching attributes that `skills/list` requires.
-    const resultSchema = this.isModernEra()
-      ? ModernDirectoryReadResultSchema
-      : DirectoryReadResultSchema;
+    // One schema for both eras (#2373): the SDK codec enforces and lifts
+    // `resultType` on a modern connection, and SEP-2640 requires no caching
+    // attributes of this method — see `skillsSchemas.ts` for why that differs
+    // from `skills/list`.
     try {
       return await this.invokeMcpClient(
         () =>
           this.client!.request(
             { method: RESOURCES_DIRECTORY_READ_METHOD, params },
-            resultSchema,
+            DirectoryReadResultSchema,
             this.getRequestOptions(this.progressTokenOf(metadata)),
           ),
         { method: RESOURCES_DIRECTORY_READ_METHOD },
@@ -5954,6 +6103,87 @@ export class InspectorClient extends InspectorClientEventTarget {
     responseBody: string,
   ): void {
     this.dispatchTypedEvent("fetchRequestBodyUpdate", { id, responseBody });
+  }
+
+  private dispatchFetchRequestStreamUpdate(
+    id: string,
+    stream: FetchStreamState,
+  ): void {
+    this.dispatchTypedEvent("fetchRequestStreamUpdate", { id, stream });
+    // The diagnostics follow only the stream they are currently watching;
+    // an update for an older one (a reconnected stream's predecessor
+    // closing late) changes nothing they report.
+    if (this.notificationStream?.id !== id) return;
+    this.notificationStream = {
+      ...this.notificationStream,
+      eventCount: stream.eventCount,
+      ...(stream.closedAt && { closedAt: stream.closedAt.getTime() }),
+    };
+    this.dispatchConnectionDiagnosticsChange();
+  }
+
+  /**
+   * Adopt a transport fetch as the notification stream when it is one — a
+   * `GET` answered with an unbounded event stream — so the diagnostics can
+   * say how long it has been open and what it has delivered (#2318). The
+   * newest such stream wins: the SDK reopens the standalone `GET` after a
+   * drop, and the current one is the one a stalled request is queued behind.
+   */
+  private noteTransportStream(entry: FetchRequestEntryBase): void {
+    if (
+      !isLongLivedStreamResponse(
+        entry.method,
+        findHeader(entry.responseHeaders, "content-type"),
+      )
+    ) {
+      return;
+    }
+    this.notificationStream = {
+      id: entry.id,
+      url: entry.url,
+      // The entry's `timestamp` is when the request went out; the stream is
+      // open from when the response headers arrived, `duration` later.
+      openedAt: entry.timestamp.getTime() + (entry.duration ?? 0),
+      eventCount: 0,
+    };
+    this.dispatchConnectionDiagnosticsChange();
+  }
+
+  /**
+   * What this client is still waiting on, when it last heard back, and the
+   * state of the notification stream (#2318). A fresh snapshot per call —
+   * the same one `annotateRequestTimeout` writes a timeout message from, and
+   * the one `connectionDiagnosticsChange` carries.
+   */
+  getConnectionDiagnostics(): ConnectionDiagnostics {
+    return {
+      capturedAt: Date.now(),
+      // Copies, not the tracked records: the snapshot is handed to callers
+      // and carried on errors, and a mutation there must not reach the
+      // correlation state.
+      outstandingRequests: [...this.outstandingRequests.values()].map(
+        (request) => ({ ...request }),
+      ),
+      ...(this.lastResponse && { lastResponse: { ...this.lastResponse } }),
+      ...(this.notificationStream && {
+        notificationStream: this.publicStreamState(this.notificationStream),
+      }),
+    };
+  }
+
+  /** The stream state minus the entry id, which is bookkeeping, not a fact. */
+  private publicStreamState(
+    stream: TrackedNotificationStream,
+  ): NotificationStreamState {
+    const { id: _id, ...state } = stream;
+    return state;
+  }
+
+  private dispatchConnectionDiagnosticsChange(): void {
+    this.dispatchTypedEvent(
+      "connectionDiagnosticsChange",
+      this.getConnectionDiagnostics(),
+    );
   }
 
   /**

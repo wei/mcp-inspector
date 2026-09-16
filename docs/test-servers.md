@@ -55,12 +55,14 @@ as a missing capability rather than an error.
 | `oauth-revocation-http.json` / `oauth-no-revocation-http.json` **(legacy era)** | RFC 7009 token revocation on clear, with and without a `revocation_endpoint` | [#2144](https://github.com/modelcontextprotocol/inspector/issues/2144) |
 | `oauth-rfc8414-at-oidc-path-http.json` **(legacy era)** | Plain OAuth 2.0 AS metadata served at the OIDC well-known path | [#2172](https://github.com/modelcontextprotocol/inspector/issues/2172) |
 | `oauth-insecure-token-endpoint-http.json` **(legacy era)** | A token endpoint the SDK refuses to post credentials to | [#2280](https://github.com/modelcontextprotocol/inspector/issues/2280) |
+| `oauth-cimd-http.json` **(legacy era)** | URL-based client IDs (CIMD / SEP-991), DCR deliberately off | [#2242](https://github.com/modelcontextprotocol/inspector/issues/2242) |
 | `logging-{legacy,modern}-http.json` **(era per file)** | Logging, both eras                                  | [#1629](https://github.com/modelcontextprotocol/inspector/issues/1629) |
 | `subscriptions-{legacy,modern}-http.json` **(era per file)** | Resource subscriptions, both eras                   | [#1630](https://github.com/modelcontextprotocol/inspector/issues/1630) |
 | `subscriptions-never-acknowledged-http.json` **(modern era)** | A `subscriptions/listen` answered with a bare result  | [#2097](https://github.com/modelcontextprotocol/inspector/issues/2097) |
 | `tasks-{legacy,modern}-http.json` **(era per file)** | Tasks, both eras                                    | [#1631](https://github.com/modelcontextprotocol/inspector/issues/1631) |
 | `cancellation-modern-http.json` **(modern era)**           | Cancelling a call by closing its response stream    | [#2140](https://github.com/modelcontextprotocol/inspector/issues/2140) |
 | `skills-http.json` **(either era)** | Skills tab: `skills/list`, `resources/directory/read`, digest verification, the frontmatter cross-check, and the non-conforming cases | [#2234](https://github.com/modelcontextprotocol/inspector/issues/2234), [#2248](https://github.com/modelcontextprotocol/inspector/issues/2248) |
+| `skills-strict-{legacy,modern}-http.json` **(era per file)** | The same skills, served only to a client that **declared** `io.modelcontextprotocol/skills` itself (SEP-2133) | [#2373](https://github.com/modelcontextprotocol/inspector/issues/2373) |
 
 ## Skills (SEP-2640)
 
@@ -76,6 +78,37 @@ handler cannot reach it. To exercise the *undeclared* case, connect to any
 config **without** `"skills"`, where the Inspector must refuse to send the call
 locally rather than letting the server answer it.
 
+⚠️ **`skills-http.json` serves any client, including one that never declared the
+extension.** SEP-2133 negotiates an extension from both sides, and a strict
+server refuses `skills/*` to a client that did not declare
+`io.modelcontextprotocol/skills` itself. The Inspector shipped without that
+declaration and passed against this fixture regardless
+([#2373](https://github.com/modelcontextprotocol/inspector/issues/2373)).
+`skills-strict-legacy-http.json` (port 3232) and
+`skills-strict-modern-http.json` (port 3233) add
+`"skillsRequireClientExtension": true`, which refuses `skills/list`,
+`skills/get` and `resources/directory/read` unless the client declared it
+(skill files still come through ordinary `resources/read`, which needs no
+extension). The refusal differs by era: a **modern** request gets SEP-2575's
+`-32021` MissingRequiredClientCapability (HTTP 400) with the Skills extension
+under `data.requiredCapabilities`; a **legacy** one, whose era has no such code,
+gets `-32601`. ⚠️ **Connect each with its own era.** A modern request
+carries the declaration in its `_meta` envelope; a legacy one relies on what
+`initialize` declared, which only a stateful legacy server keeps. A legacy
+client reaching the modern file is served statelessly, holds no declaration,
+and is refused however it is configured — so there is one file per era rather
+than one for both:
+
+1. Connect — the Inspector declares the Skills extension by default, so the
+   Skills tab lists the same eight skills. The client's declaration is visible
+   in the `initialize` request (Legacy) or in each request's
+   `io.modelcontextprotocol/clientCapabilities` `_meta` entry (Modern).
+2. Open **Server Settings → Advertised Extensions**, uncheck
+   **Skills (io.modelcontextprotocol/skills)**, and reconnect.
+3. `skills/list` now fails — with `-32021` MissingRequiredClientCapability on
+   the modern file and `-32601` on the legacy one, the refusal a strict server
+   sends in each era.
+
 **Both `skills/*` results carry the full modern base envelope** (`resultType` /
 `ttlMs` / `cacheScope`). They are consumer-owned methods, so the SDK stamps
 nothing for them; without it a 2026-era connection would receive a result
@@ -90,8 +123,10 @@ words and says nothing of the kind for this method, whose one worked example
 carries `resultType` and nothing else. A fixture sending more than the SEP shows
 would make a client that wrongly *required* them look correct, which is the
 opposite of what a conformance fixture is for — so `readDirectoryPage` stops
-where the spec does, and `ModernDirectoryReadResultSchema` requires exactly as
-much.
+where the spec does. On the client, the SDK's modern codec enforces
+`resultType` and lifts it off before the Inspector's own schema runs, so
+`DirectoryReadResultSchema` serves both eras and requires no caching attributes
+([#2373](https://github.com/modelcontextprotocol/inspector/issues/2373)).
 
 It works on **either era**: `skills/list`, `skills/get` and
 `resources/directory/read` are consumer-owned extension methods that neither
@@ -242,7 +277,7 @@ Only the **web** client advertises the nested client-side setting, and only beca
 
 Everything else falls back to the built-in elicitation form, by design: metadata that is absent or not an absolute `ui://` URI, a resource that fails to load, a sandbox or bridge that fails to initialize, an app that did not advertise `elicitation`, a request that times out, and any result that is not a valid `ElicitResult` for the requested schema. An explicit `decline` or `cancel` is **not** a fallback — it is a completed elicitation and goes back to the server as-is.
 
-> The Inspector speaks the ext-apps#733 wire protocol but does not yet consume its helpers: the released `@modelcontextprotocol/ext-apps` (1.7.5) predates that PR. `core/mcp/appElicitation.ts` and `clients/web/src/components/elements/AppRenderer/requestAppElicitation.ts` mirror it exactly and are marked for deletion in favour of the package's own exports once a release containing it ships.
+> The Inspector speaks the ext-apps#733 wire protocol but does not yet consume its helpers: #733 is not yet in a published release — the installed `@modelcontextprotocol/ext-apps` (2.0.0) does not include it. `core/mcp/appElicitation.ts` and `clients/web/src/components/elements/AppRenderer/requestAppElicitation.ts` mirror it exactly and are marked for deletion in favour of the package's own exports once a release containing it ships.
 
 ## MRTR
 
@@ -495,7 +530,7 @@ Requiredness is a property of the **expression**, not the variable: RFC 6570 dro
 
 1. Connect — the Inspector advertises the Tasks extension by default, so the Tools list shows both `echo` and `get_weather`.
 2. Open **Server Settings → Advertised Extensions**, uncheck **Tasks (io.modelcontextprotocol/tasks)**, and reconnect.
-3. The client now advertises no extensions, the server never enables `get_weather`, and the Tools list shows only `echo`.
+3. The client no longer advertises the Tasks extension (it still advertises the others, such as MCP Apps UI and Skills), the server never enables `get_weather`, and the Tools list shows only `echo`.
 
 This is the debugging knob for a server legitimately changing tool registration based on what the client advertises. Legacy stateful leg only — the modern per-request leg has no persistent `oninitialized`.
 
@@ -533,6 +568,85 @@ Note the second option is phrased as a *spelling* change, not a networking one. 
 On the broken build you got a **"Re-authentication required"** banner with a **Re-authenticate** button ([#2280](https://github.com/modelcontextprotocol/inspector/issues/2280)). That button could never work: `InsecureTokenEndpointError` does not extend `OAuthError`, and `auth()` special-cases it to rethrow rather than start a fresh `/authorize` redirect, so clicking it re-ran the same flow to the same refusal. The only text on screen was the raw SDK message, which names the three exempt literals and says nothing about which lever to reach for.
 
 Note that the fix here is presentational only. Making a `*.localhost` token endpoint actually **work** has to land in the SDK — the assertion runs inside `executeTokenRequest`, takes no options, and there is no hook the Inspector could reach.
+
+## URL-based client IDs (CIMD / SEP-991)
+
+`oauth-cimd-http.json` is a combined AS + resource server that advertises
+`client_id_metadata_document_supported: true` and — the part that makes it usable — **hosts the client
+metadata document itself**, at `/client-metadata.json`. Plain streamable-HTTP; connect with the
+**default (legacy)** protocol era.
+
+Hosting the document is the whole reason this fixture exists. In CIMD the `client_id` *is* a URL that
+the authorization server dereferences to learn the client's metadata, so a server that merely
+advertises support is only half a fixture: exercising it still meant standing up a second host by
+hand. That is why [#2242](https://github.com/modelcontextprotocol/inspector/issues/2242) shipped
+verified by its tests alone, and the v2.6.0 release ledger recorded it as the one row that had an
+observable UI surface but no way to reach it.
+
+**`supportDCR` is `false` on purpose.** With both registration paths available a successful connection
+proves nothing about which one ran — precisely the confusion #2242 was about, where Connection Info
+reported `Dynamic (DCR)` for a connection that never issued a `POST /oauth/register`. With DCR off,
+CIMD is the only way the flow can complete, so reaching a connected state *is* the assertion.
+
+⚠️ **CIMD is configured install-wide, not per server.** It lives in `client.json`
+(`~/.mcp-inspector/storage/client.json`) as `cimd: { enabled: true, clientMetadataUrl }`, reachable
+from **Client settings**, not from a server's own OAuth settings. A `clientMetadataUrl` written into a
+catalog entry's `oauth` block is silently ignored — and with `supportDCR: true` the connection then
+succeeds *via DCR*, which looks like CIMD working until you read the client id.
+
+**Use this server's own document as the `clientMetadataUrl`** — `/client-metadata.json` on the origin
+the server announced on startup (`http://127.0.0.1:8092/client-metadata.json` when it got its
+configured port; read the announced URL, since this fixture walks upward on `EADDRINUSE` like every
+other one here). The Inspector requires HTTPS *except* on the three
+loopback literals `localhost`, `127.0.0.1` and `[::1]`
+(`getCimdClientMetadataUrlError` in `core/client/config-parse.ts`, applied to `client.json` on disk as
+well as to the settings form), which is the same exemption the SDK applies to token endpoints and what
+the runtime already tolerated for an already-stored `client_id`. Give the URL the host the server is
+actually listening on; a host outside those three — `localhost.` and `tenant.app.localhost` included,
+even though both resolve to loopback — is still rejected, deliberately, so this allow-list and the
+SDK's cannot disagree about one URL.
+
+⚠️ **Before [#2305](https://github.com/modelcontextprotocol/inspector/issues/2305) the config and
+form validator had no loopback exemption** — the *runtime* already tolerated an `http://` URL as an
+already-stored `client_id`, which is precisely the asymmetry that issue is about; there was simply no
+way to get such a value past validation and into `client.json`. So driving this flow meant standing
+up a throwaway self-signed HTTPS listener to hold the document and setting
+`NODE_TLS_REJECT_UNAUTHORIZED=0` in the *test server's* environment so its own fetch of that document
+would succeed. That workaround is no longer needed — if you find it in a script or an older note,
+delete it.
+
+⚠️ **Use the canonical spelling of the host.** `http://127.1/…` and `http://2130706433/…` are accepted
+by the validator (and by the SDK) because both canonicalize to `127.0.0.1` — but a CIMD `client_id`
+is compared as a **string** by the authorization server against the URL it dereferenced, so an
+exotic spelling can fail that comparison on a server that normalizes differently than the one here.
+Paste the origin the fixture announced rather than an equivalent you typed yourself.
+
+⚠️ **Clear OAuth state before the run if you have connected to this fixture before.** Tokens and the
+registered client persist in `~/.mcp-inspector/storage/oauth.json` independently of the install-wide
+CIMD toggle, and the Inspector reuses valid stored tokens before prompting — so a leftover grant can
+carry a run that the registration path never actually completed, which is the same
+"it connected, therefore CIMD worked" trap `supportDCR: false` exists to close. Use **Clear OAuth
+state and disconnect** (Server Settings → Authorization), or point `MCP_STORAGE_DIR` at a throwaway
+directory, which additionally survives a restarted fixture having forgotten a client it once issued.
+
+With that in place: set the metadata URL in Client settings, connect, and open **Connection Info**.
+It should read `Client registration — Client ID Metadata (CIMD)` with the **client id equal to the
+metadata URL**, which is what CIMD means and what distinguishes it from a DCR-issued
+`test_client_…`. On the broken build it read `Dynamic (DCR)` for exactly this flow
+([#2242](https://github.com/modelcontextprotocol/inspector/issues/2242)).
+
+⚠️ **`clientMetadata.redirectUris` must list the callback for the port you are running.** The
+Inspector's browser redirect is `<web origin>/oauth/callback` and the CLI/TUI's is
+`http://127.0.0.1:6276/oauth/callback`; the authorization server checks the incoming `redirect_uri`
+against this list. The shipped fixture lists **6274** (the default), **6330** and **6276**; on any
+other port the flow fails with `Invalid redirect_uri`, which reads like a CIMD problem and is not one.
+Add your port to the config rather than debugging the registration path.
+
+This fixture has **no** fixed-`issuerUrl` hazard, unlike several of the ones above: it configures no
+`issuerUrl`, and the document's `client_id` is derived from the request it was fetched over — query
+string included — so a server that walked to another port on `EADDRINUSE` still publishes a
+`client_id` equal to the URL you fetched, and the integration test drives it on a harness-chosen port
+for exactly that reason. The fixed-port dependency that *does* bite is `redirect_uris`, above.
 
 ## Revoking tokens on clear (RFC 7009)
 

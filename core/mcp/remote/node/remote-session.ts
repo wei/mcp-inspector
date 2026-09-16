@@ -4,12 +4,13 @@
 
 import type { Transport } from "@modelcontextprotocol/client";
 import type { JSONRPCMessage } from "@modelcontextprotocol/client";
-import type { FetchRequestEntryBase } from "../../types.js";
+import type { FetchRequestEntryBase, FetchStreamState } from "../../types.js";
 import type { RemoteEvent } from "../types.js";
 import type { AuthChallenge } from "../../../auth/challenge.js";
 import { AuthChallengeError } from "../../../auth/challenge.js";
 import type { RemoteAuthProviderHandle } from "./tokenAuthProvider.js";
 import type { RemoteAuthState } from "../types.js";
+import { progressTokenOf } from "../progressToken.js";
 
 export interface SessionEvent {
   type: RemoteEvent["type"];
@@ -19,6 +20,14 @@ export interface SessionEvent {
 type RequestWait = {
   resolve: () => void;
   reject: (error: Error) => void;
+  /**
+   * Re-arm this wait's timeout for another full window. Called when a
+   * `notifications/progress` for this request arrives, mirroring the SDK
+   * client's `resetTimeoutOnProgress` so the relay's own deadline never fires
+   * before the client's progress-aware one (#2028). A no-op when the wait was
+   * created without a timeout.
+   */
+  resetTimeout: () => void;
 };
 
 export class RemoteSession {
@@ -172,33 +181,55 @@ export class RemoteSession {
     timeoutMs = 60_000,
   ): Promise<void> {
     return new Promise((resolve, reject) => {
-      const timer =
-        timeoutMs > 0
-          ? setTimeout(() => {
-              this.requestWaits.delete(requestId);
-              reject(
-                new Error(
-                  `MCP request ${String(requestId)} timed out after ${timeoutMs}ms`,
-                ),
-              );
-            }, timeoutMs)
-          : undefined;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const arm = () => {
+        if (timeoutMs <= 0) return;
+        timer = setTimeout(() => {
+          this.requestWaits.delete(requestId);
+          reject(
+            new Error(
+              `MCP request ${String(requestId)} timed out after ${timeoutMs}ms`,
+            ),
+          );
+        }, timeoutMs);
+      };
+      const clear = () => {
+        if (timer !== undefined) {
+          clearTimeout(timer);
+          timer = undefined;
+        }
+      };
+      arm();
 
       this.requestWaits.set(requestId, {
         resolve: () => {
-          if (timer !== undefined) {
-            clearTimeout(timer);
-          }
+          clear();
           resolve();
         },
         reject: (error) => {
-          if (timer !== undefined) {
-            clearTimeout(timer);
-          }
+          clear();
           reject(error);
+        },
+        // A progress notification for this request re-arms the full window, so
+        // a tool that keeps reporting progress never trips the relay's own
+        // deadline — the same guarantee the SDK client's `resetTimeoutOnProgress`
+        // gives on a direct transport (#2028).
+        resetTimeout: () => {
+          if (timer === undefined) return;
+          clear();
+          arm();
         },
       });
     });
+  }
+
+  /**
+   * Re-arm a pending request's wait timeout. Invoked from {@link onMessage} when
+   * a `notifications/progress` carrying this request's `progressToken` arrives.
+   * A no-op when no wait is pending for the id.
+   */
+  noteRequestProgress(requestId: string | number): void {
+    this.requestWaits.get(requestId)?.resetTimeout();
   }
 
   cancelRequestWait(requestId: string | number): void {
@@ -265,6 +296,15 @@ export class RemoteSession {
     ) {
       this.settleRequestWait(message.id);
     }
+    // A `notifications/progress` carries the originating request's id in
+    // `params.progressToken` (the SDK stamps `progressToken: messageId`). Re-arm
+    // that request's wait so the relay's deadline tracks the client's
+    // progress-aware one instead of firing at a flat 60s (#2028). Log messages
+    // (`notifications/message`) deliberately do NOT reset it, matching the SDK.
+    const progressToken = progressTokenOf(message);
+    if (progressToken !== undefined) {
+      this.noteRequestProgress(progressToken);
+    }
     this.pushEvent({ type: "message", data: message });
   }
 
@@ -285,6 +325,17 @@ export class RemoteSession {
     this.pushEvent({
       type: "fetch_request_body_update",
       data: { id, responseBody },
+    });
+  }
+
+  onFetchStreamUpdate(id: string, stream: FetchStreamState): void {
+    this.pushEvent({
+      type: "fetch_stream_update",
+      data: {
+        id,
+        eventCount: stream.eventCount,
+        ...(stream.closedAt && { closedAt: stream.closedAt.toISOString() }),
+      },
     });
   }
 

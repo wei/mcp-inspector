@@ -21,6 +21,7 @@ import {
   serializeMcpConfig,
   storedFieldsToInspectorSettings,
 } from "@inspector/core/mcp/serverList.js";
+import { DEFAULT_CONNECTION_TIMEOUT_MS } from "@inspector/core/mcp/types.js";
 import type {
   InspectorServerSettings,
   MCPServerConfig,
@@ -258,7 +259,10 @@ describe("serverEntriesToMcpConfig", () => {
           url: "https://x.test/mcp",
           headers: { Authorization: "Bearer xyz" },
           metadata: { tenant: "acme", limits: { rps: 10 } },
-          connectionTimeout: 30000,
+          // Non-default on purpose: 30000 is DEFAULT_CONNECTION_TIMEOUT_MS,
+          // which the write side omits (as it does taskTtl's 60000), so it
+          // would not survive a byte-equal round-trip (#2320).
+          connectionTimeout: 45000,
           requestTimeout: 60000,
           oauth: {
             clientId: "client-abc",
@@ -452,6 +456,55 @@ describe("serverEntriesToMcpConfig", () => {
     expect(round).toEqual(original);
   });
 
+  it("round-trips the skills catalog budget (#2294)", () => {
+    const original: MCPConfig = {
+      mcpServers: {
+        sk: {
+          type: "streamable-http",
+          url: "https://x.test/mcp",
+          skillCatalogMaxSkills: 10,
+          skillCatalogMaxBytes: 2048,
+        },
+      },
+    };
+    const [entry] = mcpConfigToServerEntries(original);
+    expect(entry?.settings?.skillCatalogMaxSkills).toBe(10);
+    expect(entry?.settings?.skillCatalogMaxBytes).toBe(2048);
+    const round = serverEntriesToMcpConfig(mcpConfigToServerEntries(original));
+    expect(round).toEqual(original);
+  });
+
+  it("drops an unusable skills catalog limit on read and omits the default on write", () => {
+    const [entry] = mcpConfigToServerEntries({
+      mcpServers: {
+        sk: {
+          type: "streamable-http",
+          url: "https://x.test/mcp",
+          skillCatalogMaxSkills: 0,
+          skillCatalogMaxBytes: 1.5,
+        },
+      },
+    });
+    // Present on disk still materializes a settings node, but neither value
+    // is usable, so both read back as absent (the default budget).
+    expect(entry?.settings).toBeDefined();
+    expect(entry?.settings?.skillCatalogMaxSkills).toBeUndefined();
+    expect(entry?.settings?.skillCatalogMaxBytes).toBeUndefined();
+
+    const round = serverEntriesToMcpConfig([
+      {
+        ...entry!,
+        settings: {
+          ...entry!.settings!,
+          skillCatalogMaxSkills: 256,
+          skillCatalogMaxBytes: 64 * 1024 * 1024,
+        },
+      },
+    ]);
+    expect("skillCatalogMaxSkills" in (round.mcpServers.sk ?? {})).toBe(false);
+    expect("skillCatalogMaxBytes" in (round.mcpServers.sk ?? {})).toBe(false);
+  });
+
   it("round-trips protocolEra: lifts a non-default value to settings and back to disk", () => {
     const original: MCPConfig = {
       mcpServers: {
@@ -590,7 +643,8 @@ describe("serverEntriesToMcpConfig", () => {
       // Non-stdio server → empty env mirror in memory (for the form)
       env: [],
       metadata: {},
-      connectionTimeout: 0,
+      // Absent connectionTimeout on disk → product default in memory (#2320)
+      connectionTimeout: 30000,
       requestTimeout: 0,
       // Absent taskTtl on disk → product default in memory (for the form)
       taskTtl: 60000,
@@ -685,11 +739,45 @@ describe("serverEntriesToMcpConfig", () => {
     expect(stored?.headers).toEqual({ "X-Tenant": "acme" });
   });
 
-  it("omits zero-valued timeouts and empty oauth fields on serialize", () => {
-    // The form keeps numeric defaults at 0 and empty-string OAuth values.
-    // Round-tripping them onto disk would leave noisy `connectionTimeout: 0`
-    // / `oauth: {}` keys; suppress them so the diff stays minimal for
-    // entries the user never customized.
+  it("omits default-valued timeouts and empty oauth fields on serialize", () => {
+    // The form keeps the timeouts at their defaults (the 30 s product default
+    // for connectionTimeout, 0 = "SDK default" for requestTimeout) and
+    // empty-string OAuth values. Round-tripping them onto disk would leave
+    // noisy `connectionTimeout: 30000` / `oauth: {}` keys; suppress them so
+    // the diff stays minimal for entries the user never customized.
+    const entries: ServerEntry[] = [
+      {
+        id: "alpha",
+        name: "alpha",
+        config: { type: "streamable-http", url: "https://x.test" },
+        settings: {
+          headers: [],
+          env: [],
+          metadata: {},
+          connectionTimeout: DEFAULT_CONNECTION_TIMEOUT_MS,
+          requestTimeout: 0,
+          taskTtl: 0,
+          maxFetchRequests: 1000,
+          roots: [],
+        },
+        connection: { status: "disconnected" },
+      },
+    ];
+    const stored = serverEntriesToMcpConfig(entries).mcpServers.alpha;
+    expect(stored).not.toHaveProperty("connectionTimeout");
+    expect(stored).not.toHaveProperty("requestTimeout");
+    expect(stored).not.toHaveProperty("taskTtl");
+    expect(stored).not.toHaveProperty("oauth");
+    expect(stored).not.toHaveProperty("headers");
+    expect(stored).not.toHaveProperty("metadata");
+    expect(stored).not.toHaveProperty("roots");
+  });
+
+  it("persists an explicit connectionTimeout of 0 so the opt-out round-trips (#2320)", () => {
+    // 0 used to be the default and was suppressed on disk. Now that an absent
+    // field reads back as the 30 s product default, a suppressed 0 would
+    // silently turn "no timeout" into 30 s on the next load — so 0 is a real
+    // value here, written and read back as itself.
     const entries: ServerEntry[] = [
       {
         id: "alpha",
@@ -709,13 +797,11 @@ describe("serverEntriesToMcpConfig", () => {
       },
     ];
     const stored = serverEntriesToMcpConfig(entries).mcpServers.alpha;
-    expect(stored).not.toHaveProperty("connectionTimeout");
-    expect(stored).not.toHaveProperty("requestTimeout");
-    expect(stored).not.toHaveProperty("taskTtl");
-    expect(stored).not.toHaveProperty("oauth");
-    expect(stored).not.toHaveProperty("headers");
-    expect(stored).not.toHaveProperty("metadata");
-    expect(stored).not.toHaveProperty("roots");
+    expect(stored?.connectionTimeout).toBe(0);
+    const [entry] = mcpConfigToServerEntries({
+      mcpServers: { alpha: stored! },
+    });
+    expect(entry?.settings?.connectionTimeout).toBe(0);
   });
 
   it("round-trips roots (uri + optional name) onto the top-level disk field", () => {

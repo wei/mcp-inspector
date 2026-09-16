@@ -23,6 +23,11 @@ import {
   findWorkflowViolations,
   formatWorkflowViolations,
 } from "./workflow-gate.mjs";
+import {
+  GATE_LEASE_WRAPPER,
+  reachableScripts,
+  scriptChainRuns,
+} from "./npm-scripts.mjs";
 
 const repoRoot = join(import.meta.dirname, "..", "..");
 const workflowDir = join(repoRoot, ".github", "workflows");
@@ -606,7 +611,138 @@ describe("the gate's name", () => {
 
   it("is `local:gate`, and runs the local-only Storybook step", () => {
     assert.ok(scripts["local:gate"], "the pre-push gate must exist");
-    assert.match(scripts["local:gate"], /local:storybook/);
+    assert.match(scripts["local:gate:stages"], /local:storybook/);
+  });
+
+  it("runs its stages under the lease wrapper, and nothing else (#2339)", () => {
+    // The wrapper serializes gates across worktrees. It must be the ONLY thing
+    // `local:gate` does — a stage placed beside it would run outside the
+    // lease — and it must run exactly the stages script, so every assertion
+    // below about what the gate runs can read `local:gate:stages` directly.
+    assert.equal(
+      scripts["local:gate"],
+      `${GATE_LEASE_WRAPPER}npm run local:gate:stages`,
+    );
+    assert.ok(
+      scriptChainRuns(scripts, "local:gate", "local:storybook"),
+      "the wrapper is transparent to a chain vouch",
+    );
+  });
+
+  describe("runs each client's test suite once, not twice (#2341)", () => {
+    // CI runs each client's unit suite bare (inside `validate`) and again
+    // instrumented (inside `coverage`) on two PARALLEL runners, so the second
+    // pass is free there. The gate runs serially, where the bare pass was ~80s
+    // of a ~370s run re-executing exactly the files `coverage` runs a few
+    // minutes later. So the gate's first stage is `local:validate` — `validate`
+    // minus every client's `test` leg — and these pin the three properties
+    // that keep it honest: the gate no longer reaches a client's bare `test`,
+    // it still reaches every non-test check `validate` reaches, and `validate`
+    // itself (CI's inner loop) is untouched.
+    const clients = ["web", "cli", "tui", "launcher"];
+    const clientScripts = Object.fromEntries(
+      clients.map((c) => [
+        c,
+        JSON.parse(
+          readFileSync(join(repoRoot, "clients", c, "package.json"), "utf8"),
+        ).scripts,
+      ]),
+    );
+
+    it("starts from `local:validate`, and never from `validate`", () => {
+      assert.match(scripts["local:gate:stages"], /^npm run local:validate && /);
+      assert.doesNotMatch(
+        scripts["local:gate:stages"],
+        /\brun validate(?=$|[\s&;])/,
+      );
+      // Nothing reachable from the WHOLE gate — not just its first stage —
+      // may run `validate` or a client's `validate:*`: those are the doors
+      // through which the bare `test` leg would come back, and a later stage
+      // could open one just as easily as the first (Copilot).
+      const reached = reachableScripts(scripts, "local:gate");
+      assert.ok(!reached.has("validate"), "local:gate must not reach validate");
+      for (const c of clients)
+        assert.ok(
+          !reached.has(`validate:${c}`),
+          `local:gate must not reach validate:${c}`,
+        );
+      // Each client is visited AND its `check` is the very next command —
+      // matched together, so dropping one client's `npm run check` while the
+      // `cd` and another client's `check` remain cannot stay green (Copilot).
+      for (const c of clients)
+        assert.match(
+          scripts["local:validate"],
+          new RegExp(
+            `(?:cd (?:\\.\\./|clients/)${c} && npm run check|--prefix clients/${c} run check)(?=$|[\\s&;])`,
+          ),
+          `local:validate must run \`check\` in clients/${c}`,
+        );
+    });
+
+    it("shares the guards and `validate:core` with `validate`", () => {
+      // One list of durable guards, reached by both entry points — so a guard
+      // added to `validate:guards` lands in CI and in the gate together.
+      const gate = reachableScripts(scripts, "local:validate");
+      const inner = reachableScripts(scripts, "validate");
+      for (const name of ["validate:guards", "validate:core"]) {
+        assert.ok(gate.has(name), `local:validate must reach ${name}`);
+        assert.ok(inner.has(name), `validate must reach ${name}`);
+      }
+      // Everything `validate` reaches at the root that is not a client
+      // delegation is reached by the gate too.
+      for (const name of inner)
+        if (
+          name !== "validate" &&
+          !/^validate:(web|cli|tui|launcher)$/.test(name)
+        )
+          assert.ok(gate.has(name), `local:validate must reach ${name}`);
+    });
+
+    it("each client's `validate` is `check` plus `test`, and `check` runs no tests", () => {
+      for (const c of clients) {
+        const s = clientScripts[c];
+        assert.equal(
+          s.validate,
+          "npm run check && npm run test",
+          `clients/${c} validate`,
+        );
+        const fromCheck = reachableScripts(s, "check");
+        for (const name of fromCheck)
+          assert.doesNotMatch(
+            name,
+            /^(pre|post)?test(:|$)/,
+            `clients/${c} check must not reach ${name}`,
+          );
+        // `reachableScripts` follows `npm run <name>` only, so also reject the
+        // spellings that reach the suite without one: a direct `vitest`, and
+        // npm's built-in `npm test` / `npm t` / `npm tst` aliases (Copilot).
+        const checkCommands = [...fromCheck].map((n) => s[n]).join(" ");
+        assert.doesNotMatch(
+          checkCommands,
+          /\bvitest\b/,
+          `clients/${c} check must not invoke vitest`,
+        );
+        assert.doesNotMatch(
+          checkCommands,
+          /\bnpm (?:test|t|tst)(?=$|[\s&;])/,
+          `clients/${c} check must not invoke \`npm test\``,
+        );
+        // And `check` is the whole of `validate` minus the test leg: what
+        // `validate` reaches is exactly itself, plus what `check` reaches, plus
+        // what `test` reaches (its `pretest` build preambles included).
+        assert.deepEqual(
+          [...reachableScripts(s, "validate")].sort(),
+          [
+            ...new Set([
+              "validate",
+              ...fromCheck,
+              ...reachableScripts(s, "test"),
+            ]),
+          ].sort(),
+          `clients/${c} validate must reach exactly check + test`,
+        );
+      }
+    });
   });
 
   it("has no `ci` alias, not even a deprecated one", () => {

@@ -1,4 +1,4 @@
-import type { FetchRequestEntryBase } from "./types.js";
+import type { FetchRequestEntryBase, FetchStreamState } from "./types.js";
 
 /**
  * Header names whose values are replaced with `REDACTED_HEADER_VALUE` before a
@@ -151,6 +151,14 @@ function redactJsonValue(value: unknown): unknown {
  * multipart, so the risk is low; revisit if a multipart secret path appears.
  */
 export function redactBody(
+  body: string,
+  contentType: string | null | undefined,
+): string;
+export function redactBody(
+  body: string | undefined,
+  contentType: string | null | undefined,
+): string | undefined;
+export function redactBody(
   body: string | undefined,
   contentType: string | null | undefined,
 ): string | undefined {
@@ -190,11 +198,18 @@ export function redactBody(
   return body;
 }
 
-/** Case-insensitive lookup of a header value from a plain header record. */
-function findHeader(
-  headers: Record<string, string>,
+/**
+ * Case-insensitive lookup of a header value from a plain header record.
+ * Exported because a recorded entry's header casing is host-dependent (Node
+ * lowercases, happy-dom preserves the wire casing), so any consumer reading
+ * one back — the Network UI, the connection diagnostics — needs the same
+ * tolerance the tracker itself has.
+ */
+export function findHeader(
+  headers: Record<string, string> | undefined,
   name: string,
 ): string | undefined {
+  if (!headers) return undefined;
   const target = name.toLowerCase();
   for (const [key, value] of Object.entries(headers)) {
     if (key.toLowerCase() === target) return value;
@@ -215,12 +230,106 @@ export function isLongLivedStreamResponse(
   method: string,
   contentType: string | null | undefined,
 ): boolean {
-  if (method !== "GET") return false;
+  if (method.toUpperCase() !== "GET") return false;
   if (!contentType) return false;
+  // Media types are case-insensitive (RFC 9110 §8.3.1); a server may send
+  // `Text/Event-Stream` and still be sending an event stream.
+  const type = contentType.toLowerCase();
   return (
-    contentType.includes("text/event-stream") ||
-    contentType.includes("application/x-ndjson")
+    type.includes("text/event-stream") || type.includes("application/x-ndjson")
   );
+}
+
+/** Most of a 401/403 body the tracker will buffer before it stops reading. */
+export const CHALLENGE_BODY_MAX_BYTES = 64 * 1024;
+/** How long the tracker waits for a 401/403 body before giving up on the rest. */
+export const CHALLENGE_BODY_READ_MS = 2_000;
+/** Appended to a 401/403 body the tracker stopped reading early. */
+export const TRUNCATED_BODY_SUFFIX = "\n[truncated]";
+/**
+ * Recorded in place of a 401/403 body that was cut off and looks like JSON.
+ * {@link redactBody} can only mask fields in JSON that parses, so a cut-off
+ * prefix such as `{"access_token":"…",` would otherwise reach the log verbatim.
+ */
+export const WITHHELD_TRUNCATED_JSON_BODY =
+  "[truncated JSON body withheld: an incomplete body cannot be redacted]";
+
+interface ChallengeBodyRead {
+  text: string;
+  truncated: boolean;
+}
+
+/**
+ * The recorded form of a 401/403 body: redacted, marked when cut off, and never
+ * a cut-off JSON prefix. Form-encoded bodies still redact when cut, since each
+ * surviving `key=value` pair is parsed on its own; plain text has nothing to
+ * redact either way.
+ */
+function recordableChallengeBody(
+  read: ChallengeBodyRead,
+  contentType: string | null,
+): string {
+  if (!read.truncated) return redactBody(read.text, contentType);
+  const looksLikeJson =
+    (contentType ?? "").toLowerCase().includes("json") ||
+    /^\s*[{[]/.test(read.text);
+  if (looksLikeJson) return WITHHELD_TRUNCATED_JSON_BODY;
+  return redactBody(read.text, contentType) + TRUNCATED_BODY_SUFFIX;
+}
+
+/**
+ * Read a 401/403 response body from a clone, bounded by
+ * {@link CHALLENGE_BODY_MAX_BYTES} and {@link CHALLENGE_BODY_READ_MS}.
+ *
+ * Unlike every other status, a challenge body is read *before* the entry is
+ * recorded (#2297). An auth-challenge interceptor above the tracker cancels the
+ * response and throws as soon as the tracker returns, and on the web backend
+ * that ends the connect request — so a body delivered later, as a separate
+ * update, arrives after anything could still carry it to the log. The bound is
+ * what makes waiting safe: a body that never ends is cut off, and cancelling the
+ * clone's reader lets the interceptor's cancel of the original release the
+ * connection instead of leaving the clone draining it.
+ */
+async function readChallengeBody(
+  response: Response,
+): Promise<ChallengeBodyRead | undefined> {
+  let reader: ReadableStreamDefaultReader<Uint8Array>;
+  try {
+    const body = response.clone().body;
+    /* v8 ignore next -- the caller checked response.body, and a clone of a response with a body has one */
+    if (!body) return undefined;
+    reader = body.getReader();
+  } catch {
+    return undefined;
+  }
+
+  const decoder = new TextDecoder();
+  let text = "";
+  let bytes = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), CHALLENGE_BODY_READ_MS);
+  });
+  try {
+    while (bytes < CHALLENGE_BODY_MAX_BYTES) {
+      const next = await Promise.race([reader.read(), deadline]);
+      if (next === "timeout") break;
+      if (next.done) return { text: text + decoder.decode(), truncated: false };
+      // A stream may hand back one chunk far larger than the budget, so the cap
+      // is applied to the bytes, not to the chunk count.
+      const chunk = next.value.subarray(0, CHALLENGE_BODY_MAX_BYTES - bytes);
+      bytes += chunk.byteLength;
+      text += decoder.decode(chunk, { stream: true });
+    }
+    // Stopped early. Not awaited: cancel() adopts the source's promise, which a
+    // stalled body may never settle.
+    reader.cancel().catch(() => {});
+    return { text: text + decoder.decode(), truncated: true };
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export interface FetchTrackingCallbacks {
@@ -233,6 +342,194 @@ export interface FetchTrackingCallbacks {
    * never invoked and the entry's responseBody stays undefined.
    */
   updateResponseBody?: (id: string, responseBody: string) => void;
+  /**
+   * Called for a long-lived stream response — the one case `updateResponseBody`
+   * never covers — each time an SSE event is delivered on it, and once more
+   * when it ends (with `closedAt` set). Lets the consumer show that the stream
+   * is open and what it has carried, which is the whole diagnostic when a
+   * server serializes requests behind it (#2318).
+   */
+  updateStream?: (id: string, stream: FetchStreamState) => void;
+  /**
+   * How often, at most, `updateStream` reports a moving event count, in ms.
+   * The first report (open, zero events) and the close are immediate; counts
+   * in between are coalesced so a server pushing hundreds of notifications a
+   * second costs one update per window rather than one per event — each
+   * update re-publishes the whole fetch log and, on the web client, crosses
+   * the backend-to-browser event stream. Defaults to
+   * `DEFAULT_STREAM_UPDATE_INTERVAL_MS`; `0` reports every event, for tests.
+   */
+  streamUpdateIntervalMs?: number;
+}
+
+/** See `FetchTrackingCallbacks.streamUpdateIntervalMs`. */
+export const DEFAULT_STREAM_UPDATE_INTERVAL_MS = 250;
+
+/**
+ * The framing a long-lived stream's events arrive in — the two content types
+ * `isLongLivedStreamResponse` accepts. SSE dispatches on a blank line;
+ * NDJSON dispatches on every line.
+ */
+export type LongLivedStreamFraming = "sse" | "ndjson";
+
+/** The framing for a long-lived stream's content type. */
+export function longLivedStreamFraming(
+  contentType: string | null | undefined,
+): LongLivedStreamFraming {
+  return contentType?.toLowerCase().includes("application/x-ndjson")
+    ? "ndjson"
+    : "sse";
+}
+
+/**
+ * Count the events on a long-lived stream without buffering it, and report
+ * when it ends.
+ *
+ * Reads a `clone()` of the response through a reader and discards the bytes,
+ * so the transport keeps consuming the original at its own pace (the same
+ * tee the bounded-body path relies on). Counting follows the framing the
+ * transport's own parser applies. For SSE a blank line dispatches the block
+ * before it, and only a block carrying a `data` field is an event —
+ * keepalive comments (`: ping`) and bare `event:`/`id:` lines are not; a
+ * partial block at end-of-stream is dropped, exactly as the SSE spec and the
+ * SDK's `EventSourceParserStream` (which has no flush) drop it. For NDJSON
+ * every non-blank line is one event.
+ *
+ * Reports once as soon as watching starts (zero events, open), once per event,
+ * and once more on every exit from the read loop — a clean end-of-stream, a
+ * network error, or the transport aborting the fetch on disconnect (which
+ * errors both tee branches) — with `closedAt` set. The reader is never cancelled from here:
+ * cancelling one branch of a tee does not release the source, and
+ * `ReadableStream.cancel()` adopts the source's promise, which on a teardown
+ * path may never settle (the same hazard `core/mcp/remote/node/server.ts`
+ * documents at its own `cancel()` call).
+ */
+function watchLongLivedStream(
+  response: Response,
+  id: string,
+  framing: LongLivedStreamFraming,
+  callbacks: FetchTrackingCallbacks,
+): void {
+  const listener = callbacks.updateStream;
+  if (!listener) return;
+  // Every report goes through here: the listener is consumer code (a relay
+  // sink that may already be closed, a state store), and it runs from three
+  // places none of which may throw outward — synchronously inside the fetch
+  // wrapper (the open), from a timer (a coalesced count), and off the
+  // discarded watcher promise (the close). A throw is the listener's
+  // problem; the stream's bookkeeping carries on.
+  const report = (state: FetchStreamState): void => {
+    try {
+      listener(id, state);
+    } catch {
+      // See above.
+    }
+  };
+  const intervalMs =
+    callbacks.streamUpdateIntervalMs ?? DEFAULT_STREAM_UPDATE_INTERVAL_MS;
+  let body: ReadableStream<Uint8Array> | null;
+  try {
+    body = response.clone().body;
+  } catch {
+    // Clone failed (consumed body, transport quirks) — there is nothing to
+    // watch; the entry stays as tracked with no stream state.
+    return;
+  }
+  if (!body) return;
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let eventCount = 0;
+  let pending = "";
+  let blockHasData = false;
+  // A moving count is reported at most once per interval (see
+  // `streamUpdateIntervalMs`); the open and the close go out at once.
+  let reportTimer: ReturnType<typeof setTimeout> | null = null;
+  const reportCount = (): void => {
+    if (intervalMs <= 0) {
+      report({ eventCount });
+      return;
+    }
+    if (reportTimer !== null) return;
+    reportTimer = setTimeout(() => {
+      reportTimer = null;
+      report({ eventCount });
+    }, intervalMs);
+  };
+  // Announce the stream as open before a byte arrives. A stream that never
+  // delivers anything is the #2187 tell, and it would otherwise be the one
+  // stream with no state to show — the count only moves on an event.
+  report({ eventCount });
+
+  const consumeLine = (line: string): void => {
+    if (framing === "ndjson") {
+      if (line.trim() === "") return;
+      eventCount += 1;
+      reportCount();
+      return;
+    }
+    if (line === "") {
+      if (blockHasData) {
+        eventCount += 1;
+        blockHasData = false;
+        reportCount();
+      }
+      return;
+    }
+    // A field line is `name[:value]`; `data` with no colon is still a data
+    // field per the spec, so match the name rather than the `data:` prefix.
+    if (line === "data" || line.startsWith("data:")) blockHasData = true;
+  };
+
+  // Split off every complete line in `pending`. The SSE grammar (and the
+  // SDK's parser) accept LF, CRLF and a bare CR as a line ending, so all three
+  // end a line here; a CR that is the last byte so far is held back, since
+  // the LF of a CRLF pair may still be in flight in the next chunk.
+  const consumeCompleteLines = (): void => {
+    for (;;) {
+      const cr = pending.indexOf("\r");
+      const lf = pending.indexOf("\n");
+      const end = cr === -1 ? lf : lf === -1 ? cr : Math.min(cr, lf);
+      if (end === -1) return;
+      if (pending[end] === "\r") {
+        if (end === pending.length - 1) return;
+        const width = pending[end + 1] === "\n" ? 2 : 1;
+        consumeLine(pending.slice(0, end));
+        pending = pending.slice(end + width);
+      } else {
+        consumeLine(pending.slice(0, end));
+        pending = pending.slice(end + 1);
+      }
+    }
+  };
+
+  const pump = async (): Promise<void> => {
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        pending += decoder.decode(value, { stream: true });
+        consumeCompleteLines();
+      }
+      // A CR held back as a possible half of a CRLF is, at end-of-stream, a
+      // whole line ending — `data: x\r\r` is a complete event. Anything after
+      // it is a partial block and is dropped, as above.
+      if (pending.endsWith("\r")) consumeLine(pending.slice(0, -1));
+    } catch {
+      // An errored or aborted stream has still ended — fall through to report
+      // the close; the entry's `error` field is for a fetch that never got a
+      // response, which this one did.
+    }
+    if (reportTimer !== null) {
+      clearTimeout(reportTimer);
+      reportTimer = null;
+    }
+    report({ eventCount, closedAt: new Date() });
+  };
+  // Deliberately not awaited: the fetch wrapper has to return the response
+  // now, and this watcher lives as long as the stream does. It owns its own
+  // failures — the read loop is wrapped in a `try`, and every report goes
+  // through the non-throwing `report` above — so the promise cannot reject.
+  void pump();
 }
 
 /**
@@ -257,7 +554,12 @@ export function createFetchTracker(
         : input instanceof URL
           ? input.toString()
           : input.url;
-    const method = init?.method || "GET";
+    // The method decides the long-lived-stream classification below, so it
+    // has to be the one the request actually carries: a `Request` input
+    // carries its own, and HTTP methods compare case-insensitively.
+    const method = (
+      init?.method ?? (input instanceof Request ? input.method : "GET")
+    ).toUpperCase();
 
     // Extract headers, redacting sensitive values BEFORE they reach any
     // downstream sink (logger, in-memory list, persisted session storage).
@@ -376,7 +678,35 @@ export function createFetchTracker(
       duration,
     };
 
+    // Not gated on isLongLivedStream: that exclusion guards an unbounded read,
+    // and this one is bounded — so a challenge to an SSE GET is recorded too.
+    if (
+      (responseStatus === 401 || responseStatus === 403) &&
+      response.body &&
+      !response.bodyUsed
+    ) {
+      const read = await readChallengeBody(response);
+      entry.responseBody =
+        read === undefined
+          ? undefined
+          : recordableChallengeBody(read, response.headers.get("content-type"));
+      callbacks.trackRequest?.(entry);
+      return response;
+    }
+
     callbacks.trackRequest?.(entry);
+
+    // A long-lived stream is watched instead of read: its body never ends,
+    // but its event count and its eventual close are exactly the state a
+    // stalled connection is diagnosed from (#2318).
+    if (isLongLivedStream && response.body && !response.bodyUsed) {
+      watchLongLivedStream(
+        response,
+        id,
+        longLivedStreamFraming(response.headers.get("content-type")),
+        callbacks,
+      );
+    }
 
     // Kick off a fire-and-forget read of the cloned body. The clone is an
     // independent tee'd stream so the transport keeps consuming the

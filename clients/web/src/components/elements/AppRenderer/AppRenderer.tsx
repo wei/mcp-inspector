@@ -245,12 +245,7 @@ export function AppRenderer({
     if (pendingResultRef.current !== null) {
       const result = pendingResultRef.current;
       pendingResultRef.current = null;
-      // ext-apps' AppBridge peers on SDK v1's CallToolResult (whose
-      // `structuredContent` is typed narrower than v2's). Runtime-compatible;
-      // cast at this boundary. TODO: drop when ext-apps#702 ships a v2 peer.
-      void bridge.sendToolResult(
-        result as Parameters<typeof bridge.sendToolResult>[0],
-      );
+      void bridge.sendToolResult(result);
     }
   }, []);
 
