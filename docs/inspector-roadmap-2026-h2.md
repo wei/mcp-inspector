@@ -8,6 +8,10 @@
 **Owner:** [Inspector V2 WG](https://modelcontextprotocol.io/community/working-groups/inspector-v2)
 **Status:** Draft for WG review — **revised 2026-09-16** against the published MCP roadmap of 2026-08-22 (#2400)
 
+## Work we can start now, no external blockers
+
+[Inspector Unblocked Work](https://claude.ai/artifact/MTFGsTVbKCqMchA1JYHo83) lists the roadmap items that depend on nothing outside this repo.
+
 ---
 
 ## Table of Contents
