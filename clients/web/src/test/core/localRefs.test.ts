@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   EXPANSION_BUDGET,
+  MAX_DEPTH,
   inlineLocalRefs,
 } from "@inspector/core/json/localRefs.js";
 
@@ -92,8 +93,9 @@ describe("inlineLocalRefs", () => {
         scalar: { $ref: "#/$defs/S/type" },
         pastEnd: { $ref: "#/$defs/L/5" },
         badIndex: { $ref: "#/$defs/L/01" },
+        badEscape2: { $ref: "#/$defs/A~2B" },
       },
-      $defs: { S: date, L: [date] },
+      $defs: { S: date, L: [date], "A~2B": date },
     });
     expect(resolved.properties).toEqual({
       remote: { $ref: "https://example.com/s.json" },
@@ -103,6 +105,7 @@ describe("inlineLocalRefs", () => {
       scalar: { $ref: "#/$defs/S/type" },
       pastEnd: { $ref: "#/$defs/L/5" },
       badIndex: { $ref: "#/$defs/L/01" },
+      badEscape2: { $ref: "#/$defs/A~2B" },
     });
   });
 
@@ -230,5 +233,66 @@ describe("inlineLocalRefs", () => {
     const schema = { properties: { top: { $ref: "#/$defs/L20" } }, $defs };
     expect(2 ** 20).toBeGreaterThan(EXPANSION_BUDGET);
     expect(inlineLocalRefs(schema)).toBe(schema);
+  });
+  it("copies extension keywords as data even when they hold a $ref", () => {
+    const resolved = inlineLocalRefs({
+      type: "object",
+      "x-vendor": { $ref: "#/$defs/D" },
+      properties: { a: { $ref: "#/$defs/D" } },
+      $defs: { D: date },
+    });
+    expect(resolved["x-vendor"]).toEqual({ $ref: "#/$defs/D" });
+    expect(resolved.properties.a).toEqual(date);
+  });
+
+  it("walks every subschema keyword shape", () => {
+    const pointer = { $ref: "#/$defs/D" };
+    const resolved = inlineLocalRefs({
+      not: pointer,
+      items: [pointer],
+      prefixItems: [pointer],
+      patternProperties: { "^x": pointer },
+      allOf: "not an array",
+      properties: "not a map",
+      $defs: { D: date },
+    });
+    expect(resolved).toMatchObject({
+      not: date,
+      items: [date],
+      prefixItems: [date],
+      patternProperties: { "^x": date },
+      allOf: "not an array",
+      properties: "not a map",
+    });
+  });
+
+  it("keeps enumNames beside a $ref as an annotation", () => {
+    const resolved = inlineLocalRefs({
+      properties: { c: { $ref: "#/$defs/C", enumNames: ["Red"] } },
+      $defs: { C: { type: "string", enum: ["r"] } },
+    });
+    expect(resolved.properties.c).toEqual({
+      type: "string",
+      enum: ["r"],
+      enumNames: ["Red"],
+    });
+  });
+
+  it("returns the schema unresolved past MAX_DEPTH, in either pass", () => {
+    // Deeper than the stack allows, with the $ref at the bottom: the scan bails.
+    let deep: Record<string, unknown> = { $ref: "#/$defs/D" };
+    for (let n = 0; n < 6000; n++) deep = { items: deep };
+    const scanned = { ...deep, $defs: { D: date } };
+    expect(inlineLocalRefs(scanned)).toBe(scanned);
+
+    // Within the bound where it is declared (`$defs/T`, one level down) but
+    // past it once inlined under `properties/a` (two down): only inlining bails.
+    let tall: Record<string, unknown> = { type: "string" };
+    for (let n = 0; n < MAX_DEPTH - 1; n++) tall = { items: tall };
+    const inlined = {
+      properties: { a: { $ref: "#/$defs/T" } },
+      $defs: { T: tall },
+    };
+    expect(inlineLocalRefs(inlined)).toBe(inlined);
   });
 });

@@ -32,23 +32,52 @@
  * - **Expansion is bounded.** Inlining copies a referent at every use, so a
  *   chain of definitions each using the previous one twice grows as `2^n`
  *   from an `O(n)` schema. A server controls the schema, so past
- *   {@link EXPANSION_BUDGET} nodes the whole schema is returned unresolved
- *   rather than freezing the form that renders it.
+ *   {@link EXPANSION_BUDGET} nodes — or {@link MAX_DEPTH} levels of nesting,
+ *   which would otherwise overflow the stack — the whole schema is returned
+ *   unresolved rather than freezing or crashing the form that renders it.
  */
 
-/** Keywords whose values are data, not subschemas — never walked. */
-const DATA_KEYWORDS = new Set(["const", "default", "enum", "examples"]);
+/*
+ * Where subschemas live, and nowhere else. Every other keyword's value is data
+ * — `const`, `enum`, an `x-vendor` extension — and is copied untouched even
+ * when it happens to hold a `$ref`-shaped object. Same lists as
+ * `schemaLint.ts`.
+ */
+
+/** Keywords whose value is one subschema (or, for draft-04 `items`, an array). */
+const SUBSCHEMA_KEYWORDS = new Set([
+  "items",
+  "contains",
+  "not",
+  "propertyNames",
+  "if",
+  "then",
+  "else",
+  "additionalProperties",
+  "unevaluatedProperties",
+  "additionalItems",
+  "unevaluatedItems",
+  "contentSchema",
+]);
+
+/** Keywords whose value is an array of subschemas. */
+const SUBSCHEMA_ARRAY_KEYWORDS = new Set([
+  "allOf",
+  "anyOf",
+  "oneOf",
+  "prefixItems",
+]);
 
 /**
  * Keywords whose values map arbitrary NAMES to subschemas. Their keys are
  * user-chosen, so a property called `default` is a schema, not data.
  */
-const NAME_MAP_KEYWORDS = new Set([
+const SUBSCHEMA_MAP_KEYWORDS = new Set([
   "properties",
   "patternProperties",
   "dependentSchemas",
-  // Pre-2019 spelling of `dependentSchemas` (its array values are name lists,
-  // which the walk passes through untouched).
+  // Pre-2019 spelling of `dependentSchemas`; its array values are property
+  // name lists, which are not schemas and pass through untouched.
   "dependencies",
   "$defs",
   "definitions",
@@ -67,6 +96,8 @@ const NON_CONSTRAINT_SIBLINGS = new Set([
   "deprecated",
   "readOnly",
   "writeOnly",
+  // Non-standard labels for `enum` values, read by both form builders.
+  "enumNames",
   "$comment",
   "$schema",
   "$id",
@@ -77,8 +108,15 @@ const NON_CONSTRAINT_SIBLINGS = new Set([
 /** Most schema nodes one inlining may produce before it gives up. */
 export const EXPANSION_BUDGET = 10_000;
 
-/** Thrown to unwind a traversal that has spent {@link EXPANSION_BUDGET}. */
-class BudgetExceeded extends Error {}
+/**
+ * Deepest subschema nesting either pass walks before it gives up — the same
+ * bound `schemaLint.ts` uses. Both passes recurse, and a server can nest far
+ * deeper than the call stack allows.
+ */
+export const MAX_DEPTH = 64;
+
+/** Thrown to unwind a traversal that hit a bound; the input is returned. */
+class Bail extends Error {}
 
 type JsonRecord = Record<string, unknown>;
 
@@ -92,12 +130,55 @@ interface Traversal {
 /** Charge one produced node against the traversal's budget. */
 function spend(traversal: Traversal): void {
   traversal.remaining -= 1;
-  if (traversal.remaining < 0) throw new BudgetExceeded();
+  if (traversal.remaining < 0) throw new Bail();
 }
 
-/** Whether `key` holds data rather than a subschema, in a schema object. */
-function isDataKey(key: string, inNameMap: boolean): boolean {
-  return !inNameMap && DATA_KEYWORDS.has(key);
+/**
+ * Rebuild `node` with `visit` applied to each subschema it holds directly,
+ * copying every other value untouched.
+ */
+function mapSubschemas(
+  node: JsonRecord,
+  visit: (child: unknown) => unknown,
+): JsonRecord {
+  const result: JsonRecord = {};
+  for (const [key, value] of Object.entries(node)) {
+    let next: unknown = value;
+    if (SUBSCHEMA_KEYWORDS.has(key)) {
+      next = Array.isArray(value) ? value.map(visit) : visit(value);
+    } else if (SUBSCHEMA_ARRAY_KEYWORDS.has(key) && Array.isArray(value)) {
+      next = value.map(visit);
+    } else if (SUBSCHEMA_MAP_KEYWORDS.has(key) && isRecord(value)) {
+      next = mapNames(value, visit);
+    }
+    define(result, key, next);
+  }
+  return result;
+}
+
+/** A name → subschema map with `visit` applied to each value. */
+function mapNames(
+  map: JsonRecord,
+  visit: (child: unknown) => unknown,
+): JsonRecord {
+  const result: JsonRecord = {};
+  for (const [name, value] of Object.entries(map)) {
+    define(result, name, Array.isArray(value) ? value : visit(value));
+  }
+  return result;
+}
+
+/**
+ * `defineProperty`, not assignment: `__proto__` is a legal property name in a
+ * schema's `properties`, and assigning it would set the prototype instead.
+ */
+function define(target: JsonRecord, key: string, value: unknown): void {
+  Object.defineProperty(target, key, {
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
 }
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -120,7 +201,10 @@ function resolvePointer(root: unknown, ref: string): unknown {
   if (!pointer.startsWith("/")) return undefined;
   let current: unknown = root;
   for (const token of pointer.slice(1).split("/")) {
-    // RFC 6901 escaping, `~1` before `~0` so `~01` decodes to `~1`.
+    // `~0` and `~1` are the only escapes RFC 6901 defines; anything else makes
+    // the pointer malformed rather than naming a key that happens to match.
+    if (/~(?![01])/.test(token)) return undefined;
+    // `~1` before `~0`, so `~01` decodes to `~1`.
     const segment = token.replace(/~1/g, "/").replace(/~0/g, "~");
     if (Array.isArray(current)) {
       const index = Number(segment);
@@ -137,27 +221,26 @@ function resolvePointer(root: unknown, ref: string): unknown {
   return current;
 }
 
-/** Whether any subschema position in `node` holds a `$ref` string. */
-function containsRef(node: unknown, inNameMap = false): boolean {
-  if (Array.isArray(node)) return node.some((item) => containsRef(item));
+/** Whether any subschema in `node` holds a `$ref` string. */
+function containsRef(node: unknown, depth: number): boolean {
+  if (depth > MAX_DEPTH) throw new Bail();
   if (!isRecord(node)) return false;
-  if (!inNameMap && typeof node.$ref === "string") return true;
-  return Object.entries(node).some(
-    ([key, value]) =>
-      !isDataKey(key, inNameMap) &&
-      containsRef(value, !inNameMap && NAME_MAP_KEYWORDS.has(key)),
-  );
+  if (typeof node.$ref === "string") return true;
+  let found = false;
+  mapSubschemas(node, (child) => {
+    found ||= containsRef(child, depth + 1);
+    return child;
+  });
+  return found;
 }
 
-function inline(node: unknown, traversal: Traversal): unknown {
-  if (Array.isArray(node)) {
-    spend(traversal);
-    return node.map((item) => inline(item, traversal));
-  }
+function inline(node: unknown, traversal: Traversal, depth: number): unknown {
+  if (depth > MAX_DEPTH) throw new Bail();
   if (!isRecord(node)) return node;
   // An embedded resource: its pointers are relative to itself (see the header).
   if (node !== traversal.root && typeof node.$id === "string") return node;
   spend(traversal);
+  const visit = (child: unknown) => inline(child, traversal, depth + 1);
 
   const ref = node.$ref;
   const siblingsConstrain = Object.keys(node).some(
@@ -171,41 +254,14 @@ function inline(node: unknown, traversal: Traversal): unknown {
     const target = resolvePointer(traversal.root, ref);
     if (isRecord(target)) {
       traversal.active.add(ref);
-      const resolved = inline(target, traversal) as JsonRecord;
+      const resolved = visit(target) as JsonRecord;
       traversal.active.delete(ref);
       const siblings: JsonRecord = { ...node };
       delete siblings.$ref;
-      return { ...resolved, ...inlineEntries(siblings, traversal, false) };
+      return { ...resolved, ...mapSubschemas(siblings, visit) };
     }
   }
-  return inlineEntries(node, traversal, false);
-}
-
-function inlineEntries(
-  node: JsonRecord,
-  traversal: Traversal,
-  inNameMap: boolean,
-): JsonRecord {
-  const result: JsonRecord = {};
-  for (const [key, value] of Object.entries(node)) {
-    let next: unknown = value;
-    if (inNameMap) {
-      next = inline(value, traversal);
-    } else if (NAME_MAP_KEYWORDS.has(key) && isRecord(value)) {
-      next = inlineEntries(value, traversal, true);
-    } else if (!isDataKey(key, false)) {
-      next = inline(value, traversal);
-    }
-    // `defineProperty`, not assignment: `__proto__` is a legal property name
-    // in a schema's `properties`, and assigning it would set the prototype.
-    Object.defineProperty(result, key, {
-      value: next,
-      writable: true,
-      enumerable: true,
-      configurable: true,
-    });
-  }
-  return result;
+  return mapSubschemas(node, visit);
 }
 
 // Keyed on the input object: form panels call this on every render, and a
@@ -215,26 +271,29 @@ const cache = new WeakMap<object, unknown>();
 /**
  * `schema` with every resolvable same-document `$ref` replaced by its referent.
  *
- * Returns `schema` itself — same reference — when it contains no `$ref` or
- * inlining would exceed {@link EXPANSION_BUDGET}, and the same resolved object for repeated calls with the same input. Never
+ * Returns `schema` itself — same reference — when it contains no `$ref`, or
+ * when inlining would exceed {@link EXPANSION_BUDGET} or {@link MAX_DEPTH};
+ * and the same resolved object for repeated calls with the same input. Never
  * mutates the input.
  */
 export function inlineLocalRefs<T>(schema: T): T {
-  if (!isRecord(schema) || !containsRef(schema)) return schema;
+  if (!isRecord(schema)) return schema;
   const cached = cache.get(schema);
   if (cached !== undefined) return cached as T;
   // The result is the input's own shape with references expanded, so it is
   // still a `T` to every caller that reads it as one.
   let resolved: T;
   try {
-    resolved = inline(schema, {
-      root: schema,
-      active: new Set(),
-      remaining: EXPANSION_BUDGET,
-    }) as T;
+    resolved = containsRef(schema, 0)
+      ? (inline(
+          schema,
+          { root: schema, active: new Set(), remaining: EXPANSION_BUDGET },
+          0,
+        ) as T)
+      : schema;
   } catch (error) {
-    /* v8 ignore next -- only BudgetExceeded is thrown by the traversal */
-    if (!(error instanceof BudgetExceeded)) throw error;
+    /* v8 ignore next -- Bail is the only thing either traversal throws */
+    if (!(error instanceof Bail)) throw error;
     resolved = schema;
   }
   cache.set(schema, resolved);
