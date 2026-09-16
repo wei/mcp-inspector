@@ -140,6 +140,293 @@ function bearerChallenge(config: OAuthConfig, req: Request): string {
 }
 
 /**
+ * The OAuth endpoints a fixture can be told to stall.
+ *
+ * One name per call that #2319 put an `AbortSignal.timeout` on, plus
+ * `authorize` for completeness. They are named for the *call* rather than the
+ * path because two of them share `/oauth/token` (exchange and refresh are the
+ * same endpoint with a different `grant_type`), and because the path of the
+ * protected-resource document is itself configurable.
+ */
+export const STALLABLE_OAUTH_ENDPOINTS = [
+  "protected-resource-metadata",
+  "as-metadata",
+  "authorize",
+  "token",
+  "revoke",
+  "register",
+] as const;
+
+export type StallableOAuthEndpoint = (typeof STALLABLE_OAUTH_ENDPOINTS)[number];
+
+/**
+ * The largest delay `setTimeout` can actually schedule. Past `2 ** 31 - 1` the
+ * delay overflows a 32-bit signed integer and Node falls back to **1ms**, so an
+ * over-large `stallMs` would produce an *immediate* answer — the opposite of
+ * what the fixture author asked for. Mirrors `MAX_TIMER_DELAY_MS` in
+ * `core/auth/requestTimeout.ts`, which exists for the same reason.
+ */
+export const MAX_STALL_MS = 2_147_483_647;
+
+/**
+ * Render a rejected config value for an error message.
+ *
+ * ⚠️ `JSON.stringify` returns the string `"null"` for `NaN` and `Infinity` — the
+ * two values most likely to reach the `stallMs` check — so an error built with
+ * it names the wrong offending value and sends the reader looking for a `null`
+ * they did not write (Copilot). Strings keep their quotes, which is what makes
+ * `"600"` distinguishable from `600` in the message.
+ */
+function describeValue(value: unknown): string {
+  if (typeof value === "number" && !Number.isFinite(value))
+    return String(value);
+  return JSON.stringify(value) ?? String(value);
+}
+
+export function isStallableOAuthEndpoint(
+  value: unknown,
+): value is StallableOAuthEndpoint {
+  return (STALLABLE_OAUTH_ENDPOINTS as readonly unknown[]).includes(value);
+}
+
+/** How a stallable endpoint is addressed: its path, and the methods it serves. */
+export interface StallTarget {
+  path: string;
+  methods: readonly string[];
+}
+
+/**
+ * Where each stallable endpoint lives, for this config.
+ *
+ * Two of these are configurable, so the map is built per config rather than
+ * hardcoded: the protected-resource document moves with `resourceMetadataPath`
+ * and the AS metadata with `asMetadataPath`. Getting either wrong would make
+ * the stall silently never match, which is the one failure this fixture must
+ * not have — a test would then read as "the timeout did not fire". Every entry
+ * is covered by a real-request test for exactly that reason.
+ *
+ * ⚠️ **The method is part of the identity, not decoration.** Both configurable
+ * paths are caller-supplied, so a config may legitimately point one of them at
+ * a path another endpoint already uses — `asMetadataPath: "/oauth/token"` is
+ * valid. Keyed on path alone, selecting `token` would then also stall the
+ * metadata GET and selecting `as-metadata` would stall the token POST, which
+ * breaks the per-call contract this option exists to provide (Copilot).
+ *
+ * `authorize` serves both GET (the consent page) and POST (the submission), so
+ * it carries both: stalling "the authorize call" means either direction.
+ */
+/**
+ * Does this config actually serve `endpoint`?
+ *
+ * Mirrors the route registration in `setupOAuthRoutes` / `setupMetadataEndpoints`
+ * exactly — the protected-resource document is always served, everything else
+ * on the local AS exists only in `combined` mode, and two routes carry their own
+ * feature flags. Kept adjacent to `stallTargetsFor` so the two stay in step: a
+ * new OAuth route needs an entry in both.
+ */
+export function servesEndpoint(
+  config: OAuthConfig,
+  endpoint: StallableOAuthEndpoint,
+): boolean {
+  const combined = getOAuthMode(config) === "combined";
+  switch (endpoint) {
+    case "protected-resource-metadata":
+      return true;
+    case "as-metadata":
+    case "authorize":
+    case "token":
+      return combined;
+    case "revoke":
+      return combined && config.supportRevocation !== false;
+    case "register":
+      return combined && config.supportDCR === true;
+  }
+}
+
+export function stallTargetsFor(
+  config: OAuthConfig,
+): Record<StallableOAuthEndpoint, StallTarget> {
+  return {
+    "protected-resource-metadata": {
+      path:
+        resourceMetadataPath(config) ?? "/.well-known/oauth-protected-resource",
+      methods: ["GET"],
+    },
+    "as-metadata": { path: asMetadataPath(config), methods: ["GET"] },
+    authorize: { path: "/oauth/authorize", methods: ["GET", "POST"] },
+    token: { path: "/oauth/token", methods: ["POST"] },
+    revoke: { path: "/oauth/revoke", methods: ["POST"] },
+    register: { path: "/oauth/register", methods: ["POST"] },
+  };
+}
+
+/**
+ * How many requests are currently parked in a stall on one server.
+ *
+ * A test waits on this to know a request was actually **accepted and parked**,
+ * instead of sleeping and hoping. That distinction is the whole point of the
+ * teardown test: a fixed sleep that lost the race would stop the server before
+ * the request arrived, the fetch would then reject because the server closed,
+ * and the test would pass without ever exercising `closeAllConnections()` on an
+ * established request (Copilot).
+ *
+ * ⚠️ **Per server, deliberately not a module-level counter.** A module global
+ * was tried first and failed under Vitest, which can load this module more than
+ * once: the middleware incremented one copy while the test polled another, and
+ * the wait timed out with the fixture working perfectly. Hanging the state off
+ * the server instance the test already holds makes module identity irrelevant —
+ * and scopes the count to one fixture, which is what a caller means anyway.
+ */
+export interface StallRegistry {
+  parked: number;
+}
+
+export function createStallRegistry(): StallRegistry {
+  return { parked: 0 };
+}
+
+/**
+ * Accept a request on a configured endpoint and withhold its response.
+ *
+ * ⚠️ **This deliberately calls neither `next()` nor any `res` method.** That is
+ * the whole point: the socket is accepted and established, the client's fetch
+ * is pending, and nothing ever answers — which is the state #2319 describes and
+ * the one a `fetch` stub cannot reproduce. A stub rejects or resolves on the
+ * client side; only a real server holding a real socket exercises the
+ * `AbortSignal.timeout` that #2319 added.
+ *
+ * With `stallMs > 0` it answers late instead of never, by handing control back
+ * to the real route after the delay — so one fixture covers both "slower than
+ * the budget" and "never".
+ *
+ * **Teardown is already safe and this relies on it rather than re-implementing
+ * it.** `TestServerHttp.stop()` calls `httpServer.closeAllConnections?.()`,
+ * which destroys an established socket whether or not a response was ever
+ * written. A withheld response therefore cannot hang a suite at teardown —
+ * `stalls the token endpoint and still stops cleanly` pins that, because it is
+ * the property most likely to be broken by a future change to the stop path.
+ */
+export function createOAuthStallMiddleware(
+  config: OAuthConfig,
+  registry?: StallRegistry,
+): express.RequestHandler | null {
+  // ⚠️ Validate the CONTAINER before its contents. A JSON/YAML config is only
+  // cast, so `stallEndpoints` can arrive as a string, `null`, or an object with
+  // a `length`. A bare `.length === 0` check accepts `""` and `{ length: 0 }`
+  // and silently returns "no stalling configured" — the precise misconfiguration
+  // this startup validation exists to catch — while a non-empty string fails
+  // later with an incidental `.filter is not a function` (Copilot).
+  if (
+    config.stallEndpoints !== undefined &&
+    !Array.isArray(config.stallEndpoints)
+  ) {
+    throw new Error(
+      `oauth.stallEndpoints must be an array (got ${JSON.stringify(config.stallEndpoints)}).`,
+    );
+  }
+  const requested = config.stallEndpoints ?? [];
+  if (requested.length === 0) return null;
+
+  const unknown = requested.filter((e) => !isStallableOAuthEndpoint(e));
+  if (unknown.length > 0) {
+    // Loud, not ignored: a typo would otherwise produce a fixture that answers
+    // normally, and a test asserting a timeout would fail pointing at the
+    // timeout rather than at the config.
+    throw new Error(
+      `Unknown oauth.stallEndpoints entry: ${unknown.map((e) => JSON.stringify(e)).join(", ")}. ` +
+        `Expected one of: ${STALLABLE_OAUTH_ENDPOINTS.join(", ")}.`,
+    );
+  }
+
+  // ⚠️ `stallMs` needs validating for the same reason `stallEndpoints` does, and
+  // more urgently: a JSON/YAML config is only *cast* to its interface, so
+  // anything can arrive here. Unchecked, a negative or non-numeric value makes
+  // `stallMs > 0` false and silently becomes a PERMANENT stall, and a value past
+  // the 32-bit timer range overflows and fires almost immediately — both of
+  // which read as "the timeout behaved strangely" rather than "the config is
+  // wrong" (Copilot).
+  // ⚠️ `?? 0` would turn an explicit `stallMs: null` from a config file into a
+  // valid 0 and skip every check below, silently producing a permanent stall.
+  // Only an OMITTED value gets the default; `null` falls through to the
+  // finite-number check and is rejected (Copilot).
+  const rawStallMs = config.stallMs === undefined ? 0 : config.stallMs;
+  if (
+    typeof rawStallMs !== "number" ||
+    !Number.isFinite(rawStallMs) ||
+    rawStallMs < 0 ||
+    rawStallMs > MAX_STALL_MS
+  ) {
+    throw new Error(
+      `oauth.stallMs must be a finite number between 0 and ${MAX_STALL_MS} (got ${describeValue(config.stallMs)}).`,
+    );
+  }
+
+  // ⚠️ Refuse to stall a route this config does not actually serve. The stall
+  // middleware runs BEFORE Express routing, so it will happily hold a request
+  // for an endpoint that would otherwise 404 — turning a contradictory fixture
+  // (`supportDCR: false` with `stallEndpoints: ["register"]`) into a hanging
+  // registration endpoint rather than a configuration error, and inviting a
+  // timeout test that passes for entirely the wrong reason (Copilot).
+  const unavailable = requested.filter(
+    (endpoint) => !servesEndpoint(config, endpoint),
+  );
+  if (unavailable.length > 0) {
+    throw new Error(
+      `oauth.stallEndpoints names ${unavailable.map((e) => JSON.stringify(e)).join(", ")}, ` +
+        `which this config does not serve (mode=${getOAuthMode(config)}, ` +
+        `supportDCR=${String(config.supportDCR ?? false)}, ` +
+        `supportRevocation=${String(config.supportRevocation !== false)}). ` +
+        "Stalling a route that would otherwise 404 produces a hang that reads as a timeout.",
+    );
+  }
+
+  const targets = stallTargetsFor(config);
+  // `${METHOD} ${path}` rather than a path set — see `stallTargetsFor`.
+  const stalled = new Set(
+    requested.flatMap((endpoint) => {
+      const { path, methods } = targets[endpoint];
+      return methods.map((method) => `${method} ${path}`);
+    }),
+  );
+  const stallMs = rawStallMs;
+
+  return (req: Request, res: Response, next: express.NextFunction) => {
+    // `req.path`, never `req.url`: the latter carries the query string, which
+    // every authorize request has, so matching on it would silently stop
+    // hitting `authorize` while every bare-path endpoint kept working.
+    if (!stalled.has(`${req.method} ${req.path}`)) {
+      next();
+      return;
+    }
+
+    if (registry) registry.parked += 1;
+    // One decrement per request, whichever way it ends: answered late, or the
+    // socket destroyed under it. Without this the counter only ever rises and
+    // a later "wait until parked" would pass instantly on a stale count.
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      if (registry) registry.parked -= 1;
+    };
+    res.on("close", release);
+
+    if (stallMs > 0) {
+      const timer = setTimeout(() => {
+        release();
+        next();
+      }, stallMs);
+      // Release the timer if the client gives up first, so a stalled fixture
+      // cannot keep the event loop alive past the test that used it.
+      res.on("close", () => clearTimeout(timer));
+      return;
+    }
+    // Answer never. The socket stays established and idle until the client's
+    // own timeout fires or the server destroys it on stop.
+  };
+}
+
+/**
  * Set up OAuth routes on an Express application
  * This adds all OAuth endpoints (authorization, token, metadata, etc.)
  *
@@ -149,7 +436,14 @@ function bearerChallenge(config: OAuthConfig, req: Request): string {
 export function setupOAuthRoutes(
   app: express.Application,
   config: OAuthConfig,
+  stallRegistry?: StallRegistry,
 ): void {
+  // Ahead of every OAuth route, so a stalled endpoint is withheld before any
+  // handler can answer it — including the metadata documents, which are
+  // registered first.
+  const stall = createOAuthStallMiddleware(config, stallRegistry);
+  if (stall) app.use(stall);
+
   setupMetadataEndpoints(app, config);
 
   if (getOAuthMode(config) === "combined") {
