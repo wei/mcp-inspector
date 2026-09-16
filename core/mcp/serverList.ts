@@ -163,6 +163,7 @@ type StoredInspectorFields = Pick<
   | "taskTtl"
   | "autoRefreshOnListChanged"
   | "paginatedLists"
+  | "suppressNotificationStream"
   | "advertisedExtensions"
   | "maxFetchRequests"
   | "skillCatalogMaxSkills"
@@ -526,6 +527,7 @@ export function storedFieldsToInspectorSettings(
     stored.taskTtl !== undefined ||
     stored.autoRefreshOnListChanged !== undefined ||
     stored.paginatedLists !== undefined ||
+    stored.suppressNotificationStream !== undefined ||
     stored.advertisedExtensions !== undefined ||
     stored.maxFetchRequests !== undefined ||
     stored.skillCatalogMaxSkills !== undefined ||
@@ -575,6 +577,11 @@ export function storedFieldsToInspectorSettings(
   }
   if (isSkillCatalogLimit(stored.skillCatalogMaxBytes)) {
     settings.skillCatalogMaxBytes = stored.skillCatalogMaxBytes;
+  }
+  // Hand-edited non-boolean values are dropped (→ off) rather than coerced;
+  // only an explicit `true` suppresses the stream (#2317).
+  if (stored.suppressNotificationStream === true) {
+    settings.suppressNotificationStream = true;
   }
   // Absent on disk reads back as the default era; the write side then omits the
   // default so a byte-stable round-trip never injects `protocolEra` into files
@@ -717,6 +724,11 @@ export function inspectorSettingsToStoredFields(
     out.paginatedLists = true;
   }
 
+  // Persist only when enabled — absent reads back as unset (off) (#2317).
+  if (settings.suppressNotificationStream) {
+    out.suppressNotificationStream = true;
+  }
+
   // Persist only when the user has toggled at least one extension override;
   // an empty map reads back as unset (above), keeping the diff minimal for the
   // common (no-override) case.
@@ -848,6 +860,7 @@ const INSPECTOR_FIELD_KEY_MAP = {
   taskTtl: true,
   autoRefreshOnListChanged: true,
   paginatedLists: true,
+  suppressNotificationStream: true,
   advertisedExtensions: true,
   maxFetchRequests: true,
   skillCatalogMaxSkills: true,
