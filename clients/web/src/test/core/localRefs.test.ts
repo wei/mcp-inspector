@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { inlineLocalRefs } from "@inspector/core/json/localRefs.js";
+import {
+  EXPANSION_BUDGET,
+  inlineLocalRefs,
+} from "@inspector/core/json/localRefs.js";
 
 // Zod → JSON Schema converters deduplicate a reused schema instance into
 // `$defs` and point each use at it with a bare `$ref`, which has no `type` for
@@ -164,5 +167,68 @@ describe("inlineLocalRefs", () => {
       $defs: { D: date },
     };
     expect(inlineLocalRefs(schema).properties.const).toEqual(date);
+  });
+  it("merges annotation siblings but declines a $ref whose siblings constrain", () => {
+    const resolved = inlineLocalRefs({
+      properties: {
+        annotated: { $ref: "#/$defs/E", title: "T", default: "a" },
+        widened: { $ref: "#/$defs/E", enum: ["a", "b"] },
+      },
+      $defs: { E: { type: "string", enum: ["a"] } },
+    });
+    expect(resolved.properties.annotated).toEqual({
+      type: "string",
+      enum: ["a"],
+      title: "T",
+      default: "a",
+    });
+    // Conjunctive in JSON Schema, so a merge would admit "b"; left as written.
+    expect(resolved.properties.widened).toEqual({
+      $ref: "#/$defs/E",
+      enum: ["a", "b"],
+    });
+  });
+
+  it("inlines a root $ref beside its definitions", () => {
+    const resolved = inlineLocalRefs({
+      $ref: "#/definitions/Args",
+      definitions: { Args: { type: "object", properties: { a: date } } },
+    });
+    expect(resolved).toMatchObject({
+      type: "object",
+      properties: { a: date },
+    });
+  });
+
+  it("leaves everything under a nested $id unresolved", () => {
+    const embedded = {
+      $id: "https://example.com/inner",
+      properties: { x: { $ref: "#/$defs/D" } },
+      $defs: { D: { type: "integer" } },
+    };
+    const resolved = inlineLocalRefs({
+      $id: "https://example.com/outer",
+      properties: { outer: { $ref: "#/$defs/D" }, inner: embedded },
+      $defs: { D: date },
+    });
+    expect(resolved.properties.outer).toEqual(date);
+    expect(resolved.properties.inner).toBe(embedded);
+  });
+
+  it("returns the schema unresolved when expansion would exceed the budget", () => {
+    // Each level uses the previous one twice: 2^20 nodes from 20 definitions.
+    const $defs: Record<string, unknown> = { L0: { type: "string" } };
+    for (let n = 1; n <= 20; n++) {
+      $defs[`L${n}`] = {
+        type: "object",
+        properties: {
+          a: { $ref: `#/$defs/L${n - 1}` },
+          b: { $ref: `#/$defs/L${n - 1}` },
+        },
+      };
+    }
+    const schema = { properties: { top: { $ref: "#/$defs/L20" } }, $defs };
+    expect(2 ** 20).toBeGreaterThan(EXPANSION_BUDGET);
+    expect(inlineLocalRefs(schema)).toBe(schema);
   });
 });

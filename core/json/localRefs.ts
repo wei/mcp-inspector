@@ -19,9 +19,21 @@
  * - **Recursive references stop at the recursion.** A `$ref` to a schema that
  *   is already being inlined above it is kept as a `$ref`, so a tree type
  *   renders its first level and edits the rest as JSON rather than looping.
- * - **Sibling keywords win over the referent's.** `{ $ref, description }` is
- *   exactly what `.optional().describe(…)` on a shared instance produces, and
- *   the description written at the use site is the one the user should see.
+ * - **Only annotation siblings are merged.** `{ $ref, description }` is exactly
+ *   what `.optional().describe(…)` on a shared instance produces, and the
+ *   description written at the use site is the one the user should see. A
+ *   sibling that *constrains* (`enum`, `minLength`, …) applies in conjunction
+ *   with the referent rather than replacing it, which a merge cannot express —
+ *   so a `$ref` carrying one is left unresolved rather than loosened.
+ * - **Embedded resources are left alone.** A nested `$id` starts a new base
+ *   URI, and a `#/…` pointer beneath it means that resource's root, not the
+ *   document's. Rather than track bases, nothing under a nested `$id` is
+ *   resolved.
+ * - **Expansion is bounded.** Inlining copies a referent at every use, so a
+ *   chain of definitions each using the previous one twice grows as `2^n`
+ *   from an `O(n)` schema. A server controls the schema, so past
+ *   {@link EXPANSION_BUDGET} nodes the whole schema is returned unresolved
+ *   rather than freezing the form that renders it.
  */
 
 /** Keywords whose values are data, not subschemas — never walked. */
@@ -42,7 +54,46 @@ const NAME_MAP_KEYWORDS = new Set([
   "definitions",
 ]);
 
+/**
+ * Keywords that may sit beside a `$ref` without blocking its inlining: they
+ * annotate or organize, and constrain nothing, so the use site's value can
+ * safely replace the referent's.
+ */
+const NON_CONSTRAINT_SIBLINGS = new Set([
+  "title",
+  "description",
+  "default",
+  "examples",
+  "deprecated",
+  "readOnly",
+  "writeOnly",
+  "$comment",
+  "$schema",
+  "$id",
+  "$defs",
+  "definitions",
+]);
+
+/** Most schema nodes one inlining may produce before it gives up. */
+export const EXPANSION_BUDGET = 10_000;
+
+/** Thrown to unwind a traversal that has spent {@link EXPANSION_BUDGET}. */
+class BudgetExceeded extends Error {}
+
 type JsonRecord = Record<string, unknown>;
+
+interface Traversal {
+  root: JsonRecord;
+  /** References being inlined above the current node, for cycle detection. */
+  active: Set<string>;
+  remaining: number;
+}
+
+/** Charge one produced node against the traversal's budget. */
+function spend(traversal: Traversal): void {
+  traversal.remaining -= 1;
+  if (traversal.remaining < 0) throw new BudgetExceeded();
+}
 
 /** Whether `key` holds data rather than a subschema, in a schema object. */
 function isDataKey(key: string, inNameMap: boolean): boolean {
@@ -98,42 +149,52 @@ function containsRef(node: unknown, inNameMap = false): boolean {
   );
 }
 
-function inline(node: unknown, root: unknown, active: Set<string>): unknown {
+function inline(node: unknown, traversal: Traversal): unknown {
   if (Array.isArray(node)) {
-    return node.map((item) => inline(item, root, active));
+    spend(traversal);
+    return node.map((item) => inline(item, traversal));
   }
   if (!isRecord(node)) return node;
+  // An embedded resource: its pointers are relative to itself (see the header).
+  if (node !== traversal.root && typeof node.$id === "string") return node;
+  spend(traversal);
 
   const ref = node.$ref;
-  if (typeof ref === "string" && !active.has(ref)) {
-    const target = resolvePointer(root, ref);
+  const siblingsConstrain = Object.keys(node).some(
+    (key) => key !== "$ref" && !NON_CONSTRAINT_SIBLINGS.has(key),
+  );
+  if (
+    typeof ref === "string" &&
+    !siblingsConstrain &&
+    !traversal.active.has(ref)
+  ) {
+    const target = resolvePointer(traversal.root, ref);
     if (isRecord(target)) {
-      active.add(ref);
-      const resolved = inline(target, root, active) as JsonRecord;
-      active.delete(ref);
+      traversal.active.add(ref);
+      const resolved = inline(target, traversal) as JsonRecord;
+      traversal.active.delete(ref);
       const siblings: JsonRecord = { ...node };
       delete siblings.$ref;
-      return { ...resolved, ...inlineEntries(siblings, root, active, false) };
+      return { ...resolved, ...inlineEntries(siblings, traversal, false) };
     }
   }
-  return inlineEntries(node, root, active, false);
+  return inlineEntries(node, traversal, false);
 }
 
 function inlineEntries(
   node: JsonRecord,
-  root: unknown,
-  active: Set<string>,
+  traversal: Traversal,
   inNameMap: boolean,
 ): JsonRecord {
   const result: JsonRecord = {};
   for (const [key, value] of Object.entries(node)) {
     let next: unknown = value;
     if (inNameMap) {
-      next = inline(value, root, active);
+      next = inline(value, traversal);
     } else if (NAME_MAP_KEYWORDS.has(key) && isRecord(value)) {
-      next = inlineEntries(value, root, active, true);
+      next = inlineEntries(value, traversal, true);
     } else if (!isDataKey(key, false)) {
-      next = inline(value, root, active);
+      next = inline(value, traversal);
     }
     // `defineProperty`, not assignment: `__proto__` is a legal property name
     // in a schema's `properties`, and assigning it would set the prototype.
@@ -154,8 +215,8 @@ const cache = new WeakMap<object, unknown>();
 /**
  * `schema` with every resolvable same-document `$ref` replaced by its referent.
  *
- * Returns `schema` itself — same reference — when it contains no `$ref`, and
- * the same resolved object for repeated calls with the same input. Never
+ * Returns `schema` itself — same reference — when it contains no `$ref` or
+ * inlining would exceed {@link EXPANSION_BUDGET}, and the same resolved object for repeated calls with the same input. Never
  * mutates the input.
  */
 export function inlineLocalRefs<T>(schema: T): T {
@@ -164,7 +225,18 @@ export function inlineLocalRefs<T>(schema: T): T {
   if (cached !== undefined) return cached as T;
   // The result is the input's own shape with references expanded, so it is
   // still a `T` to every caller that reads it as one.
-  const resolved = inline(schema, schema, new Set()) as T;
+  let resolved: T;
+  try {
+    resolved = inline(schema, {
+      root: schema,
+      active: new Set(),
+      remaining: EXPANSION_BUDGET,
+    }) as T;
+  } catch (error) {
+    /* v8 ignore next -- only BudgetExceeded is thrown by the traversal */
+    if (!(error instanceof BudgetExceeded)) throw error;
+    resolved = schema;
+  }
   cache.set(schema, resolved);
   return resolved;
 }
