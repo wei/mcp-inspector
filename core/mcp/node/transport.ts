@@ -17,6 +17,7 @@ import {
   createAuthChallengeObserverFetch,
 } from "./authChallengeFetch.js";
 import { createProxyFetch } from "./proxyFetch.js";
+import { createNotificationHeadersFetch } from "./notificationHeadersFetch.js";
 
 /**
  * Build the wire `headers` record from `settings.headers`, dropping rows with
@@ -172,10 +173,12 @@ export function createTransportNode(
       ...(headers && { headers }),
     };
 
+    // Outermost, so the network tracker below records the headers that are
+    // actually sent (#2385).
     const transport = new StreamableHTTPClientTransport(url, {
       authProvider,
       requestInit,
-      fetch: fetchWithOptionalAuthIntercept,
+      fetch: createNotificationHeadersFetch(fetchWithOptionalAuthIntercept),
       // SEP-2350: how the transport reacts to a `403 insufficient_scope`
       // challenge. Defaults to the SDK's `reauthorize` when unset.
       ...(settings?.oauthOnInsufficientScope && {
