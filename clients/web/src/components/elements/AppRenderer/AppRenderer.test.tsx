@@ -1,5 +1,5 @@
 import { createRef, StrictMode } from "react";
-import { act, waitFor } from "@testing-library/react";
+import { act } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { AppBridge } from "@modelcontextprotocol/ext-apps/app-bridge";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/client";
@@ -76,6 +76,34 @@ async function flushAsync(): Promise<void> {
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
+  });
+}
+
+// Runs `mutate` and resolves once every MutationObserver that was already
+// watching `data-mantine-color-scheme` on `documentElement` has had its
+// callback delivered — which is what the AppRenderer theme push rides on.
+//
+// This is an awaited condition rather than a wall-clock budget, per #2384.
+// A probe observer registered *after* the component's is notified after it:
+// observers are queued in registration order and each delivery is an ordinary
+// microtask, so by the time the probe's callback runs the component's has
+// already run and the assertion below is settled. No polling and no timeout is
+// involved, so nothing here is load-sensitive.
+async function flipThemeAttributeAndAwaitObservers(
+  value: string,
+): Promise<void> {
+  await act(async () => {
+    await new Promise<void>((resolve) => {
+      const probe = new MutationObserver(() => {
+        probe.disconnect();
+        resolve();
+      });
+      probe.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ["data-mantine-color-scheme"],
+      });
+      document.documentElement.setAttribute("data-mantine-color-scheme", value);
+    });
   });
 }
 
@@ -538,47 +566,17 @@ describe("AppRenderer", () => {
       // flip we trigger below.
       bridge.sendHostContextChange.mockClear();
 
-      await act(async () => {
-        document.documentElement.setAttribute(
-          "data-mantine-color-scheme",
-          "dark",
-        );
-        // MutationObserver callbacks are delivered on a microtask.
-        await Promise.resolve();
-      });
-      // `waitFor`, not a bare assertion after the single microtask above: how
-      // many ticks happy-dom takes to deliver the MutationObserver callback is
-      // load-dependent, so under a full parallel run the observer can still be
-      // pending here. Observed failing exactly once that way, with 0 calls.
-      //
-      // The default 1000ms then turned out not to be enough either — it failed
-      // twice in a row in `npm run local:gate` (at ~1021ms, still 0 calls) while
-      // passing every time this file runs alone, which is the signature of a
-      // budget that is too tight rather than of a broken observer. Raised
-      // rather than retried: a `waitFor` that is generous costs nothing on the
-      // passing path, since it returns as soon as the assertion holds.
-      //
-      // #2323 briefly deleted this argument as one of its "a budget inside an
-      // equal budget can never be observed" cases, which it was: 5000 inside a
-      // 5000ms test could never win. That is fixed from the other end now — the
-      // enclosing budget is 15000 — so the raise is observable again and has to
-      // stay, because the value it beats is a measured failure rather than a
-      // default. It does NOT ride on `asyncUtilTimeout`, which is pinned at
-      // 1000 precisely because raising it globally was measured worse
-      // (Copilot).
-      await waitFor(
-        () =>
-          expect(bridge.sendHostContextChange).toHaveBeenCalledWith(
-            expect.objectContaining({
-              theme: "dark",
-              styles: expect.objectContaining({
-                variables: expect.objectContaining({
-                  "--color-background-primary": "#101113",
-                }),
-              }),
+      await flipThemeAttributeAndAwaitObservers("dark");
+
+      expect(bridge.sendHostContextChange).toHaveBeenCalledWith(
+        expect.objectContaining({
+          theme: "dark",
+          styles: expect.objectContaining({
+            variables: expect.objectContaining({
+              "--color-background-primary": "#101113",
             }),
-          ),
-        { timeout: 5000 },
+          }),
+        }),
       );
     } finally {
       getComputedStyleSpy.mockRestore();
@@ -599,13 +597,10 @@ describe("AppRenderer", () => {
     // No `initialized` emitted — the theme observer is gated, like the
     // container and displayMode pushes, so a pre-handshake flip is dropped.
     bridge.sendHostContextChange.mockClear();
-    await act(async () => {
-      document.documentElement.setAttribute(
-        "data-mantine-color-scheme",
-        "dark",
-      );
-      await Promise.resolve();
-    });
+    // Same awaited-delivery helper as the positive case: it is what makes this
+    // "not called" a real gate rather than a vacuous pass on a flip that was
+    // never delivered at all.
+    await flipThemeAttributeAndAwaitObservers("dark");
     expect(bridge.sendHostContextChange).not.toHaveBeenCalled();
     document.documentElement.removeAttribute("data-mantine-color-scheme");
   });
@@ -627,13 +622,10 @@ describe("AppRenderer", () => {
     });
     bridge.sendHostContextChange.mockClear();
 
-    await act(async () => {
-      document.documentElement.setAttribute(
-        "data-mantine-color-scheme",
-        "dark",
-      );
-      await Promise.resolve();
-    });
+    // Same awaited-delivery helper as the positive case: it is what makes this
+    // "not called" a real gate rather than a vacuous pass on a flip that was
+    // never delivered at all.
+    await flipThemeAttributeAndAwaitObservers("dark");
     expect(bridge.sendHostContextChange).not.toHaveBeenCalled();
     document.documentElement.removeAttribute("data-mantine-color-scheme");
   });
