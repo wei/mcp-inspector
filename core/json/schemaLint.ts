@@ -16,7 +16,12 @@
  * conformance check would report nothing on essentially every real server.
  * What bites instead is the narrower subset each consumer accepts, which is
  * what the rules below encode. Every rule is a construct that is legal JSON
- * Schema and is known to be refused or quietly mishandled by real MCP clients.
+ * Schema and is either known to be refused or quietly mishandled by real MCP
+ * clients, or — a weaker class, and only ever at `warning` severity — outside
+ * a documented schema dialect that consumers translate tool schemas into
+ * (`type-union`, #2286). A rule in the weaker class names that dialect at its
+ * call site, and moves to the stronger class only once a shipping client that
+ * mishandles it is recorded there.
  *
  * Kept pure and dependency-free so all three clients share one verdict: the
  * CLI's `--strict` report, the TUI's tool detail pane, and the web Tools tab
