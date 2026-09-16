@@ -507,13 +507,19 @@ printf '%s' "<prompt>" \
 probe, nothing here stops the run after the first move, so `head -3` only
 trims the output; the session carries on until it answers.
 
-**First measurement** (2026-09-16, Copilot CLI 1.0.85, Claude Sonnet 5,
-`RUNS=3`, the full suite): **63/63 first-move cases at 100%**, every negative
-clean, and **1/2 hand-off cases** — `testing → test-servers` at 100% on the
-integration-test prompt and 33% on the pagination one. Read the hand-off the
-way the section above says to: a noisy second-hop measurement at `RUNS=3`, not
-a Copilot-specific defect, until a `RUNS=5` Claude run of the same case says
-otherwise.
+**First measurement** (2026-09-16, Copilot CLI 1.0.85, Claude Sonnet 5): the
+full suite at `RUNS=3` put **63/63 first-move cases at 100%**, every negative
+clean. The hand-offs were then re-measured at `RUNS=5`, since `RUNS=3` is too
+coarse to read a chain:
+
+| Hand-off case | Copilot, `RUNS=5` | Claude, `RUNS=5` (#2247) |
+| --- | --- | --- |
+| `testing → test-servers`, "Write an integration test that exercises tool listing end to end." | 100% | 100% |
+| `testing → test-servers`, "Add end-to-end coverage for the tool-list pagination path." | **40%** | 100% |
+
+So the pagination prompt is a **Copilot-specific shortfall**, not noise: it held
+below the 50% bar at both sample sizes, while the same case clears 100% under
+Claude. First moves transfer; this one hand-off does not yet (#2399).
 
 ## Checklist for a new or edited skill
 
