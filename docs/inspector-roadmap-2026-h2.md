@@ -101,7 +101,7 @@ Closed as **not planned**, so not carried forward: custom transports ([#1741](ht
 |                             | **Track A — Spec-following**                                      | **Track B — Experience**                    |
 | --------------------------- | ----------------------------------------------------------------- | ------------------------------------------- |
 | **Driver**                  | MCP roadmap, WG deliverables, SEP acceptance, approved extensions | Our own judgment about the tool             |
-| **Trigger to start**        | A SEP reaches Draft with a Tier-1 SDK reference impl, or is Final | Whenever we have capacity                   |
+| **Trigger to start**        | A SEP reaches Draft with a Tier-1 SDK reference impl, or is Final; or an extension is approved as official (§4) | Whenever we have capacity                   |
 | **Risk**                    | Slips when upstream slips; we cannot control the date             | We control the date entirely                |
 | **Failure mode if starved** | Inspector stops being the reference test client                   | Inspector stays a protocol dump, not a tool |
 | **Target capacity**         | ~50%                                                              | ~50%                                        |
@@ -242,7 +242,7 @@ What we _can_ do now is show the problem the redesign is solving: a server retur
 
 | Feature                                                                                                                                                                                     | Confidence | Notes                                                                                                                    |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------ |
-| **`content` / `structuredContent` consistency check** — flag results where both are present and disagree, or where a declared `outputSchema` requires `structuredContent` and it is missing | 🟢         | Useful today, and implementation evidence for the Core Primitives WG.                                                    |
+| **`content` / `structuredContent` consistency check** — flag results where both are present and disagree | 🟢         | Useful today, and implementation evidence for the Core Primitives WG. A missing `structuredContent` under a declared `outputSchema` is already flagged by `validateToolOutput` (shipped).                                                    |
 | **New tool result shape**                                                                                                                                                                   | 🔴         | WG still forming. Keep both renderings behind the era seam when it lands.                                                |
 | **Progressive discovery**                                                                                                                                                                   | 🔴         | Design the lists (§5.10) so "not loaded yet" is a state, not an empty list.                                              |
 | **Annotation-driven confirmation** before a `destructiveHint` call                                                                                                                          | 🟢         | Tool annotations are not the audience/priority content annotations under review. Small and obviously correct.            |
@@ -320,14 +320,14 @@ official status through the Extensions Track of
 
 | Extension                        | Identifier                                                 | Web | CLI | TUI | Upstream matrix         | Notes                                                                                                                                                                                                           |
 | -------------------------------- | ---------------------------------------------------------- | --- | --- | --- | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| MCP Apps                         | `io.modelcontextprotocol/ui`                               | ✅  | 🟡  | —   | ❌ not listed           | Apps tab. Columns are rendering support: rendering needs a browser, so the CLI has only the `--app-info` metadata probe and the TUI nothing. The shared client still advertises the extension from CLI and TUI. |
+| MCP Apps                         | `io.modelcontextprotocol/ui`                               | ✅  | 🟡  | —   | Inspector row, cell blank | Apps tab. Columns are rendering support: rendering needs a browser, so the CLI has only the `--app-info` metadata probe and the TUI nothing. The shared client still advertises the extension from CLI and TUI. |
 | Tasks                            | `io.modelcontextprotocol/tasks`                            | ✅  | ❌  | ❌  | No column in the matrix | Raw-wire channel; stays for the horizon (§3.1). The CLI's one-shot mode rejects `tasks/*`; no TUI Tasks pane yet.                                                                                               |
 | Skills over MCP                  | `io.modelcontextprotocol/skills`                           | ✅  | ✅  | ✅  | "Partial" (CLI README)  | [#2234](https://github.com/modelcontextprotocol/inspector/issues/2234), [#2248](https://github.com/modelcontextprotocol/inspector/issues/2248).                                                                 |
-| Enterprise-Managed Authorization | `io.modelcontextprotocol/enterprise-managed-authorization` | ✅  | ✅  | ✅  | ❌ not listed           | [#1509](https://github.com/modelcontextprotocol/inspector/issues/1509).                                                                                                                                         |
+| Enterprise-Managed Authorization | `io.modelcontextprotocol/enterprise-managed-authorization` | ✅  | ✅  | ✅  | Inspector row, cell blank | [#1509](https://github.com/modelcontextprotocol/inspector/issues/1509).                                                                                                                                         |
 | OAuth Client Credentials         | `io.modelcontextprotocol/oauth-client-credentials`         | ❌  | ❌  | ❌  | ❌                      | **Gap** (§3.3). [#1225](https://github.com/modelcontextprotocol/inspector/issues/1225) was closed only because v1 is frozen.                                                                                    |
 
 **Actions:** implement OAuth Client Credentials; and, with maintainer sign-off, open a PR on
-`modelcontextprotocol/modelcontextprotocol` to correct the Inspector's row in the client matrix.
+`modelcontextprotocol/modelcontextprotocol` to fill in the Inspector row's blank Apps and Enterprise Auth cells and update its Skills cell in the client matrix.
 
 ### Keeping up as extensions are approved
 
@@ -339,7 +339,7 @@ mechanism, the way SDK releases already are:
   `/extensions/overview`, compare with a committed list of the ones we have assessed, and file
   one issue per new entry. It **files issues, never PRs**, and trusts only markers the
   automation wrote, exactly as the SDK watch does.
-- **Official extension** → a `v2` + `enhancement` issue to implement it, milestoned at triage.
+- **Official extension** → a `v2` + `enhancement` issue to implement it, filed with the current milestone as `sdk-watch` does; only when no dated milestone is open is it left unmilestoned for triage to place in Incoming.
 - **Experimental extension** → a `v2` + `question` tracking issue, so we can design against it
   before its SEP (the 🟡 rule) without committing build capacity.
 - **This table is the record.** An extension is added here when its issue is filed, and its
