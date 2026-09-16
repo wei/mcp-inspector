@@ -207,6 +207,8 @@ it — the split is the design.
 
 `npm run pack:verify` builds, packs the real tarball, installs it into a clean
 throwaway consumer, and drives the installed `mcp-inspector` bin end to end. It
-needs **network access**, so it is a local/release check and is in neither
-`local:gate` nor CI. Run it when touching packaging (the `files` allowlist,
-a bundler `external` list, anything read from disk at runtime).
+needs **network access**, so it is a local/release check: it is **not** a
+`local:gate` stage, and CI runs it only in the `publish` job on a published
+GitHub Release — never on a push or PR. Run it when touching packaging (the
+`files` allowlist, a bundler `external` list, anything read from disk at
+runtime), and as its own step when cutting a release (the `release` skill).

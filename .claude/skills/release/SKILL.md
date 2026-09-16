@@ -143,9 +143,16 @@ Then drive it. Work from a **dedicated worktree** with its own full
 `npm install` (a symlinked `node_modules` passes lint and tests and then fails
 every story file), run `npm run local:gate` there, and exercise the app from the
 **production build** — the packaged bin and the built bundles, not `vite dev`.
-The `local-dev`, `test-servers` and `pre-push-gate` skills cover the mechanics;
-`pack:verify` inside the gate is what proves the tarball a consumer installs
-actually resolves.
+The `local-dev`, `test-servers` and `pre-push-gate` skills cover the mechanics.
+
+**Then run `npm run pack:verify` there as its own step.** It is what proves the
+tarball a consumer installs actually resolves, and ⚠️ **`local:gate` does not
+run it** — `local:gate:stages` has no packaging stage, and a green gate says
+nothing about the published tarball (#2380). CI runs it only in the `publish`
+job, which fires on the published GitHub Release — after the tag exists — so
+skipping it here means the first signal of a broken package arrives too late to
+stop the release. It needs network access; record its result (tarball size and
+the `pack:verify OK` line) for the ledger below.
 
 **Every contribution closed in the milestone gets driven, not read.** The bar is
 observed behavior from the running app — a rendered panel, a status attribute, a
