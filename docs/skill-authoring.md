@@ -443,6 +443,78 @@ metered calls, it is non-deterministic by construction, and it goes red on a
 rate limit. A case below threshold is a signal to investigate, not a build
 break.
 
+## Measuring GitHub Copilot
+
+Some maintainers work on this repo with the [GitHub Copilot
+CLI](https://www.npmjs.com/package/@github/copilot), so the same committed cases
+also run through it (#2397):
+
+```sh
+npm install -g @github/copilot   # then sign in once: `copilot`, then `/login`
+AGENT=copilot npm run skills:eval
+AGENT=copilot RUNS=5 npm run skills:eval -- pr-flow
+```
+
+**No coercion is needed: Copilot reads `.claude/skills/` as it is.** Its project
+skill sources are `.github/skills/`, `.agents/skills/` **and** `.claude/skills/`,
+and `copilot skill list` on 1.0.85 shows all ten of ours. So there is no symlink,
+no `.github/skills/` copy and no pointer file, and there must not be one — two
+copies of a procedure is how the stale one gets read.
+
+What was verified about how Copilot treats the files, on 1.0.85:
+
+- **It honors `disable-model-invocation: true`, but only as far as its tool
+  goes.** Its `skill` tool refused `release` with `Skill not found`, and the
+  model then opened `.claude/skills/release/SKILL.md` with `view` and read it
+  anyway. A name-only skill is kept out of the automatic listing, not made
+  unreadable — which is equally true of Claude, which can `Read` the file.
+- **`AGENTS.md` is loaded as custom instructions**, so the rule in
+  [Do not write a case `AGENTS.md` already answers](#do-not-write-a-case-agentsmd-already-answers)
+  applies to Copilot runs unchanged.
+
+How the Copilot run differs from the Claude run, since a rate only means
+something next to the harness that produced it:
+
+| | Claude | Copilot |
+| --- | --- | --- |
+| Turn budget | `--max-turns` | none exists; `runPrompt` stops the process once the stream shows that many model calls |
+| Availability (the real bound) | `--tools Read,Glob,Grep,Skill` | `--available-tools view,glob,grep,skill` |
+| Pre-approval only | `--allowedTools` | `--allow-tool` |
+| Unconditional deny | `--disallowedTools` by tool name | `--deny-tool shell`, `write`, `url` — permission **kinds**, not names |
+| MCP servers | `--strict-mcp-config` | `--disable-builtin-mcps`; it does not read `.mcp.json` |
+| Model | whatever `claude` defaults to | whatever Copilot's model picker defaults to (Claude Sonnet 5 when measured) |
+
+**Each invocation measures one agent, and every heading and summary line names
+it.** The two rates come from different models behind different harnesses, so
+they are compared side by side and never summed, for the same reason first-move
+and hand-off cases are not.
+
+To probe one prompt the way the Copilot run does:
+
+```sh
+printf '%s' "<prompt>" \
+  | copilot --output-format json \
+      --available-tools view,glob,grep,skill --allow-tool view,glob,grep,skill \
+      --deny-tool shell --deny-tool write --deny-tool url \
+      --disable-builtin-mcps --disallow-temp-dir --no-ask-user --no-auto-update \
+  | jq -r 'select(.type == "assistant.message") | .data.toolRequests[]
+           | if .name == "skill" then "skill:" + .arguments.skill else .name end' \
+  | head -3
+```
+
+⚠️ Like the Claude probe above, **these flags are a copy of `agentArgs` in
+`scripts/skill-eval.mjs`** — change both in the same edit. Unlike the Claude
+probe, nothing here stops the run after the first move, so `head -3` only
+trims the output; the session carries on until it answers.
+
+**First measurement** (2026-09-16, Copilot CLI 1.0.85, Claude Sonnet 5,
+`RUNS=3`, the full suite): **63/63 first-move cases at 100%**, every negative
+clean, and **1/2 hand-off cases** — `testing → test-servers` at 100% on the
+integration-test prompt and 33% on the pagination one. Read the hand-off the
+way the section above says to: a noisy second-hop measurement at `RUNS=3`, not
+a Copilot-specific defect, until a `RUNS=5` Claude run of the same case says
+otherwise.
+
 ## Checklist for a new or edited skill
 
 1. Frontmatter opens on line 1 (no BOM, no blank line), YAML is valid, and any

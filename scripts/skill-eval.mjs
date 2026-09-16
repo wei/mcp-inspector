@@ -29,6 +29,17 @@
 //   npm run skills:eval -- testing             # one skill's cases
 //   npm run skills:eval -- testing test-servers  # several skills' cases
 //   RUNS=5 THRESHOLD=0.8 npm run skills:eval
+//   AGENT=copilot npm run skills:eval          # the same cases, driven through GitHub Copilot
+//
+// Two agents, measured separately (#2397). Some maintainers work on this repo
+// with the GitHub Copilot CLI, which discovers project skills from
+// `.claude/skills/` as well as `.github/skills/` (verified on 1.0.85: `copilot
+// skill list` shows all ten). Discovery is not triggering, though, so the same
+// committed cases run through `copilot` when `AGENT=copilot`. One invocation
+// measures ONE agent and says which in every heading: a Copilot rate and a
+// Claude rate come from different models behind different harnesses, so they
+// are never folded into one number, for the same reason first-move and
+// hand-off cases are not.
 //
 // Two kinds of case, measured and reported separately (#2204). A `expect` case
 // is a FIRST-MOVE measurement: one turn, does the model reach for the skill
@@ -41,7 +52,7 @@ import { spawn } from "node:child_process";
 import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { claudeSpawnArgs, probeClaudeVersion } from "./lib/claude-cli.mjs";
+import { cliSpawnArgs, probeCliVersion } from "./lib/claude-cli.mjs";
 import {
   isChainCase,
   parseClaudeVersion,
@@ -93,6 +104,10 @@ const CONCURRENCY = Number(process.env.CONCURRENCY ?? 4);
  * cannot distinguish "the hand-off does not fire" from "the run was cut short".
  */
 const CHAIN_MAX_TURNS = Number(process.env.CHAIN_MAX_TURNS ?? 14);
+
+/** The agent CLIs this eval can drive. `claude` is the default. */
+export const AGENTS = ["claude", "copilot"];
+const AGENT = process.env.AGENT ?? "claude";
 
 /** Collect the committed cases for every model-invoked skill (optionally one). */
 /**
@@ -244,6 +259,57 @@ export function collectSkillInvocations(text, turnOffset = 0) {
 }
 
 /**
+ * Extract the skills the Copilot CLI's `skill` tool was asked for, from a chunk
+ * of `copilot --output-format json` output (#2397).
+ *
+ * The same contract as `collectSkillInvocations`, over a different event shape.
+ * Copilot emits one `assistant.message` per model call, carrying every tool
+ * request that call made in `data.toolRequests` — so one such event is one
+ * turn, and two `skill` requests inside it are concurrent guesses rather than a
+ * hand-off, exactly as for Claude. The terminal event is `{type: "result",
+ * exitCode}`; it is reported as `success` for exit 0 and `exit_<code>`
+ * otherwise, so `runRejection` classifies both CLIs with one table.
+ *
+ * A request is counted whether or not the tool then succeeded. That matches
+ * the Claude side, which scores the `tool_use` block, and it is what a trigger
+ * eval asks: did the model reach for the skill. (Copilot refuses a request
+ * for a `disable-model-invocation: true` skill with "Skill not found", and
+ * no case here names such a skill.)
+ *
+ * @param {string} text Newline-delimited JSON events; a trailing partial line
+ *   is held back.
+ * @param {number} [turnOffset]
+ * @returns {{ invoked: {payload: string, turn: number}[], rest: string,
+ *   result: string | null, nextTurn: number }}
+ */
+export function collectCopilotSkillInvocations(text, turnOffset = 0) {
+  const lines = text.split("\n");
+  const rest = lines.pop() ?? "";
+  const invoked = [];
+  let result = null;
+  let turn = turnOffset;
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    let evt;
+    try {
+      evt = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (evt?.type === "result") {
+      result = evt.exitCode === 0 ? "success" : `exit_${evt.exitCode}`;
+    }
+    if (evt?.type !== "assistant.message") continue;
+    turn++;
+    for (const req of evt.data?.toolRequests ?? []) {
+      if (req?.name !== "skill") continue;
+      invoked.push({ payload: JSON.stringify(req.arguments ?? {}), turn });
+    }
+  }
+  return { invoked, rest, result, nextTurn: turn };
+}
+
+/**
  * The skill names one recorded invocation asked for.
  *
  * @param {{payload: string} | string} entry
@@ -262,7 +328,13 @@ function entryNames(entry) {
  * reject exactly the runs the eval is trying to count. Verified against the
  * CLI: a firing prompt ends `{subtype: "error_max_turns", num_turns: 2}`.
  */
-const CONCLUSIVE_RESULTS = new Set(["success", "error_max_turns"]);
+const CONCLUSIVE_RESULTS = new Set([
+  "success",
+  "error_max_turns",
+  // Copilot has no `--max-turns`; `runPrompt` stops it at the budget itself and
+  // records this. It is the same observation as `error_max_turns` (#2397).
+  "turn_budget",
+]);
 
 /**
  * Whether a finished run produced a usable observation.
@@ -448,6 +520,95 @@ const DISALLOWED_TOOLS = [
 ];
 
 /**
+ * The Copilot CLI's equivalents of the three lists above (#2397).
+ *
+ * Its permission model has the same split Claude's does, under other names:
+ * `--available-tools` decides what the model can SEE ("disables all other
+ * tools"), while `--allow-tool` / `--deny-tool` only decide approval and
+ * "do not expose tools that were filtered out" — so availability is the
+ * restriction here too, and the deny patterns are the unconditional second
+ * layer. `view`/`glob`/`grep` are Copilot's read tools and `skill` is its
+ * skill loader, confirmed from a live run's `toolRequests`.
+ *
+ * Copilot's deny list takes permission KINDS rather than tool names: `shell`
+ * (every shell command), `write` (every file-modifying tool) and `url` (every
+ * URL the shell or web-fetch tools would reach). `--disable-builtin-mcps`
+ * drops the one MCP server it ships (`github-mcp-server`); it does not read
+ * this checkout's `.mcp.json`, and any server a contributor configured is
+ * invisible past `--available-tools` anyway.
+ */
+const COPILOT_AVAILABLE_TOOLS = ["view", "glob", "grep", "skill"];
+const COPILOT_DENIED_KINDS = ["shell", "write", "url"];
+
+/**
+ * The command line for one headless run of `agent`.
+ *
+ * @param {string} agent One of `AGENTS`.
+ * @param {number} maxTurns
+ * @returns {string[]}
+ */
+export function agentArgs(agent, maxTurns) {
+  if (agent === "copilot") {
+    return [
+      // No `-p`: with none, the CLI reads the prompt from piped stdin, which
+      // keeps it out of argv for the same reasons as the Claude run below.
+      "--output-format",
+      "json",
+      "--available-tools",
+      COPILOT_AVAILABLE_TOOLS.join(","),
+      "--allow-tool",
+      COPILOT_AVAILABLE_TOOLS.join(","),
+      ...COPILOT_DENIED_KINDS.flatMap((kind) => ["--deny-tool", kind]),
+      "--disable-builtin-mcps",
+      "--disallow-temp-dir",
+      "--no-ask-user",
+      // A measurement should run the CLI version it reports, not one it
+      // downloaded partway through the suite.
+      "--no-auto-update",
+    ];
+  }
+  if (agent !== "claude") throw new Error(`unknown agent \`${agent}\``);
+  return [
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--max-turns",
+    String(maxTurns),
+    // Keep the run read-only, across every turn it is given: what the
+    // harness needs, minus what it must never do, minus every MCP server
+    // this checkout or the contributor happens to configure.
+    "--tools",
+    ALLOWED_TOOLS.join(","),
+    "--allowedTools",
+    ALLOWED_TOOLS.join(","),
+    "--disallowedTools",
+    DISALLOWED_TOOLS.join(","),
+    "--strict-mcp-config",
+  ];
+}
+
+/**
+ * Stop a child and everything it started.
+ *
+ * On Windows the CLI runs under `cmd.exe`, so `child.kill()` would end the
+ * shell and orphan the agent still spending model calls; `taskkill /T` takes
+ * the tree.
+ *
+ * @param {import("node:child_process").ChildProcess} child
+ * @param {string} platform
+ */
+function killTree(child, platform) {
+  if (platform === "win32" && child.pid !== undefined) {
+    spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+      stdio: "ignore",
+    });
+    return;
+  }
+  child.kill("SIGTERM");
+}
+
+/**
  * Drive one fresh session and return the payloads the `Skill` tool was called
  * with.
  *
@@ -468,6 +629,8 @@ export function runPrompt(
     cwd = ROOT,
     platform = process.platform,
     maxTurns = 1,
+    agent = "claude",
+    killFn = killTree,
   } = {},
 ) {
   return new Promise((resolve, reject) => {
@@ -477,29 +640,21 @@ export function runPrompt(
     // through a shell, and `cmd.exe` would re-parse any prompt containing a
     // metacharacter as syntax (Copilot). It also keeps the prompt out of the
     // process table.
-    const { command, args, options } = claudeSpawnArgs(
-      [
-        "-p",
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "--max-turns",
-        String(maxTurns),
-        // Keep the run read-only, across every turn it is given: what the
-        // harness needs, minus what it must never do, minus every MCP server
-        // this checkout or the contributor happens to configure.
-        "--tools",
-        ALLOWED_TOOLS.join(","),
-        "--allowedTools",
-        ALLOWED_TOOLS.join(","),
-        "--disallowedTools",
-        DISALLOWED_TOOLS.join(","),
-        "--strict-mcp-config",
-      ],
+    const { command, args, options } = cliSpawnArgs(
+      agent,
+      agentArgs(agent, maxTurns),
       { cwd, stdio: ["pipe", "pipe", "inherit"] },
       platform,
     );
     const p = spawnFn(command, args, options);
+    const collect =
+      agent === "copilot"
+        ? collectCopilotSkillInvocations
+        : collectSkillInvocations;
+    // Copilot has no `--max-turns`, so the budget is enforced from outside: once
+    // the stream has shown `maxTurns` model calls, the run has made every move
+    // it is being scored on, and the rest would only spend metered calls.
+    let stopped = false;
 
     let buf = "";
     const invoked = [];
@@ -508,26 +663,39 @@ export function runPrompt(
     // stream rather than restarting at each read.
     let turnOffset = 0;
     p.stdout.on("data", (chunk) => {
-      const parsed = collectSkillInvocations(
-        buf + chunk.toString(),
-        turnOffset,
-      );
+      if (stopped) return;
+      const parsed = collect(buf + chunk.toString(), turnOffset);
       buf = parsed.rest;
       turnOffset = parsed.nextTurn;
       for (const entry of parsed.invoked) invoked.push(entry);
       if (parsed.result !== null) result = parsed.result;
+      if (agent === "copilot" && turnOffset >= maxTurns && result === null) {
+        stopped = true;
+        result = "turn_budget";
+        killFn(p, platform);
+      }
     });
     p.on("error", reject);
     p.on("close", (code) => {
       const rejection = runRejection({ result, code });
       if (rejection !== null) {
-        reject(new Error(`\`claude -p\` ${rejection} for prompt: ${prompt}`));
+        reject(new Error(`\`${agent}\` ${rejection} for prompt: ${prompt}`));
         return;
       }
       resolve(invoked);
     });
     p.stdin?.end(prompt);
   });
+}
+
+/**
+ * Read `copilot --version` (`GitHub Copilot CLI 1.0.85.`) down to its version.
+ *
+ * @param {string} text
+ * @returns {string | null}
+ */
+export function parseCopilotVersion(text) {
+  return /^GitHub Copilot CLI (\d+\.\d+\.\d+)/m.exec(text)?.[1] ?? null;
 }
 
 async function pool(items, n, fn) {
@@ -574,7 +742,8 @@ export function passesThreshold(rate, threshold, strict) {
  * @param {object[]} cases
  * @param {{c: object, invoked: Iterable<string>}[]} results One per sample.
  * @param {Set<string> | null} ours
- * @param {{threshold: number, chainThreshold: number, chainMaxTurns: number}} opts
+ * @param {{threshold: number, chainThreshold: number, chainMaxTurns: number,
+ *   agent?: string}} opts
  * @returns {{ lines: string[], failed: number }}
  */
 export function formatReport(cases, results, ours, opts) {
@@ -603,15 +772,18 @@ export function formatReport(cases, results, ours, opts) {
 
   const direct = cases.filter((c) => !isChainCase(c));
   const chained = cases.filter(isChainCase);
+  // Every heading names the agent, so a Copilot report pasted next to a Claude
+  // one cannot be read as the same measurement (#2397).
+  const agent = opts.agent ?? "claude";
   const directShort = group(
     direct,
-    "First move (1 turn)",
+    `First move (1 turn) — ${agent}`,
     opts.threshold,
     false,
   );
   const chainedShort = group(
     chained,
-    `Hand-off (${opts.chainMaxTurns} turns)`,
+    `Hand-off (${opts.chainMaxTurns} turns) — ${agent}`,
     opts.chainThreshold,
     true,
   );
@@ -624,13 +796,13 @@ export function formatReport(cases, results, ours, opts) {
   lines.push("");
   if (direct.length > 0) {
     lines.push(
-      `${direct.length - directShort}/${direct.length} first-move cases at or above ${opts.threshold * 100}%.`,
+      `${direct.length - directShort}/${direct.length} ${agent} first-move cases at or above ${opts.threshold * 100}%.`,
     );
   }
   lines.push(
     chained.length === 0
       ? "No hand-off cases in this selection."
-      : `${chained.length - chainedShort}/${chained.length} hand-off cases above ${opts.chainThreshold * 100}%.`,
+      : `${chained.length - chainedShort}/${chained.length} ${agent} hand-off cases above ${opts.chainThreshold * 100}%.`,
   );
   return { lines, failed };
 }
@@ -660,9 +832,23 @@ async function main() {
     );
     process.exit(1);
   }
-  if (probeClaudeVersion(parseClaudeVersion) === null) {
+  if (!AGENTS.includes(AGENT)) {
     console.error(
-      "skills:eval — no usable `claude` CLI on PATH. This eval needs one.",
+      `skills:eval — AGENT must be one of ${AGENTS.join(", ")} (got \`${AGENT}\`).`,
+    );
+    process.exit(1);
+  }
+  const version = probeCliVersion(
+    AGENT,
+    AGENT === "claude" ? parseClaudeVersion : parseCopilotVersion,
+  );
+  if (version === null) {
+    console.error(
+      AGENT === "claude"
+        ? "skills:eval — no usable `claude` CLI on PATH. This eval needs one."
+        : "skills:eval — no usable `copilot` CLI on PATH. Install it with " +
+            "`npm install -g @github/copilot` and sign in (`copilot` then " +
+            "`/login`, or export COPILOT_GITHUB_TOKEN), then re-run.",
     );
     process.exit(1);
   }
@@ -680,6 +866,7 @@ async function main() {
     c,
     invoked: await runPrompt(c.prompt, {
       maxTurns: isChainCase(c) ? CHAIN_MAX_TURNS : 1,
+      agent: AGENT,
     }),
   }));
 
@@ -687,6 +874,7 @@ async function main() {
     threshold: THRESHOLD,
     chainThreshold: CHAIN_THRESHOLD,
     chainMaxTurns: CHAIN_MAX_TURNS,
+    agent: AGENT,
   });
   for (const line of lines) console.log(line);
   process.exit(failed > 0 ? 1 : 0);

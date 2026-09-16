@@ -297,6 +297,12 @@ node/field/option IDs, and the option-deletion hazard` was cut at `#28`, so 90
    expose a description that only fires on one narrow phrasing; `npm run skills:eval` actually runs them (it needs the
    `claude` CLI and real model calls, so it is deliberately **not** in the gate —
    run it when adding a skill or editing a model-invoked description).
+   **The skills serve GitHub Copilot users too, from where they are.** The
+   Copilot CLI discovers `.claude/skills/` alongside `.github/skills/`, so a
+   Copilot session reaches the same procedures with no second copy — and none
+   may be added. `AGENT=copilot npm run skills:eval` measures that side with the
+   same cases; one run measures one agent and never folds the two rates together
+   (#2397, details in `docs/skill-authoring.md`).
    Two things learned writing the first set, both of which make a case measure
    the wrong thing: a prompt whose answer is **already in this file** is not a
    trigger case — the model answers correctly without the skill, and the case

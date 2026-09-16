@@ -23,6 +23,9 @@ import {
   passesThreshold,
   collectCases,
   collectSkillInvocations,
+  collectCopilotSkillInvocations,
+  agentArgs,
+  parseCopilotVersion,
   runRejection,
   invokedSkillNames,
   runPrompt,
@@ -478,8 +481,8 @@ test("the report keeps the two measurements in separate columns", () => {
   const text = lines.join("\n");
   assert.match(text, /First move \(1 turn\)/);
   assert.match(text, /Hand-off \(14 turns\)/);
-  assert.match(text, /1\/1 first-move cases at or above 80%\./);
-  assert.match(text, /0\/1 hand-off cases above 50%\./);
+  assert.match(text, /1\/1 claude first-move cases at or above 80%\./);
+  assert.match(text, /0\/1 claude hand-off cases above 50%\./);
   // One summary line per kind, and no line that merges them.
   assert.equal(text.match(/cases (at or above|above)/g).length, 2);
   assert.equal(failed, 1, "the chained case is short, the direct one is not");
@@ -524,7 +527,7 @@ test("a single-kind selection reports only that kind, and says so", () => {
   );
   const text = chainOnly.lines.join("\n");
   assert.doesNotMatch(text, /first-move cases/);
-  assert.match(text, /1\/1 hand-off cases above 50%\./);
+  assert.match(text, /1\/1 claude hand-off cases above 50%\./);
   assert.equal(chainOnly.failed, 0);
 });
 
@@ -736,4 +739,197 @@ test("collection fails loudly rather than silently shrinking the set", () => {
     /beta is model-invoked but has no/,
   );
   rmSync(root, { recursive: true, force: true });
+});
+
+// --- Copilot (#2397) --------------------------------------------------------
+
+/** One Copilot model call, with the tool requests it made. */
+const copilotMessage = (...requests) =>
+  JSON.stringify({
+    type: "assistant.message",
+    data: {
+      toolRequests: requests.map(([name, args]) => ({
+        name,
+        arguments: args,
+        type: "function",
+      })),
+    },
+  }) + "\n";
+const copilotSkill = (skill) => ["skill", { skill }];
+const copilotResult = (exitCode) =>
+  JSON.stringify({ type: "result", exitCode }) + "\n";
+
+test("collectCopilotSkillInvocations reads skill requests, one turn per model call", () => {
+  const text =
+    copilotMessage(copilotSkill("pr-flow"), ["view", { path: "/x" }]) +
+    JSON.stringify({ type: "assistant.message_delta", data: {} }) +
+    "\nnot json\n" +
+    copilotMessage(copilotSkill("board-ops"), copilotSkill("issue-create")) +
+    copilotMessage() +
+    copilotResult(0);
+  const parsed = collectCopilotSkillInvocations(text);
+  assert.deepEqual(parsed.invoked, [
+    { payload: '{"skill":"pr-flow"}', turn: 1 },
+    { payload: '{"skill":"board-ops"}', turn: 2 },
+    { payload: '{"skill":"issue-create"}', turn: 2 },
+  ]);
+  assert.equal(parsed.nextTurn, 3);
+  assert.equal(parsed.result, "success");
+  // Two skills in one model call are not a hand-off, exactly as for Claude.
+  assert.equal(chainHit(["board-ops", "issue-create"], parsed.invoked), false);
+  assert.equal(chainHit(["pr-flow", "board-ops"], parsed.invoked), true);
+});
+
+test("collectCopilotSkillInvocations maps the exit code and holds back a partial line", () => {
+  const whole = copilotMessage(copilotSkill("testing"));
+  const first = collectCopilotSkillInvocations(whole.slice(0, 20));
+  assert.deepEqual(first.invoked, []);
+  const second = collectCopilotSkillInvocations(
+    first.rest + whole.slice(20) + copilotResult(1),
+    first.nextTurn,
+  );
+  assert.equal(second.invoked.length, 1);
+  assert.equal(second.result, "exit_1");
+  assert.match(runRejection({ result: second.result, code: 1 }), /exit_1/);
+  // A request with no arguments is recorded, and simply names nothing.
+  const bare = collectCopilotSkillInvocations(
+    JSON.stringify({
+      type: "assistant.message",
+      data: { toolRequests: [{ name: "skill" }] },
+    }) + "\n",
+  );
+  assert.deepEqual(bare.invoked, [{ payload: "{}", turn: 1 }]);
+});
+
+test("a Copilot run bounds availability, not just approval", () => {
+  const args = agentArgs("copilot", 1);
+  const after = (flag) => args[args.indexOf(flag) + 1];
+  // `--available-tools` is what the model can see; `--allow-tool` only spares
+  // a prompt, so it alone would bound nothing.
+  assert.equal(after("--available-tools"), "view,glob,grep,skill");
+  assert.equal(after("--allow-tool"), "view,glob,grep,skill");
+  const denied = args.flatMap((a, i) =>
+    args[i - 1] === "--deny-tool" ? [a] : [],
+  );
+  assert.deepEqual(denied, ["shell", "write", "url"]);
+  for (const flag of [
+    "--disable-builtin-mcps",
+    "--no-ask-user",
+    "--no-auto-update",
+  ]) {
+    assert.ok(args.includes(flag), `${flag} must be set`);
+  }
+  // The prompt arrives on stdin; `-p` would demand it in argv.
+  assert.ok(!args.includes("-p") && !args.includes("--prompt"));
+  // Copilot has no turn flag at all — the budget is enforced by `runPrompt`.
+  assert.ok(!args.includes("--max-turns"));
+  assert.throws(() => agentArgs("cursor", 1), /unknown agent `cursor`/);
+});
+
+/** A fake child that emits the given chunks, recording whether it was killed. */
+function fakeCopilot(chunks, { code = 0 } = {}) {
+  const state = { command: null, killed: 0, written: null };
+  const spawnFn = (command) => {
+    state.command = command;
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stdin = { end: (t) => (state.written = t) };
+    queueMicrotask(() => {
+      for (const c of chunks) child.stdout.emit("data", Buffer.from(c));
+      child.emit("close", state.killed > 0 ? null : code);
+    });
+    return child;
+  };
+  const killFn = () => state.killed++;
+  return { state, spawnFn, killFn };
+}
+
+test("runPrompt stops a Copilot run once it has made its budgeted moves", async () => {
+  const { state, spawnFn, killFn } = fakeCopilot([
+    copilotMessage(copilotSkill("pr-flow")),
+    copilotMessage(copilotSkill("board-ops")),
+  ]);
+  const invoked = await runPrompt("take it to a PR", {
+    agent: "copilot",
+    spawnFn,
+    killFn,
+    platform: "linux",
+  });
+  assert.equal(state.command, "copilot");
+  assert.equal(state.written, "take it to a PR");
+  assert.equal(state.killed, 1, "stopped exactly once");
+  // Only the first move is scored: the second call arrived after the stop.
+  assert.deepEqual(
+    invoked.map((e) => e.payload),
+    ['{"skill":"pr-flow"}'],
+  );
+});
+
+test("runPrompt accepts a Copilot run that finished inside its budget", async () => {
+  const { state, spawnFn, killFn } = fakeCopilot([
+    copilotMessage(copilotSkill("testing")),
+    copilotMessage(),
+    copilotResult(0),
+  ]);
+  const invoked = await runPrompt("p", {
+    agent: "copilot",
+    maxTurns: 14,
+    spawnFn,
+    killFn,
+  });
+  assert.equal(state.killed, 0);
+  assert.equal(sampleHit("testing", invoked), true);
+});
+
+test("runPrompt rejects a Copilot run that never observed anything", async () => {
+  // An unauthenticated CLI prints its login hint and exits 1 with no events;
+  // that must not read as "no skill fired".
+  const { spawnFn, killFn } = fakeCopilot(["To authenticate…\n"], {
+    code: 1,
+  });
+  await assert.rejects(
+    runPrompt("p", { agent: "copilot", spawnFn, killFn }),
+    /`copilot` produced no terminal `result` event \(exit 1\)/,
+  );
+  const failed = fakeCopilot([copilotResult(2)], { code: 2 });
+  await assert.rejects(
+    runPrompt("p", { agent: "copilot", ...failed }),
+    /ended `exit_2`/,
+  );
+});
+
+test("parseCopilotVersion reads the CLI's banner", () => {
+  assert.equal(
+    parseCopilotVersion("GitHub Copilot CLI 1.0.85.\nRun 'copilot update'"),
+    "1.0.85",
+  );
+  assert.equal(parseCopilotVersion("copilot: command not found"), null);
+});
+
+test("the report names the agent it measured", () => {
+  const direct = { prompt: "d", expect: "testing" };
+  const text = formatReport(
+    [direct],
+    samples(direct, 3, 3),
+    new Set(["testing"]),
+    {
+      ...OPTS,
+      agent: "copilot",
+    },
+  ).lines.join("\n");
+  assert.match(text, /First move \(1 turn\) — copilot/);
+  assert.match(text, /1\/1 copilot first-move cases at or above 80%\./);
+  assert.doesNotMatch(text, /claude/);
+});
+
+test("an unknown AGENT is rejected before anything runs", () => {
+  const res = spawnSync(process.execPath, [SCRIPT_PATH], {
+    env: { ...process.env, AGENT: "cursor" },
+    encoding: "utf8",
+  });
+  assert.equal(res.status, 1);
+  assert.match(
+    res.stderr,
+    /AGENT must be one of claude, copilot \(got `cursor`\)/,
+  );
 });
