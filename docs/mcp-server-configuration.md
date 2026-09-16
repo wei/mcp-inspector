@@ -272,6 +272,20 @@ A catalog carrying these fields:
 }
 ```
 
+## Reading this file from other tools
+
+A catalog you have already reviewed in the Inspector is a natural input for other tooling — a CI job or a reliability harness that connects to the same servers non-interactively. Reading the file is a supported interoperability use case. It is **not a versioned interchange format**: the Inspector makes no compatibility promise beyond what this page documents, the Inspector-specific fields above grow as features land, and a standard MCP client-configuration shape may supersede this one. Pin the Inspector version you validated against, and say so in your own documentation.
+
+A tool that consumes the file should:
+
+- **Treat it as read-only.** Don't rewrite it, and don't convert it into another format as a copy that users then maintain. The Inspector owns what it writes back — it omits fields equal to their defaults and upgrades older shapes (such as the pair-array `metadata`) on save — so a second writer drifts from it.
+- **Preserve stdio argument boundaries.** `command` and each `args` element are separate argv entries. Spawn them directly rather than joining them into a string for a shell, which re-splits on whitespace and interprets quoting, globs and metacharacters. Keep `cwd` and `env` as given.
+- **Decide on unknown fields explicitly.** Either honor an Inspector-specific field, or reject the entry naming the field you don't support. Silently ignoring one can change behavior — `protocolEra`, `headers` or `oauth` alter what connects and how.
+- **Keep credential values out of its output.** `env`, `headers` and `oauth.clientSecret` routinely hold secrets. Don't copy their values into logs, reports, evidence bundles or generated files; key names are usually enough.
+- **Describe its own scope without implying endorsement.** Which fields and Inspector versions it supports is that tool's claim to document; reading this file does not make it Inspector- or MCP-certified.
+
+Connecting is not side-effect free: calling a server's tools can change state wherever that server acts, so a tool that goes beyond reading the file should leave that decision to its user.
+
 ## Per-client behavior
 
 |                              | Web                                                           | CLI                                     | TUI                                              |
