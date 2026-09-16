@@ -591,22 +591,44 @@ export function agentArgs(agent, maxTurns) {
 /**
  * Stop a child and everything it started.
  *
- * On Windows the CLI runs under `cmd.exe`, so `child.kill()` would end the
- * shell and orphan the agent still spending model calls; `taskkill /T` takes
- * the tree.
+ * `copilot` is a Node wrapper around a native binary, and SIGTERM to the
+ * wrapper does NOT reach the binary: measured on 1.0.85, the native process was
+ * still running (and still spending its model call) ten seconds later. So on
+ * POSIX a Copilot run is spawned as the leader of its own process group and the
+ * whole group is signalled (Copilot). On Windows the CLI runs under `cmd.exe`,
+ * where `taskkill /T` takes the tree.
  *
- * @param {import("node:child_process").ChildProcess} child
+ * @param {{ pid?: number, kill: (signal: string) => unknown }} child
  * @param {string} platform
+ * @param {{ spawnFn?: typeof spawn, killProcess?: typeof process.kill }} [io]
  */
-function killTree(child, platform) {
-  if (platform === "win32" && child.pid !== undefined) {
-    spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+export function killTree(
+  child,
+  platform,
+  { spawnFn = spawn, killProcess = process.kill } = {},
+) {
+  if (child.pid === undefined) return;
+  if (platform === "win32") {
+    spawnFn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
       stdio: "ignore",
     });
     return;
   }
-  child.kill("SIGTERM");
+  try {
+    killProcess(-child.pid, "SIGTERM");
+  } catch {
+    // The group is already gone — the run finished as the budget was reached.
+  }
 }
+
+/**
+ * Copilot runs still in flight, so an interrupted eval can stop them.
+ *
+ * A child in its own process group no longer receives the terminal's Ctrl-C,
+ * which is the price of being able to signal the group — so without this, an
+ * interrupted suite would leave every in-flight session running unattended.
+ */
+const liveCopilotRuns = new Set();
 
 /**
  * Drive one fresh session and return the payloads the `Skill` tool was called
@@ -643,10 +665,20 @@ export function runPrompt(
     const { command, args, options } = cliSpawnArgs(
       agent,
       agentArgs(agent, maxTurns),
-      { cwd, stdio: ["pipe", "pipe", "inherit"] },
+      {
+        cwd,
+        stdio: ["pipe", "pipe", "inherit"],
+        // Its own process group, so `killTree` can reach the native binary the
+        // wrapper starts. Windows has no groups; `taskkill /T` covers it.
+        ...(agent === "copilot" && platform !== "win32"
+          ? { detached: true }
+          : {}),
+      },
       platform,
     );
     const p = spawnFn(command, args, options);
+    const run = { child: p, platform, killFn };
+    if (agent === "copilot") liveCopilotRuns.add(run);
     const collect =
       agent === "copilot"
         ? collectCopilotSkillInvocations
@@ -685,6 +717,7 @@ export function runPrompt(
     });
     p.on("error", reject);
     p.on("close", (code) => {
+      liveCopilotRuns.delete(run);
       const rejection = runRejection({ result, code });
       if (rejection !== null) {
         // An unauthenticated `copilot` answers `--version` fine, then prints
@@ -876,6 +909,13 @@ async function main() {
   if (cases.length === 0) {
     console.error("skills:eval — no cases found.");
     process.exit(1);
+  }
+
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    process.once(signal, () => {
+      for (const run of liveCopilotRuns) run.killFn(run.child, run.platform);
+      process.exit(130);
+    });
   }
 
   const jobs = cases.flatMap((c) => Array.from({ length: RUNS }, () => c));

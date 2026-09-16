@@ -418,8 +418,8 @@ CHAIN_THRESHOLD=0.4 CHAIN_MAX_TURNS=20 npm run skills:eval -- test-servers
 The summary is two lines, never one:
 
 ```
-7/7 first-move cases at or above 80%.
-2/2 hand-off cases above 50%.
+7/7 claude first-move cases at or above 80%.
+2/2 claude hand-off cases above 50%.
 ```
 
 Narrowing the run never narrows what a **negative** case is scored against — a
@@ -467,7 +467,14 @@ What was verified about how Copilot treats the files, on 1.0.85:
   goes.** Its `skill` tool refused `release` with `Skill not found`, and the
   model then opened `.claude/skills/release/SKILL.md` with `view` and read it
   anyway. A name-only skill is kept out of the automatic listing, not made
-  unreadable — which is equally true of Claude, which can `Read` the file.
+  unreadable — which is equally true of Claude, which can `Read` the file. It
+  still offers `/release` in its interactive slash-command menu.
+- **It honors `user-invocable: false` in that menu.** Driven through a real
+  pty, typing `/pro` lists `pr-flow` and `pre-push-gate` but not
+  `project-structure`, while `/testin` lists `testing`. The model can still load
+  it through its `skill` tool, which is what `user-invocable: false` is for.
+  (Headless `-p "/name"` is no test of this: prompt mode does not expand slash
+  commands, so the model simply loads the named skill as a tool call.)
 - **`AGENTS.md` is loaded as custom instructions**, so the rule in
   [Do not write a case `AGENTS.md` already answers](#do-not-write-a-case-agentsmd-already-answers)
   applies to Copilot runs unchanged.

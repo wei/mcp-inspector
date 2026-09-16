@@ -26,6 +26,7 @@ import {
   collectCopilotSkillInvocations,
   agentArgs,
   parseCopilotVersion,
+  killTree,
   runRejection,
   invokedSkillNames,
   runPrompt,
@@ -954,4 +955,70 @@ test("an unknown AGENT is rejected before anything runs", () => {
     res.stderr,
     /AGENT must be one of claude, copilot \(got `cursor`\)/,
   );
+});
+
+test("a Copilot run gets its own process group on POSIX, and none on Windows", () => {
+  // The native binary the wrapper starts ignores the wrapper's SIGTERM, so
+  // only a group signal reaches it.
+  const seen = {};
+  for (const platform of ["linux", "win32"]) {
+    const { spawnFn, killFn } = fakeCopilot([copilotResult(0)]);
+    runPrompt("p", {
+      agent: "copilot",
+      platform,
+      killFn,
+      spawnFn: (c, a, options) => {
+        seen[platform] = options.detached;
+        return spawnFn(c, a, options);
+      },
+    }).catch(() => {});
+  }
+  assert.equal(seen.linux, true);
+  assert.equal(seen.win32, undefined);
+  // Claude is bounded by `--max-turns` and never killed, so it stays attached.
+  let claudeDetached;
+  runPrompt("p", {
+    platform: "linux",
+    spawnFn: (_c, _a, options) => {
+      claudeDetached = options.detached;
+      const c = new EventEmitter();
+      c.stdout = new EventEmitter();
+      c.stdin = { end: () => {} };
+      queueMicrotask(() => c.emit("close", 0));
+      return c;
+    },
+  }).catch(() => {});
+  assert.equal(claudeDetached, undefined);
+});
+
+test("killTree signals the whole group on POSIX and the tree on Windows", () => {
+  const kills = [];
+  killTree(
+    { pid: 4242, kill: () => assert.fail("not the leader alone") },
+    "darwin",
+    {
+      killProcess: (pid, signal) => kills.push([pid, signal]),
+    },
+  );
+  assert.deepEqual(kills, [[-4242, "SIGTERM"]]);
+
+  // A group that already exited is not an error.
+  assert.doesNotThrow(() =>
+    killTree({ pid: 4242, kill: () => {} }, "linux", {
+      killProcess: () => {
+        throw Object.assign(new Error("ESRCH"), { code: "ESRCH" });
+      },
+    }),
+  );
+
+  const spawned = [];
+  killTree({ pid: 4242, kill: () => {} }, "win32", {
+    spawnFn: (c, a) => spawned.push([c, ...a]),
+  });
+  assert.deepEqual(spawned, [["taskkill", "/pid", "4242", "/T", "/F"]]);
+
+  // A child that never started has nothing to stop.
+  killTree({ pid: undefined, kill: () => {} }, "linux", {
+    killProcess: () => assert.fail("no pid, no signal"),
+  });
 });
