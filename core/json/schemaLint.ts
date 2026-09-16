@@ -16,7 +16,12 @@
  * conformance check would report nothing on essentially every real server.
  * What bites instead is the narrower subset each consumer accepts, which is
  * what the rules below encode. Every rule is a construct that is legal JSON
- * Schema and is known to be refused or quietly mishandled by real MCP clients.
+ * Schema and is either known to be refused or quietly mishandled by real MCP
+ * clients, or — a weaker class, and only ever at `warning` severity — outside
+ * a documented schema dialect that consumers translate tool schemas into
+ * (`type-union`, #2286). A rule in the weaker class names that dialect at its
+ * call site, and moves to the stronger class only once a shipping client that
+ * mishandles it is recorded there.
  *
  * Kept pure and dependency-free so all three clients share one verdict: the
  * CLI's `--strict` report, the TUI's tool detail pane, and the web Tools tab
@@ -465,6 +470,17 @@ function walk(
   });
 }
 
+/**
+ * Appended to the `type-union` suggestion when the union includes `null`.
+ * `anyOf` fixes the single-`type` problem, but OpenAPI 3.0 — the dialect the
+ * warning names — has no `null` type at all and spells nullability
+ * `nullable: true`, so the `{"type": "null"}` branch is not itself portable
+ * there (#2395 review). The suggestion stays JSON Schema rather than
+ * recommending `nullable`, which is not a JSON Schema keyword, and says so.
+ */
+const NULL_BRANCH_CAVEAT =
+  " A dialect with no `null` type, such as OpenAPI 3.0, still cannot express the `null` branch directly; there nullability is written `nullable: true`, which is not JSON Schema, so no single spelling is portable to both.";
+
 /** Rules that apply to a single schema object, ignoring its children. */
 function lintNode(
   node: SchemaRecord,
@@ -482,17 +498,29 @@ function lintNode(
     // omission — a different contract, not the same one spelled portably.
     // `anyOf` branches each carrying a single `type` are equivalent, and this
     // lint treats them as portable.
+    //
+    // Deliberately a `warning` and worded as a trade, not a defect (#2286).
+    // The array form is what some model providers' own tool guidance
+    // recommends for a nullable field (OpenAI's structured outputs), so an
+    // author may be using it on purpose. What it costs is portability to a
+    // consumer that translates tool schemas into a single-`type` dialect —
+    // the OpenAPI 3.0 subset Gemini's function declarations use, where `type`
+    // is one enum value and nullability is `nullable: true`. A warning never
+    // fails the CLI's `--strict` exit code (only `error` does), so keeping the
+    // rule informs without turning a deliberate choice into a red CI job.
     add(
       ctx,
       "type-union",
       "warning",
       path,
-      `\`type\` is an array (${JSON.stringify(type)}). The array form is legal JSON Schema, but several MCP clients read \`type\` as a single string and either reject the tool or drop the constraint.`,
+      `\`type\` is an array (${JSON.stringify(type)}). This is legal JSON Schema, and some model providers recommend it for nullable fields, but it is less portable: a client that maps tool schemas onto a single-\`type\` dialect (such as the OpenAPI subset used for Gemini function declarations) may reject the tool or drop the constraint.`,
       `Split it into \`anyOf\` branches, each with a single \`type\` — \`{"anyOf": [${type
         .map((t) => `{"type": "${t}"}`)
         .join(
           ", ",
-        )}]}\`. (Making the property optional instead is a different contract: absent is not the same as \`null\`.)`,
+        )}]}\`. (Making the property optional instead is a different contract: absent is not the same as \`null\`.)${
+        type.includes("null") ? NULL_BRANCH_CAVEAT : ""
+      }`,
     );
   }
 
