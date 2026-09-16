@@ -36,7 +36,7 @@ other.
 | Branch | `v2/chore/<ISSUE>-bump-<X-Y-Z>`, cut from `origin/v2/main` | the milestone-merge branch, cut from `origin/main` |
 | Base | **`v2/main`** | **`main`** |
 | Carries | the `npm audit` report, **any fixes the audit forces**, and the **version bump** — all three, one PR | the milestone's work, arriving whole from `v2/main`. **No commits of its own.** |
-| Verified by | `npm run local:gate` | `npm run local:gate` **plus** a hand-driven smoke of every contribution in the milestone, from the **production build**, written up as a **ledger artifact** |
+| Verified by | `npm run local:gate` | `npm run local:gate`, **plus** `npm run pack:verify` (not a gate stage), **plus** a hand-driven smoke of every contribution in the milestone, from the **production build**, written up as a **ledger artifact** |
 | Merged when | reviewed and green | the ledger is reviewed by the maintainers and clean |
 
 Then, and only then, a maintainer tags and publishes the **GitHub Release**
@@ -172,7 +172,7 @@ and link it from PR 2. Shape it like the
   standfirst saying what tree was tested and that its hash matches
   `origin/v2/main`, plus whether the milestone payload is complete (the only
   issue left open should be the merge itself).
-- **Verdict band** — `local:gate` result, milestone issues verified as `N / N`,
+- **Verdict band** — `local:gate` and `pack:verify` results, milestone issues verified as `N / N`,
   distinct test count, regressions found.
 - **The automated gate** — one cell per stage with its number (file counts,
   test counts, smoke count, `pack:verify` size), and a note on what is new this
