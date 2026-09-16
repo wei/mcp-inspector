@@ -35,6 +35,9 @@ const NAME_MAP_KEYWORDS = new Set([
   "properties",
   "patternProperties",
   "dependentSchemas",
+  // Pre-2019 spelling of `dependentSchemas` (its array values are name lists,
+  // which the walk passes through untouched).
+  "dependencies",
   "$defs",
   "definitions",
 ]);
@@ -52,19 +55,22 @@ function isRecord(value: unknown): value is JsonRecord {
 
 /** The referent of a `#/…` JSON Pointer within `root`, or `undefined`. */
 function resolvePointer(root: unknown, ref: string): unknown {
-  if (ref === "#") return root;
-  if (!ref.startsWith("#/")) return undefined;
+  if (!ref.startsWith("#")) return undefined;
+  let pointer: string;
+  try {
+    // The whole fragment is URI-decoded BEFORE it is split into tokens (RFC
+    // 6901 §6): `#%2F$defs%2FDate` is the pointer `/$defs/Date`, and
+    // `#/a%2Fb` is the path `a` → `b`. A literal `/` inside a name is `~1`.
+    pointer = decodeURIComponent(ref.slice(1));
+  } catch {
+    return undefined;
+  }
+  if (pointer === "") return root;
+  if (!pointer.startsWith("/")) return undefined;
   let current: unknown = root;
-  for (const raw of ref.slice(2).split("/")) {
-    let decoded: string;
-    try {
-      // A fragment is URI-encoded (`#/$defs/a%20b`) before it is a pointer.
-      decoded = decodeURIComponent(raw);
-    } catch {
-      return undefined;
-    }
+  for (const token of pointer.slice(1).split("/")) {
     // RFC 6901 escaping, `~1` before `~0` so `~01` decodes to `~1`.
-    const segment = decoded.replace(/~1/g, "/").replace(/~0/g, "~");
+    const segment = token.replace(/~1/g, "/").replace(/~0/g, "~");
     if (Array.isArray(current)) {
       const index = Number(segment);
       if (!/^(0|[1-9]\d*)$/.test(segment) || index >= current.length) {

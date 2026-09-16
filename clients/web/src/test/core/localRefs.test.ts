@@ -83,6 +83,7 @@ describe("inlineLocalRefs", () => {
     const resolved = inlineLocalRefs({
       properties: {
         remote: { $ref: "https://example.com/s.json" },
+        notPointer: { $ref: "#Anchor" },
         missing: { $ref: "#/$defs/Nope" },
         badEscape: { $ref: "#/$defs/%E0%A4%A" },
         scalar: { $ref: "#/$defs/S/type" },
@@ -93,6 +94,7 @@ describe("inlineLocalRefs", () => {
     });
     expect(resolved.properties).toEqual({
       remote: { $ref: "https://example.com/s.json" },
+      notPointer: { $ref: "#Anchor" },
       missing: { $ref: "#/$defs/Nope" },
       badEscape: { $ref: "#/$defs/%E0%A4%A" },
       scalar: { $ref: "#/$defs/S/type" },
@@ -107,12 +109,16 @@ describe("inlineLocalRefs", () => {
       properties: {
         indexed: { $ref: "#/$defs/L/0" },
         escaped: { $ref: "#/$defs/a~1b~0c%20d" },
+        encodedSlashes: { $ref: "#%2F$defs%2FL%2F0" },
+        encodedSeparator: { $ref: "#/$defs/N%2Finner" },
         self: { anyOf: [{ $ref: "#" }] },
       },
-      $defs: { L: [date], "a/b~c d": date },
+      $defs: { L: [date], "a/b~c d": date, N: { inner: date } },
     });
     expect(resolved.properties.indexed).toEqual(date);
     expect(resolved.properties.escaped).toEqual(date);
+    expect(resolved.properties.encodedSlashes).toEqual(date);
+    expect(resolved.properties.encodedSeparator).toEqual(date);
     // `#` is the schema being inlined, so it is kept rather than recursed.
     expect(resolved.properties.self.anyOf[0]).toEqual({
       type: "object",
@@ -137,6 +143,19 @@ describe("inlineLocalRefs", () => {
     expect(resolved.properties.default).toEqual(date);
     expect(resolved.properties.enum).toEqual(date);
     expect(Object.hasOwn(resolved.properties, "__proto__")).toBe(true);
+  });
+
+  it("walks the legacy dependencies map by name, passing name lists through", () => {
+    const resolved = inlineLocalRefs({
+      type: "object",
+      dependencies: {
+        default: { properties: { x: { $ref: "#/$defs/D" } } },
+        other: ["default"],
+      },
+      $defs: { D: date },
+    });
+    expect(resolved.dependencies.default.properties.x).toEqual(date);
+    expect(resolved.dependencies.other).toEqual(["default"]);
   });
 
   it("finds a reference that sits only under a data-keyword-named property", () => {
