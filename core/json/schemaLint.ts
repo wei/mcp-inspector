@@ -482,12 +482,22 @@ function lintNode(
     // omission — a different contract, not the same one spelled portably.
     // `anyOf` branches each carrying a single `type` are equivalent, and this
     // lint treats them as portable.
+    //
+    // Deliberately a `warning` and worded as a trade, not a defect (#2286).
+    // The array form is what some model providers' own tool guidance
+    // recommends for a nullable field (OpenAI's structured outputs), so an
+    // author may be using it on purpose. What it costs is portability to a
+    // consumer that translates tool schemas into a single-`type` dialect —
+    // the OpenAPI 3.0 subset Gemini's function declarations use, where `type`
+    // is one enum value and nullability is `nullable: true`. A warning never
+    // fails the CLI's `--strict` exit code (only `error` does), so keeping the
+    // rule informs without turning a deliberate choice into a red CI job.
     add(
       ctx,
       "type-union",
       "warning",
       path,
-      `\`type\` is an array (${JSON.stringify(type)}). The array form is legal JSON Schema, but several MCP clients read \`type\` as a single string and either reject the tool or drop the constraint.`,
+      `\`type\` is an array (${JSON.stringify(type)}). This is legal JSON Schema, and some model providers recommend it for nullable fields, but it is less portable: a client that maps tool schemas onto a single-\`type\` dialect (such as the OpenAPI subset used for Gemini function declarations) may reject the tool or drop the constraint.`,
       `Split it into \`anyOf\` branches, each with a single \`type\` — \`{"anyOf": [${type
         .map((t) => `{"type": "${t}"}`)
         .join(

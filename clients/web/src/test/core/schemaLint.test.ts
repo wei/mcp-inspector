@@ -303,7 +303,12 @@ describe("lintToolSchemas — type-union", () => {
       }),
     );
     expect(rules(findings)).toEqual(["type-union"]);
+    // A warning, not an error: `--strict` exits 6 only on error findings, and
+    // the array form is provider-recommended, so it must not fail CI (#2286).
     expect(findings[0]!.severity).toBe("warning");
+    // Framed as a portability trade that acknowledges the provider guidance.
+    expect(findings[0]!.issue).toContain("some model providers recommend it");
+    expect(findings[0]!.issue).toContain("less portable");
     expect(findings[0]!.suggestion).toContain(
       '{"anyOf": [{"type": "null"}, {"type": "boolean"}]}',
     );
