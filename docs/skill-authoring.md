@@ -528,9 +528,12 @@ So the pagination prompt was a **Copilot-specific shortfall**, not noise: it
 held below the 50% bar at both sample sizes, while the same case cleared 100%
 under Claude.
 
-**Where it stopped** (#2399), from five recorded Copilot runs of that prompt:
-two loaded `testing` and then went straight to `grep`, never following its
-pointer; two opened with `grep` and loaded no skill at all. The pointer was
+**Where it stopped** (#2399), from five recorded Copilot runs of that prompt,
+two of which made the hand-off: one loaded `testing` then `test-servers` as its
+first two moves; one opened with `grep` and reached `testing → test-servers`
+only after about ten searches, inside the turn budget. Of the three misses, two
+loaded `testing` and then went straight to `grep`, never following its pointer,
+and one searched the code throughout without loading any skill. The pointer was
 conditional on "does this test use a `test-servers/` fixture?", and a prompt
 about pagination does not say so, so the model went to the code to find out and
 did not come back once it found `pagination-http.json`. The fix is in
