@@ -2,6 +2,7 @@ import {
   admitsNull,
   normalizeNullableUnion,
 } from "@inspector/core/json/nullableUnion.js";
+import { inlineLocalRefs } from "@inspector/core/json/localRefs.js";
 import {
   branchAcceptsValues,
   declaresAnyFields,
@@ -92,8 +93,10 @@ export function toFormSchema(schema: unknown): InspectorFormSchema | null {
   }
   // Structural narrow: the SDK schema's fields are a superset of what the form
   // reads (`type`, `properties`, `required`, `items`, …); the values the form
-  // never dereferences don't affect rendering.
-  return schema as InspectorFormSchema;
+  // never dereferences don't affect rendering. Same-document `$ref`s are
+  // inlined first, since every widget is chosen by a property's own `type` and
+  // a deduplicated Zod schema carries none (#2321).
+  return inlineLocalRefs(schema) as InspectorFormSchema;
 }
 
 export type DataType =
