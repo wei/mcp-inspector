@@ -17,6 +17,7 @@ import {
   createAuthChallengeObserverFetch,
 } from "./authChallengeFetch.js";
 import { createProxyFetch } from "./proxyFetch.js";
+import { createNotificationHeadersFetch } from "./notificationHeadersFetch.js";
 import { createSuppressNotificationStreamFetch } from "./suppressNotificationStreamFetch.js";
 
 /**
@@ -173,16 +174,19 @@ export function createTransportNode(
       ...(headers && { headers }),
     };
 
-    // Outermost, so a suppressed GET is answered before it reaches the
-    // tracker: it is never sent, and the Network log should not show a
-    // request the server never saw (#2317).
+    // Both wrappers sit above the tracker. Header stamping, so the tracker
+    // records the headers actually sent (#2385); stream suppression outermost
+    // of all, so a suppressed GET is answered before it reaches the tracker —
+    // it is never sent, and the Network log should not show a request the
+    // server never saw (#2317). They touch disjoint requests (notification
+    // POSTs vs. the endpoint's SSE GET), so their relative order is free.
+    const stampedFetch = createNotificationHeadersFetch(
+      fetchWithOptionalAuthIntercept,
+    );
     const httpFetch =
       settings?.suppressNotificationStream === true
-        ? createSuppressNotificationStreamFetch(
-            fetchWithOptionalAuthIntercept,
-            url,
-          )
-        : fetchWithOptionalAuthIntercept;
+        ? createSuppressNotificationStreamFetch(stampedFetch, url)
+        : stampedFetch;
 
     const transport = new StreamableHTTPClientTransport(url, {
       authProvider,
