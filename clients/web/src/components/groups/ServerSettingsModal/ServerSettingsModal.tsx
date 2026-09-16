@@ -206,6 +206,14 @@ export function ServerSettingsModal({
     onSettingsChange({ ...settings, paginatedLists: value });
   }
 
+  function handleSuppressNotificationStreamChange(value: boolean) {
+    // Omit-when-off, so a server that never touched the box writes no field.
+    onSettingsChange({
+      ...settings,
+      suppressNotificationStream: value ? true : undefined,
+    });
+  }
+
   function handleAdvertisedExtensionChange(key: string, checked: boolean) {
     const next = { ...settings.advertisedExtensions };
     const ext = ADVERTISABLE_EXTENSIONS.find((e) => e.key === key);
@@ -306,6 +314,9 @@ export function ServerSettingsModal({
             onTimeoutChange={handleTimeoutChange}
             onAutoRefreshChange={handleAutoRefreshChange}
             onPaginatedListsChange={handlePaginatedListsChange}
+            onSuppressNotificationStreamChange={
+              handleSuppressNotificationStreamChange
+            }
             onAdvertisedExtensionChange={handleAdvertisedExtensionChange}
             onMaxFetchRequestsChange={handleMaxFetchRequestsChange}
             onSkillCatalogLimitChange={handleSkillCatalogLimitChange}

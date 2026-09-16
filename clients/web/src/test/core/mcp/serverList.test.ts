@@ -347,6 +347,41 @@ describe("serverEntriesToMcpConfig", () => {
     expect(round).toEqual(original);
   });
 
+  it("round-trips suppressNotificationStream: lifts true to settings and back to disk (#2317)", () => {
+    const original: MCPConfig = {
+      mcpServers: {
+        delta: {
+          type: "streamable-http",
+          url: "https://x.test/mcp",
+          suppressNotificationStream: true,
+        },
+      },
+    };
+    const [entry] = mcpConfigToServerEntries(original);
+    expect(entry?.settings?.suppressNotificationStream).toBe(true);
+    const round = serverEntriesToMcpConfig(mcpConfigToServerEntries(original));
+    expect(round).toEqual(original);
+  });
+
+  it("drops a non-true suppressNotificationStream on read and omits it on write (#2317)", () => {
+    const original = {
+      mcpServers: {
+        epsilon: {
+          type: "streamable-http",
+          url: "https://x.test/mcp",
+          suppressNotificationStream: false,
+        },
+      },
+    } satisfies MCPConfig;
+    const [entry] = mcpConfigToServerEntries(original);
+    expect(entry?.settings).toBeDefined();
+    expect(entry?.settings?.suppressNotificationStream).toBeUndefined();
+    const round = serverEntriesToMcpConfig(mcpConfigToServerEntries(original));
+    expect(
+      "suppressNotificationStream" in (round.mcpServers.epsilon ?? {}),
+    ).toBe(false);
+  });
+
   it("round-trips advertisedExtensions: lifts a non-empty map to settings and back to disk", () => {
     const original: MCPConfig = {
       mcpServers: {

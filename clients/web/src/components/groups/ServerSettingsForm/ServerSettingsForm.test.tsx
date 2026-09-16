@@ -68,6 +68,7 @@ const baseHandlers = {
   onTimeoutChange: vi.fn(),
   onAutoRefreshChange: vi.fn(),
   onPaginatedListsChange: vi.fn(),
+  onSuppressNotificationStreamChange: vi.fn(),
   onAdvertisedExtensionChange: vi.fn(),
   onMaxFetchRequestsChange: vi.fn(),
   onSkillCatalogLimitChange: vi.fn(),
@@ -450,6 +451,64 @@ describe("ServerSettingsForm", () => {
       }),
     );
     expect(onAutoRefreshChange).toHaveBeenCalledWith(true);
+  });
+
+  describe("Suppress Notification Stream (#2317)", () => {
+    const name = /Suppress Notification Stream/;
+
+    it("is unchecked by default and reflects an explicit true", () => {
+      const { rerender } = renderWithMantine(
+        <ServerSettingsForm
+          {...baseHandlers}
+          settings={emptySettings}
+          expandedSections={["options"]}
+        />,
+      );
+      expect(screen.getByRole("checkbox", { name })).not.toBeChecked();
+      rerender(
+        <ServerSettingsForm
+          {...baseHandlers}
+          settings={{ ...emptySettings, suppressNotificationStream: true }}
+          expandedSections={["options"]}
+        />,
+      );
+      expect(screen.getByRole("checkbox", { name })).toBeChecked();
+    });
+
+    it("invokes onSuppressNotificationStreamChange when toggled", async () => {
+      const user = userEvent.setup();
+      const onSuppressNotificationStreamChange = vi.fn();
+      renderWithMantine(
+        <ServerSettingsForm
+          {...baseHandlers}
+          onSuppressNotificationStreamChange={
+            onSuppressNotificationStreamChange
+          }
+          settings={emptySettings}
+          expandedSections={["options"]}
+        />,
+      );
+      await user.click(screen.getByRole("checkbox", { name }));
+      expect(onSuppressNotificationStreamChange).toHaveBeenCalledWith(true);
+    });
+
+    it.each(["sse", "stdio"] as const)(
+      "is hidden for a %s server, which has no standalone GET stream",
+      (serverType) => {
+        renderWithMantine(
+          <ServerSettingsForm
+            {...baseHandlers}
+            serverType={serverType}
+            isStdio={serverType === "stdio"}
+            settings={emptySettings}
+            expandedSections={["options"]}
+          />,
+        );
+        expect(
+          screen.queryByRole("checkbox", { name }),
+        ).not.toBeInTheDocument();
+      },
+    );
   });
 
   it("renders the Advertised Extensions section with Tasks checked by default", () => {

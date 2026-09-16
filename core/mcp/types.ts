@@ -158,6 +158,13 @@ export type StoredMCPServer = MCPServerConfig & {
    */
   paginatedLists?: boolean;
   /**
+   * When true, the Streamable HTTP transport does not open the standalone
+   * `GET` notification stream, so traffic is POST-only and server-initiated
+   * messages outside a request's own response stream do not arrive.
+   * Inspector-specific. Omitted on disk when false (the default). (#2317)
+   */
+  suppressNotificationStream?: boolean;
+  /**
    * Per-extension overrides for which extensions the Inspector advertises to
    * this server (keyed by extension id; a present key wins over the registry
    * default). Inspector-specific. Omitted on disk when empty, keeping the file
@@ -928,6 +935,18 @@ export interface InspectorServerSettings {
    * Default false. Server-wide; the per-list sidebar toggle edits this. (#1721)
    */
   paginatedLists?: boolean;
+  /**
+   * When true, a Streamable HTTP connection does not open the standalone `GET`
+   * notification stream (the client MAY open it; it is never required), so
+   * request/response traffic is POST-only (#2317). Two uses: a one-click
+   * diagnostic for a server that cannot serve a second concurrent request —
+   * which the long-lived stream otherwise occupies, hanging every request
+   * after `initialize` (#2187) — and an escape hatch that makes such a server
+   * inspectable. The cost is that server→client messages not tied to a request
+   * (list_changed, resource updates, standalone logs) do not arrive. Read at
+   * connect time; no effect on stdio or legacy SSE. Default false.
+   */
+  suppressNotificationStream?: boolean;
   /**
    * Maximum number of HTTP fetch requests retained in the Network log for this
    * server. When exceeded, the oldest entries rotate out (and any deferred

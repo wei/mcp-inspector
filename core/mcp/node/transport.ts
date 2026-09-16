@@ -17,6 +17,7 @@ import {
   createAuthChallengeObserverFetch,
 } from "./authChallengeFetch.js";
 import { createProxyFetch } from "./proxyFetch.js";
+import { createSuppressNotificationStreamFetch } from "./suppressNotificationStreamFetch.js";
 
 /**
  * Build the wire `headers` record from `settings.headers`, dropping rows with
@@ -172,10 +173,18 @@ export function createTransportNode(
       ...(headers && { headers }),
     };
 
+    // Outermost, so a suppressed GET is answered before it reaches the
+    // tracker: it is never sent, and the Network log should not show a
+    // request the server never saw (#2317).
+    const httpFetch =
+      settings?.suppressNotificationStream === true
+        ? createSuppressNotificationStreamFetch(fetchWithOptionalAuthIntercept)
+        : fetchWithOptionalAuthIntercept;
+
     const transport = new StreamableHTTPClientTransport(url, {
       authProvider,
       requestInit,
-      fetch: fetchWithOptionalAuthIntercept,
+      fetch: httpFetch,
       // SEP-2350: how the transport reacts to a `403 insufficient_scope`
       // challenge. Defaults to the SDK's `reauthorize` when unset.
       ...(settings?.oauthOnInsufficientScope && {

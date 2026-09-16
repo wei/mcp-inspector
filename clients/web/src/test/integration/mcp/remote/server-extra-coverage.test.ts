@@ -827,6 +827,40 @@ describe("server.ts supplemental coverage", () => {
       expect((await res.json()).error).toMatch(/paginatedLists/);
     });
 
+    it("rejects a non-boolean suppressNotificationStream (#2317)", async () => {
+      const res = await postSettings({
+        ...base,
+        suppressNotificationStream: "yes",
+      });
+      expect((await res.json()).error).toMatch(/suppressNotificationStream/);
+    });
+
+    // #2317 — a 200 only proves the payload validated; read the entry back so
+    // dropping the field from `normalizeSettings` cannot pass silently.
+    async function readSuppressNotificationStream() {
+      const res = await fetch(`${h.baseUrl}/api/servers`);
+      const body = (await res.json()) as {
+        mcpServers: Record<string, Record<string, unknown>>;
+      };
+      return body.mcpServers.srv?.suppressNotificationStream;
+    }
+
+    it("persists suppressNotificationStream through a save (#2317)", async () => {
+      expect(
+        (await postSettings({ ...base, suppressNotificationStream: true }))
+          .status,
+      ).toBe(200);
+      expect(await readSuppressNotificationStream()).toBe(true);
+    });
+
+    it("writes no suppressNotificationStream field when off (#2317)", async () => {
+      expect(
+        (await postSettings({ ...base, suppressNotificationStream: false }))
+          .status,
+      ).toBe(200);
+      expect(await readSuppressNotificationStream()).toBeUndefined();
+    });
+
     it("rejects a negative maxFetchRequests", async () => {
       const res = await postSettings({ ...base, maxFetchRequests: -2 });
       expect((await res.json()).error).toMatch(/maxFetchRequests/);

@@ -104,6 +104,8 @@ export interface ServerSettingsFormProps {
   ) => void;
   onAutoRefreshChange: (value: boolean) => void;
   onPaginatedListsChange: (value: boolean) => void;
+  /** Toggle the standalone `GET` notification stream suppression (#2317). */
+  onSuppressNotificationStreamChange: (value: boolean) => void;
   /**
    * Toggle whether the Inspector advertises the extension `key` to this server.
    * `checked` is the new advertise state; the modal folds it into
@@ -479,6 +481,7 @@ export function ServerSettingsForm({
   onTimeoutChange,
   onAutoRefreshChange,
   onPaginatedListsChange,
+  onSuppressNotificationStreamChange,
   onAdvertisedExtensionChange,
   onMaxFetchRequestsChange,
   onSkillCatalogLimitChange,
@@ -708,6 +711,16 @@ export function ServerSettingsForm({
               checked={settings.paginatedLists ?? false}
               onChange={(e) => onPaginatedListsChange(e.currentTarget.checked)}
             />
+            {serverType === "streamable-http" ? (
+              <Checkbox
+                label="Suppress Notification Stream"
+                description="When checked, the Inspector does not open the standalone GET stream after connecting, so requests and responses travel over POST only. Server-to-client notifications that are not part of a request's own response — list changes, resource updates, standalone logs — will not arrive while this is on. Use it to test whether a server that answers initialize but then times out every request cannot serve a second concurrent request, and to inspect such a server anyway. Takes effect on the next connect."
+                checked={settings.suppressNotificationStream ?? false}
+                onChange={(e) =>
+                  onSuppressNotificationStreamChange(e.currentTarget.checked)
+                }
+              />
+            ) : null}
             <LogSizeInput
               label="Network Log Size"
               description="Maximum number of HTTP requests kept in the Network log for this server. Older entries rotate out past this limit; a response body that arrives after its entry rotated out is dropped. Use 0 for unlimited (not recommended). Applies immediately to the active connection."
