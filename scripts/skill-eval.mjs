@@ -631,6 +631,27 @@ export function killTree(
 const liveCopilotRuns = new Set();
 
 /**
+ * Stop every Copilot run still in flight.
+ *
+ * Every way the eval can end early has to come through here: an interrupt, and
+ * just as much one sample rejecting — `pool` rejects on the first failure and
+ * `main().catch` exits while the other detached groups are still running, and
+ * a process exit does not reach them (Copilot).
+ *
+ * @param {Set<{child: object, platform: string, killFn: Function}>} [runs]
+ * @returns {number} How many runs were signalled.
+ */
+export function stopLiveCopilotRuns(runs = liveCopilotRuns) {
+  let n = 0;
+  for (const run of runs) {
+    run.killFn(run.child, run.platform);
+    n++;
+  }
+  runs.clear();
+  return n;
+}
+
+/**
  * Drive one fresh session and return the payloads the `Skill` tool was called
  * with.
  *
@@ -913,7 +934,7 @@ async function main() {
 
   for (const signal of ["SIGINT", "SIGTERM"]) {
     process.once(signal, () => {
-      for (const run of liveCopilotRuns) run.killFn(run.child, run.platform);
+      stopLiveCopilotRuns();
       process.exit(130);
     });
   }
@@ -942,6 +963,7 @@ if (
   path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
   main().catch((e) => {
+    stopLiveCopilotRuns();
     console.error(e.message ?? e);
     process.exit(1);
   });

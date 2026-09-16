@@ -27,6 +27,7 @@ import {
   agentArgs,
   parseCopilotVersion,
   killTree,
+  stopLiveCopilotRuns,
   runRejection,
   invokedSkillNames,
   runPrompt,
@@ -1021,4 +1022,34 @@ test("killTree signals the whole group on POSIX and the tree on Windows", () => 
   killTree({ pid: undefined, kill: () => {} }, "linux", {
     killProcess: () => assert.fail("no pid, no signal"),
   });
+});
+
+test("stopLiveCopilotRuns stops every run in flight, once", () => {
+  // The early-exit path: one sample rejects, `main().catch` exits, and the
+  // other detached groups would otherwise keep spending model calls.
+  const stopped = [];
+  const runs = new Set(
+    ["a", "b"].map((id) => ({
+      child: { id },
+      platform: "linux",
+      killFn: (child, platform) => stopped.push([child.id, platform]),
+    })),
+  );
+  assert.equal(stopLiveCopilotRuns(runs), 2);
+  assert.deepEqual(stopped, [
+    ["a", "linux"],
+    ["b", "linux"],
+  ]);
+  assert.equal(stopLiveCopilotRuns(runs), 0, "nothing is signalled twice");
+});
+
+test("a rejected Copilot run leaves the in-flight set", async () => {
+  // A run that closed is no longer live, so the cleanup never signals a pid
+  // that may since have been reused.
+  const { spawnFn, killFn } = fakeCopilot([copilotResult(3)], { code: 3 });
+  await assert.rejects(
+    runPrompt("p", { agent: "copilot", spawnFn, killFn }),
+    /exit_3/,
+  );
+  assert.equal(stopLiveCopilotRuns(), 0);
 });
