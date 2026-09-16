@@ -1,7 +1,10 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { InspectorClient } from "@inspector/core/mcp/inspectorClient.js";
 import { createTransportNode } from "@inspector/core/mcp/node/transport.js";
-import { eraToVersionNegotiation } from "@inspector/core/mcp/types.js";
+import {
+  eraToVersionNegotiation,
+  MODERN_PROTOCOL_VERSION,
+} from "@inspector/core/mcp/types.js";
 import type { McpSubscription } from "@modelcontextprotocol/client";
 import {
   createTestServerHttp,
@@ -101,6 +104,19 @@ describe("resource subscriptions era fork (#1630)", () => {
     return { connected, messages };
   }
 
+  /** A fetch that records each string-bodied request's body and final headers. */
+  function recordingFetch(
+    inner: typeof fetch,
+    sent: { body: string; headers: Headers }[],
+  ): typeof fetch {
+    return (input, init) => {
+      if (typeof init?.body === "string") {
+        sent.push({ body: init.body, headers: new Headers(init.headers) });
+      }
+      return inner(input, init);
+    };
+  }
+
   function methodsSent(messages: MessageEntry[]): string[] {
     return messages
       .filter((m) => m.direction === "request")
@@ -194,6 +210,48 @@ describe("resource subscriptions era fork (#1630)", () => {
       expect(connected.getSubscribedResources()).toEqual([]);
       // No re-listen: there is nothing left to listen for.
       expect(methodsSent(messages)).not.toContain("subscriptions/listen");
+    });
+
+    it("sends the listen stream's notifications/cancelled with Mcp-Method (#2385)", async () => {
+      // The SDK POSTs a `notifications/cancelled` when a listen stream closes,
+      // and stamps the SEP-2243 headers on requests only — so a strict modern
+      // server refused the unsubscribe `400 Mcp-Method is required`. The test
+      // server is lenient, so the wire headers are asserted directly.
+      const started = await startServer({});
+      const sent: { body: string; headers: Headers }[] = [];
+      const connected = new InspectorClient(
+        { type: "streamable-http", url: started.url },
+        {
+          environment: {
+            transport: (config, options) =>
+              createTransportNode(config, {
+                ...options,
+                fetchFn: recordingFetch(
+                  options?.fetchFn ?? globalThis.fetch,
+                  sent,
+                ),
+              }),
+          },
+          versionNegotiation: eraToVersionNegotiation("modern"),
+          listChangedNotifications: NO_LIST_CHANGED,
+        },
+      );
+      client = connected;
+      await connected.connect();
+      await connected.subscribeToResource(RESOURCE_URI);
+      await connected.unsubscribeFromResource(RESOURCE_URI);
+
+      await vi.waitFor(() => {
+        const cancelled = sent.find((request) =>
+          request.body.includes('"notifications/cancelled"'),
+        );
+        expect(cancelled?.headers.get("mcp-method")).toBe(
+          "notifications/cancelled",
+        );
+        expect(cancelled?.headers.get("mcp-protocol-version")).toBe(
+          MODERN_PROTOCOL_VERSION,
+        );
+      });
     });
 
     it("keeps the stream open past the last subscription when a listChanged opt-in remains", async () => {
