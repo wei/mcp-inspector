@@ -172,11 +172,13 @@ and link it from PR 2. Shape it like the
   standfirst saying what tree was tested and that its hash matches
   `origin/v2/main`, plus whether the milestone payload is complete (the only
   issue left open should be the merge itself).
-- **Verdict band** — `local:gate` and `pack:verify` results, milestone issues verified as `N / N`,
-  distinct test count, regressions found.
-- **The automated gate** — one cell per stage with its number (file counts,
-  test counts, smoke count, `pack:verify` size), and a note on what is new this
+- **Verdict band** — `local:gate` and `pack:verify` results, milestone issues
+  verified as `N / N`, distinct test count, regressions found.
+- **The automated gate** — one cell per `local:gate` stage with its number
+  (file counts, test counts, smoke count), and a note on what is new this
   milestone.
+- **The packaging check** — `pack:verify` in its own cell, apart from the gate
+  stages because it is not one of them: its result and the tarball size.
 - **One section per theme**, each a table of *Issue · What was driven ·
   Observed · Status*. One row per closed issue, issue-linked, with the actual
   output in the Observed cell.
