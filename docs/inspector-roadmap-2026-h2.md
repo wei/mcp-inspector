@@ -87,9 +87,9 @@ be re-planned:
 | Discover checkmarks for task extensions                                                     | [#1887](https://github.com/modelcontextprotocol/inspector/issues/1887)                                                                                                                                                                                                                                                                                                                                                                         |
 | Tool-schema portability lint (`--strict`)                                                               | [#1005](https://github.com/modelcontextprotocol/inspector/issues/1005), [#1015](https://github.com/modelcontextprotocol/inspector/issues/1015)                                                                                                                                                                                                                                                                                                 |
 | The argument editor workstream (all six issues)                                             | [#1853](https://github.com/modelcontextprotocol/inspector/issues/1853), [#1856](https://github.com/modelcontextprotocol/inspector/issues/1856), [#1885](https://github.com/modelcontextprotocol/inspector/issues/1885), [#1928](https://github.com/modelcontextprotocol/inspector/issues/1928), [#1919](https://github.com/modelcontextprotocol/inspector/issues/1919), [#1910](https://github.com/modelcontextprotocol/inspector/issues/1910) |
-| Connection fixes (version-negotiation DX, `https://localhost`, dev containers, ghost entry) | [#962](https://github.com/modelcontextprotocol/inspector/issues/962), [#1936](https://github.com/modelcontextprotocol/inspector/issues/1936), [#1951](https://github.com/modelcontextprotocol/inspector/issues/1951), [#1914](https://github.com/modelcontextprotocol/inspector/issues/1914)                                                                                                                                                   |
+| Connection fixes (version-negotiation DX, dev containers, ghost entry) and self-signed `https://localhost` guidance (documented trust configuration, not a code fix) | [#962](https://github.com/modelcontextprotocol/inspector/issues/962), [#1936](https://github.com/modelcontextprotocol/inspector/issues/1936), [#1951](https://github.com/modelcontextprotocol/inspector/issues/1951), [#1914](https://github.com/modelcontextprotocol/inspector/issues/1914)                                                                                                                                                   |
 | Server config: paste-JSON, custom headers, auth URL overrides, file-backed secrets          | [#904](https://github.com/modelcontextprotocol/inspector/issues/904), [#1915](https://github.com/modelcontextprotocol/inspector/issues/1915), [#1906](https://github.com/modelcontextprotocol/inspector/issues/1906), [#1950](https://github.com/modelcontextprotocol/inspector/issues/1950)                                                                                                                                                   |
-| Enterprise-Managed Authorization; IdP OIDC option                                           | [#1509](https://github.com/modelcontextprotocol/inspector/issues/1509), [#1937](https://github.com/modelcontextprotocol/inspector/issues/1937)                                                                                                                                                                                                                                                                                                 |
+| IdP OIDC option (EMA itself, #1509, predates the first draft) | [#1937](https://github.com/modelcontextprotocol/inspector/issues/1937)                                                                                                                                                                                                                                                                                                 |
 | Skills over MCP (SEP-2640) across web, CLI and TUI                                          | [#2234](https://github.com/modelcontextprotocol/inspector/issues/2234), [#2248](https://github.com/modelcontextprotocol/inspector/issues/2248)                                                                                                                                                                                                                                                                                                 |
 
 Closed as **not planned**, so not carried forward: custom transports ([#1741](https://github.com/modelcontextprotocol/inspector/issues/1741)), the configurable-proxy base ([#1684](https://github.com/modelcontextprotocol/inspector/issues/1684)), the readiness summary ([#1916](https://github.com/modelcontextprotocol/inspector/issues/1916)), full panel collapse ([#928](https://github.com/modelcontextprotocol/inspector/issues/928)), `*.localhost` domains ([#1944](https://github.com/modelcontextprotocol/inspector/issues/1944)), and the trusted-local-host OAuth HTTP exception ([#1911](https://github.com/modelcontextprotocol/inspector/issues/1911)).
@@ -289,7 +289,7 @@ does not.
 | ------------------------------------------------------------------------------------------------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Conformance runner** — run the suite against a connected server, render pass/fail per assertion | 🟡         | **Action: open a conversation with the conformance maintainers.** Build the shared assertion engine (§5.6) first.                                         |
 | **`mcp-inspector --conformance` for CI**                                                          | 🟡         | Same engine, CLI report, exit code.                                                                                                                       |
-| **Strict schema validation with actionable errors**                                               | ✅         | Shipped — [#1005](https://github.com/modelcontextprotocol/inspector/issues/1005), [#1015](https://github.com/modelcontextprotocol/inspector/issues/1015). |
+| **Tool-schema portability lint (`--strict`)** — not a full JSON Schema validator | ✅ | Shipped — [#1005](https://github.com/modelcontextprotocol/inspector/issues/1005), [#1015](https://github.com/modelcontextprotocol/inspector/issues/1015). |
 
 ### 3.7 Off the published roadmap — watch only
 
@@ -311,9 +311,9 @@ work for them this horizon**. Each keeps a tracking issue and a liaison.
 
 ## 4. Official extensions
 
-The MCP roadmap does not list extensions, but **approved extensions are spec-following work** —
+The MCP roadmap mentions Tasks (§3.1) but carries no inventory of official extensions, and **approved extensions are spec-following work** —
 a client that ignores them stops being a reference client. The list lives at
-[`/extensions/overview`](https://modelcontextprotocol.io/extensions/overview), implementations
+[`/extensions/overview`](https://modelcontextprotocol.io/extensions/overview); implementations
 are recorded in the community-maintained
 [client matrix](https://modelcontextprotocol.io/extensions/client-matrix), and extensions reach
 official status through the Extensions Track of
@@ -345,7 +345,9 @@ mechanism, the way SDK releases already are:
   `/extensions/overview`, and file one issue per entry it has not filed before. As in the SDK watch, the **issue markers
   are the source of truth** for idempotency: an entry whose marker is on an existing issue (open or
   closed) authored by the automation is skipped, so nothing needs committing back. It **files
-  issues, never PRs**, and trusts only markers the automation wrote.
+  issues, never PRs**. Two details are left to the sweep's own design issue: which labels a trusted
+  marker issue must also carry (as `sdk-watch` requires), and the first-run bootstrap for extensions
+  already tracked by hand-filed issues (Skills, EMA), so that it does not file duplicates.
 - **Official extension** → a `v2` + `enhancement` issue to implement it, filed with the current milestone as `sdk-watch` does; only when no dated milestone is open is it left unmilestoned for triage to place in Incoming.
 - **Experimental extension** → a `v2` + `question` tracking issue, so we can design against it
   before its SEP (the 🟡 rule) without committing build capacity.
@@ -502,13 +504,13 @@ diff, and session format exist would mean designing it against the wrong surface
 
 Four phases of roughly six weekly milestones each. Track A items appear where their upstream
 signal is expected; Track B items are placed to unblock Track A wherever possible. Phase 1 is
-annotated with what has already shipped.
+annotated with a selection of what has already shipped; §1 has the full list.
 
 ### Phase 1 — Foundations (~`v2.2` – `v2.9`, Aug–Sep 2026)
 
 - ✅ `Last-Event-ID` resumption, legacy only (#920); discover checkmarks (#1887); `server.json` (#922)
 - ✅ Argument editor workstream (six issues); connection fixes (§1)
-- ✅ Skills over MCP (#2234, #2248); Enterprise-Managed Authorization (#1509)
+- ✅ Skills over MCP (#2234, #2248)
 - 🅑 **Zoomable timeline v1** — carried into Phase 2
 - 🅑 **Connection Doctor** (§5.8) — carried into Phase 2
 
@@ -608,7 +610,7 @@ For WG discussion.
 - [MCP Roadmap](https://modelcontextprotocol.io/development/roadmap) (last updated 2026-08-22)
 - [Extensions overview](https://modelcontextprotocol.io/extensions/overview) · [Extension support matrix](https://modelcontextprotocol.io/extensions/client-matrix) · [SEP-2133: Extensions](https://modelcontextprotocol.io/seps/2133-extensions)
 - Final SEPs cited: [SEP-2549 (TTL for list results)](https://modelcontextprotocol.io/seps/2549-TTL-for-list-results) · [SEP-2567 (sessionless)](https://modelcontextprotocol.io/seps/2567-sessionless-mcp) · [SEP-2575 (stateless)](https://modelcontextprotocol.io/seps/2575-stateless-mcp) · [SEP-2663 (Tasks extension)](https://modelcontextprotocol.io/seps/2663-tasks-extension) · [SEP-2640 (Skills extension)](https://modelcontextprotocol.io/seps/2640-skills-extension) · [SEP-2484 (conformance tests)](https://modelcontextprotocol.io/seps/2484-conformance-tests-required-for-final-seps)
-- WG charters: [Inspector V2](https://modelcontextprotocol.io/community/working-groups/inspector-v2) · [Triggers & Events](https://modelcontextprotocol.io/community/working-groups/triggers-events) · [Agents](https://modelcontextprotocol.io/community/working-groups/agents) · [File Uploads](https://modelcontextprotocol.io/community/working-groups/file-uploads) · [SDK](https://modelcontextprotocol.io/community/working-groups/sdk)
+- WG charters: [Inspector V2](https://modelcontextprotocol.io/community/working-groups/inspector-v2) · [Triggers & Events](https://modelcontextprotocol.io/community/working-groups/triggers-events) · [Agents](https://modelcontextprotocol.io/community/working-groups/agents) · [Transports](https://modelcontextprotocol.io/community/working-groups/transports) · [File Uploads](https://modelcontextprotocol.io/community/working-groups/file-uploads) · [SDK](https://modelcontextprotocol.io/community/working-groups/sdk)
 - [SDK tiers and conformance testing](https://modelcontextprotocol.io/community/sdk-tiers)
 - Internal: [`specification/v2_new_spec_impact.md`](../specification/v2_new_spec_impact.md) · [`specification/v2_scope.md`](../specification/v2_scope.md) · [`specification/v2_ux_features.md`](../specification/v2_ux_features.md)
 - [Inspector V2 project board (#28)](https://github.com/orgs/modelcontextprotocol/projects/28)
