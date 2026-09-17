@@ -16,6 +16,7 @@
 
 ## Table of Contents
 
+- [Work we can start now, no external blockers](#work-we-can-start-now-no-external-blockers)
 - [1. Why this document exists](#1-why-this-document-exists)
 - [2. The two tracks](#2-the-two-tracks)
 - [3. Track A — following the spec](#3-track-a--following-the-spec)
@@ -116,7 +117,7 @@ general surfaces early so the spec work that lands later is cheap to display.**
 
 Worth stating plainly, because it shapes the priorities below. The roadmap's SDK area makes
 the **conformance test suite** the source of truth that SDKs and quickstarts are validated
-against, and SEP-2484 (Final) requires conformance tests for Standards Track SEPs to reach
+against, and SEP-2484 (Final) requires conformance tests for Standards Track SEPs that change observable protocol behavior to reach
 Final. The Inspector is the most visible MCP client in the ecosystem and is already the thing
 people reach for when a server misbehaves.
 
@@ -302,7 +303,7 @@ work for them this horizon**. Each keeps a tracking issue and a liaison.
 | Effort                                                | First-draft plan                                             | Now                                                                                                                                |
 | ----------------------------------------------------- | ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
 | **Server Cards** (SEP-2127)                           | Card preview, card-vs-reality diff, `--card-lint` in Phase 3 | 🔴 Watch. [#1857](https://github.com/modelcontextprotocol/inspector/issues/1857)'s **registry** half does not depend on it (§5.9). |
-| **Interceptors** (SEP-1763)                           | Test bench, audit mode, CLI invocation in Phase 4            | 🔴 Watch. The WG's unowned "CLI client for interceptor invocation" is still worth raising (§8).                                    |
+| **Interceptors** ([SEP-2624](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2624); originally SEP-1763)                           | Test bench, audit mode, CLI invocation in Phase 4            | 🔴 Watch. The WG's unowned "CLI client for interceptor invocation" is still worth raising (§8).                                    |
 | **Primitive grouping** (IG)                           | Grouped sidebars                                             | The **UX** half proceeds as Track B (§5.10) on client-side heuristics; no spec data source is expected this horizon.               |
 | **Streamed and reference results**                    | Incremental rendering, reference handles                     | 🔴 Watch. Planned payload truncation (§5.10) will cover the large-result case; result views render full payloads today.                                                          |
 | **File picker from `FileInputDescriptor`** (SEP-2356) | `SchemaForm` + elicitation picker                            | 🔴 Watch. The File Uploads WG's published direction is now filesystem-like resources (§3.4).                                       |
@@ -326,7 +327,7 @@ official status through the Extensions Track of
 | Extension                        | Identifier                                                 | Web | CLI | TUI | Upstream matrix         | Notes                                                                                                                                                                                                           |
 | -------------------------------- | ---------------------------------------------------------- | --- | --- | --- | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | MCP Apps                         | `io.modelcontextprotocol/ui`                               | ✅  | 🟡  | —   | Inspector row, cell blank | Apps tab. Columns are rendering support: rendering needs a browser, so the CLI has only the `--app-info` metadata probe and the TUI nothing. The shared client still advertises the extension from CLI and TUI, which is a compatibility bug tracked in [#2403](https://github.com/modelcontextprotocol/inspector/issues/2403). |
-| Tasks                            | `io.modelcontextprotocol/tasks`                            | 🟡  | 🟡  | 🟡  | No column in the matrix | Raw-wire channel; stays for the horizon (§3.1). All three clients are currently partial, for two separate reasons. (1) Over Streamable HTTP, the shared `InspectorClient` sends modern `tasks/*` requests without the `Mcp-Name` header SEP-2663 requires, so strict servers reject them; stdio is unaffected. This is fixed by #1917. (2) CLI and TUI have no user-facing task surface: `mcp-inspector --cli` rejects `tasks/*` (they are not in `ONE_SHOT_METHODS`), and the TUI has no Tasks pane. #1917 does not change that. |
+| Tasks                            | `io.modelcontextprotocol/tasks`                            | 🟡  | 🟡  | 🟡  | No column in the matrix | Raw-wire channel; stays for the horizon (§3.1). All three clients are currently partial, for two separate reasons. (1) Over Streamable HTTP, the shared `InspectorClient` sends modern `tasks/*` requests without the `Mcp-Name` header SEP-2663 requires, so strict servers reject them; stdio is unaffected. It is fixed once the upstream SDK change tracked by #1917 is released. (2) CLI and TUI have no user-facing task surface: `mcp-inspector --cli` rejects `tasks/*` (they are not in `ONE_SHOT_METHODS`), and the TUI has no Tasks pane. #1917 does not change that. |
 | Skills over MCP                  | `io.modelcontextprotocol/skills`                           | ✅  | ✅  | ✅  | "Partial" (CLI README)  | [#2234](https://github.com/modelcontextprotocol/inspector/issues/2234), [#2248](https://github.com/modelcontextprotocol/inspector/issues/2248).                                                                 |
 | Enterprise-Managed Authorization | `io.modelcontextprotocol/enterprise-managed-authorization` | ✅  | 🟡  | 🟡  | Inspector row, cell blank | [#1509](https://github.com/modelcontextprotocol/inspector/issues/1509). CLI and TUI have no in-client Client Settings surface; they consume the `client.json` / `mcp.json` and keychain state the web settings flows write (or hand-edited files), and terminal EMA follow-ups remain (`specification/v2_auth_ema.md`).                                                                                                                                         |
 | OAuth Client Credentials         | `io.modelcontextprotocol/oauth-client-credentials`         | ❌  | ❌  | ❌  | Inspector row, cell blank | **Gap** (§3.3). [#1225](https://github.com/modelcontextprotocol/inspector/issues/1225) was closed only because v1 is frozen.                                                                                    |
@@ -334,7 +335,7 @@ official status through the Extensions Track of
 **Actions:** implement OAuth Client Credentials; and, with maintainer sign-off, open a PR on
 `modelcontextprotocol/modelcontextprotocol` to update the Inspector row. That matrix has one row per product,
 so it cannot represent the Inspector's separate Web, CLI and TUI clients: mark Apps as partial with a link explaining the split (Apps renders in
-Web only; the CLI has a metadata probe), or propose separate Web/CLI/TUI rows. Skills and Enterprise Auth can be plain checks.
+Web only; the CLI has a metadata probe), or propose separate Web/CLI/TUI rows. Skills and Enterprise Auth can be plain checks. The same PR should propose a **Tasks** column: Tasks is an official extension the matrix cannot currently represent at all.
 
 ### Keeping up as extensions are approved
 
