@@ -55,7 +55,7 @@ Through v1, the Inspector was a **follow-along project**. The spec moved, we cha
 whatever planning capacity remained went to keeping up rather than to the tool's own design.
 Every release was reactive by necessity.
 
-That constraint has lifted. v2 meets the 2026-07-28 spec across all three clients, on SDK v2,
+That constraint has lifted. v2 meets the 2026-07-28 spec across all three clients (one known exception, #1917, waits on an SDK release), on SDK v2,
 with a shared `core/`, a ≥90% per-file coverage gate, and a smoke/e2e apparatus that catches
 packaging failures. For the first time we can spend planned effort on **what the Inspector
 should be**, not only on what the spec just became.
@@ -166,7 +166,7 @@ conversation now and bring it to the WG as implementation feedback.
 | **Callback receiver** — backend-hosted endpoint registered as a push target                                                                        | 🔴         | Design now, build when the SEP lands. Security review mandatory: an inbound public endpoint on a process that spawns subprocesses.                |
 | **Local reachability story** — tunnel integration or documented guidance                                                                           | 🔴         | Likely the hardest UX problem of the six months.                                                                                                  |
 | **Delivery log with ordering and duplicate assertions**                                                                                            | 🔴         | The conformance value: did events arrive in order? were any redelivered?                                                                          |
-| **`Mcp-Name` header on Tasks over Streamable HTTP**                                                                                                | 🟡         | [#1917](https://github.com/modelcontextprotocol/inspector/issues/1917) — blocked upstream.                                                        |
+| **`Mcp-Name` header on Tasks over Streamable HTTP**                                                                                                | 🟡         | [#1917](https://github.com/modelcontextprotocol/inspector/issues/1917) — a current non-conformance: the fix is merged upstream but unreleased, so the pinned SDK still omits the header SEP-2663 requires. Waits on the next SDK release.                                                        |
 | **Tasks extension → core migration**                                                                                                               | 🔴         | Moved to "Beyond" upstream. Keep the era-conditional exposure; the legacy `capabilities.tasks` path must keep working.                            |
 
 ### 3.2 HTTP-native transport unification and hardening
@@ -193,10 +193,10 @@ where the Inspector is thinnest over the SDK. Watch closely.
 
 | Feature                                                                                                                                                       | Confidence | Notes                                                                                                                                                                                        |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Cache hint display** — `ttlMs` / `cacheScope` on the SEP-2549 surfaces (`tools/list`, `prompts/list`, `resources/list`, `resources/templates/list`, `resources/read`), plus modern (2026-07-28+) `skills/list`, which SEP-2640 requires to carry both fields; legacy `skills/list` and `skills/get` carry none, with freshness countdown and "stale" marking                                 | 🟢         | SEP-2549 is Final. The runtime already parses the hints and honors them through the SDK list cache; the gap is showing them.                                                                 |
+| **Cache hint display** — `ttlMs` / `cacheScope` on the SEP-2549 surfaces (`tools/list`, `prompts/list`, `resources/list`, `resources/templates/list`, `resources/read`), plus modern (2026-07-28+) `skills/list`, which SEP-2640 requires to carry both fields; legacy `skills/list` and `skills/get` carry none, with freshness countdown and "stale" marking                                 | 🟢         | SEP-2549 is Final. The runtime parses the hints everywhere and honors them through the SDK cache for the four `*/list` methods; `resources/read` and `skills/list` go through plain requests that validate but do not honor them, so this item includes that plumbing as well as the display.                                                                 |
 | **Cache behavior observations** — note a re-fetch of a still-fresh result, and a list that changed inside its declared TTL, as diagnostics rather than errors | 🟢         | Inspector-shaped: nobody else observes both the hint and the reality. `ttlMs` is a freshness hint, so both are compliant.                                                                    |
 | **Stateful-tool workflow investigation** — how to help a user carry an SEP-2567-style handle from one tool result into the next call                          | 🟡         | Replaces the first draft's "session lifecycle lane". The protocol has no concept of a handle (it is ordinary tool data), so a generic view would be inference; investigate before designing. |
-| **ETag support** — send `If-None-Match`, show 304s and version changes                                                                                        | 🟡         | Build when the SEP reaches Draft with an SDK impl.                                                                                                                                           |
+| **ETag support** — send `If-None-Match`, show 304s and version changes                                                                                        | 🔴         | Watch until a SEP reaches Draft with an SDK impl.                                                                                                                                           |
 | **HTTP over stdio**                                                                                                                                           | 🔴         | Watch. If it lands, the Network screen becomes meaningful for stdio servers too — a large win.                                                                                               |
 | **Standardized error rendering**                                                                                                                              | 🔴         | "Beyond". Our Protocol-vs-Network error split (#1628) is the seam to adopt it into.                                                                                                          |
 
@@ -211,8 +211,9 @@ human-presence attestation.
 
 **Read:** DPoP was 🔴 in the first draft and is now a named deliverable, so it moves up. Our
 EMA work (#1509) already gives us the ID-JAG leg, which makes the Inspector a credible test
-client for the whole identity chain. The first draft's audit trails, gateway mode and
-configuration portability are **no longer on the MCP roadmap**; OTLP export and the audit
+client for the whole identity chain. The first draft's audit trails and gateway mode are **no longer on the MCP roadmap**, and
+configuration ("providing servers with configuration options in a secure way") is now a
+"Beyond" item (§3.2), outside this horizon; OTLP export and the audit
 transcript are still worth building, but as our own Track B work (§5.7), not as spec-following.
 
 | Feature                                                                                            | Confidence | Notes                                                                                           |
@@ -332,8 +333,8 @@ official status through the Extensions Track of
 
 **Actions:** implement OAuth Client Credentials; and, with maintainer sign-off, open a PR on
 `modelcontextprotocol/modelcontextprotocol` to update the Inspector row. That matrix has one row per client,
-so it cannot show per-client support: mark Apps and Skills as partial with a link explaining the split (Apps renders in
-Web only; the CLI has a metadata probe), or propose separate Web/CLI/TUI rows. Enterprise Auth can be a plain check.
+so it cannot show per-client support: mark Apps as partial with a link explaining the split (Apps renders in
+Web only; the CLI has a metadata probe), or propose separate Web/CLI/TUI rows. Skills and Enterprise Auth can be plain checks.
 
 ### Keeping up as extensions are approved
 
@@ -349,8 +350,9 @@ mechanism, the way SDK releases already are:
   marker issue must also carry (as `sdk-watch` requires), and the first-run bootstrap for extensions
   already tracked by hand-filed issues (Apps #1740, Tasks #1887, Skills #2234, EMA #1509), so that it does not file duplicates.
 - **Official extension** → a `v2` + `enhancement` issue to implement it, filed with the current milestone as `sdk-watch` does; only when no dated milestone is open is it left unmilestoned for triage to place in Incoming.
-- **Experimental extension** → a `v2` + `question` tracking issue, so we can design against it
-  before its SEP (the 🟡 rule) without committing build capacity.
+- **Experimental extension** → a `v2` + `question` tracking issue, filed **unmilestoned and
+  unboarded** so triage places it in Incoming (the documented exception for unapproved work); it
+  gets a milestone only if a maintainer approves design work against it before its SEP.
 - **This table is maintainer-maintained.** The sweep never edits it; a maintainer adds a row when
   an extension's issue is triaged and moves its cells as support lands.
 
