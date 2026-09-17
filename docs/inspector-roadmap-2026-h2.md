@@ -82,10 +82,10 @@ be re-planned:
 
 | Item                                                                                        | Issue(s)                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Last-Event-ID` resumption                                                                  | [#920](https://github.com/modelcontextprotocol/inspector/issues/920)                                                                                                                                                                                                                                                                                                                                                                           |
+| `Last-Event-ID` resumption (legacy Streamable HTTP only; the 2026-07-28 era removed SSE resumability)                                                                  | [#920](https://github.com/modelcontextprotocol/inspector/issues/920)                                                                                                                                                                                                                                                                                                                                                                           |
 | `server.json` support                                                                       | [#922](https://github.com/modelcontextprotocol/inspector/issues/922)                                                                                                                                                                                                                                                                                                                                                                           |
 | Discover checkmarks for task extensions                                                     | [#1887](https://github.com/modelcontextprotocol/inspector/issues/1887)                                                                                                                                                                                                                                                                                                                                                                         |
-| Strict JSON Schema validation                                                               | [#1005](https://github.com/modelcontextprotocol/inspector/issues/1005), [#1015](https://github.com/modelcontextprotocol/inspector/issues/1015)                                                                                                                                                                                                                                                                                                 |
+| Tool-schema portability lint (`--strict`)                                                               | [#1005](https://github.com/modelcontextprotocol/inspector/issues/1005), [#1015](https://github.com/modelcontextprotocol/inspector/issues/1015)                                                                                                                                                                                                                                                                                                 |
 | The argument editor workstream (all six issues)                                             | [#1853](https://github.com/modelcontextprotocol/inspector/issues/1853), [#1856](https://github.com/modelcontextprotocol/inspector/issues/1856), [#1885](https://github.com/modelcontextprotocol/inspector/issues/1885), [#1928](https://github.com/modelcontextprotocol/inspector/issues/1928), [#1919](https://github.com/modelcontextprotocol/inspector/issues/1919), [#1910](https://github.com/modelcontextprotocol/inspector/issues/1910) |
 | Connection fixes (version-negotiation DX, `https://localhost`, dev containers, ghost entry) | [#962](https://github.com/modelcontextprotocol/inspector/issues/962), [#1936](https://github.com/modelcontextprotocol/inspector/issues/1936), [#1951](https://github.com/modelcontextprotocol/inspector/issues/1951), [#1914](https://github.com/modelcontextprotocol/inspector/issues/1914)                                                                                                                                                   |
 | Server config: paste-JSON, custom headers, auth URL overrides, file-backed secrets          | [#904](https://github.com/modelcontextprotocol/inspector/issues/904), [#1915](https://github.com/modelcontextprotocol/inspector/issues/1915), [#1906](https://github.com/modelcontextprotocol/inspector/issues/1906), [#1950](https://github.com/modelcontextprotocol/inspector/issues/1950)                                                                                                                                                   |
@@ -161,7 +161,7 @@ conversation now and bring it to the WG as implementation feedback.
 
 | Feature                                                                                                                                            | Confidence | Notes                                                                                                                                             |
 | -------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **In-flight work lane** — tasks, open `subscriptions/listen` streams and progress-reporting requests as spans on one timeline lane (§5.1)          | 🟢         | All three already exist in the 2026-07-28 spec. Makes composition gaps (mismatched cancellation, divergent errors) visible, which the WG can use. |
+| **In-flight work lane** — tasks, open `subscriptions/listen` streams and progress-reporting requests as spans on one timeline lane (§5.1)          | 🟢         | `subscriptions/listen` and progress are in the 2026-07-28 spec; Tasks is the official `io.modelcontextprotocol/tasks` extension (§4). Makes composition gaps (mismatched cancellation, divergent errors) visible, which the WG can use. |
 | **Cancellation and error comparison** — show how each in-flight kind ended (completed, cancelled, errored, server-closed) with the same vocabulary | 🟢         | A small, direct contribution to the composition review.                                                                                           |
 | **Callback receiver** — backend-hosted endpoint registered as a push target                                                                        | 🔴         | Design now, build when the SEP lands. Security review mandatory: an inbound public endpoint on a process that spawns subprocesses.                |
 | **Local reachability story** — tunnel integration or documented guidance                                                                           | 🔴         | Likely the hardest UX problem of the six months.                                                                                                  |
@@ -179,10 +179,12 @@ including for tool-call results. **Beyond:** standardized error handling across 
 capability scoping for tool lists after SEP-2575, and a secure way to hand servers
 configuration.
 
-**Read:** The first draft's §3.1 (stateless Streamable HTTP, session creation / resumption /
-migration) is **largely obsolete**: SEP-2575 (stateless) and SEP-2567 (sessionless, explicit
-state handles) are Final and already shipped. A "session lifecycle lane" describes a model the
-spec has left behind; what remains to show is **state handles**. Caching, on the other hand, is
+**Read:** For **modern** (2026-07-28) connections, the first draft's §3.1 (stateless Streamable
+HTTP, session creation / resumption / migration) is **largely obsolete**: SEP-2575 (stateless)
+and SEP-2567 (sessionless) are Final and already shipped, so a session lifecycle lane has nothing
+to show there. The Inspector is still a dual-era client, though, and **legacy** Streamable HTTP
+keeps `initialize` and session-scoped state; a session lifecycle lane for legacy connections stays
+a valid, **deferred** timeline follow-up (§5.1) rather than being dropped. Caching, on the other hand, is
 Final and we already parse the fields — we just do not render them, and a client that shows
 cache hints is exactly how a server author finds out theirs are wrong.
 
@@ -235,7 +237,8 @@ filesystem-like resource semantics** (range reads, hierarchical listing).
 result view; progressive discovery breaks the assumption behind every list we render (that
 `*/list` returns everything); and a possible annotation deprecation means we should not invest
 in richer annotation rendering now. The first draft's §3.6 (streamed and reference results)
-and §3.8 (the SEP-2356 file picker) are **not on the published roadmap** and move to watch.
+and §3.8 (the SEP-2356 file picker) are **not prioritized deliverables for this period** — the
+roadmap mentions "results that stream" only in framing — so they move to watch.
 
 What we _can_ do now is show one concrete symptom of the problem the redesign is solving: a
 server that returns `structuredContent` without the serialized-JSON text block the spec asks
@@ -300,7 +303,7 @@ work for them this horizon**. Each keeps a tracking issue and a liaison.
 | **Server Cards** (SEP-2127)                           | Card preview, card-vs-reality diff, `--card-lint` in Phase 3 | 🔴 Watch. [#1857](https://github.com/modelcontextprotocol/inspector/issues/1857)'s **registry** half does not depend on it (§5.9). |
 | **Interceptors** (SEP-1763)                           | Test bench, audit mode, CLI invocation in Phase 4            | 🔴 Watch. The WG's unowned "CLI client for interceptor invocation" is still worth raising (§8).                                    |
 | **Primitive grouping** (IG)                           | Grouped sidebars                                             | The **UX** half proceeds as Track B (§5.10) on client-side heuristics; no spec data source is expected this horizon.               |
-| **Streamed and reference results**                    | Incremental rendering, reference handles                     | 🔴 Watch. Payload truncation in §5.10 covers the large-result case today.                                                          |
+| **Streamed and reference results**                    | Incremental rendering, reference handles                     | 🔴 Watch. Planned payload truncation (§5.10) will cover the large-result case; result views render full payloads today.                                                          |
 | **File picker from `FileInputDescriptor`** (SEP-2356) | `SchemaForm` + elicitation picker                            | 🔴 Watch. The File Uploads WG's published direction is now filesystem-like resources (§3.4).                                       |
 | **Gateways, audit trails, configuration portability** | Gateway mode; OTLP as spec work                              | Gateway mode dropped. OTLP and the audit transcript continue as Track B (§5.7).                                                    |
 
@@ -325,7 +328,7 @@ official status through the Extensions Track of
 | Tasks                            | `io.modelcontextprotocol/tasks`                            | ✅  | ❌  | ❌  | No column in the matrix | Raw-wire channel; stays for the horizon (§3.1). The CLI's one-shot mode rejects `tasks/*`; no TUI Tasks pane yet.                                                                                               |
 | Skills over MCP                  | `io.modelcontextprotocol/skills`                           | ✅  | ✅  | ✅  | "Partial" (CLI README)  | [#2234](https://github.com/modelcontextprotocol/inspector/issues/2234), [#2248](https://github.com/modelcontextprotocol/inspector/issues/2248).                                                                 |
 | Enterprise-Managed Authorization | `io.modelcontextprotocol/enterprise-managed-authorization` | ✅  | ✅  | ✅  | Inspector row, cell blank | [#1509](https://github.com/modelcontextprotocol/inspector/issues/1509).                                                                                                                                         |
-| OAuth Client Credentials         | `io.modelcontextprotocol/oauth-client-credentials`         | ❌  | ❌  | ❌  | ❌                      | **Gap** (§3.3). [#1225](https://github.com/modelcontextprotocol/inspector/issues/1225) was closed only because v1 is frozen.                                                                                    |
+| OAuth Client Credentials         | `io.modelcontextprotocol/oauth-client-credentials`         | ❌  | ❌  | ❌  | Inspector row, cell blank | **Gap** (§3.3). [#1225](https://github.com/modelcontextprotocol/inspector/issues/1225) was closed only because v1 is frozen.                                                                                    |
 
 **Actions:** implement OAuth Client Credentials; and, with maintainer sign-off, open a PR on
 `modelcontextprotocol/modelcontextprotocol` to update the Inspector row. That matrix has one row per client,
@@ -339,14 +342,15 @@ mechanism, the way SDK releases already are:
 
 - **An extension-watch sweep**, modelled on `scripts/sdk-watch.mjs`: on a schedule, list the
   org's `ext-*` and `experimental-ext-*` repositories and the extension identifiers on
-  `/extensions/overview`, compare with a committed list of the ones we have assessed, and file
-  one issue per new entry. It **files issues, never PRs**, and trusts only markers the
-  automation wrote, exactly as the SDK watch does.
+  `/extensions/overview`, and file one issue per entry it has not filed before. As in the SDK watch, the **issue markers
+  are the source of truth** for idempotency: an entry whose marker is on an existing issue (open or
+  closed) authored by the automation is skipped, so nothing needs committing back. It **files
+  issues, never PRs**, and trusts only markers the automation wrote.
 - **Official extension** → a `v2` + `enhancement` issue to implement it, filed with the current milestone as `sdk-watch` does; only when no dated milestone is open is it left unmilestoned for triage to place in Incoming.
 - **Experimental extension** → a `v2` + `question` tracking issue, so we can design against it
   before its SEP (the 🟡 rule) without committing build capacity.
-- **This table is the record.** An extension is added here when its issue is filed, and its
-  cells move as support lands.
+- **This table is maintainer-maintained.** The sweep never edits it; a maintainer adds a row when
+  an extension's issue is triaged and moves its cells as support lands.
 
 ---
 
@@ -502,7 +506,7 @@ annotated with what has already shipped.
 
 ### Phase 1 — Foundations (~`v2.2` – `v2.9`, Aug–Sep 2026)
 
-- ✅ `Last-Event-ID` resumption (#920); discover checkmarks (#1887); `server.json` (#922)
+- ✅ `Last-Event-ID` resumption, legacy only (#920); discover checkmarks (#1887); `server.json` (#922)
 - ✅ Argument editor workstream (six issues); connection fixes (§1)
 - ✅ Skills over MCP (#2234, #2248); Enterprise-Managed Authorization (#1509)
 - 🅑 **Zoomable timeline v1** — carried into Phase 2
