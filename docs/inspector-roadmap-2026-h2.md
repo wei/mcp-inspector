@@ -237,12 +237,13 @@ result view; progressive discovery breaks the assumption behind every list we re
 in richer annotation rendering now. The first draft's §3.6 (streamed and reference results)
 and §3.8 (the SEP-2356 file picker) are **not on the published roadmap** and move to watch.
 
-What we _can_ do now is show the problem the redesign is solving: a server returning
-`content` and `structuredContent` that disagree is a real bug today.
+What we _can_ do now is show one concrete symptom of the problem the redesign is solving: a
+server that returns `structuredContent` without the serialized-JSON text block the spec asks
+for breaks older clients today.
 
 | Feature                                                                                                                                                                                     | Confidence | Notes                                                                                                                    |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------ |
-| **`content` / `structuredContent` consistency check** — flag results where both are present and disagree | 🟢         | Useful today, and implementation evidence for the Core Primitives WG. A missing `structuredContent` under a declared `outputSchema` is already flagged by `validateToolOutput` (shipped).                                                    |
+| **Serialized-JSON check for `structuredContent`** — when a result carries `structuredContent`, flag the absence of a `TextContent` block holding its serialized JSON, the one relationship the spec defines (a SHOULD, "for backwards compatibility"). Reported as a diagnostic, never an error; any other text is a legitimate summary and is not compared | 🟢 | Useful today, and implementation evidence for the Core Primitives WG. A missing `structuredContent` under a declared `outputSchema` is already flagged by `validateToolOutput` (shipped). |
 | **New tool result shape**                                                                                                                                                                   | 🔴         | WG still forming. Keep both renderings behind the era seam when it lands.                                                |
 | **Progressive discovery**                                                                                                                                                                   | 🔴         | Design the lists (§5.10) so "not loaded yet" is a state, not an empty list.                                              |
 | **Annotation-driven confirmation** before a `destructiveHint` call                                                                                                                          | 🟢         | Tool annotations are not the audience/priority content annotations under review. Small and obviously correct.            |
@@ -327,7 +328,9 @@ official status through the Extensions Track of
 | OAuth Client Credentials         | `io.modelcontextprotocol/oauth-client-credentials`         | ❌  | ❌  | ❌  | ❌                      | **Gap** (§3.3). [#1225](https://github.com/modelcontextprotocol/inspector/issues/1225) was closed only because v1 is frozen.                                                                                    |
 
 **Actions:** implement OAuth Client Credentials; and, with maintainer sign-off, open a PR on
-`modelcontextprotocol/modelcontextprotocol` to fill in the Inspector row's blank Apps and Enterprise Auth cells and update its Skills cell in the client matrix.
+`modelcontextprotocol/modelcontextprotocol` to update the Inspector row. That matrix has one row per client,
+so it cannot show per-client support: mark Apps and Skills as partial with a link explaining the split (Apps renders in
+Web only; the CLI has a metadata probe), or propose separate Web/CLI/TUI rows. Enterprise Auth can be a plain check.
 
 ### Keeping up as extensions are approved
 
@@ -516,7 +519,7 @@ items that need no upstream work._
 - 🅑 **Command palette and global search** (§5.4); **Connection Doctor** (§5.8)
 - 🅐 **Cache hint display and observations** (§3.2) — SEP-2549 is Final
 - 🅐 **OAuth Client Credentials extension** (§3.3, §4)
-- 🅐 **`content` / `structuredContent` consistency check** and **destructive-call confirmation** (§3.4)
+- 🅐 **Serialized-JSON check for `structuredContent`** and **destructive-call confirmation** (§3.4)
 - 🅐 **Extension-watch sweep** (§4)
 
 ### Phase 3 — Automation (~`v2.16` – `v2.21`, Nov 2026 – Jan 2027)
