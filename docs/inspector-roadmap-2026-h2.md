@@ -56,7 +56,7 @@ Through v1, the Inspector was a **follow-along project**. The spec moved, we cha
 whatever planning capacity remained went to keeping up rather than to the tool's own design.
 Every release was reactive by necessity.
 
-That constraint has lifted. v2 meets the 2026-07-28 spec across all three clients (one known exception, #1917, waits on an SDK release), on SDK v2,
+That constraint has lifted. v2 meets the 2026-07-28 spec across all three clients (one known base-protocol exception, #1917, waits on an SDK release; open extension gaps are tracked in §4), on SDK v2,
 with a shared `core/`, a ≥90% per-file coverage gate, and a smoke/e2e apparatus that catches
 packaging failures. For the first time we can spend planned effort on **what the Inspector
 should be**, not only on what the spec just became.
@@ -342,9 +342,10 @@ Web only; the CLI has a metadata probe), or propose separate Web/CLI/TUI rows. S
 We picked up Skills because someone noticed, not because anything told us. Make it a
 mechanism, the way SDK releases already are:
 
-- **An extension-watch sweep**, modelled on `scripts/sdk-watch.mjs`: on a schedule, list the
-  org's `ext-*` and `experimental-ext-*` repositories, use `/extensions/overview` for official
-  membership and read each extension's identifier from its own specification or repository (the
+- **An extension-watch sweep**, modelled on `scripts/sdk-watch.mjs`: on a schedule, treat
+  `/extensions/overview` as the authoritative set of official extensions (Tasks, for one, has no
+  `ext-*` repository), enumerate the org's `experimental-ext-*` repositories to discover
+  experimental entries and `ext-*` repositories only to enrich official ones, and read each extension's identifier from its own specification or repository (the
   overview lists names and links, not identifiers), and file one issue per entry it has not filed before. As in the SDK watch, the **issue markers
   are the source of truth** for idempotency: an entry whose marker is on an existing issue (open or
   closed) authored by the automation is skipped, so nothing needs committing back. It **files
@@ -453,7 +454,7 @@ but we hold the entire session and cannot export it in any pipeline-shaped form.
 
 ### 5.8 Connection Doctor
 
-The individual connection bugs have been fixed (§1), but a failure is still reported as a
+The connection fixes listed in §1 have shipped (and #1944 and #1911 were closed as not planned), but a failure is still reported as a
 single error. Run an ordered checklist on failure — DNS · TCP · TLS (including local-cert
 cases) · `/.well-known` discovery · protocol version negotiation · auth — and report **which
 step failed and what to do about it**. First-connection success is the entire first impression
