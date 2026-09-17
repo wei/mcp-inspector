@@ -193,7 +193,7 @@ where the Inspector is thinnest over the SDK. Watch closely.
 
 | Feature                                                                                                                                                       | Confidence | Notes                                                                                                                                                                                        |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Cache hint display** — `ttlMs` / `cacheScope` on the SEP-2549 surfaces (`tools/list`, `prompts/list`, `resources/list`, `resources/templates/list`, `resources/read`), plus modern (2026-07-28+) `skills/list`, which SEP-2640 requires to carry both fields; legacy `skills/list` and `skills/get` carry none, with freshness countdown and "stale" marking                                 | 🟢         | SEP-2549 is Final. The runtime parses the hints everywhere and honors them through the SDK cache for the four `*/list` methods; `resources/read` and `skills/list` go through plain requests that validate but do not honor them, so this item includes that plumbing as well as the display.                                                                 |
+| **Cache hint display** — `ttlMs` / `cacheScope` on the SEP-2549 surfaces (`tools/list`, `prompts/list`, `resources/list`, `resources/templates/list`, `resources/read`), plus modern (2026-07-28+) `skills/list` and `skills/get`, which the stable ext-skills spec requires to carry both fields (our `skills/get` validation still treats them as optional: [#2404](https://github.com/modelcontextprotocol/inspector/issues/2404)); legacy results carry none, with freshness countdown and "stale" marking                                 | 🟢         | SEP-2549 is Final. The runtime parses the hints everywhere and honors them through the SDK cache for the four `*/list` methods; `resources/read`, `skills/list` and `skills/get` go through plain requests that validate but do not honor them, so this item includes that plumbing as well as the display.                                                                 |
 | **Cache behavior observations** — note a re-fetch of a still-fresh result, and a list that changed inside its declared TTL, as diagnostics rather than errors | 🟢         | Inspector-shaped: nobody else observes both the hint and the reality. `ttlMs` is a freshness hint, so both are compliant.                                                                    |
 | **Stateful-tool workflow investigation** — how to help a user carry an SEP-2567-style handle from one tool result into the next call                          | 🟡         | Replaces the first draft's "session lifecycle lane". The protocol has no concept of a handle (it is ordinary tool data), so a generic view would be inference; investigate before designing. |
 | **ETag support** — send `If-None-Match`, show 304s and version changes                                                                                        | 🔴         | Watch until a SEP reaches Draft with an SDK impl.                                                                                                                                           |
@@ -205,7 +205,7 @@ where the Inspector is thinnest over the SDK. Watch closely.
 **Upstream:** Agent Identity WG (forming this period), coordinated with the IETF OAuth and
 WIMSE WGs. MCP authorization assumes a person at a browser; increasingly the caller is an
 agent. This period: **finalize DPoP** and drive adoption; an opinionated **agent identity and
-delegation** model built on **Workload Identity Federation** (SEP-1933), **ID-JAG** as used by
+delegation** model built on **Workload Identity Federation** ([SEP-1933](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/1933)), **ID-JAG** as used by
 Enterprise-Managed Authorization, and **RFC 8693 token exchange**. **Beyond:**
 human-presence attestation.
 
@@ -220,7 +220,7 @@ transcript are still worth building, but as our own Track B work (§5.7), not as
 | -------------------------------------------------------------------------------------------------- | ---------- | ----------------------------------------------------------------------------------------------- |
 | **OAuth Client Credentials extension** — client-secret and JWT-bearer assertion flows              | 🟢         | An **approved** official extension (§4) we do not support. No upstream dependency.              |
 | **Token exchange (RFC 8693) test flow**                                                            | 🟡         | Named in the roadmap; the RFC is stable, the MCP profile of it is not.                          |
-| **DPoP** — generate a proof key, send `DPoP` proofs, show proof/nonce exchange in the Network view | 🟡         | Design against SEP-1932; build when it is Final or has a Tier-1 SDK impl.                       |
+| **DPoP** — generate a proof key, send `DPoP` proofs, show proof/nonce exchange in the Network view | 🟡         | Design against [SEP-1932](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/1932); build when it is Final or has a Tier-1 SDK impl.                       |
 | **Workload Identity Federation**                                                                   | 🟡         | SEP-1933. Needs a way to present a workload credential from a developer machine — design first. |
 | **Human-presence attestation**                                                                     | 🔴         | "Beyond".                                                                                       |
 
@@ -326,9 +326,9 @@ official status through the Extensions Track of
 | Extension                        | Identifier                                                 | Web | CLI | TUI | Upstream matrix         | Notes                                                                                                                                                                                                           |
 | -------------------------------- | ---------------------------------------------------------- | --- | --- | --- | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | MCP Apps                         | `io.modelcontextprotocol/ui`                               | ✅  | 🟡  | —   | Inspector row, cell blank | Apps tab. Columns are rendering support: rendering needs a browser, so the CLI has only the `--app-info` metadata probe and the TUI nothing. The shared client still advertises the extension from CLI and TUI, which is a compatibility bug tracked in [#2403](https://github.com/modelcontextprotocol/inspector/issues/2403). |
-| Tasks                            | `io.modelcontextprotocol/tasks`                            | 🟡  | 🟡  | 🟡  | No column in the matrix | Raw-wire channel; stays for the horizon (§3.1). Web is partial until #1917 ships: modern `tasks/*` requests omit the required `Mcp-Name` header, so strict servers reject them. CLI and TUI advertise the extension and the shared core supports it, but neither exposes a user-facing task surface: the CLI's one-shot mode rejects `tasks/*`, and the TUI has no Tasks pane.                                                                                               |
+| Tasks                            | `io.modelcontextprotocol/tasks`                            | 🟡  | 🟡  | 🟡  | No column in the matrix | Raw-wire channel; stays for the horizon (§3.1). All three clients are partial until #1917 ships: the shared `InspectorClient` issues modern `tasks/*` requests without the required `Mcp-Name` header, so strict servers reject them. Separately, CLI and TUI advertise the extension and the shared core supports it, but neither exposes a user-facing task surface: the CLI's one-shot mode rejects `tasks/*`, and the TUI has no Tasks pane.                                                                                               |
 | Skills over MCP                  | `io.modelcontextprotocol/skills`                           | ✅  | ✅  | ✅  | "Partial" (CLI README)  | [#2234](https://github.com/modelcontextprotocol/inspector/issues/2234), [#2248](https://github.com/modelcontextprotocol/inspector/issues/2248).                                                                 |
-| Enterprise-Managed Authorization | `io.modelcontextprotocol/enterprise-managed-authorization` | ✅  | ✅  | ✅  | Inspector row, cell blank | [#1509](https://github.com/modelcontextprotocol/inspector/issues/1509).                                                                                                                                         |
+| Enterprise-Managed Authorization | `io.modelcontextprotocol/enterprise-managed-authorization` | ✅  | 🟡  | 🟡  | Inspector row, cell blank | [#1509](https://github.com/modelcontextprotocol/inspector/issues/1509). CLI and TUI work only from hand-edited `client.json` / `mcp.json`: there is no Client Settings surface, and terminal EMA follow-ups remain (`specification/v2_auth_ema.md`).                                                                                                                                         |
 | OAuth Client Credentials         | `io.modelcontextprotocol/oauth-client-credentials`         | ❌  | ❌  | ❌  | Inspector row, cell blank | **Gap** (§3.3). [#1225](https://github.com/modelcontextprotocol/inspector/issues/1225) was closed only because v1 is frozen.                                                                                    |
 
 **Actions:** implement OAuth Client Credentials; and, with maintainer sign-off, open a PR on
@@ -361,7 +361,7 @@ mechanism, the way SDK releases already are:
 
 ## 5. Track B — experience work we choose
 
-Nothing in this section waits on a SEP or another project. Ordered by leverage, not by effort.
+No item here waits on a SEP or another project to **start**. Some later parts depend on each other or on Track A (for example, cross-server timeline correlation needs §5.11, and the assertion engine is shared with §3.6). Ordered by leverage, not by effort.
 
 ### 5.1 The zoomable timeline (headline)
 
@@ -472,7 +472,7 @@ A 1000-tool server or a long-running session should not degrade.
 
 - **Grouped / tree lists with group-aware search**, built on client-side heuristics (name
   prefixes, annotations). No spec data source is expected this horizon (§3.7).
-- **Virtualize** the long lists and logs; cap in-memory protocol history; truncate large
+- **Virtualize** the long lists and logs; cap in-memory protocol history with spill-to-disk, so evicted entries still reach the §5.2 session file; truncate large
   payloads by default with explicit expansion.
 - Design lists so **"not loaded yet" is a state**, ready for progressive discovery (§3.4).
 
