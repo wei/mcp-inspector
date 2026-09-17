@@ -294,8 +294,8 @@ does not.
 
 ### 3.7 Off the published roadmap — watch only
 
-The first draft planned build work for several WG efforts that the 2026-08-22 roadmap does not
-list. They are not cancelled upstream — WGs keep working outside the priority areas — but the
+The first draft planned build work for several WG efforts that are not priority deliverables in
+the 2026-08-22 roadmap (some, such as streamed results, appear only in its framing). They are not cancelled upstream — WGs keep working outside the priority areas — but the
 roadmap says SEPs outside those areas "expect a longer queue", so **we do not schedule build
 work for them this horizon**. Each keeps a tracking issue and a liaison.
 
@@ -306,7 +306,7 @@ work for them this horizon**. Each keeps a tracking issue and a liaison.
 | **Primitive grouping** (IG)                           | Grouped sidebars                                             | The **UX** half proceeds as Track B (§5.10) on client-side heuristics; no spec data source is expected this horizon.               |
 | **Streamed and reference results**                    | Incremental rendering, reference handles                     | 🔴 Watch. Planned payload truncation (§5.10) will cover the large-result case; result views render full payloads today.                                                          |
 | **File picker from `FileInputDescriptor`** (SEP-2356) | `SchemaForm` + elicitation picker                            | 🔴 Watch. The File Uploads WG's published direction is now filesystem-like resources (§3.4).                                       |
-| **Gateways, audit trails, configuration portability** | Gateway mode; OTLP as spec work                              | Gateway mode dropped. OTLP and the audit transcript continue as Track B (§5.7); rich server configuration and registry browsing (#1857) continue in §5.9.                                                    |
+| **Gateways, audit trails** | Gateway mode; OTLP as spec work | Gateway mode dropped. OTLP and the audit transcript continue as Track B (§5.7). (Secure server configuration is not off the roadmap: it is a "Beyond" item, §3.2; our rich server configuration and registry browsing, #1857, continue in §5.9.)                                                    |
 
 ---
 
@@ -321,19 +321,19 @@ official status through the Extensions Track of
 [SEP-2133](https://modelcontextprotocol.io/seps/2133-extensions), optionally after incubating in an
 `experimental-ext-*` repository (encouraged, not required).
 
-### Current support (as of 2026-09-16)
+### Current support (as of 2026-09-17)
 
 | Extension                        | Identifier                                                 | Web | CLI | TUI | Upstream matrix         | Notes                                                                                                                                                                                                           |
 | -------------------------------- | ---------------------------------------------------------- | --- | --- | --- | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | MCP Apps                         | `io.modelcontextprotocol/ui`                               | ✅  | 🟡  | —   | Inspector row, cell blank | Apps tab. Columns are rendering support: rendering needs a browser, so the CLI has only the `--app-info` metadata probe and the TUI nothing. The shared client still advertises the extension from CLI and TUI, which is a compatibility bug tracked in [#2403](https://github.com/modelcontextprotocol/inspector/issues/2403). |
-| Tasks                            | `io.modelcontextprotocol/tasks`                            | ✅  | 🟡  | 🟡  | No column in the matrix | Raw-wire channel; stays for the horizon (§3.1). CLI and TUI advertise the extension and the shared core supports it, but neither exposes a user-facing task surface: the CLI's one-shot mode rejects `tasks/*`, and the TUI has no Tasks pane.                                                                                               |
+| Tasks                            | `io.modelcontextprotocol/tasks`                            | 🟡  | 🟡  | 🟡  | No column in the matrix | Raw-wire channel; stays for the horizon (§3.1). Web is partial until #1917 ships: modern `tasks/*` requests omit the required `Mcp-Name` header, so strict servers reject them. CLI and TUI advertise the extension and the shared core supports it, but neither exposes a user-facing task surface: the CLI's one-shot mode rejects `tasks/*`, and the TUI has no Tasks pane.                                                                                               |
 | Skills over MCP                  | `io.modelcontextprotocol/skills`                           | ✅  | ✅  | ✅  | "Partial" (CLI README)  | [#2234](https://github.com/modelcontextprotocol/inspector/issues/2234), [#2248](https://github.com/modelcontextprotocol/inspector/issues/2248).                                                                 |
 | Enterprise-Managed Authorization | `io.modelcontextprotocol/enterprise-managed-authorization` | ✅  | ✅  | ✅  | Inspector row, cell blank | [#1509](https://github.com/modelcontextprotocol/inspector/issues/1509).                                                                                                                                         |
 | OAuth Client Credentials         | `io.modelcontextprotocol/oauth-client-credentials`         | ❌  | ❌  | ❌  | Inspector row, cell blank | **Gap** (§3.3). [#1225](https://github.com/modelcontextprotocol/inspector/issues/1225) was closed only because v1 is frozen.                                                                                    |
 
 **Actions:** implement OAuth Client Credentials; and, with maintainer sign-off, open a PR on
-`modelcontextprotocol/modelcontextprotocol` to update the Inspector row. That matrix has one row per client,
-so it cannot show per-client support: mark Apps as partial with a link explaining the split (Apps renders in
+`modelcontextprotocol/modelcontextprotocol` to update the Inspector row. That matrix has one row per product,
+so it cannot represent the Inspector's separate Web, CLI and TUI clients: mark Apps as partial with a link explaining the split (Apps renders in
 Web only; the CLI has a metadata probe), or propose separate Web/CLI/TUI rows. Skills and Enterprise Auth can be plain checks.
 
 ### Keeping up as extensions are approved
@@ -342,8 +342,9 @@ We picked up Skills because someone noticed, not because anything told us. Make 
 mechanism, the way SDK releases already are:
 
 - **An extension-watch sweep**, modelled on `scripts/sdk-watch.mjs`: on a schedule, list the
-  org's `ext-*` and `experimental-ext-*` repositories and the extension identifiers on
-  `/extensions/overview`, and file one issue per entry it has not filed before. As in the SDK watch, the **issue markers
+  org's `ext-*` and `experimental-ext-*` repositories, use `/extensions/overview` for official
+  membership and read each extension's identifier from its own specification or repository (the
+  overview lists names and links, not identifiers), and file one issue per entry it has not filed before. As in the SDK watch, the **issue markers
   are the source of truth** for idempotency: an entry whose marker is on an existing issue (open or
   closed) authored by the automation is skipped, so nothing needs committing back. It **files
   issues, never PRs**. Two details are left to the sweep's own design issue: which labels a trusted
@@ -546,7 +547,7 @@ _The items whose shape we cannot yet commit to, plus the multiplier._
 
 - 🅐 **DPoP**, **token exchange**, **Workload Identity Federation** (§3.3) — as each reaches Final or a Tier-1 SDK impl
 - 🅐 **Server-initiated events receiver** (§3.1) — design throughout, build only if the SEP lands
-- 🅐 **ETags** (§3.2); **extension contract validation** (§3.5)
+- 🅐 **ETags** (§3.2), only if a SEP reaches Draft with an SDK impl; **extension contract validation** (§3.5), only once the contract is published
 - 🅑 **Plugin architecture** (§5.14) — designed against surfaces that now exist
 - 🅑 Workspace and layout (§5.11); onboarding (§5.13)
 
