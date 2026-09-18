@@ -81,6 +81,7 @@ Each client has its own README with client-specific detail:
 | [Reviewing an MCP App](./docs/mcp-app-review.md) | The CLI-first → one-shot-web recipe for automated App-tool review |
 | [Smoke-testing an MCP server](./docs/cli-smoke-testing.md) | The connect → list → call → assert workflow for a shell or CI job: `--format json` + `jq`, the exit-code map, and keeping OAuth non-interactive |
 | [Launcher and config consolidation](./docs/launcher-config-consolidation-plan.md) | Why the launcher runs a client in-process rather than spawning it |
+| [Roadmap, Aug 2026 → Feb 2027](./docs/inspector-roadmap-2026-h2.md) | The six-month plan: spec-following work aligned to the published MCP roadmap, official extension support, and the experience work we choose |
 
 ## Testing and the quality gate
 
