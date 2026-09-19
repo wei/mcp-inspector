@@ -12,11 +12,18 @@ chooser deliberately has no security template, because a vulnerability report
 must not open a public issue. So an advisory never arrives as an issue, and for
 most of its life it must **not** become one.
 
-Two steps in this flow are **outward-facing and irreversible-ish, and both stay
-human-gated**: **accepting** an advisory (the reporter sees it) and
-**publishing** it (it becomes public, assigns a CVE, and credits the reporter —
-there is no unpublish). Never automate either, never bulk-apply them, and never
-take either step because a checklist said to. Everything else here is mechanics.
+Two steps in this flow are **outward-facing, and both stay human-gated**:
+**accepting** an advisory (the reporter sees it) and **publishing** it (it
+becomes public, and there is no unpublish). Never automate either, never
+bulk-apply them, and never take either step because a checklist said to.
+Everything else here is mechanics.
+
+⚠️ **A CVE and the credits are *choices made at publish time*, not effects of
+publishing.** Requesting a CVE is an optional action on the advisory, and a
+credit appears only when someone is explicitly added **and accepts** it. They
+are named here because they are the parts a maintainer must not forget — the
+reporter's credit especially, since nothing prompts for it — not because
+publishing performs them.
 
 Related: `/board-ops` (the card IDs and recipes) and `/issue-create`, for the
 labels and milestone the converted card takes **after** publication. The public
@@ -50,8 +57,18 @@ a real GitHub issue".
   is not cosmetic: the board audit in `/issue-triage` keys its draft carve-out
   on it, so a card titled any other way is reported as a stray draft.
 - **Body:** `**Advisory:** <html_url>` on the first line, then severity and
-  reported date, then the advisory description. The link first, because a
-  maintainer reading the card has no other route back to the private advisory.
+  reported date. The link first, because a maintainer reading the card has no
+  other route back to the private advisory.
+  ⚠️ **Do not copy the vulnerability description onto the card.** Project
+  access and advisory access are **separate permission sets**, so the board's
+  audience is not the advisory's audience — anyone with project access reads
+  the card, whether or not they are an advisory collaborator. The boards are
+  private ([`/issue-triage`](../issue-triage/SKILL.md)), so this is a wider
+  audience than intended rather than a public leak, but a reproduction or a PoC
+  is the part worth keeping to the people handling it. The card carries the
+  **link and triage metadata only**; the link is how a reader with access gets
+  the details, and the absence of details is how a reader without access is
+  told they do not have them.
 - **Status `Incoming`**, plus a Priority scored with the `/issue-triage` rubric.
   `Incoming` is correct even though somebody clearly triaged it to make the
   card: nobody has approved shipping a fix yet, and a draft card has no
@@ -189,6 +206,15 @@ normal public review flow applies; the diff comes back as an ordinary commit at
 merge time, **to the branch of each line step 2 found affected** — `v2/main`
 for v2, `v1/main` for v1.
 
+⚠️ **Move the card as the work moves.** `AGENTS.md`'s lifecycle applies to this
+card like any other: **`In Progress`** when the fix is started, **`In Review`**
+when the fork's PR is open. The card being private is not a reason to skip it —
+it is the reason to do it, since the fork is invisible to everyone who is not on
+the advisory, and this card is the only place the rest of the team can see the
+work exists at all. A card that sits in `Incoming` until it jumps to `Done`
+reports "unreviewed, nobody committed to it" for the entire time somebody is
+actively fixing it.
+
 ### 5. Merge to every affected line, release, publish
 
 Publish **after** the fix has shipped in a release, never before — publishing
@@ -200,12 +226,29 @@ independently under separate dist-tags, so v2 reaching `latest` says nothing
 about `v1-latest`. Publishing with one line still unpatched discloses a live
 vulnerability to the users who have no fix — and they are the users least able
 to move, since v1 is the deprecated line they are on because upgrading is hard.
-Cutting each release is `/release` for v2; a v1 fix publishes straight from
-`v1/main`.
 
-⚠️ **Publishing is irreversible and human-gated.** It makes the advisory public,
-requests a **CVE**, and credits the reporter. There is no undo. Same rule as
-accepting: recommend, never perform.
+⚠️ **The patch stops being secret at MERGE, not at publish — and no release
+path changes that.** Merging the private fork puts an ordinary public commit on
+`v2/main` or `v1/main`, readable by anyone, and a v2 release then moves it
+through **two public PRs** on its way to `main`. So the window between merge and
+publish is not a period of secrecy to protect; it is a period of **exposure to
+anyone reading commits**, which is why it should be short. Merge close to the
+release rather than early, and publish as soon as the release is out.
+
+**Do not hand this off to the release skill.** It is `disable-model-invocation:
+true`, so a pointer to it from here is a dead end for the model anyway — a
+maintainer invokes `/release` themselves. Say which lines need a release and
+stop there. A v1 fix takes no merge into `main` at all and publishes straight
+from `v1/main`, so it does not go through that procedure.
+
+⚠️ **Publishing is irreversible and human-gated.** It makes the advisory
+public, and there is no undo. Same rule as accepting: recommend, never perform.
+
+**Before publishing, do the two things publishing will not do for you:**
+request the **CVE** (optional, and the advisory is the only place to ask) and
+**add the reporter to the credits** — a credit is an explicit addition the
+person then has to accept, so an unadded reporter is simply never credited, and
+that is the failure nobody notices because nothing reports it.
 
 ### 6. Convert the card afterwards
 
@@ -228,12 +271,31 @@ the way it does:
    | --- | --- | --- | --- |
    | v2 | `v2` | the release the fix shipped in | #28 — the converted card is already there |
    | v1 | `v1` | **none** — every milestone is a v2 release bucket | **#11**, which has no Priority field |
-   | both | one issue per line, labelled and boarded as above | | |
+   | both | **two issues**, one per line — see below | | |
 
    Do **not** run `/issue-create`'s add-card step for the converted card: it
-   already exists. A **v1** issue does need a card created on #11, because the
-   draft lived on #28 — and a v1 advisory's draft card on #28 is deleted once
-   its #11 issue exists, rather than left behind claiming v2 work.
+   already exists.
+
+   **The draft converts exactly once, so "both" needs a stated order.** Every
+   issue carries exactly one version label and lives on one board, and there is
+   only ever one draft card — so one line inherits it and the other gets a
+   fresh issue:
+
+   1. **Convert the draft into the `v2` issue on #28.** v2 takes the
+      conversion because the draft is already on #28 and v2 is the line with a
+      milestone to record.
+   2. **File the `v1` issue separately** through `/issue-create` — `v1`, a type
+      label, **no milestone**, and a card on **#11** (Status only; that board
+      has no Priority field). This one *is* filed rather than converted, which
+      is not a contradiction of step 6: there is no second draft to convert.
+   3. Cross-link the two so neither reads as the whole story, then **close
+      both** and move both cards to `Done`.
+
+   **For a v1-only advisory** the draft is on the wrong board and cannot be
+   moved there by converting: file the `v1` issue on #11 as in (2), then
+   **delete** the #28 draft rather than converting it — a converted card would
+   put a `v1` issue on #28, which the board audit reports as a wrong-board
+   card.
 3. **Close it.** The work shipped before the issue existed.
 4. Move the card to **`Done`** — correct here, because the fix genuinely
    shipped.
