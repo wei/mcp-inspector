@@ -35,7 +35,7 @@ relevant only once the advisory is published.
 | 3 | Valid → **accept** (`triage` → `draft`); invalid → close with a reason | **Human only** |
 | 4 | Create the **private fork**, fix and review there | Mechanical |
 | 5 | Merge, release, then **publish** the advisory | **Human only** |
-| 6 | After the release, file the public (closed) issue and convert the card | Mechanical |
+| 6 | After the release, **convert** the draft card — that is what creates the public issue | Mechanical |
 
 ### 1. Board it as a draft card
 

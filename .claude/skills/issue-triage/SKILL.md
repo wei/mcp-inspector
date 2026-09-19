@@ -200,7 +200,7 @@ count means the board contradicts a rule, not that the rule needs revisiting.
 | Check | Invariant | Fix |
 | --- | --- | --- |
 | Double-boarded | An issue has a card on **one** board, the one matching its version label | Delete the wrong-board card |
-| Non-Issue items | **Only issues go on a board** — never PRs, never drafts, *except* an advisory draft titled `[GHSA-…]` | Delete the item |
+| Non-Issue items | **Only issues go on a board** — never PRs, never drafts, *except* a `[GHSA-…]` **draft** on **#28** | Delete the item |
 | No Status | Every card carries a Status | Set one — `Incoming` if unmilestoned, else by where it actually is |
 | GHSA draft missing Status/Priority | An exempted advisory draft still carries both | Set them — `/security-advisory` |
 | `Incoming` **with** a milestone (#28) | Incoming ⇔ no milestone | Approval was never recorded: move to **Todo**, or clear the milestone |
@@ -237,11 +237,15 @@ jq -nr --slurpfile o "$D/i.json" --slurpfile a "$D/b28.json" --slurpfile b "$D/b
   | {
     "double-boarded":        [$B28[].n | select(. as $n | [$B11[].n]|index($n))],
     # An advisory draft card is the ONE legitimate non-Issue item (see AGENTS.md).
-    # It is identified by its `[GHSA-` title prefix and nothing else, so a stray
-    # draft is still reported. Reports the TITLE, since a draft has no number.
-    "non-Issue on a board":  [(own($a)[], own($b)[]) | select(.content.type!="Issue")
-                              | (.content.title // "(untitled)")
-                              | select(startswith("[GHSA-") | not)],
+    # The exemption is narrowed three ways, and each one matters: DRAFTS only
+    # (a GHSA-titled PR is still reported), board #28 ONLY (an advisory has no
+    # business on #11), and the `[GHSA-` title prefix (a stray draft is still
+    # reported). Reports the TITLE, since a draft has no number.
+    "non-Issue on a board":  [(own($a)[] | select(.content.type!="Issue"
+                                and ((.content.type=="DraftIssue"
+                                      and ((.content.title // "") | startswith("[GHSA-"))) | not))),
+                              (own($b)[] | select(.content.type!="Issue"))]
+                             | map(.content.title // "(untitled)"),
     # $B28/$B11 hold only Issue items, so the Status and Priority checks below
     # cannot see an advisory draft. Exempting drafts from the check above would
     # therefore have made a half-made advisory card invisible to the whole
@@ -312,6 +316,13 @@ Two things the queries must account for, both learned the hard way:
   would let an ordinary stray draft through, which is the defect the check
   exists for. So a draft titled anything else is still reported — by title,
   since a draft has no issue number to print.
+  ⚠️ **The title prefix alone is not enough, because a title is not a type and
+  not a board.** Matched on its own it would also exempt a **pull request**
+  whose title happens to start `[GHSA-` — a plausible title for a security fix
+  — and an advisory draft misfiled on **#11**, where the replacement field check
+  below does not look either, so both checks would read `0`. The exemption is
+  therefore `DraftIssue` **and** `[GHSA-` **and** board #28; #11 still reports
+  every non-Issue item it carries.
   ⚠️ **The exemption had to come with a replacement check.** `$B28` and `$B11`
   are built from `Issue` items only, so the `no Status` and `no Priority`
   checks never see a draft — before the carve-out the non-Issue check was the
