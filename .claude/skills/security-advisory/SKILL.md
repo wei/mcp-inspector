@@ -1,6 +1,6 @@
 ---
 name: security-advisory
-description: "Take a privately reported vulnerability through this repo's security advisory flow — board it, verify who owns the code path, accept or reject, fix it in the private fork, ship to every affected release line, publish, then convert the card. Use when a vulnerability is reported privately; when deciding whether an advisory is ours to fix; when looking up or creating its private fork; when answering a reporter; or when a GHSA-titled board card needs handling."
+description: "Take a privately reported vulnerability through this repo's security advisory flow — board it, verify who owns the code path, accept or reject, fix it in the private fork, ship to every affected release line, publish, then turn the card into public tracking. Use when a vulnerability is reported privately; when deciding whether an advisory is ours to fix; when looking up or creating its private fork; when answering a reporter; or when a GHSA-titled board card needs handling."
 disable-model-invocation: false
 ---
 
@@ -26,9 +26,15 @@ reporter's credit especially, since nothing prompts for it — not because
 publishing performs them.
 
 Related: `/board-ops` (the card IDs and recipes) and `/issue-create`, for the
-labels and milestone the converted card takes **after** publication. The public
-issue is not *filed* — step 6 **converts** the draft card, which is what creates
-it.
+labels, milestone and board that public tracking takes — **after publication,
+never merely after the release**, since the release ships the fix while the
+advisory may still be private.
+
+⚠️ **How that tracking is created depends on the affected lines**, and only the
+v2 path is a conversion: a v2 issue is **converted** from the draft (filing one
+separately would duplicate both the issue and the card), while a v1 issue is
+**filed** on #11, because the draft is on #28 and cannot move there. Step 6 has
+the per-line sequence.
 
 ⚠️ **`/pr-flow` does not apply to the fix itself.** It requires a public issue
 and a public PR against the release branch — the disclosure this flow exists to
@@ -44,7 +50,7 @@ becomes relevant only once the advisory is published.
 | 3 | Valid → **accept** (`triage` → `draft`); invalid → close with a reason | **Human only** |
 | 4 | Create the **private fork**, fix and review there | Mechanical |
 | 5 | Merge **to every affected line**, release each, then **publish** the advisory | **Human only** |
-| 6 | After the release, **convert** the draft card — that is what creates the public issue | Mechanical |
+| 6 | **After publication**, turn the card into public tracking — per line: convert (v2), or file on #11 and delete the draft (v1) | Mechanical |
 
 ### 1. Board it as a draft card
 
@@ -69,16 +75,25 @@ a real GitHub issue".
   **link and triage metadata only**; the link is how a reader with access gets
   the details, and the absence of details is how a reader without access is
   told they do not have them.
-- **Status `Incoming`**, plus a Priority scored with the `/issue-triage` rubric.
-  `Incoming` is correct even though somebody clearly triaged it to make the
-  card: nobody has approved shipping a fix yet, and a draft card has no
-  milestone to carry the approval.
-  ⚠️ **Put the score's arithmetic in the draft body**, under the description.
-  `/issue-triage` says to record it as an issue comment, and a draft card has
-  no comments — so without this the Priority is a bare word with nothing behind
-  it, and a later re-scoring cannot tell a judgment from a guess. Write the two
-  axes, the bonuses you claimed, and the total, exactly as the comment form
-  would.
+- **Status `Incoming`**, plus a **provisional** Priority scored with the
+  `/issue-triage` rubric. `Incoming` is correct even though somebody clearly
+  triaged it to make the card: nobody has approved shipping a fix yet, and a
+  draft card has no milestone to carry the approval.
+  ⚠️ **Provisional is not a hedge — it is the only honest score at this
+  point.** The rubric's first axis is *severity*, and step 2 says ownership is
+  established **before** severity, precisely because #2409 looked severe right
+  up until it turned out not to be ours. At step 1 you have a report and
+  nothing verified, so score what the report claims, mark it provisional in the
+  body, and **re-score it at the end of step 2**, when you know whether the
+  code is ours and which lines it reaches. An advisory that turns out to be
+  upstream has its card deleted rather than re-scored (step 3).
+  ⚠️ **Put the score's arithmetic in the draft body**, marked provisional and
+  dated. `/issue-triage` says to record it as an issue comment, and a draft
+  card has no comments — so without this the Priority is a bare word with
+  nothing behind it, and the step-2 re-score cannot tell what it is revising.
+  Write the two axes, the bonuses you claimed, and the total, exactly as the
+  comment form would; leave the provisional line in place when you re-score and
+  add the new one under it, so the change of view is legible.
   ⚠️ **Set both fields.** The board audit's non-Issue check now exempts
   `[GHSA-` drafts, so a half-made card no longer trips it; the audit carries a
   narrow replacement check (see `/issue-triage`) and it is the only thing
@@ -149,6 +164,12 @@ shipped on its own terms:
 not forward-ported** — if v2 is affected too, that is a second fix on `v2/main`,
 not a merge. Branch names carry the version segment either way
 (`v1/fix/…`, `v2/fix/…`).
+
+**Now re-score the card's Priority**, replacing the provisional one from step 1.
+This is the first point at which the rubric's severity axis has anything solid
+under it: you know the code is ours, you have reproduced it, and you know how
+many lines it reaches — and "affects both lines" is itself a severity input the
+provisional score could not have had.
 
 ### 3. Accept, or close
 
@@ -250,10 +271,15 @@ request the **CVE** (optional, and the advisory is the only place to ask) and
 person then has to accept, so an unadded reporter is simply never credited, and
 that is the failure nobody notices because nothing reports it.
 
-### 6. Convert the card afterwards
+### 6. After publication, turn the card into public tracking
 
-Once the advisory is published, the work becomes ordinary board history and the
-draft card becomes a real issue.
+**The trigger is publication, not the release.** The release ships the fix
+while the advisory can still be private, and a public issue opened in that gap
+describes a vulnerability the advisory has not disclosed yet. Wait for step 5
+to finish.
+
+Once it has, the work becomes ordinary board history — by conversion for v2, by
+filing for v1.
 
 ⚠️ **Convert FIRST — the order is not interchangeable.** GitHub's "Convert to
 issue" creates a **new** issue from the draft; there is no way to point an
