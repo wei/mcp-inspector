@@ -29,6 +29,12 @@ belong to the field", so the mistake is at least loud.
 **Only issues go on a board — never PRs, never draft cards.** A PR is tracked
 through the card of the issue it closes.
 
+**The one exception is a GitHub security advisory**, tracked by a draft card
+titled `[GHSA-xxxx-yyyy-zzzz] - …` because a real issue would disclose it before
+a fix exists. The flow is `/security-advisory`; every recipe below applies to
+that card unchanged, except that an advisory draft is found by title rather than
+by issue number.
+
 ## V2 board (#28) IDs
 
 The project node id and the field ids are stable. The **option** ids are **not** —

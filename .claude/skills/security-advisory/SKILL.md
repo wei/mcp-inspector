@@ -18,8 +18,13 @@ human-gated**: **accepting** an advisory (the reporter sees it) and
 there is no unpublish). Never automate either, never bulk-apply them, and never
 take either step because a checklist said to. Everything else here is mechanics.
 
-Related: `/board-ops` (the card IDs and recipes), `/issue-create` and
-`/pr-flow` for the public issue and the eventual release.
+Related: `/board-ops` (the card IDs and recipes) and `/issue-create`, for the
+public issue **after** publication.
+
+⚠️ **`/pr-flow` does not apply to the fix itself.** It requires a public issue
+and a public PR against `v2/main` — the disclosure this flow exists to delay.
+The fix is reviewed inside the private fork (step 4), and `/pr-flow` becomes
+relevant only once the advisory is published.
 
 ## The flow
 
@@ -49,6 +54,16 @@ a real GitHub issue".
   `Incoming` is correct even though somebody clearly triaged it to make the
   card: nobody has approved shipping a fix yet, and a draft card has no
   milestone to carry the approval.
+  ⚠️ **Put the score's arithmetic in the draft body**, under the description.
+  `/issue-triage` says to record it as an issue comment, and a draft card has
+  no comments — so without this the Priority is a bare word with nothing behind
+  it, and a later re-scoring cannot tell a judgment from a guess. Write the two
+  axes, the bonuses you claimed, and the total, exactly as the comment form
+  would.
+  ⚠️ **Set both fields.** The board audit's non-Issue check now exempts
+  `[GHSA-` drafts, so a half-made card no longer trips it; the audit carries a
+  narrow replacement check (see `/issue-triage`) and it is the only thing
+  looking.
 
 The card is made **by hand**. There is no `PROJECT_TOKEN` in this org and
 `organization projects: write` is a permission `GITHUB_TOKEN` structurally
@@ -58,7 +73,9 @@ workflow for this;** that approach was tried and abandoned for exactly this
 reason.
 
 ```sh
-gh api repos/modelcontextprotocol/inspector/security-advisories \
+# --paginate: this endpoint returns 30 per page, and an inventory that silently
+# stops at the first page is worse than none — it reads as "nothing pending".
+gh api --paginate repos/modelcontextprotocol/inspector/security-advisories \
   --jq '.[] | select(.state=="triage")
         | "\(.ghsa_id)\t\(.severity)\t\(.summary)"'
 ```
@@ -76,8 +93,17 @@ it. Had ownership been checked after the severity assessment rather than before,
 the fix would have been written against the wrong repo.
 
 So: reproduce it, find the code, and check whether that code is first-party or
-reached through a dependency. An advisory against upstream code is closed here
-with a pointer to the upstream issue — it is not ours to accept or publish.
+reached through a dependency. An advisory against upstream code is not ours to
+accept or publish.
+
+⚠️ **"Upstream's problem" is not a reason to say it in public.** A genuine
+unfixed vulnerability handed to a public upstream issue is disclosed — by us,
+on someone else's behalf, before they have a fix. Route it through **that
+project's own private reporting channel** (its `SECURITY.md`, or its advisory
+form), and only reference a public upstream issue once the upstream has
+published. Where the reporter would rather carry it over themselves, say so and
+let them. #2409 took the benign version of this path: the reporter withdrew the
+report here and raised it upstream.
 
 ### 3. Accept, or close
 
@@ -87,6 +113,12 @@ moves the advisory `triage` → `draft`. The state is readable as `state` and
 
 **Invalid, out of scope, or upstream → close** with a comment saying which, and
 why. A reporter who is told nothing reasonably assumes they were ignored.
+
+⚠️ **Closing an advisory leaves its draft card behind — delete it.** Nothing
+shipped, so `Done` would be a false record and `Incoming` would claim work is
+still queued; `AGENTS.md` deletes a card in exactly this situation, and a
+rejected advisory's card is now invisible to the audit's non-Issue check by
+construction. The delete recipe is in `/board-ops`.
 
 ⚠️ **Accepting is a human act, always.** It is visible to the reporter and it
 commits this project to treating the report as a real vulnerability. Nothing in
@@ -138,13 +170,25 @@ hands out a working exploit.
 requests a **CVE**, and credits the reporter. There is no undo. Same rule as
 accepting: recommend, never perform.
 
-### 6. File the public issue afterwards
+### 6. Convert the card afterwards
 
-Once the advisory is published, the work becomes ordinary board history: file a
-public issue recording what shipped, **close it** (the work is already done),
-and convert the draft card to that issue so the board stops carrying a draft.
-Label and milestone it per `/issue-create`; `Done` is correct here, because the
-fix genuinely shipped.
+Once the advisory is published, the work becomes ordinary board history and the
+draft card becomes a real issue.
+
+⚠️ **Convert FIRST — the order is not interchangeable.** GitHub's "Convert to
+issue" creates a **new** issue from the draft; there is no way to point an
+existing card at an issue you filed separately. Filing the issue by hand and
+then converting produces two issues and two cards, which is why this step reads
+the way it does:
+
+1. **Convert the draft card to an issue** on board #28 (the card keeps its
+   place and its field values; the issue is created from the card's title and
+   body).
+2. Apply `v2` and a type label, and a milestone — the one the fix shipped in.
+   Do **not** run `/issue-create`'s add-card step: the card already exists.
+3. **Close it.** The work shipped before the issue existed.
+4. Move the card to **`Done`** — correct here, because the fix genuinely
+   shipped.
 
 ## API facts worth not re-deriving
 
