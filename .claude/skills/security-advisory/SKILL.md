@@ -1,6 +1,6 @@
 ---
 name: security-advisory
-description: "Take a privately reported vulnerability through this repo's security advisory flow — board it, verify who owns the code path, accept or reject, fix it in the private fork, publish, then file the public issue. Use when a vulnerability is reported privately; when deciding whether an advisory is ours to fix; when looking up or creating its private fork; when answering a reporter; or when a GHSA-titled board card needs handling."
+description: "Take a privately reported vulnerability through this repo's security advisory flow — board it, verify who owns the code path, accept or reject, fix it in the private fork, ship to every affected release line, publish, then convert the card. Use when a vulnerability is reported privately; when deciding whether an advisory is ours to fix; when looking up or creating its private fork; when answering a reporter; or when a GHSA-titled board card needs handling."
 disable-model-invocation: false
 ---
 
@@ -19,22 +19,24 @@ there is no unpublish). Never automate either, never bulk-apply them, and never
 take either step because a checklist said to. Everything else here is mechanics.
 
 Related: `/board-ops` (the card IDs and recipes) and `/issue-create`, for the
-public issue **after** publication.
+labels and milestone the converted card takes **after** publication. The public
+issue is not *filed* — step 6 **converts** the draft card, which is what creates
+it.
 
 ⚠️ **`/pr-flow` does not apply to the fix itself.** It requires a public issue
-and a public PR against `v2/main` — the disclosure this flow exists to delay.
-The fix is reviewed inside the private fork (step 4), and `/pr-flow` becomes
-relevant only once the advisory is published.
+and a public PR against the release branch — the disclosure this flow exists to
+delay. The fix is reviewed inside the private fork (step 4), and `/pr-flow`
+becomes relevant only once the advisory is published.
 
 ## The flow
 
 | # | Step | Gate |
 | --- | --- | --- |
 | 1 | Advisory lands in state `triage` → **draft card** on board #28 | Mechanical |
-| 2 | **Verify the claim — including who owns the code path** | Judgment |
+| 2 | **Verify the claim** — who owns the code path, and **which release lines are affected** | Judgment |
 | 3 | Valid → **accept** (`triage` → `draft`); invalid → close with a reason | **Human only** |
 | 4 | Create the **private fork**, fix and review there | Mechanical |
-| 5 | Merge, release, then **publish** the advisory | **Human only** |
+| 5 | Merge **to every affected line**, release each, then **publish** the advisory | **Human only** |
 | 6 | After the release, **convert** the draft card — that is what creates the public issue | Mechanical |
 
 ### 1. Board it as a draft card
@@ -80,7 +82,7 @@ gh api --paginate repos/modelcontextprotocol/inspector/security-advisories \
         | "\(.ghsa_id)\t\(.severity)\t\(.summary)"'
 ```
 
-### 2. Verify the claim — and who owns the code path
+### 2. Verify the claim — who owns the code path, and which lines it affects
 
 Before assessing severity, establish that the vulnerable code is **ours**. A
 report can be entirely accurate about behavior the Inspector merely exhibits
@@ -104,6 +106,32 @@ form), and only reference a public upstream issue once the upstream has
 published. Where the reporter would rather carry it over themselves, say so and
 let them. #2409 took the benign version of this path: the reporter withdrew the
 report here and raised it upstream.
+
+#### Which release lines are affected — ask it here, not at merge time
+
+⚠️ **An advisory is very nearly the only work the v1 line ever receives**, so
+this is exactly where assuming v2 does the most damage. `SECURITY.md` supports
+v1 for **security fixes only**, published under the `v1-latest` dist-tag, and
+its "What to Include" asks the reporter to state "whether it affects v2, v1, or
+both". Read what they said and then check it yourself — it is a request, not a
+required form field, so it is often absent and it is never authoritative when
+present. A v1-only advisory assumed to be
+v2 gets merged to a branch where the bug does not exist, and one affecting both
+lines leaves v1 **unpatched** while the advisory is published, which is the
+worst outcome this whole flow can produce.
+
+So the outcome of step 2 is a **set** of affected lines, and each one is
+shipped on its own terms:
+
+| Line | Branch | Flow | Publishes to |
+| --- | --- | --- | --- |
+| v2 | `v2/main` | `fix branch → v2/main → (milestone) main` | `latest` |
+| v1 | `v1/main` | `fix branch → v1/main`, flat — **no merge into `main`** | `v1-latest` |
+
+**The two lines publish independently under separate dist-tags, so a v1 fix is
+not forward-ported** — if v2 is affected too, that is a second fix on `v2/main`,
+not a merge. Branch names carry the version segment either way
+(`v1/fix/…`, `v2/fix/…`).
 
 ### 3. Accept, or close
 
@@ -157,14 +185,23 @@ something you can quietly undo — it takes a re-scoped token or an admin in the
 UI. That asymmetry is the whole reason for the read-first rule above.
 
 Fix and review inside the fork. Its PRs and commits are private, so none of the
-normal public review flow applies; the diff comes back to `v2/main` as an
-ordinary commit at merge time.
+normal public review flow applies; the diff comes back as an ordinary commit at
+merge time, **to the branch of each line step 2 found affected** — `v2/main`
+for v2, `v1/main` for v1.
 
-### 5. Merge, release, publish
+### 5. Merge to every affected line, release, publish
 
 Publish **after** the fix has shipped in a release, never before — publishing
 discloses the vulnerability, so doing it while users have no upgrade available
 hands out a working exploit.
+
+⚠️ **"Shipped" means shipped on *every* affected line.** The two lines release
+independently under separate dist-tags, so v2 reaching `latest` says nothing
+about `v1-latest`. Publishing with one line still unpatched discloses a live
+vulnerability to the users who have no fix — and they are the users least able
+to move, since v1 is the deprecated line they are on because upgrading is hard.
+Cutting each release is `/release` for v2; a v1 fix publishes straight from
+`v1/main`.
 
 ⚠️ **Publishing is irreversible and human-gated.** It makes the advisory public,
 requests a **CVE**, and credits the reporter. There is no undo. Same rule as
@@ -184,8 +221,19 @@ the way it does:
 1. **Convert the draft card to an issue** on board #28 (the card keeps its
    place and its field values; the issue is created from the card's title and
    body).
-2. Apply `v2` and a type label, and a milestone — the one the fix shipped in.
-   Do **not** run `/issue-create`'s add-card step: the card already exists.
+2. Apply a **type label** and the **version label of the line the fix shipped
+   on**, then a milestone — and those two are not independent:
+
+   | Affected | Version label | Milestone | Board |
+   | --- | --- | --- | --- |
+   | v2 | `v2` | the release the fix shipped in | #28 — the converted card is already there |
+   | v1 | `v1` | **none** — every milestone is a v2 release bucket | **#11**, which has no Priority field |
+   | both | one issue per line, labelled and boarded as above | | |
+
+   Do **not** run `/issue-create`'s add-card step for the converted card: it
+   already exists. A **v1** issue does need a card created on #11, because the
+   draft lived on #28 — and a v1 advisory's draft card on #28 is deleted once
+   its #11 issue exists, rather than left behind claiming v2 work.
 3. **Close it.** The work shipped before the issue existed.
 4. Move the card to **`Done`** — correct here, because the fix genuinely
    shipped.
@@ -203,3 +251,4 @@ All verified against the live API.
 | Fork deletion | Needs the `delete_repo` OAuth scope; a default `gh` token lacks it |
 | Comments | **No API at all**, REST or GraphQL. UI-only |
 | Board writes | Not automatable — no `PROJECT_TOKEN`, and `GITHUB_TOKEN` cannot hold `organization projects: write` |
+| Affected lines | `SECURITY.md` **asks** for v2 / v1 / both — a request, not a required field. Read it, never rely on it |

@@ -25,7 +25,7 @@ users invoke them by name.
 | [`pr-flow`](.claude/skills/pr-flow/SKILL.md)                     | Branch naming, DCO signoff, screenshots, opening the PR, requesting a Copilot review, responding, closing out                                                                                                        | Model-invoked, or `/pr-flow`       |
 | [`pre-push-gate`](.claude/skills/pre-push-gate/SKILL.md)         | Running `npm run local:gate` and diagnosing a failing stage                                                                                                                                                          | Model-invoked, or `/pre-push-gate` |
 | [`release`](.claude/skills/release/SKILL.md)                     | Cutting a release: bump on `v2/main`, milestone merge, tag `origin/main`, publish                                                                                                                                    | `/release`                         |
-| [`security-advisory`](.claude/skills/security-advisory/SKILL.md) | A privately reported vulnerability end to end: the draft card, verifying who owns the code path, accepting, the private fork, publishing, the public issue afterwards                                                | Model-invoked, or `/security-advisory` |
+| [`security-advisory`](.claude/skills/security-advisory/SKILL.md) | A privately reported vulnerability end to end: the draft card, who owns the code path, which release lines are affected, accepting, the private fork, publishing, converting the card                                | Model-invoked, or `/security-advisory` |
 | [`test-servers`](.claude/skills/test-servers/SKILL.md)           | Picking and running a showcase test server; the stale-build hazard                                                                                                                                                   | Model-invoked, or `/test-servers`  |
 
 Longer-form human documentation lives in [`docs/`](./docs) — see the table in the
@@ -342,7 +342,7 @@ node/field/option IDs, and the option-deletion hazard` was cut at `#28`, so 90
    overflows, and drops the least-invoked entries **first** — which are exactly the
    model-invoked skills that must fire on their own. `verify:skills` prints the
    current cost against the budget recorded in `scripts/lib/skill-manifest.mjs`
-   (3,679/4,000 characters as of this writing) and fails when it is exceeded. Raise
+   (3,711/4,000 characters as of this writing) and fails when it is exceeded. Raise
    the budget deliberately, or tighten a description; each entry is capped at 1,536
    characters regardless, so **put the key use case first**.
 
