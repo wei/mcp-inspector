@@ -109,6 +109,19 @@ describe("SecretStorageFooter", () => {
     expect(band).toHaveAttribute("data-tone", "warn");
   });
 
+  it("offers both key variables in the plaintext tooltip", async () => {
+    // Either variable clears the condition, and the file form is the one a
+    // container should use (#2447), so the advice names both.
+    const user = userEvent.setup();
+    renderWithMantine(<SecretStorageFooter info={plaintextFile} />);
+    await user.hover(screen.getByRole("button", { name: /Copy secrets file/ }));
+    expect(
+      await screen.findByText(
+        /Set MCP_INSPECTOR_SECRET_KEY or MCP_INSPECTOR_SECRET_KEY_FILE to encrypt\./,
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("does not claim exposure in the tooltip when encryption is unknown", async () => {
     // Mirrors `secretStorageCaveat`: `plaintext` is absent alongside
     // `encryptionUnknown`, and a two-way `!== false` test would assert that

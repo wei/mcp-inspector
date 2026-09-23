@@ -88,6 +88,14 @@ export const SECRET_FILE_ENV = "MCP_INSPECTOR_SECRET_FILE";
  */
 export const STORAGE_DIR_ENV = "MCP_STORAGE_DIR";
 
+/**
+ * The user-facing guide the fallback and caveat warnings point to. On
+ * `main`, the release branch, so it describes the behavior that was
+ * published rather than whatever `v2/main` is mid-way through.
+ */
+export const SECRET_STORAGE_DOCS_URL =
+  "https://github.com/modelcontextprotocol/inspector/blob/main/docs/secret-storage.md";
+
 const KINDS: SecretStoreKind[] = ["keyring", "file", "memory"];
 
 export interface ResolvedSecretStore {
@@ -462,6 +470,16 @@ export function warnAboutSecretStorage(info: SecretStorageInfo): void {
   }
   const caveat = secretStorageCaveat(info);
   if (caveat) console.warn(`[mcp-inspector] ${caveat}`);
+  // Only after something was actually said: the ordinary keychain run stays
+  // silent. This is the one place a headless or SSH user is guaranteed to
+  // look, and the fallback it reports — a plaintext file on a Linux box with
+  // no Secret Service — is otherwise explained only in docs they would have
+  // no reason to open (#2447).
+  if (info.reason === "fallback" || caveat) {
+    console.warn(
+      `[mcp-inspector] How the secret store is chosen, and how to secure it: ${SECRET_STORAGE_DOCS_URL}`,
+    );
+  }
 }
 
 let resolved: Promise<ResolvedSecretStore> | undefined;
