@@ -62,7 +62,7 @@ The path is the first of these that applies:
 
 **Adding a passphrase later is safe.** The next write upgrades an existing plaintext file in place. Until that write happens the existing values are still readable, and the banner and footer keep saying so. They do not report the file as encrypted just because the variable is now set.
 
-**Changing or losing the passphrase is not safe.** A file that can no longer be decrypted is read as empty, and the Inspector **refuses to write to it** rather than replacing it with a new file that holds only your latest secret. To recover, restore the original passphrase, or delete `secrets.json` and enter the values again.
+**Changing or losing the passphrase is not safe.** A file that can no longer be decrypted is read as empty, and the Inspector **refuses to write to it** rather than replacing it with a new file that holds only your latest secret. To recover, restore the original passphrase, or delete the secrets file at its configured path (see [Where the file is](#where-the-file-is); the path is also shown in the startup warning and the settings footer) and enter the values again.
 
 ### Permissions
 
@@ -86,8 +86,8 @@ The same read-back check covers a lock that cannot be taken at all. The file sto
 
 If you install libsecret (or start a Secret Service) on a machine that was using the file store, the next start probes successfully, selects the keychain, and **moves the contents of `secrets.json` into it**:
 
-- **The keychain wins on conflict.** A value already in the keychain is kept; the file's value is treated as the older copy.
-- **The file is removed only when every value was copied.** If the hand-off is partial, the file is left as it was and the next start tries again.
+- **The keychain wins on conflict.** A value already in the keychain is kept and the file's value is not copied, because it is treated as the older copy. Only entries the keychain does not have are written.
+- **The file is removed only when every entry is accounted for**, meaning each one either was already in the keychain or was written there. If any entry could not be handled, or a keychain read or write fails, the file is left as it was and the next start tries again. A file with no entries is also left in place.
 - **An unreadable file is not deleted.** If the file cannot be decrypted (the passphrase changed or is now unset), the Inspector reports it and leaves the file in place.
 
 A successful move prints a message naming the file it removed. The same hand-off runs when you select the keychain explicitly with `MCP_INSPECTOR_SECRET_STORE=keyring`. It does not run in the other direction: choosing `file` or `memory` does not copy anything out of the keychain.
