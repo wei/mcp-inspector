@@ -178,8 +178,13 @@ depend on how many items the board holds (see [Finding a card without trusting
 board's **node id**, not its number: project numbers are per-owner, and an issue
 can also sit on a user-owned project that happens to be numbered 28. Querying
 through the repository also means the issue number cannot match another repo's
-issue — board #11 really does carry a `modelcontextprotocol/servers` card. For
-#11, swap in its node id `PVT_kwDOCt2Azc4BA5sz`.
+issue — board #11 really does carry a `modelcontextprotocol/servers` card.
+
+**For a v1 card on #11, swap every #28 id, not just the lookup's.** #11's node
+id `PVT_kwDOCt2Azc4BA5sz` goes in both the lookup's `select` and the edit's
+`--project-id`; the edit also takes #11's own Status field
+`PVTSSF_lADOCt2Azc4BA5szzgzkS-g` and an option id from [its
+table](#v1-board-11-ids); and a delete is `item-delete 11`.
 
 The mutation runs only on a non-empty id: `item-edit --id ""` fails with an
 opaque node-resolution error rather than saying the card was not found. The
