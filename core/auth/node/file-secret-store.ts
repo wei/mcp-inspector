@@ -140,25 +140,37 @@ export interface SecretPassphrase {
  * not mean — which is only discovered when the file will not open. Refusing
  * names both variables at startup instead.
  *
- * The file's trailing line break is stripped (`echo … > key` writes one, and
- * the passphrase is not meant to include it); anything else is kept as-is,
- * matching how the env var is used verbatim. Blank after that is a problem,
- * not "off": unlike an empty `MCP_INSPECTOR_SECRET_KEY=`, pointing at a file
- * is an explicit request for encryption.
+ * The file's trailing line breaks (`\n`, `\r\n` or a lone `\r`) are stripped
+ * (`echo … > key` writes one, and the passphrase is not meant to include it);
+ * anything else is kept as-is, matching how the env var is used verbatim.
+ *
+ * Blank is a problem, not "off", at both levels — a blank
+ * `SECRET_KEY_FILE_ENV` and a key file that is empty after stripping. Unlike
+ * an empty `MCP_INSPECTOR_SECRET_KEY=`, naming a key file is an explicit
+ * request for encryption.
  */
 export function resolveSecretPassphrase(
   env: NodeJS.ProcessEnv = process.env,
 ): SecretPassphrase {
   const direct = env[SECRET_KEY_ENV];
   const hasDirect = direct !== undefined && direct.trim() !== "";
-  const keyFile = env[SECRET_KEY_FILE_ENV]?.trim();
-  if (hasDirect && keyFile) {
+  // Presence, not content, decides whether a key file was asked for. Unlike a
+  // blank `MCP_INSPECTOR_SECRET_KEY=` (a user switching encryption off), a
+  // blank `MCP_INSPECTOR_SECRET_KEY_FILE=` is almost always a template whose
+  // path did not expand — and reading it as "unset" would write plaintext.
+  const rawKeyFile = env[SECRET_KEY_FILE_ENV];
+  const wantsKeyFile = rawKeyFile !== undefined;
+  const keyFile = rawKeyFile?.trim();
+  if (hasDirect && wantsKeyFile) {
     return {
       problem: `both ${SECRET_KEY_ENV} and ${SECRET_KEY_FILE_ENV} are set; set only one`,
     };
   }
   if (hasDirect) return { passphrase: direct };
-  if (!keyFile) return {};
+  if (!wantsKeyFile) return {};
+  if (!keyFile) {
+    return { problem: `${SECRET_KEY_FILE_ENV} is set but empty` };
+  }
   const resolved = path.resolve(keyFile);
   let contents: string;
   try {
@@ -170,7 +182,7 @@ export function resolveSecretPassphrase(
       problem: `${SECRET_KEY_FILE_ENV} (${resolved}) could not be read: ${String(err)}`,
     };
   }
-  const passphrase = contents.replace(/(\r?\n)+$/, "");
+  const passphrase = contents.replace(/[\r\n]+$/, "");
   if (passphrase.trim() === "") {
     return { problem: `${SECRET_KEY_FILE_ENV} (${resolved}) is empty` };
   }

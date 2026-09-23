@@ -1593,6 +1593,31 @@ describe("resolveSecretPassphrase (MCP_INSPECTOR_SECRET_KEY_FILE, #2447)", () =>
     expect(result.problem).toMatch(/could not be read: .*ENOENT/);
   });
 
+  it("strips a lone trailing carriage return", async () => {
+    await fs.writeFile(keyFile(), "classic-mac\r");
+    expect(
+      resolveSecretPassphrase({ [SECRET_KEY_FILE_ENV]: keyFile() }),
+    ).toEqual({ passphrase: "classic-mac" });
+  });
+
+  it("reports a blank MCP_INSPECTOR_SECRET_KEY_FILE as a problem, not as unset", () => {
+    // A template whose path did not expand must not quietly mean plaintext.
+    const result = resolveSecretPassphrase({ [SECRET_KEY_FILE_ENV]: "  " });
+    expect(result.passphrase).toBeUndefined();
+    expect(result.problem).toBe(
+      "MCP_INSPECTOR_SECRET_KEY_FILE is set but empty",
+    );
+  });
+
+  it("still refuses both variables when the file variable is blank", () => {
+    const result = resolveSecretPassphrase({
+      [SECRET_KEY_ENV]: "direct",
+      [SECRET_KEY_FILE_ENV]: "",
+    });
+    expect(result.passphrase).toBeUndefined();
+    expect(result.problem).toMatch(/both .* are set/);
+  });
+
   it("reports an empty key file as a problem", async () => {
     await fs.writeFile(keyFile(), "\n");
     const result = resolveSecretPassphrase({
