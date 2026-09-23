@@ -189,7 +189,7 @@ function footerTooltip(info: SecretStorageInfo): string | undefined {
     parts.push(
       info.pendingEncryption
         ? "Re-encrypted the next time a secret is saved."
-        : "Set MCP_INSPECTOR_SECRET_KEY to encrypt.",
+        : "Set MCP_INSPECTOR_SECRET_KEY or MCP_INSPECTOR_SECRET_KEY_FILE to encrypt.",
     );
   }
   if (info.looseMode !== undefined) {

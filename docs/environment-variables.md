@@ -71,13 +71,17 @@ Every default above that starts with `~` is built from the home directory the pr
 
 ## Secret store
 
-Where server secrets (headers, client secrets) are kept. The details — the keychain probe, the file format, encryption and locking — are in the [Docker guide](./docker.md); these variables apply to every install, not only containers.
+Where the Inspector's secrets (OAuth client secrets, the enterprise IdP client secret, stdio `env:` values) are kept. How the store is chosen, and the details of the file store — its location, encryption, permissions and locking — are in [Where secrets are stored](./secret-storage.md); these variables apply to every install, not only containers.
+
+> [!WARNING]
+> On a host with no OS keychain (Linux without libsecret or a Secret Service, headless or SSH sessions, Termux), the Inspector **automatically** stores secrets in a file that is **plaintext** unless `MCP_INSPECTOR_SECRET_KEY_FILE` or `MCP_INSPECTOR_SECRET_KEY` is set. See [the warning in Where secrets are stored](./secret-storage.md#how-the-store-is-chosen).
 
 | Variable                     | Read by       | Default                           | Effect                                                                                                                                                                                                                                |
 | ---------------------------- | ------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `MCP_INSPECTOR_SECRET_STORE` | web, CLI, TUI | probe the OS keychain             | `keyring`, `file`, or `memory` (case-insensitive) picks the store outright and skips the probe. An empty or whitespace-only value counts as unset and silently runs automatic selection; any other value is ignored with a warning and also falls back to automatic selection.                                                                                             |
 | `MCP_INSPECTOR_SECRET_FILE`  | web, CLI, TUI | `~/.mcp-inspector/secrets.json`   | Path of the file store. Lookup order: this variable, then `secrets.json` in `MCP_STORAGE_DIR` when that is set, then `~/.mcp-inspector/secrets.json`. ⚠️ The default sits **beside** the storage directory, not inside it.          |
-| `MCP_INSPECTOR_SECRET_KEY`   | web, CLI, TUI | unset (file is plaintext, `0600`) | Passphrase that encrypts the file store; an empty or whitespace-only value counts as unset. Use a generated, high-entropy value. ⚠️ Changing or losing it makes the existing file unreadable; see the Docker guide before rotating it. |
+| `MCP_INSPECTOR_SECRET_KEY`   | web, CLI, TUI | unset (file is plaintext, `0600`) | Passphrase that encrypts the file store; an empty or whitespace-only value counts as unset. Use a generated, high-entropy value. ⚠️ Changing or losing it makes the existing file unreadable; see [Where secrets are stored](./secret-storage.md#encryption) before rotating it. |
+| `MCP_INSPECTOR_SECRET_KEY_FILE` | web, CLI, TUI | unset | Path of a file holding the passphrase; trailing line breaks are removed. Use this for Docker or Compose secrets, so the key stays out of the environment. Setting it together with a non-blank `MCP_INSPECTOR_SECRET_KEY` is an error, and so is setting it to an empty value. ⚠️ If the file is missing, unreadable or empty, or is the secrets file itself, the file store refuses to read or write rather than fall back to plaintext. |
 
 When no store is configured, the choice also depends on whether the Inspector is running in a container, which it detects from `KUBERNETES_SERVICE_HOST` (or Docker's and Podman's marker files). That variable is set by the orchestrator, not by you.
 
