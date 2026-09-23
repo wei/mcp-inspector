@@ -16,11 +16,11 @@ They are kept out of `mcp.json` so that sharing, committing or syncing the file 
 
 ## How the store is chosen
 
-At startup every client (web, CLI and TUI) picks one store, in this order:
+Each process picks one store, once, the first time it needs it: the web backend at startup, the CLI and TUI on their first access to a secret. Every client (web, CLI and TUI) goes through the same selection, in this order:
 
-1. **`MCP_INSPECTOR_SECRET_STORE`**, if it is `keyring`, `file` or `memory` (case-insensitive). That store is used and nothing is probed. An empty value counts as unset. Any other value is ignored with a warning, and selection continues as if it were unset.
+1. **`MCP_INSPECTOR_SECRET_STORE`**, if it is `keyring`, `file` or `memory` (case-insensitive). That store is used and nothing is probed. An empty or whitespace-only value counts as unset. Any other value is ignored with a warning, and selection continues as if it were unset.
 2. **The OS keychain**, if a probe can reach it: Keychain on macOS, Credential Manager on Windows, and the Secret Service (libsecret, for example GNOME Keyring or KWallet) on Linux. Entries are stored under the service name `mcp-inspector`. Most desktop installs stop here.
-3. **A fallback**, when the probe fails. The Inspector says so on startup and names the store it picked (see [Where the active store is reported](#where-the-active-store-is-reported)):
+3. **A fallback**, when the probe fails. The Inspector says so on stderr when it selects the store, and names the store it picked (see [Where the active store is reported](#where-the-active-store-is-reported)):
    - `memory` if it is running in a container **and** the directory the secrets file would go in is not on a mounted volume, because a file in a container's writable layer is lost on `docker run --rm` and on every image update;
    - `file` everywhere else.
 
@@ -32,7 +32,7 @@ At startup every client (web, CLI and TUI) picks one store, in this order:
 | Android/Termux                                                          | File                                | Yes                        |
 | Container with **no volume** on the secrets directory                   | Memory                              | No, this session only      |
 | Container **with** a volume on the secrets directory                    | File                                | Yes                        |
-| Any of the above with `MCP_INSPECTOR_SECRET_STORE` set                  | The store you named                 | Unless you named `memory`  |
+| Any of the above with `MCP_INSPECTOR_SECRET_STORE` set                  | The store you named                 | Not with `memory`; with `file` in a container, only if the file is on a volume |
 
 The Inspector decides that it is in a container from `KUBERNETES_SERVICE_HOST`, Docker's `/.dockerenv`, Podman's `/run/.containerenv`, or the process's cgroup. The container check only chooses between `memory` and `file`; the mount check is what actually decides.
 
@@ -52,13 +52,13 @@ The path is the first of these that applies:
 2. `secrets.json` inside `MCP_STORAGE_DIR`, if that is set;
 3. `~/.mcp-inspector/secrets.json`.
 
-⚠️ The default sits **beside** the default storage directory (`~/.mcp-inspector/storage`), not inside it. Setting `MCP_STORAGE_DIR` moves the secrets file together with the OAuth state and `client.json`.
+⚠️ The default sits **beside** the default storage directory (`~/.mcp-inspector/storage`), not inside it. Setting `MCP_STORAGE_DIR` moves the secrets file together with the OAuth state (`oauth.json`), for every client. It also moves `client.json` for the **web** backend only; the CLI and TUI find `client.json` through `MCP_CLIENT_CONFIG_PATH` instead.
 
 ### Encryption
 
-**A file store is unencrypted unless you give it a passphrase.** Set `MCP_INSPECTOR_SECRET_KEY` and the file is encrypted with AES-256-GCM, with the passphrase stretched by scrypt against a per-file random salt. Without it, the file is still mode `0600`, but anyone who can read the file can read the values. The startup log and the settings footer say so every session, as a warning.
+**A file store is unencrypted unless you give it a passphrase.** Set `MCP_INSPECTOR_SECRET_KEY` and the file is encrypted with AES-256-GCM, with the passphrase stretched by scrypt against a random salt that is regenerated on every write. Without it, the file is still mode `0600`, but anyone who can read the file can read the values. The startup log and the settings footer say so every session, as a warning.
 
-**Use a high-entropy passphrase: generate it, don't choose it.** The random salt stops an attacker from precomputing a table across files, but it does nothing against guessing. The scrypt cost is deliberately low because the derivation runs on every read and write. Anyone who obtains `secrets.json` can therefore test candidate passphrases quickly and offline, so treat this value like any other credential, not like a memorable password.
+**Use a high-entropy passphrase: generate it, don't choose it.** The random salt stops an attacker from precomputing a table, but it does nothing against guessing. The scrypt cost is deliberately low because the derivation runs on every read and write. Anyone who obtains `secrets.json` can therefore test candidate passphrases quickly and offline, so treat this value like any other credential, not like a memorable password.
 
 **Adding a passphrase later is safe.** The next write upgrades an existing plaintext file in place. Until that write happens the existing values are still readable, and the banner and footer keep saying so. They do not report the file as encrypted just because the variable is now set.
 
@@ -66,7 +66,7 @@ The path is the first of these that applies:
 
 ### Permissions
 
-The Inspector writes the file with mode `0600` and tightens it again at startup if something loosened it. If it _cannot_ tighten it (the file belongs to another user, or the mount is read-only), it says so in the log and the footer instead of continuing to describe the file as protected.
+The Inspector writes the file with mode `0600` and tightens it again when the store is selected if something loosened it. If it _cannot_ tighten it (the file belongs to another user, or the mount is read-only), it says so in the log and the footer instead of continuing to describe the file as protected.
 
 ### Two Inspectors, one file
 
@@ -94,7 +94,7 @@ A successful move prints a message naming the file it removed. The same hand-off
 
 ## Where the active store is reported
 
-- **On startup**, every client prints a warning on stderr when it falls back from the keychain, including the keychain error, and another when the file is unencrypted, has loose permissions, or cannot be read. The web client's startup banner also has a `Secrets:` line on every run.
+- **When the store is selected** (at startup for the web backend, on first use for the CLI and TUI), every client prints a warning on stderr if it falls back from the keychain, including the keychain error, and another if the file is unencrypted, has loose permissions, or cannot be read. The web client's startup banner also has a `Secrets:` line on every run.
 - **`GET /api/config`** (web) includes a `secretStorage` object describing the active store.
 - **In the web UI**, a footer at the bottom of the **Client Settings**, **Server Settings** and **Add / Edit / Clone server** dialogs names the store, and turns into a warning when it is memory-only, unencrypted, loosely permissioned, or unreadable. It is shown where you type a secret, not only once at startup.
 

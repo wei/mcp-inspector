@@ -71,7 +71,7 @@ Every default above that starts with `~` is built from the home directory the pr
 
 ## Secret store
 
-Where server secrets (OAuth client secrets, the enterprise IdP client secret, stdio `env:` values) are kept. How the store is chosen, and the details of the file store — its location, encryption, permissions and locking — are in [Where secrets are stored](./secret-storage.md); these variables apply to every install, not only containers.
+Where the Inspector's secrets (OAuth client secrets, the enterprise IdP client secret, stdio `env:` values) are kept. How the store is chosen, and the details of the file store — its location, encryption, permissions and locking — are in [Where secrets are stored](./secret-storage.md); these variables apply to every install, not only containers.
 
 | Variable                     | Read by       | Default                           | Effect                                                                                                                                                                                                                                |
 | ---------------------------- | ------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

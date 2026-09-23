@@ -49,7 +49,7 @@ The same volume also persists OAuth tokens and stored state, so an authorized se
 | **No volume** on `/home/node/.mcp-inspector`            | Memory                                       | No — session only          |
 | **With** that volume                                    | `~/.mcp-inspector/secrets.json`, mode `0600` | Yes                        |
 
-So the same volume that keeps your server list also switches secrets from session-scoped to durable — nothing extra to configure. The in-memory default for an unmounted container is deliberate: a file in the writable layer is discarded by `--rm` and by every image update, and promising durability it can't deliver is worse than declining to. If you relocate storage with `-e MCP_STORAGE_DIR=…` or `-e MCP_INSPECTOR_SECRET_FILE=…`, mount the volume at that directory instead.
+So the same volume that keeps your server list also switches secrets from session-scoped to durable — nothing extra to configure. The in-memory default for an unmounted container is deliberate: a file in the writable layer is discarded by `--rm` and by every image update, and promising durability it can't deliver is worse than declining to. The check looks at the **directory that holds the secrets file**, so if you relocate it with `-e MCP_STORAGE_DIR=…` or `-e MCP_INSPECTOR_SECRET_FILE=…`, mount a volume at that file's parent directory. Don't bind-mount the file on its own: it is not recognized as durable, so you get the memory store, and even with `-e MCP_INSPECTOR_SECRET_STORE=file` it cannot be written, because every save replaces the file by renaming a temporary file over it.
 
 The file is **unencrypted unless you give it a key**. Pass a generated, high-entropy passphrase with `-e`:
 
