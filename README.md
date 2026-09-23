@@ -107,4 +107,4 @@ A key rule worth surfacing here: **all work is issue-driven.** Before starting, 
 
 ## License
 
-MIT.
+See [`LICENSE`](./LICENSE). The MCP project is transitioning from the MIT License to Apache-2.0: new code contributions are licensed under Apache-2.0, documentation (excluding specifications) under CC-BY-4.0, and contributions whose authors originally licensed them under MIT and have not granted relicensing consent remain under MIT. The file carries the full Apache-2.0 and MIT texts and links the CC-BY-4.0 legal code.

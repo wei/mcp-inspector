@@ -2,7 +2,7 @@
   "name": "@modelcontextprotocol/inspector-launcher",
   "private": true,
   "description": "Launcher for MCP Inspector (web, CLI, TUI)",
-  "license": "MIT",
+  "license": "SEE LICENSE IN ../../LICENSE",
   "type": "module",
   "main": "build/index.js",
   "bin": {
