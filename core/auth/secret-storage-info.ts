@@ -200,7 +200,7 @@ export function secretStorageCaveat(
   if (info.plaintext) {
     return info.pendingEncryption
       ? "Existing secrets in this file are still unencrypted (file mode 0600). They are re-encrypted the next time a secret is saved."
-      : "Secrets are stored unencrypted (file mode 0600). Set MCP_INSPECTOR_SECRET_KEY to encrypt them.";
+      : "Secrets are stored unencrypted (file mode 0600). Set MCP_INSPECTOR_SECRET_KEY or MCP_INSPECTOR_SECRET_KEY_FILE to encrypt them.";
   }
   return undefined;
 }

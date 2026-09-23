@@ -16,6 +16,9 @@ import * as path from "node:path";
 import {
   FileSecretStore,
   readSecretFilePermissions,
+  resolveSecretPassphrase,
+  SECRET_KEY_ENV,
+  SECRET_KEY_FILE_ENV,
   SecretFileKeyMismatchError,
   tightenSecretFilePermissions,
 } from "@inspector/core/auth/node/file-secret-store.js";
@@ -1529,5 +1532,148 @@ describe("tightenSecretFilePermissions reports what it could not fix", () => {
     expect(await tightenSecretFilePermissions(filePath())).toEqual({
       state: "ok",
     });
+  });
+});
+
+describe("resolveSecretPassphrase (MCP_INSPECTOR_SECRET_KEY_FILE, #2447)", () => {
+  const keyFile = (): string => path.join(tmpDir, "secret-key");
+
+  it("returns nothing when neither variable is set", () => {
+    expect(resolveSecretPassphrase({})).toEqual({});
+  });
+
+  it("uses MCP_INSPECTOR_SECRET_KEY verbatim", () => {
+    expect(
+      resolveSecretPassphrase({ [SECRET_KEY_ENV]: " pass phrase " }),
+    ).toEqual({ passphrase: " pass phrase " });
+  });
+
+  it("reads the key file, stripping only the trailing line break", async () => {
+    await fs.writeFile(keyFile(), "  from file  \r\n\n");
+    expect(
+      resolveSecretPassphrase({ [SECRET_KEY_FILE_ENV]: keyFile() }),
+    ).toEqual({ passphrase: "  from file  " });
+  });
+
+  it("treats a blank MCP_INSPECTOR_SECRET_KEY as unset, so the file is used", async () => {
+    await fs.writeFile(keyFile(), "from-file\n");
+    expect(
+      resolveSecretPassphrase({
+        [SECRET_KEY_ENV]: "  ",
+        [SECRET_KEY_FILE_ENV]: keyFile(),
+      }),
+    ).toEqual({ passphrase: "from-file" });
+  });
+
+  it("resolves a relative key-file path against the working directory", async () => {
+    await fs.writeFile(keyFile(), "relative\n");
+    const relative = path.relative(process.cwd(), keyFile());
+    expect(
+      resolveSecretPassphrase({ [SECRET_KEY_FILE_ENV]: relative }),
+    ).toEqual({ passphrase: "relative" });
+  });
+
+  it("refuses both variables at once rather than picking one", async () => {
+    await fs.writeFile(keyFile(), "from-file\n");
+    const result = resolveSecretPassphrase({
+      [SECRET_KEY_ENV]: "direct",
+      [SECRET_KEY_FILE_ENV]: keyFile(),
+    });
+    expect(result.passphrase).toBeUndefined();
+    expect(result.problem).toMatch(
+      /both MCP_INSPECTOR_SECRET_KEY and MCP_INSPECTOR_SECRET_KEY_FILE are set/,
+    );
+  });
+
+  it("reports a missing key file as a problem, not as no passphrase", () => {
+    const result = resolveSecretPassphrase({
+      [SECRET_KEY_FILE_ENV]: path.join(tmpDir, "nope"),
+    });
+    expect(result.passphrase).toBeUndefined();
+    expect(result.problem).toMatch(/could not be read: .*ENOENT/);
+  });
+
+  it("reports an empty key file as a problem", async () => {
+    await fs.writeFile(keyFile(), "\n");
+    const result = resolveSecretPassphrase({
+      [SECRET_KEY_FILE_ENV]: keyFile(),
+    });
+    expect(result.passphrase).toBeUndefined();
+    expect(result.problem).toMatch(/is empty/);
+  });
+});
+
+describe("FileSecretStore with MCP_INSPECTOR_SECRET_KEY_FILE (#2447)", () => {
+  const keyFile = (): string => path.join(tmpDir, "secret-key");
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("encrypts with the passphrase read from the file", async () => {
+    await fs.writeFile(keyFile(), "hunter2\n");
+    vi.stubEnv(SECRET_KEY_ENV, "");
+    vi.stubEnv(SECRET_KEY_FILE_ENV, keyFile());
+    const store = new FileSecretStore({ filePath: filePath() });
+    expect(store.encrypted).toBe(true);
+    expect(store.keyProblem).toBeUndefined();
+    await store.set("alpha", "env:A", "super-secret");
+    const raw = await fs.readFile(filePath(), "utf-8");
+    expect(JSON.parse(raw).encryption).toBe("aes-256-gcm");
+    // The same passphrase supplied directly opens it: the newline is not
+    // part of the key.
+    const direct = new FileSecretStore({
+      filePath: filePath(),
+      passphrase: "hunter2",
+    });
+    expect(await direct.get("alpha", "env:A")).toBe("super-secret");
+  });
+
+  it("refuses to write, rather than writing plaintext, when the key file is missing", async () => {
+    vi.stubEnv(SECRET_KEY_ENV, "");
+    vi.stubEnv(SECRET_KEY_FILE_ENV, path.join(tmpDir, "missing-key"));
+    const store = new FileSecretStore({ filePath: filePath() });
+    expect(store.encrypted).toBe(false);
+    expect(store.keyProblem).toMatch(/could not be read/);
+    await expect(store.set("alpha", "env:A", "v")).rejects.toThrow(
+      SecretStoreUnavailableError,
+    );
+    await expect(store.set("alpha", "env:A", "v")).rejects.toThrow(
+      /Refusing to read or write it rather than store secrets unencrypted/,
+    );
+    expect(existsSyncFile(filePath())).toBe(false);
+    expect(await store.get("alpha", "env:A")).toBeNull();
+    await expect(store.readAll()).rejects.toThrow(SecretStoreUnavailableError);
+    expect(await store.readOnDiskEncryption()).toEqual({
+      state: "unreadable",
+      detail: expect.stringMatching(
+        /MCP_INSPECTOR_SECRET_KEY_FILE .* could not be read/,
+      ),
+    });
+  });
+
+  it("leaves an existing file untouched while the key is unavailable", async () => {
+    const plain = new FileSecretStore({ filePath: filePath() });
+    await plain.set("alpha", "env:A", "1");
+    const before = await fs.readFile(filePath(), "utf-8");
+    vi.stubEnv(SECRET_KEY_ENV, "direct");
+    vi.stubEnv(SECRET_KEY_FILE_ENV, keyFile());
+    const store = new FileSecretStore({ filePath: filePath() });
+    expect(store.keyProblem).toMatch(/both/);
+    await expect(store.set("alpha", "env:B", "2")).rejects.toThrow(
+      SecretStoreUnavailableError,
+    );
+    await expect(store.delete("alpha", "env:A")).resolves.toBeUndefined();
+    expect(await fs.readFile(filePath(), "utf-8")).toBe(before);
+  });
+
+  it("an explicit passphrase option ignores the environment", () => {
+    vi.stubEnv(SECRET_KEY_FILE_ENV, path.join(tmpDir, "missing-key"));
+    const store = new FileSecretStore({
+      filePath: filePath(),
+      passphrase: "hunter2",
+    });
+    expect(store.keyProblem).toBeUndefined();
+    expect(store.encrypted).toBe(true);
   });
 });

@@ -56,9 +56,11 @@ The path is the first of these that applies:
 
 ### Encryption
 
-**A file store is unencrypted unless you give it a passphrase.** Set `MCP_INSPECTOR_SECRET_KEY` and the file is encrypted with AES-256-GCM, with the passphrase stretched by scrypt against a random salt that is regenerated on every write. Without it, the file is still mode `0600`, but anyone who can read the file can read the values. The startup log and the settings footer say so every session, as a warning.
+**A file store is unencrypted unless you give it a passphrase.** Set `MCP_INSPECTOR_SECRET_KEY`, or point `MCP_INSPECTOR_SECRET_KEY_FILE` at a file containing it, and the file is encrypted with AES-256-GCM, with the passphrase stretched by scrypt against a random salt that is regenerated on every write. Without it, the file is still mode `0600`, but anyone who can read the file can read the values. The startup log and the settings footer say so every session, as a warning.
 
 **Use a high-entropy passphrase: generate it, don't choose it.** The random salt stops an attacker from precomputing a table, but it does nothing against guessing. The scrypt cost is deliberately low because the derivation runs on every read and write. Anyone who obtains `secrets.json` can therefore test candidate passphrases quickly and offline, so treat this value like any other credential, not like a memorable password.
+
+**Prefer the key file.** `MCP_INSPECTOR_SECRET_KEY_FILE` reads the passphrase from a file, with trailing line breaks removed, so it never has to sit in the environment, a shell profile, an `.env` file or a Compose file. It is the variable Docker and Compose secrets are built for (see the [Docker guide](./docker.md)). Setting both variables is an error. If the key file is missing, unreadable or empty, or both are set, the file store **refuses to read or write** instead of falling back to plaintext: saves fail, and the startup warning and settings footer report the file as unreadable, with the reason.
 
 **Adding a passphrase later is safe.** The next write upgrades an existing plaintext file in place. Until that write happens the existing values are still readable, and the banner and footer keep saying so. They do not report the file as encrypted just because the variable is now set.
 
@@ -67,6 +69,27 @@ The path is the first of these that applies:
 ### Permissions
 
 The Inspector writes the file with mode `0600` and tightens it again when the store is selected if something loosened it. If it _cannot_ tighten it (the file belongs to another user, or the mount is read-only), it says so in the log and the footer instead of continuing to describe the file as protected.
+
+### What the file store protects against
+
+The file store is a fallback for machines without a keychain, and it is weaker than a keychain. Treat keeping secrets in it, even encrypted, as a **moderate risk**. Here is what it does and does not defend against.
+
+**Without a passphrase (plaintext, mode `0600`):**
+
+- ✅ Other non-root users on the same machine, as long as the mode holds.
+- ❌ Root, and on a container host, every member of the `docker` group, which is equivalent to root.
+- ❌ Anyone who gets a copy of the file: a backup, a disk or volume snapshot, a synced home directory, or an accidental `git add` of a bind-mounted directory.
+- ❌ Any program running as your user, including the stdio MCP servers the Inspector starts.
+
+**With `MCP_INSPECTOR_SECRET_KEY` set (AES-256-GCM):**
+
+- ✅ **The file leaking on its own.** A backup, snapshot, copy or commit of `secrets.json` is useless without the key, _provided_ the passphrase is high-entropy (see [Encryption](#encryption)) and the key did not leak with it. This is the threat encryption at rest is for.
+- ❌ **Anyone who can read the key where it lives.** With `MCP_INSPECTOR_SECRET_KEY` the key is in the Inspector's environment, readable through `/proc/<pid>/environ` by the same user or root, through `docker inspect` and `docker exec` for a container, and wherever you stored it for launching, such as a shell profile, an `.env` file or a Compose file. `MCP_INSPECTOR_SECRET_KEY_FILE` narrows this to whoever can read the key file, but the Inspector must be able to read it, so the same user can too. If the key sits next to the secrets file (in the same backup, volume or repository), encryption buys nothing.
+- ❌ **Root on the host, or the `docker` group.** They can read both the file and the key, or the process memory holding the decrypted values.
+- ❌ **Code running as the same user.** The Inspector does **not** pass its own environment to the stdio servers it starts: they get a short allowlist (`HOME`, `LOGNAME`, `PATH`, `SHELL`, `TERM`, `USER` on macOS and Linux) plus their configured `env:`. But a server runs as the same user, so it can open the secrets file directly and can usually read the Inspector's environment through `/proc`. Only run servers you would trust with these secrets.
+- ❌ **A weak passphrase.** Anyone with the file can guess offline.
+
+In short, encryption turns "the file leaked" into "the file **and** the key leaked". It does not help against anyone who already has access to the machine or the container as root, or as the user the Inspector runs as. When that is not acceptable, use a keychain (install libsecret or run a Secret Service on Linux), or `MCP_INSPECTOR_SECRET_STORE=memory` and re-enter secrets each session.
 
 ### Two Inspectors, one file
 
@@ -106,6 +129,6 @@ A successful move prints a message naming the file it removed. The same hand-off
 | Use a file even though a keychain exists   | `MCP_INSPECTOR_SECRET_STORE=file`                                    |
 | Never write secrets to disk                | `MCP_INSPECTOR_SECRET_STORE=memory`                                  |
 | Put the file somewhere else                | `MCP_INSPECTOR_SECRET_FILE=/path/to/secrets.json`, or `MCP_STORAGE_DIR` |
-| Encrypt the file                           | `MCP_INSPECTOR_SECRET_KEY=<generated passphrase>`                    |
+| Encrypt the file                           | `MCP_INSPECTOR_SECRET_KEY_FILE=/path/to/key-file` (preferred), or `MCP_INSPECTOR_SECRET_KEY=<generated passphrase>` |
 
 Every variable is also listed in [Environment variables](./environment-variables.md#secret-store).

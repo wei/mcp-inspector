@@ -59,6 +59,7 @@
  */
 
 import * as crypto from "node:crypto";
+import { readFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { readStoreFile, writeStoreFile } from "../../storage/store-io.js";
@@ -107,6 +108,74 @@ const SCRYPT_P = 1;
 
 /** Env var holding the passphrase. Absent → the file is written in the clear. */
 export const SECRET_KEY_ENV = "MCP_INSPECTOR_SECRET_KEY";
+
+/**
+ * Env var naming a file that holds the passphrase — the `_FILE` convention
+ * Docker and Compose secrets are built around (#2447). A secret mounted at
+ * `/run/secrets/<name>` never appears in `docker inspect`, the process
+ * environment, or a Compose file, which is where `SECRET_KEY_ENV` has to
+ * live and where it is readable by anyone who can reach the container.
+ */
+export const SECRET_KEY_FILE_ENV = "MCP_INSPECTOR_SECRET_KEY_FILE";
+
+/**
+ * Where the passphrase came from, or why it could not be had.
+ *
+ * `problem` is the state this type exists for. A key file that is named but
+ * missing, unreadable or empty is a user who asked for encryption and did not
+ * get a key — and treating that as "no passphrase" would write every secret
+ * in the clear, the one outcome they configured this to prevent. So it is
+ * carried as its own state, and the store refuses to read or write under it.
+ */
+export interface SecretPassphrase {
+  passphrase?: string;
+  problem?: string;
+}
+
+/**
+ * Resolve the passphrase from `SECRET_KEY_ENV` or `SECRET_KEY_FILE_ENV`.
+ *
+ * Both set is a misconfiguration rather than a precedence question: they can
+ * disagree, and silently preferring one would encrypt with a key the user did
+ * not mean — which is only discovered when the file will not open. Refusing
+ * names both variables at startup instead.
+ *
+ * The file's trailing line break is stripped (`echo … > key` writes one, and
+ * the passphrase is not meant to include it); anything else is kept as-is,
+ * matching how the env var is used verbatim. Blank after that is a problem,
+ * not "off": unlike an empty `MCP_INSPECTOR_SECRET_KEY=`, pointing at a file
+ * is an explicit request for encryption.
+ */
+export function resolveSecretPassphrase(
+  env: NodeJS.ProcessEnv = process.env,
+): SecretPassphrase {
+  const direct = env[SECRET_KEY_ENV];
+  const hasDirect = direct !== undefined && direct.trim() !== "";
+  const keyFile = env[SECRET_KEY_FILE_ENV]?.trim();
+  if (hasDirect && keyFile) {
+    return {
+      problem: `both ${SECRET_KEY_ENV} and ${SECRET_KEY_FILE_ENV} are set; set only one`,
+    };
+  }
+  if (hasDirect) return { passphrase: direct };
+  if (!keyFile) return {};
+  const resolved = path.resolve(keyFile);
+  let contents: string;
+  try {
+    contents = readFileSync(resolved, "utf-8");
+  } catch (err) {
+    return {
+      // `String(err)` rather than `.message`: `readFileSync` only ever throws
+      // an `Error`, so an `instanceof` guard would be a branch no test can take.
+      problem: `${SECRET_KEY_FILE_ENV} (${resolved}) could not be read: ${String(err)}`,
+    };
+  }
+  const passphrase = contents.replace(/(\r?\n)+$/, "");
+  if (passphrase.trim() === "") {
+    return { problem: `${SECRET_KEY_FILE_ENV} (${resolved}) is empty` };
+  }
+  return { passphrase };
+}
 
 interface KdfParams {
   algorithm: "scrypt";
@@ -168,8 +237,8 @@ export class SecretFileKeyMismatchError extends SecretStoreUnavailableError {
   constructor(filePath: string, hasKey: boolean) {
     super(
       hasKey
-        ? `The secrets file at ${filePath} could not be decrypted with the current ${SECRET_KEY_ENV}. Refusing to write, which would overwrite the existing secrets. Restore the original passphrase, or delete the file to start over.`
-        : `The secrets file at ${filePath} is encrypted but ${SECRET_KEY_ENV} is not set. Refusing to write, which would overwrite the existing secrets. Set the passphrase this file was written with, or delete the file to start over.`,
+        ? `The secrets file at ${filePath} could not be decrypted with the current ${SECRET_KEY_ENV} (or ${SECRET_KEY_FILE_ENV}). Refusing to write, which would overwrite the existing secrets. Restore the original passphrase, or delete the file to start over.`
+        : `The secrets file at ${filePath} is encrypted but ${SECRET_KEY_ENV} is not set (nor ${SECRET_KEY_FILE_ENV}). Refusing to write, which would overwrite the existing secrets. Set the passphrase this file was written with, or delete the file to start over.`,
     );
     this.name = "SecretFileKeyMismatchError";
   }
@@ -294,9 +363,10 @@ export interface FileSecretStoreOptions {
   /** Absolute path of the secrets file. */
   filePath: string;
   /**
-   * Passphrase. Defaults to `process.env[SECRET_KEY_ENV]`; an empty or
-   * whitespace-only value counts as absent, since `MCP_INSPECTOR_SECRET_KEY=`
-   * in a compose file is a user who meant "off", not a one-character key.
+   * Passphrase. Defaults to {@link resolveSecretPassphrase} over
+   * `process.env`; an empty or whitespace-only value counts as absent, since
+   * `MCP_INSPECTOR_SECRET_KEY=` in a compose file is a user who meant "off",
+   * not a one-character key.
    */
   passphrase?: string;
 }
@@ -304,10 +374,20 @@ export interface FileSecretStoreOptions {
 export class FileSecretStore implements SecretStore {
   readonly filePath: string;
   private readonly passphrase: string | undefined;
+  /**
+   * Why a configured key could not be obtained. While set, every read throws
+   * and every write refuses — see {@link SecretPassphrase}.
+   */
+  readonly keyProblem: string | undefined;
   constructor(options: FileSecretStoreOptions) {
     this.filePath = options.filePath;
-    const raw = options.passphrase ?? process.env[SECRET_KEY_ENV];
+    const resolved =
+      options.passphrase !== undefined
+        ? { passphrase: options.passphrase }
+        : resolveSecretPassphrase();
+    const raw = resolved.passphrase;
     this.passphrase = raw && raw.trim() ? raw : undefined;
+    this.keyProblem = resolved.problem;
   }
 
   /**
@@ -348,6 +428,12 @@ export class FileSecretStore implements SecretStore {
    * `set` is in fact about to refuse.
    */
   async readOnDiskEncryption(): Promise<SecretFileEncryptionState> {
+    // Before looking at the file at all: with no key to open it and no
+    // permission to write it in the clear, neither "absent" (which would fall
+    // back to reporting the write policy) nor "plaintext" is true of it.
+    if (this.keyProblem !== undefined) {
+      return { state: "unreadable", detail: this.keyProblem };
+    }
     let raw: string | null;
     try {
       raw = await readStoreFile(this.filePath);
@@ -412,7 +498,7 @@ export class FileSecretStore implements SecretStore {
             state: "unreadable",
             detail:
               err instanceof SecretFileKeyMismatchError
-                ? `it cannot be decrypted with the current ${SECRET_KEY_ENV}`
+                ? `it cannot be decrypted with the current ${SECRET_KEY_ENV} (or ${SECRET_KEY_FILE_ENV})`
                 : err instanceof Error
                   ? err.message
                   : String(err),
@@ -469,6 +555,13 @@ export class FileSecretStore implements SecretStore {
   }
 
   private async readMap(): Promise<Record<string, string> | null> {
+    // Every read and write passes through here, so this one check is what
+    // stops a missing key file from degrading to plaintext writes.
+    if (this.keyProblem !== undefined) {
+      throw new SecretStoreUnavailableError(
+        `The secrets file at ${this.filePath} cannot be used: ${this.keyProblem}. Refusing to read or write it rather than store secrets unencrypted.`,
+      );
+    }
     const raw = await readStoreFile(this.filePath);
     if (raw === null) return null;
 

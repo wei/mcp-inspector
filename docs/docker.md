@@ -51,16 +51,42 @@ The same volume also persists OAuth tokens and stored state, so an authorized se
 
 So the same volume that keeps your server list also switches secrets from session-scoped to durable — nothing extra to configure. The in-memory default for an unmounted container is deliberate: a file in the writable layer is discarded by `--rm` and by every image update, and promising durability it can't deliver is worse than declining to. The check looks at the **directory that holds the secrets file**, so if you relocate it with `-e MCP_STORAGE_DIR=…` or `-e MCP_INSPECTOR_SECRET_FILE=…`, mount a volume at that file's parent directory. Don't bind-mount the file on its own: it is not recognized as durable, so you get the memory store, and even with `-e MCP_INSPECTOR_SECRET_STORE=file` it cannot be written, because every save replaces the file by renaming a temporary file over it.
 
-The file is **unencrypted unless you give it a key**. Pass a generated, high-entropy passphrase with `-e`:
+> [!WARNING]
+> **Mounting that volume turns on file storage of secrets, and without a key the file is plaintext.** Every OAuth client secret, IdP client secret and stdio `env:` value you save is then written to `secrets.json` on the volume, readable by anyone who can read the volume: root and every member of the `docker` group on the host, and anyone who gets a backup, snapshot or copy of it. Mode `0600` only keeps out other non-root users.
+>
+> **Give it a key, and keep that key only where the Inspector can read it.** Generate one (for example `openssl rand -base64 32 > secret-key`), keep it out of the volume, backups and any repository that holds the secrets file, and hand it to the container **as a file** with `MCP_INSPECTOR_SECRET_KEY_FILE`, not as an environment variable:
+>
+> ```bash
+> docker run --rm -p 127.0.0.1:6274:6274 \
+>   -v mcp-inspector-data:/home/node/.mcp-inspector \
+>   -v "$HOME/.config/mcp-inspector/secret-key:/run/secrets/mcp_inspector_secret_key:ro" \
+>   -e MCP_INSPECTOR_SECRET_KEY_FILE=/run/secrets/mcp_inspector_secret_key \
+>   ghcr.io/modelcontextprotocol/inspector
+> ```
+>
+> Or with Compose secrets:
+>
+> ```yaml
+> services:
+>   inspector:
+>     image: ghcr.io/modelcontextprotocol/inspector
+>     ports: ["127.0.0.1:6274:6274"]
+>     volumes: ["mcp-inspector-data:/home/node/.mcp-inspector"]
+>     environment:
+>       MCP_INSPECTOR_SECRET_KEY_FILE: /run/secrets/mcp_inspector_secret_key
+>     secrets: [mcp_inspector_secret_key]
+> secrets:
+>   mcp_inspector_secret_key:
+>     file: ./secret-key
+> volumes:
+>   mcp-inspector-data:
+> ```
+>
+> A key passed as a file stays out of `docker inspect`, the container's environment, your shell history and the Compose file. The container runs as uid `1000`, so the key file must be readable by that uid; without Swarm, Compose secrets are bind mounts that keep the host file's owner and mode. `MCP_INSPECTOR_SECRET_KEY` still works, but a key passed that way is readable by anyone who can run `docker inspect` or `docker exec` against the container. If the key file is missing, unreadable or empty, or both variables are set, the Inspector **refuses to read or write the secrets file** rather than falling back to plaintext, and says why in the log and the settings footer.
+>
+> **Even encrypted, secrets on disk carry moderate risk.** Encryption protects against the file leaking **on its own**. It does not protect against anyone who can also reach the key, which on a single host usually includes root and the `docker` group. Read [what the file store protects against](./secret-storage.md#what-the-file-store-protects-against) before relying on it. If that is not acceptable, don't mount the volume (secrets then stay in memory for the session), or run the Inspector outside a container, where it uses the OS keychain.
 
-```bash
-docker run --rm -p 127.0.0.1:6274:6274 \
-  -v mcp-inspector-data:/home/node/.mcp-inspector \
-  -e MCP_INSPECTOR_SECRET_KEY="$MY_PASSPHRASE" \
-  ghcr.io/modelcontextprotocol/inspector
-```
-
-⚠️ Keep passing the **same** passphrase on every run: a file that can no longer be decrypted is read as empty and refuses to be written. Everything else about the store — the selection order, the file's location, encryption, permissions, locking, and choosing a store explicitly with `MCP_INSPECTOR_SECRET_STORE` — applies to every runtime and is in [Where secrets are stored](./secret-storage.md).
+⚠️ Keep supplying the **same** passphrase on every run: a file that can no longer be decrypted is read as empty and refuses to be written. Everything else about the store — the selection order, the file's location, encryption, permissions, locking, and choosing a store explicitly with `MCP_INSPECTOR_SECRET_STORE` — applies to every runtime and is in [Where secrets are stored](./secret-storage.md).
 
 **Upgrading from an image before this fix?** Earlier images did not create `/home/node/.mcp-inspector`, so Docker created the volume's mount point as `root` and the non-root `node` user couldn't write to it. An **empty** volume repairs itself on the first run of a current image (Docker applies the image directory's ownership to an empty volume), but one that already has files in it keeps its old `root` ownership and still fails with `EACCES`. Fix it once:
 
