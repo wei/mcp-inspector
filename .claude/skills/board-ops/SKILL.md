@@ -62,6 +62,7 @@ Look it up by **title** in the full listing instead, then feed that item id to
 
 ```sh
 GHSA=GHSA-xxxx-yyyy-zzzz   # the advisory's real id
+ITEM_ID=   # never let an earlier lookup's id survive a failed one
 BOARD=$(gh project item-list 28 --owner modelcontextprotocol --format json --limit 2000)
 if jq -e '(.items | length) == .totalCount' <<<"$BOARD" >/dev/null; then
   ITEM_ID=$(jq -r '.items[] | select(.content.type=="DraftIssue")
@@ -180,23 +181,33 @@ through the repository also means the issue number cannot match another repo's
 issue — board #11 really does carry a `modelcontextprotocol/servers` card. For
 #11, swap in its node id `PVT_kwDOCt2Azc4BA5sz`.
 
-Check the id is non-empty before using it: `item-edit --id ""` fails with an
+The mutation runs only on a non-empty id: `item-edit --id ""` fails with an
 opaque node-resolution error rather than saying the card was not found. The
 `|| ITEM_ID=` matters too — on a GraphQL error (a number that is a PR, not an
 issue; a rate limit) `gh api` still prints the raw error JSON to stdout, which
-would otherwise land in `ITEM_ID` as a non-empty "id".
+would otherwise land in `ITEM_ID` as a non-empty "id". `first:100` is the
+connection's maximum page; it counts the boards one issue is on, not the cards
+on a board, so it has no board-size exposure.
 
 ```sh
 N=<ISSUE_NUMBER>
 ITEM_ID=$(gh api graphql -F n="$N" -f query='query($n:Int!){
   repository(owner:"modelcontextprotocol",name:"inspector"){issue(number:$n){
-    projectItems(first:20){nodes{id project{id}}}}}}' \
+    projectItems(first:100){nodes{id project{id}}}}}}' \
   --jq '.data.repository.issue.projectItems.nodes[]
         | select(.project.id=="PVT_kwDOCt2Azc4BJVxt") | .id') || ITEM_ID=
 [ -n "$ITEM_ID" ] || echo "#$N has no card on #28 (or the lookup failed)" >&2
-# e.g. Status → In Review, when its PR opens
-gh project item-edit --project-id PVT_kwDOCt2Azc4BJVxt --id "$ITEM_ID" \
-  --field-id PVTSSF_lADOCt2Azc4BJVxtzg5iI8c --single-select-option-id 159c8a02
+```
+
+Then edit it — e.g. Status → In Review, when its PR opens:
+
+```sh
+if [ -n "$ITEM_ID" ]; then
+  gh project item-edit --project-id PVT_kwDOCt2Azc4BJVxt --id "$ITEM_ID" \
+    --field-id PVTSSF_lADOCt2Azc4BJVxtzg5iI8c --single-select-option-id 159c8a02
+else
+  echo "no ITEM_ID — nothing edited" >&2
+fi
 ```
 
 ### Delete a card
@@ -206,8 +217,13 @@ not planned / obsolete / superseded shipped nothing, so its card is **deleted**,
 not parked in Done:
 
 ```sh
-# ITEM_ID from the issue-side lookup in "Move an existing card" above.
-[ -n "$ITEM_ID" ] && gh project item-delete 28 --owner modelcontextprotocol --id "$ITEM_ID"
+# ITEM_ID from the issue-side LOOKUP block in "Move an existing card" above —
+# the lookup only, not the item-edit that follows it.
+if [ -n "$ITEM_ID" ]; then
+  gh project item-delete 28 --owner modelcontextprotocol --id "$ITEM_ID"
+else
+  echo "no ITEM_ID — nothing deleted" >&2
+fi
 ```
 
 Deleting the card removes it from the board only — **the issue itself is
@@ -281,7 +297,7 @@ gh project item-list 28 --owner modelcontextprotocol --format json --limit 2000 
 jq -e '(.items | length) == .totalCount' "$BOARD_TMP/board-snapshot.json" >/dev/null \
   && echo "snapshot: $BOARD_TMP/board-snapshot.json" \
   || { echo "SNAPSHOT INCOMPLETE — raise --limit and retake it before editing options" >&2
-       rm -f "$BOARD_TMP/board-snapshot.json"; }
+       rm -f "$BOARD_TMP/board-snapshot.json"; false; }
 ```
 
 Note the printed path; you need it to recover.
@@ -307,7 +323,7 @@ gh project item-list 28 --owner modelcontextprotocol --format json --limit 2000 
   > "$BOARD_TMP/board-broken.json"
 jq -e '(.items | length) == .totalCount' "$BOARD_TMP/board-broken.json" >/dev/null \
   || { echo "board-broken.json INCOMPLETE — raise --limit and re-run" >&2
-       rm -f "$BOARD_TMP/board-broken.json"; }   # so the steps below fail, not undercount
+       rm -f "$BOARD_TMP/board-broken.json"; false; }   # so the steps below fail, not undercount
 jq -r '[.items[]|select(.status==null)|.id]' "$BOARD_TMP/board-broken.json" \
   > "$BOARD_TMP/lost-ids.json"
 jq -r --slurpfile L "$BOARD_TMP/lost-ids.json" '($L[0]) as $lost

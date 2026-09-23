@@ -57,7 +57,7 @@ gh issue list --repo modelcontextprotocol/inspector --state open --limit 1000 \
 for P in 28 11; do
   gh project item-list $P --owner modelcontextprotocol --format json --limit 2000 > "$D/b$P.json"
   jq -e '(.items | length) == .totalCount' "$D/b$P.json" >/dev/null \
-    || { echo "board #$P listing INCOMPLETE — raise --limit and re-run" >&2; rm -f "$D/b$P.json"; }
+    || { echo "board #$P listing INCOMPLETE — raise --limit and re-run" >&2; rm -f "$D/b$P.json"; false; }
 done
 # Union of BOTH boards, filtered to this repo — org boards can hold other repos' issues.
 jq -s '[.[].items[] | select(.content.type=="Issue"
@@ -230,7 +230,7 @@ gh issue list --repo $R --state all --limit 2000 \
 for P in 28 11; do gh project item-list $P --owner modelcontextprotocol \
   --format json --limit 2000 > "$D/b$P.json"
   jq -e '(.items | length) == .totalCount' "$D/b$P.json" >/dev/null \
-    || { echo "board #$P listing INCOMPLETE — raise --limit and re-run" >&2; rm -f "$D/b$P.json"; }
+    || { echo "board #$P listing INCOMPLETE — raise --limit and re-run" >&2; rm -f "$D/b$P.json"; false; }
 done
 jq -nr --slurpfile o "$D/i.json" --slurpfile a "$D/b28.json" --slurpfile b "$D/b11.json" --arg R "$R" '
   ($o[0] | map({key:(.number|tostring), value:{st:.state, sr:(.stateReason // ""),
