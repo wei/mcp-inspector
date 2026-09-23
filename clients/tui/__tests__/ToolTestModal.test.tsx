@@ -121,6 +121,52 @@ describe("ToolTestModal", () => {
     api.unmount();
   });
 
+  it("resolves a $ref'd union branch before checking its required arguments (#2321)", async () => {
+    // Unresolved, a `$ref` branch's requirements read as unknown and the call
+    // would go out missing `address`; inlined, the branch is checked as written.
+    const callTool = vi.fn();
+    const tool = makeTool({
+      inputSchema: {
+        type: "object",
+        oneOf: [{ $ref: "#/$defs/Email" }, { $ref: "#/$defs/Sms" }],
+        $defs: {
+          Email: {
+            type: "object",
+            properties: {
+              kind: { type: "string", const: "email" },
+              address: { type: "string" },
+            },
+            required: ["kind", "address"],
+          },
+          Sms: {
+            type: "object",
+            properties: {
+              kind: { type: "string", const: "sms" },
+              phone: { type: "string" },
+            },
+            required: ["kind", "phone"],
+          },
+        },
+      },
+    });
+    const api = render(
+      <ToolTestModal
+        tool={tool}
+        inspectorClient={fakeClient(callTool)}
+        width={80}
+        height={24}
+        onClose={vi.fn()}
+      />,
+    );
+    await tick();
+    setSubmitValue({ __variant: "0", __b0__kind: "email" });
+    api.stdin.write("\r");
+    await tick();
+    await tick();
+    expect(callTool).not.toHaveBeenCalled();
+    api.unmount();
+  });
+
   it("names every missing required argument (#2123)", async () => {
     const callTool = vi.fn();
     const tool = makeTool({

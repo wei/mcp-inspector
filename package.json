@@ -1,6 +1,6 @@
 {
   "name": "@modelcontextprotocol/inspector",
-  "version": "2.7.0",
+  "version": "2.8.0",
   "description": "The Model Context Protocol Inspector",
   "keywords": [
     "MCP",
@@ -14,7 +14,7 @@
     "type": "git",
     "url": "git+https://github.com/modelcontextprotocol/inspector.git"
   },
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "author": "The MCP Maintainers and Community",
   "type": "module",
   "bin": {

@@ -12,6 +12,10 @@
 // space-joined string, so any argument holding a metacharacter becomes syntax —
 // so arguments go through the same `winShellArgs` quoting the npm/npx call
 // sites use. This is deliberately the ONLY place that decides either question.
+//
+// The same two questions apply to every agent CLI the skills eval drives —
+// `copilot` is an npm-installed `.cmd` shim on Windows too (#2397) — so the
+// decision is made once, for any command, and the `claude` helpers delegate.
 
 import { spawnSync } from "node:child_process";
 import { winShellArgs } from "./win-shell-args.mjs";
@@ -29,8 +33,26 @@ export function claudeSpawnArgs(
   options = {},
   platform = process.platform,
 ) {
+  return cliSpawnArgs("claude", args, options, platform);
+}
+
+/**
+ * `spawn` arguments for any npm-installed agent CLI, correct on every platform.
+ *
+ * @param {string} command
+ * @param {string[]} args
+ * @param {object} [options] Passed through to the spawn call.
+ * @param {string} [platform] Defaults to the current platform; injectable for tests.
+ * @returns {{ command: string, args: string[], options: object }}
+ */
+export function cliSpawnArgs(
+  command,
+  args,
+  options = {},
+  platform = process.platform,
+) {
   return {
-    command: "claude",
+    command,
     args: winShellArgs(args, platform),
     options: { ...options, shell: platform === "win32" },
   };
@@ -53,11 +75,26 @@ export function claudeSpawnArgs(
  * @param {{ spawn?: typeof spawnSync, platform?: string }} [io]
  * @returns {T | null}
  */
-export function probeClaudeVersion(
+export function probeClaudeVersion(parseVersion, io = {}) {
+  return probeCliVersion("claude", parseVersion, io);
+}
+
+/**
+ * Read any agent CLI's version, or null when there is no usable one.
+ *
+ * @template T
+ * @param {string} cli
+ * @param {(text: string) => T | null} parseVersion
+ * @param {{ spawn?: typeof spawnSync, platform?: string }} [io]
+ * @returns {T | null}
+ */
+export function probeCliVersion(
+  cli,
   parseVersion,
   { spawn = spawnSync, platform } = {},
 ) {
-  const { command, args, options } = claudeSpawnArgs(
+  const { command, args, options } = cliSpawnArgs(
+    cli,
     ["--version"],
     { encoding: "utf8" },
     platform,

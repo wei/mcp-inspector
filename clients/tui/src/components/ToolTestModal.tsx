@@ -11,6 +11,7 @@ import {
   schemaToForm,
 } from "../utils/schemaToForm.js";
 import { ScrollView, type ScrollViewRef } from "ink-scroll-view";
+import { inlineLocalRefs } from "@inspector/core/json/localRefs.js";
 
 interface ToolTestModalProps {
   tool: Tool;
@@ -63,8 +64,13 @@ export function ToolTestModal({
     };
   }, [width, height]);
 
-  const formStructure = tool?.inputSchema
-    ? schemaToForm(tool.inputSchema, tool.name || "Unknown Tool")
+  // Same-document `$ref`s inlined once, for the form and the decode alike: a
+  // property declared as a bare `$ref` has no `type` to build a field from, so
+  // a deduplicated Zod schema would otherwise lose its string input (#2321).
+  const inputSchema = inlineLocalRefs(tool?.inputSchema);
+
+  const formStructure = inputSchema
+    ? schemaToForm(inputSchema, tool?.name || "Unknown Tool")
     : {
         title: `Test Tool: ${tool?.name || "Unknown"}`,
         sections: [{ title: "Parameters", fields: [] }],
@@ -125,14 +131,14 @@ export function ToolTestModal({
     // field names, because ink-form scopes values by name across the whole form
     // (#2123). This turns them back into the arguments the server declared:
     // the base fields plus the chosen branch's, and nothing from the others.
-    const values = decodeFormValues(tool.inputSchema, rawValues);
+    const values = decodeFormValues(inputSchema, rawValues);
 
     // A branch's fields are rendered optional — only one alternative applies to
     // a call, and requiring every branch's would deadlock a static form — so
     // the chosen shape's own requirements are checked here instead. Reported
     // rather than sent: a call known to violate the schema teaches the user
     // nothing about the server (#2123).
-    const missing = missingRequiredFields(tool.inputSchema, values, rawValues);
+    const missing = missingRequiredFields(inputSchema, values, rawValues);
     if (missing.length > 0) {
       setResult({
         input: values,

@@ -14,6 +14,9 @@ npx @modelcontextprotocol/inspector --cli    # CLI
 npx @modelcontextprotocol/inspector --tui    # TUI
 ```
 
+> [!WARNING]
+> **On a machine with no OS keychain, secrets are saved to a plaintext file by default.** That covers Linux without libsecret or a Secret Service, headless and SSH sessions, Termux, and containers with a mounted volume. OAuth client secrets and stdio `env:` values then go to `~/.mcp-inspector/secrets.json`, unencrypted unless you supply a key. See [Where secrets are stored](./docs/secret-storage.md) for how to get a keychain back, encrypt the file, or keep secrets in memory only.
+
 > **Upgrading from v1?** Read the [v1 → v2 migration guide](./docs/v1-to-v2-migration.md) — CLI flags, the new `--config` vs. `--catalog` split, the Node engine bump, and what no longer ships.
 
 > **Repo status.** This is the **v2** line of the Inspector. Active development happens on **`v2/main`** (the develop branch — all v2 PRs target it), which is merged into **`main`** at milestone releases; `main` is the default branch and holds the latest released v2, published to the npm `latest` tag. The legacy **v1** line lives on **`v1/main`** — security fixes only, published straight from that branch to the npm `v1-latest` tag (`npx @modelcontextprotocol/inspector@v1-latest`). See [`AGENTS.md`](./AGENTS.md) for branch/board conventions.
@@ -74,13 +77,15 @@ Each client has its own README with client-specific detail:
 | [Writing a skill](./docs/skill-authoring.md) | How to write a skill description that actually fires, and eval cases that measure it — the case shapes that work, and the tuning loop |
 | [Test servers](./docs/test-servers.md) | The composable test servers and the showcase config for every feature — what to run, what to click, and what the broken build did |
 | [Publishing](./docs/publishing.md) | What ships in the tarball, the packaging invariants, and `pack:verify` |
-| [Docker](./docs/docker.md) | Running the container image — ports, volumes, and where secrets go |
+| [Docker](./docs/docker.md) | Running the container image — ports, volumes, and making secrets durable in a container |
+| [Where secrets are stored](./docs/secret-storage.md) | How the secret store is chosen on every runtime — OS keychain, `secrets.json` or memory — plus file encryption, locking, and moving back to a keychain |
 | [Migrating from v1 to v2](./docs/v1-to-v2-migration.md) | CLI flag mapping, `--config` vs. `--catalog`, the Node engine bump, env-var renames |
 | [Environment variables](./docs/environment-variables.md) | Every variable that changes runtime behavior — auth, ports, storage, the secret store, logging, proxies — plus the Node TLS variables for a self-signed server |
 | [MCP server configuration](./docs/mcp-server-configuration.md) | Which server(s) the Inspector connects to, and the config file format |
 | [Reviewing an MCP App](./docs/mcp-app-review.md) | The CLI-first → one-shot-web recipe for automated App-tool review |
 | [Smoke-testing an MCP server](./docs/cli-smoke-testing.md) | The connect → list → call → assert workflow for a shell or CI job: `--format json` + `jq`, the exit-code map, and keeping OAuth non-interactive |
 | [Launcher and config consolidation](./docs/launcher-config-consolidation-plan.md) | Why the launcher runs a client in-process rather than spawning it |
+| [Roadmap, Aug 2026 → Feb 2027](./docs/inspector-roadmap-2026-h2.md) | The six-month plan: spec-following work aligned to the published MCP roadmap, official extension support, and the experience work we choose |
 
 ## Testing and the quality gate
 
@@ -106,4 +111,4 @@ A key rule worth surfacing here: **all work is issue-driven.** Before starting, 
 
 ## License
 
-MIT.
+See [`LICENSE`](./LICENSE). The MCP project is transitioning from the MIT License to Apache-2.0: new code contributions are licensed under Apache-2.0, documentation (excluding specifications) under CC-BY-4.0, and contributions whose authors originally licensed them under MIT and have not granted relicensing consent remain under MIT. The file carries the full Apache-2.0 and MIT texts and links the CC-BY-4.0 legal code.

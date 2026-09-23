@@ -608,6 +608,77 @@ describe("probe cancellation (#2319)", () => {
     ).rejects.toBe(reason);
   });
 
+  /**
+   * A response whose body `cancel()` never settles — the shape `ReadableStream`
+   * permits — running `onCancel` when the release starts.
+   */
+  function stallingCancelResponse(
+    status: number,
+    text: string,
+    onCancel: () => void = () => {},
+  ): Response {
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        start(ctrl) {
+          ctrl.enqueue(new TextEncoder().encode(text));
+          ctrl.close();
+        },
+        cancel() {
+          onCancel();
+          return new Promise<void>(() => {});
+        },
+      }),
+      { status },
+    );
+  }
+
+  it("rejects with the caller's reason when it aborts during a non-OK probe's release (#2389)", async () => {
+    const caller = new AbortController();
+    const reason = new Error("gave up during release");
+    const inner = vi.fn<typeof fetch>((input) =>
+      Promise.resolve(
+        String(input) === RFC8414
+          ? new Response(null, { status: 404 })
+          : // The abort lands while the probe's body is being discarded.
+            stallingCancelResponse(404, "nope", () => caller.abort(reason)),
+      ),
+    );
+    const wrapped = withRfc8414OidcCompat(inner);
+
+    // Would hang if the release were awaited: the recheck sits after it.
+    await expect(wrapped(RFC8414, { signal: caller.signal })).rejects.toBe(
+      reason,
+    );
+    // Stopped at the first candidate rather than probing on.
+    expect(inner).toHaveBeenCalledTimes(2);
+  });
+
+  it("walks past a non-OK probe whose release never settles (#2389)", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const cancelled: string[] = [];
+    const inner = vi.fn<typeof fetch>((input) => {
+      const url = String(input);
+      if (url === OIDC_APPENDED) return Promise.resolve(json(RFC8414_DOC));
+      if (url === OIDC_SUFFIXED) {
+        return Promise.resolve(
+          stallingCancelResponse(404, "nope", () => cancelled.push("probe")),
+        );
+      }
+      return Promise.resolve(
+        stallingCancelResponse(404, "nope", () => cancelled.push("original")),
+      );
+    });
+    const wrapped = withRfc8414OidcCompat(inner);
+
+    // Reaching the second candidate and substituting it is only possible if
+    // neither the probe's release nor the original's was waited on.
+    const response = await wrapped(RFC8414);
+    await expect(response.json()).resolves.toEqual(RFC8414_DOC);
+    expect(inner).toHaveBeenCalledTimes(3);
+    // Still released, just not waited on.
+    expect(cancelled.sort()).toEqual(["original", "probe"]);
+  });
+
   it("still falls back to the original response on an ordinary probe failure", async () => {
     const inner = vi.fn<typeof fetch>((input) => {
       if (String(input) === RFC8414) {

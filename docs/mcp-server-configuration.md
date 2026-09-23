@@ -187,6 +187,7 @@ These have no analog in the broader `mcp.json` ecosystem. Each is **omitted on w
 | `taskTtl`                              | `60000`    | TTL in ms for tasks created via "Run as task" (`DEFAULT_TASK_TTL_MS`)                                                                                                                       |
 | `autoRefreshOnListChanged`             | `false`    | Refresh lists automatically on `*/list_changed` instead of only flagging the indicator                                                                                                      |
 | `paginatedLists`                       | `false`    | Fetch tools/resources/prompts one page at a time instead of auto-aggregating                                                                                                                |
+| `suppressNotificationStream`           | `false`    | Streamable HTTP, legacy era only: don't open the standalone `GET` notification stream. Server→client messages not carried on a request's own response stream won't arrive. `Last-Event-ID` resumption `GET`s still go out, and modern-era connections are unaffected (they never open this stream). A diagnostic and escape hatch for a server that times out every request after `initialize` because it cannot serve a second concurrent request ([#2317](https://github.com/modelcontextprotocol/inspector/issues/2317)) |
 | `advertisedExtensions`                 | —          | Per-extension overrides for what the Inspector declares in `capabilities.extensions`                                                                                                        |
 | `maxFetchRequests`                     | `1000`     | Network-log retention for this server (`DEFAULT_MAX_FETCH_REQUESTS`); `0` means unlimited                                                                                                   |
 | `skillCatalogMaxSkills`                | `256`      | The maximum number of skills whose files are read in one verification run (`SKILL_MAX_CATALOG_SKILLS`) — the CLI's `--verify` and the TUI Skills pane. Positive integer; there is no unlimited value |
@@ -270,6 +271,21 @@ A catalog carrying these fields:
   }
 }
 ```
+
+## Reading this file from other tools
+
+A catalog you have already reviewed in the Inspector is a natural input for other tooling — a CI job or a reliability harness that connects to the same servers non-interactively. Reading the file is a supported interoperability use case. It is **not a versioned interchange format**: the Inspector makes no compatibility promise beyond what this page documents, the Inspector-specific fields above grow as features land, and a standard MCP client-configuration shape may supersede this one. Pin the Inspector version you validated against, and say so in your own documentation.
+
+A tool that consumes the file should:
+
+- **Treat it as read-only.** Don't rewrite it, and don't convert it into another format as a copy that users then maintain. The Inspector owns what it writes back — it omits fields equal to their defaults and upgrades older shapes (such as the pair-array `metadata`) on save — so a second writer drifts from it.
+- **Preserve stdio argument boundaries.** `command` and each `args` element are separate argv entries. Spawn them directly rather than joining them into a string for a shell, which re-splits on whitespace and interprets quoting, globs and metacharacters. Keep `cwd` and the `env` key set as given.
+- **Decide on unknown fields explicitly.** Either honor an Inspector-specific field, or reject the entry naming the field you don't support. Silently ignoring one can change behavior — `protocolEra`, `headers` or `oauth` alter what connects and how.
+- **Expect secrets to be absent, and supply them itself.** When the Inspector saves an entry to a durable secret store (the OS keychain, or `~/.mcp-inspector/secrets.json` — see [Where secrets are stored](./secret-storage.md)) it moves two kinds of value out of this file — each stdio `env` value and `oauth.clientSecret` — leaving each `env` key in place with an empty value and the client secret omitted. Under the session-only `memory` store it keeps plaintext that was already on disk, so `mcp.json` stays the durable copy of those values rather than a store that is lost on exit, while new or changed values still stay out of it; the same file can therefore hold a mix of placeholders and real values. Nothing else is stripped: `headers` are saved as written, so they can still hold a credential. That store is not part of the file's interface, so a file-only reader sees `"API_KEY": ""` and cannot tell an intentionally empty value from a stored one. Inject those values from the tool's own secret source, or reject the entry naming the missing key — don't launch the server with the empty placeholders.
+- **Keep credential values out of its output.** A hand-written or imported file can still carry plaintext in `env` or `oauth.clientSecret`, and any saved `headers` value may be one. Don't copy those values into logs, reports, evidence bundles or generated files; key names are usually enough.
+- **Describe its own scope without implying endorsement.** Which fields and Inspector versions it supports is that tool's claim to document; reading this file does not make it Inspector- or MCP-certified.
+
+Connecting is not side-effect free. Connecting to a stdio entry **runs its `command`** on the consumer's machine before any MCP message is exchanged, and calling a server's tools can change state wherever that server acts. A tool that goes beyond reading the file should leave both decisions to its user — authorizing the launch, not only the tool calls.
 
 ## Per-client behavior
 

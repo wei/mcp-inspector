@@ -158,6 +158,13 @@ export type StoredMCPServer = MCPServerConfig & {
    */
   paginatedLists?: boolean;
   /**
+   * When true, a legacy-era Streamable HTTP connection does not open the
+   * standalone `GET` notification stream. See
+   * {@link InspectorServerSettings.suppressNotificationStream}.
+   * Inspector-specific. Omitted on disk when false (the default). (#2317)
+   */
+  suppressNotificationStream?: boolean;
+  /**
    * Per-extension overrides for which extensions the Inspector advertises to
    * this server (keyed by extension id; a present key wins over the registry
    * default). Inspector-specific. Omitted on disk when empty, keeping the file
@@ -928,6 +935,25 @@ export interface InspectorServerSettings {
    * Default false. Server-wide; the per-list sidebar toggle edits this. (#1721)
    */
   paginatedLists?: boolean;
+  /**
+   * When true, a Streamable HTTP connection on the **legacy** (initialize
+   * handshake) era does not open the standalone `GET` notification stream,
+   * which the client MAY open but is never required to (#2317). Two uses: a
+   * one-click diagnostic for a server that cannot serve a second concurrent
+   * request — which the long-lived stream otherwise occupies, hanging every
+   * request after `initialize` (#2187) — and an escape hatch that makes such a
+   * server inspectable. The cost is that server→client messages not carried on
+   * a request's own response stream (list_changed, resource updates,
+   * standalone logs) do not arrive.
+   *
+   * Two things it does not change. A `Last-Event-ID` `GET` resuming a dropped
+   * POST response stream is part of request/response traffic and still goes
+   * out. And a modern-era connection never opens the standalone stream (its
+   * notifications arrive over POST `subscriptions/listen`), so the setting has
+   * no effect there. Read at connect time; no effect on stdio or legacy SSE
+   * transports. Default false.
+   */
+  suppressNotificationStream?: boolean;
   /**
    * Maximum number of HTTP fetch requests retained in the Network log for this
    * server. When exceeded, the oldest entries rotate out (and any deferred

@@ -193,6 +193,23 @@ describe("JSON Utils", () => {
       },
     };
 
+    it("coerces a value whose property is a bare $ref (#2321)", () => {
+      const refTool: Tool = {
+        name: "ref-tool",
+        inputSchema: {
+          type: "object",
+          properties: {
+            first: { type: "integer" },
+            second: { $ref: "#/$defs/Count" },
+          },
+          $defs: { Count: { type: "integer" } },
+        },
+      };
+      expect(
+        convertToolParameters(refTool, { first: "1", second: "2" }),
+      ).toEqual({ first: 1, second: 2 });
+    });
+
     it("coerces a value whose schema lives on a root union branch (#2123)", () => {
       const unionTool: Tool = {
         name: "union-tool",
