@@ -14,7 +14,7 @@
     "type": "git",
     "url": "git+https://github.com/modelcontextprotocol/inspector.git"
   },
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "author": "The MCP Maintainers and Community",
   "type": "module",
   "bin": {
