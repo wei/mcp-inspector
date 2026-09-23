@@ -51,13 +51,19 @@ double-boarded (a real defect a past sweep introduced — #1929 reproduced it).
 D=$(mktemp -d)
 gh issue list --repo modelcontextprotocol/inspector --state open --limit 1000 \
   --json number,milestone > "$D/open.json"
-# Union of BOTH boards, filtered to this repo — org boards can hold other repos' issues.
+# item-list truncates SILENTLY past --limit (and a failed call writes nothing), and a
+# missing card reads as an "unboarded" issue that then gets double-carded — so an
+# incomplete dump is deleted, and the steps below fail on the missing file.
 for P in 28 11; do
-  gh project item-list $P --owner modelcontextprotocol --format json --limit 700 \
-    | jq '[.items[] | select(.content.type=="Issue"
-           and .content.repository=="modelcontextprotocol/inspector")
-           | .content.number]'
-done | jq -s 'add' > "$D/boarded.json"
+  gh project item-list $P --owner modelcontextprotocol --format json --limit 2000 > "$D/b$P.json"
+  jq -e '(.items | length) == .totalCount' "$D/b$P.json" >/dev/null \
+    || { echo "board #$P listing INCOMPLETE — raise --limit and re-run" >&2; rm -f "$D/b$P.json"; false; }
+done
+# Union of BOTH boards, filtered to this repo — org boards can hold other repos' issues.
+jq -s '[.[].items[] | select(.content.type=="Issue"
+        and .content.repository=="modelcontextprotocol/inspector")
+        | .content.number]' "$D/b28.json" "$D/b11.json" > "$D/boarded.json" \
+  || rm -f "$D/boarded.json"
 # Prints the destination too: milestoned already → Todo, otherwise → Incoming.
 jq -r --slurpfile b "$D/boarded.json" \
   '.[] | select(.number as $n | ($b[0]|index($n))|not)
@@ -218,8 +224,14 @@ D=$(mktemp -d); R=modelcontextprotocol/inspector
 # the last check below reads closed issues' state reasons.
 gh issue list --repo $R --state all --limit 2000 \
   --json number,state,stateReason,labels,milestone > "$D/i.json"
+# item-list truncates SILENTLY past --limit (and a failed call writes nothing); an
+# incomplete dump would make every check below lie, so it is deleted and the audit
+# fails on the missing file instead.
 for P in 28 11; do gh project item-list $P --owner modelcontextprotocol \
-  --format json --limit 700 > "$D/b$P.json"; done
+  --format json --limit 2000 > "$D/b$P.json"
+  jq -e '(.items | length) == .totalCount' "$D/b$P.json" >/dev/null \
+    || { echo "board #$P listing INCOMPLETE — raise --limit and re-run" >&2; rm -f "$D/b$P.json"; false; }
+done
 jq -nr --slurpfile o "$D/i.json" --slurpfile a "$D/b28.json" --slurpfile b "$D/b11.json" --arg R "$R" '
   ($o[0] | map({key:(.number|tostring), value:{st:.state, sr:(.stateReason // ""),
                 lab:[.labels[].name], ms:(.milestone.title // null)}}) | from_entries) as $M
