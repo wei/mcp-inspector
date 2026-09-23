@@ -91,9 +91,15 @@ a real GitHub issue".
   dated. `/issue-triage` says to record it as an issue comment, and a draft
   card has no comments — so without this the Priority is a bare word with
   nothing behind it, and the step-2 re-score cannot tell what it is revising.
-  Write the two axes, the bonuses you claimed, and the total, exactly as the
-  comment form would; leave the provisional line in place when you re-score and
-  add the new one under it, so the change of view is legible.
+  Write the two axes, the bonuses you claimed, and the total as **numbers and
+  rubric names only** — `Severity 4`, `+1 security`, `Total 6`. That is
+  deliberately *not* the comment form: its template follows each axis with a
+  free-text justification ("Severity 3 — a real feature is broken…"), and for
+  an advisory that justification is the impact and the affected surface, which
+  is exactly what the warning above keeps off the card. The reasoning behind a
+  number belongs in the private advisory. Leave the provisional line in place
+  when you re-score and add the new one under it, so the change of view is
+  legible.
   ⚠️ **Set both fields.** The board audit's non-Issue check now exempts
   `[GHSA-` drafts, so a half-made card no longer trips it; the audit carries a
   narrow replacement check (see `/issue-triage`) and it is the only thing
