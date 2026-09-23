@@ -9,8 +9,9 @@
  * off disk. Writing secrets back to disk here is therefore a decision, not
  * an oversight, and it is bounded three ways: the file is separate from
  * `mcp.json` (so a user pasting their catalog into an issue does not paste
- * their secrets), it is written `0600`, and it is encrypted whenever
- * `MCP_INSPECTOR_SECRET_KEY` is set. What it buys is the alternative:
+ * their secrets), it is written `0600`, and it is encrypted whenever a
+ * passphrase is supplied, through `MCP_INSPECTOR_SECRET_KEY` or the file
+ * named by `MCP_INSPECTOR_SECRET_KEY_FILE`. What it buys is the alternative:
  * before this, those users could not persist a secret at all — `set` threw
  * and the route answered 503.
  *
@@ -30,10 +31,13 @@
  * of them you hold an OAuth client secret for. That index is worth
  * roughly as much to an attacker as some of the values.
  *
- * **Key.** `MCP_INSPECTOR_SECRET_KEY` is a passphrase, not a key: it is
- * stretched with scrypt against a per-file random salt stored beside the
- * ciphertext, so the same passphrase produces a different key for a
- * different file and a precomputed table buys an attacker nothing.
+ * **Key.** The value of `MCP_INSPECTOR_SECRET_KEY`, or the contents of the
+ * file named by `MCP_INSPECTOR_SECRET_KEY_FILE` (see
+ * {@link resolveSecretPassphrase}), is a passphrase, not a key: it is
+ * stretched with scrypt against a random salt, regenerated on every write
+ * and stored beside the ciphertext, so the same passphrase produces a
+ * different key for every write and a precomputed table buys an attacker
+ * nothing.
  *
  * That is **not** a licence to use a short, memorable one. The salt
  * defeats precomputation; it does nothing against guessing, and the cost

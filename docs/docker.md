@@ -54,7 +54,14 @@ So the same volume that keeps your server list also switches secrets from sessio
 > [!WARNING]
 > **Mounting that volume turns on file storage of secrets, and without a key the file is plaintext.** Every OAuth client secret, IdP client secret and stdio `env:` value you save is then written to `secrets.json` on the volume, readable by anyone who can read the volume: root and every member of the `docker` group on the host, and anyone who gets a backup, snapshot or copy of it. Mode `0600` only keeps out other non-root users.
 >
-> **Give it a key, and keep that key only where the Inspector can read it.** Generate one (for example `openssl rand -base64 32 > secret-key`), keep it out of the volume, backups and any repository that holds the secrets file, and hand it to the container **as a file** with `MCP_INSPECTOR_SECRET_KEY_FILE`, not as an environment variable:
+> **Give it a key, and keep that key only where the Inspector can read it.** Generate one into a file only you can read, outside the volume, backups and any repository that holds the secrets file:
+>
+> ```bash
+> mkdir -p ~/.config/mcp-inspector
+> (umask 077 && openssl rand -base64 32 > ~/.config/mcp-inspector/secret-key)
+> ```
+>
+> Then hand it to the container **as a file** with `MCP_INSPECTOR_SECRET_KEY_FILE`, not as an environment variable:
 >
 > ```bash
 > docker run --rm -p 127.0.0.1:6274:6274 \
@@ -77,12 +84,12 @@ So the same volume that keeps your server list also switches secrets from sessio
 >     secrets: [mcp_inspector_secret_key]
 > secrets:
 >   mcp_inspector_secret_key:
->     file: ./secret-key
+>     file: ${HOME}/.config/mcp-inspector/secret-key
 > volumes:
 >   mcp-inspector-data:
 > ```
 >
-> A key passed as a file stays out of `docker inspect`, the container's environment, your shell history and the Compose file. The container runs as uid `1000`, so the key file must be readable by that uid; without Swarm, Compose secrets are bind mounts that keep the host file's owner and mode. `MCP_INSPECTOR_SECRET_KEY` still works, but a key passed that way is readable by anyone who can run `docker inspect` or `docker exec` against the container. If the key file is missing, unreadable or empty, or both variables are set, the Inspector **refuses to read or write the secrets file** rather than falling back to plaintext, and says why in the log and the settings footer.
+> A key passed as a file stays out of `docker inspect`, the container's environment, your shell history and the Compose file. The container runs as uid `1000`, and without Swarm, Compose secrets are bind mounts that keep the host file's owner and mode, so the `0600` file must be owned by uid `1000`. On a Linux host where your uid is not `1000`, `sudo chown 1000 ~/.config/mcp-inspector/secret-key`; if the container can't read it, the log and the settings footer say the key file could not be read. Don't loosen the mode to make it readable instead: that hands the key to every other user on the host, and anyone who also gets a copy of the secrets file can then open it. `MCP_INSPECTOR_SECRET_KEY` still works, but a key passed that way is readable by anyone who can run `docker inspect` or `docker exec` against the container. If the key file is missing, unreadable or empty, `MCP_INSPECTOR_SECRET_KEY_FILE` is set to an empty value, or it is set together with a non-blank `MCP_INSPECTOR_SECRET_KEY`, the Inspector **refuses to read or write the secrets file** rather than falling back to plaintext, and says why in the log and the settings footer.
 >
 > **Even encrypted, secrets on disk carry moderate risk.** Encryption protects against the file leaking **on its own**. It does not protect against anyone who can also reach the key, which on a single host usually includes root and the `docker` group. Read [what the file store protects against](./secret-storage.md#what-the-file-store-protects-against) before relying on it. If that is not acceptable, don't mount the volume (secrets then stay in memory for the session), or run the Inspector outside a container, where it uses the OS keychain.
 
