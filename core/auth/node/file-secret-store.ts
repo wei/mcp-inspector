@@ -63,7 +63,7 @@
  */
 
 import * as crypto from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { readStoreFile, writeStoreFile } from "../../storage/store-io.js";
@@ -137,6 +137,23 @@ export interface SecretPassphrase {
 }
 
 /**
+ * Whether two paths name the same file. Equal resolved paths always do; past
+ * that, matching device and inode catch a symlink or hard link. A path that
+ * cannot be stat'd (it does not exist yet, as a secrets file before its first
+ * save often does) matches only by path.
+ */
+function isSameFile(a: string, b: string): boolean {
+  if (path.resolve(a) === path.resolve(b)) return true;
+  try {
+    const sa = statSync(a);
+    const sb = statSync(b);
+    return sa.dev === sb.dev && sa.ino === sb.ino;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Resolve the passphrase from `SECRET_KEY_ENV` or `SECRET_KEY_FILE_ENV`.
  *
  * Both set is a misconfiguration rather than a precedence question: they can
@@ -155,6 +172,7 @@ export interface SecretPassphrase {
  */
 export function resolveSecretPassphrase(
   env: NodeJS.ProcessEnv = process.env,
+  secretFilePath?: string,
 ): SecretPassphrase {
   const direct = env[SECRET_KEY_ENV];
   const hasDirect = direct !== undefined && direct.trim() !== "";
@@ -176,6 +194,16 @@ export function resolveSecretPassphrase(
     return { problem: `${SECRET_KEY_FILE_ENV} is set but empty` };
   }
   const resolved = path.resolve(keyFile);
+  // A key file that *is* the secrets file reads the plaintext JSON as the
+  // passphrase, and the next save replaces it with ciphertext — so on the
+  // following start the key has changed to that ciphertext and nothing it
+  // wrote can be opened again. Checked before reading, by path and by inode
+  // (a symlink or hard link names the same file under another path).
+  if (secretFilePath !== undefined && isSameFile(resolved, secretFilePath)) {
+    return {
+      problem: `${SECRET_KEY_FILE_ENV} (${resolved}) is the secrets file itself; point it at a separate key file`,
+    };
+  }
   let contents: string;
   try {
     contents = readFileSync(resolved, "utf-8");
@@ -400,7 +428,7 @@ export class FileSecretStore implements SecretStore {
     const resolved =
       options.passphrase !== undefined
         ? { passphrase: options.passphrase }
-        : resolveSecretPassphrase();
+        : resolveSecretPassphrase(process.env, this.filePath);
     const raw = resolved.passphrase;
     this.passphrase = raw && raw.trim() ? raw : undefined;
     this.keyProblem = resolved.problem;
@@ -420,7 +448,8 @@ export class FileSecretStore implements SecretStore {
    * no file yet, or when it cannot be read or parsed.
    *
    * Separate from {@link encrypted} because the two genuinely disagree for a
-   * whole session: adding `MCP_INSPECTOR_SECRET_KEY` to an install that
+   * whole session: adding a passphrase (`MCP_INSPECTOR_SECRET_KEY` or
+   * `MCP_INSPECTOR_SECRET_KEY_FILE`) to an install that
    * already has a plaintext file flips `encrypted` to true immediately,
    * while the bytes stay readable until the next `set`. A descriptor built
    * from the policy would tell that user "File (encrypted)" while their

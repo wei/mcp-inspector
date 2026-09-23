@@ -1692,6 +1692,44 @@ describe("FileSecretStore with MCP_INSPECTOR_SECRET_KEY_FILE (#2447)", () => {
     expect(await fs.readFile(filePath(), "utf-8")).toBe(before);
   });
 
+  it("refuses a key file that is the secrets file itself", async () => {
+    // Otherwise the plaintext JSON becomes the passphrase, the next save
+    // replaces it with ciphertext, and the following start cannot open it.
+    const plain = new FileSecretStore({ filePath: filePath() });
+    await plain.set("alpha", "env:A", "1");
+    const before = await fs.readFile(filePath(), "utf-8");
+    vi.stubEnv(SECRET_KEY_ENV, "");
+    vi.stubEnv(SECRET_KEY_FILE_ENV, filePath());
+    const store = new FileSecretStore({ filePath: filePath() });
+    expect(store.keyProblem).toMatch(/is the secrets file itself/);
+    await expect(store.set("alpha", "env:B", "2")).rejects.toThrow(
+      SecretStoreUnavailableError,
+    );
+    expect(await fs.readFile(filePath(), "utf-8")).toBe(before);
+  });
+
+  it("refuses a symlink or hard link to the secrets file", async () => {
+    await fs.writeFile(filePath(), "{}\n");
+    const link = path.join(tmpDir, "key-symlink");
+    const hard = path.join(tmpDir, "key-hardlink");
+    await fs.symlink(filePath(), link);
+    await fs.link(filePath(), hard);
+    for (const keyPath of [link, hard]) {
+      expect(
+        resolveSecretPassphrase({ [SECRET_KEY_FILE_ENV]: keyPath }, filePath())
+          .problem,
+      ).toMatch(/is the secrets file itself/);
+    }
+  });
+
+  it("matches by path when the secrets file does not exist yet", () => {
+    const result = resolveSecretPassphrase(
+      { [SECRET_KEY_FILE_ENV]: filePath() },
+      filePath(),
+    );
+    expect(result.problem).toMatch(/is the secrets file itself/);
+  });
+
   it("an explicit passphrase option ignores the environment", () => {
     vi.stubEnv(SECRET_KEY_FILE_ENV, path.join(tmpDir, "missing-key"));
     const store = new FileSecretStore({

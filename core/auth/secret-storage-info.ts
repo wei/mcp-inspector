@@ -45,9 +45,9 @@ export interface SecretStorageInfo {
    * True when the secrets file is *currently* in the clear. Read off the
    * file's own envelope rather than off whether a passphrase is
    * configured, because those two disagree for a whole session: adding
-   * `MCP_INSPECTOR_SECRET_KEY` to an install that already has a plaintext
-   * file makes the next write encrypt, while the existing bytes stay
-   * readable until then. Reporting the intent would tell that user their
+   * `MCP_INSPECTOR_SECRET_KEY` (or `MCP_INSPECTOR_SECRET_KEY_FILE`) to an
+   * install that already has a plaintext file makes the next write encrypt,
+   * while the existing bytes stay readable until then. Reporting the intent would tell that user their
    * secrets were encrypted while they were not.
    *
    * **File-only, and omitted entirely for the other kinds** — not "false".
