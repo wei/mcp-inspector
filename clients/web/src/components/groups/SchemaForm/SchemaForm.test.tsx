@@ -1067,6 +1067,34 @@ describe("SchemaForm nullable unions", () => {
     expect(onChange).toHaveBeenCalledWith({ direction: "envio" });
   });
 
+  it("renders a string input for a property that is a bare $ref to a string (#2321)", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    // What a Zod → JSON Schema converter emits for one `z.string().regex(…)`
+    // instance used by two fields: the second use is only a pointer, with no
+    // `type` of its own. Through `toFormSchema`, as the Tools panel does.
+    const schema = toFormSchema({
+      type: "object",
+      properties: {
+        dateRangeBegin: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
+        dateRangeEnd: {
+          $ref: "#/$defs/DateString",
+          description: "end date, yyyy-MM-dd",
+        },
+      },
+      $defs: {
+        DateString: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
+      },
+    });
+    renderWithMantine(
+      <SchemaForm schema={schema!} values={{}} onChange={onChange} />,
+    );
+    await user.type(screen.getByRole("textbox", { name: "dateRangeEnd" }), "2");
+    expect(onChange).toHaveBeenCalledWith({ dateRangeEnd: "2" });
+    expect(screen.getByText("end date, yyyy-MM-dd")).toBeInTheDocument();
+    expect(screen.queryByText(/Not valid JSON/)).not.toBeInTheDocument();
+  });
+
   it("renders a TextInput for a type: [string, null] field", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();

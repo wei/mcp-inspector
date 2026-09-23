@@ -1957,6 +1957,16 @@ export function createRemoteApp(
         error: "settings.paginatedLists must be a boolean",
       };
     }
+    // Optional on the wire; boolean when present, else unset (off) (#2317).
+    if (
+      obj.suppressNotificationStream !== undefined &&
+      typeof obj.suppressNotificationStream !== "boolean"
+    ) {
+      return {
+        ok: false,
+        error: "settings.suppressNotificationStream must be a boolean",
+      };
+    }
     // maxFetchRequests is optional on the wire (older clients won't send it);
     // when present it must be a non-negative number (0 = unlimited), otherwise
     // it defaults below.
@@ -2114,6 +2124,10 @@ export function createRemoteApp(
       autoRefreshOnListChanged: obj.autoRefreshOnListChanged === true,
       // Absent → false, matching the read side (omit-on-false on the write side).
       paginatedLists: obj.paginatedLists === true,
+      // Absent → unset (off); only an explicit true is carried (#2317).
+      ...(obj.suppressNotificationStream === true && {
+        suppressNotificationStream: true,
+      }),
       // Absent → product default, matching the read side. The default is the
       // omit-sentinel in inspectorSettingsToStoredFields, so a client that
       // didn't send one writes no spurious maxFetchRequests to disk.

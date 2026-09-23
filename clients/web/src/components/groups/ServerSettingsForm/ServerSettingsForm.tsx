@@ -104,6 +104,8 @@ export interface ServerSettingsFormProps {
   ) => void;
   onAutoRefreshChange: (value: boolean) => void;
   onPaginatedListsChange: (value: boolean) => void;
+  /** Toggle the standalone `GET` notification stream suppression (#2317). */
+  onSuppressNotificationStreamChange: (value: boolean) => void;
   /**
    * Toggle whether the Inspector advertises the extension `key` to this server.
    * `checked` is the new advertise state; the modal folds it into
@@ -479,6 +481,7 @@ export function ServerSettingsForm({
   onTimeoutChange,
   onAutoRefreshChange,
   onPaginatedListsChange,
+  onSuppressNotificationStreamChange,
   onAdvertisedExtensionChange,
   onMaxFetchRequestsChange,
   onSkillCatalogLimitChange,
@@ -513,6 +516,11 @@ export function ServerSettingsForm({
   // `auto` server that is either not yet connected or resolved to modern, keep
   // it visible.
   const configuredEra = settings.protocolEra ?? DEFAULT_PROTOCOL_ERA;
+  // The standalone GET stream exists only on a legacy-era Streamable HTTP
+  // connection; a pinned-modern server never opens it, so the box would be a
+  // no-op there (#2317). `auto` keeps it, since it may resolve to legacy.
+  const showSuppressNotificationStream =
+    serverType === "streamable-http" && configuredEra !== "modern";
   const showModernLogLevel =
     configuredEra === "modern" ||
     (configuredEra === "auto" && negotiatedEra !== "legacy");
@@ -708,6 +716,16 @@ export function ServerSettingsForm({
               checked={settings.paginatedLists ?? false}
               onChange={(e) => onPaginatedListsChange(e.currentTarget.checked)}
             />
+            {showSuppressNotificationStream ? (
+              <Checkbox
+                label="Suppress Notification Stream"
+                description="Legacy era only. When checked, the Inspector does not open the standalone GET notification stream after the initialize handshake. Server-to-client notifications that are not part of a request's own response — list changes, resource updates, standalone logs — will not arrive while this is on. Use it to test whether a server that answers initialize but then times out every request cannot serve a second concurrent request, and to inspect such a server anyway. Modern-era connections never open this stream and are unaffected. Takes effect on the next connect."
+                checked={settings.suppressNotificationStream ?? false}
+                onChange={(e) =>
+                  onSuppressNotificationStreamChange(e.currentTarget.checked)
+                }
+              />
+            ) : null}
             <LogSizeInput
               label="Network Log Size"
               description="Maximum number of HTTP requests kept in the Network log for this server. Older entries rotate out past this limit; a response body that arrives after its entry rotated out is dropped. Use 0 for unlimited (not recommended). Applies immediately to the active connection."

@@ -2,7 +2,7 @@
   "name": "@modelcontextprotocol/inspector-cli",
   "private": true,
   "description": "CLI for the Model Context Protocol inspector",
-  "license": "MIT",
+  "license": "SEE LICENSE IN ../../LICENSE",
   "type": "module",
   "main": "build/index.js",
   "exports": {

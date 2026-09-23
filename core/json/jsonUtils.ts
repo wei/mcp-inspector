@@ -1,4 +1,5 @@
 import type { Tool } from "@modelcontextprotocol/client";
+import { inlineLocalRefs } from "./localRefs.js";
 import { normalizeNullableUnion } from "./nullableUnion.js";
 import {
   narrowBySuppliedNames,
@@ -317,8 +318,10 @@ export function convertParametersForSchema(
   // A property's schema can live on a root composition branch rather than on
   // the root itself (#2123); see `coercionProperties` for how the branch is
   // identified when it does.
+  // Same-document `$ref`s are inlined first: a property declared as a bare
+  // `$ref` has no `type` of its own to convert by (#2321).
   const { base, branches } = resolveRootUnion(
-    (inputSchema ?? {}) as RootUnionSchema,
+    inlineLocalRefs(inputSchema ?? {}) as RootUnionSchema,
   );
   const properties = coercionProperties(base, branches, params);
   for (const [key, value] of Object.entries(params)) {

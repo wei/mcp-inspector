@@ -42,44 +42,58 @@ docker run --rm -p 127.0.0.1:6274:6274 \
 
 The same volume also persists OAuth tokens and stored state, so an authorized server stays authorized across runs. Use `-e MCP_CATALOG_PATH=/some/other/path.json` to put the catalog somewhere else — mount a volume covering whatever directory you point it at. If you **bind-mount a host directory** instead of a named volume (`-v "$PWD/inspector-data:/home/node/.mcp-inspector"`), the directory keeps its host ownership, so on Linux add `--user "$(id -u):$(id -g)"` or `chown` it to uid `1000` — otherwise the non-root `node` user can't write and adding a server fails with `EACCES`.
 
-**Where secrets go, and how to make them survive (#1950).** The Inspector keeps the values it deliberately does _not_ write to `mcp.json` — an OAuth client secret, an enterprise IdP client secret, each stdio `env:` value — in the **OS keychain**. A container has no keychain (the published image has no D-Bus session), so on startup the Inspector probes for one and falls back, saying so in the logs and in a permanent footer at the bottom of the Client Settings and Server Settings dialogs. Which fallback you get depends on whether the directory it would write to is going to survive:
+**Where secrets go, and how to make them survive (#1950).** The Inspector keeps an OAuth client secret, an enterprise IdP client secret and each stdio `env:` value out of `mcp.json`, in the OS keychain. A container has no keychain (the published image has no D-Bus session), so it falls back, and which fallback you get depends on whether the secrets directory is going to survive:
 
-| Situation                                                      | Store                                        | Secrets survive a restart? |
-| -------------------------------------------------------------- | -------------------------------------------- | -------------------------- |
-| Keychain reachable (a normal desktop install)                  | OS keychain                                  | Yes                        |
-| Container, **no volume** on `/home/node/.mcp-inspector`        | Memory                                       | No — session only          |
-| Container **with** that volume, or any host without a keychain | `~/.mcp-inspector/secrets.json`, mode `0600` | Yes                        |
+| Situation                                               | Store                                        | Secrets survive a restart? |
+| ------------------------------------------------------- | -------------------------------------------- | -------------------------- |
+| **No volume** on `/home/node/.mcp-inspector`            | Memory                                       | No — session only          |
+| **With** that volume                                    | `~/.mcp-inspector/secrets.json`, mode `0600` | Yes                        |
 
-So the same volume that keeps your server list also switches secrets from session-scoped to durable — nothing extra to configure. The in-memory default for an unmounted container is deliberate: a file in the writable layer is discarded by `--rm` and by every image update, and promising durability it can't deliver is worse than declining to.
+So the same volume that keeps your server list also switches secrets from session-scoped to durable — nothing extra to configure. The in-memory default for an unmounted container is deliberate: a file in the writable layer is discarded by `--rm` and by every image update, and promising durability it can't deliver is worse than declining to. The check looks at the **directory that holds the secrets file**, so if you relocate it with `-e MCP_STORAGE_DIR=…` or `-e MCP_INSPECTOR_SECRET_FILE=…`, mount a volume at that file's parent directory. Don't bind-mount the file on its own: it is not recognized as durable, so you get the memory store, and even with `-e MCP_INSPECTOR_SECRET_STORE=file` it cannot be written, because every save replaces the file by renaming a temporary file over it.
 
-**A file-backed store is unencrypted unless you give it a key.** Set `MCP_INSPECTOR_SECRET_KEY` and the file is encrypted with AES-256-GCM (the passphrase is stretched with scrypt against a per-file random salt). Without it the file is still `0600`, but the values are readable to anyone who can read the file — which the startup log and the settings footer both say, every session, in a warning tone:
+> [!WARNING]
+> **Mounting that volume turns on file storage of secrets, and without a key the file is plaintext.** Every OAuth client secret, IdP client secret and stdio `env:` value you save is then written to `secrets.json` on the volume, readable by anyone who can read the volume: root and every member of the `docker` group on the host, and anyone who gets a backup, snapshot or copy of it. Mode `0600` only keeps out other non-root users.
+>
+> **Give it a key, and keep that key only where the Inspector can read it.** Generate one into a file only you can read, outside the volume, backups and any repository that holds the secrets file:
+>
+> ```bash
+> mkdir -p ~/.config/mcp-inspector
+> (umask 077 && openssl rand -base64 32 > ~/.config/mcp-inspector/secret-key)
+> ```
+>
+> Then hand it to the container **as a file** with `MCP_INSPECTOR_SECRET_KEY_FILE`, not as an environment variable:
+>
+> ```bash
+> docker run --rm -p 127.0.0.1:6274:6274 \
+>   -v mcp-inspector-data:/home/node/.mcp-inspector \
+>   -v "$HOME/.config/mcp-inspector/secret-key:/run/secrets/mcp_inspector_secret_key:ro" \
+>   -e MCP_INSPECTOR_SECRET_KEY_FILE=/run/secrets/mcp_inspector_secret_key \
+>   ghcr.io/modelcontextprotocol/inspector
+> ```
+>
+> Or with Compose secrets:
+>
+> ```yaml
+> services:
+>   inspector:
+>     image: ghcr.io/modelcontextprotocol/inspector
+>     ports: ["127.0.0.1:6274:6274"]
+>     volumes: ["mcp-inspector-data:/home/node/.mcp-inspector"]
+>     environment:
+>       MCP_INSPECTOR_SECRET_KEY_FILE: /run/secrets/mcp_inspector_secret_key
+>     secrets: [mcp_inspector_secret_key]
+> secrets:
+>   mcp_inspector_secret_key:
+>     file: ${HOME}/.config/mcp-inspector/secret-key
+> volumes:
+>   mcp-inspector-data:
+> ```
+>
+> A key passed as a file stays out of `docker inspect`, the container's environment, your shell history and the Compose file. The container runs as uid `1000`, and without Swarm, Compose secrets are bind mounts that keep the host file's owner and mode, so the `0600` file must be owned by uid `1000`. On a Linux host where your uid is not `1000`, `sudo chown 1000 ~/.config/mcp-inspector/secret-key`; if the container can't read it, the log and the settings footer say the key file could not be read. Don't loosen the mode to make it readable instead: that hands the key to every other user on the host, and anyone who also gets a copy of the secrets file can then open it. `MCP_INSPECTOR_SECRET_KEY` still works, but a key passed that way is readable by anyone who can run `docker inspect` or `docker exec` against the container. If the key file is missing, unreadable or empty, `MCP_INSPECTOR_SECRET_KEY_FILE` is set to an empty value, or it is set together with a non-blank `MCP_INSPECTOR_SECRET_KEY`, the Inspector **refuses to read or write the secrets file** rather than falling back to plaintext, and says why in the log and the settings footer.
+>
+> **Even encrypted, secrets on disk carry moderate risk.** Encryption protects against the file leaking **on its own**. It does not protect against anyone who can also reach the key, which on a single host usually includes root and the `docker` group. Read [what the file store protects against](./secret-storage.md#what-the-file-store-protects-against) before relying on it. If that is not acceptable, don't mount the volume (secrets then stay in memory for the session), or run the Inspector outside a container, where it uses the OS keychain.
 
-```bash
-docker run --rm -p 127.0.0.1:6274:6274 \
-  -v mcp-inspector-data:/home/node/.mcp-inspector \
-  -e MCP_INSPECTOR_SECRET_KEY="$MY_PASSPHRASE" \
-  ghcr.io/modelcontextprotocol/inspector
-```
-
-**Use a high-entropy passphrase — generated, not chosen.** The random salt stops an attacker precomputing a table across files; it does nothing against _guessing_, and the scrypt cost is deliberately low because the derivation runs on every read and write. Anyone who obtains `secrets.json` can therefore test candidate passphrases quickly and offline, so treat this value like any other credential rather than like a memorable password.
-
-Setting the passphrase later is safe — the next write upgrades an existing plaintext file in place. Until that write happens the existing values really are still readable, and the banner and footer keep saying so rather than reporting the file as encrypted the moment the variable appears. **Changing or losing the passphrase is not safe**: a file that can no longer be decrypted is read as empty and _refuses to be written_, rather than being silently replaced with a new one holding only your latest secret. Restore the original passphrase, or delete `secrets.json` and re-enter the values.
-
-The Inspector writes the file `0600` and re-tightens it at startup if something loosened it. If it _cannot_ — the file belongs to another user, or the mount is read-only — it says so in the log rather than continuing to describe the file as protected, since on that box the mode claim above is not true.
-
-**Two Inspectors, one file.** Within a process, mutations are serialized per file path, so a web session's own concurrent saves cannot lose each other. Across processes — a CLI run beside a web session — each mutation takes an exclusive lock on `secrets.json.lock` for the whole read-modify-write, using [`proper-lockfile`](https://github.com/moxystudio/node-proper-lockfile) (the same library npm itself locks with). The lock expires 10 seconds after its holder stops refreshing it, so an Inspector that is killed mid-save does not leave the file unwritable.
-
-Two running Inspectors are therefore genuinely serialized. What a lock file cannot make single-winner is the *takeover of a lock whose holder died* — that needs a compare-and-swap on a directory entry (`renameat2`) which Node does not expose, and it is what an earlier hand-rolled attempt failed three review rounds on. `proper-lockfile` does not close that race either. The window opens only after a holder dies without releasing.
-
-The Inspector adds one thing on top: every lock-directory removal the library makes on its behalf — on release, and from its exit handler — is guarded by a check that the directory is still the one it created (by inode and birth time, which survive the library's own refresh but not a delete-and-recreate). That matters because those removals are otherwise unconditional, so a holder whose lock had been replaced would delete the *winner's* lock on the way out, turning one compromised writer into two unprotected ones. It also surfaces the takeover as a warning. Treat all of this as **best-effort**: the guard is still a check followed by an act, so it makes the destructive case rare rather than impossible, and it rests on filesystem metadata that not every filesystem reports.
-
-Which is why, underneath the lock, each mutation still reads the file, applies its change, writes, then reads back and compares the whole map; if something wrote in between it re-applies onto what was left and retries, failing loudly after five lost rounds rather than returning as though the value were saved. That check is what still catches a clobber inside that window — and it covers what no lock can, since a lock only orders the writers that *take* it: an editor, a restored backup, or an Inspector older than this release.
-
-If another process holds the lock and will not let go, the save **fails** rather than going ahead unlocked — waiting past the stale window first, so a crashed Inspector resolves itself rather than failing everyone else's saves. Writing alongside a writer you can see is the one case where degrading would lose the secret it was trying to protect.
-
-It is also what covers the lock being unavailable. This store exists for boxes where the usual mechanism isn't there, so a directory that can't hold a lock file — a read-only `$HOME`, a mount owned by another uid — makes the save proceed unlocked with a warning, rather than turning every `set` into a failure on exactly the deployments the store was written for.
-
-Three env vars affect where the file lands. `MCP_INSPECTOR_SECRET_STORE=keyring|file|memory` picks the store outright, bypassing the probe. `MCP_INSPECTOR_SECRET_FILE` names the file. Failing both, the file follows `MCP_STORAGE_DIR` — the same variable that relocates OAuth tokens and `client.json` — so mounting a volume at your configured storage directory is enough to make secrets durable there. These variables apply outside a container too; every runtime variable is listed in [Environment variables](./environment-variables.md).
+⚠️ Keep supplying the **same** passphrase on every run: a file that can no longer be decrypted is read as empty and refuses to be written. Everything else about the store — the selection order, the file's location, encryption, permissions, locking, and choosing a store explicitly with `MCP_INSPECTOR_SECRET_STORE` — applies to every runtime and is in [Where secrets are stored](./secret-storage.md).
 
 **Upgrading from an image before this fix?** Earlier images did not create `/home/node/.mcp-inspector`, so Docker created the volume's mount point as `root` and the non-root `node` user couldn't write to it. An **empty** volume repairs itself on the first run of a current image (Docker applies the image directory's ownership to an empty volume), but one that already has files in it keeps its old `root` ownership and still fails with `EACCES`. Fix it once:
 

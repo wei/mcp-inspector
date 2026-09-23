@@ -82,7 +82,9 @@ describe("secretStorageCaveat", () => {
   it("names the fix for an unencrypted file, not just the problem", () => {
     const caveat = secretStorageCaveat(plaintextFile);
     expect(caveat).toContain("unencrypted");
-    expect(caveat).toContain("MCP_INSPECTOR_SECRET_KEY");
+    expect(caveat).toContain(
+      "Set MCP_INSPECTOR_SECRET_KEY or MCP_INSPECTOR_SECRET_KEY_FILE to encrypt them.",
+    );
   });
 
   it("changes the advice once a passphrase is set but not yet applied", () => {

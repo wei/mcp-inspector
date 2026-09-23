@@ -285,7 +285,8 @@ const PROBE_ACCOUNT = "__inspector:probe";
  * - `KeyringSecretStore` — the OS keychain, and the default wherever one
  *   is reachable.
  * - `FileSecretStore` — `~/.mcp-inspector/secrets.json`, `0600`,
- *   encrypted when `MCP_INSPECTOR_SECRET_KEY` is set. The fallback on a
+ *   encrypted when `MCP_INSPECTOR_SECRET_KEY` or
+ *   `MCP_INSPECTOR_SECRET_KEY_FILE` supplies a passphrase. The fallback on a
  *   host with no keychain, and on a container with a mounted volume.
  * - `InMemorySecretStore` — the session-scoped store. Used by the test
  *   suite (so CI needs no libsecret), and as the container fallback when

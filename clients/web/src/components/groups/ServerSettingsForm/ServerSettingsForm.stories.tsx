@@ -112,6 +112,12 @@ function InteractiveRender(args: ServerSettingsFormProps) {
           settings: { ...args.settings, paginatedLists: value },
         });
       }}
+      onSuppressNotificationStreamChange={(value) => {
+        args.onSuppressNotificationStreamChange(value);
+        updateArgs({
+          settings: { ...args.settings, suppressNotificationStream: value },
+        });
+      }}
       onAdvertisedExtensionChange={(key, checked) => {
         args.onAdvertisedExtensionChange(key, checked);
         updateArgs({
@@ -182,6 +188,7 @@ const meta: Meta<typeof ServerSettingsForm> = {
     onTimeoutChange: fn(),
     onAutoRefreshChange: fn(),
     onPaginatedListsChange: fn(),
+    onSuppressNotificationStreamChange: fn(),
     onAdvertisedExtensionChange: fn(),
     onMaxFetchRequestsChange: fn(),
     onSkillCatalogLimitChange: fn(),
