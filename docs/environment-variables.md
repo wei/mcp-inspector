@@ -73,6 +73,9 @@ Every default above that starts with `~` is built from the home directory the pr
 
 Where the Inspector's secrets (OAuth client secrets, the enterprise IdP client secret, stdio `env:` values) are kept. How the store is chosen, and the details of the file store — its location, encryption, permissions and locking — are in [Where secrets are stored](./secret-storage.md); these variables apply to every install, not only containers.
 
+> [!WARNING]
+> On a host with no OS keychain (Linux without libsecret or a Secret Service, headless or SSH sessions, Termux), the Inspector **automatically** stores secrets in a file that is **plaintext** unless `MCP_INSPECTOR_SECRET_KEY_FILE` or `MCP_INSPECTOR_SECRET_KEY` is set. See [the warning in Where secrets are stored](./secret-storage.md#how-the-store-is-chosen).
+
 | Variable                     | Read by       | Default                           | Effect                                                                                                                                                                                                                                |
 | ---------------------------- | ------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `MCP_INSPECTOR_SECRET_STORE` | web, CLI, TUI | probe the OS keychain             | `keyring`, `file`, or `memory` (case-insensitive) picks the store outright and skips the probe. An empty or whitespace-only value counts as unset and silently runs automatic selection; any other value is ignored with a warning and also falls back to automatic selection.                                                                                             |

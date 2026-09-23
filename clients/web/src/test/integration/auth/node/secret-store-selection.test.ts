@@ -26,6 +26,7 @@ import {
   chooseFallbackKind,
   isOnMountPoint,
   parseSecretStoreEnv,
+  SECRET_STORAGE_DOCS_URL,
   warnAboutSecretStorage,
 } from "@inspector/core/auth/node/secret-store-selection.js";
 import {
@@ -38,6 +39,7 @@ const ENV_KEYS = [
   "MCP_INSPECTOR_SECRET_STORE",
   "MCP_INSPECTOR_SECRET_FILE",
   "MCP_INSPECTOR_SECRET_KEY",
+  "MCP_INSPECTOR_SECRET_KEY_FILE",
   "MCP_STORAGE_DIR",
   "KUBERNETES_SERVICE_HOST",
 ];
@@ -430,6 +432,48 @@ describe("warnAboutSecretStorage", () => {
   it("says nothing for the ordinary keychain case", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     warnAboutSecretStorage(base);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("points a plaintext fallback at the secret-storage guide", () => {
+    // The Linux-without-libsecret case (#2447): the one run where a user
+    // gets a plaintext file without asking for it.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    warnAboutSecretStorage({
+      kind: "file",
+      reason: "fallback",
+      durable: true,
+      path: "/home/u/.mcp-inspector/secrets.json",
+      plaintext: true,
+      detail: "no Secret Service",
+    });
+    const output = warn.mock.calls.flat().join("\n");
+    expect(output).toContain("Secrets are stored unencrypted");
+    expect(output).toContain(SECRET_STORAGE_DOCS_URL);
+    expect(SECRET_STORAGE_DOCS_URL).toMatch(/\/docs\/secret-storage\.md$/);
+  });
+
+  it("points a configured store with a caveat at the guide too", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    warnAboutSecretStorage({
+      kind: "memory",
+      reason: "configured",
+      durable: false,
+    });
+    expect(warn.mock.calls.flat().join("\n")).toContain(
+      SECRET_STORAGE_DOCS_URL,
+    );
+  });
+
+  it("does not print the guide link for a configured store with nothing to say", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    warnAboutSecretStorage({
+      kind: "file",
+      reason: "configured",
+      durable: true,
+      path: "/x/secrets.json",
+      plaintext: false,
+    });
     expect(warn).not.toHaveBeenCalled();
   });
 

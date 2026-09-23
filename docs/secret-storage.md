@@ -34,6 +34,17 @@ Each process picks one store, once, the first time it needs it: the web backend 
 | Container **with** a volume on the secrets directory                    | File                                | Yes                        |
 | Any of the above with `MCP_INSPECTOR_SECRET_STORE` set                  | The store you named                 | Not with `memory`; with `file` in a container, only if the file is on a volume |
 
+> [!WARNING]
+> **With no keychain, secrets go to a plaintext file, and you did not have to ask for it.** On a host where the keychain probe fails (Linux without libsecret or a running Secret Service such as GNOME Keyring or KWallet, a headless server or SSH session with no D-Bus session, or Android/Termux), the Inspector falls back **automatically** to `~/.mcp-inspector/secrets.json`. Unless you supply a key, that file is **unencrypted**. Mode `0600` keeps out other non-root users, but not root, not backups or copies of your home directory, and not any program running as you. The only signs are a warning on stderr when the store is selected and the footer in the web settings dialogs.
+>
+> Pick one:
+>
+> - **Get a keychain back**: install libsecret and run a Secret Service (for example `gnome-keyring`), or run the Inspector inside a desktop session. On the next start the Inspector moves the file's secrets into the keychain and deletes the file ([details](#getting-a-keychain-back)).
+> - **Encrypt the file**: supply a generated key with `MCP_INSPECTOR_SECRET_KEY_FILE` (preferred) or `MCP_INSPECTOR_SECRET_KEY` ([details](#encryption)).
+> - **Don't write secrets to disk at all**: `MCP_INSPECTOR_SECRET_STORE=memory`, and re-enter them each session.
+>
+> Even encrypted, secrets on disk carry moderate risk. See [what the file store protects against](#what-the-file-store-protects-against).
+
 The Inspector decides that it is in a container from `KUBERNETES_SERVICE_HOST`, Docker's `/.dockerenv`, Podman's `/run/.containerenv`, or the process's cgroup. The container check only chooses between `memory` and `file`; the mount check is what actually decides.
 
 The choice is made once per process. Installing a keychain while the Inspector is running takes effect on the next start.
@@ -117,7 +128,7 @@ A successful move prints a message naming the file it removed. The same hand-off
 
 ## Where the active store is reported
 
-- **When the store is selected** (at startup for the web backend, on first use for the CLI and TUI), every client prints a warning on stderr if it falls back from the keychain, including the keychain error, and another if the file is unencrypted, has loose permissions, or cannot be read. The web client's startup banner also has a `Secrets:` line on every run.
+- **When the store is selected** (at startup for the web backend, on first use for the CLI and TUI), every client prints a warning on stderr if it falls back from the keychain, including the keychain error, and another if the file is unencrypted, has loose permissions, or cannot be read. Either warning is followed by a link to this guide. The web client's startup banner also has a `Secrets:` line on every run.
 - **`GET /api/config`** (web) includes a `secretStorage` object describing the active store.
 - **In the web UI**, a footer at the bottom of the **Client Settings**, **Server Settings** and **Add / Edit / Clone server** dialogs names the store, and turns into a warning when it is memory-only, unencrypted, loosely permissioned, or unreadable. It is shown where you type a secret, not only once at startup.
 
