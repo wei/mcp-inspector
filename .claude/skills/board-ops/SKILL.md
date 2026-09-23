@@ -324,8 +324,9 @@ and pass the Priority field id `PVTSSF_lADOCt2Azc4BJVxtzg5iJE4`.
 BOARD_TMP=${BOARD_TMP:-$(mktemp -d)}
 
 # 1. Which cards lost their value, and what did they hold? lost-ids.json is
-#    written ONLY from a complete dump — step 3 refuses to run without it, so an
-#    incomplete dump cannot become a re-apply loop that silently does nothing.
+#    kept ONLY when the dump is complete AND the snapshot reports what those cards
+#    held — step 3 refuses to run without it, so neither a truncated dump nor a
+#    missing snapshot can turn into a silent no-op or an unconfirmed re-apply.
 rm -f "$BOARD_TMP/lost-ids.json"
 gh project item-list 28 --owner modelcontextprotocol --format json --limit 2000 \
   > "$BOARD_TMP/board-broken.json"
@@ -335,7 +336,9 @@ if jq -e '(.items | length) == .totalCount' "$BOARD_TMP/board-broken.json" >/dev
   jq -r --slurpfile L "$BOARD_TMP/lost-ids.json" '($L[0]) as $lost
     | [.items[] | select(.id as $i | $lost|index($i)) | .status // "(none)"]
     | group_by(.) | map({s:.[0],c:length}) | .[] | "was \(.s): \(.c)"' \
-    "$BOARD_TMP/board-snapshot.json"
+    "$BOARD_TMP/board-snapshot.json" \
+    || { echo "no usable snapshot — cannot confirm what these cards held; not re-applying" >&2
+         rm -f "$BOARD_TMP/lost-ids.json"; }
 else
   echo "board-broken.json INCOMPLETE — raise --limit and re-run step 1" >&2
   rm -f "$BOARD_TMP/board-broken.json"
