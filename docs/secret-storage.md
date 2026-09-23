@@ -70,7 +70,7 @@ The Inspector writes the file with mode `0600` and tightens it again when the st
 
 ### Two Inspectors, one file
 
-Within a process, changes are serialized per file path, so a web session's own concurrent saves cannot overwrite each other. Across processes, for example a CLI run next to a web session, each change takes an exclusive lock on `secrets.json.lock` for the whole read-modify-write. The lock uses [`proper-lockfile`](https://github.com/moxystudio/node-proper-lockfile), the same library npm uses for its own locks. The lock expires 10 seconds after its holder stops refreshing it, so an Inspector that is killed mid-save does not leave the file unwritable.
+Within a process, changes are serialized per file path, so a web session's own concurrent saves cannot overwrite each other. Across processes, for example a CLI run next to a web session, each change takes an exclusive lock on `<secrets-file>.lock`, a lock directory beside the secrets file named after it (`secrets.json.lock` by default), for the whole read-modify-write. The lock uses [`proper-lockfile`](https://github.com/moxystudio/node-proper-lockfile), the same library npm uses for its own locks. The lock expires 10 seconds after its holder stops refreshing it, so an Inspector that is killed mid-save does not leave the file unwritable.
 
 So two running Inspectors are genuinely serialized. What a lock file cannot make single-winner is the _takeover of a lock whose holder died_. That needs a compare-and-swap on a directory entry (`renameat2`), which Node does not expose, and `proper-lockfile` does not close that race either. The window only opens after a holder dies without releasing its lock.
 
