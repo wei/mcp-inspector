@@ -323,28 +323,37 @@ and pass the Priority field id `PVTSSF_lADOCt2Azc4BJVxtzg5iJE4`.
 # 0. Same temp dir the snapshot went to — keep every dump out of the worktree.
 BOARD_TMP=${BOARD_TMP:-$(mktemp -d)}
 
-# 1. Which cards lost their value, and what did they hold?
+# 1. Which cards lost their value, and what did they hold? lost-ids.json is
+#    written ONLY from a complete dump — step 3 refuses to run without it, so an
+#    incomplete dump cannot become a re-apply loop that silently does nothing.
+rm -f "$BOARD_TMP/lost-ids.json"
 gh project item-list 28 --owner modelcontextprotocol --format json --limit 2000 \
   > "$BOARD_TMP/board-broken.json"
-jq -e '(.items | length) == .totalCount' "$BOARD_TMP/board-broken.json" >/dev/null \
-  || { echo "board-broken.json INCOMPLETE — raise --limit and re-run" >&2
-       rm -f "$BOARD_TMP/board-broken.json"; false; }   # so the steps below fail, not undercount
-jq -r '[.items[]|select(.status==null)|.id]' "$BOARD_TMP/board-broken.json" \
-  > "$BOARD_TMP/lost-ids.json"
-jq -r --slurpfile L "$BOARD_TMP/lost-ids.json" '($L[0]) as $lost
-  | [.items[] | select(.id as $i | $lost|index($i)) | .status // "(none)"]
-  | group_by(.) | map({s:.[0],c:length}) | .[] | "was \(.s): \(.c)"' \
-  "$BOARD_TMP/board-snapshot.json"
+if jq -e '(.items | length) == .totalCount' "$BOARD_TMP/board-broken.json" >/dev/null; then
+  jq -r '[.items[]|select(.status==null)|.id]' "$BOARD_TMP/board-broken.json" \
+    > "$BOARD_TMP/lost-ids.json" || rm -f "$BOARD_TMP/lost-ids.json"
+  jq -r --slurpfile L "$BOARD_TMP/lost-ids.json" '($L[0]) as $lost
+    | [.items[] | select(.id as $i | $lost|index($i)) | .status // "(none)"]
+    | group_by(.) | map({s:.[0],c:length}) | .[] | "was \(.s): \(.c)"' \
+    "$BOARD_TMP/board-snapshot.json"
+else
+  echo "board-broken.json INCOMPLETE — raise --limit and re-run step 1" >&2
+  rm -f "$BOARD_TMP/board-broken.json"
+fi
 
 # 2. Recreate the option, echoing every surviving option's id (see above).
 #    NOTE: the recreated option gets a NEW id — the deleted one never comes back.
 
 # 3. Re-apply it to the orphaned cards.
-for id in $(jq -r '.[]' "$BOARD_TMP/lost-ids.json"); do
-  gh project item-edit --project-id PVT_kwDOCt2Azc4BJVxt --id "$id" \
-    --field-id PVTSSF_lADOCt2Azc4BJVxtzg5iI8c --single-select-option-id <NEW_OPTION_ID>
-  sleep 0.4
-done
+if [ -s "$BOARD_TMP/lost-ids.json" ]; then
+  for id in $(jq -r '.[]' "$BOARD_TMP/lost-ids.json"); do
+    gh project item-edit --project-id PVT_kwDOCt2Azc4BJVxt --id "$id" \
+      --field-id PVTSSF_lADOCt2Azc4BJVxtzg5iI8c --single-select-option-id <NEW_OPTION_ID>
+    sleep 0.4
+  done
+else
+  echo "no lost-ids.json — step 1 did not complete; nothing re-applied" >&2
+fi
 ```
 
 Step 1's grouping is the safety check: confirm the orphaned set is exactly the
