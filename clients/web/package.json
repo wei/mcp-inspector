@@ -1,6 +1,7 @@
 {
   "name": "@modelcontextprotocol/inspector-web",
   "private": true,
+  "license": "SEE LICENSE IN ../../LICENSE",
   "type": "module",
   "main": "build/index.js",
   "bin": {
