@@ -40,9 +40,11 @@ Look it up by **title** instead, then feed that item id to `item-edit` or
 `item-delete` exactly as usual:
 
 ```sh
+GHSA=GHSA-xxxx-yyyy-zzzz   # the advisory's real id
 ITEM_ID=$(gh project item-list 28 --owner modelcontextprotocol --format json --limit 500 \
   --jq '.items[] | select(.content.type=="DraftIssue")
-        | select(.content.title | startswith("[GHSA-xxxx-yyyy-zzzz]")) | .id')
+        | select(.content.title | startswith("['"$GHSA"']")) | .id')
+[ -n "$ITEM_ID" ] || echo "no draft card titled [$GHSA] on #28" >&2
 ```
 
 Match on the **bracketed GHSA id**, not on words from the summary — a summary is

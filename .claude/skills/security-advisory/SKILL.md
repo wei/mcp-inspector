@@ -183,6 +183,13 @@ provisional score could not have had.
 moves the advisory `triage` → `draft`. The state is readable as `state` and
 `submission.accepted` on the API object.
 
+**Then move the card `Incoming` → `Todo`.** On #28 the approval act is
+normally assigning a milestone, and a draft card cannot carry one — so for an
+advisory draft, **accepting the advisory is the approval**, and it is what
+licenses the card to leave `Incoming`. `AGENTS.md` records this as the
+advisory exemption to its `Incoming` ⇔ milestone invariant. The milestone
+arrives with the public issue in step 6, where the ordinary rule resumes.
+
 **Invalid, out of scope, or upstream → close** with a comment saying which, and
 why. A reporter who is told nothing reasonably assumes they were ignored.
 

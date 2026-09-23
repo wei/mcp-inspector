@@ -295,7 +295,12 @@ Two things the queries must account for, both learned the hard way:
 - **The two milestone checks are #28-only.** Every milestone in this repo is a
   v2 release bucket, so a `v1` issue has none it could take — running the
   Incoming⇔milestone invariant over board #11 would flag every card on it for a
-  state it cannot reach.
+  state it cannot reach. They also read **Issue items only**, which is what
+  exempts a `[GHSA-` advisory draft on #28: it cannot carry a milestone, and its
+  approval is the advisory's **acceptance** (`/security-advisory` step 3),
+  which lives on the advisory rather than the board. The audit cannot see that,
+  so a GHSA draft past `Incoming` is correct once its advisory is accepted and
+  is not reported.
 - **Count the labels; don't test for presence.** The invariant is *exactly
   one*, so a predicate that only asks "is any version label present" passes an
   issue carrying **both** `v1` and `v2` — which belongs to two lines at once
